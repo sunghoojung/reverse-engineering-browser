@@ -2,6 +2,7 @@
 #include "reb/js_dispatch.hpp"
 #include "reb/js_invocation.hpp"
 #include "reb/network_request.hpp"
+#include "reb/network_response_body.hpp"
 #include "reb/network_scope.hpp"
 #include "reb/tab_link.hpp"
 #include "reb/wasm_dispatch.hpp"
@@ -79,6 +80,7 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kWasmExecutionOutcome:
     case EventType::kWasmDispatchOverflow:
     case EventType::kWasmIndirectOverflow:
+    case EventType::kResponseBody:
     case EventType::kCaptureExclusion:
     case EventType::kTabSet:
     case EventType::kRequestTabLink:
@@ -174,6 +176,8 @@ bool IsValidEvent(const EventRecord& event) noexcept {
   if (event.header.type == EventType::kWasmDispatchOverflow && !IsValidWasmDispatchOverflow(event))
     return false;
   if (event.header.type == EventType::kWasmIndirectOverflow && !IsValidWasmIndirectOverflow(event))
+    return false;
+  if (event.header.type == EventType::kResponseBody && !IsValidResponseBodyEvent(event))
     return false;
   if (event.header.type == EventType::kCaptureExclusion && !IsValidCaptureExclusionEvent(event))
     return false;
@@ -374,6 +378,8 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "wasm_dispatch_overflow";
     case EventType::kWasmIndirectOverflow:
       return "wasm_indirect_overflow";
+    case EventType::kResponseBody:
+      return "response_body";
     case EventType::kCaptureExclusion:
       return "capture_exclusion";
     case EventType::kTabSet:

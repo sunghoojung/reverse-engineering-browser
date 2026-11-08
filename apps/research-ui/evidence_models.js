@@ -34,7 +34,7 @@
           'vm_dispatch_sample', 'wasm_dispatch_observation', 'wasm_guest_dispatch', 'wasm_guest_invocation',
           'wasm_indirect_observation', 'wasm_execution_outcome', 'js_dispatch_observation', 'js_invocation_start', 'js_invocation_settle',
           'js_invocation_request', 'wasm_dispatch_overflow', 'wasm_indirect_overflow',
-          'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target',
+          'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target', 'response_body',
           'capture_exclusion', 'tab_set', 'request_tab_link'
         ])
       };
@@ -69,14 +69,14 @@
         ['request_failed', 5]
       ]);
       const networkLifecycleTypes = new Set(lifecycleRanks.keys());
-      // Children of a lifecycle record (protocol/native-network-v2.md). They
-      // describe a request; they never advance its lifecycle rank.
-      const networkRequestDetailTypes = new Set(['request_target', 'request_body']);
+      // Children of a lifecycle record (protocol/native-network-v2.md and v3).
+      // They describe a request; they never advance its lifecycle rank.
+      const networkRequestDetailTypes = new Set(['request_target', 'request_body', 'response_body']);
       // Session-level network records the backend keeps in its network window.
       const networkContextTypes = new Set(['capture_exclusion', 'tab_set', 'request_tab_link']);
       const artifactKinds = new Set([
         'javascript', 'wasm', 'source_map', 'response_body', 'canvas_data_url',
-        'bytecode_buffer', 'wasm_guest_adapter', 'request_body'
+        'bytecode_buffer', 'wasm_guest_adapter', 'request_body', 'request_target'
       ]);
       const artifactCaptureOrigins = new Set([
         'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
@@ -571,19 +571,31 @@
       }
 
       const requestSchemes = new Map([[0, null], [1, 'http'], [2, 'https'], [3, 'ws'], [4, 'wss']]);
+      const requestTargetRetentions = ['complete', 'retained', 'not_retained_artifact_unavailable',
+        'not_retained_transfer_refused', 'not_retained_session_budget', 'not_retained_url'];
 
       function decodeRequestTargetRecord(event) {
-        if (!isRequestChildEnvelope(event, 'request_target') || event.artifact_id !== '0') return null;
+        if (!isRequestChildEnvelope(event, 'request_target') ||
+            !isCanonicalInteger(event.artifact_id, 0n, uint64Max)) return null;
         const bytes = bytesFromHex(event.payload);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const version = view.getUint16(0, true);
         const length = view.getUint32(4, true);
         const prefix = Math.min(length, 116);
-        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || !requestSchemes.has(bytes[8]) ||
-            bytes[9] !== 0 || bytes.slice(12, 12 + prefix).some(byte => byte === 0) ||
+        const hasArtifact = event.artifact_id !== '0';
+        // Version 2 byte 9 says where bytes past the prefix went; version 1 has none.
+        const retentionValid = version === 1 ? bytes[9] === 0 && !hasArtifact
+          : version === 2 && bytes[9] < requestTargetRetentions.length &&
+            (bytes[9] === 0) !== (length > 116) && (bytes[9] === 1) === hasArtifact;
+        if (!retentionValid || view.getUint16(2, true) !== 128 || !requestSchemes.has(bytes[8]) ||
+            bytes.slice(12, 12 + prefix).some(byte => byte === 0) ||
             bytes.slice(12 + prefix).some(byte => byte !== 0)) return null;
         return {scheme: requestSchemes.get(bytes[8]), port: view.getUint16(10, true), targetLength: length,
           // Decoded as text and only ever assigned to textContent.
-          target: new TextDecoder().decode(bytes.slice(12, 12 + prefix)), truncated: length > prefix};
+          target: new TextDecoder().decode(bytes.slice(12, 12 + prefix)), truncated: length > prefix,
+          retention: version === 1 ? (length > prefix ? 'not_recorded' : 'complete') : requestTargetRetentions[bytes[9]],
+          artifactId: event.artifact_id, sequenceNumber: event.sequence_number, sessionId: event.session_id,
+          processId: event.process_id};
       }
 
       const requestBodyKinds = ['none', 'bytes', 'file', 'data_pipe', 'chunked_data_pipe', 'mixed', 'unknown'];
@@ -644,6 +656,60 @@
         };
       }
 
+      const responseBodyStates = [null, 'captured', 'captured_truncated', 'partial', 'aborted', 'cancelled', 'empty',
+        'not_modified', 'redirected', 'not_captured_type', 'not_captured_artifact_unavailable',
+        'not_captured_transfer_refused', 'not_captured_session_budget'];
+      const responseCodings = new Map([[1, 'gzip'], [2, 'deflate'], [3, 'br'], [4, 'zstd'], [5, 'dcb'], [6, 'dcz'],
+        [7, 'compress'], [15, 'other']]);
+      const responseCaptureBytes = 16n * 1024n * 1024n;
+
+      // Every rule of the response_body payload (protocol/native-network-v3.md),
+      // shared with the C++ core and the Python evidence validator through
+      // tools/check-network-request-wire.mjs.
+      function decodeResponseBodyRecord(event) {
+        if (!isRequestChildEnvelope(event, 'response_body') ||
+            !isCanonicalInteger(event.artifact_id, 0n, uint64Max)) return null;
+        const bytes = bytesFromHex(event.payload);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const [stateCode, flags, typeLength, codingCount] = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        const bodyLength = view.getBigUint64(8, true);
+        const captured = view.getBigUint64(16, true);
+        const codings = Array.from(bytes.slice(24, 28));
+        const partialIndex = view.getUint16(28, true);
+        const digest = bytes.slice(32, 64);
+        const typeBytes = bytes.slice(64, 128);
+        const contentType = String.fromCharCode(...typeBytes.slice(0, Math.min(typeLength, 64)));
+        const has = bit => (flags & bit) !== 0;
+        const typePresent = has(0x40);
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || view.getUint16(30, true) !== 0 ||
+            stateCode < 1 || stateCode > 12 || (flags & ~0x7f) !== 0 || typeLength > 64 ||
+            typePresent !== (typeLength !== 0) || typeBytes.slice(typeLength).some(byte => byte !== 0) ||
+            (typePresent && !requestTokenCharacters.test(contentType)) || codingCount > 4 ||
+            (has(0x10) && codingCount !== 4) ||
+            codings.some((coding, index) => index < codingCount ? !responseCodings.has(coding) : coding !== 0)) return null;
+        const retained = captured !== 0n;
+        const whole = bodyLength < responseCaptureBytes ? bodyLength : responseCaptureBytes;
+        if (captured > bodyLength || (event.artifact_id !== '0') !== retained || digest.some(byte => byte !== 0) !== retained ||
+            (has(1) && !retained) || (partialIndex !== 0) !== (stateCode === 3) ||
+            (has(0x20) && ![1, 2, 6].includes(stateCode))) return null;
+        const valid = stateCode === 1 ? bodyLength !== 0n && captured === bodyLength
+          : stateCode === 2 ? bodyLength > responseCaptureBytes && captured === responseCaptureBytes
+            : stateCode === 3 ? bodyLength !== 0n && captured === whole
+              : stateCode <= 5 ? !retained || captured === whole
+                : stateCode <= 9 ? bodyLength === 0n : !retained;
+        if (!valid) return null;
+        return {
+          state: responseBodyStates[stateCode], shared: has(1), fromCache: has(2), serviceWorker: has(4),
+          stillEncoded: has(8), codingsOmitted: has(0x10), completionUnobserved: has(0x20),
+          contentType: typePresent ? contentType : null,
+          codings: codings.slice(0, codingCount).map(coding => responseCodings.get(coding)),
+          bodyLength: String(bodyLength), capturedLength: String(captured), partialIndex,
+          sha256: retained ? Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') : null,
+          artifactId: event.artifact_id, sequenceNumber: event.sequence_number, parentEventId: event.parent_event_id,
+          sessionId: event.session_id, processId: event.process_id
+        };
+      }
+
       // A child record joins its exact parent lifecycle record, never by URL.
       function requestChildOf(details, parent, type) {
         return parent ? details.find(event => event.type === type && event.parent_event_id === parent.sequence_number &&
@@ -661,6 +727,17 @@
           const start = request.events.find(event => event.type === 'request_started') ?? null;
           const bodyEvent = requestChildOf(request.details, start, 'request_body');
           request.body = bodyEvent ? decodeRequestBodyRecord(bodyEvent) ?? {malformed: true} : null;
+          // The final response's newest body record: a later end supersedes partial snapshots.
+          const newest = (latest, event) => !latest || BigInt(event.sequence_number) > BigInt(latest.sequence_number) ? event : latest;
+          const response = request.events.filter(event => event.type === 'response_started').reduce(newest, null);
+          request.responseStarted = response ? {sequenceNumber: response.sequence_number, sessionId: response.session_id,
+            processId: response.process_id} : null;
+          const responseBody = response ? request.details.filter(event => event.type === 'response_body' &&
+            event.parent_event_id === response.sequence_number && event.session_id === response.session_id &&
+            event.process_id === response.process_id).reduce(newest, null) : null;
+          request.responseBody = responseBody ? decodeResponseBodyRecord(responseBody) ?? {malformed: true} : null;
+          request.redirectedBody = request.events.some(event => event.type === 'request_redirected' &&
+            requestChildOf(request.details, event, 'response_body'));
           const targetEvent = requestChildOf(request.details, request.targetEvent, 'request_target');
           const target = targetEvent ? decodeRequestTargetRecord(targetEvent) : null;
           request.targetMalformed = Boolean(targetEvent) && !target;
@@ -681,6 +758,7 @@
           request.target = target.target;
           request.urlTruncated = target.truncated;
           request.targetLength = target.targetLength;
+          request.fullTarget = target.truncated ? target : null;
           request.path = target.scheme
             ? `${target.scheme}://${host}${target.port ? `:${target.port}` : ''}${target.target}`
             : `${host}${target.target}`;
@@ -900,9 +978,10 @@
           return false;
         }
         if (artifact.kind === 'wasm_guest_adapter' && artifact.capture_origin !== 'native_wasm_guest') return false;
-        // A request body is created by its browser request_body record only.
-        if ((artifact.kind === 'request_body') !== (artifact.capture_origin === 'network_request') ||
-          (artifact.kind === 'request_body' && (artifact.execution_context_id !== '0' ||
+        // Request content is created by its browser request_body or request_target record only.
+        const requestContent = ['request_body', 'request_target'].includes(artifact.kind);
+        if (requestContent !== (artifact.capture_origin === 'network_request') ||
+          (requestContent && (artifact.execution_context_id !== '0' ||
             !isCanonicalInteger(artifact.creator_event_id, 1n, uint64Max)))) return false;
         if (artifact.capture_origin === 'native_wasm_guest' && (!['bytecode_buffer','wasm_guest_adapter'].includes(artifact.kind) ||
           !['frame_id','parent_artifact_id','creator_event_id','execution_context_id'].every(k => isCanonicalInteger(artifact[k],1n,uint64Max)))) return false;
@@ -926,7 +1005,7 @@
           isSafeIntegerInRange(artifact.byte_size, 0, Number.MAX_SAFE_INTEGER) &&
           typeof artifact.sha256 === 'string' && /^[0-9a-f]{64}$/.test(artifact.sha256) &&
           typeof artifact.sensitive === 'boolean' &&
-          artifact.sensitive === ['response_body', 'canvas_data_url', 'request_body'].includes(artifact.kind);
+          artifact.sensitive === ['response_body', 'canvas_data_url', 'request_body', 'request_target'].includes(artifact.kind);
       }
 
       function isArtifactResponse(body) {

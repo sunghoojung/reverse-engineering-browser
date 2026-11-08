@@ -49,6 +49,10 @@ HEADERS = (
     "base/threading/thread_local.h",
     "base/time/time.h",
     "base/functional/bind.h",
+    "base/memory/scoped_refptr.h",
+    "base/task/thread_pool.h",
+    "services/network/public/cpp/data_element.h",
+    "services/network/public/cpp/resource_request_body.h",
     "url/gurl.h",
     "mojo/public/cpp/base/big_buffer.h",
     "mojo/public/cpp/bindings/receiver.h",
@@ -58,6 +62,7 @@ HEADERS = (
     "services/network/public/mojom/url_response_head.mojom.h",
     "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h",
     "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h",
+    "brave/components/reverse_engineering_browser/browser/native_response_body_capture.h",
     "brave/components/reverse_engineering_browser/browser/native_probe_session.h",
     "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h",
 )

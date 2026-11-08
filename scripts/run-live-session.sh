@@ -64,6 +64,12 @@ readonly capture_request_content="${REB_CAPTURE_REQUEST_CONTENT:-0}"
 # Browser-internal pages (chrome:, devtools: and WebUI renderers) are excluded
 # and counted unless this is 1 (native-network-v3.md).
 readonly capture_browser_internal="${REB_CAPTURE_BROWSER_INTERNAL:-0}"
+# Unique body and full-target bytes one content session retains.
+readonly request_content_budget_mib="${REB_REQUEST_CONTENT_BUDGET_MIB:-256}"
+# Content sessions also retain response bodies (native-network-v3.md): unique
+# bytes per session, and whether element images, audio, video and fonts count.
+readonly response_body_budget_mib="${REB_RESPONSE_BODY_BUDGET_MIB:-512}"
+readonly capture_response_media="${REB_CAPTURE_RESPONSE_MEDIA:-0}"
 readonly use_system_keychain="${REB_USE_SYSTEM_KEYCHAIN:-1}"
 readonly localhost_only="${REB_LOCALHOST_ONLY:-0}"
 readonly embedded_session="${REB_EMBEDDED_SESSION:-0}"
@@ -231,6 +237,18 @@ if [[ "${capture_request_content}" != 0 && "${capture_request_content}" != 1 ]];
 fi
 if [[ "${capture_browser_internal}" != 0 && "${capture_browser_internal}" != 1 ]]; then
   fail_live_session 2 "REB_CAPTURE_BROWSER_INTERNAL must be 0 or 1."
+fi
+if ! [[ "${request_content_budget_mib}" =~ ^[1-9][0-9]{0,3}$ ]] || ((request_content_budget_mib > 4096)); then
+  fail_live_session 2 "REB_REQUEST_CONTENT_BUDGET_MIB must be an integer from 1 to 4096."
+fi
+if ! [[ "${response_body_budget_mib}" =~ ^[1-9][0-9]{0,4}$ ]] || ((response_body_budget_mib > 16384)); then
+  fail_live_session 2 "REB_RESPONSE_BODY_BUDGET_MIB must be an integer from 1 to 16384."
+fi
+if [[ "${capture_response_media}" != 0 && "${capture_response_media}" != 1 ]]; then
+  fail_live_session 2 "REB_CAPTURE_RESPONSE_MEDIA must be 0 or 1."
+fi
+if [[ "${capture_response_media}" == 1 && "${capture_request_content}" != 1 ]]; then
+  fail_live_session 2 "REB_CAPTURE_RESPONSE_MEDIA requires REB_CAPTURE_REQUEST_CONTENT=1."
 fi
 if [[ "${use_system_keychain}" != 0 && "${use_system_keychain}" != 1 ]]; then
   fail_live_session 2 "REB_USE_SYSTEM_KEYCHAIN must be 0 or 1."
@@ -634,6 +652,15 @@ if ((category_mask & (512 | 1024))); then
   if [[ "${capture_canvas_images}" == 1 || "${capture_request_content}" == 1 ]]; then
     artifact_receiver_arguments+=(--allow-sensitive)
   fi
+  # Request content is bounded by its byte budget, not a count, so the store
+  # grows by that budget and admits small bodies past the default 4,096 items.
+  if [[ "${capture_request_content}" == 1 ]]; then
+    artifact_receiver_arguments+=(
+      --max-store-bytes "$(((256 + request_content_budget_mib + response_body_budget_mib) * 1048576))"
+      --max-artifacts 65536
+      --max-manifest-bytes 268435456
+    )
+  fi
   "${artifact_receiver_binary}" "${artifact_receiver_arguments[@]}" \
     >"${artifact_receiver_log}" 2>&1 &
   artifact_receiver_pid=$!
@@ -829,7 +856,12 @@ if [[ "${capture_canvas_images}" == 1 ]]; then
   brave_arguments+=(--reb-capture-canvas-images)
 fi
 if [[ "${capture_request_content}" == 1 ]]; then
-  brave_arguments+=(--reb-capture-request-content)
+  brave_arguments+=(--reb-capture-request-content
+    "--reb-request-content-budget-bytes=$((request_content_budget_mib * 1048576))"
+    "--reb-response-body-budget-bytes=$((response_body_budget_mib * 1048576))")
+  if [[ "${capture_response_media}" == 1 ]]; then
+    brave_arguments+=(--reb-capture-response-media)
+  fi
 fi
 if [[ "${capture_browser_internal}" == 1 ]]; then
   brave_arguments+=(--reb-capture-browser-internal)
@@ -910,9 +942,10 @@ else
   echo "Canvas image capture: disabled; set REB_CAPTURE_CANVAS_IMAGES=1 to enable it for one session"
 fi
 if [[ "${capture_request_content}" == 1 ]]; then
-  echo "Request content capture: enabled for this session; request paths, queries and bodies are retained locally"
+  echo "Request content capture: enabled for this session; request paths, queries and bodies are retained locally, at most ${request_content_budget_mib} MiB of unique content"
+  echo "Response body capture: enabled for this session; at most ${response_body_budget_mib} MiB of unique response bytes, element media $([[ "${capture_response_media}" == 1 ]] && echo retained || echo skipped)"
 else
-  echo "Request content capture: disabled; hosts and body length, type and digest only. Set REB_CAPTURE_REQUEST_CONTENT=1 to retain paths and bodies"
+  echo "Request content capture: disabled; hosts and body length, type and digest only. Set REB_CAPTURE_REQUEST_CONTENT=1 to retain paths, request bodies and response bodies"
 fi
 if [[ "${capture_browser_internal}" == 1 ]]; then
   echo "Browser-internal capture: enabled; chrome:, devtools: and WebUI renderer evidence is recorded"

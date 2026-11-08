@@ -247,8 +247,9 @@ Native network records keep the v1 host-only start payload. Each admitted
 request also gets a `request_body` summary record (length, normalized content
 type, SHA-256, kind and capture state). When `--reb-capture-request-content` is
 explicitly present, the browser also records the raw path and query as
-`request_target` children and retains at most 256 KiB of in-memory body bytes
-per request through the artifact channel. The change lives entirely in the
+`request_target` children, retains targets past their 116-byte prefix and at
+most 16 MiB of in-memory body bytes per request through the artifact channel,
+within a per-session byte budget. The change lives entirely in the
 overlay sink; the existing proxy hooks already pass the full `ResourceRequest`.
 See [Native network v2](../../../protocol/native-network-v2.md).
 Renderer events use a bounded shared-memory queue with Mojo lifecycle control
@@ -288,7 +289,8 @@ capture policy.
 When the Artifact category is authorized, the browser process recognizes
 JavaScript and WebAssembly responses, preserves the observed source URL
 (including credentials, queries and fragments) in local artifact metadata, and
-asynchronously tees at most 16 MiB per response. The original response pipe remains the page's source of bytes. A
+asynchronously tees at most 16 MiB per response, holding only the bytes it has
+within a shared 32 MiB in-flight pool. The original response pipe remains the page's source of bytes. A
 separate queue permits at most 16 pending artifacts and 32 MiB of queued
 content, then transfers frames over an authenticated user-only socket. Brave
 emits `artifact_captured` only after a durable receiver acknowledgment and

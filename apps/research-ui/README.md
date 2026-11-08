@@ -209,8 +209,8 @@ for the schema, rules, bounds and commands.
 
 ## Captured request exports
 
-Live native Traffic retains no request or response bodies, so Traffic has no
-capture actions. **Export…** in the Traffic toolbar converts a local
+Live native Traffic has no CDP exchange to replay, so Traffic has no capture
+actions. **Export…** in the Traffic toolbar converts a local
 introspection JSON file (`__schema` or `data.__schema`, up to 1 MiB) to GraphQL
 SDL; duplicate keys, invalid UTF-8, partial/error schemas and unsafe SDL
 literals are refused. Export never queries an introspection endpoint or sends a
@@ -432,7 +432,7 @@ The failure dialog preserves the launcher's explicit browser/helper diagnosis
 when teardown writes later shell messages; the full session log path stays visible.
 **New Live Session…** in the application menu chooses the capture mode and
 Keychain storage. **Content (default)** sets `REB_CAPTURE_REQUEST_CONTENT=1`,
-which retains request paths, queries and request bodies up to 256 KiB each, and
+which retains request paths, queries and request bodies up to 16 MiB each, and
 retains Canvas images. While a live session has either turned on, the titlebar
 shows **Content capture** and its tooltip names which; a browser built before
 that capture ignores the switch, and each Traffic row and body still shows what
@@ -578,13 +578,15 @@ REB_CAPTURE_CANVAS_IMAGES=1 make live
 To retain request paths, queries and bounded request bodies with `make live`,
 run `REB_CAPTURE_REQUEST_CONTENT=1 make live`. Traffic then shows each request's
 captured path and query, and its General view shows the request body: capture
-state, content type, length, SHA-256, kind and the retained bytes as text.
-Without it, the General view still shows the body's length, type and digest and
+state, content type, length, SHA-256, kind and the retained bytes as text, read
+256 KiB at a time with **Show the next 256 KiB**. A path and query past the
+116-byte row prefix is loaded from its retained full target for the Request URL
+and Copy URL, or General says why it was not retained. Without it, the General view still shows the body's length, type and digest and
 says that content capture was off. File, blob and stream bodies are named, not
 read; password form bodies keep neither bytes nor a digest. A body read that
 times out or gets an error status stays shown with its reason and is read again
 on the next refresh; a size or SHA-256 mismatch is kept with its reason and is
-not reread. Sources never lists or opens request bodies.
+not reread. Sources never lists or opens request bodies or full targets.
 
 Canvas image capture is disabled by default because rendered output can contain
 page content. Enabled output stays in the local session artifact store, is
@@ -671,16 +673,25 @@ has no newer events.
 
 Traffic uses a compact network ledger with visible resource-type filters and
 sortable Name, Status, Type, Method, and Time columns. **Capture order** restores
-the evidence order. The selected request opens General, Initiator, Timing,
-Signals and Evidence beside the ledger above 1100 px, or below it in narrow
+the evidence order. The selected request opens General, Preview, Response,
+Initiator, Timing, Signals and Evidence beside the ledger above 1100 px, or below it in narrow
 windows. Both panes stay within the available workspace height; the request
 ledger and inspector body scroll independently. Captured-tab and domain filters
 share a compact row at narrow widths. Native capture records the method, host,
 status and lifecycle timing of each request, and the request body's length,
 type and SHA-256. Content capture sessions add the path and query and bounded
-request body bytes, which General shows as text. Request and response headers
-and response bodies are not captured, so Traffic has no header, response,
-preview, comparison or content-search views; General states that coverage.
+request body bytes, which General shows as text, and response bodies
+([native network v3](../../protocol/native-network-v3.md)). Response
+(`traffic_response.js`) shows a body's capture state, codings, lengths and
+digest, then its bytes as syntax-colored text with pretty print, wrap, find,
+copy and hex, read 2 MiB at a time and rechecked by SHA-256. Preview shows a
+bounded JSON tree, a raster image whose signature matches its bytes, or text;
+HTML and SVG stay source and are never rendered. Script and Wasm responses show
+their Sources artifact in any session. A request with no body record says why:
+metadata-only session, redirect, or never seen by the browser proxy (service
+worker, memory cache). Request and response headers are not captured, so
+Traffic has no header, comparison or content-search views.
+`tools/check-traffic-response-ui.mjs` covers both tabs in a DOM model.
 Missing initiators and timing phases stay explicitly unavailable.
 Request signal profiles are owned by the exact selected session, request and root
 event. Late responses cannot replace a newer selection or refresh. Malformed or
@@ -919,8 +930,10 @@ window and the enforced 760×560 minimum it checks:
 - VM: the opcode workspace for the guest artifact shows the native guest row
   with its wide instance identity, and the physical artifact never claims a
   guest PC;
-- native-only coverage: Traffic offers only General, Initiator, Timing, Signals
-  and Evidence with no content search or Compare; Export offers only local-file
+- native-only coverage: Traffic offers only General, Preview, Response,
+  Initiator, Timing, Signals and Evidence with no content search or Compare;
+  a retained response body is inert colored text on Response, pretty prints,
+  and is a JSON tree on Preview, reached by arrow key; Export offers only local-file
   SDL and says why; golden and hostile guest bytecode render as an inert hex
   view with an unclipped kind icon;
 - keyboard order and visible focus for 30 stops (Option+Tab when Full Keyboard

@@ -66,8 +66,9 @@ above `2^53`, exercising decimal-string identity preservation through JSON and U
 Additional component assertions cover old body and old ACK completion after
 same-session and different-session emitter reconfiguration, disable/re-enable,
 expiry, disabled/category/disconnected admission, an invalid body, unknown MIME,
-declared size and metadata limits, the 32 MiB active reservation bound and release,
-tee and enqueue failure, incomplete bodies, generated/runtime input validation,
+declared size and metadata limits, the 32 MiB in-flight pool (40 parallel bodies
+of unknown length, growth without slack, full-pool and growth refusals, shares
+held until the transfer is dropped), tee and enqueue failure, incomplete bodies, generated/runtime input validation,
 real receiver rejection and duplicate/unknown ACKs.
 
 `manifest.json` identifies `session_dir` and cases with exact request selection
@@ -77,16 +78,33 @@ metadata, never substituted into production evidence. `in-process-artifacts`
 also contains independent lifecycle-test artifacts that are deliberately excluded
 from the corpus sent to the optional production services.
 
-Request bodies (protocol/native-network-v2.md): the unchanged network sink in a
+Request content (protocol/native-network-v2.md): the unchanged network sink in a
 content session emits `request_target` and `request_body` children of
-`request_started` and hands an 816-byte JSON body and a truncated 300 KiB body to
-the unchanged artifact sink. The production receiver retains both as sensitive
-`request_body` artifacts with the full URL; the broker stores both children.
-`request-bodies.json` names the expected joins, and the stage checks blob bytes,
-digests, target prefixes, `creator_event_id` and the capture event's parent,
-then runs `tools/validate-evidence-store.py` over the broker output. Component
-cases cover a metadata-only session, a receiver started without
-`--allow-sensitive` and a session without the Artifact category.
+`request_started` and hands an 816-byte JSON body, a 5 MiB body and an 8 KB
+GraphQL target to the unchanged artifact sink, whose background copy the stub
+thread pool runs. The production receiver retains them as sensitive
+`request_body` and `request_target` artifacts; the broker stores the children.
+`request-bodies.json` and `request-targets.json` name the expected joins, and
+the stage checks blob bytes, digests, target prefixes and retention,
+`creator_event_id` and the capture event's parent, then runs
+`tools/validate-evidence-store.py` over the broker output. Component cases cover
+a metadata-only session, a receiver started without `--allow-sensitive`, a
+session without the Artifact category, 5,000 bodies within a byte budget, digest
+dedupe, a 16 MiB prefix, the shared pool, changed and refused copies, and every
+target retention state.
+
+Response bodies (protocol/native-network-v3.md): the unchanged network sink,
+artifact sink and `native_response_body_capture.cc` in a content session tee
+JSON, gzip HTML, brotli and service-worker JSON, a fetched PNG, a chunked event
+stream (a partial snapshot, then the ended body), an aborted prefix and
+records for a 304, a redirect, a cancelled body and a skipped font. The
+production receiver retains each as a sensitive `response_body` artifact
+created by its `response_started` record; `response-bodies.json` names the
+expected joins, which the stage checks through the receiver and broker.
+`response_bodies_test.h` also covers dedupe, the byte budget and its
+exhaustion, a receiver refusal refund, 50 parallel bodies, the shared pool,
+16 MiB truncation, a missing completion, coding order, the capture-end
+partial, media opt-in, metadata-only sessions and tee refusal.
 
 ## Socket transport stages
 
@@ -118,9 +136,10 @@ Commit rollback and the receiver's failed-store state are covered in
 ## Deliberate limits
 
 Chromium process/thread/time/profile types and the browser sequence allocator
-are minimal adapters. The Mojo adapter schedules the real sink's body callback
-but does not test data-pipe forwarding, backpressure, watches, or Chromium task
-execution. The artifact socket enqueue adapter allows deterministic delayed,
+are minimal adapters. The Mojo adapter feeds the real capture buffer in 64 KiB
+chunks and schedules the real sink's body callback but does not test data-pipe
+forwarding, backpressure, watches, or Chromium task execution. The thread-pool
+adapter holds background copies until a test runs them. The artifact socket enqueue adapter allows deterministic delayed,
 missing, reordered, and rejected transfers; the production socket writer's
 queue, thread and reconnect behavior is covered by the transport stage instead.
 Only the receiver return status creates an ACK in the normal success and

@@ -170,7 +170,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent("app.css")),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/pane_layout.js", "/app.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/source_search.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/invocation_sites.js", "/traffic_view.js", "/network_scope.js", "/request_tabs.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/native_console_completion.js", "/native_console.js":
+      case "/pane_layout.js", "/app.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/source_search.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/invocation_sites.js", "/traffic_view.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/native_console_completion.js", "/native_console.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -1768,8 +1768,10 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       CFGetTypeID(protocolVersion) != CFBooleanGetTypeID(),
       protocolVersion.stringValue == "1",
       let kind = artifact["kind"] as? String,
-      Set(["javascript", "wasm", "source_map", "response_body", "canvas_data_url", "request_body"])
-        .contains(kind),
+      Set([
+        "javascript", "wasm", "source_map", "response_body", "canvas_data_url", "request_body",
+        "request_target",
+      ]).contains(kind),
       let url = artifact["url"] as? String,
       !url.isEmpty,
       let mimeType = artifact["mime_type"] as? String,
@@ -1781,7 +1783,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       let sha256 = artifact["sha256"] as? String,
       sha256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
       let sensitive = artifact["sensitive"] as? Bool,
-      sensitive == ["response_body", "canvas_data_url", "request_body"].contains(kind),
+      sensitive
+        == ["response_body", "canvas_data_url", "request_body", "request_target"].contains(kind),
       artifact["content_path"] as? String == "blobs/\(sha256).bin"
     else {
       return false
@@ -1800,10 +1803,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     guard identifiersValid else { return false }
     let hasExecutionContext = artifact["execution_context_id"] != nil
     let hasCaptureOrigin = artifact["capture_origin"] != nil
-    // A request body exists only as the native network v2 artifact that its
-    // browser request_body record created; validate_artifact in evidence.rs
-    // applies the same rules.
-    guard hasExecutionContext == hasCaptureOrigin, hasCaptureOrigin || kind != "request_body" else {
+    // Request content exists only as the native network v2 artifact that its
+    // browser request_body or request_target record created; validate_artifact
+    // in evidence.rs applies the same rules.
+    let requestContent = kind == "request_body" || kind == "request_target"
+    guard hasExecutionContext == hasCaptureOrigin, hasCaptureOrigin || !requestContent else {
       return false
     }
     if hasExecutionContext {
@@ -1817,7 +1821,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           "webassembly_module", "webassembly_instantiate",
           "canvas_to_data_url", "network_request",
         ]).contains(captureOrigin),
-        (kind == "request_body") == (captureOrigin == "network_request"),
+        requestContent == (captureOrigin == "network_request"),
         captureOrigin != "network_request"
           || (executionContextID == "0" && artifact["creator_event_id"] as? String != "0"),
         captureOrigin != "dynamic_javascript" || (kind == "javascript" && executionContextID != "0"),
@@ -2847,7 +2851,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let modeLabel = NSTextField(labelWithString: "Capture mode")
     modeLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
     let privacyLabel = NSTextField(wrappingLabelWithString:
-      "Content mode, the default, retains request paths, queries and request bodies up to 256 KiB each, and Canvas images. Metadata mode keeps request hosts and each request body's length, type and SHA-256, without Canvas images. Neither mode captures headers. Artifacts keep raw source URLs locally; only an explicitly exported redacted copy is altered."
+      "Content mode, the default, retains request paths, queries and request bodies up to 16 MiB each, and Canvas images. Metadata mode keeps request hosts and each request body's length, type and SHA-256, without Canvas images. Neither mode captures headers. Artifacts keep raw source URLs locally; only an explicitly exported redacted copy is altered."
     )
     privacyLabel.textColor = .secondaryLabelColor
     privacyLabel.maximumNumberOfLines = 0

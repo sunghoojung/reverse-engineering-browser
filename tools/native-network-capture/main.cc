@@ -3,6 +3,7 @@
 #include <cassert>
 #include <iostream>
 #include <string>
+#include <tuple>
 #include <vector>
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
@@ -14,6 +15,7 @@
 #include "crypto/hash.h"
 #include "reb/event.hpp"
 #include "reb/network_request.hpp"
+#include "reb/network_response_body.hpp"
 namespace {
 std::vector<reb::NativeProbeEvent> events;
 reb::NativeProbeQueue queue;
@@ -125,26 +127,37 @@ void RequestContent() {
          events[2].header.artifact_id == 900);
   assert(artifacts.calls.size() == 1);
   const auto& call = artifacts.calls.back();
-  assert(call.creator_event_id == events[2].header.sequence_number && call.request_id == 172 &&
+  assert(call.kind == reb::NativeArtifactKind::kRequestBody &&
+         call.creator_event_id == events[2].header.sequence_number && call.request_id == 172 &&
          call.frame_id == 5 && call.mime_type == "application/json" &&
          call.url == "https://api.hcaptcha.test" + expected_target &&
          std::string(call.content.begin(), call.content.end()) == json);
 
-  // A long target keeps its original length; the artifact URL stays whole.
+  // A long target keeps its original length and is retained whole under its
+  // origin; the body artifact URL stays whole.
   const std::string key(300, 'k');
   request.url = GURL("https", "api.hcaptcha.test", "/checkcaptcha/site/" + key, "", 8443);
   request.headers = {};
   events.clear();
   start();
   assert(AllValid());
-  const auto long_target = Target(Last(reb::NativeProbeType::kRequestTarget));
-  assert(long_target.target_length == 19 + key.size() && long_target.port == 8443);
+  const auto long_record = Last(reb::NativeProbeType::kRequestTarget);
+  const auto long_target = Target(long_record);
+  assert(long_target.target_length == 19 + key.size() && long_target.port == 8443 &&
+         long_target.reserved0 ==
+             static_cast<std::uint8_t>(reb::RequestTargetRetention::kRetained) &&
+         long_record.header.artifact_id != 0);
+  const auto& full = artifacts.calls[artifacts.calls.size() - 2];
+  assert(full.kind == reb::NativeArtifactKind::kRequestTarget &&
+         full.creator_event_id == long_record.header.sequence_number &&
+         full.url == "https://api.hcaptcha.test:8443" && full.mime_type == "text/plain" &&
+         std::string(full.content.begin(), full.content.end()) == "/checkcaptcha/site/" + key);
   assert(artifacts.calls.back().url == "https://api.hcaptcha.test:8443/checkcaptcha/site/" + key);
   body = Body(Last(reb::NativeProbeType::kRequestBody));
   assert(body.content_type_length == 0 && (body.flags & 0x30) == 0 &&
          artifacts.calls.back().mime_type == "application/octet-stream");
 
-  // Truncation keeps the original length and full-body digest.
+  // Past 16 MiB a body keeps that prefix and its original length.
   request.headers.SetHeader("content-type", "text/plain");
   const std::vector<std::uint8_t> large(reb::kNativeRequestBodyCaptureBytes + 1000, 'x');
   request.request_body = BytesBody({large});
@@ -154,21 +167,22 @@ void RequestContent() {
   assert(AllValid() && body.state == static_cast<std::uint8_t>(State::kCapturedTruncated) &&
          body.body_length == large.size() &&
          body.captured_length == reb::kNativeRequestBodyCaptureBytes &&
-         body.sha256 == crypto::hash::Sha256(large) &&
+         (body.flags & reb::kRequestBodyDigestSizeLimit) != 0 &&
          artifacts.calls.back().content.size() == reb::kNativeRequestBodyCaptureBytes);
 
-  // Above the digest bound: explicit flag, still a bounded prefix.
-  request.request_body =
-      BytesBody({std::vector<std::uint8_t>(reb::kNativeRequestBodyDigestBytes + 1, 'y')});
+  // Above the 4 MiB digest bound: explicit flag, and the whole body is retained.
+  const std::vector<std::uint8_t> five(5U * 1024U * 1024U, 'y');
+  request.request_body = BytesBody({five});
   events.clear();
   start();
   body = Body(Last(reb::NativeProbeType::kRequestBody));
   assert(AllValid() && (body.flags & reb::kRequestBodyDigestSizeLimit) != 0 &&
          (body.flags & reb::kRequestBodyDigestPresent) == 0 &&
-         body.state == static_cast<std::uint8_t>(State::kCapturedTruncated));
+         body.state == static_cast<std::uint8_t>(State::kCaptured) &&
+         body.captured_length == five.size() && artifacts.calls.back().content == five);
 
   // File, blob, stream, unknown and mixed bodies are named, never read.
-  const auto calls = artifacts.calls.size();
+  const auto calls = artifacts.Count(reb::NativeArtifactKind::kRequestBody);
   const auto kind_case = [&](network::DataElement first, Kind kind, bool with_bytes) {
     auto element_body = std::make_shared<network::ResourceRequestBody>();
     if (with_bytes) {
@@ -190,7 +204,7 @@ void RequestContent() {
             false);
   kind_case(network::DataElement(), Kind::kUnknown, false);
   kind_case(network::DataElement(network::DataElementFile{}), Kind::kMixed, true);
-  assert(artifacts.calls.size() == calls);
+  assert(artifacts.Count(reb::NativeArtifactKind::kRequestBody) == calls);
 
   // Password form posts keep neither bytes nor a digest.
   request.request_body = BytesBody({Bytes("user=a&password=b")});
@@ -199,7 +213,8 @@ void RequestContent() {
   start();
   body = Body(Last(reb::NativeProbeType::kRequestBody));
   assert(AllValid() && body.state == static_cast<std::uint8_t>(State::kNotCapturedCredentialForm) &&
-         body.body_length == 17 && (body.flags & 0x06) == 0 && artifacts.calls.size() == calls);
+         body.body_length == 17 && (body.flags & 0x06) == 0 &&
+         artifacts.Count(reb::NativeArtifactKind::kRequestBody) == calls);
 
   // Empty, unavailable, refused and unsupported-URL outcomes are explicit.
   request.request_body = BytesBody({{}});
@@ -209,18 +224,37 @@ void RequestContent() {
   assert(AllValid() && body.state == static_cast<std::uint8_t>(State::kEmpty) &&
          body.sha256 == crypto::hash::Sha256(std::string_view()));
   request.request_body = BytesBody({Bytes("payload")});
+  const auto retention = [] {
+    return static_cast<reb::RequestTargetRetention>(
+        Target(Last(reb::NativeProbeType::kRequestTarget)).reserved0);
+  };
   artifacts.enabled = false;
   events.clear();
   start();
-  assert(AllValid() && Body(Last(reb::NativeProbeType::kRequestBody)).state ==
-                           static_cast<std::uint8_t>(State::kNotCapturedArtifactUnavailable));
+  assert(AllValid() &&
+         Body(Last(reb::NativeProbeType::kRequestBody)).state ==
+             static_cast<std::uint8_t>(State::kNotCapturedArtifactUnavailable) &&
+         retention() == reb::RequestTargetRetention::kNotRetainedArtifactUnavailable);
   artifacts.enabled = true;
-  artifacts.refuse = true;
-  events.clear();
-  start();
-  assert(AllValid() && Body(Last(reb::NativeProbeType::kRequestBody)).state ==
-                           static_cast<std::uint8_t>(State::kNotCapturedTransferRefused));
-  artifacts.refuse = false;
+  for (const auto [admission, state, target_retention] :
+       {std::tuple{reb::NativeRequestContentAdmission::kRefused, State::kNotCapturedTransferRefused,
+                   reb::RequestTargetRetention::kNotRetainedTransferRefused},
+        std::tuple{reb::NativeRequestContentAdmission::kSessionBudget,
+                   State::kNotCapturedSessionBudget,
+                   reb::RequestTargetRetention::kNotRetainedSessionBudget},
+        std::tuple{reb::NativeRequestContentAdmission::kUnavailable,
+                   State::kNotCapturedArtifactUnavailable,
+                   reb::RequestTargetRetention::kNotRetainedArtifactUnavailable}}) {
+    artifacts.admission = admission;
+    events.clear();
+    start();
+    assert(AllValid() &&
+           Body(Last(reb::NativeProbeType::kRequestBody)).state ==
+               static_cast<std::uint8_t>(state) &&
+           retention() == target_retention &&
+           Last(reb::NativeProbeType::kRequestTarget).header.artifact_id == 0);
+  }
+  artifacts.admission = reb::NativeRequestContentAdmission::kQueued;
   request.url = GURL("wss", "socket.test", "/stream");
   events.clear();
   start();
@@ -229,43 +263,28 @@ void RequestContent() {
              static_cast<std::uint8_t>(State::kNotCapturedUrl) &&
          Target(Last(reb::NativeProbeType::kRequestTarget)).scheme ==
              static_cast<std::uint8_t>(reb::RequestScheme::kWss));
-  request.url = GURL("https", "api.test", "/" + std::string(reb::kNativeArtifactMaxUrlBytes, 'p'));
+  // A body to a URL past the manifest's 8 KiB keeps its origin; its target is whole.
+  const std::string long_path = "/" + std::string(reb::kNativeArtifactMaxUrlBytes, 'p');
+  request.url = GURL("https", "api.test", long_path);
   events.clear();
   start();
-  assert(AllValid() && Body(Last(reb::NativeProbeType::kRequestBody)).state ==
-                           static_cast<std::uint8_t>(State::kNotCapturedUrl));
+  assert(AllValid() &&
+         Body(Last(reb::NativeProbeType::kRequestBody)).state ==
+             static_cast<std::uint8_t>(State::kCaptured) &&
+         artifacts.calls.back().url == "https://api.test" &&
+         artifacts.calls[artifacts.calls.size() - 2].content.size() == long_path.size() &&
+         retention() == reb::RequestTargetRetention::kRetained);
+  request.url = GURL("ftp", "files.test", long_path);
+  events.clear();
+  start();
+  assert(AllValid() &&
+         Body(Last(reb::NativeProbeType::kRequestBody)).state ==
+             static_cast<std::uint8_t>(State::kNotCapturedUrl) &&
+         retention() == reb::RequestTargetRetention::kNotRetainedUrl);
   request.url.valid_ = false;
   events.clear();
   start();
   assert(AllValid() && Target(Last(reb::NativeProbeType::kRequestTarget)).target_length == 0);
-
-  // The per-configuration count and byte budgets end retention visibly.
-  request.url = GURL("https", "api.test", "/beacon");
-  sink.SetEmitter(Emit, 22, mask, 200, true);
-  artifacts.calls.clear();
-  for (std::size_t i = 0; i < reb::kNativeRequestBodySessionCount; ++i) {
-    events.clear();
-    start();
-  }
-  assert(artifacts.calls.size() == reb::kNativeRequestBodySessionCount);
-  events.clear();
-  start();
-  assert(AllValid() && Body(Last(reb::NativeProbeType::kRequestBody)).state ==
-                           static_cast<std::uint8_t>(State::kNotCapturedSessionBudget));
-  sink.SetEmitter(Emit, 22, mask, 200, true);
-  artifacts.calls.clear();
-  request.request_body = BytesBody({large});
-  const std::size_t byte_budget =
-      reb::kNativeRequestBodySessionBytes / reb::kNativeRequestBodyCaptureBytes;
-  for (std::size_t i = 0; i < byte_budget; ++i) {
-    events.clear();
-    start();
-    artifacts.calls.clear();
-  }
-  events.clear();
-  start();
-  assert(AllValid() && Body(Last(reb::NativeProbeType::kRequestBody)).state ==
-                           static_cast<std::uint8_t>(State::kNotCapturedSessionBudget));
 
   // Redirects in a content session carry their new target as a child.
   net::RedirectInfo redirect;
@@ -274,27 +293,71 @@ void RequestContent() {
   network::mojom::URLResponseHead head;
   head.headers = std::make_shared<net::HttpResponseHeaders>();
   head.headers->code = 307;
+  head.headers->content_encoding = "gzip";
+  head.mime_type = "text/html";
   events.clear();
   sink.RecordRequestRedirected(172, 0, 0, 4, 5, 11, 12, redirect, head);
-  assert(events.size() == 2 && AllValid() &&
+  assert(events.size() == 3 && AllValid() &&
          events[1].header.parent_event_id == events[0].header.sequence_number &&
          Target(events[1]).target_length == 18);
+  // Chromium discards a redirect's body, so the hop says so instead of looking empty.
+  reb::ResponseBodyPayload hop;
+  assert(events[2].header.type == reb::NativeProbeType::kResponseBody &&
+         events[2].header.parent_event_id == events[0].header.sequence_number &&
+         events[2].header.artifact_id == 0 &&
+         reb::DecodeResponseBodyPayload(events[2].inline_payload, hop) &&
+         hop.state == static_cast<std::uint8_t>(reb::ResponseBodyState::kRedirected) &&
+         hop.coding_count == 1 && hop.codings[0] == 1 &&
+         std::string_view(hop.content_type.data(), hop.content_type_length) == "text/html");
+
+  // The body record's parent is noted for the tee, or says the channel is down.
+  auto& bodies = reb::NativeResponseBodyCapture::Get();
+  bodies.noted.clear();
+  events.clear();
+  const auto response = sink.RecordResponseStarted(172, 0, 0, 4, 5, 11, 12, head);
+  assert(events.size() == 1 && bodies.noted.size() == 1 &&
+         bodies.noted[0].sequence_number == response && bodies.noted[0].tab_id == 4);
+  artifacts.enabled = false;
+  events.clear();
+  static_cast<void>(sink.RecordResponseStarted(172, 0, 0, 4, 5, 11, 12, head));
+  assert(events.size() == 2 && AllValid() && bodies.noted.size() == 1);
+  reb::ResponseBodyPayload unavailable;
+  assert(reb::DecodeResponseBodyPayload(events[1].inline_payload, unavailable) &&
+         unavailable.state ==
+             static_cast<std::uint8_t>(reb::ResponseBodyState::kNotCapturedArtifactUnavailable) &&
+         events[1].header.parent_event_id == events[0].header.sequence_number);
+  artifacts.enabled = true;
+  events.clear();
+  static_cast<void>(sink.RecordResponseStarted(172, 0, 0, 4, 5, 11, 12, head, true));
+  assert(events.size() == 1 && bodies.noted.size() == 1);
+  network::URLLoaderCompletionStatus aborted;
+  aborted.error_code = -3;
+  sink.RecordRequestCompleted(172, 0, 0, 4, 5, 11, 12, aborted);
+  assert(bodies.completions.size() == 1 && bodies.completions[0].request_id == 172 &&
+         bodies.completions[0].frame_id == 5 && bodies.completions[0].error_code == -3);
 
   // Reconfiguring without content returns to metadata-only.
   sink.SetEmitter(Emit, 22, mask, 200);
   events.clear();
   sink.RecordRequestRedirected(172, 0, 0, 4, 5, 11, 12, redirect, head);
+  static_cast<void>(sink.RecordResponseStarted(172, 0, 0, 4, 5, 11, 12, head));
+  sink.RecordRequestCompleted(172, 0, 0, 4, 5, 11, 12, aborted);
   start();
-  assert(std::none_of(events.begin(), events.end(), [](const auto& event) {
-    return event.header.type == reb::NativeProbeType::kRequestTarget;
-  }));
+  assert(std::none_of(events.begin(), events.end(),
+                      [](const auto& event) {
+                        return event.header.type == reb::NativeProbeType::kRequestTarget ||
+                               event.header.type == reb::NativeProbeType::kResponseBody;
+                      }) &&
+         bodies.noted.size() == 1 && bodies.completions.size() == 1);
   sink.SetEmitter(nullptr, 0, 0, 0, true);
   events.clear();
   start();
   assert(events.empty());
   std::cout << "PASS native request content: metadata-only digest/type/length, content target and "
                "body handoff, truncation, digest bound, file/blob/stream/mixed kinds, credential "
-               "form, unavailable/refused/URL outcomes, count and byte budgets, redirect target\n";
+               "form, unavailable/refused/budget/URL outcomes for bodies and full targets, "
+               "redirect target, redirected and unavailable response bodies, tee parent and "
+               "completion hand-off\n";
 }
 }  // namespace
 int main() {

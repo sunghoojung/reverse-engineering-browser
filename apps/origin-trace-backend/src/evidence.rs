@@ -353,6 +353,7 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             "bytecode_buffer",
             "wasm_guest_adapter",
             "request_body",
+            "request_target",
         ]
         .contains(&artifact["kind"].as_str().unwrap_or(""))
         && artifact["url"].as_str().is_some_and(|s| !s.is_empty())
@@ -371,7 +372,7 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
         || artifact["sensitive"]
             != matches!(
                 artifact["kind"].as_str(),
-                Some("response_body" | "canvas_data_url" | "request_body")
+                Some("response_body" | "canvas_data_url" | "request_body" | "request_target")
             )
     {
         return Err(Error::new(
@@ -419,8 +420,12 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             || (origin == "runtime_typed_array"
                 && (artifact["kind"] != "bytecode_buffer"
                     || artifact["execution_context_id"] == "0"))
-            // A request body is created by its browser request_body record.
-            || ((artifact["kind"] == "request_body") != (origin == "network_request"))
+            // Request content is created by its browser request_body or
+            // request_target record.
+            || (matches!(
+                artifact["kind"].as_str(),
+                Some("request_body" | "request_target")
+            ) != (origin == "network_request"))
             || (origin == "network_request"
                 && (artifact["execution_context_id"] != "0"
                     || artifact["creator_event_id"] == "0"))
@@ -431,7 +436,10 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             ));
         }
     } else {
-        if artifact["kind"] == "wasm_guest_adapter" || artifact["kind"] == "request_body" {
+        if matches!(
+            artifact["kind"].as_str(),
+            Some("wasm_guest_adapter" | "request_body" | "request_target")
+        ) {
             return Err(Error::new(500, "Native artifact origin is missing"));
         }
         artifact["execution_context_id"] = json!("0");
@@ -1252,15 +1260,21 @@ mod tests {
             "content_path": "blobs/0000000000000000000000000000000000000000000000000000000000000000.bin"
         });
         assert!(validate_artifact(&mut valid.clone()).is_ok());
-        for (field, value) in [
-            ("sensitive", json!(false)),
-            ("capture_origin", json!("network_response")),
-            ("execution_context_id", json!("4")),
-            ("creator_event_id", json!("0")),
-        ] {
-            let mut artifact = valid.clone();
-            artifact[field] = value;
-            assert!(validate_artifact(&mut artifact).is_err(), "{field}");
+        let mut target = valid.clone();
+        target["kind"] = json!("request_target");
+        target["url"] = json!("https://api.example.test");
+        assert!(validate_artifact(&mut target.clone()).is_ok());
+        for base in [&valid, &target] {
+            for (field, value) in [
+                ("sensitive", json!(false)),
+                ("capture_origin", json!("network_response")),
+                ("execution_context_id", json!("4")),
+                ("creator_event_id", json!("0")),
+            ] {
+                let mut artifact = base.clone();
+                artifact[field] = value;
+                assert!(validate_artifact(&mut artifact).is_err(), "{field}");
+            }
         }
         let mut other = valid.clone();
         other["kind"] = json!("javascript");

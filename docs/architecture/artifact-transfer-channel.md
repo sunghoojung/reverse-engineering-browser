@@ -77,7 +77,7 @@ size. Native tests assert that the two definitions remain ABI-identical.
 | 0 | 4 | `magic` | `0x41424552` |
 | 4 | 2 | `protocol_version` | `1` |
 | 6 | 2 | `header_size` | `128` |
-| 8 | 2 | `kind` | JavaScript, WASM, source map, response body, Canvas data URL, bytecode buffer, guest adapter, request body |
+| 8 | 2 | `kind` | JavaScript, WASM, source map, response body, Canvas data URL, bytecode buffer, guest adapter, request body, request target |
 | 10 | 2 | `flags` | bit 0 marks sensitive content |
 | 12 | 4 | `reserved0` | zero |
 | 16 | 48 | correlation IDs | six unsigned 64-bit values |
@@ -106,7 +106,10 @@ acknowledgment to the queued artifact.
 Defaults are:
 
 - 16 MiB per artifact;
-- 32 MiB of active browser capture memory;
+- 32 MiB in-flight pool for response tees and request content, charged with
+  the bytes a capture holds (a declared Content-Length, or one 64 KiB chunk
+  that grows) and returned when the artifact writer drops the transfer, so it
+  bounds bytes held rather than captures;
 - 16 queued artifacts and 32 MiB of queued browser content;
 - 256 MiB of immutable blobs per session store;
 - 8 KiB source URL;
@@ -189,18 +192,21 @@ Project-wide authorization, capture, and privacy rules are in
 [`SAFETY.md`](../../SAFETY.md). This section describes the artifact channel's
 specific enforcement contract.
 
-Response bodies, request bodies and Canvas data URLs require both controls:
+Response bodies, request bodies, full request targets and Canvas data URLs
+require both controls:
 
-1. the frame kind is `response_body`, `request_body` or `canvas_data_url` and
-   its sensitive flag is set;
+1. the frame kind is `response_body`, `request_body`, `request_target` or
+   `canvas_data_url` and its sensitive flag is set;
 2. the receiver was started with `--allow-sensitive` for that authorized
    session.
 
-The default receiver rejects all three kinds. The live launcher enables the
+The default receiver rejects all four kinds. The live launcher enables the
 receiver policy only when `REB_CAPTURE_CANVAS_IMAGES=1` or
-`REB_CAPTURE_REQUEST_CONTENT=1` is set. A `request_body` artifact must use the
-`network_request` origin, name its `request_body` event as creator and carry no
-execution context; see [Native network v2](../../protocol/native-network-v2.md). JavaScript,
+`REB_CAPTURE_REQUEST_CONTENT=1` is set. A `request_body` or `request_target`
+artifact must use the `network_request` origin, name its creator record and
+carry no execution context; see [Native network v2](../../protocol/native-network-v2.md). A
+`response_body` artifact uses the `network_response` origin and is created by
+its `response_started` record. JavaScript,
 WASM, and source maps cannot be mislabeled as sensitive content. Credentials,
 cookies, and authorization headers are not artifact kinds and remain outside
 this channel.
@@ -223,9 +229,11 @@ inert hex view of their retained bytes.
 A response body becomes a stored JavaScript artifact only when the network tee
 classifies it as a script resource or a JavaScript MIME type. `application/wasm`
 and the compile, module, and instantiate hooks store Wasm, often under a
-synthetic `wasm://` URL, without copying the surrounding loader script. Fetch
-or XHR bodies with another MIME type, and generated source that misses the
-allocating-script hook, are absent from the manifest. `chrome://` script
+synthetic `wasm://` URL, without copying the surrounding loader script. In
+content sessions the same tee stores every other kept response as a sensitive
+`response_body` artifact ([native network v3](../../protocol/native-network-v3.md));
+otherwise those bodies, and generated source that misses the allocating-script
+hook, are absent from the manifest. `chrome://` script
 responses can still be stored; they are browser-UI noise, not a challenge
 loader. VM Lab's session-sources panel lists stored same-session artifacts and,
 only when that session is in the current live evidence window, joins CDP

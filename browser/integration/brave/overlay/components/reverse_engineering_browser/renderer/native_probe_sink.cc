@@ -1985,6 +1985,12 @@ void NativeProbeSink::RecordRendererRequestComplete(
     std::copy_n(target_prefix.begin(),
                 std::min({target_prefix.size(), target_length, target.prefix.size()}),
                 target.prefix.begin());
+    // The renderer has no artifact channel for the rest of a long target.
+    if (target_length > target.prefix.size()) {
+      target.retention = target.scheme == NativeRequestScheme::kOther
+                             ? NativeRequestTargetRetention::kNotRetainedUrl
+                             : NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
+    }
     NativeProbeEvent child;
     child.header.category = NativeProbeCategory::kNetwork;
     child.header.type = NativeProbeType::kRequestTarget;

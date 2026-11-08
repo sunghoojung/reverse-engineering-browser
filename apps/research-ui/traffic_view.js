@@ -1,8 +1,9 @@
 /* Native Traffic rows carry method, host, status, type and lifecycle timing.
  * Content capture sessions add the URL path and query and a bounded request
  * body (protocol/native-network-v2.md); every session records the body's
- * length, type and digest. Headers and response bodies are not part of native
- * capture, so this view never implies or searches them. */
+ * length, type and digest. Response bodies have their own tabs
+ * (traffic_response.js). Headers are not part of native capture, so this view
+ * never implies or searches them. */
 function trafficTargetParts(request) {
   const target = String(request?.path ?? '').trim();
   if (request?.hostOnly) return {name: target || 'Unknown host', host: request.schemeOnly ? 'Path not captured' : 'Host-only metadata'};
@@ -43,12 +44,12 @@ function trafficBodyCapture(body) {
     empty: 'Empty body (0 bytes).',
     metadata_only: 'Not retained: content capture was off for this session. Length, type and digest are recorded.',
     captured: 'Retained in full.',
-    captured_truncated: `Retained prefix: ${trafficByteCount(body.capturedLength)} of ${trafficByteCount(body.bodyLength)}, truncated at the 256 KiB capture limit.`,
+    captured_truncated: `Retained prefix: ${trafficByteCount(body.capturedLength)} of ${trafficByteCount(body.bodyLength)}, truncated at the capture limit.`,
     not_captured_body_kind: `Not captured: ${kind.toLowerCase()} bodies are never read by native capture.`,
     not_captured_artifact_unavailable: 'Not captured: the artifact channel was unavailable.',
-    not_captured_transfer_refused: 'Not captured: the artifact transfer queue refused it.',
-    not_captured_url: 'Not captured: the URL is not HTTP(S) or is longer than 8 KiB.',
-    not_captured_session_budget: 'Not captured: this session reached its request body budget (1,024 bodies or 64 MiB).',
+    not_captured_transfer_refused: 'Not captured: the bounded in-flight memory or artifact transfer queue refused it.',
+    not_captured_url: 'Not captured: the URL is not HTTP(S), or in older captures longer than 8 KiB.',
+    not_captured_session_budget: 'Not captured: this session had used its request body budget.',
     not_captured_credential_form: 'Not captured: password form submission. Bytes and digest are withheld.'
   }[body.state] ?? 'Unknown capture state.';
 }
@@ -89,9 +90,36 @@ function trafficBodyContent(body, view) {
   }
   const notes = [];
   if (body.state === 'captured_truncated') notes.push(`Prefix only: ${trafficByteCount(body.capturedLength)} of ${trafficByteCount(body.bodyLength)}.`);
+  const more = view.complete === false;
+  if (more) notes.push(`Showing the first ${trafficByteCount(view.loaded)} of ${trafficByteCount(view.total)} retained.`);
+  if (view.moreError) notes.push(`The next range could not be read: ${view.moreError}.`);
   if (view.lossy) notes.push('Not valid UTF-8; shown with replacement characters.');
-  if (!view.verified) notes.push('The retained digest could not be rechecked in this view.');
-  return {text: view.text, note: notes.join(' '), url: view.url};
+  if (!view.verified) notes.push(more ? 'The local backend checked the retained digest; this view rechecks it once every byte is shown.'
+    : 'The retained digest could not be rechecked in this view.');
+  return {text: view.text, note: notes.join(' '), url: view.url, more: more ? view.key : null, loadingMore: Boolean(view.loadingMore)};
+}
+
+// The Request URL row: the full target once retained bytes are loaded, else
+// the captured prefix and what happened to the rest.
+const TRAFFIC_TARGET_RETENTION = Object.freeze({
+  not_retained_artifact_unavailable: 'the artifact channel was unavailable',
+  not_retained_transfer_refused: 'the bounded in-flight memory or artifact transfer queue refused it',
+  not_retained_session_budget: 'this session had used its request content budget',
+  not_retained_url: 'the URL has no HTTP(S) or WebSocket origin or exceeds the URL limit'
+});
+function trafficRequestUrl(request, view) {
+  if (request.hostOnly) return `${request.path} (${request.schemeOnly ? 'path' : 'host only; path and query'} not captured)`;
+  if (!request.urlTruncated) return request.path;
+  if (view?.status === 'ready' && view.complete) return `${view.url}${view.text}`;
+  const prefix = `${request.path}… (truncated; the original path and query are ${request.targetLength} bytes`;
+  const retention = request.fullTarget?.retention;
+  if (retention === 'retained') {
+    return `${prefix}; ${!view || view.status === 'loading' ? 'loading the retained full target'
+      : view.status === 'refused' ? `the artifact receiver did not retain the full target (${view.reason || 'unknown reason'})`
+        : view.status === 'missing' ? 'the full target artifact is not in the current catalog'
+          : view.status === 'error' ? `the full target could not be read: ${view.error}` : 'the full target is not readable here'})`;
+  }
+  return TRAFFIC_TARGET_RETENTION[retention] ? `${prefix}; the full target was not retained: ${TRAFFIC_TARGET_RETENTION[retention]})` : `${prefix})`;
 }
 
 const TRAFFIC_TYPE_LABELS = Object.freeze({xhr: 'Fetch/XHR', doc: 'Document', css: 'CSS', js: 'Script',
@@ -270,9 +298,9 @@ function trafficOriginLabel(request) {
     : request?.origin === 'live' ? 'Live metadata' : 'Local evidence';
 }
 
-// Native capture has no header or response body record to show. Make that
-// coverage explicit instead of rendering request/response panes that stay empty.
-function renderTrafficDetails(container, request, notice = '', bodyView = null) {
+// Native capture has no header record to show. Make that coverage explicit
+// instead of rendering request/response panes that stay empty.
+function renderTrafficDetails(container, request, notice = '', bodyView = null, targetView = null) {
   const key = JSON.stringify([request?.origin, request?.id, notice]);
   if (container.dataset.selection !== key) {
     container.dataset.selection = key;
@@ -294,15 +322,15 @@ function renderTrafficDetails(container, request, notice = '', bodyView = null) 
   }
   if (!request) return;
   renderTrafficBody(container.querySelector('.traffic-body'), request, bodyView);
-  const values = [request.hostOnly ? `${request.path} (${request.schemeOnly ? 'path' : 'host only; path and query'} not captured)`
-    : request.urlTruncated ? `${request.path}… (truncated; the original path and query are ${request.targetLength} bytes)` : request.path,
+  const fullTarget = request.urlTruncated && targetView?.status === 'ready' && targetView.complete;
+  const values = [trafficRequestUrl(request, targetView),
     request.documentUrl ?? 'Not captured', request.method, request.failed ? 'Failed' : request.status === 'pending'
       ? (Number.isInteger(request.provisionalStatus) ? `Pending · provisional HTTP ${request.provisionalStatus}` : 'Pending')
       : request.status, trafficOriginLabel(request), request.id,
     trafficTabText(request),
     `${request.hostOnly
       ? 'Native capture recorded method, host, status and lifecycle timing. URL path, query and body bytes are recorded only in content capture sessions.'
-      : 'Native capture recorded method, URL path and query, status and lifecycle timing.'} Request and response headers and response bodies are not captured.${request.targetMalformed ? ' The URL target record is malformed and was not interpreted.' : ''}${request.urlTruncated ? ' Request URL truncated.' : ''}${request.documentUrlTruncated ? ' Document URL truncated.' : ''}${request.methodTruncated ? ' Method truncated.' : ''}`];
+      : 'Native capture recorded method, URL path and query, status and lifecycle timing.'} Request and response headers are not captured. Response bodies are on the Response tab.${request.targetMalformed ? ' The URL target record is malformed and was not interpreted.' : ''}${request.urlTruncated && !fullTarget ? ' Request URL truncated.' : ''}${request.documentUrlTruncated ? ' Document URL truncated.' : ''}${request.methodTruncated ? ' Method truncated.' : ''}`];
   // Captured values stay mono; coverage notes read as prose; Source is provenance.
   const kinds = ['value', request.documentUrl ? 'value' : 'prose', 'value', /^\d+$/.test(String(values[3])) ? 'value' : 'prose',
     'provenance', 'value', trafficTabs(request).length ? 'value' : 'prose', 'prose'];
@@ -326,7 +354,8 @@ function trafficTabText(request) {
 function renderTrafficBody(section, request, view) {
   const body = request.origin === 'live' || request.origin === 'demo' ? request.body ?? null : undefined;
   const content = body === undefined ? null : trafficBodyContent(body, view);
-  const key = JSON.stringify([body, content]);
+  // Text is keyed by length: the body record and loaded range already identify it.
+  const key = JSON.stringify([body, content && {...content, text: content.text?.length}]);
   if (section.dataset.renderKey === key) return;
   section.dataset.renderKey = key;
   const rows = body === undefined ? [['Capture', 'This row has no native body record.', 'prose']]
@@ -352,7 +381,18 @@ function renderTrafficBody(section, request, view) {
     text.setAttribute('aria-label', 'Retained request body text');
     nodes.push(text);
   }
+  if (content?.more) {
+    const more = trafficNode('button', 'secondary-button traffic-body-more', content.loadingMore ? 'Loading…' : 'Show the next 256 KiB');
+    more.type = 'button';
+    more.dataset.contentKey = content.more;
+    more.disabled = content.loadingMore;
+    nodes.push(more);
+  }
+  // Keyboard focus stays on the body when its next range replaces the button.
+  const refocus = Boolean(section.querySelector('.traffic-body-more')) &&
+    section.querySelector('.traffic-body-more') === globalThis.document?.activeElement;
   section.replaceChildren(trafficNode('h2', '', 'Request body'), ...nodes);
+  if (refocus) (section.querySelector('.traffic-body-more') ?? section.querySelector('.traffic-body-text'))?.focus?.();
   section.dataset.state = body === undefined ? 'none' : body === null ? 'missing' : body.malformed ? 'malformed' : body.state;
 }
 

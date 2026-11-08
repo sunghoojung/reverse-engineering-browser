@@ -19,10 +19,12 @@
 
 #include "components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "components/reverse_engineering_browser/common/native_network_request.h"
+#include "components/reverse_engineering_browser/common/native_network_response_body.h"
 #include "components/reverse_engineering_browser/common/native_probe_event.h"
 #include "reb/artifact.hpp"
 #include "reb/event.hpp"
 #include "reb/network_request.hpp"
+#include "reb/network_response_body.hpp"
 
 namespace {
 
@@ -55,6 +57,11 @@ static_assert(static_cast<std::uint8_t>(reb::RequestBodyKind::kUnknown) ==
 static_assert(reb::kRequestBodyContentTypeOmitted == reb::kNativeRequestBodyContentTypeOmitted);
 static_assert(static_cast<std::uint8_t>(reb::RequestScheme::kWss) ==
               static_cast<std::uint8_t>(reb::NativeRequestScheme::kWss));
+static_assert(reb::kRequestTargetPayloadVersion == reb::kNativeRequestTargetPayloadVersion);
+static_assert(static_cast<std::uint8_t>(reb::RequestTargetRetention::kNotRetainedUrl) ==
+              static_cast<std::uint8_t>(reb::NativeRequestTargetRetention::kNotRetainedUrl));
+static_assert(static_cast<std::uint16_t>(reb::ArtifactKind::kRequestTarget) ==
+              static_cast<std::uint16_t>(reb::NativeArtifactKind::kRequestTarget));
 
 reb::NativeRequestBodySummary Summary(const reb::NativeRequestBodyKind kind,
                                       const reb::NativeRequestBodyState state,
@@ -144,6 +151,7 @@ void CheckParity() {
   reb::NativeRequestTarget target;
   target.target_length = 0x01020304U;
   target.scheme = reb::NativeRequestScheme::kWs;
+  target.retention = reb::NativeRequestTargetRetention::kNotRetainedSessionBudget;
   target.port = 0x0506;
   for (std::size_t i = 0; i < target.prefix.size(); ++i) {
     target.prefix[i] = static_cast<char>('A' + i % 26);
@@ -152,9 +160,9 @@ void CheckParity() {
   Check(reb::DecodeRequestTargetPayload(reb::EncodeNativeRequestTargetPayload(target),
                                         target_decoded),
         "target payload decodes");
-  Check(target_decoded.protocol_version == 1 && target_decoded.payload_size == 128 &&
+  Check(target_decoded.protocol_version == 2 && target_decoded.payload_size == 128 &&
             target_decoded.target_length == target.target_length && target_decoded.scheme == 3 &&
-            target_decoded.reserved0 == 0 && target_decoded.port == 0x0506 &&
+            target_decoded.reserved0 == 4 && target_decoded.port == 0x0506 &&
             std::equal(target_decoded.target_prefix.begin(), target_decoded.target_prefix.end(),
                        target.prefix.begin()),
         "every target field crosses the overlay/core boundary at its documented offset");
@@ -345,40 +353,66 @@ void CheckBodyStates() {
 }
 
 void CheckTargets() {
+  using Retention = reb::NativeRequestTargetRetention;
   reb::NativeRequestTarget target;
   target.scheme = reb::NativeRequestScheme::kHttps;
+  target.retention = Retention::kRetained;
   const std::string path =
       "/checksiteconfig?v=1&host=accounts.example&sitekey=" + std::string(90, 'k');
   target.target_length = static_cast<std::uint32_t>(path.size());
   std::copy_n(path.begin(), target.prefix.size(), target.prefix.begin());
   auto event = Event(reb::EventType::kRequestTarget, reb::EncodeNativeRequestTargetPayload(target));
+  event.header.artifact_id = 31;
   golden.emplace_back("truncated target", event);
-  Check(reb::IsValidEvent(event), "truncated target with original length is valid");
+  Check(reb::IsValidEvent(event), "a long target names its full-target artifact");
   reb::RequestTargetPayload decoded;
   Check(reb::DecodeRequestTargetPayload(event.inline_payload, decoded) &&
             decoded.target_length == path.size() &&
             std::string_view(decoded.target_prefix.data(), decoded.target_prefix.size()) ==
                 std::string_view(path).substr(0, 116),
         "target prefix and original length survive");
+  for (const auto [name, retention] :
+       {std::pair{"target not retained: artifact channel",
+                  Retention::kNotRetainedArtifactUnavailable},
+        std::pair{"target not retained: transfer refused", Retention::kNotRetainedTransferRefused},
+        std::pair{"target not retained: session budget", Retention::kNotRetainedSessionBudget},
+        std::pair{"target not retained: url", Retention::kNotRetainedUrl}}) {
+    auto refused = event;
+    refused.header.artifact_id = 0;
+    refused.inline_payload[9] = static_cast<std::byte>(retention);
+    golden.emplace_back(name, refused);
+    Check(reb::IsValidEvent(refused), std::string("named refusal is valid: ") + name);
+  }
+  auto legacy = event;
+  legacy.header.artifact_id = 0;
+  legacy.inline_payload[0] = std::byte{1};
+  legacy.inline_payload[9] = std::byte{0};
+  golden.emplace_back("version 1 truncated target", legacy);
+  Check(reb::IsValidEvent(legacy), "a stored version 1 target keeps its meaning");
 
   reb::NativeRequestTarget empty;
   Check(reb::IsValidEvent(
             Event(reb::EventType::kRequestTarget, reb::EncodeNativeRequestTargetPayload(empty))),
         "an invalid URL reports an empty target, not a guessed one");
 
-  const auto mutate = [&](const char* name, const std::function<void(reb::EventRecord&)>& change) {
-    auto copy = event;
+  const auto mutate = [&](const char* name, const std::function<void(reb::EventRecord&)>& change,
+                          const reb::EventRecord& base) {
+    auto copy = base;
     change(copy);
     golden.emplace_back(name, copy);
     Check(!reb::IsValidEvent(copy), std::string("malformed target rejected: ") + name);
   };
-  mutate("NUL inside prefix", [](auto& e) { e.inline_payload[20] = std::byte{0}; });
-  mutate("scheme", [](auto& e) { e.inline_payload[8] = std::byte{5}; });
-  mutate("reserved", [](auto& e) { e.inline_payload[9] = std::byte{1}; });
-  mutate("version", [](auto& e) { e.inline_payload[0] = std::byte{2}; });
-  mutate("artifact", [](auto& e) { e.header.artifact_id = 1; });
-  mutate("flags", [](auto& e) { e.header.flags = 1; });
-  mutate("parent", [](auto& e) { e.header.parent_event_id = 0; });
+  mutate("NUL inside prefix", [](auto& e) { e.inline_payload[20] = std::byte{0}; }, event);
+  mutate("scheme", [](auto& e) { e.inline_payload[8] = std::byte{5}; }, event);
+  mutate("retention unknown", [](auto& e) { e.inline_payload[9] = std::byte{6}; }, event);
+  mutate("retained without artifact", [](auto& e) { e.header.artifact_id = 0; }, event);
+  mutate("refused with artifact", [](auto& e) { e.inline_payload[9] = std::byte{4}; }, event);
+  mutate("long target marked complete", [](auto& e) { e.inline_payload[9] = std::byte{0}; }, event);
+  mutate("version", [](auto& e) { e.inline_payload[0] = std::byte{3}; }, event);
+  mutate("version 1 with artifact", [](auto& e) { e.header.artifact_id = 1; }, legacy);
+  mutate("version 1 with retention", [](auto& e) { e.inline_payload[9] = std::byte{4}; }, legacy);
+  mutate("flags", [](auto& e) { e.header.flags = 1; }, event);
+  mutate("parent", [](auto& e) { e.header.parent_event_id = 0; }, event);
   reb::NativeRequestTarget short_target;
   short_target.target_length = 3;
   std::copy_n("/ab", 3, short_target.prefix.begin());
@@ -386,6 +420,7 @@ void CheckTargets() {
       Event(reb::EventType::kRequestTarget, reb::EncodeNativeRequestTargetPayload(short_target));
   golden.emplace_back("short target", dirty);
   Check(reb::IsValidEvent(dirty), "short target valid");
+  mutate("short target not retained", [](auto& e) { e.inline_payload[9] = std::byte{2}; }, dirty);
   dirty.inline_payload[12 + 3] = std::byte{'x'};
   golden.emplace_back("target dirty tail", dirty);
   Check(!reb::IsValidEvent(dirty), "bytes after the recorded target are rejected");
@@ -430,6 +465,14 @@ void CheckArtifacts() {
     h.kind = reb::ArtifactKind::kJavaScript;
     h.flags = 0;
   });
+  auto target_header = header;
+  target_header.kind = reb::ArtifactKind::kRequestTarget;
+  Check(reb::IsValidArtifactHeader(target_header), "request target artifact header is valid");
+  target_header.flags = 0;
+  Check(!reb::IsValidArtifactHeader(target_header), "a request target is always sensitive");
+  target_header.flags = reb::kArtifactFlagSensitive;
+  target_header.capture_origin = reb::ArtifactCaptureOrigin::kNetworkResponse;
+  Check(!reb::IsValidArtifactHeader(target_header), "a request target has the request origin");
 
   const auto root = std::filesystem::temp_directory_path() /
                     ("reb-network-request-test-" + std::to_string(::getpid()));
@@ -471,11 +514,238 @@ void CheckArtifacts() {
 
 }  // namespace
 
+static_assert(static_cast<std::uint16_t>(reb::EventType::kResponseBody) ==
+              static_cast<std::uint16_t>(reb::NativeProbeType::kResponseBody));
+static_assert(reb::kResponseBodyCaptureBytes == reb::kNativeResponseBodyCaptureBytes);
+static_assert(reb::kResponseBodyPayloadVersion == reb::kNativeResponseBodyPayloadVersion);
+static_assert(static_cast<std::uint8_t>(reb::ResponseBodyState::kNotCapturedSessionBudget) ==
+              static_cast<std::uint8_t>(reb::NativeResponseBodyState::kNotCapturedSessionBudget));
+static_assert(static_cast<std::uint8_t>(reb::ResponseBodyState::kPartial) ==
+              static_cast<std::uint8_t>(reb::NativeResponseBodyState::kPartial));
+static_assert(reb::kResponseBodyContentTypePresent == reb::kNativeResponseBodyContentTypePresent);
+static_assert(reb::kResponseBodyCompletionUnobserved ==
+              reb::kNativeResponseBodyCompletionUnobserved);
+static_assert(reb::kResponseBodyShared == reb::kNativeResponseBodyShared);
+static_assert(reb::IsNativeResponseMedia(5, "font/woff2") &&
+              reb::IsNativeResponseMedia(4, "image/png") &&
+              !reb::IsNativeResponseMedia(13, "image/png") &&
+              !reb::IsNativeResponseMedia(4, "image/svg+xml") &&
+              reb::IsNativeResponseMedia(13, "video/mp4") &&
+              reb::IsNativeResponseMedia(13, "application/vnd.ms-fontobject") &&
+              !reb::IsNativeResponseMedia(0, "text/html") &&
+              !reb::IsNativeResponseMedia(13, "application/json"));
+
+reb::NativeResponseBodySummary ResponseSummary(const reb::NativeResponseBodyState state,
+                                               const std::uint64_t body,
+                                               const std::uint64_t captured = 0) {
+  reb::NativeResponseBodySummary value;
+  value.state = state;
+  value.body_length = body;
+  value.captured_length = captured;
+  if (captured != 0) {
+    value.sha256.fill(0xcd);
+  }
+  if (state == reb::NativeResponseBodyState::kPartial) {
+    value.partial_index = 1;
+  }
+  reb::SetNativeResponseContentType("application/json", value);
+  return value;
+}
+
+reb::EventRecord ResponseEvent(const reb::NativeResponseBodySummary& summary,
+                               const std::uint64_t artifact_id = 0) {
+  auto event = Event(reb::EventType::kResponseBody, reb::EncodeNativeResponseBodyPayload(summary));
+  event.header.artifact_id = artifact_id;
+  return event;
+}
+
+void CheckResponseBodies() {
+  using S = reb::NativeResponseBodyState;
+  constexpr std::uint64_t kCap = reb::kNativeResponseBodyCaptureBytes;
+  reb::NativeResponseBodySummary full;
+  full.state = S::kPartial;
+  full.flags = 0x5a;
+  full.content_type_length = 0x3f;
+  full.coding_count = 3;
+  full.body_length = 0x0102030405060708ULL;
+  full.captured_length = 0x1112131415161718ULL;
+  full.codings = {reb::NativeResponseCoding::kGzip, reb::NativeResponseCoding::kBrotli,
+                  reb::NativeResponseCoding::kOther, reb::NativeResponseCoding::kZstd};
+  full.partial_index = 0x2122;
+  for (std::size_t i = 0; i < full.sha256.size(); ++i) {
+    full.sha256[i] = static_cast<std::uint8_t>(0xc0 + i);
+  }
+  for (std::size_t i = 0; i < full.content_type.size(); ++i) {
+    full.content_type[i] = static_cast<char>('a' + i % 26);
+  }
+  reb::ResponseBodyPayload decoded;
+  Check(reb::DecodeResponseBodyPayload(reb::EncodeNativeResponseBodyPayload(full), decoded) &&
+            decoded.protocol_version == 1 && decoded.payload_size == 128 && decoded.state == 3 &&
+            decoded.flags == 0x5a && decoded.content_type_length == 0x3f &&
+            decoded.coding_count == 3 && decoded.body_length == full.body_length &&
+            decoded.captured_length == full.captured_length &&
+            decoded.codings == std::array<std::uint8_t, 4>{1, 3, 15, 4} &&
+            decoded.partial_index == 0x2122 && decoded.reserved0 == 0 &&
+            decoded.sha256 == full.sha256 &&
+            std::equal(decoded.content_type.begin(), decoded.content_type.end(),
+                       full.content_type.begin()),
+        "response body payload layout matches between overlay and core");
+
+  const auto codings = [](std::string_view header) {
+    reb::NativeResponseBodySummary value;
+    reb::SetNativeResponseCodings(header, value);
+    return value;
+  };
+  const auto two = codings(" gzip , BR ");
+  Check(two.coding_count == 2 && two.codings[0] == reb::NativeResponseCoding::kGzip &&
+            two.codings[1] == reb::NativeResponseCoding::kBrotli && two.flags == 0,
+        "codings keep their order and case-insensitive names");
+  const auto plain = codings("identity, , ");
+  Check(plain.coding_count == 0 && plain.flags == 0, "identity and empty members are not codings");
+  const auto many = codings("x-gzip,deflate,zstd,dcb,dcz");
+  Check(many.coding_count == 4 && many.codings[0] == reb::NativeResponseCoding::kGzip &&
+            many.codings[3] == reb::NativeResponseCoding::kDcb &&
+            (many.flags & reb::kNativeResponseBodyCodingsOmitted) != 0,
+        "a fifth coding is marked omitted");
+  Check(codings("x-compress, aes128gcm").codings[1] == reb::NativeResponseCoding::kOther,
+        "an unrecognized coding is kOther");
+
+  struct Valid {
+    const char* name;
+    reb::NativeResponseBodySummary summary;
+    std::uint64_t artifact_id;
+  };
+  auto shared = ResponseSummary(S::kCaptured, 900, 900);
+  shared.flags |= reb::kNativeResponseBodyShared | reb::kNativeResponseBodyFromCache;
+  auto encoded = ResponseSummary(S::kCaptured, 40, 40);
+  reb::SetNativeResponseCodings("gzip, br", encoded);
+  encoded.flags |= reb::kNativeResponseBodyStillEncoded | reb::kNativeResponseBodyServiceWorker;
+  auto unobserved = ResponseSummary(S::kCaptured, 12, 12);
+  unobserved.flags |= reb::kNativeResponseBodyCompletionUnobserved;
+  auto untyped = ResponseSummary(S::kNotModified, 0);
+  untyped.flags = 0;
+  untyped.content_type = {};
+  untyped.content_type_length = 0;
+  const Valid valid[] = {
+      {"response captured", ResponseSummary(S::kCaptured, 900, 900), 911},
+      {"response captured shared", shared, 911},
+      {"response captured still encoded", encoded, 912},
+      {"response captured unobserved completion", unobserved, 913},
+      {"response truncated", ResponseSummary(S::kCapturedTruncated, kCap + 5, kCap), 914},
+      {"response partial", ResponseSummary(S::kPartial, 300, 300), 915},
+      {"response partial past cap", ResponseSummary(S::kPartial, kCap + 1, kCap), 916},
+      {"response aborted prefix", ResponseSummary(S::kAborted, 2048, 2048), 917},
+      {"response aborted nothing kept", ResponseSummary(S::kAborted, 0), 0},
+      {"response cancelled prefix", ResponseSummary(S::kCancelled, 10, 10), 918},
+      {"response cancelled before bytes", ResponseSummary(S::kCancelled, 0), 0},
+      {"response empty", ResponseSummary(S::kEmpty, 0), 0},
+      {"response not modified", untyped, 0},
+      {"response redirected", ResponseSummary(S::kRedirected, 0), 0},
+      {"response type skipped", ResponseSummary(S::kNotCapturedType, 0), 0},
+      {"response artifact unavailable", ResponseSummary(S::kNotCapturedArtifactUnavailable, 77), 0},
+      {"response transfer refused", ResponseSummary(S::kNotCapturedTransferRefused, 0), 0},
+      {"response session budget", ResponseSummary(S::kNotCapturedSessionBudget, 4096), 0},
+  };
+  for (const Valid& item : valid) {
+    golden.emplace_back(item.name, ResponseEvent(item.summary, item.artifact_id));
+    Check(reb::IsValidEvent(golden.back().second),
+          std::string("valid response body state: ") + item.name);
+  }
+
+  using Mutation = std::function<void(reb::NativeResponseBodySummary&, reb::EventRecord&)>;
+  struct Invalid {
+    const char* name;
+    reb::NativeResponseBodySummary base;
+    std::uint64_t artifact_id;
+    Mutation mutate;
+  };
+  const auto captured = ResponseSummary(S::kCaptured, 900, 900);
+  const auto refused = ResponseSummary(S::kNotCapturedSessionBudget, 900);
+  const auto summary = [](auto change) {
+    return [change](reb::NativeResponseBodySummary& value, reb::EventRecord&) { change(value); };
+  };
+  const auto byte = [](std::size_t offset, std::byte value) {
+    return [offset, value](reb::NativeResponseBodySummary&, reb::EventRecord& event) {
+      event.inline_payload[offset] = value;
+    };
+  };
+  const Invalid invalid[] = {
+      {"response version 2", captured, 911, byte(0, std::byte{2})},
+      {"response reserved", captured, 911, byte(30, std::byte{1})},
+      {"response state 0", captured, 911, byte(4, std::byte{0})},
+      {"response state 13", refused, 0, byte(4, std::byte{13})},
+      {"response unknown flag", captured, 911, byte(5, std::byte{0xc0})},
+      {"response captured without artifact", captured, 0, {}},
+      {"response artifact without bytes", refused, 911, {}},
+      {"response digest without bytes", refused, 0,
+       summary([](auto& value) { value.sha256.fill(1); })},
+      {"response bytes without digest", captured, 911,
+       summary([](auto& value) { value.sha256 = {}; })},
+      {"response captured past body", captured, 911,
+       summary([](auto& value) { value.captured_length = 901; })},
+      {"response captured short", captured, 911,
+       summary([](auto& value) { value.captured_length = 899; })},
+      {"response shared without artifact", refused, 0,
+       summary([](auto& value) { value.flags |= reb::kNativeResponseBodyShared; })},
+      {"response partial index on captured", captured, 911,
+       summary([](auto& value) { value.partial_index = 1; })},
+      {"response partial without index", ResponseSummary(S::kPartial, 30, 30), 911,
+       summary([](auto& value) { value.partial_index = 0; })},
+      {"response partial short of cap", ResponseSummary(S::kPartial, kCap + 1, kCap), 911,
+       summary([](auto& value) { value.captured_length = kCap - 1; })},
+      {"response unobserved on aborted", ResponseSummary(S::kAborted, 0), 0,
+       summary([](auto& value) { value.flags |= reb::kNativeResponseBodyCompletionUnobserved; })},
+      {"response truncated under cap", ResponseSummary(S::kCapturedTruncated, kCap, kCap), 911, {}},
+      {"response empty with bytes", ResponseSummary(S::kEmpty, 0), 0,
+       summary([](auto& value) { value.body_length = 3; })},
+      {"response redirect with length", ResponseSummary(S::kRedirected, 0), 0,
+       summary([](auto& value) { value.body_length = 3; })},
+      {"response five codings", captured, 911, byte(7, std::byte{5})},
+      {"response zero coding", captured, 911, summary([](auto& value) { value.coding_count = 1; })},
+      {"response coding 8", captured, 911, summary([](auto& value) {
+         value.coding_count = 1;
+         value.codings[0] = static_cast<reb::NativeResponseCoding>(8);
+       })},
+      {"response coding past count", captured, 911,
+       summary([](auto& value) { value.codings[0] = reb::NativeResponseCoding::kGzip; })},
+      {"response codings omitted under four", captured, 911, summary([](auto& value) {
+         value.flags |= reb::kNativeResponseBodyCodingsOmitted;
+         value.coding_count = 1;
+         value.codings[0] = reb::NativeResponseCoding::kGzip;
+       })},
+      {"response type without flag", captured, 911,
+       summary([](auto& value) { value.flags &= ~reb::kNativeResponseBodyContentTypePresent; })},
+      {"response unnormalized type", captured, 911, byte(64, std::byte{'A'})},
+      {"response type dirty tail", captured, 911, byte(127, std::byte{'x'})},
+      {"response envelope flags", captured, 911,
+       [](auto&, reb::EventRecord& event) { event.header.flags = 1; }},
+      {"response envelope status", captured, 911,
+       [](auto&, reb::EventRecord& event) { event.header.status_code = 200; }},
+      {"response envelope no parent", captured, 911,
+       [](auto&, reb::EventRecord& event) { event.header.parent_event_id = 0; }},
+  };
+  for (const Invalid& item : invalid) {
+    auto value = item.base;
+    reb::EventRecord event = ResponseEvent(value, item.artifact_id);
+    if (item.mutate) {
+      item.mutate(value, event);
+      // Summary mutations re-encode; payload and envelope mutations stand.
+      const auto mutated = ResponseEvent(value, item.artifact_id);
+      if (mutated.inline_payload != ResponseEvent(item.base, item.artifact_id).inline_payload) {
+        event.inline_payload = mutated.inline_payload;
+      }
+    }
+    Check(!reb::IsValidEvent(event), std::string("invalid response body: ") + item.name);
+    golden.emplace_back(item.name, event);
+  }
+}
+
 int main(int argc, char** argv) {
   CheckParity();
   CheckContentTypes();
   CheckBodyStates();
   CheckTargets();
+  CheckResponseBodies();
   if (failures != 0) {
     return 1;
   }
@@ -497,6 +767,7 @@ int main(int argc, char** argv) {
     return 1;
   }
   std::cout << "PASS network request wire: overlay/core parity, content types, every body "
-               "state and malformed record, targets, request_body artifact policy\n";
+               "state and malformed record, targets, request_body artifact policy, every "
+               "response_body state, codings and malformed record\n";
   return 0;
 }

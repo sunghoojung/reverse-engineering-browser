@@ -1645,6 +1645,112 @@ async fn session_summary_counts_frames_and_explains_gaps() {
 }
 
 #[tokio::test]
+async fn session_summary_counts_every_capture_refusal_by_reason() {
+    let server = Server::start().await;
+    let binary = |sequence, kind: &str, edit: &dyn Fn(&mut [u8; 128])| {
+        let mut payload = [0u8; 128];
+        payload[0] = 1;
+        payload[2] = 128;
+        edit(&mut payload);
+        let mut event = window_event(sequence, "network", kind, "");
+        event["payload"] = json!(hex::encode(payload));
+        event["payload_size"] = json!(128);
+        event
+    };
+    let events = vec![
+        window_event(
+            1,
+            "artifact",
+            "artifact_capture_failed",
+            "active_memory_limit",
+        ),
+        window_event(
+            2,
+            "artifact",
+            "artifact_capture_failed",
+            "active_memory_limit",
+        ),
+        window_event(3, "artifact", "artifact_capture_failed", "body_too_large"),
+        window_event(4, "artifact", "artifact_capture_failed", "Not A Reason"),
+        binary(5, "request_body", &|p| p[5] = 10),
+        binary(6, "request_body", &|p| p[5] = 4),
+        binary(7, "request_target", &|p| {
+            p[0] = 2;
+            p[9] = 4;
+        }),
+        binary(8, "request_target", &|p| p[9] = 4),
+        binary(9, "response_body", &|p| p[4] = 12),
+        binary(10, "response_body", &|p| p[4] = 12),
+        binary(11, "response_body", &|p| p[4] = 1),
+    ];
+    server.file("events.jsonl", &jsonl(&events));
+    let response = server.get("/api/session/summary").await;
+    let bytes = assert_contract_response(response, "get", "/api/session/summary", 200).await;
+    let summary: Value = serde_json::from_slice(&bytes).unwrap();
+    let found = |code: &str, reason: &str| {
+        summary["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == code && check["reason"] == reason)
+            .map(|check| check["count"].as_str().unwrap().to_owned())
+    };
+    assert_eq!(
+        found("artifact_capture_failed", "active_memory_limit").as_deref(),
+        Some("2")
+    );
+    assert_eq!(
+        found("artifact_capture_failed", "body_too_large").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        found("artifact_capture_failed", "unrecognized").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        found(
+            "request_content_not_retained",
+            "not_captured_session_budget"
+        )
+        .as_deref(),
+        Some("1")
+    );
+    // A version 1 target has no retention byte, so it is not counted.
+    assert_eq!(
+        found(
+            "request_content_not_retained",
+            "not_retained_session_budget"
+        )
+        .as_deref(),
+        Some("1")
+    );
+    // Response body budget exhaustion is counted under its own category.
+    let response = summary["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["category"] == "response_body")
+        .unwrap();
+    assert_eq!(response["reason"], "not_captured_session_budget");
+    assert_eq!(response["count"], "2");
+    assert!(
+        response["message"]
+            .as_str()
+            .unwrap()
+            .contains("REB_RESPONSE_BODY_BUDGET_MIB")
+    );
+    assert_eq!(
+        summary["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|check| check["code"] == "request_content_not_retained")
+            .count(),
+        3
+    );
+}
+
+#[tokio::test]
 async fn event_waits_return_new_matches_or_time_out() {
     let server = Server::start().await;
     let events = vec![window_event(1, "wasm", "module_compiled", "")];

@@ -71,8 +71,13 @@ it.
   can be confirmed by guessing; password form posts keep no digest. Request
   paths, queries and body bytes are sensitive capture: they are retained only
   with `REB_CAPTURE_REQUEST_CONTENT=1`, which the packaged app's default content
-  mode sets, at most 256 KiB per body and 1,024 bodies or 64 MiB per session. See
-  [Native network v2](protocol/native-network-v2.md).
+  mode sets, at most 16 MiB per body and 256 MiB of unique body and full-URL
+  bytes per session unless `REB_REQUEST_CONTENT_BUDGET_MIB` sets another
+  budget. See [Native network v2](protocol/native-network-v2.md). The same
+  sessions retain response bodies, at most 16 MiB each and 512 MiB of unique
+  bytes unless `REB_RESPONSE_BODY_BUDGET_MIB` sets another budget; images,
+  audio, video and fonts that page elements load need
+  `REB_CAPTURE_RESPONSE_MEDIA=1`. See [Native network v3](protocol/native-network-v3.md).
 - Historical captures can include sensitive URLs, headers, bodies and source.
   Removal of CDP does not sanitize previously saved evidence. Only collect and
   disclose data covered by authorization.
@@ -89,7 +94,7 @@ it.
 
 - Sensitive capture requires an enabled, visibly labeled session. Content mode
   is the default for captures the packaged app starts: for its bounded session
-  it turns on retention of request paths, queries and bodies up to 256 KiB each
+  it turns on retention of request paths, queries and bodies up to 16 MiB each
   and of Canvas images, and the titlebar labels that session "Content
   capture". **Metadata
   only** is the opt-out, chosen in **New Live Session…** or with

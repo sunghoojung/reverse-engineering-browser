@@ -258,7 +258,7 @@
       "get": {
         "operationId": "get_session_summary",
         "summary": "Summarize what this capture recorded",
-        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, counted exclusions, requests without a browser tab, and checks that name what looks wrong, such as a full sampling budget or Wasm compiled without a stored module. Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
+        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget, Wasm compiled without a stored module, each artifact capture failure reason, or request bodies and full targets a content session did not retain (budget, pool, channel or kind) with counts, counted browser-internal exclusions, and requests without a browser tab. Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
         "tags": [
           "health"
         ],
@@ -1435,7 +1435,7 @@
       "get": {
         "operationId": "get_events",
         "summary": "Read native events, optionally filtered and paged",
-        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; select one request with request_id. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. A sample refused by a function, module, call-site, or the 16-record stream budget is wasm_dispatch_overflow (28) or wasm_indirect_overflow (29): a compact identity, not a full observation. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0.  wasm_dispatch_overflow and wasm_indirect_overflow include wasm_overflow beside that hex. status decoded names kind identity or omitted. An identity names ring_index, function_index, and module_byte_offset, plus selector and arm_count, or table_index, slot, and resolution. An omitted record names omitted_count and no site. status invalid carries no fields. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
+        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; response_body (33), in those sessions only, says whether each response body was retained, partial, refused or never observed, names its response_body artifact and joins its response_started parent; select one request with request_id. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. A sample refused by a function, module, call-site, or the 16-record stream budget is wasm_dispatch_overflow (28) or wasm_indirect_overflow (29): a compact identity, not a full observation. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0.  wasm_dispatch_overflow and wasm_indirect_overflow include wasm_overflow beside that hex. status decoded names kind identity or omitted. An identity names ring_index, function_index, and module_byte_offset, plus selector and arm_count, or table_index, slot, and resolution. An omitted record names omitted_count and no site. status invalid carries no fields. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
         "tags": [
           "events"
         ],
@@ -1527,7 +1527,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, capture_exclusion, tab_set, request_tab_link, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, response_body, capture_exclusion, tab_set, request_tab_link, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -1723,7 +1723,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, capture_exclusion, tab_set, request_tab_link, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, response_body, capture_exclusion, tab_set, request_tab_link, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -1928,7 +1928,7 @@
       "get": {
         "operationId": "get_artifacts",
         "summary": "List stored artifacts, optionally filtered and paged",
-        "description": "Lists retained script, Wasm and other artifact records with their sha256, size, frame and session. Without filters it returns the newest records. With any filter or cursor it scans the manifest from the cursor and adds a query object with next_before and next_after cursors. Filters combine with AND. Bytes come from get_artifact_content, which the MCP projection does not inline; inspect_wasm describes a Wasm module, and resolve_js_invocation_site names a function in a javascript artifact. request_body artifacts are sensitive and exist only when the session retains request content. Unknown parameters are rejected.",
+        "description": "Lists retained script, Wasm and other artifact records with their sha256, size, frame and session. Without filters it returns the newest records. With any filter or cursor it scans the manifest from the cursor and adds a query object with next_before and next_after cursors. Filters combine with AND. Bytes come from get_artifact_content, which the MCP projection does not inline; inspect_wasm describes a Wasm module, and resolve_js_invocation_site names a function in a javascript artifact. request_body and response_body artifacts are sensitive and exist only when the session retains request content; a response_body record names the artifact for its response. Unknown parameters are rejected.",
         "tags": [
           "artifacts"
         ],
@@ -2020,7 +2020,7 @@
             "name": "kind",
             "in": "query",
             "required": false,
-            "description": "Comma-separated artifact kinds: javascript, wasm, source_map, response_body, request_body, canvas_data_url, bytecode_buffer, wasm_guest_adapter. request_body exists only in sessions that retain request content.",
+            "description": "Comma-separated artifact kinds: javascript, wasm, source_map, response_body, request_body, request_target, canvas_data_url, bytecode_buffer, wasm_guest_adapter. request_body, request_target and response_body exist only in sessions that retain request content.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -13782,7 +13782,8 @@
               "canvas_data_url",
               "bytecode_buffer",
               "wasm_guest_adapter",
-              "request_body"
+              "request_body",
+              "request_target"
             ]
           },
           "url": {
@@ -18306,7 +18307,7 @@
               },
               "request_content": {
                 "type": "boolean",
-                "description": "Request paths, queries and bodies are retained (request_target events, request_body artifacts)."
+                "description": "Request paths, queries and bodies, and response bodies, are retained (request_target and response_body events, request_body and response_body artifacts)."
               },
               "canvas_images": {
                 "type": "boolean"
@@ -19238,6 +19239,7 @@
               "wasm_execution_outcome",
               "wasm_dispatch_overflow",
               "wasm_indirect_overflow",
+              "response_body",
               "capture_exclusion",
               "tab_set",
               "request_tab_link"
@@ -19453,7 +19455,8 @@
               "canvas_data_url",
               "bytecode_buffer",
               "wasm_guest_adapter",
-              "request_body"
+              "request_body",
+              "request_target"
             ]
           },
           "byte_size": {
@@ -26068,6 +26071,7 @@
                     "no_events",
                     "wasm_without_artifacts",
                     "artifact_capture_failed",
+                    "request_content_not_retained",
                     "queue_drops",
                     "sequence_gaps",
                     "named_gap",
@@ -26972,7 +26976,7 @@
           "request_content": {
             "type": "boolean",
             "default": false,
-            "description": "Retain request paths, queries and bodies (at most 256 KiB each, 1,024 bodies or 64 MiB per session) as request_target events and request_body artifacts. Sensitive capture: requires confirm_sensitive_capture and category bits 256 and 1024. Off, Network capture still records each body's length, type and digest."
+            "description": "Retain request paths, queries and bodies (at most 16 MiB each, 256 MiB of unique content per session) as request_target events, request_target artifacts for targets past the 116-byte prefix, and request_body artifacts, plus response bodies (at most 16 MiB each, 512 MiB of unique content per session; element images, audio, video and fonts are skipped) as response_body events and artifacts. Sensitive capture: requires confirm_sensitive_capture and category bits 256 and 1024. Off, Network capture still records each body's length, type and digest."
           },
           "document_start": {
             "type": "boolean",

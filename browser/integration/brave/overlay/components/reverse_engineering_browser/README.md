@@ -95,9 +95,10 @@ also gets a `request_body` child record from `browser/native_network_capture_sin
 with the body's kind, length, normalized content type and a SHA-256 of
 in-memory bytes up to 4 MiB. Only with `--reb-capture-request-content` does the
 sink also emit `request_target` children (path and query, 116-byte prefix plus
-original length) for starts and redirects and hand at most 256 KiB of in-memory
-body bytes to `NativeArtifactCaptureSink::CaptureRequestBody` as a sensitive
-`request_body` artifact. File, blob and stream elements are never read, and
+original length) for starts and redirects and hand longer targets and at most
+16 MiB of in-memory body bytes to `NativeArtifactCaptureSink::CaptureRequestContent`
+as sensitive `request_target` and `request_body` artifacts, copied and hashed
+off the UI sequence within a per-session byte budget. File, blob and stream elements are never read, and
 password form posts keep neither bytes nor a digest. The wire and limits are in
 [Native network v2](../../../../../../protocol/native-network-v2.md).
 
@@ -125,16 +126,23 @@ services; the drain links worker requests to `tab_set` records with one
 Large artifact bytes use the separate 128-byte framed contract and 32-byte
 acknowledgment in `common/native_artifact_header.h`. Only the browser-process
 bridge owns that receiver connection. JavaScript and WASM response bodies are
-copied by an asynchronous Mojo tee with a 16 MiB per-artifact limit and a 32
-MiB active capture budget. Accepted dynamic JavaScript and WASM byte-buffer API
+copied by an asynchronous Mojo tee with a 16 MiB per-artifact limit. Tees and
+request content share the 32 MiB in-flight pool in
+`common/native_artifact_capture_buffer.h`, charged with the bytes each capture
+holds and returned when the writer drops its transfer. Accepted dynamic JavaScript and WASM byte-buffer API
 inputs use a separate one-way Mojo submission with the same per-artifact cap.
 The browser copies renderer-owned shared memory before validation and records
 the stable execution context plus exact capture origin. A dedicated writer
 thread drains a 16-artifact, 32 MiB queue to the authenticated artifact socket.
 Successful evidence is emitted only after receiver acknowledgment; every local
 or remote rejection becomes an `artifact_capture_failed` event. Artifact bytes
-do not enter the renderer event ring, and arbitrary response bodies still
-require explicit sensitive-capture authorization under
+do not enter the renderer event ring. Other response bodies need request
+content capture: `browser/native_response_body_capture.cc` takes them from the
+same tee, joins each to its loader completion, retains it as a sensitive
+`response_body` artifact deduplicated by SHA-256 within a per-session byte
+budget, and writes a `response_body` record (type 33) for every outcome, from
+`common/native_network_response_body.h`. See
+[Native network v3](../../../../../../protocol/native-network-v3.md) and
 [`SAFETY.md`](../../../../../../SAFETY.md).
 
 Bounded VM investigation metadata uses `NativeVmFindingPayload` from

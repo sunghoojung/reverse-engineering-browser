@@ -310,6 +310,7 @@ fn is_network(event: &Value) -> bool {
                     | "capture_exclusion"
                     | "tab_set"
                     | "request_tab_link"
+                    | "response_body"
             )
         )
 }
@@ -522,12 +523,13 @@ mod tests {
             event(1, "network", "request_started", ""),
             event(2, "network", "request_target", ""),
             event(3, "network", "request_body", ""),
+            event(4, "network", "response_body", ""),
         ];
-        events.extend((4..=40).map(|n| event(n, "canvas", "api_call", "")));
+        events.extend((5..=40).map(|n| event(n, "canvas", "api_call", "")));
         write(&path, &events);
-        let window = poll(&mut EventWindowCache::default(), &path, 3);
+        let window = poll(&mut EventWindowCache::default(), &path, 4);
         // Busy fingerprint traffic cannot evict a request's own child records.
-        assert_eq!(ids(&window.network_events), vec![1, 2, 3]);
+        assert_eq!(ids(&window.network_events), vec![1, 2, 3, 4]);
     }
 
     #[test]

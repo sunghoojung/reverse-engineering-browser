@@ -23,11 +23,16 @@
 #include "base/location.h"
 #include "base/process/process_handle.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/task/thread_pool.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
+#include "brave/components/reverse_engineering_browser/browser/native_response_body_capture.h"
+#include "crypto/hash.h"
+#include "services/network/public/cpp/data_element.h"
 #include "services/network/public/cpp/resource_request.h"
+#include "services/network/public/cpp/resource_request_body.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
 #include "url/gurl.h"
 
@@ -41,7 +46,8 @@ bool SameEventBytes(const NativeProbeEvent& left, const NativeProbeEvent& right)
 }
 
 constexpr std::size_t kMaxArtifactBytes = kNativeArtifactMaxContentBytes;
-constexpr std::size_t kMaxActiveCaptureBytes = 32U * 1024U * 1024U;
+// Bounds the dedupe set; past it, identical content is charged again.
+constexpr std::size_t kRequestContentDigestLimit = 16'384;
 constexpr std::size_t kRuntimeTypedArrayMinBytes = 32;
 constexpr std::size_t kRuntimeTypedArrayMaxSnapshots = 16;
 constexpr std::uint64_t kExpiryFlushLeadNs = 250'000'000;
@@ -119,10 +125,13 @@ bool NativeArtifactCaptureSink::IsEnabledFor(const NativeProbeCategory category)
   return now < expires_at_monotonic_ns_.load(std::memory_order_relaxed);
 }
 
-void NativeArtifactCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
-                                           const std::uint64_t session_id,
-                                           const std::uint64_t category_mask,
-                                           const std::uint64_t expires_at_monotonic_ns) noexcept {
+void NativeArtifactCaptureSink::SetEmitter(
+    const NativeProbeEmitter emitter,
+    const std::uint64_t session_id,
+    const std::uint64_t category_mask,
+    const std::uint64_t expires_at_monotonic_ns,
+    const std::uint64_t request_content_budget,
+    const NativeResponseBodyPolicy& response_bodies) noexcept {
   // The ending configuration's unresolved records become gaps while its
   // session can still record them.
   if (emitter_.load(std::memory_order_acquire))
@@ -155,7 +164,12 @@ void NativeArtifactCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
   wasm_execution_count_ = 0;
   runtime_typed_array_count_.store(0, std::memory_order_relaxed);
   allocating_scripts_.clear();
+  request_content_budget_ = emitter ? request_content_budget : 0;
+  request_content_used_ = 0;
+  request_content_digests_.clear();
   emitter_.store(emitter, std::memory_order_release);
+  NativeResponseBodyCapture::Get().Configure(emitter, session_id, category_mask,
+                                             expires_at_monotonic_ns, response_bodies);
   const auto now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
   if (emitter && expires_at_monotonic_ns > now && base::SequencedTaskRunner::HasCurrentDefault()) {
@@ -179,11 +193,15 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactCaptureSink::MaybeCaptureRespon
     const network::ResourceRequest& request,
     const network::mojom::URLResponseHead& response_head,
     mojo::ScopedDataPipeConsumerHandle body) {
-  if (!IsEnabled() || !body.is_valid()) {
+  if (!IsEnabled()) {
     return body;
   }
   const NativeArtifactKind kind = Classify(request, response_head);
   if (kind == NativeArtifactKind::kUnknown) {
+    return NativeResponseBodyCapture::Get().MaybeCapture(creator_event_id, request, response_head,
+                                                         std::move(body));
+  }
+  if (!body.is_valid()) {
     return body;
   }
 
@@ -199,13 +217,6 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactCaptureSink::MaybeCaptureRespon
                "declared_size_limit");
     return body;
   }
-  const std::size_t reservation = kMaxArtifactBytes;
-  if (!Reserve(reservation)) {
-    EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, request_id, frame_id,
-               "active_memory_limit");
-    return body;
-  }
-
   auto context = std::make_unique<CaptureContext>();
   context->header.kind = kind;
   context->header.session_id = session_id_.load(std::memory_order_relaxed);
@@ -215,69 +226,171 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactCaptureSink::MaybeCaptureRespon
   context->header.capture_origin = NativeArtifactCaptureOrigin::kNetworkResponse;
   context->url = request.url.spec();
   context->mime_type = response_head.mime_type;
-  context->reservation_bytes = reservation;
   context->request_id = request_id;
   context->frame_id = frame_id;
   context->generation = generation_.load(std::memory_order_acquire);
   if (context->url.empty() || context->url.size() > kNativeArtifactMaxUrlBytes ||
       context->mime_type.empty() || context->mime_type.size() > kNativeArtifactMaxMimeTypeBytes) {
-    Release(reservation);
     EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, request_id, frame_id,
                "metadata_limit");
     return body;
   }
+  // A declared length is the encoded size; a decoded body grows past it.
+  NativeArtifactCaptureBuffer captured(
+      NativeArtifactReservation::Acquire(
+          memory_pool_, declared_size > 0 ? declared_size : kNativeArtifactInitialReservation),
+      kMaxArtifactBytes);
+  if (captured.status() != NativeArtifactCaptureStatus::kCapturing) {
+    EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, request_id, frame_id,
+               "active_memory_limit");
+    return body;
+  }
 
   bool started = false;
-  body = NativeArtifactBodyTee::Create(std::move(body), kMaxArtifactBytes, declared_size,
+  body = NativeArtifactBodyTee::Create(std::move(body), std::move(captured),
                                        base::BindOnce(&NativeArtifactCaptureSink::OnBodyComplete,
                                                       base::Unretained(this), std::move(context)),
                                        started);
   if (!started) {
-    Release(reservation);
     EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, request_id, frame_id,
                "tee_unavailable");
   }
   return body;
 }
 
-std::uint64_t NativeArtifactCaptureSink::CaptureRequestBody(const std::uint64_t request_id,
-                                                            const std::uint64_t frame_id,
-                                                            const std::uint64_t creator_event_id,
-                                                            std::string url,
-                                                            std::string mime_type,
-                                                            std::vector<std::uint8_t> content) {
-  if (!IsEnabled() || creator_event_id == 0 || content.empty() ||
-      content.size() > kMaxArtifactBytes || url.empty() ||
-      url.size() > kNativeArtifactMaxUrlBytes || mime_type.empty() ||
-      mime_type.size() > kNativeArtifactMaxMimeTypeBytes) {
-    return 0;
+NativeRequestContentAdmission NativeArtifactCaptureSink::CaptureRequestContent(
+    NativeRequestContent content,
+    std::uint64_t& artifact_id) {
+  artifact_id = 0;
+  if (!IsEnabled()) {
+    return NativeRequestContentAdmission::kUnavailable;
   }
-  const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
-  const std::uint64_t artifact_id = next_artifact_id_.fetch_add(1, std::memory_order_relaxed);
+  const bool body = content.kind == NativeArtifactKind::kRequestBody;
+  if ((!body && content.kind != NativeArtifactKind::kRequestTarget) ||
+      content.creator_event_id == 0 || content.size == 0 || content.size > kMaxArtifactBytes ||
+      (body ? !content.body : content.text.size() < content.size) || content.url.empty() ||
+      content.url.size() > kNativeArtifactMaxUrlBytes || content.mime_type.empty() ||
+      content.mime_type.size() > kNativeArtifactMaxMimeTypeBytes) {
+    return NativeRequestContentAdmission::kRefused;
+  }
+  if (content.size >
+      request_content_budget_ - std::min(request_content_budget_, request_content_used_)) {
+    return NativeRequestContentAdmission::kSessionBudget;
+  }
+  auto reservation = NativeArtifactReservation::Acquire(memory_pool_, content.size);
+  if (!reservation.is_valid()) {
+    return NativeRequestContentAdmission::kRefused;
+  }
+  auto context = std::make_unique<CaptureContext>();
+  context->header.kind = content.kind;
+  context->header.flags |= kNativeArtifactFlagSensitive;
+  context->header.session_id = session_id_.load(std::memory_order_relaxed);
+  context->header.frame_id = content.frame_id;
+  context->header.artifact_id = next_artifact_id_.fetch_add(1, std::memory_order_relaxed);
+  context->header.creator_event_id = content.creator_event_id;
+  context->header.capture_origin = NativeArtifactCaptureOrigin::kNetworkRequest;
+  context->header.content_size = content.size;
+  context->url = std::move(content.url);
+  context->mime_type = std::move(content.mime_type);
+  context->request_id = content.request_id;
+  context->frame_id = content.frame_id;
+  context->generation = generation_.load(std::memory_order_acquire);
+  context->reservation = std::move(reservation);
+  const std::uint64_t id = context->header.artifact_id;
+  // A started body is immutable; the reference keeps it alive for the copy.
+  if (!base::ThreadPool::PostTaskAndReplyWithResult(
+          FROM_HERE,
+          {base::TaskPriority::USER_VISIBLE, base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
+          base::BindOnce(&NativeArtifactCaptureSink::CopyRequestContent, std::move(content.body),
+                         std::move(content.text), content.size),
+          base::BindOnce(&NativeArtifactCaptureSink::OnRequestContentCopied, base::Unretained(this),
+                         std::move(context)))) {
+    return NativeRequestContentAdmission::kRefused;
+  }
+  request_content_used_ += content.size;
+  artifact_id = id;
+  return NativeRequestContentAdmission::kQueued;
+}
+
+NativeArtifactCaptureSink::CopiedContent NativeArtifactCaptureSink::CopyRequestContent(
+    scoped_refptr<network::ResourceRequestBody> body,
+    std::string text,
+    const std::size_t size) {
+  CopiedContent copied;
+  if (body) {
+    copied.bytes.reserve(size);
+    for (const network::DataElement& element : *body->elements()) {
+      const auto* bytes = element.TryAs<network::DataElementBytes>();
+      if (!bytes || copied.bytes.size() == size) {
+        break;
+      }
+      const auto& data = bytes->bytes();
+      const std::size_t count = std::min(data.size(), size - copied.bytes.size());
+      copied.bytes.insert(copied.bytes.end(), data.begin(),
+                          data.begin() + static_cast<std::ptrdiff_t>(count));
+    }
+  } else {
+    copied.bytes.assign(text.begin(),
+                        text.begin() + static_cast<std::ptrdiff_t>(std::min(size, text.size())));
+  }
+  copied.sha256 = crypto::hash::Sha256(copied.bytes);
+  return copied;
+}
+
+void NativeArtifactCaptureSink::OnRequestContentCopied(std::unique_ptr<CaptureContext> context,
+                                                       CopiedContent copied) {
+  if (!IsCurrentCapture(context->header.session_id, context->generation)) {
+    return;
+  }
+  const std::uint64_t artifact_id = context->header.artifact_id;
+  const std::uint64_t creator = context->header.creator_event_id;
+  const std::size_t size = static_cast<std::size_t>(context->header.content_size);
+  if (copied.bytes.size() != size) {
+    RefundRequestContent(size);
+    EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, context->request_id,
+               context->frame_id, "request_content_changed", NativeProbeCategory::kArtifact,
+               creator);
+    return;
+  }
+  // The receiver stores one blob per digest, so a repeat costs no budget.
+  const bool charged = !request_content_digests_.contains(copied.sha256);
+  const bool new_digest = charged && request_content_digests_.size() < kRequestContentDigestLimit &&
+                          request_content_digests_.insert(copied.sha256).second;
+  if (!charged) {
+    RefundRequestContent(size);
+  }
+  context->header.url_size = static_cast<std::uint32_t>(context->url.size());
+  context->header.mime_type_size = static_cast<std::uint32_t>(context->mime_type.size());
+  context->header.expected_sha256 = copied.sha256;
   auto transfer = std::make_unique<NativeArtifactTransfer>();
-  transfer->header.kind = NativeArtifactKind::kRequestBody;
-  transfer->header.flags |= kNativeArtifactFlagSensitive;
-  transfer->header.session_id = session_id;
-  transfer->header.frame_id = frame_id;
-  transfer->header.artifact_id = artifact_id;
-  transfer->header.creator_event_id = creator_event_id;
-  transfer->header.capture_origin = NativeArtifactCaptureOrigin::kNetworkRequest;
-  transfer->header.content_size = content.size();
-  transfer->header.url_size = static_cast<std::uint32_t>(url.size());
-  transfer->header.mime_type_size = static_cast<std::uint32_t>(mime_type.size());
-  transfer->url = std::move(url);
-  transfer->mime_type = std::move(mime_type);
-  transfer->content = std::move(content);
-  if (!NativeArtifactSocketClient::Get().Enqueue(std::move(transfer))) {
-    return 0;
+  transfer->header = context->header;
+  transfer->url = std::move(context->url);
+  transfer->mime_type = std::move(context->mime_type);
+  transfer->content = std::move(copied.bytes);
+  transfer->reservation = std::move(context->reservation);
+  const bool enabled = IsEnabled();
+  if (!enabled || !NativeArtifactSocketClient::Get().Enqueue(std::move(transfer))) {
+    if (new_digest) {
+      request_content_digests_.erase(copied.sha256);
+    }
+    if (charged) {
+      RefundRequestContent(size);
+    }
+    EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, context->request_id,
+               context->frame_id,
+               enabled ? "transfer_queue_full_or_disconnected" : "session_inactive",
+               NativeProbeCategory::kArtifact, creator);
+    return;
   }
-  pending_.emplace(artifact_id,
-                   PendingContext{.request_id = request_id,
-                                  .frame_id = frame_id,
-                                  .session_id = session_id,
-                                  .generation = generation_.load(std::memory_order_acquire),
-                                  .parent_event_id = creator_event_id});
-  return artifact_id;
+  pending_.emplace(artifact_id, PendingContext{.request_id = context->request_id,
+                                               .frame_id = context->frame_id,
+                                               .session_id = context->header.session_id,
+                                               .generation = context->generation,
+                                               .parent_event_id = creator});
+}
+
+void NativeArtifactCaptureSink::RefundRequestContent(const std::size_t bytes) noexcept {
+  request_content_used_ -= std::min<std::uint64_t>(request_content_used_, bytes);
 }
 
 void NativeArtifactCaptureSink::CaptureRuntimeTypedArray(const int renderer_process_id,
@@ -783,6 +896,7 @@ void NativeArtifactCaptureSink::FlushBeforeExpiry(const std::uint64_t generation
 
 void NativeArtifactCaptureSink::FlushPendingWork(const std::string_view guest_reason,
                                                  const std::string_view wasm_reason) {
+  NativeResponseBodyCapture::Get().Flush();
   for (auto& [key, pending] : guest_dispatches_) {
     static_cast<void>(key);
     if (pending.failed || pending.published)
@@ -1252,27 +1366,33 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
 }
 
 void NativeArtifactCaptureSink::OnBodyComplete(std::unique_ptr<CaptureContext> context,
-                                               const bool complete,
-                                               std::vector<std::uint8_t> content) {
-  Release(context->reservation_bytes);
+                                               const NativeArtifactBodyEnd end,
+                                               NativeArtifactCaptureBuffer captured) {
   if (!IsCurrentCapture(context->header.session_id, context->generation)) {
     // Do not enqueue old bytes or relabel a failed old body under a new session.
     return;
   }
-  if (!complete || !IsEnabled()) {
+  const char* failure =
+      end != NativeArtifactBodyEnd::kSourceClosed                      ? "body_incomplete"
+      : captured.status() == NativeArtifactCaptureStatus::kTooLarge    ? "body_too_large"
+      : captured.status() == NativeArtifactCaptureStatus::kMemoryLimit ? "active_memory_limit"
+      : !IsEnabled()                                                   ? "session_inactive"
+                                                                       : nullptr;
+  if (failure) {
     EmitResult(NativeProbeType::kArtifactCaptureFailed, context->header.artifact_id,
-               context->request_id, context->frame_id,
-               complete ? "session_inactive" : "body_incomplete_or_too_large");
+               context->request_id, context->frame_id, failure);
     return;
   }
-  context->header.content_size = content.size();
+  captured.Finish();
+  context->header.content_size = captured.size();
   context->header.url_size = static_cast<std::uint32_t>(context->url.size());
   context->header.mime_type_size = static_cast<std::uint32_t>(context->mime_type.size());
   auto transfer = std::make_unique<NativeArtifactTransfer>();
   transfer->header = context->header;
   transfer->url = std::move(context->url);
   transfer->mime_type = std::move(context->mime_type);
-  transfer->content = std::move(content);
+  transfer->content = captured.TakeContent();
+  transfer->reservation = captured.TakeReservation();
   if (!NativeArtifactSocketClient::Get().Enqueue(std::move(transfer))) {
     EmitResult(NativeProbeType::kArtifactCaptureFailed, context->header.artifact_id,
                context->request_id, context->frame_id, "transfer_queue_full_or_disconnected");
@@ -1284,6 +1404,22 @@ void NativeArtifactCaptureSink::OnBodyComplete(std::unique_ptr<CaptureContext> c
                                   .session_id = context->header.session_id,
                                   .generation = context->generation,
                                   .parent_event_id = context->header.creator_event_id});
+}
+
+bool NativeArtifactCaptureSink::QueueResponseBody(std::unique_ptr<NativeArtifactTransfer> transfer,
+                                                  const std::uint64_t request_id) noexcept {
+  const std::uint64_t artifact_id = transfer->header.artifact_id;
+  const PendingContext context{.request_id = request_id,
+                               .frame_id = transfer->header.frame_id,
+                               .session_id = transfer->header.session_id,
+                               .generation = generation_.load(std::memory_order_acquire),
+                               .parent_event_id = transfer->header.creator_event_id,
+                               .response_body = true};
+  if (!IsEnabled() || !NativeArtifactSocketClient::Get().Enqueue(std::move(transfer))) {
+    return false;
+  }
+  pending_.emplace(artifact_id, context);
+  return true;
 }
 
 void NativeArtifactCaptureSink::TransferCompleted(
@@ -1303,6 +1439,10 @@ void NativeArtifactCaptureSink::OnTransferCompleted(
   pending_.erase(found);
   if (!IsCurrentCapture(context.session_id, context.generation)) {
     return;
+  }
+  if (context.response_body) {
+    NativeResponseBodyCapture::Get().OnTransferCompleted(
+        artifact_id, status == NativeArtifactReceiveStatus::kAccepted);
   }
   if (auto receipt = guest_receipts_.find(artifact_id); receipt != guest_receipts_.end()) {
     receipt->second = status == NativeArtifactReceiveStatus::kAccepted ? GuestReceipt::kAccepted
@@ -1384,21 +1524,6 @@ bool NativeArtifactCaptureSink::IsCurrentCapture(const std::uint64_t session_id,
                                                  const std::uint64_t generation) const noexcept {
   return generation == generation_.load(std::memory_order_acquire) &&
          session_id == session_id_.load(std::memory_order_relaxed);
-}
-
-bool NativeArtifactCaptureSink::Reserve(const std::size_t bytes) noexcept {
-  std::size_t current = active_bytes_.load(std::memory_order_relaxed);
-  while (current <= kMaxActiveCaptureBytes && bytes <= kMaxActiveCaptureBytes - current) {
-    if (active_bytes_.compare_exchange_weak(current, current + bytes, std::memory_order_acq_rel,
-                                            std::memory_order_relaxed)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-void NativeArtifactCaptureSink::Release(const std::size_t bytes) noexcept {
-  active_bytes_.fetch_sub(bytes, std::memory_order_acq_rel);
 }
 
 }  // namespace reb

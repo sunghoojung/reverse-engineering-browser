@@ -577,6 +577,7 @@
             "wasm_execution_outcome",
             "wasm_dispatch_overflow",
             "wasm_indirect_overflow",
+            "response_body",
             "capture_exclusion",
             "tab_set",
             "request_tab_link"
@@ -792,7 +793,8 @@
             "canvas_data_url",
             "bytecode_buffer",
             "wasm_guest_adapter",
-            "request_body"
+            "request_body",
+            "request_target"
           ]
         },
         "byte_size": {

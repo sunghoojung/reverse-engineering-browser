@@ -942,7 +942,7 @@ const details = new TrafficFixtureNode();
 let selectedTraffic = uiRequest("inspect", {status: 200, hostOnly: true, path: "fixture.invalid"});
 trafficUI.renderTrafficDetails(details, selectedTraffic);
 const generalSection = details.querySelector(".traffic-general");
-assert.match(details.textContent, /Request and response headers and response bodies are not captured/);
+assert.match(details.textContent, /Request and response headers are not captured\. Response bodies are on the Response tab\./);
 assert.match(details.textContent, /host only; path and query not captured/);
 {
   // Request body section: every record state reads as its own sentence and the
@@ -1006,7 +1006,18 @@ assert.match(details.textContent, /host only; path and query not captured/);
   assert.equal(section().dataset.state, "missing");
   assert.match(section().textContent, /No body record for this request/);
   trafficUI.renderTrafficDetails(bodyDetails, live(null, {urlTruncated: true, targetLength: 412}));
-  assert.match(bodyDetails.textContent, /truncated; the original path and query are 412 bytes/);
+  assert.match(bodyDetails.textContent, /truncated; the original path and query are 412 bytes\)/);
+  trafficUI.renderTrafficDetails(bodyDetails, live(null, {urlTruncated: true, targetLength: 412,
+    fullTarget: {retention: "not_retained_session_budget"}}));
+  assert.match(bodyDetails.textContent, /412 bytes; the full target was not retained: this session had used its request content budget/);
+  trafficUI.renderTrafficDetails(bodyDetails, live(null, {urlTruncated: true, targetLength: 412, fullTarget: {retention: "retained"}}),
+    "", null, {status: "ready", complete: true, url: "https://api.hcaptcha.test", text: "/checksiteconfig?v=1&full"});
+  assert.match(bodyDetails.textContent, /https:\/\/api\.hcaptcha\.test\/checksiteconfig\?v=1&full/);
+  assert.doesNotMatch(bodyDetails.textContent, /Request URL truncated/);
+  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "",
+    {status: "ready", text: "{", lossy: false, verified: false, complete: false, loaded: 262144, total: 300000, key: "7:901:x"});
+  assert.match(section().textContent, /Showing the first 262,144 bytes of 300,000 bytes retained/);
+  assert.equal(section().querySelector(".traffic-body-more").dataset.contentKey, "7:901:x");
   // Spread copies the other realm's object so prototypes compare equal.
   assert.deepEqual({...trafficUI.trafficTargetParts(live(null, {urlTruncated: true}))},
     {name: "/checksiteconfig?v=1…", host: "api.hcaptcha.test"});
@@ -1254,7 +1265,7 @@ const summaryState = {selectedRequestId: "current", requests: [uiRequest("curren
   trafficDetailOpen: true, trafficSelectionNotice: null};
 const summaryElements = {};
 for (const name of ["selectedMethod", "selectedStatus", "selectedUrl", "requestCopyUrl", "requestCollectionPivot", "requestInspector", "requestFilter"]) summaryElements[name] = new TrafficFixtureNode();
-const summaryNodes = new Map(["#exchange-inspector", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
+const summaryNodes = new Map(["#exchange-inspector", "#response-inspector", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
 let renderedSummaryRequest;
 const summaryInspector = runInNewContext(
   appSection("      function updateSelectionSummary(", "      function selectRequest(") +
@@ -1263,7 +1274,7 @@ const summaryInspector = runInNewContext(
     document: {querySelectorAll: () => [], querySelector: selector => summaryNodes.get(selector)},
     renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;},
     // Body loading is outside this slice; its states are checked with traffic_view.js.
-    requestBodyView: () => null, requestBodyViewKey: () => '',
+    requestBodyView: () => null, requestTargetView: () => null, requestContentViewKey: () => '', requestFullUrl: () => null,
   });
 for (const [status, failed] of [["pending", false], [200, false], ["failed", true]]) {
   summaryState.requests = [{...summaryState.requests[0], status, failed}];
@@ -1299,9 +1310,9 @@ console.log("PASS selected strip and inspector share current pending/response/fa
     Date: {now: () => clock}, sourceFactsReadBytes: sourceFactsUI.sourceFactsReadBytes, decodePayload: () => "",
     setTimeout: (fn) => {timers.push(fn); return timers.length;}, clearTimeout: () => {},
     fetch: (url, {signal}) => {fetches.push(url); return respond.shift()(signal);},
-    renderInspector: () => {renders++; bodyState.requestBodyViewKey = body.requestBodyViewKey(body.requestBodyView(request));}};
-  const body = runInNewContext(appSection("      const REQUEST_BODY_READ_LIMIT", "      function renderInspectorMessage(") +
-    ";({requestBodyView,requestBodyViewKey,refreshSelectedRequestBody})", context);
+    renderInspector: () => {renders++; bodyState.requestBodyViewKey = body.requestContentViewKey(request);}};
+  const body = runInNewContext(appSection("      const REQUEST_BODY_PAGE_BYTES", "      function renderInspectorMessage(") +
+    ";({requestBodyView,requestContentViewKey,refreshSelectedRequestBody,loadMoreRequestBody,requestFullUrl})", context);
   const settle = () => new Promise(resolve => setTimeout(resolve, 20));
   // The first read times out.
   respond.push(signal => new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")))));
@@ -1328,7 +1339,7 @@ console.log("PASS selected strip and inspector share current pending/response/fa
   respond.push(async () => new Response("busy", {status: 503}));
   body.requestBodyView(failingRequest); await settle();
   assert.match(body.requestBodyView(failingRequest).error, /returned 503/);
-  bodyState.requestBodyViewKey = body.requestBodyViewKey(body.requestBodyView(failingRequest));
+  bodyState.requestBodyViewKey = body.requestContentViewKey(failingRequest);
   const quiet = renders;
   clock += 2000; respond.push(async () => new Response("busy", {status: 503}));
   body.requestBodyView(failingRequest); await settle();
@@ -1340,7 +1351,37 @@ console.log("PASS selected strip and inspector share current pending/response/fa
   assert.match(view.error, /do not match the retained SHA-256/); assert.equal(view.retryable, false);
   clock += 60000; body.requestBodyView(failingRequest); body.refreshSelectedRequestBody(); await settle();
   assert.equal(fetches.length, 5, "An integrity failure is not retried");
-  console.log("PASS request body loading retries transient failures after the visible error, keeps integrity failures with their reason, and re-renders only on change (production app.js block)");
+  // Bodies past one range load 256 KiB at a time, on request, and verify once whole.
+  const large = new Uint8Array(300 * 1024).map((_, index) => 97 + index % 26);
+  const largeDigest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", large)), b => b.toString(16).padStart(2, "0")).join("");
+  bodyState.artifacts.push({...artifact, artifact_id: "903", sha256: largeDigest, byte_size: large.length});
+  const largeRequest = {id: "l", body: {...request.body, artifactId: "903"}};
+  bodyState.requests.push(largeRequest); bodyState.selectedRequestId = "l";
+  respond.push(async () => new Response(large.slice(0, 256 * 1024)));
+  body.requestBodyView(largeRequest); await settle();
+  view = body.requestBodyView(largeRequest);
+  assert.equal(view.complete, false); assert.equal(view.loaded, 256 * 1024); assert.equal(view.verified, false);
+  assert.match(fetches.at(-1), /offset=0&limit=262144$/);
+  respond.push(async () => new Response(large.slice(256 * 1024)));
+  body.loadMoreRequestBody(view.key); await settle();
+  view = body.requestBodyView(largeRequest);
+  assert.match(fetches.at(-1), /offset=262144&limit=45056$/, "The next range starts where the shown bytes end");
+  assert.equal(view.complete, true); assert.equal(view.verified, true); assert.equal(view.text.length, large.length);
+  // A long target's retained artifact completes the request URL.
+  const full = "/graphql?variables=" + "v".repeat(8000);
+  const fullBytes = new TextEncoder().encode(full);
+  const fullDigest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", fullBytes)), b => b.toString(16).padStart(2, "0")).join("");
+  bodyState.artifacts.push({artifact_id: "904", kind: "request_target", session_id: "7", creator_event_id: "13",
+    sha256: fullDigest, byte_size: fullBytes.length, url: "https://api.example"});
+  const targetRequest = {id: "t", body: null, urlTruncated: true,
+    fullTarget: {retention: "retained", artifactId: "904", sessionId: "7", sequenceNumber: "13", processId: 42}};
+  bodyState.requests.push(targetRequest); bodyState.selectedRequestId = "t";
+  respond.push(async () => new Response(fullBytes));
+  assert.equal(body.requestFullUrl(targetRequest), null, "Nothing is composed before the bytes load");
+  await settle();
+  assert.equal(body.requestFullUrl(targetRequest), `https://api.example${full}`);
+  assert.match(fetches.at(-1), new RegExp(`/api/artifacts/904/content\\?offset=0&limit=${fullBytes.length}$`));
+  console.log("PASS request content loading retries transient failures after the visible error, keeps integrity failures with their reason, pages bodies by range, completes long URLs from their full target, and re-renders only on change (production app.js block)");
 }
 
 // Exercise the actual production listeners: selecting a tab is idempotent,

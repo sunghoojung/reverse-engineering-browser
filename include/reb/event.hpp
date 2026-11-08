@@ -73,6 +73,8 @@ enum class EventType : std::uint16_t {
   // See protocol/native-wasm-dispatch-v1.md.
   kWasmDispatchOverflow = 28,
   kWasmIndirectOverflow = 29,
+  // What happened to a response body, see protocol/native-network-v3.md.
+  kResponseBody = 33,
   // Counted browser-internal exclusion; see protocol/native-network-v3.md.
   kCaptureExclusion = 36,
   // Worker client tabs and the request that names them; same contract.

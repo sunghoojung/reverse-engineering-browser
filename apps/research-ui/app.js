@@ -1282,7 +1282,7 @@ invocationSitesPanel.refresh();
               : 'Deterministic developer evidence is loaded.';
         // Sensitive capture is labeled for the whole session, not only in the
         // rows it fills, because the packaged app turns it on without a dialog.
-        const retained = [state.requestContentCaptureEnabled && 'request paths, queries and bodies up to 256 KiB each',
+        const retained = [state.requestContentCaptureEnabled && 'request paths, queries and bodies, and response bodies, up to 16 MiB each',
           state.canvasImageCaptureEnabled && 'Canvas images'].filter(Boolean);
         elements.sessionContent.hidden = !live || !retained.length;
         // The launch turned these on; a browser built before them ignores the
@@ -2953,13 +2953,14 @@ invocationSitesPanel.refresh();
         const failed = Boolean(request.failed) || Number.isFinite(numericStatus) && numericStatus >= 400;
         elements.selectedStatus.classList.toggle('status-error', failed);
         elements.selectedStatus.classList.toggle('status-neutral', !failed && (!Number.isFinite(numericStatus) || request.status === 'pending'));
+        const fullUrl = request.urlTruncated ? requestFullUrl(request) : null;
         elements.selectedUrl.textContent = request.origin === 'sample'
           ? `https://checkout.acme.test${request.path}`
           : request.hostOnly ? `${request.path} (host only metadata)`
-            : request.urlTruncated ? `${request.path}… (truncated)` : request.path;
+            : fullUrl ?? (request.urlTruncated ? `${request.path}… (truncated)` : request.path);
         elements.selectedUrl.title = elements.selectedUrl.textContent;
-        // A truncated or scheme-less target is not a URL to copy.
-        elements.requestCopyUrl.disabled = request.hostOnly || Boolean(request.urlTruncated) || request.targetKind === 'path';
+        // A truncated or scheme-less target is not a URL to copy until its full target is loaded.
+        elements.requestCopyUrl.disabled = request.hostOnly || (Boolean(request.urlTruncated) && !fullUrl) || request.targetKind === 'path';
       }
 
       function selectRequest(id, expectedIdentity = null) {
@@ -3196,60 +3197,84 @@ invocationSitesPanel.refresh();
         elements.requestDecoderPivot.disabled = !selected;
       }
 
-      // Retained request bodies (protocol/native-network-v2.md) load only for the
-      // selected request: at most 256 KiB, checked against the catalog's size and
-      // SHA-256, and decoded to text that is only ever assigned to textContent.
-      const REQUEST_BODY_READ_LIMIT = 256 * 1024;
+      // Retained request content (protocol/native-network-v2.md) loads only for the
+      // selected request and by range: a body 256 KiB at a time, a full target in
+      // one read. The backend checks the catalog's size and SHA-256 on every read;
+      // this view rechecks the digest once every byte is loaded. Text is only ever
+      // assigned to textContent.
+      const REQUEST_BODY_PAGE_BYTES = 256 * 1024;
+      // The backend's largest range read, which is also Chromium's URL limit.
+      const REQUEST_TARGET_READ_BYTES = 2 * 1024 * 1024;
+      // Loaded bytes kept for recently selected requests, never the session's content.
+      const REQUEST_CONTENT_CACHE_BYTES = 32 * 1024 * 1024;
       // A transient read failure (timeout, HTTP status, transport) stays shown
       // and is retried by the next refresh or selection at least this long
       // after it, so a failing backend sees one read per poll, not a loop. A size
       // or SHA-256 mismatch stays cached with its reason.
       const REQUEST_BODY_RETRY_MS = 2000;
       const requestBodyViews = new Map();
-      function requestBodyArtifact(body) {
-        const matches = (state.artifacts ?? []).filter(artifact => artifact.artifact_id === body.artifactId &&
-          artifact.kind === 'request_body' && artifact.session_id === body.sessionId &&
-          artifact.creator_event_id === body.sequenceNumber);
+      function requestContentArtifact(record, kind) {
+        const matches = (state.artifacts ?? []).filter(artifact => artifact.artifact_id === record.artifactId &&
+          artifact.kind === kind && artifact.session_id === record.sessionId &&
+          artifact.creator_event_id === record.sequenceNumber);
         return matches.length === 1 ? matches[0] : null;
       }
-      function requestBodyView(request) {
-        const body = request?.body;
-        if (!body || body.malformed || !['captured', 'captured_truncated'].includes(body.state)) return null;
+      function requestContentView(record, kind) {
         if (location.protocol === 'file:') return {status: 'unavailable'};
-        // The receiver's refusal joins the body record exactly, as its parent.
+        // The receiver's refusal joins the creator record exactly, as its parent.
         const refusal = state.events.find(event => event.type === 'artifact_capture_failed' &&
-          event.artifact_id === body.artifactId && event.parent_event_id === body.sequenceNumber &&
-          event.session_id === body.sessionId && event.process_id === body.processId);
+          event.artifact_id === record.artifactId && event.parent_event_id === record.sequenceNumber &&
+          event.session_id === record.sessionId && event.process_id === record.processId);
         if (refusal) return {status: 'refused', reason: decodePayload(refusal)};
-        const artifact = requestBodyArtifact(body);
+        const artifact = requestContentArtifact(record, kind);
         if (!artifact) return {status: 'missing'};
         const key = `${artifact.session_id}:${artifact.artifact_id}:${artifact.sha256}`;
         const view = requestBodyViews.get(key);
         if (view?.retryable && Date.now() - view.failedAt >= REQUEST_BODY_RETRY_MS) {
           // The failed view stays visible until the retry settles.
           requestBodyViews.set(key, {status: 'loading', previous: view});
-          void loadRequestBody(artifact, key);
-          return {...view, url: artifact.url};
+          void loadRequestContent(artifact, key, null);
+          return {...view, url: artifact.url, key};
         }
-        if (view) return {...(view.previous ?? view), url: artifact.url};
+        if (view) return {...(view.previous ?? view), loadingMore: view.status === 'loading' && Boolean(view.previous?.bytes), url: artifact.url, key};
         requestBodyViews.set(key, {status: 'loading'});
-        void loadRequestBody(artifact, key);
-        return {status: 'loading', url: artifact.url};
+        void loadRequestContent(artifact, key, null);
+        return {status: 'loading', url: artifact.url, key};
       }
-      async function loadRequestBody(artifact, key) {
+      function requestBodyView(request) {
+        const body = request?.body;
+        if (!body || body.malformed || !['captured', 'captured_truncated'].includes(body.state)) return null;
+        return requestContentView(body, 'request_body');
+      }
+      function requestTargetView(request) {
+        const target = request?.fullTarget;
+        return target?.retention === 'retained' ? requestContentView(target, 'request_target') : null;
+      }
+      // The composed URL once its retained full target is loaded.
+      function requestFullUrl(request) {
+        const view = requestTargetView(request);
+        return view?.status === 'ready' && view.complete ? `${view.url}${view.text}` : null;
+      }
+      async function loadRequestContent(artifact, key, previous) {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 10000);
         const mismatch = message => Object.assign(new Error(message), {integrity: true});
+        const loaded = previous?.bytes ?? new Uint8Array(0);
         let view;
         try {
-          const limit = Math.min(artifact.byte_size, REQUEST_BODY_READ_LIMIT);
-          const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?limit=${limit}`,
+          const page = artifact.kind === 'request_target' ? REQUEST_TARGET_READ_BYTES : REQUEST_BODY_PAGE_BYTES;
+          const limit = Math.min(artifact.byte_size - loaded.length, page);
+          const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?offset=${loaded.length}&limit=${limit}`,
             {cache: 'no-store', signal: controller.signal});
           if (!response.ok) {response.body?.cancel().catch(() => {}); throw new Error(`the artifact store returned ${response.status}`);}
-          const bytes = await sourceFactsReadBytes(response, limit, controller.signal);
-          if (bytes.length !== artifact.byte_size) throw mismatch('its retained byte size changed');
+          const chunk = await sourceFactsReadBytes(response, limit, controller.signal);
+          if (chunk.length !== limit) throw mismatch('its retained byte size changed');
+          const bytes = new Uint8Array(loaded.length + chunk.length);
+          bytes.set(loaded);
+          bytes.set(chunk, loaded.length);
+          const complete = bytes.length === artifact.byte_size;
           let verified = false;
-          if (globalThis.crypto?.subtle) {
+          if (complete && globalThis.crypto?.subtle) {
             const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
               byte => byte.toString(16).padStart(2, '0')).join('');
             if (digest !== artifact.sha256) throw mismatch('its bytes do not match the retained SHA-256');
@@ -3257,31 +3282,54 @@ invocationSitesPanel.refresh();
           }
           let lossy = false;
           try {new TextDecoder('utf-8', {fatal: true}).decode(bytes);} catch {lossy = true;}
-          view = {status: 'ready', text: new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(bytes), lossy, verified};
+          view = {status: 'ready', artifact, bytes, text: new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(bytes),
+            lossy, verified, complete, loaded: bytes.length, total: artifact.byte_size};
         } catch (error) {
-          view = {status: 'error', error: controller.signal.aborted ? 'timed out after 10 seconds'
-            : String(error?.message ?? error).replace(/\.$/, ''), retryable: error?.integrity !== true, failedAt: Date.now()};
+          const message = controller.signal.aborted ? 'timed out after 10 seconds' : String(error?.message ?? error).replace(/\.$/, '');
+          // A failed next range keeps the bytes already shown.
+          view = previous ? {...previous, moreError: message}
+            : {status: 'error', error: message, retryable: error?.integrity !== true, failedAt: Date.now()};
         } finally {
           clearTimeout(timeout);
         }
-        // Bounded: a few recently selected bodies, never the session's bodies.
+        // Bounded: a few recently selected requests, never the session's content.
         requestBodyViews.delete(key);
         requestBodyViews.set(key, view);
-        while (requestBodyViews.size > 8) requestBodyViews.delete(requestBodyViews.keys().next().value);
+        let retained = [...requestBodyViews.values()].reduce((sum, item) => sum + (item.bytes?.length ?? 0), 0);
+        for (const [oldest, item] of requestBodyViews) {
+          if (requestBodyViews.size <= 8 && retained <= REQUEST_CONTENT_CACHE_BYTES) break;
+          if (oldest === key) continue;
+          retained -= item.bytes?.length ?? 0;
+          requestBodyViews.delete(oldest);
+        }
         const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        if (selected?.body?.artifactId === artifact.artifact_id &&
-            requestBodyViewKey(requestBodyView(selected)) !== state.requestBodyViewKey) renderInspector();
+        if (selected && requestContentViewKey(selected) !== state.requestBodyViewKey) renderInspector();
+      }
+      function loadMoreRequestBody(key) {
+        const view = requestBodyViews.get(key);
+        if (view?.status !== 'ready' || view.complete) return;
+        requestBodyViews.set(key, {status: 'loading', previous: {...view, moreError: null}});
+        void loadRequestContent(view.artifact, key, view);
+        renderInspector();
       }
       function requestBodyViewKey(view) {
-        return view ? `${view.status}|${view.reason ?? view.error ?? ''}|${view.url ?? ''}` : '';
+        return view ? `${view.status}|${view.reason ?? view.error ?? ''}|${view.url ?? ''}|${view.loaded ?? ''}|${view.moreError ?? ''}|${view.loadingMore ?? ''}` : '';
       }
-      // A body whose acknowledgment arrives after selection becomes readable on
+      function requestContentViewKey(request) {
+        return `${requestBodyViewKey(requestBodyView(request))}#${requestBodyViewKey(requestTargetView(request))}`;
+      }
+      // Content whose acknowledgment arrives after selection becomes readable on
       // the next catalog refresh without reselecting the request. Unchanged
       // views do not re-render the inspector on every poll.
       function refreshSelectedRequestBody() {
         const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        if (state.inspectorTab !== 'general' || !['captured', 'captured_truncated'].includes(selected?.body?.state)) return;
-        if (requestBodyViewKey(requestBodyView(selected)) !== state.requestBodyViewKey) renderInspector();
+        if (selected && ['response', 'preview'].includes(state.inspectorTab)) {
+          trafficResponse.render(document.querySelector('#response-inspector'), selected, state.inspectorTab);
+          return;
+        }
+        if (state.inspectorTab !== 'general' || !selected ||
+            (!['captured', 'captured_truncated'].includes(selected.body?.state) && selected.fullTarget?.retention !== 'retained')) return;
+        if (requestContentViewKey(selected) !== state.requestBodyViewKey) renderInspector();
       }
 
       function renderInspectorMessage(message) {
@@ -3302,6 +3350,11 @@ invocationSitesPanel.refresh();
           return row;
         }));
       }
+
+      // Response and Preview tabs, protocol/native-network-v3.md.
+      const trafficResponse = createTrafficResponse({getArtifacts: () => state.artifacts, getEvents: () => state.events,
+        contentSession: () => state.requestContentCaptureEnabled, readable: () => location.protocol !== 'file:',
+        onChange: () => renderInspector()});
 
       function renderInspector() {
         evidencePackagePanel.sync();
@@ -3329,10 +3382,20 @@ invocationSitesPanel.refresh();
         elements.requestCollectionPivot.disabled = !request;
         elements.requestInspector.hidden = showingGeneral;
         document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingGeneral);
+        const responseInspector = document.querySelector('#response-inspector');
+        responseInspector.hidden = showingGeneral || !['response', 'preview'].includes(state.inspectorTab);
+        if (!responseInspector.hidden) {
+          responseInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
+          elements.requestInspector.hidden = true;
+          document.querySelector('.detail-pane').classList.add('showing-exchange');
+          trafficResponse.render(responseInspector, request, state.inspectorTab);
+          return;
+        }
         if (showingGeneral) {
           const bodyView = requestBodyView(request);
-          state.requestBodyViewKey = requestBodyViewKey(bodyView);
-          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice, bodyView);
+          const targetView = requestTargetView(request);
+          state.requestBodyViewKey = requestContentViewKey(request);
+          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice, bodyView, targetView);
           return;
         }
         elements.requestInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
@@ -5938,11 +6001,11 @@ invocationSitesPanel.refresh();
       }
 
       // The one Sources exclusion rule. Canvas images belong to Fingerprinting;
-      // request bodies are sensitive network evidence shown with their Traffic
-      // row (protocol/native-network-v2.md). Neither is listed, opened or loaded
-      // as a source file.
+      // request bodies and full targets are sensitive network evidence shown with
+      // their Traffic row (protocol/native-network-v2.md). None is listed, opened
+      // or loaded as a source file.
       function isSourceArtifact(artifact) {
-        return Boolean(artifact) && artifact.kind !== 'canvas_data_url' && artifact.kind !== 'request_body';
+        return Boolean(artifact) && !['canvas_data_url', 'request_body', 'request_target'].includes(artifact.kind);
       }
 
       function sourceIsCurrent(source) {
@@ -7480,8 +7543,8 @@ invocationSitesPanel.refresh();
       async function loadArtifactContent(artifact, {retry = false, canvasOwner = null} = {}) {
         if (artifact?.kind === 'canvas_data_url' && (!canvasOwner ||
             state.canvasPreviewOwners?.get(sourceIdentity(artifact)) !== canvasOwner || !canvasGalleryVisible() || state.artifactReceiverError)) return;
-        // Request body bytes are read only by the Traffic body view.
-        if (artifact?.kind === 'request_body') return;
+        // Request content is read only by the Traffic views.
+        if (['request_body', 'request_target'].includes(artifact?.kind)) return;
         if (!sourceIsCurrent(artifact) || artifact.content !== undefined || artifact.loading || (artifact.loadError && !retry)) return;
         const identity = sourceIdentity(artifact);
         const controller = new AbortController();
@@ -7621,6 +7684,8 @@ invocationSitesPanel.refresh();
           state.sourceNoticeKind = 'warning';
           state.sourceNotice = artifact.kind === 'request_body'
             ? 'Request bodies are shown with their request in Traffic. No source was opened.'
+            : artifact.kind === 'request_target'
+            ? 'Full request targets are shown with their request in Traffic. No source was opened.'
             : 'Canvas images are shown in Fingerprinting. No source was opened.';
           renderSourceHealth();
           return false;
@@ -8232,11 +8297,16 @@ invocationSitesPanel.refresh();
         state.trafficNewIds.clear(); renderRequests();
         elements.requestRows.scrollTop = elements.requestRows.scrollHeight;
       });
+      document.querySelector('#exchange-inspector').addEventListener('click', event => {
+        const key = event.target.closest?.('.traffic-body-more')?.dataset.contentKey;
+        if (key) loadMoreRequestBody(key);
+      });
       elements.requestCopyUrl.addEventListener('click', async () => {
         const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        if (!selected || selected.hostOnly || selected.urlTruncated || selected.targetKind === 'path') return;
+        const fullUrl = selected?.urlTruncated ? requestFullUrl(selected) : null;
+        if (!selected || selected.hostOnly || (selected.urlTruncated && !fullUrl) || selected.targetKind === 'path') return;
         try {
-          const url = selected.origin === 'sample' ? `https://checkout.acme.test${selected.path}` : selected.path;
+          const url = selected.origin === 'sample' ? `https://checkout.acme.test${selected.path}` : fullUrl ?? selected.path;
           await navigator.clipboard.writeText(url);
           elements.requestCopyUrl.textContent = 'Copied';
         } catch {

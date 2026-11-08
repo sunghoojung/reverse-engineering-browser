@@ -83,10 +83,16 @@ void ChannelLost() noexcept {
   ++g_channel_lost;
 }
 
+// Every transfer holds a share of this pool, as capture transfers do; the
+// writer must return it once the frame is written or reported.
+reb::NativeArtifactMemoryPool g_pool{4U * 1024U * 1024U};
+
 std::unique_ptr<reb::NativeArtifactTransfer> MakeTransfer(const std::uint64_t artifact_id,
                                                           const std::size_t size,
                                                           const bool canvas = false) {
   auto transfer = std::make_unique<reb::NativeArtifactTransfer>();
+  transfer->reservation = reb::NativeArtifactReservation::Acquire(g_pool, size);
+  Require(transfer->reservation.is_valid(), "transfer pool share");
   transfer->header.session_id = kSessionId;
   transfer->header.artifact_id = artifact_id;
   if (canvas) {
@@ -309,6 +315,8 @@ void CheckProductionReceiver(const std::string& receiver, const std::string& roo
   Require(CountOf(manifest, "\n") == 2 && CountOf(manifest, "\"artifact_id\":\"1\"") == 1 &&
               CountOf(manifest, "\"artifact_id\":\"4\"") == 1,
           "only the accepted artifacts are in the manifest");
+  Require(WaitFor([] { return g_pool.used() == 0; }),
+          "written and rejected transfers return their pool share");
   std::cout << "PASS artifact writer: sensitive, oversize and duplicate rejections answered on one "
                "connection with their real status; the next artifact is accepted\n";
 
@@ -327,6 +335,8 @@ void CheckProductionReceiver(const std::string& receiver, const std::string& roo
   Require(client.state() == NativeArtifactChannelState::kLost && !client.IsConnected(),
           "lost channel refuses admission");
   Require(!Enqueue(MakeTransfer(7, 8)), "lost channel refuses transfers");
+  Require(WaitFor([] { return g_pool.used() == 0; }),
+          "reported and refused transfers return their pool share");
   Require(Clock::now() - lost_started < std::chrono::seconds(10), "reconnect budget is bounded");
   StopArtifactClient();
   Require(g_channel_lost == 1 && Completions().empty(), "loss announced exactly once");

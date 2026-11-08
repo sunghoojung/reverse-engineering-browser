@@ -22,6 +22,7 @@ const TRACKED_FRAMES: usize = 4096;
 const FRAME_TYPES: usize = 8;
 const SESSIONS: usize = 16;
 const ARTIFACTS: usize = 32;
+const REFUSAL_REASONS: usize = 32;
 
 /// Live state the backend knows outside the stores.
 pub struct CaptureState<'a> {
@@ -146,6 +147,141 @@ impl EventCounts {
     }
 }
 
+/// Every capture refusal by its native reason: artifact_capture_failed
+/// payloads, and request content a content session did not retain.
+#[derive(Default)]
+struct Refusals {
+    failures: BTreeMap<String, u64>,
+    content: BTreeMap<(&'static str, &'static str), u64>,
+}
+impl Refusals {
+    fn record(&mut self, event: &Value) {
+        let payload = || {
+            event["payload"]
+                .as_str()
+                .and_then(|text| hex::decode(text).ok())
+        };
+        match (event["category"].as_str(), event["type"].as_str()) {
+            (_, Some("artifact_capture_failed")) => {
+                let reason = payload()
+                    .filter(|bytes| {
+                        !bytes.is_empty()
+                            && bytes.len() <= 64
+                            && bytes
+                                .iter()
+                                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+                    })
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .unwrap_or_else(|| "unrecognized".into());
+                let key = if self.failures.len() < REFUSAL_REASONS
+                    || self.failures.contains_key(&reason)
+                {
+                    reason
+                } else {
+                    "other".into()
+                };
+                *self.failures.entry(key).or_default() += 1;
+            }
+            (Some("network"), Some("request_body")) => {
+                if let Some(reason) = payload()
+                    .filter(|b| b.len() == 128)
+                    .and_then(|b| body_refusal(b[5]))
+                {
+                    *self.content.entry(("request_body", reason)).or_default() += 1;
+                }
+            }
+            (Some("network"), Some("request_target")) => {
+                if let Some(reason) = payload()
+                    .filter(|b| b.len() == 128 && b[0] == 2)
+                    .and_then(|b| target_refusal(b[9]))
+                {
+                    *self.content.entry(("request_target", reason)).or_default() += 1;
+                }
+            }
+            (Some("network"), Some("response_body")) => {
+                if let Some(reason) = payload()
+                    .filter(|b| b.len() == 128 && b[0] == 1)
+                    .and_then(|b| response_refusal(b[4]))
+                {
+                    *self.content.entry(("response_body", reason)).or_default() += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// request_body states that keep less than the whole body (native-network-v2.md).
+fn body_refusal(state: u8) -> Option<&'static str> {
+    Some(match state {
+        5 => "captured_truncated",
+        6 => "not_captured_body_kind",
+        7 => "not_captured_artifact_unavailable",
+        8 => "not_captured_transfer_refused",
+        9 => "not_captured_url",
+        10 => "not_captured_session_budget",
+        11 => "not_captured_credential_form",
+        _ => return None,
+    })
+}
+
+/// Version 2 request_target retention states that did not retain the full target.
+fn target_refusal(retention: u8) -> Option<&'static str> {
+    Some(match retention {
+        2 => "not_retained_artifact_unavailable",
+        3 => "not_retained_transfer_refused",
+        4 => "not_retained_session_budget",
+        5 => "not_retained_url",
+        _ => return None,
+    })
+}
+
+/// response_body states a capture limit or policy caused (native-network-v3.md).
+fn response_refusal(state: u8) -> Option<&'static str> {
+    Some(match state {
+        2 => "captured_truncated",
+        9 => "not_captured_type",
+        10 => "not_captured_artifact_unavailable",
+        11 => "not_captured_transfer_refused",
+        12 => "not_captured_session_budget",
+        _ => return None,
+    })
+}
+
+fn content_meaning(category: &str, reason: &str, count: u64) -> String {
+    let what = match category {
+        "request_body" => "request bodies",
+        "response_body" => "response bodies",
+        _ => "full request targets",
+    };
+    let why = match reason {
+        "captured_truncated" => "were longer than 16 MiB, so only their first 16 MiB is retained",
+        "not_captured_type" => {
+            "were images, audio, video or fonts that page elements load, which are kept only with REB_CAPTURE_RESPONSE_MEDIA=1"
+        }
+        "not_captured_session_budget" if category == "response_body" => {
+            "arrived after the session's response body byte budget was used. Start a new session, or raise REB_RESPONSE_BODY_BUDGET_MIB"
+        }
+        "not_captured_body_kind" => {
+            "were files, blobs or streams, which are described but not read"
+        }
+        "not_captured_credential_form" => {
+            "were password form posts, which keep neither bytes nor a digest"
+        }
+        "not_captured_url" | "not_retained_url" => {
+            "had no HTTP(S) or WebSocket origin, or exceeded Chromium's URL limit"
+        }
+        "not_captured_session_budget" | "not_retained_session_budget" => {
+            "arrived after the session's request-content byte budget was used. Start a new session, or raise REB_REQUEST_CONTENT_BUDGET_MIB"
+        }
+        "not_captured_artifact_unavailable" | "not_retained_artifact_unavailable" => {
+            "had no artifact channel: the Artifact category was off or the receiver was disconnected"
+        }
+        _ => "were refused by the bounded in-flight memory pool or artifact queue",
+    };
+    format!("{count} {what} {why}.")
+}
+
 #[derive(Default)]
 struct ArtifactCounts {
     total: u64,
@@ -264,6 +400,7 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
     let mut events = EventCounts::default();
     let mut exclusions = Exclusions::default();
     let mut request_tabs = RequestTabs::default();
+    let mut refusals = Refusals::default();
     let mut tally = Tally::default();
     let event_page = event_query::read_page(
         store,
@@ -279,6 +416,7 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
             events.record(&event);
             exclusions.record(&event);
             request_tabs.record(&event);
+            refusals.record(&event);
             Ok(None)
         },
     )?;
@@ -343,13 +481,26 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
             ),
         ));
     }
-    let failed = events.count("artifact_capture_failed");
-    if failed > 0 {
-        checks.push(check(
+    for (reason, count) in &refusals.failures {
+        let mut item = check(
             "artifact_capture_failed",
             "warning",
-            format!("{failed} artifact captures failed; those bodies are not stored."),
-        ));
+            format!("{count} artifact captures failed ({reason}); those bytes are not stored."),
+        );
+        item["reason"] = json!(reason);
+        item["count"] = json!(count.to_string());
+        checks.push(item);
+    }
+    for ((category, reason), count) in &refusals.content {
+        let mut item = check(
+            "request_content_not_retained",
+            "warning",
+            content_meaning(category, reason, *count),
+        );
+        item["category"] = json!(category);
+        item["reason"] = json!(reason);
+        item["count"] = json!(count.to_string());
+        checks.push(item);
     }
     let (drops, _) = tally.queue_drops();
     let named: u64 = tally.named_gaps().iter().map(|gap| gap.count).sum();

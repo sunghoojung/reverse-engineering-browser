@@ -807,6 +807,9 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         "REB_NATIVE_WASM_FUNCTION_DENY",
         "REB_NATIVE_WASM_MODULE_ALLOWLIST",
         "REB_NATIVE_JS_DISPATCH_SITES",
+        "REB_REQUEST_CONTENT_BUDGET_MIB",
+        "REB_RESPONSE_BODY_BUDGET_MIB",
+        "REB_CAPTURE_RESPONSE_MEDIA",
         // Invocation sites arm only from a named option, never from the
         // researcher's file or saved set. A named set is strict: a Brave
         // without invocation capture refuses the start instead of dropping it.

@@ -344,12 +344,13 @@ bool ParseManifestRecord(const std::string_view line,
   const std::string_view kind = line.substr(position, kind_end - position);
   if (kind != "javascript" && kind != "wasm" && kind != "source_map" && kind != "response_body" &&
       kind != "canvas_data_url" && kind != "bytecode_buffer" && kind != "wasm_guest_adapter" &&
-      kind != "request_body") {
+      kind != "request_body" && kind != "request_target") {
     return false;
   }
-  // A request body is created by its browser request_body record and has no
-  // renderer execution context.
-  if ((kind == "request_body") != (capture_origin == "network_request") ||
+  // Request content is created by its browser request_body or request_target
+  // record and has no renderer execution context.
+  if ((kind == "request_body" || kind == "request_target") !=
+          (capture_origin == "network_request") ||
       (capture_origin == "network_request" && (execution_context_id != 0 || !creator_event_id))) {
     return false;
   }
@@ -398,8 +399,8 @@ bool ParseManifestRecord(const std::string_view line,
   } else {
     return false;
   }
-  if (sensitive !=
-          (kind == "response_body" || kind == "canvas_data_url" || kind == "request_body") ||
+  if (sensitive != (kind == "response_body" || kind == "canvas_data_url" ||
+                    kind == "request_body" || kind == "request_target") ||
       !ConsumePrefix(line, position, ",\"content_path\":\"blobs/") ||
       line.substr(position, digest.size()) != digest) {
     return false;
@@ -467,12 +468,13 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
        (!header.frame_id || !header.parent_artifact_id || !header.creator_event_id)))
     return false;
   const bool sensitive = (header.flags & kArtifactFlagSensitive) != 0;
+  const bool request_content =
+      header.kind == ArtifactKind::kRequestBody || header.kind == ArtifactKind::kRequestTarget;
   if ((header.kind == ArtifactKind::kResponseBody || header.kind == ArtifactKind::kCanvasDataUrl ||
-       header.kind == ArtifactKind::kRequestBody) != sensitive) {
+       request_content) != sensitive) {
     return false;
   }
-  if ((header.kind == ArtifactKind::kRequestBody) !=
-          (header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest) ||
+  if (request_content != (header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest) ||
       (header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest &&
        (header.execution_context_id != 0 || header.creator_event_id == 0))) {
     return false;
@@ -481,7 +483,7 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
       header.kind == ArtifactKind::kJavaScript || header.kind == ArtifactKind::kWasm ||
       header.kind == ArtifactKind::kSourceMap || header.kind == ArtifactKind::kResponseBody ||
       header.kind == ArtifactKind::kCanvasDataUrl || header.kind == ArtifactKind::kBytecodeBuffer ||
-      header.kind == ArtifactKind::kWasmGuestAdapter || header.kind == ArtifactKind::kRequestBody;
+      header.kind == ArtifactKind::kWasmGuestAdapter || request_content;
   const bool valid_origin =
       header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
       header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
@@ -539,6 +541,8 @@ const char* ArtifactKindName(const ArtifactKind kind) noexcept {
       return "wasm_guest_adapter";
     case ArtifactKind::kRequestBody:
       return "request_body";
+    case ArtifactKind::kRequestTarget:
+      return "request_target";
     case ArtifactKind::kUnknown:
       return "unknown";
   }

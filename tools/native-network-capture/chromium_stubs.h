@@ -1,15 +1,18 @@
 // Narrow Chromium type boundaries; the sink/lifecycle/queue are production code.
 #pragma once
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <new>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+#include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "network_request_body_stub.h"
 #define BUILDFLAG(flag) (flag)
@@ -112,7 +115,11 @@ class GURL {
 namespace net {
 struct HttpResponseHeaders {
   int code = 200;
+  std::optional<std::string> content_encoding;
   int response_code() const { return code; }
+  std::optional<std::string> GetNormalizedHeader(std::string_view name) const {
+    return name == "Content-Encoding" ? content_encoding : std::nullopt;
+  }
 };
 struct RedirectInfo {
   std::string new_method = "GET";
@@ -146,11 +153,30 @@ class URLResponseHead {
 }  // namespace mojom
 }  // namespace network
 namespace reb {
+struct NativeRequestContent final {
+  NativeArtifactKind kind = NativeArtifactKind::kUnknown;
+  std::uint64_t request_id = 0;
+  std::uint64_t frame_id = 0;
+  std::uint64_t creator_event_id = 0;
+  std::string url;
+  std::string mime_type;
+  std::size_t size = 0;
+  std::shared_ptr<network::ResourceRequestBody> body;
+  std::string text;
+};
+enum class NativeRequestContentAdmission : std::uint8_t {
+  kQueued,
+  kUnavailable,
+  kSessionBudget,
+  kRefused,
+};
 // Records what the network sink hands to the artifact channel; the real
-// artifact sink and receiver run in tools/check-native-artifact-capture.py.
+// artifact sink, its budget and pool, and the receiver run in
+// tools/check-native-artifact-capture.py.
 class NativeArtifactCaptureSink {
  public:
   struct Call {
+    NativeArtifactKind kind = NativeArtifactKind::kUnknown;
     std::uint64_t request_id = 0, frame_id = 0, creator_event_id = 0;
     std::string url, mime_type;
     std::vector<std::uint8_t> content;
@@ -160,22 +186,62 @@ class NativeArtifactCaptureSink {
     return sink;
   }
   bool IsEnabled() const { return enabled; }
-  std::uint64_t CaptureRequestBody(std::uint64_t request_id,
-                                   std::uint64_t frame_id,
-                                   std::uint64_t creator_event_id,
-                                   std::string url,
-                                   std::string mime_type,
-                                   std::vector<std::uint8_t> content) {
-    if (refuse)
-      return 0;
-    calls.push_back({request_id, frame_id, creator_event_id, std::move(url), std::move(mime_type),
-                     std::move(content)});
-    return next_artifact_id++;
+  NativeRequestContentAdmission CaptureRequestContent(NativeRequestContent content,
+                                                      std::uint64_t& artifact_id) {
+    artifact_id = 0;
+    if (admission != NativeRequestContentAdmission::kQueued)
+      return admission;
+    Call call{content.kind,
+              content.request_id,
+              content.frame_id,
+              content.creator_event_id,
+              std::move(content.url),
+              std::move(content.mime_type),
+              {}};
+    if (content.body) {
+      for (const auto& element : *content.body->elements()) {
+        const auto& bytes = element.As<network::DataElementBytes>().bytes();
+        const auto count = std::min(bytes.size(), content.size - call.content.size());
+        call.content.insert(call.content.end(), bytes.begin(),
+                            bytes.begin() + static_cast<std::ptrdiff_t>(count));
+      }
+    } else {
+      call.content.assign(content.text.begin(),
+                          content.text.begin() + static_cast<std::ptrdiff_t>(content.size));
+    }
+    calls.push_back(std::move(call));
+    artifact_id = next_artifact_id++;
+    return NativeRequestContentAdmission::kQueued;
+  }
+  std::size_t Count(NativeArtifactKind kind) const {
+    return static_cast<std::size_t>(std::count_if(
+        calls.begin(), calls.end(), [kind](const Call& call) { return call.kind == kind; }));
   }
   bool enabled = true;
-  bool refuse = false;
+  NativeRequestContentAdmission admission = NativeRequestContentAdmission::kQueued;
   std::uint64_t next_artifact_id = 900;
   std::vector<Call> calls;
+};
+// Records the response-body hand-offs; the real capture runs in
+// tools/check-native-artifact-capture.py.
+class NativeResponseBodyCapture {
+ public:
+  static NativeResponseBodyCapture& Get() {
+    static NativeResponseBodyCapture capture;
+    return capture;
+  }
+  bool IsEnabled() const { return enabled; }
+  void NoteResponseStarted(const NativeProbeHeader& header) { noted.push_back(header); }
+  void OnCompleted(std::uint64_t request_id, std::uint64_t frame_id, int error_code) {
+    completions.push_back({request_id, frame_id, error_code});
+  }
+  struct Completion {
+    std::uint64_t request_id = 0, frame_id = 0;
+    int error_code = 0;
+  };
+  bool enabled = true;
+  std::vector<NativeProbeHeader> noted;
+  std::vector<Completion> completions;
 };
 class NativeProbeSession {
  public:

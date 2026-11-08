@@ -68,10 +68,12 @@ function trafficSite(domain) {
   return labels.slice(Math.max(0, count - keep)).join('.');
 }
 
-// WebUI loads (chrome://resources, newtab) reach no browser loader record and
-// name a single-label host.
+// The recorded scheme class decides (protocol/native-network-v3.md). Rows
+// recorded before it: WebUI loads (chrome://resources, newtab) reach no browser
+// loader record and name a single-label host.
 function trafficBrowserInternal(request) {
   if (typeof request?.browserInternal === 'boolean') return request.browserInternal;
+  if (globalThis.RebNetworkScope) return globalThis.RebNetworkScope.isBrowserInternalRequest(request);
   const host = String(request?.path ?? '').trim();
   return request?.loaderObserved === false && request.targetKind === 'host' && /^[a-z0-9-]+$/i.test(host) &&
     host.toLowerCase() !== 'localhost';

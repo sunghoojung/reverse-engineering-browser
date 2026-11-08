@@ -189,8 +189,11 @@ function trafficSizeCell(request) {
     resource: resource === null ? '' : trafficBytesLabel(resource), title: lines.join('\n')};
 }
 
-const TRAFFIC_INITIATOR_LABELS = Object.freeze({renderer: 'Renderer', worker: 'Service worker', browser: 'Browser'});
+const TRAFFIC_INITIATOR_LABELS = Object.freeze({script: 'Script', parser: 'Parser', renderer: 'Renderer', worker: 'Service worker',
+  browser: 'Browser'});
 const TRAFFIC_INITIATOR_TITLES = Object.freeze({
+  script: 'JavaScript or WebAssembly was running when the renderer started this request. The Initiator tab shows its call stack.',
+  parser: 'No script was on the stack when the renderer started this request: the HTML parser, a preload, or a deferred start.',
   renderer: 'A renderer started this request. Parser and script starts are not told apart without an initiator stack.',
   worker: 'A service worker started this request.',
   browser: 'The browser process started this request, such as a navigation; no renderer record names it.'});

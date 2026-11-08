@@ -23,7 +23,7 @@ use std::{
 pub const SIDECAR_SUFFIX: &str = ".requests-v1";
 const FORMAT: &str = "reb-request-index-v1";
 /// Sidecar row layout; a sidecar of another layout is rebuilt from byte 0.
-const LAYOUT: u32 = 2;
+const LAYOUT: u32 = 3;
 /// Bounds one call; a larger store reports partial coverage and continues next call.
 const SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const RECORD_BYTES: usize = 4096;
@@ -43,6 +43,18 @@ const MAX_LOCATE: usize = 4;
 const MAX_TEXT: usize = 512;
 const TIMELINE_BUCKETS: usize = 120;
 const UNIDENTIFIED: &str = "Unidentified network event";
+/// Records that belong to a row without changing its lifecycle; a selected
+/// row reads them back by member (protocol/native-network-v2.md and v3).
+const CHILD_TYPES: [&str; 8] = [
+    "request_target",
+    "request_body",
+    "response_body",
+    "request_headers",
+    "response_headers",
+    "cookie_list",
+    "request_initiator_stack",
+    "request_tab_link",
+];
 
 pub const QUERY_KEYS: [&str; 18] = [
     "limit",
@@ -171,6 +183,10 @@ struct Row {
     worker_started: bool,
     versioned: bool,
     main_frame: bool,
+    /// The newest nonzero envelope scheme class (protocol/native-network-v3.md).
+    scheme_class: u8,
+    /// The renderer's request_initiator_stack state, or 0.
+    stack_state: u8,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -648,6 +664,11 @@ fn short_name(target: &str) -> String {
 fn initiator(row: &Row) -> Option<&'static str> {
     if row.worker_started {
         Some("worker")
+    } else if row.renderer && matches!(row.stack_state, 1 | 4 | 5) {
+        // A walked request_initiator_stack (protocol/native-network-v3.md).
+        Some("script")
+    } else if row.renderer && row.stack_state == 2 {
+        Some("parser")
     } else if row.renderer {
         Some("renderer")
     } else if row.versioned && row.loader {
@@ -659,6 +680,8 @@ fn initiator(row: &Row) -> Option<&'static str> {
 fn initiator_label(row: &Row) -> Option<&'static str> {
     initiator(row).map(|kind| match kind {
         "worker" => "Service worker",
+        "script" => "Script",
+        "parser" => "Parser",
         "renderer" => "Renderer",
         _ => "Browser",
     })
@@ -976,14 +999,19 @@ fn view(row: &Row) -> View {
             _ => trimmed.into(),
         }
     };
-    // WebUI loads (chrome://resources, newtab) never reach the browser loader proxy.
-    let internal = !row.loader
-        && target_kind == "host"
-        && !trimmed.is_empty()
-        && trimmed
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        && !trimmed.eq_ignore_ascii_case("localhost");
+    // A recorded scheme class decides. Before scheme classes, WebUI loads
+    // (chrome://resources, newtab) never reached the browser loader proxy.
+    let internal = if row.scheme_class != 0 {
+        (16..=20).contains(&row.scheme_class)
+    } else {
+        !row.loader
+            && target_kind == "host"
+            && !trimmed.is_empty()
+            && trimmed
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && !trimmed.eq_ignore_ascii_case("localhost")
+    };
     View {
         internal,
         haystack: format!("{} {path} {}", row.method, text(&status)).to_lowercase(),
@@ -1196,11 +1224,17 @@ impl RequestIndex {
             return;
         }
         let Some(incoming) = rank(kind) else {
-            if kind == "request_target" || kind == "request_body" {
+            if CHILD_TYPES.contains(&kind) {
                 let id = request_identity(&event, &state.keys);
                 if let Some(&ordinal) = state.by_id.get(&id) {
                     let row = &mut state.rows[ordinal as usize];
                     Self::member(row, &event, start, end);
+                    if kind == "request_initiator_stack" {
+                        row.stack_state = hex::decode(event["payload"].as_str().unwrap_or(""))
+                            .ok()
+                            .and_then(|bytes| bytes.get(4).copied())
+                            .unwrap_or(0);
+                    }
                     let parent = (
                         text(&event["session_id"]),
                         number(&event["process_id"]) as u32,
@@ -1267,6 +1301,8 @@ impl RequestIndex {
                     worker_started: false,
                     versioned: false,
                     main_frame: false,
+                    scheme_class: 0,
+                    stack_state: 0,
                 });
                 self.views.push(view(state.rows.last().unwrap()));
                 ordinal
@@ -1311,6 +1347,9 @@ impl RequestIndex {
         let versioned = version >= 2;
         let flags = number(&event["flags"]);
         row.versioned |= versioned;
+        if let Some(class) = event["scheme_class"].as_u64().filter(|class| (1..=255).contains(class)) {
+            row.scheme_class = class as u8;
+        }
         row.loader |= kind != "request_initiated";
         row.renderer |= kind == "request_initiated"
             || (versioned && number(&event["initiator_process_id"]) > 0);
@@ -2086,6 +2125,30 @@ mod tests {
             .iter()
             .map(|row| row["id"].as_str().unwrap().to_owned())
             .collect()
+    }
+
+    #[test]
+    fn scheme_class_decides_browser_internal() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events.jsonl");
+        let mut store = Store {
+            events: Vec::new(),
+            sequence: 0,
+        };
+        store.push(43, 1, "request_initiated", b"GET newtab", json!({"scheme_class": 16}));
+        store.push(43, 2, "request_initiated", b"GET intranet", json!({"scheme_class": 2}));
+        store.push(43, 3, "request_initiated", b"GET resources", json!({}));
+        write(&path, &store);
+        let mut index = RequestIndex::new(&path);
+        let document = page(&mut index, "sort=capture&order=asc");
+        let internal: Vec<_> = document["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["browser_internal"].as_bool().unwrap())
+            .collect();
+        assert_eq!(internal, [true, false, true]);
+        assert_eq!(page(&mut index, "hide_internal=1")["hidden_internal"], 2);
     }
 
     #[test]

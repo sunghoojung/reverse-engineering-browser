@@ -35,9 +35,9 @@ Rows also carry what the lifecycle records hold beyond the row model:
 | `response_time_ns` | The first `response_started` record's time |
 | `error_code` | The last non-zero `error_code` |
 | `loader_observed` | Any lifecycle record other than `request_initiated` |
-| `initiator` | `worker` when `request_started` has flag 4, else `renderer` for a `request_initiated` record or a non-zero `initiator_process_id`, else `browser` for a versioned browser record, else null |
+| `initiator` | `worker` when `request_started` has flag 4; else, for a `request_initiated` record or a non-zero `initiator_process_id`, `script` when its `request_initiator_stack` walked frames, `parser` when no script was on the stack, else `renderer` ([native network v3](native-network-v3.md#request-initiator-stacks)); else `browser` for a versioned browser record, else null |
 | `main_frame` | `request_started` with resource type 0 |
-| `browser_internal` | Not `loader_observed`, a host-only target and a single-label host other than `localhost`, as WebUI loads are |
+| `browser_internal` | The row's scheme class is browser-internal (16 to 20, [native network v3](native-network-v3.md#scheme-class)); without a scheme class, not `loader_observed`, a host-only target and a single-label host other than `localhost`, as WebUI loads are |
 
 `type` follows the pinned `blink::mojom::ResourceType`; a request whose type says
 only "other" is classed by its MIME type.
@@ -46,8 +46,11 @@ Each row also names its root event (`request_started`, else
 `request_initiated`, else the first record with a request ID), the
 `(session_id, process_id, request_id)` members whose records form it with their
 record counts (at most 8), and the byte boundaries of its first record and
-after its last. Reading a row's records is `get_events` per member with
-`after=first_offset` and `limit=records`.
+after its last. Record counts include the lifecycle records and their children
+(`request_target`, `request_body`, `response_body`, header blocks, cookie
+lists, `request_initiator_stack` and `request_tab_link`). Reading a row's
+records is `get_events` per member with `after=first_offset` and
+`limit=records`.
 
 Paths and targets are captured text, present only when the session retained
 request content (protocol/native-network-v2.md). Consumers insert them as text.

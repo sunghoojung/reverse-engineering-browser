@@ -15996,12 +15996,14 @@
               "null"
             ],
             "enum": [
+              "script",
+              "parser",
               "renderer",
               "worker",
               "browser",
               null
             ],
-            "description": "Who started the request: a renderer, a service worker, or the browser process; null without a versioned record."
+            "description": "Who started the request: script or the parser in a renderer (from its request_initiator_stack), a renderer without a stack record, a service worker, or the browser process; null without a versioned record."
           },
           "main_frame": {
             "type": "boolean",
@@ -16009,7 +16011,7 @@
           },
           "browser_internal": {
             "type": "boolean",
-            "description": "Only the renderer recorded it and it names a single-label host other than localhost, as WebUI loads do."
+            "description": "Its scheme class is browser-internal (protocol/native-network-v3.md); recorded before scheme classes, only the renderer recorded it and it names a single-label host other than localhost, as WebUI loads do."
           }
         }
       },

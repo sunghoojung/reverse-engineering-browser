@@ -1597,6 +1597,14 @@
         });
         const rows = [...requests.values()];
         attachRequestDetails(rows, events, browserRequestKeys);
+        // A walked initiator stack tells script starts from parser starts (protocol/native-network-v3.md).
+        for (const row of rows) {
+          if (row.initiator !== 'renderer') continue;
+          const stack = row.details.find(event => event.type === 'request_initiator_stack');
+          const stackState = typeof stack?.payload === 'string' ? Number.parseInt(stack.payload.slice(8, 10), 16) : 0;
+          if ([1, 4, 5].includes(stackState)) row.initiator = 'script';
+          else if (stackState === 2) row.initiator = 'parser';
+        }
         return rows;
       }
 

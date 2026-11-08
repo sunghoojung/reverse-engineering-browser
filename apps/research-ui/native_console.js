@@ -183,6 +183,7 @@
       typeof target.label !== 'string' || encoder.encode(target.label).length > 128 || typeof target.url !== 'string' || encoder.encode(target.url).length > 512 ||
       typeof target.main_frame !== 'boolean' || typeof target.truncated !== 'boolean') || new Set(value.targets.map(target => target.id)).size !== value.targets.length) throw new TypeError('Malformed document listing');
     const invalid = documentSource === 'live_capture' && !!session && value.selected_target_id === null;
+    document.dispatchEvent(new CustomEvent('reb:console-documents', {detail: value.targets.map(target => ({url: target.url, main_frame: target.main_frame}))}));
     clearTargets(); partialTargets = value.truncated;
     for (const target of value.targets) {
       const option = document.createElement('option'); option.value = target.id;

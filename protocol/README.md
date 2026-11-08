@@ -19,6 +19,9 @@ defined the getProperties-only host import map.
 [JavaScript Source Facts v1](javascript-source-facts-v1.md) defines exact-artifact
 lexical binding/effect analysis, original-byte ranges and explicit unknown coverage.
 
+[Source format v1](source-format-v1.md) defines the Prettier-style JavaScript
+layout that changes only whitespace, its fidelity checks and limits.
+
 [Native Console v2](native-console-v2.md) defines the opt-in mutable console,
 its disposable browser ownership, wire layouts, and limits.
 
@@ -409,8 +412,16 @@ use the names.
 | 27 | `wasm_execution_outcome` | `include/reb/wasm_dispatch.hpp` | [native Wasm execution outcomes](native-wasm-dispatch-v1.md#execution-outcomes) |
 | 28 | `wasm_dispatch_overflow` | `include/reb/wasm_dispatch.hpp` | [native Wasm overflow identities](native-wasm-dispatch-v1.md#overflow-identities) |
 | 29 | `wasm_indirect_overflow` | `include/reb/wasm_dispatch.hpp` | [native Wasm overflow identities](native-wasm-dispatch-v1.md#overflow-identities) |
+| 30 | `request_headers` | `include/reb/network_headers.hpp` | [native network v3](native-network-v3.md#records) |
+| 31 | `response_headers` | `include/reb/network_headers.hpp` | [native network v3](native-network-v3.md#records) |
+| 32 | `cookie_list` | `include/reb/network_cookies.hpp` | [native network v3](native-network-v3.md#network-cookie-lists) |
+| 33 | `response_body` | `include/reb/network_response_body.hpp` | [native network v3](native-network-v3.md#response_body-type-33) |
 | 34 | `request_initiator_stack` | `include/reb/request_stack.hpp` | [native network v3](native-network-v3.md#request-initiator-stacks) |
 | 35 | `script_identity` | `include/reb/request_stack.hpp` | [native network v3](native-network-v3.md#script_identity-type-35) |
+| 36 | `capture_exclusion` | `include/reb/network_scope.hpp` | [native network v3](native-network-v3.md#capture_exclusion-type-36) |
+| 37 | `tab_set` | `include/reb/tab_link.hpp` | [native network v3](native-network-v3.md#tab_set-type-37) |
+| 38 | `request_tab_link` | `include/reb/tab_link.hpp` | [native network v3](native-network-v3.md#request_tab_link-type-38) |
+| 39 | `script_cookie` | `include/reb/network_cookies.hpp` | [native network v3](native-network-v3.md#script-cookie-access) |
 | 40 | `request_watch_match` | `include/reb/debugger_observation.hpp` | [native debugger observation v1](native-debugger-observation-v1.md) |
 | 41 | `listener_dispatch` | `include/reb/debugger_observation.hpp` | [native debugger observation v1](native-debugger-observation-v1.md) |
 | 42 | `timer_observation` | `include/reb/debugger_observation.hpp` | [native debugger observation v1](native-debugger-observation-v1.md) |

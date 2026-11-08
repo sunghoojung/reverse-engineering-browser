@@ -486,7 +486,7 @@ export async function checkNamesApp(root) {
     function renderRequests() {} function updateSelectionSummary() {} function renderSourceTree() {} function renderSourceTabs() {}
     function textElement(tag, className, value) {const element = document.createElement(tag); if (className) element.className = className; element.textContent = String(value); return element;}
     function selectedSource() {return state.artifacts.find(item => item.artifact_id === state.selectedArtifactId) ?? null;}
-    function sourceDisplayName(source) {return 'loader.js · artifact ' + source.artifact_id;}
+    function sourceDisplayName() {return 'loader.js';}
     function capturedSources() {return state.artifacts;}
     function selectRequest(id) {record('selectRequest', id); state.selectedRequestId = id;}
     function focusRequestRow(id) {record('focusRequestRow', id);}

@@ -247,7 +247,7 @@ for bounds, identity semantics and validation coverage.
 
 Name what you have understood, as in a disassembler: a request as "session token
 mint", a source as "obfuscated loader", a VM handler as `push_const`. Choose the
-pencil in the Traffic request header, **Rename** in the Sources toolbar or
+pencil in the Traffic request header, **Rename** in the Sources **More** menu or
 **Rename** in the VM Selected handler pane, or press F2 on the focused or selected
 request, source (tree row or tab) or handler (listing or Symbol Tree row). The
 inline editor saves on Enter, cancels on Escape or when focus leaves it, and an
@@ -956,8 +956,10 @@ capture, fetch anything or change a row.
 | `traffic_overview.js` | The timing strip and its pointer and keyboard time-range selection |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
+| `source_tree.js` | The Sources navigator: frame, group, origin and folder model, hand-parsed non-special URLs, mounted-window rows, keyboard, type-ahead and filter; `app.js` supplies the catalog and the open path |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
+| `source_format.js` | The backend JavaScript layout client and its whitespace-only mapping to the displayed evidence |
 | `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
 | `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `workspace_lease.rs` | Workspace contracts, explicit analyst execution, private durable replacement |
@@ -1065,7 +1067,14 @@ resource filters stay visible below search and wrap within narrow windows. Selec
 and below it on narrow windows. Session
 counts come from loaded requests, and sample evidence stays visibly labeled.
 Keep labels at least 10 px and reserve stronger color for selection, connection
-state, errors, and evidence confidence.
+state, errors, and evidence confidence. Sources file icons are the one chrome
+tint: JavaScript, WebAssembly, JSON, source map and HTML icons take their code
+color at low strength, while folders, origins and frames stay neutral. Code is the exception: Sources and the
+Native Console color code like the Rosé Pine Moon VS Code theme (Rosé Pine
+Dawn in light mode), with its token colors, bracket pair colors, editor colors
+and Menlo 12/18 px; the Analyst editor takes the same editor colors and font. With macOS Increase Contrast, comments and
+keywords are brightened. `node tools/check-source-format-ui.mjs` (part of
+`make lint`) pins the token kinds and colors.
 
 Tool workspaces put the next action before implementation details. Decoder
 controls follow input, transformation, and result order; chain editing stays
@@ -1181,31 +1190,48 @@ correlation and exposes zero-count families instead of hiding coverage. The
 view never claims that an observed value was transmitted or that a particular
 fingerprinting vendor produced the activity.
 
-Sources navigation lists retained Captured artifacts.
-File rows reserve their remaining width for the filename, with full URLs in
-tooltips and source metadata in Details. Folder rows retain their item counts.
-The navigator initially expands branches to keep retained files directly visible.
-Click a branch, or press Enter/Space on it, to collapse or expand it. One tree row
-is in the Tab order; Up/Down move through visible rows, Right opens a branch or
-enters its first child, Left closes it or returns to its parent, and Home/End
-reach the first/last visible row. Modified arrows keep their browser/history
-meaning. Focus and the open document are separate: collapsing a selected file's
-ancestor leaves its editor, Find result and original-byte location unchanged and
-never reads source bytes or runs analysis. Ordinary catalog refresh keeps keyed
-rows, tree focus and scroll, returning a removed focused row to its closest
-surviving ancestor. Branch state is session-only; origins and full path
-segments have distinct identities.
+Sources navigation lists every retained Captured artifact (`source_tree.js`).
+The catalog is read forward from `get_artifacts` in 5,000-record pages; a
+one-record probe carries the ETag, a manifest that only grew is read from its
+last boundary, and loading stops at 50,000 records with a notice. The tree reads
+**top**, then one row per frame, then the **Workers** (no frame),
+**Dynamic (eval / new Function)**, **WebAssembly** (modules compiled from bytes
+and their guest artifacts), **Extensions** (by extension ID) and **Browser
+internals** groups, then origins, folders and files. The frame seen first is
+listed first, other frames by name. A frame is named by its Console document URL
+when the Console listing has one, which also marks top-level documents, and
+otherwise by the origin of its first eval or Wasm artifact. Extension and
+`chrome://` hosts are read by hand because their URL origin is `null`; browser
+internals start collapsed. A folder chain with one folder child reads as one row
+(`a/b/c`). Files show their plain name, eval code `VM<id>` as in DevTools, with
+a mask icon tinted by type and the two-letter kind code kept as its text. The
+artifact ID is in the muted meta column, the tooltip and Details; same-named
+siblings add a muted query or session suffix. Extension names are not captured,
+so extensions show their ID.
 
-The navigator inspects at most 5,000 catalog records, retains 10,000 metadata
-nodes and renders at most 1,000 expanded rows. Collapsed descendants have no DOM
-rows. It rejects URLs above 4,096 characters and identities above 8,192
-characters, shortens directory structure after 16 levels, and visibly discloses
-these limits rather than implying omitted sources are absent. Selection markers
-are withheld when the catalog cap prevents verifying a unique source. Empty path
-segments remain distinct, explicitly labeled folders. Collapse branches
-or use **Open file** to reach later catalog choices. Deep indentation is bounded
-for narrow sidebars; full source URLs remain available in tooltips. These limits
-do not evict open source text, change captured evidence, or relink documents.
+Only rows near the viewport are mounted; the focused row stays mounted while
+scrolled away. One row is in the Tab order. Up/Down move through rows, Right
+opens a branch or enters its first child, Left closes it or returns to its
+parent, Home/End reach the first/last row, and typing a name moves to the next
+row that starts with it (repeat a letter to cycle). Modified arrows keep their
+browser/history meaning; Enter/Space keep native button activation. **Filter
+files** above the tree matches file names, URLs and artifact IDs and shows each
+match with its folders; Down enters the tree and Escape clears it. Expansion
+under a filter is separate, so clearing it restores the saved expansion.
+**Expand all** and **Collapse all** act on the current view. Expansion is kept
+for the app session. Focus and the open document are separate: collapsing a
+selected file's ancestor never reads source bytes or runs analysis. Catalog
+refresh keeps keyed rows, focus and the first visible row in place, returning a
+removed focused row to its closest surviving ancestor.
+
+The navigator holds at most 120,000 metadata nodes, rejects URLs above 4,096
+characters and identities above 8,192 characters, shortens directory structure
+after 16 levels, and discloses each limit rather than implying omitted sources
+are absent. Selection markers are withheld when the catalog is capped, a source
+identity repeats, or an omitted record shares the selected ID. Empty path
+segments remain distinct, explicitly labeled folders. **Open file** lists the
+first 200 matches. These limits do not evict open source text, change captured
+evidence, or relink documents.
 Find searches the selected document's owned retained text, independently of
 which lines are mounted. It uses a case-insensitive single-line literal of at
 most 512 UTF-16 code units. Multiline pastes are refused before the browser can
@@ -1229,8 +1255,8 @@ Enter searches immediately. The command palette's **Search all sources** entry
 opens this view with its query and runs it; typing in the palette never reads
 artifact bytes.
 
-Each file is read once through `/api/artifacts/{artifact_id}/content` with the
-same 2 MiB limit, byte-size and SHA-256 checks as the Sources preview. A loaded
+Each file is read once through `/api/artifacts/{artifact_id}/content` with a
+2 MiB limit and the Sources preview's byte-size and SHA-256 checks. A loaded
 preview is reused without a request, and other text is kept in a separate cache
 of at most 8 Mi UTF-16 code units, so the next query does not refetch it; files
 that leave the catalog leave that cache. One search reads at most 32 MiB and
@@ -1254,17 +1280,19 @@ after the search is refused rather than reopened. `node tools/check-source-searc
 (part of `make check`) exercises the matcher, caps, cancellation, partial-result
 notes, reader checks and this open-and-Back path in the shipped scripts.
 
-The editor mounts at most 1,000 lines. Previous/Next and explicit local Line /
-Column controls reach other retained locations. The target line retains at most
-16,384 UTF-16 units (one additional unit may preserve a surrogate pair); other
-lines retain at most 512 each. Omitted-column markers sit outside source text.
-Find and original-byte links reveal an excerpt containing the requested absolute
-location, rather than increasing these limits. Later or clipped windows use a
-plain-text label because omitted prefixes cannot establish lexical coloring
-state. Captured bytes, line endings, BOMs and absolute runtime locations stay
-unchanged. The current document has one sparse line anchor per 128 lines, at
-most 65,537 anchors for the defensive 8 Mi UTF-16-unit inspection limit. Accepted
-preview and verified-original readers retain their existing smaller byte limits.
+The editor mounts at most 1,000 lines. A row above and below them reaches the
+previous and next 1,000 lines, and **Go to line** (Ctrl+G, or **More**) takes a
+line and column. The target line retains at most 16,384 UTF-16 units (one
+additional unit may preserve a surrogate pair); other lines retain at most 512
+each. Omitted-column markers sit outside source text. Find and original-byte
+links reveal an excerpt containing the requested absolute location, rather than
+increasing these limits. Colors resume from lexer checkpoints saved every 4 Ki
+UTF-16 units of the document, so later windows and clipped columns color exactly
+as a pass from the start would. Checkpoints extend in steps of 64 Ki units
+between tasks; a window they have not reached shows **coloring…** in plain text
+until they do. Captured bytes, line endings, BOMs and absolute runtime locations
+stay unchanged. The current document has one sparse line anchor per 128 lines,
+within a defensive 64 Mi UTF-16-unit inspection limit.
 Derived/Pretty mappings are projected only for mounted lines.
 
 Investigation history retains logical line/column windows with the exact source
@@ -1273,8 +1301,16 @@ version or intrinsic assumption cannot restore a stale representation window.
 Ordinary evidence refresh leaves Find and the current window in place; explicit
 original-source pivots choose their own retained location.
 
+The editor toolbar is one row: the URL, **Open file**, Find (Cmd+F) and **More**,
+which holds Go to line, Rename, Decode range, Facts, Track calls, Static cleanup
+and Details. Find's coverage sentence is its tooltip. The status bar shows the
+caret line and column, with the original location in a pretty-printed or derived
+view (`Line 1204, Column 5 (original 1:48213)`), the selection length, the
+evidence state (Original or Derived), the language and layout, the **{ }**
+toggle and the size.
+
 The Sources sidebar starts closed. Details opens source metadata, JavaScript
-facts and static cleanup; the toggle remains available at narrow window sizes.
+facts and static cleanup; it remains available at narrow window sizes.
 Wasm modules and native guest bytecode buffers open as an inert hex view of
 their retained bytes (offset, hex and printable columns, labeled **WebAssembly
 hex** or **Guest bytecode hex**); bytecode is never decoded as text. Guest
@@ -1351,14 +1387,27 @@ Unsupported behavior remains visibly unresolved even if no resource budget was
 reached; no safe rewrites is not a claim that source is unobfuscated. This is a
 separate ephemeral derived view, not a persisted replacement capture.
 
-The adjacent **{ }** control pretty prints JavaScript, JSON, CSS, and HTML using
-the detected source type. It can format either the original evidence or the
+The status-bar **{ }** toggle pretty prints JavaScript, JSON, CSS, and HTML using
+the detected source type. JavaScript, CSS and JSON with a line over 16 KiB open
+pretty-printed, shown as **Pretty-printed · Show original**; the choice either
+way is remembered per artifact for the session. The gutter numbers formatted
+lines; its tooltip names the original line and column. A complete JavaScript artifact is laid out by the
+backend's Oxc formatter (`get_source_format`, [Source format v1](../../protocol/source-format-v1.md)):
+Prettier's layout at 80 columns, with every token printed as captured. Its
+text differs from the evidence only in whitespace, so the editor maps every
+character back by walking both texts, and clicking a formatted token shows the
+exact raw range it came from. While it runs the original stays on screen. If
+the source does not parse, the backend is unavailable, or the text is derived,
+truncated or another language, the in-page formatter is used and the
+status bar says so. It runs in a Web Worker (on the page, after one task, where
+workers are unavailable). It can format either the original evidence or the
 active deobfuscated representation, so an unchanged deobfuscation result does
 not leave a minified bundle on one line. Pretty printing changes only display
 whitespace, keeps source-line mappings back to the captured bytes, and never
-rewrites stored evidence. Input is capped at 2 MiB and formatted output at 4
-MiB, with 250,000 lexical tokens and 500,000 mapping segments as pathological
-input guards.
+rewrites stored evidence. Both layouts map back through one sync point per
+4 Ki formatted units rather than a segment per change. The in-page formatter
+streams its tokens, accepts the 16 MiB artifact cap and stops when its output
+exceeds three times that.
 **Details > Static cleanup** shows analysis, limits, omissions, and retry actions. The native app ships a Rust/Oxc worker for bounded static AST rewriting
 over captured artifacts. It needs no Python runtime. Building the app
 requires a current stable Rust toolchain (`rustup toolchain install stable`).
@@ -1408,8 +1457,8 @@ worker makes AST operations unavailable with an explicit error. Deob stays insid
 To follow calls of a page function such as `window.hsw` in the next capture,
 open its captured script in **Sources** and either type the name in the
 **Track function calls** pane of **Details** and press Return, or put the
-cursor in the function (click it, or use **Line**, **Column** and **Go**) and
-choose **Track calls** in the toolbar. The position must be in the original
+cursor in the function (click it, or use **Go to line**) and
+choose **Track calls** in **More**. The position must be in the original
 view, not a pretty-printed, derived or Wasm view. The backend resolves the
 exact artifact and saves one site; it never guesses. A name bound by several
 definitions, or by none, lists the candidates with their line, column and a
@@ -1512,7 +1561,7 @@ drag. Traffic saves wide column and narrow row splits separately. Sizes persist 
 proportions in the local `origin-trace.layout.v1` preference, independently of evidence and backend state.
 
 Minimum pane sizes keep controls and empty states usable. The Sources toolbar
-wraps within the editor; its narrow details overlay starts below those controls. Saved widths are suspended when the
+stays one row (a rename field wraps below it); its narrow details overlay starts below those controls. Saved widths are suspended when the
 responsive layout stacks panes or lacks enough space. Returning to a wide window restores them. Handles follow scrolling and
 are clipped to the active workspace. `pane_layout.js` owns the shared layout controller;
 no captured evidence is modified by resizing.
@@ -1662,16 +1711,18 @@ proof of ownership.
 Artifact catalog refreshes preserve an exact pending preview owner. Changing
 its session, hash or descriptor retires that read. Preview failures and deadlines
 show **Retry source**; they do not silently retry during refresh. Preview bodies
-reuse the Facts bounded streaming reader: 2 MiB raw artifact bytes and 33 MiB
-for an analyzer envelope, with at most 65,536 chunks. Artifact and analyzer
-deadlines are ten seconds, including body reads and SHA-256 work. Cancellation
+reuse the Facts bounded streaming reader in 2 MiB pages: a text preview reads
+the whole artifact up to the 16 MiB artifact cap, and a larger one keeps its first
+16 MiB with a visible limit notice. Binary previews read 2 MiB, and an analyzer
+envelope 33 MiB, with at most 65,536 chunks per page. Analyzer deadlines are ten
+seconds; a preview has five seconds plus five per page, including SHA-256 work. Cancellation
 retires ownership without waiting for a stalled producer's cleanup. Full artifact
 previews verify SHA-256 when WebCrypto is available; partial or lossy text is
 visibly a preview. Exact byte navigation still belongs to the existing Facts
 verified-original reader.
 
-The editor retains at most eight preview owners and 16 MiB of UTF-16 preview
-text across captured files. The selected owner is pinned; older preview
+The editor retains at most eight preview owners and 32 Mi UTF-16 units of
+preview text across captured files. The selected owner is pinned; older preview
 bytes can be evicted while their tab and immutable catalog metadata remain.
 **Retry source** or reopening the file loads it again. Closing a file cancels its
 preview/Deob reads and releases its preview, Deob and formatting cache entries.
@@ -1680,12 +1731,14 @@ empty/retry controls are removed when the editor becomes ready. Hidden UI
 closures cannot keep evicted preview or analysis payloads alive. This never
 deletes captured evidence. Canvas thumbnails and the existing bounded
 Facts/WASM inspectors retain their separate ownership contracts. WASM Hex formats
-every retained byte whose text fits in the 8 MiB editor index, about 1.6 MiB of
+every retained byte whose text fits in 8 Mi UTF-16 units, about 1.6 MiB of
 module bytes. A longer module keeps a labeled prefix, and Find covers that prefix.
 
 Deob retains at most eight documents, 16 MiB of original/derived UTF-16 text and
-250,000 map segments and 32 MiB of serialized response data in total. Formatting retains at most two documents, 12 MiB
-of input/output UTF-16 text and 500,000 segments. These are explicit text/entry
+250,000 map segments and 32 MiB of serialized response data in total. In-page
+formatting retains at most eight layouts and 64 Mi UTF-16 units of input and
+output text; Oxc layouts at most four and 64 Mi units. The newest layout is kept
+even when it alone exceeds its budget. These are explicit text/entry
 budgets, not JavaScript heap or process-RSS guarantees. The editor DOM and Facts'
 independently verified original also use memory; no duplicate history of source
 bytes is introduced.

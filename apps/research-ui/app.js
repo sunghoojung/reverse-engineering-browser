@@ -16,6 +16,30 @@ const invocationSitesPanel = createInvocationSitesPanel({
   onShow: showInvocationSites
 });
 invocationSitesPanel.refresh();
+const sourceFormatClient = createSourceFormatClient({
+  onChange: source => { if (state.sourceFormatted && sourceIdentity(selectedSource()) === sourceIdentity(source)) renderSources(); }
+});
+const sourceTreeView = createSourceTree({
+  tree: elements.sourceTree, filter: document.querySelector('#source-tree-filter'),
+  expand: document.querySelector('#source-tree-expand'), collapse: document.querySelector('#source-tree-collapse'),
+  helpers: {isSource: isSourceArtifact, identity: sourceIdentity, reference: sourceReference, name: sourceDisplayName, isCurrent: sourceIsCurrent},
+  catalog: () => state.artifacts, collection: () => state.sourceCollection, selectedId: () => state.selectedArtifactId,
+  catalogLimit: () => state.artifactCatalogLimit, consoleDocuments: () => state.consoleDocuments,
+  hideInternal: () => state.hideBrowserInternal, internalToggle: internal => sourceInternalToggle(internal),
+  kindLabel: source => sourceKindLabel(source.kind),
+  researcherName(source) {
+    const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
+    return names?.has('captured-artifact') ? names.nameFor('artifact', source) : null;
+  },
+  open: artifactId => selectArtifact(artifactId),
+  stale() {
+    state.sourceNoticeKind = 'warning';
+    state.sourceNotice = 'This exact source changed or is no longer available. Refresh the catalog before opening it.';
+    renderSourceHealth();
+  }
+});
+// The Console's document listing names frames and marks the top-level ones.
+document.addEventListener('reb:console-documents', event => { state.consoleDocuments = event.detail; renderSourceTree(); });
       const evidencePackagePanel = createEvidencePackagePanel({getContext: () => ({
         requestId: evidenceRequestKey(state.requests.find(request => request.id === state.selectedRequestId)),
         requestEvents: state.requests.find(request => request.id === state.selectedRequestId)?.events ?? [],
@@ -6311,12 +6335,13 @@ invocationSitesPanel.refresh();
         }
       }
 
-      function releaseSourcePreview(source) {
+      // Passing the catalog record keeps a whole-catalog release linear.
+      function releaseSourcePreview(source, owner = null) {
         const identity = sourceIdentity(source);
-        const preview = state.artifacts.find(value => sourceIdentity(value) === identity);
+        const preview = owner ?? state.artifacts.find(value => sourceIdentity(value) === identity);
         if (preview) {
           preview.controller?.abort();
-          for (const field of ['content', 'sourceTextLength', 'contentTruncated', 'loading', 'loadError', 'controller', 'previewUsed', 'contentVerified', 'contentLossy']) delete preview[field];
+          for (const field of ['content', 'sourceTextLength', 'contentTruncated', 'contentLongLine', 'loading', 'loadError', 'controller', 'previewUsed', 'contentVerified', 'contentLossy']) delete preview[field];
         }
         for (const cache of [state.deobfuscationRequests, state.deobfuscationCache, state.sourceFormatCache]) {
           for (const [key, value] of cache ?? []) {
@@ -6336,16 +6361,16 @@ invocationSitesPanel.refresh();
         let characters = entries.reduce((sum, {preview}) => sum + (preview.content?.length ?? 0), 0);
         let documents = entries.length;
         // Metadata/open tabs remain. Reopening an evicted preview reloads it.
-        // Text is at most 16 MiB of UTF-16 units across eight preview owners.
+        // Other previews hold at most 32 Mi UTF-16 units across eight owners.
         for (const {source, preview} of entries) {
-          if (documents <= 8 && characters <= 8 * 1024 * 1024) break;
+          if (documents <= 8 && characters <= 32 * 1024 * 1024) break;
           if (sourceIdentity(source) === protectedIdentity) continue;
           characters -= preview.content?.length ?? 0; documents -= 1;
           releaseSourcePreview(source);
         }
       }
 
-      function boundSourceAnalysis(cache, maximum, characterLimit, segmentLimit) {
+      function boundSourceAnalysis(cache, maximum, characterLimit, segmentLimit, keep = null) {
         let characters = 0, segments = 0, wireBytes = 0;
         for (const value of cache.values()) {
           wireBytes += value.sourceDocumentBytes ?? 0;
@@ -6354,6 +6379,7 @@ invocationSitesPanel.refresh();
         }
         for (const [key, value] of cache) {
           if (cache.size <= maximum && characters <= characterLimit && segments <= segmentLimit && wireBytes <= 32 * 1024 * 1024) break;
+          if (key === keep) continue;
           wireBytes -= value.sourceDocumentBytes ?? 0;
           characters -= (value.original_source?.length ?? value.sourceInput?.length ?? 0) + (value.representation?.text?.length ?? value.text?.length ?? 0);
           segments -= value.representation?.segments?.length ?? value.segments?.length ?? 0;
@@ -6362,21 +6388,18 @@ invocationSitesPanel.refresh();
         }
       }
 
-      function capturedSources() {
+      function capturedSources(artifactId = null) {
         return state.artifacts
-          .filter(isSourceArtifact)
+          .filter(artifact => isSourceArtifact(artifact) && (artifactId === null || artifact.artifact_id === artifactId))
           .map(artifact => {
             const key = `artifact:${artifact.artifact_id}`;
             return { ...artifact, source_type: 'artifact', key, deobfuscation: state.deobfuscationCache?.get(deobfuscationKey({...artifact, key})) ?? null };
           });
       }
 
-      function sourceOrigin(source) {
-        try { return source.url ? new URL(source.url).origin : '(anonymous)'; } catch { return '(generated)'; }
-      }
-
+      // Dynamic code has no file of its own; DevTools names it VM<id> too.
       function sourceDisplayName(source) {
-        return `${sourceName(source)} · artifact ${source.artifact_id}`;
+        return source?.capture_origin === 'dynamic_javascript' ? `VM${source.artifact_id}` : sourceName(source);
       }
 
       // Every artifact kind the evidence contract admits, labeled by what its
@@ -6387,212 +6410,31 @@ invocationSitesPanel.refresh();
           bytecode_buffer: ['BC', 'guest bytecode']}[kind] ?? null;
       }
 
-      function sourceDisplayMeta(source) {
-        return `${source.origin === 'sample' ? 'sample' : source.origin === 'demo' ? 'demo' : 'evidence'} · ${sourceKindLabel(source.kind)?.[1] ?? source.kind}`;
-      }
-
-      function sourcePathParts(source) {
-        try { return source.url ? new URL(source.url).pathname.split('/').filter(Boolean) : [sourceName(source)]; } catch { return [sourceName(source)]; }
-      }
-
       function sourceIcon(source) {
         return sourceKindLabel(source.kind)?.[0] ?? '?';
       }
 
       function selectedSource() {
-        const matches = capturedSources().filter(source => source.artifact_id === state.selectedArtifactId);
+        if (state.selectedArtifactId == null) return null;
+        const matches = capturedSources(state.selectedArtifactId);
         return matches.length === 1 ? matches[0] : null;
       }
 
-      // The navigator owns metadata and focus only. It never owns source bytes,
-      // editor state, analysis, or fetches. These caps also bound hostile paths.
-      const SOURCE_TREE_LIMITS = Object.freeze({catalog: 5000, nodes: 10000, visible: 1000, depth: 16, url: 4096, identity: 8192});
+      function renderSourceTree(refresh = true) {
+        sourceTreeView.render(refresh);
+      }
 
-      function sourceTreeModel(collection) {
-        const catalog = state.artifacts;
-        const nodes = new Map();
-        const rootKey = JSON.stringify([collection, 'root']);
-        const root = {key: rootKey, kind: 'root', label: 'top', depth: 0, parent: null, children: [], count: 0};
-        nodes.set(rootKey, root);
-        const limits = {catalog: Math.max(0, catalog.length - SOURCE_TREE_LIMITS.catalog), omitted: 0, deep: 0, ambiguous: 0, internal: 0};
-        const internalUrl = globalThis.RebNetworkScope?.isBrowserInternalSourceUrl ?? (() => false);
-        const files = new Map();
-        const branch = (key, label, kind, parent) => {
-          if (!nodes.has(key)) {
-            const node = {key, label, kind, depth: parent.depth + 1, parent: parent.key, children: [], count: 0};
-            nodes.set(key, node); parent.children.push(key);
-          }
-          return nodes.get(key);
-        };
-        for (let index = 0; index < Math.min(catalog.length, SOURCE_TREE_LIMITS.catalog); index++) {
-          const raw = catalog[index];
-          if (!isSourceArtifact(raw)) continue;
-          if (internalUrl(raw.url)) {
-            limits.internal++;
-            if (state.hideBrowserInternal) continue;
-          }
-          // Refuse an overlong path before URL parsing or identity serialization.
-          if (typeof raw.url !== 'string' || raw.url.length > SOURCE_TREE_LIMITS.url) {limits.omitted++; continue;}
-          const source = {...sourceReference(raw), source_type: 'artifact'};
-          const identity = sourceIdentity(source);
-          if (!identity || identity.length > SOURCE_TREE_LIMITS.identity) {limits.omitted++; continue;}
-          const key = JSON.stringify([collection, 'source', identity]);
-          // Duplicate exact identities must never become two apparent choices.
-          if (files.has(key)) {files.get(key).ambiguous = true; limits.ambiguous++; continue;}
-          let origin = '(anonymous)', originIdentity = ['anonymous'], parts = [];
-          if (source.url) {
-            try {
-              const url = new URL(source.url);
-              origin = url.origin === 'null' ? url.protocol : url.origin;
-              originIdentity = ['url', origin];
-              parts = url.pathname.split('/');
-              if (url.pathname.startsWith('/')) parts.shift();
-            } catch {origin = '(generated)'; originIdentity = ['generated'];}
-          }
-          const directories = parts.slice(0, -1);
-          const bounded = directories.slice(0, SOURCE_TREE_LIMITS.depth);
-          const originKey = JSON.stringify([collection, 'origin', originIdentity]);
-          const directoryKeys = bounded.map((_, index) => JSON.stringify([collection, 'folder', originIdentity, bounded.slice(0, index + 1)]));
-          const newBranches = [originKey, ...directoryKeys].filter(value => !nodes.has(value)).length;
-          if (nodes.size + newBranches + 1 > SOURCE_TREE_LIMITS.nodes) {limits.omitted++; continue;}
-          if (directories.length > SOURCE_TREE_LIMITS.depth) limits.deep++;
-          let parent = branch(originKey, origin.replace(/^https?:\/\//, ''), 'origin', root);
-          const ancestors = [root, parent];
-          bounded.forEach((label, index) => {
-            parent = branch(directoryKeys[index], label || '(empty path segment)', 'folder', parent); ancestors.push(parent);
-          });
-          const node = {key, identity, kind: 'file', label: sourceDisplayName(source), source,
-            parent: parent.key, depth: parent.depth + 1, children: null};
-          nodes.set(key, node); files.set(key, node); parent.children.push(key);
-          for (const ancestor of ancestors) ancestor.count++;
+      let sourceInternalToggleButton = null;
+      function sourceInternalToggle(internal) {
+        if (!globalThis.RebNetworkScope) return null;
+        if (!sourceInternalToggleButton) {
+          sourceInternalToggleButton = document.createElement('button');
+          sourceInternalToggleButton.type = 'button'; sourceInternalToggleButton.className = 'source-internal-toggle';
+          sourceInternalToggleButton.title = 'Hide chrome:, devtools: and other browser-internal sources; nothing is deleted';
+          sourceInternalToggleButton.addEventListener('click', () => setHideBrowserInternal(!state.hideBrowserInternal));
         }
-        for (const node of nodes.values()) {
-          if (!node.children) continue;
-          node.children.sort((a, b) => {
-            const left = nodes.get(a), right = nodes.get(b);
-            return Number(left.kind === 'file') - Number(right.kind === 'file') || left.label.localeCompare(right.label) || a.localeCompare(b);
-          });
-          node.children.forEach((key, index) => {const child = nodes.get(key); child.position = index + 1; child.size = node.children.length;});
-        }
-        root.position = 1; root.size = 1;
-        return {collection, rootKey, nodes, limits};
-      }
-
-      function sourceTreeVisible(model, collapsed) {
-        const visible = [], stack = model.nodes.get(model.rootKey).count ? [model.rootKey] : [];
-        while (stack.length && visible.length < SOURCE_TREE_LIMITS.visible) {
-          const node = model.nodes.get(stack.pop()); visible.push(node);
-          if (node.children && !collapsed.has(node.key)) {
-            for (let index = node.children.length - 1; index >= 0; index--) stack.push(node.children[index]);
-          }
-        }
-        return {visible, limited: stack.length > 0};
-      }
-
-      function sourceTreeState() {
-        return state.sourceNavigator ??= {scopes: new Map(), rows: new Map(), serial: 0, model: null, visible: []};
-      }
-
-      function sourceTreeScope(nav, collection) {
-        if (!nav.scopes.has(collection)) nav.scopes.set(collection, {collapsed: new Set(), focus: null, scrollTop: 0, scrollLeft: 0});
-        return nav.scopes.get(collection);
-      }
-
-      function sourceTreeFocus(key, reveal = false) {
-        const nav = sourceTreeState(), scope = sourceTreeScope(nav, nav.model.collection);
-        const entry = nav.rows.get(key);
-        if (!entry) return;
-        scope.focus = key;
-        for (const [rowKey, value] of nav.rows) value.row.tabIndex = rowKey === key ? 0 : -1;
-        entry.row.focus({preventScroll: true});
-        if (reveal) {
-          // Scroll only the navigator, never the editor or an outer workspace.
-          const row = entry.row.getBoundingClientRect(), pane = elements.sourceTree.getBoundingClientRect();
-          if (row.top < pane.top) elements.sourceTree.scrollTop += row.top - pane.top;
-          else if (row.bottom > pane.bottom) elements.sourceTree.scrollTop += row.bottom - pane.bottom;
-        }
-      }
-
-      function toggleSourceTree(key, expanded = null) {
-        const nav = sourceTreeState(), node = nav.model?.nodes.get(key);
-        if (!node?.children?.length) return;
-        const scope = sourceTreeScope(nav, nav.model.collection);
-        const open = expanded ?? scope.collapsed.has(key);
-        if (open) scope.collapsed.delete(key); else scope.collapsed.add(key);
-        renderSourceTree(false);
-      }
-
-      function sourceTreeKeydown(event, key) {
-        // Leave browser/history/OS chords and native button Enter/Space alone.
-        if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-        const nav = sourceTreeState(), node = nav.model?.nodes.get(key);
-        if (!node) return;
-        const scope = sourceTreeScope(nav, nav.model.collection);
-        const index = nav.visible.findIndex(value => value.key === key);
-        let next;
-        if (event.key === 'ArrowDown') next = nav.visible[Math.min(index + 1, nav.visible.length - 1)]?.key;
-        else if (event.key === 'ArrowUp') next = nav.visible[Math.max(0, index - 1)]?.key;
-        else if (event.key === 'Home') next = nav.visible[0]?.key;
-        else if (event.key === 'End') next = nav.visible.at(-1)?.key;
-        else if (event.key === 'ArrowRight') {
-          if (node.children?.length && scope.collapsed.has(key)) toggleSourceTree(key, true);
-          else if (node.children?.length) next = node.children[0];
-        } else if (event.key === 'ArrowLeft') {
-          if (node.children?.length && !scope.collapsed.has(key)) toggleSourceTree(key, false);
-          else next = node.parent;
-        } else return;
-        event.preventDefault(); event.stopPropagation();
-        if (next) sourceTreeFocus(next, true);
-      }
-
-      function sourceTreeRow(node, nav) {
-        const row = document.createElement('button');
-        row.type = 'button'; row.className = 'source-tree-row';
-        row.dataset.sourceTreeKey = node.key;
-        row.dataset.sourceTreeKind = node.kind;
-        row.setAttribute('role', 'treeitem');
-        const icon = document.createElement('span'); icon.setAttribute('aria-hidden', 'true');
-        const name = document.createElement('span'); name.className = 'source-tree-name';
-        // A researcher name leads the cell; the captured file label stays beside it.
-        const researcher = document.createElement('span'); researcher.className = 'researcher-name'; researcher.hidden = true;
-        const raw = document.createElement('span'); raw.className = 'source-tree-raw';
-        name.append(researcher, raw);
-        const detail = document.createElement('span'); detail.className = 'source-tree-meta';
-        row.append(icon, name, detail);
-        let group = null;
-        if (node.children) {
-          group = document.createElement('div'); group.setAttribute('role', 'group');
-          group.id = `source-tree-group-${++nav.serial}`;
-          // A button cannot contain interactive descendants. Own the adjacent
-          // group so the accessibility tree still has the real hierarchy.
-          row.setAttribute('aria-owns', group.id);
-        }
-        row.addEventListener('focus', () => {
-          const scope = sourceTreeScope(nav, nav.model.collection); scope.focus = node.key;
-          for (const [key, entry] of nav.rows) entry.row.tabIndex = key === node.key ? 0 : -1;
-        });
-        row.addEventListener('keydown', event => sourceTreeKeydown(event, node.key));
-        row.addEventListener('click', () => {
-          const current = nav.model?.nodes.get(node.key);
-          if (!current) return;
-          sourceTreeScope(nav, nav.model.collection).focus = node.key;
-          if (current.children) toggleSourceTree(node.key);
-          else if (sourceIsCurrent(current.source)) selectArtifact(current.source.artifact_id);
-          else {
-            state.sourceNoticeKind = 'warning';
-            state.sourceNotice = 'This exact source changed or is no longer available. Refresh the catalog before opening it.';
-            renderSourceHealth();
-          }
-        });
-        return {row, icon, name, raw, researcher, detail, group};
-      }
-
-      function sourceInternalToggle() {
-        const toggle = document.createElement('button');
-        toggle.type = 'button'; toggle.className = 'source-internal-toggle';
-        toggle.title = 'Hide chrome:, devtools: and other browser-internal sources; nothing is deleted';
-        toggle.addEventListener('click', () => setHideBrowserInternal(!state.hideBrowserInternal));
-        return toggle;
+        globalThis.RebNetworkScope.renderBrowserInternalToggle(sourceInternalToggleButton, internal, state.hideBrowserInternal);
+        return sourceInternalToggleButton;
       }
 
       // One reversible view filter for Traffic and Sources; evidence is unchanged.
@@ -6602,113 +6444,6 @@ invocationSitesPanel.refresh();
         document.querySelector('.request-flag[data-flag="hideInternal"]')?.setAttribute('aria-pressed', String(hide));
         renderRequests();
         renderSourceTree();
-      }
-
-      function renderSourceTree(refresh = true) {
-        const nav = sourceTreeState(), tree = elements.sourceTree, previous = nav.model;
-        const activeKey = document.activeElement?.dataset?.sourceTreeKey;
-        const hadFocus = tree.contains(document.activeElement);
-        const toggleFocused = Boolean(nav.internalToggle) && document.activeElement === nav.internalToggle;
-        const previousScope = previous && sourceTreeScope(nav, previous.collection);
-        let anchor = null;
-        if (refresh && previous?.collection === state.sourceCollection && tree.scrollTop > 0 && tree.clientHeight > 0) {
-          const pane = tree.getBoundingClientRect();
-          for (const node of nav.visible) {
-            const bounds = nav.rows.get(node.key).row.getBoundingClientRect();
-            if (bounds.bottom > pane.top && bounds.top < pane.bottom) {anchor = {key: node.key, offset: bounds.top - pane.top}; break;}
-          }
-        }
-        if (previousScope) {previousScope.scrollTop = tree.scrollTop; previousScope.scrollLeft = tree.scrollLeft;}
-        if (refresh || !previous || previous.collection !== state.sourceCollection) nav.model = sourceTreeModel(state.sourceCollection);
-        const model = nav.model, scope = sourceTreeScope(nav, model.collection);
-        // Deleted branches cannot grow an unbounded preference history.
-        for (const key of scope.collapsed) if (!model.nodes.get(key)?.children) scope.collapsed.delete(key);
-        const {visible, limited} = sourceTreeVisible(model, scope.collapsed);
-        const keys = new Set(visible.map(node => node.key));
-        const nearest = key => {
-          for (let count = 0; key && count <= SOURCE_TREE_LIMITS.depth + 3; count++) {
-            if (keys.has(key)) return key;
-            key = (model.nodes.get(key) ?? previous?.nodes.get(key))?.parent;
-          }
-          return null;
-        };
-        const selectedCandidates = [...model.nodes.values()].filter(node => node.source && node.source.artifact_id === state.selectedArtifactId);
-        // Selection must agree with the authoritative raw catalog, including
-        // records omitted by path/node limits. Never scan beyond the catalog cap
-        // merely to decorate a row: an incomplete catalog cannot prove uniqueness.
-        const selected = !model.limits.catalog && selectedCandidates.length === 1 && !selectedCandidates[0].ambiguous &&
-          keys.has(selectedCandidates[0].key) && sourceIsCurrent(selectedCandidates[0].source) ? selectedCandidates[0] : null;
-        scope.focus = nearest(hadFocus ? activeKey : scope.focus) ?? selected?.key ?? visible[0]?.key ?? null;
-        const containers = new Map([[tree, []]]);
-        const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
-        const namedSources = Boolean(names?.has('captured-artifact'));
-        for (const node of visible) {
-          let entry = nav.rows.get(node.key);
-          if (!entry) {entry = sourceTreeRow(node, nav); nav.rows.set(node.key, entry);}
-          const {row, icon, name, raw, researcher, detail, group} = entry;
-          row.style.setProperty('--source-depth', String(Math.min(node.depth, 6)));
-          row.setAttribute('aria-level', String(node.depth + 1));
-          row.setAttribute('aria-posinset', String(node.position)); row.setAttribute('aria-setsize', String(node.size));
-          row.tabIndex = scope.focus === node.key ? 0 : -1;
-          const label = node.label.length > 512 ? node.label.slice(0, 509) + '…' : node.label;
-          if (raw.textContent !== label) raw.textContent = label;
-          const researcherName = namedSources && node.source ? names.nameFor('artifact', node.source) : null;
-          if (researcher.textContent !== (researcherName ?? '')) researcher.textContent = researcherName ?? '';
-          researcher.hidden = !researcherName;
-          name.title = researcherName ? `${researcherName} (researcher name) · ${node.source?.url || node.label}` : node.source?.url || node.label;
-          row.setAttribute('aria-label', researcherName ? `${researcherName} (researcher name), ${label}` : label);
-          icon.className = node.source ? `source-file-icon ${node.source.kind}` : 'tree-glyph';
-          icon.textContent = node.source ? sourceIcon(node.source) : scope.collapsed.has(node.key) ? '▸' : '▾';
-          icon.title = node.source ? sourceKindLabel(node.source.kind)?.[1] ?? node.source.kind : '';
-          detail.textContent = node.children ? String(node.count) : sourceDisplayMeta(node.source);
-          if (node.source) {
-            row.dataset.artifactId = node.source.artifact_id;
-            row.setAttribute('aria-selected', String(node === selected));
-          } else {
-            row.setAttribute('aria-expanded', String(!scope.collapsed.has(node.key)));
-            group.hidden = scope.collapsed.has(node.key); containers.set(group, []);
-          }
-          const container = node.parent ? nav.rows.get(node.parent).group : tree;
-          containers.get(container).push(row);
-          if (group) containers.get(container).push(group);
-        }
-        const notices = [];
-        if (model.limits.catalog) notices.push(`Only the first ${SOURCE_TREE_LIMITS.catalog.toLocaleString()} catalog records were inspected; ${model.limits.catalog.toLocaleString()} more records are outside this navigator. Selection markers are withheld until the full catalog fits this limit.`);
-        if (model.limits.omitted) notices.push(`${model.limits.omitted} sources exceed the navigator path, identity or node limit and are not listed.`);
-        if (model.limits.ambiguous) notices.push(`${model.limits.ambiguous} duplicate source identities are not shown twice; ambiguous sources cannot be opened.`);
-        if (model.limits.deep) notices.push(`${model.limits.deep} paths are shortened after ${SOURCE_TREE_LIMITS.depth} folders; file tooltips retain their full URLs.`);
-        if (model.limits.internal && state.hideBrowserInternal) notices.push(`${model.limits.internal} browser-internal ${model.limits.internal === 1 ? 'source is' : 'sources are'} hidden.`);
-        const internalToggle = model.limits.internal && globalThis.RebNetworkScope ? nav.internalToggle ??= sourceInternalToggle() : null;
-        if (limited) notices.push(`Showing the first ${SOURCE_TREE_LIMITS.visible.toLocaleString()} expanded rows. Collapse branches to see later rows, or use Open file.`);
-        if (!visible.length || notices.length || internalToggle) {
-          nav.notice ??= document.createElement('div'); nav.notice.className = 'source-tree-empty'; nav.notice.setAttribute('role', 'status');
-          nav.notice.textContent = notices.join(' ') || (visible.length ? '' : 'No source artifacts captured. Canvas images are shown in Fingerprinting.');
-          if (internalToggle) {
-            globalThis.RebNetworkScope.renderBrowserInternalToggle(internalToggle, model.limits.internal, state.hideBrowserInternal);
-            nav.notice.append(internalToggle);
-          }
-          // Keep limit disclosures above the rows, including when the navigator
-          // itself is empty after filtering or rejecting over-limit paths.
-          containers.get(tree).unshift(nav.notice);
-        }
-        for (const [container, children] of containers) {
-          const wanted = new Set(children);
-          for (const child of [...container.children]) if (!wanted.has(child)) child.remove();
-          children.forEach((child, index) => {if (container.children[index] !== child) container.insertBefore(child, container.children[index] ?? null);});
-        }
-        for (const [key, entry] of nav.rows) if (!keys.has(key)) {entry.row.remove(); entry.group?.remove(); nav.rows.delete(key);}
-        nav.visible = visible;
-        tree.tabIndex = visible.length ? -1 : 0;
-        tree.scrollTop = scope.scrollTop; tree.scrollLeft = scope.scrollLeft;
-        if (anchor && nav.rows.has(anchor.key)) {
-          const bounds = nav.rows.get(anchor.key).row.getBoundingClientRect();
-          tree.scrollTop += bounds.top - tree.getBoundingClientRect().top - anchor.offset;
-        }
-        if (toggleFocused && nav.internalToggle.parentElement) nav.internalToggle.focus({preventScroll: true});
-        else if (hadFocus) {
-          if (scope.focus) sourceTreeFocus(scope.focus, Boolean(activeKey && activeKey !== scope.focus));
-          else tree.focus({preventScroll: true});
-        }
       }
 
       function renderSourceHealth() {
@@ -6750,25 +6485,32 @@ invocationSitesPanel.refresh();
           elements.sourceEditorTabs.replaceChildren(placeholder);
           return;
         }
+        const shared = new Map();
+        for (const source of sources) shared.set(sourceDisplayName(source), (shared.get(sourceDisplayName(source)) ?? 0) + 1);
         const tabs = sources.map((source, index) => {
+          const label = sourceDisplayName(source);
           const tab = document.createElement('button');
           tab.type = 'button';
           tab.className = 'source-editor-tab';
           tab.setAttribute('role', 'tab');
-          tab.setAttribute('aria-label', `${sourceDisplayName(source)}. Press Delete to close.`);
+          tab.setAttribute('aria-label', `${label}, artifact ${source.artifact_id}. Press Delete to close.`);
           tab.setAttribute('aria-keyshortcuts', 'Delete');
           tab.dataset.sourceIdentity = sourceIdentity(source);
-          tab.title = source.url || sourceDisplayName(source);
+          tab.title = `${source.url || label} · artifact ${source.artifact_id}`;
           const selected = source.artifact_id === state.selectedArtifactId;
           tab.setAttribute('aria-selected', String(selected));
           tab.tabIndex = selected ? 0 : -1;
           const icon = document.createElement('span');
-          icon.className = `source-file-icon ${source.kind}`;
+          icon.className = 'source-file-icon';
+          icon.dataset.icon = sourceTreeFileIcon(source);
           icon.textContent = sourceIcon(source);
           icon.title = sourceKindLabel(source.kind)?.[1] ?? source.kind;
           const name = document.createElement('span');
-          name.textContent = sourceDisplayName(source);
-          name.title = source.url || sourceDisplayName(source);
+          name.textContent = label;
+          name.title = tab.title;
+          const suffix = document.createElement('span');
+          suffix.className = 'source-tab-suffix';
+          suffix.textContent = shared.get(label) > 1 ? source.artifact_id : '';
           const close = document.createElement('span');
           close.className = 'source-tab-close';
           close.textContent = '×';
@@ -6779,9 +6521,9 @@ invocationSitesPanel.refresh();
             researcher.className = 'researcher-name';
             researcher.textContent = researcherName;
             researcher.title = `Researcher name: ${researcherName}`;
-            tab.setAttribute('aria-label', `${researcherName} (researcher name), ${sourceDisplayName(source)}. Press Delete to close.`);
-            tab.append(icon, researcher, name, close);
-          } else tab.append(icon, name, close);
+            tab.setAttribute('aria-label', `${researcherName} (researcher name), ${label}, artifact ${source.artifact_id}. Press Delete to close.`);
+            tab.append(icon, researcher, name, suffix, close);
+          } else tab.append(icon, name, suffix, close);
           tab.addEventListener('click', event => {
             if (event.target === close) {
               closeSource(source);
@@ -6843,9 +6585,13 @@ invocationSitesPanel.refresh();
 
       function appendSourceSyntax(container, tokens) {
         const fragment = document.createDocumentFragment();
-        tokens.forEach(token => {
-          if (token.type === 'plain') fragment.append(document.createTextNode(token.text));
-          else {
+        tokens.forEach((token, at) => {
+          if (token.type === 'plain') {
+            // Leading indentation carries the editor's indent guides.
+            const indent = at === 0 ? token.text.match(/^[ \t]+/)?.[0] : null;
+            if (indent) fragment.append(textElement('span', 'source-indent', indent));
+            fragment.append(document.createTextNode(indent ? token.text.slice(indent.length) : token.text));
+          } else {
             const span = document.createElement('span');
             span.className = `syntax-${token.type}`;
             span.textContent = token.text;
@@ -6880,7 +6626,12 @@ invocationSitesPanel.refresh();
         const query = elements.sourceSearch.value;
         let editor = state.sourceEditorView;
         const source = selectedSource();
-        const status = message => {if (elements.sourceSearchStatus) elements.sourceSearchStatus.textContent = message;};
+        // The coverage sentence is the Find field's tooltip and description.
+        const status = message => {
+          if (!elements.sourceSearchStatus) return;
+          elements.sourceSearchStatus.textContent = message;
+          elements.sourceSearch.title = `${message} Enter for next, Shift+Enter for previous.`;
+        };
         globalThis.CSS?.highlights?.delete('source-search-match');
         if (!editor || editor.identity !== sourceIdentity(source) || elements.sourceCode.hidden) {
           state.sourceSearchIndex = 0;
@@ -6910,7 +6661,7 @@ invocationSitesPanel.refresh();
           state.sourceSearchIndex = 0; highlightRows();
           elements.sourcePosition.textContent = editor.view.wasmRows ? `0 matches in retained inspection rows; original module bytes were not searched.${incomplete ? ' Inspection coverage is incomplete.' : ''}`
             : incomplete ? '0 matches in the searched display; source coverage is incomplete.' : '0 matches in complete retained text.';
-          status(`${coverage}.${editor.index.complete ? '' : ' Search stopped at the 8 Mi UTF-16-unit bound.'}`);
+          status(`${coverage}.${editor.index.complete ? '' : ' Search stopped at the 64 Mi UTF-16-unit bound.'}`);
           return;
         }
         state.sourceSearchIndex = reset ? 0 : (state.sourceSearchIndex + direction + matches.length) % matches.length;
@@ -6925,8 +6676,8 @@ invocationSitesPanel.refresh();
         const row = elements.sourceCode.querySelector(`[data-local-line="${match.line}"]`);
         const line = match.line;
         const column = match.column;
-        elements.sourcePosition.textContent = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches · ${editor.view.wasmRows ? 'Inspection row' : 'Line'} ${line + 1}, Column ${column + 1}`;
-        status(`${coverage}.${truncated ? ' First 1,000 matches; refine Find for later matches.' : ''}${editor.index.complete ? '' : ' Search stopped at the 8 Mi UTF-16-unit bound.'}`);
+        elements.sourcePosition.textContent = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches · ${editor.view.wasmRows ? `Inspection row ${line + 1}, Column ${column + 1}` : sourcePositionText(editor, line, column)}`;
+        status(`${coverage}.${truncated ? ' First 1,000 matches; refine Find for later matches.' : ''}${editor.index.complete ? '' : ' Search stopped at the 64 Mi UTF-16-unit bound.'}`);
         if (!row) return;
         const localColumn = match.column - Number(row.dataset.columnStart ?? 0);
         if (localColumn < 0 || localColumn + match.length > row.querySelector('.source-text').textContent.length) return;
@@ -6959,12 +6710,15 @@ invocationSitesPanel.refresh();
 
       function renderSourceWindowControls(editor = state.sourceEditorView) {
         if (!elements.sourceWindow) return;
-        elements.sourceWindow.hidden = !editor;
-        if (!editor) return;
+        elements.sourceGoto.disabled = !editor;
+        elements.sourceWindowPrevious.hidden = !editor || editor.window.start === 0;
+        elements.sourceWindowNext.hidden = !editor || editor.window.end === editor.index.lineCount;
+        if (!editor) {elements.sourceWindow.hidden = true; return;}
         const {window: window, index} = editor;
-        elements.sourceWindowLabel.textContent = `Lines ${window.start + 1}–${window.end} of ${index.lineCount}${index.complete ? '' : '+'}`;
-        elements.sourceWindowPrevious.disabled = window.start === 0;
-        elements.sourceWindowNext.disabled = window.end === index.lineCount;
+        const total = `${index.lineCount}${index.complete ? '' : '+'}`;
+        elements.sourceWindowLabel.textContent = `Lines ${window.start + 1}–${window.end} of ${total}`;
+        elements.sourceWindowPrevious.textContent = window.start ? `↑ Lines ${Math.max(1, window.start - SOURCE_WINDOW_LINES + 1)}–${window.start}` : '';
+        elements.sourceWindowNext.textContent = window.end < index.lineCount ? `↓ Lines ${window.end + 1}–${Math.min(index.lineCount, window.end + SOURCE_WINDOW_LINES)} of ${total}` : '';
         if (document.activeElement !== elements.sourceWindowLine) elements.sourceWindowLine.value = String(window.line + 1);
         if (document.activeElement !== elements.sourceWindowColumn) elements.sourceWindowColumn.value = String(Math.max(0, window.column) + 1);
         elements.sourceWindowLine.max = String(index.lineCount);
@@ -6976,21 +6730,37 @@ invocationSitesPanel.refresh();
             !Number.isSafeInteger(column) || column < 0 || column > (sourceDocumentLine(editor.index, line)?.length ?? 0)) return false;
         renderSourceContent(source, editor.view, {line, column, search: false});
         applySourceSearch(false, 0, {reveal: false});
-        elements.sourcePosition.textContent = `Line ${line + 1}, Column ${column + 1} · Retained display location`;
+        elements.sourcePosition.textContent = sourcePositionText(state.sourceEditorView, line, column);
         const row = elements.sourceCode.querySelector(`[data-local-line="${line}"]`);
         revealSourceColumn(row, column, true);
         return true;
       }
 
-      function sourceFormattedView(source, value, variant) {
-        const key = `${sourceIdentity(source)}|${variant}`;
-        const prior = state.sourceFormatCache.get(key);
-        if (prior?.sourceInput === value) return prior;
-        const formatted = {...prettyPrintSource(source, value), sourceInput: value};
-        state.sourceFormatCache.set(key, formatted);
-        boundSourceAnalysis(state.sourceFormatCache, 2, 6 * 1024 * 1024, 500000);
-        return formatted;
+      // A displayed location, with its original one when the view is a layout or derived text.
+      function sourcePositionText(editor, line, column) {
+        const start = sourceDocumentOffset(editor.index, line);
+        const original = start === null ? null : editor.mappingContext?.position(start + column, start + (sourceDocumentLine(editor.index, line)?.length ?? 0));
+        return `Line ${line + 1}, Column ${column + 1}${original ? ` (original ${original.line + 1}:${original.column + 1})` : ''}`;
       }
+
+      function sourceFormattedView(source, value, variant) {
+        // The backend Oxc layout for JavaScript evidence; otherwise the in-page layout, off the UI thread.
+        const backend = variant === 'original' ? sourceFormatClient.view(source, value) : null;
+        if (backend && !backend.fallback) return backend;
+        const key = `${sourceIdentity(source)}|${variant}`, notice = backend?.notice ?? null;
+        const prior = state.sourceFormatCache.get(key);
+        if (prior?.sourceInput === value && prior.notice === notice) return prior;
+        const entry = {pending: true, sourceInput: value, notice};
+        state.sourceFormatCache.set(key, entry);
+        sourceFormatClient.layout(source, value).then(result => {
+          if (state.sourceFormatCache.get(key) !== entry) return;
+          Object.assign(entry, result, {pending: false});
+          boundSourceAnalysis(state.sourceFormatCache, 8, 64 * 1024 * 1024, Infinity, key);
+          if (state.sourceFormatted && sourceIdentity(selectedSource()) === sourceIdentity(source)) renderSources();
+        });
+        return entry;
+      }
+
 
       function sourceDisplayView(source) {
         if (state.sourceWasm && source.kind === 'wasm' && source.source_type === 'artifact') {
@@ -7010,8 +6780,10 @@ invocationSitesPanel.refresh();
         const formatResult = state.sourceFormatted
           ? sourceFormattedView(source, active, derived ? `derived:${deobfuscationKey(source)}` : 'original')
           : null;
-        const formatted = formatResult && !formatResult.error ? formatResult : null;
+        const formatted = formatResult && !formatResult.error && !formatResult.pending ? formatResult : null;
         return {
+          formatPending: Boolean(formatResult?.pending),
+          formatNotice: formatResult?.notice ?? null,
           original,
           derived,
           active,
@@ -7106,7 +6878,11 @@ invocationSitesPanel.refresh();
         const window = sameDocument && previous.window.line === clampedLine && previous.window.column === requestedColumn
           ? previous.window : sourceDocumentWindow(index, clampedLine, requestedColumn);
         state.sourceWindow = {identity, representation, line: window.line, column: window.column};
-        const sameWindow = sameDocument && previous.window.line === window.line && previous.window.column === window.column;
+        const highlighter = sameDocument && previous.highlighter ? previous.highlighter
+          : createSourceHighlighter(view.wasmRows ? {kind: 'plain', mime_type: 'text/plain'} : source, index);
+        if (!highlighter.ready(window.rows)) highlighter.advance(SOURCE_COLOR_SYNC_UNITS);
+        const colored = highlighter.ready(window.rows);
+        const sameWindow = sameDocument && previous.window.line === window.line && previous.window.column === window.column && previous.colored === colored;
         if (sameWindow) {
           const coverageChanged = previous.view.searchCoverage !== view.searchCoverage || previous.view.searchIncomplete !== view.searchIncomplete;
           previous.view = view;
@@ -7122,29 +6898,42 @@ invocationSitesPanel.refresh();
         const mappingContext = sameDocument ? previous.mappingContext : view.lineMap ? null : sourceWindowMapping(view.mapOriginal ?? '', view.active ?? '', view.derived, view.formatted);
         const mappedLines = mappingContext?.(window.rows);
         if (!sameDocument) state.sourceSearchIndex = 0;
-        state.sourceEditorView = {identity, representation, content, mapping, formatting, index, window, view, mappingContext,
+        state.sourceEditorView = {identity, representation, content, mapping, formatting, index, window, view, mappingContext, highlighter, colored,
           search: sameDocument ? previous.search : null};
         const lineMap = view.lineMap;
-        // Later/column-clipped windows cannot assume the lexical state of an omitted prefix.
-        const plainWindow = window.start > 0 || window.rows.some(row => row.columnStart > 0 || row.columnEnd < row.fullLength);
-        const tokenizer = createSourceTokenizer(view.wasmRows || plainWindow ? {kind: 'plain', mime_type: 'text/plain'} : source);
+        const colors = colored ? highlighter.rows(window.rows) : null;
+        // Checkpoints extend in small steps between tasks; the window recolors once they reach it.
+        if (!highlighter.done() && !highlighter.pumping) {
+          highlighter.pumping = true;
+          const pump = () => {
+            const editor = state.sourceEditorView;
+            if (editor?.highlighter !== highlighter || editor.identity !== sourceIdentity(selectedSource())) {highlighter.pumping = false; return;}
+            highlighter.advance(SOURCE_COLOR_SLICE_UNITS);
+            if (!editor.colored && highlighter.ready(editor.window.rows)) {
+              renderSourceContent(selectedSource(), editor.view, {line: editor.window.line, column: editor.window.column, search: false});
+              if (elements.sourceSearch.value) applySourceSearch(false, 0, {reveal: false});
+            }
+            if (highlighter.done()) highlighter.pumping = false; else setTimeout(pump, 0);
+          };
+          setTimeout(pump, 0);
+        }
 
         const nodes = window.rows.map((excerpt, rowIndex) => {
           const {text: line, line: index} = excerpt;
           const mapped = lineMap ? lineMap[index] ?? null : mappedLines?.[rowIndex] ?? null;
           const mappedLine = mapped?.originalLine ?? null;
           const row = document.createElement('span');
-          row.className = 'source-line';
+          row.className = index === window.line ? 'source-line current-line' : 'source-line';
           row.dataset.line = String(index + 1);
           row.dataset.localLine = String(index);
           row.dataset.columnStart = String(excerpt.columnStart);
           const gutter = document.createElement('button');
           gutter.type = 'button';
           gutter.className = 'source-gutter';
-          gutter.textContent = String((mappedLine ?? index) + 1);
+          gutter.textContent = String(index + 1);
           gutter.disabled = mappedLine === null;
-          gutter.title = mappedLine === null ? 'Retained source line' : `Show original source at line ${mappedLine + 1}`;
-          gutter.setAttribute('aria-label', gutter.title);
+          gutter.setAttribute('aria-label', mappedLine === null ? 'Retained source line' : `Show original source at line ${mappedLine + 1}`);
+          gutter.title = mappedLine === null ? 'Retained source line' : `Original ${mappedLine + 1}:${(mapped?.originalColumn ?? 0) + 1} · show the original source`;
           gutter.addEventListener('click', event => {
             event.stopPropagation();
             if (!view.wasmRows && mappedLine !== null) revealOriginalLine(source, mappedLine, mapped?.originalColumn ?? 0);
@@ -7167,7 +6956,7 @@ invocationSitesPanel.refresh();
           }
           const text = document.createElement('span');
           text.className = 'source-text';
-          appendSourceSyntax(text, line ? sourceSyntaxTokens(line, tokenizer) : []);
+          appendSourceSyntax(text, colors ? colors.rows[rowIndex] : line ? [{type: 'plain', text: line}] : []);
           const displayed = document.createElement('span'); displayed.className = 'source-excerpt';
           if (excerpt.columnStart) displayed.append(textElement('span', 'source-excerpt-notice', `⟪ columns 1–${excerpt.columnStart} omitted ⟫ `));
           displayed.append(text);
@@ -7176,7 +6965,12 @@ invocationSitesPanel.refresh();
           return row;
         });
         elements.sourceCode.replaceChildren(...nodes);
-        elements.sourceLanguage.textContent = view.wasmRows ? 'WASM disassembly · byte offsets' : `${sourceSyntaxLabel(tokenizer.language)}${plainWindow ? ' · bounded excerpt; omitted lexical context' : tokenizer.truncated ? ' · color limit reached' : ''}`;
+        elements.sourceCodeWrap.dataset.gutterDigits = String(Math.max(5, String(index.lineCount).length));
+        const layout = view.formatPending ? ' · formatting…' : view.formatError ? ` · ${view.formatError}`
+          : view.formatted ? ` · ${view.formatted.engine === 'oxc' ? 'Oxc layout' : `whitespace layout${view.formatNotice ? `: ${view.formatNotice}` : ''}`}` : '';
+        elements.sourceLanguage.textContent = view.wasmRows ? 'WASM disassembly · byte offsets'
+          : `${sourceSyntaxLabel(highlighter.language)}${!colors ? ' · coloring…' : colors.truncated ? ' · color limit reached' : ''}${layout}`;
+        elements.sourceLanguage.title = elements.sourceLanguage.textContent;
         elements.sourceCode.hidden = false;
         elements.sourceCodeEmpty.hidden = true;
         renderSourceWindowControls();
@@ -7184,8 +6978,10 @@ invocationSitesPanel.refresh();
           elements.sourceCodeWrap.scrollTop = scroll.top;
           elements.sourceCodeWrap.scrollLeft = scroll.left;
           const row = [...elements.sourceCode.children].find(value => value.dataset.line === focused?.line);
-          const target = focused?.gutter ? row?.querySelector('.source-gutter') : row;
-          if (target) {target.tabIndex = -1; target.focus({preventScroll: true});}
+          const focusTarget = focused?.gutter ? row?.querySelector('.source-gutter') : row;
+          if (focusTarget) {focusTarget.tabIndex = -1; focusTarget.focus({preventScroll: true});}
+          const coverageChanged = previous.view.searchCoverage !== view.searchCoverage || previous.view.searchIncomplete !== view.searchIncomplete;
+          if (coverageChanged && target.search !== false) applySourceSearch(false, 0, {reveal: false});
         } else {
           elements.sourceCodeWrap.scrollTop = 0;
           elements.sourceCodeWrap.scrollLeft = 0;
@@ -7205,7 +7001,7 @@ invocationSitesPanel.refresh();
         renderSourceTabs();
         renderSourceFacts(source);
         elements.sourceLocation.textContent = source?.url || (source ? sourceDisplayName(source) : 'Select a source');
-        elements.sourceLocation.title = source?.url || (source ? sourceDisplayName(source) : '');
+        elements.sourceLocation.title = source ? `${source.url || sourceDisplayName(source)} · artifact ${source.artifact_id}` : '';
         elements.sourceSize.textContent = source ? formatByteSize(source.byte_size) : '0 bytes';
         elements.sourceHash.textContent = source?.sha256 ? `sha256 ${source.sha256}` : '';
         syncSourceDisplayControls(source, view);
@@ -7229,6 +7025,7 @@ invocationSitesPanel.refresh();
       function renderSourcePane() {
         const search = state.sourcePane === 'search';
         elements.sourceTree.hidden = search;
+        document.querySelector('#source-tree-tools').hidden = search;
         document.querySelector('#source-search-all-panel').hidden = !search;
         document.querySelectorAll('.source-side-tab').forEach(tab => {
           const selected = search ? tab.id === 'source-tab-search' : tab.dataset.sourceCollection === state.sourceCollection;
@@ -7238,7 +7035,11 @@ invocationSitesPanel.refresh();
       }
 
       function syncSourceDisplayControls(source, view) {
-        elements.sourceViewKind.textContent = sourceViewLabel(source, view);
+        // The status bar names the evidence state; the full provenance is its tooltip.
+        const label = sourceViewLabel(source, view);
+        elements.sourceViewKind.textContent = (state.sourceWasm && source?.kind === 'wasm') || source?.content === undefined ? label
+          : `${state.sourceDeobfuscated && sourceDerivedView(source) ? 'Derived' : 'Original'}${source.contentTruncated ? ' · truncated' : ''}${source.contentLossy ? ' · lossy' : ''}`;
+        elements.sourceViewKind.title = label;
         elements.sourceWasm.hidden = source?.kind !== 'wasm' || source?.source_type !== 'artifact';
         elements.sourceWasm.setAttribute('aria-pressed', String(state.sourceWasm));
         elements.sourceWasm.setAttribute('aria-label', state.sourceWasm ? 'Show original WASM hex' : 'Inspect WebAssembly module');
@@ -7246,8 +7047,11 @@ invocationSitesPanel.refresh();
         elements.sourceCode.classList.toggle('wasm-inspection', Boolean(view?.wasmRows));
         elements.sourcePretty.disabled = !source?.content || !sourcePrettySupported(source);
         elements.sourcePretty.setAttribute('aria-pressed', String(state.sourceFormatted));
-        elements.sourcePretty.setAttribute('aria-label', state.sourceFormatted ? 'Show source without pretty printing' : 'Pretty print source');
-        elements.sourcePretty.title = state.sourceFormatted ? 'Show source without pretty printing' : `Pretty print ${sourceSyntaxLabel(sourceSyntaxLanguage(source))}`;
+        elements.sourcePretty.setAttribute('aria-label', state.sourceFormatted ? 'Show original source' : 'Pretty print source');
+        elements.sourcePretty.textContent = !state.sourceFormatted ? '{ }' : view?.formatPending ? '{ } Formatting…'
+          : view?.formatError ? '{ } Pretty print unavailable' : '{ } Pretty-printed · Show original';
+        elements.sourcePretty.title = !state.sourceFormatted ? `Pretty print ${sourceSyntaxLabel(sourceSyntaxLanguage(source))}`
+          : view?.formatError ?? 'A display layout; the evidence is unchanged. Show the source as captured.';
         elements.sourceDeob.disabled = source?.kind !== 'javascript' || !source.content;
         elements.sourceDeob.setAttribute('aria-pressed', String(state.sourceDeobfuscated));
         elements.sourceDeob.setAttribute('aria-label', state.sourceDeobfuscated ? 'Show original evidence' : 'Run local static cleanup');
@@ -7268,12 +7072,14 @@ invocationSitesPanel.refresh();
         const original = sourceFactsPanel.original(source) !== undefined ? 'Verified original evidence'
           : `Original evidence preview${source?.contentLossy ? ' · lossy UTF-8 display' : ''}${source?.contentTruncated ? ' · truncated' : ''}`;
         if (view?.formatError) return `${original} · ${view.formatError}`;
+        if (view?.formatPending) return `${original} · formatting…`;
+        if (view?.formatNotice && !state.sourceDeobfuscated) return `Pretty printed ${original.toLowerCase()} · whitespace layout · ${view.formatNotice}`;
         if (state.sourceDeobfuscated && sourceDerivedView(source)) {
           const status = state.deobfuscationRequests.get(deobfuscationKey(source))?.status;
           return `${state.sourceFormatted ? 'Pretty printed derived' : 'Derived'} · mapped to original source${status === 'error' ? ' · last successful analysis' : status === 'loading' ? ' · reanalyzing' : status === 'cancelled' ? ' · analysis cancelled' : ''}`;
         }
         if (!state.sourceDeobfuscated || !source) {
-          return state.sourceFormatted && source ? `Pretty printed ${original.toLowerCase()} · mapped to original source` : original;
+          return state.sourceFormatted && source ? `Pretty printed ${original.toLowerCase()} · ${view?.formatted?.engine === 'oxc' ? 'Oxc layout · ' : ''}mapped to original source` : original;
         }
         const request = state.deobfuscationRequests.get(deobfuscationKey(source));
         const prefix = state.sourceFormatted ? `Pretty printed ${original.toLowerCase()}` : original;
@@ -7836,6 +7642,9 @@ invocationSitesPanel.refresh();
         if (!sourceIsCurrent(artifact) || artifact.content !== undefined || artifact.loading || (artifact.loadError && !retry)) return;
         const identity = sourceIdentity(artifact);
         const controller = new AbortController();
+        // Text previews read the whole artifact, up to its 16 MiB cap, in 2 MiB pages.
+        const previewBytes = sourceHexArtifact(artifact) || canvasOwner ? 2097152 : SOURCE_PREVIEW_BYTES;
+        const pages = Math.max(1, Math.ceil(Math.min(artifact.byte_size, previewBytes) / 2097152));
         artifact.loading = true; artifact.loadError = null; artifact.controller = controller;
         artifact.previewUsed = state.sourcePreviewSequence = (state.sourcePreviewSequence ?? 0) + 1;
         if (!canvasOwner) boundSourcePreviews(artifact);
@@ -7847,7 +7656,7 @@ invocationSitesPanel.refresh();
           delete artifact.controller; controller.abort();
           if (canvasOwner && canvasGalleryVisible()) renderFingerprintActivity();
           else if (sourceIdentity(selectedSource()) === identity) renderSources();
-        }, 10000);
+        }, 5000 + 5000 * pages);
         if (!canvasOwner) renderSources();
         let responseCancellation = null;
         try {
@@ -7864,12 +7673,32 @@ invocationSitesPanel.refresh();
               return responseCancellation;
             }};
           }}} : response;
-          const buffer = await sourceFactsReadBytes(ownedResponse, 2097152, controller.signal);
+          let buffer = await sourceFactsReadBytes(ownedResponse, 2097152, controller.signal);
           if (!current()) return;
           if (buffer.length !== Math.min(artifact.byte_size, 2097152)) throw new Error('The artifact preview byte size changed.');
           const total = response.headers.get('X-Artifact-Total-Bytes');
           if (total !== null && Number(total) !== artifact.byte_size) throw new Error('The artifact total byte size changed.');
-          if (artifact.byte_size <= 2097152 && globalThis.crypto?.subtle) {
+          if (pages > 1) {
+            const whole = new Uint8Array(Math.min(artifact.byte_size, previewBytes));
+            whole.set(buffer);
+            for (let offset = buffer.length; offset < whole.length; offset += 2097152) {
+              const page = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?offset=${offset}&limit=2097152`, {cache: 'no-store', signal: controller.signal});
+              if (!current() || !page.ok) {
+                responseCancellation = page.body?.cancel().catch(() => {});
+                if (!current()) return;
+                throw new Error(`Artifact store returned ${page.status}`);
+              }
+              const bytes = await sourceFactsReadBytes(page, 2097152, controller.signal);
+              if (!current()) return;
+              const pageTotal = page.headers.get('X-Artifact-Total-Bytes');
+              if (bytes.length !== Math.min(2097152, whole.length - offset) || (pageTotal !== null && Number(pageTotal) !== artifact.byte_size)) {
+                throw new Error('The artifact preview byte size changed.');
+              }
+              whole.set(bytes, offset);
+            }
+            buffer = whole;
+          }
+          if (artifact.byte_size <= previewBytes && globalThis.crypto?.subtle) {
             const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', buffer)), byte => byte.toString(16).padStart(2, '0')).join('');
             if (!current()) return;
             if (hash !== artifact.sha256) throw new Error('The artifact bytes do not match the selected SHA-256.');
@@ -7894,16 +7723,18 @@ invocationSitesPanel.refresh();
             else canvasOwner.imageInfo = inspection;
           }
           artifact.sourceTextLength = content.length;
+          artifact.contentLongLine = !sourceHexArtifact(artifact) && !canvasOwner && sourceHasLongLine(content);
           artifact.content = content;
           artifact.wasmHexBytes = sourceHexArtifact(artifact) ? hexBytes : undefined;
           artifact.contentTruncated = artifact.byte_size > buffer.length || (sourceHexArtifact(artifact) && buffer.length > hexBytes);
           if (artifact.contentTruncated) artifact.content += sourceHexArtifact(artifact)
             ? `\n\n[Hex preview limited to the first ${hexBytes} bytes; original bytes are unchanged]`
-            : '\n\n[Viewer preview limited to the first 2 MiB; original bytes are unchanged]';
+            : `\n\n[Viewer preview limited to the first ${previewBytes / 1048576} MiB; original bytes are unchanged]`;
           if (!canvasOwner) boundSourcePreviews();
+          if (!canvasOwner && !state.sourceFormatted && sourceIdentity(selectedSource()) === identity) state.sourceFormatted = sourceFormatWanted(artifact);
         } catch (error) {
           if (current()) {
-            if (canvasOwner) for (const field of ['content', 'sourceTextLength', 'contentVerified', 'contentLossy', 'contentTruncated']) delete artifact[field];
+            if (canvasOwner) for (const field of ['content', 'sourceTextLength', 'contentVerified', 'contentLossy', 'contentTruncated', 'contentLongLine']) delete artifact[field];
             artifact.loadError = `Artifact bytes are unavailable: ${String(error.message).slice(0, 1024)}`;
           }
         } finally {
@@ -7959,6 +7790,12 @@ invocationSitesPanel.refresh();
           identity.bytes >= 0 && identity.bytes === source?.byte_size;
       }
 
+      // An explicit { } choice for this artifact wins; otherwise a minified file opens pretty-printed.
+      function sourceFormatWanted(source) {
+        if (!source) return false;
+        return state.sourceFormatChoices?.get(sourceIdentity(source)) ?? Boolean(source.contentLongLine && sourcePrettyByDefault(source));
+      }
+
       function selectArtifact(artifactId, line = null, {identity: expectedIdentity = null, passive = false, column = 0, length = 0} = {}) {
         const matches = state.artifacts.filter(candidate => candidate.artifact_id === artifactId);
         if (matches.length !== 1 || (expectedIdentity && !sourceArtifactIdentityMatches(matches[0], expectedIdentity))) {
@@ -7984,7 +7821,7 @@ invocationSitesPanel.refresh();
         sourceFactsPanel.cancel();
         state.selectedArtifactId = artifactId;
         state.sourceDeobfuscated = false;
-        state.sourceFormatted = false;
+        state.sourceFormatted = sourceFormatWanted(artifact);
         state.sourceWasm = false;
         if (!state.openArtifactIds.includes(artifactId)) state.openArtifactIds.push(artifactId);
         // A requested location is revealed by renderSources once these bytes
@@ -8004,7 +7841,7 @@ invocationSitesPanel.refresh();
           state.selectedArtifactId = state.openArtifactIds[Math.max(0, closedIndex - 1)] ?? null;
         }
         state.sourceDeobfuscated = false;
-        state.sourceFormatted = false;
+        state.sourceFormatted = sourceFormatWanted(selectedSource());
         state.sourceWasm = false;
         renderSources();
         const selected = selectedSource();
@@ -8015,14 +7852,15 @@ invocationSitesPanel.refresh();
       function renderQuickOpen() {
         const needle = elements.quickOpenInput.value.trim().toLowerCase();
         const matches = capturedSources().map(sourceReference).filter(source =>
-          !needle || `${sourceDisplayName(source)} ${source.url}`.toLowerCase().includes(needle)
+          !needle || `${sourceDisplayName(source)} ${source.url} ${source.artifact_id}`.toLowerCase().includes(needle)
         );
-        const rows = matches.map(source => {
+        // The whole catalog can hold 50,000 files; the list shows the first 200.
+        const rows = matches.slice(0, 200).map(source => {
           const row = document.createElement('button');
           row.type = 'button';
           row.className = 'quick-open-row';
           const name = document.createElement('span'); name.textContent = sourceDisplayName(source);
-          const path = document.createElement('small'); path.textContent = source.url || '(anonymous)';
+          const path = document.createElement('small'); path.textContent = `${source.url || '(anonymous)'} · artifact ${source.artifact_id}`;
           row.append(name, path);
           row.addEventListener('click', () => {
             elements.quickOpen.hidden = true;
@@ -8030,6 +7868,7 @@ invocationSitesPanel.refresh();
           });
           return row;
         });
+        if (matches.length > rows.length) rows.push(textElement('p', 'quick-open-more', `${(matches.length - rows.length).toLocaleString()} more files match. Type more of the name or URL.`));
         elements.quickOpenResults.replaceChildren(...rows);
       }
 
@@ -8046,13 +7885,43 @@ invocationSitesPanel.refresh();
         if (state.artifactRefreshing || location.protocol === 'file:') return;
         state.artifactRefreshing = true;
         try {
-          const headers = state.artifactEtag ? { 'If-None-Match': state.artifactEtag } : {};
-          const response = await fetch('/api/artifacts?limit=500', { cache: 'no-store', headers });
-          if (response.status === 304) return;
-          if (!response.ok) throw new Error(`Artifact store returned ${response.status}`);
-          const body = await response.json();
-          if (!isArtifactResponse(body)) throw new TypeError('Malformed artifact response');
-          state.artifactEtag = response.headers.get('ETag');
+          // Pages the whole manifest; growth is read from the last boundary, up to 50,000 records.
+          const catalogLimit = 50000;
+          const read = async (query, etag = null) => {
+            const response = await fetch(`/api/artifacts?${query}`, {cache: 'no-store', headers: etag ? {'If-None-Match': etag} : {}});
+            if (response.status === 304) return null;
+            if (!response.ok) throw new Error(`Artifact store returned ${response.status}`);
+            const body = await response.json();
+            if (!isArtifactResponse(body) || (body.query !== undefined && !/^(0|[1-9][0-9]{0,19})$/.test(String(body.query?.next_after)))) {
+              throw new TypeError('Malformed artifact response');
+            }
+            return {body, etag: response.headers.get('ETag')};
+          };
+          const probe = await read('after=0&limit=1', state.artifactEtag);
+          if (!probe) return;
+          const {body} = probe;
+          let records = body.artifacts, appended = null, cursor = null, complete = true;
+          if (body.query) {
+            const first = body.artifacts.length ? JSON.stringify(body.artifacts[0]) : null, previous = state.artifactCursor;
+            const grown = first !== null && previous?.first === first && previous.catalog === state.artifacts;
+            const base = grown ? state.artifacts.length : 0;
+            let after = grown ? previous.after : '0';
+            records = []; complete = false;
+            for (let page = 0; page < 64 && base + records.length < catalogLimit; page++) {
+              const next = (await read(`after=${after}&limit=5000`))?.body;
+              if (!next) throw new TypeError('Malformed artifact response');
+              records.push(...next.artifacts);
+              if (!next.query) {complete = true; break;}
+              after = next.query.next_after;
+              if (!next.query.limited && !next.query.budget_exhausted) {complete = true; break;}
+            }
+            if (base + records.length > catalogLimit) {records.length = catalogLimit - base; complete = false;}
+            cursor = {first, after};
+            if (grown) appended = records;
+          }
+          const keepCursor = () => {state.artifactCursor = cursor && {...cursor, catalog: state.artifacts};};
+          state.artifactCatalogLimit = complete ? 0 : catalogLimit;
+          state.artifactEtag = probe.etag;
           if (typeof body.artifact_receiver_configured === 'boolean') {
             state.artifactReceiverConfigured = body.artifact_receiver_configured;
           }
@@ -8061,8 +7930,9 @@ invocationSitesPanel.refresh();
           }
           state.artifactReceiverError = null;
           renderShellStatus();
-          const catalogSignature = JSON.stringify(body.artifacts);
-          if (catalogSignature === state.artifactCatalogSignature) {
+          const catalogSignature = appended ? null : JSON.stringify(records);
+          if (appended ? !appended.length : catalogSignature === state.artifactCatalogSignature) {
+            keepCursor();
             if (canvasGalleryVisible()) renderFingerprintActivity();
             renderSourceHealth();
             return;
@@ -8070,10 +7940,10 @@ invocationSitesPanel.refresh();
           state.artifactCatalogSignature = catalogSignature;
           // A newly retained script can be another version of a saved one.
           if (typeof invocationSitesPanel !== 'undefined') invocationSitesPanel.refresh();
-          if (body.artifacts.length === 0) {
+          if (records.length === 0 && !appended) {
             if (state.sessionMode === 'live') {
               retireCanvasPreviews('Canvas previews released because the artifact catalog is empty.');
-              for (const artifact of state.artifacts) releaseSourcePreview(artifact);
+              for (const artifact of state.artifacts) releaseSourcePreview(artifact, artifact);
               state.artifacts = [];
               state.openArtifactIds = [];
               state.selectedArtifactId = null;
@@ -8081,17 +7951,21 @@ invocationSitesPanel.refresh();
             } else {
               renderSourceHealth();
             }
+            keepCursor();
             return;
           }
-          const existing = new Map(state.artifacts.map(artifact => [sourceIdentity(artifact), artifact]));
-          const incoming = new Set(body.artifacts.map(sourceIdentity));
-          for (const artifact of state.artifacts) if (!incoming.has(sourceIdentity(artifact))) releaseSourcePreview(artifact);
-          state.artifacts = body.artifacts.map(artifact => {
-            const prior = existing.get(sourceIdentity(artifact));
-            // Preserve the pending operation's owner, never clone loading state.
-            const descriptor = Object.fromEntries(sourceFactsFields.filter(field => Object.hasOwn(artifact, field)).map(field => [field, artifact[field]]));
-            return Object.assign(prior ?? {}, descriptor, {origin: state.sessionMode === 'live' ? 'live' : 'demo'});
-          });
+          const origin = state.sessionMode === 'live' ? 'live' : 'demo';
+          // Preserve the pending operation's owner, never clone loading state.
+          const retain = (artifact, prior = {}) => Object.assign(prior,
+            Object.fromEntries(sourceFactsFields.filter(field => Object.hasOwn(artifact, field)).map(field => [field, artifact[field]])), {origin});
+          if (appended) state.artifacts = state.artifacts.concat(appended.map(artifact => retain(artifact)));
+          else {
+            const existing = new Map(state.artifacts.map(artifact => [sourceIdentity(artifact), artifact]));
+            const incoming = new Set(records.map(sourceIdentity));
+            for (const artifact of state.artifacts) if (!incoming.has(sourceIdentity(artifact))) releaseSourcePreview(artifact, artifact);
+            state.artifacts = records.map(artifact => retain(artifact, existing.get(sourceIdentity(artifact))));
+          }
+          keepCursor();
           if (!canvasGalleryVisible()) retireCanvasPreviews();
           state.openArtifactIds = state.openArtifactIds.filter(id => state.artifacts.some(artifact => artifact.artifact_id === id));
           if (!state.artifacts.some(artifact => artifact.artifact_id === state.selectedArtifactId && isSourceArtifact(artifact))) {
@@ -8112,6 +7986,7 @@ invocationSitesPanel.refresh();
           }
           state.artifactReceiverError = error.message;
           state.artifactEtag = null;
+          state.artifactCursor = null;
           retireCanvasPreviews('Canvas previews released because the artifact catalog is unavailable.');
           if (canvasGalleryVisible()) renderFingerprintActivity();
           renderShellStatus();
@@ -8644,17 +8519,87 @@ invocationSitesPanel.refresh();
       });
       elements.sourceWindowPrevious.addEventListener('click', () => {
         const current = state.sourceEditorView?.window;
-        if (current) moveSourceWindow(Math.max(0, current.start - SOURCE_WINDOW_LINES));
+        if (current?.start) moveSourceWindow(current.start - 1);
       });
       elements.sourceWindowNext.addEventListener('click', () => {
         const current = state.sourceEditorView?.window;
         if (current) moveSourceWindow(current.end);
       });
+      // Go to line opens over the editor; Go or Escape closes it.
+      function openSourceGoto() {
+        if (!state.sourceEditorView) return;
+        elements.sourceMore.open = false;
+        elements.sourceWindow.hidden = false;
+        renderSourceWindowControls();
+        elements.sourceWindowLine.focus();
+        elements.sourceWindowLine.select();
+      }
+      function closeSourceGoto(restoreFocus) {
+        if (elements.sourceWindow.hidden) return;
+        elements.sourceWindow.hidden = true;
+        if (restoreFocus) elements.sourceCodeWrap.focus({preventScroll: true});
+      }
+      elements.sourceGoto.addEventListener('click', openSourceGoto);
       elements.sourceWindow.addEventListener('submit', event => {
         event.preventDefault();
-        if (!moveSourceWindow(Number(elements.sourceWindowLine.value) - 1, Number(elements.sourceWindowColumn.value) - 1)) {
-          elements.sourcePosition.textContent = 'Choose a retained line and column within that line.';
+        if (moveSourceWindow(Number(elements.sourceWindowLine.value) - 1, Number(elements.sourceWindowColumn.value) - 1)) closeSourceGoto(false);
+        else elements.sourcePosition.textContent = 'Choose a retained line and column within that line.';
+      });
+      elements.sourceWindow.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {event.preventDefault(); closeSourceGoto(true);}
+      });
+      // The More menu closes after an action, on Escape and on a click elsewhere.
+      elements.sourceMore.addEventListener('click', event => {
+        const action = event.target.closest?.('.source-more-menu button');
+        if (!action) return;
+        elements.sourceMore.open = false;
+        if (document.activeElement === action || document.activeElement === document.body) elements.sourceMore.querySelector('summary').focus();
+      });
+      document.addEventListener('pointerdown', event => {
+        if (elements.sourceMore.open && !elements.sourceMore.contains(event.target)) elements.sourceMore.open = false;
+        if (!elements.sourceWindow.hidden && !elements.sourceWindow.contains(event.target) && !elements.sourceMore.contains(event.target)) closeSourceGoto(false);
+      });
+      // Cmd/Ctrl+F finds in the open source and Ctrl+G goes to a line, as in VS Code.
+      document.addEventListener('keydown', event => {
+        if (document.querySelector('#screen-sources').hidden || event.altKey || event.shiftKey || event.repeat || document.querySelector('dialog:modal')) return;
+        if (event.key === 'Escape' && elements.sourceMore.open) {
+          event.preventDefault();
+          const inside = elements.sourceMore.contains(document.activeElement);
+          elements.sourceMore.open = false;
+          if (inside) elements.sourceMore.querySelector('summary').focus();
+        } else if (event.code === 'KeyF' && (event.metaKey || event.ctrlKey)) {
+          event.preventDefault();
+          elements.sourceSearch.focus();
+          elements.sourceSearch.select();
+        } else if (event.code === 'KeyG' && event.ctrlKey && !event.metaKey) {
+          event.preventDefault();
+          openSourceGoto();
         }
+      });
+      // The status bar follows the caret and the selection in the mounted source text.
+      function syncSourceSelection() {
+        const editor = state.sourceEditorView, selection = globalThis.getSelection?.();
+        const point = (node, offset) => {
+          const text = (node?.nodeType === 1 ? node : node?.parentElement)?.closest?.('.source-text');
+          if (!editor || !text || !elements.sourceCode.contains(text)) return null;
+          const prefix = document.createRange();
+          prefix.setStart(text, 0);
+          prefix.setEnd(node, offset);
+          const row = text.closest('.source-line'), line = Number(row.dataset.localLine);
+          const column = Number(row.dataset.columnStart ?? 0) + prefix.toString().length, start = sourceDocumentOffset(editor.index, line);
+          return start === null ? null : {line, column, offset: start + column};
+        };
+        const anchor = selection?.rangeCount ? point(selection.anchorNode, selection.anchorOffset) : null;
+        const focus = anchor ? point(selection.focusNode, selection.focusOffset) : null;
+        const length = focus ? Math.abs(focus.offset - anchor.offset) : 0;
+        elements.sourceSelection.hidden = !length;
+        elements.sourceSelection.textContent = length ? `${length} selected` : '';
+        if (focus) elements.sourcePosition.textContent = sourcePositionText(editor, focus.line, focus.column);
+      }
+      let sourceSelectionFrame = 0;
+      document.addEventListener('selectionchange', () => {
+        if (sourceSelectionFrame || document.querySelector('#screen-sources').hidden) return;
+        sourceSelectionFrame = requestAnimationFrame(() => {sourceSelectionFrame = 0; syncSourceSelection();});
       });
       elements.sourceSearch.addEventListener('paste', event => {
         const pasted = event.clipboardData?.getData('text/plain');
@@ -8707,11 +8652,32 @@ invocationSitesPanel.refresh();
       });
       elements.sourcePretty.addEventListener('click', () => {
         sourceFactsPanel.cancel();
+        const source = selectedSource();
         state.sourceFormatted = !state.sourceFormatted;
+        if (source) state.sourceFormatChoices.set(sourceIdentity(source), state.sourceFormatted);
+        if (state.sourceFormatted) sourceFormatClient.forget(source);
         renderSources();
       });
-      // Search all files. Reads use the artifact content route with the Sources
-      // preview's 2 MiB limit and checks. A loaded preview is reused as is;
+      // A formatted token reports the exact raw range it was printed from.
+      elements.sourceCode.addEventListener('click', event => {
+        const editor = state.sourceEditorView, view = editor?.view;
+        const token = event.target instanceof Element ? event.target.closest('.source-text > span:not(.source-indent)') : null;
+        const row = token?.closest('.source-line');
+        if (!view?.formatted || view.derived || !token || !row || editor.identity !== sourceIdentity(selectedSource())) return;
+        let column = Number(row.dataset.columnStart ?? 0);
+        for (let node = token.previousSibling; node; node = node.previousSibling) column += node.textContent.length;
+        const start = sourceDocumentOffset(editor.index, Number(row.dataset.localLine)) + column;
+        const range = sourceWhitespaceRange(view.formatted.map, view.active, view.formatted.text, start, start + token.textContent.length);
+        if (!range) return;
+        const original = sourceDocumentIndex(view.active), from = sourceDocumentPosition(original, range.start), to = sourceDocumentPosition(original, range.end);
+        if (!from || !to) return;
+        // After the caret update that the same click schedules.
+        requestAnimationFrame(() => {
+          elements.sourcePosition.textContent = `Line ${row.dataset.line}, Column ${column + 1} · raw ${from.line + 1}:${from.column + 1}–${to.line + 1}:${to.column + 1} (offsets ${range.start}–${range.end})`;
+        });
+      });
+      // Search all files. Reads use the artifact content route with a 2 MiB
+      // limit and the Sources preview's checks. A loaded preview is reused as is;
       // other text stays in a small search-owned cache, so typing does not
       // refetch every file and neither cache grows the other's bound.
       const SOURCE_SEARCH_CACHE_UNITS = 8 * 1024 * 1024;
@@ -8719,7 +8685,7 @@ invocationSitesPanel.refresh();
       function sourceSearchFiles() {
         const sources = capturedSources(), retained = new Set(sources.map(sourceIdentity));
         for (const key of sourceSearchCache.keys()) if (!retained.has(key)) sourceSearchCache.delete(key);
-        return sources.map(source => ({identity: sourceIdentity(source), artifactId: source.artifact_id, name: sourceDisplayName(source),
+        return sources.map(source => ({identity: sourceIdentity(source), artifactId: source.artifact_id, name: `${sourceDisplayName(source)} · artifact ${source.artifact_id}`,
           url: source.url ?? '', icon: sourceIcon(source), byteSize: source.byte_size, binary: sourceHexArtifact(source)}));
       }
       async function readSourceSearchText(entry, signal, limit) {
@@ -9170,7 +9136,7 @@ invocationSitesPanel.refresh();
         const files = {id: 'files', group: 'Files', search: () => capturedSources().map(source => {
           const id = source.artifact_id, identity = investigationArtifactIdentity(source);
           return {title: sourceDisplayName(source),
-            detail: [source.url || '(anonymous)', sourceKindLabel(source.kind)?.[1] ?? source.kind, formatByteSize(source.byte_size)].join(' · '),
+            detail: [source.url || '(anonymous)', sourceKindLabel(source.kind)?.[1] ?? source.kind, formatByteSize(source.byte_size), `artifact ${id}`].join(' · '),
             run() { if (identity) openInvestigation({kind: 'artifact', identity}); else { showScreen('sources'); selectArtifact(id); } }};
         })};
         function openPaletteFinding(id) {
@@ -9326,7 +9292,7 @@ invocationSitesPanel.refresh();
           add('Request', evidenceNames.identityFor('request', request), `${request.method} ${request.path}`, () => openNamedRequest(evidenceNames.identityFor('request', request)));
         }
         if (evidenceNames.has('captured-artifact')) for (const source of capturedSources()) {
-          add('Source', evidenceNames.identityFor('artifact', source), sourceDisplayName(source), () => openNamedSource(evidenceNames.identityFor('artifact', source)));
+          add('Source', evidenceNames.identityFor('artifact', source), `${sourceDisplayName(source)} · artifact ${source.artifact_id}`, () => openNamedSource(evidenceNames.identityFor('artifact', source)));
         }
         if (evidenceNames.has('vm-handler')) for (const finding of state.vmFindings) {
           const workspace = vmOpcodeWorkspaceForFinding(state.vmOpcodeWorkspace, finding);

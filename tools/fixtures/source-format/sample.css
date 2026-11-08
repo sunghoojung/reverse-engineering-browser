@@ -1,0 +1,2 @@
+/* theme fixture */
+@media (max-width: 600px) { a:hover > .note, #main::before { color: #fff; margin: 0 4px !important; --gap: 1; width: calc(100% - var(--gap)); } }

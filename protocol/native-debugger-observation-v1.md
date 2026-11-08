@@ -39,7 +39,7 @@ need `--reb-request-stacks`; without it records carry stack state
 128 bytes, little endian. Bytes 0-79 are the `request_initiator_stack` stack
 summary with the same states, flags and validation (offsets 24 and 28 stay
 Wasm frames and distinct scripts). Bytes 80-127 are per type; unused bytes are
-zero. Stacks are kind 10 `stack` artifacts with capture origin 12, shared by
+zero. Stacks are kind 13 `stack` artifacts with capture origin 12, shared by
 digest with request stacks; the creator is the first record that named it.
 
 ## Types

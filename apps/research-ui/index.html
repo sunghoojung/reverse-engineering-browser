@@ -245,6 +245,11 @@
                 <button id="source-tab-search" class="source-side-tab" type="button" role="tab" aria-selected="false" aria-controls="source-search-all-panel" tabindex="-1">Search</button>
               </div>
               <div id="source-health" class="source-health" data-kind="warning" role="status" aria-live="polite" hidden></div>
+              <div id="source-tree-tools" class="source-tree-tools">
+                <input id="source-tree-filter" class="source-tree-filter" type="search" maxlength="512" autocomplete="off" spellcheck="false" placeholder="Filter files" aria-label="Filter files by name, URL or artifact ID" aria-controls="source-tree" />
+                <button id="source-tree-expand" class="source-tree-tool" type="button" data-icon="expand-all" aria-controls="source-tree" aria-label="Expand all" title="Expand all"></button>
+                <button id="source-tree-collapse" class="source-tree-tool" type="button" data-icon="collapse-all" aria-controls="source-tree" aria-label="Collapse all" title="Collapse all"></button>
+              </div>
               <div id="source-tree" class="source-tree" role="tree" aria-labelledby="source-tab-captured"></div>
               <section id="source-search-all-panel" class="source-search-all" role="tabpanel" aria-labelledby="source-tab-search" hidden>
                 <div class="source-search-all-form" role="search">
@@ -261,38 +266,43 @@
               <div id="source-editor-tabs" class="source-editor-tabs" role="tablist" aria-label="Open source files"></div>
               <div class="source-editor-toolbar">
                 <span id="source-location" class="source-location">Select a captured artifact</span>
-                <button id="source-rename" class="source-tool" type="button" aria-keyshortcuts="F2" title="Open a captured source to name it." disabled>Rename</button>
                 <button id="source-quick-open" class="source-tool" type="button">Open file</button>
-                <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" maxlength="512" placeholder="Find" aria-label="Find in source" title="Find retained text; Enter for next, Shift+Enter for previous (single-line literal, first 1000 matches)" /></label>
-                <button id="source-pretty" class="source-tool" type="button" aria-label="Pretty print source" title="Pretty print source" disabled>{ }</button>
+                <input id="source-search" class="source-search" type="search" maxlength="512" placeholder="Find" aria-label="Find in source" aria-keyshortcuts="Meta+F Control+F" aria-describedby="source-search-status" title="Find retained text; Enter for next, Shift+Enter for previous (single-line literal, first 1000 matches)" />
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
-                <button id="investigation-decode-range" class="source-tool" type="button" title="First select an Original bytes link in Facts; this copies at most 64 KiB without running a transformation" disabled>Decode range</button>
-                <button id="source-facts-toggle" class="source-tool" type="button" aria-controls="source-facts-details" aria-expanded="false" disabled>Facts</button>
-                <button id="source-track-calls" class="source-tool" type="button" aria-controls="invocation-sites-details" disabled>Track calls</button>
-                <button id="source-deob" class="source-tool" type="button" aria-label="Run local static cleanup" title="Run local static cleanup" disabled>Static cleanup</button>
-
-                <button id="source-sidebar-toggle" class="source-tool" type="button" aria-controls="source-sidebar" aria-expanded="false">Details</button>
-
-                <form id="source-window" class="source-window" aria-label="Source display window" hidden>
+                <details id="source-more" class="source-more">
+                  <summary class="source-tool" title="More source actions">More</summary>
+                  <div class="source-more-menu" role="group" aria-label="Source actions">
+                    <button id="source-goto" class="source-tool" type="button" aria-keyshortcuts="Control+G" disabled>Go to line…</button>
+                    <button id="source-rename" class="source-tool" type="button" aria-keyshortcuts="F2" title="Open a captured source to name it." disabled>Rename</button>
+                    <button id="investigation-decode-range" class="source-tool" type="button" title="First select an Original bytes link in Facts; this copies at most 64 KiB without running a transformation" disabled>Decode range</button>
+                    <button id="source-facts-toggle" class="source-tool" type="button" aria-controls="source-facts-details" aria-expanded="false" disabled>Facts</button>
+                    <button id="source-track-calls" class="source-tool" type="button" aria-controls="invocation-sites-details" disabled>Track calls</button>
+                    <button id="source-deob" class="source-tool" type="button" aria-label="Run local static cleanup" title="Run local static cleanup" disabled>Static cleanup</button>
+                    <button id="source-sidebar-toggle" class="source-tool" type="button" aria-controls="source-sidebar" aria-expanded="false">Details</button>
+                  </div>
+                </details>
+                <form id="source-window" class="source-window" aria-label="Go to line" hidden>
                   <span id="source-window-label"></span>
-                  <button id="source-window-previous" class="source-tool" type="button" aria-label="Previous source lines">Previous</button>
-                  <button id="source-window-next" class="source-tool" type="button" aria-label="Next source lines">Next</button>
                   <label>Line <input id="source-window-line" type="number" min="1" step="1" value="1" aria-label="Local source line" /></label>
                   <label>Column <input id="source-window-column" type="number" min="1" step="1" value="1" aria-label="Local source column" /></label>
                   <button class="source-tool" type="submit">Go</button>
                 </form>
-                <p id="source-search-status" class="source-search-status" role="status"></p>
+                <p id="source-search-status" class="source-search-status" hidden></p>
                 <div id="source-name-host" class="evidence-name-host"></div>
               </div>
               <div id="source-code-wrap" class="source-code-wrap" tabindex="0">
+                <button id="source-window-previous" class="source-window-edge" type="button" aria-label="Previous source lines" hidden></button>
                 <div id="source-code-empty" class="source-empty">Select a JavaScript file, WASM module, source map, or approved response body.</div>
                 <code id="source-code" class="source-code" aria-label="Source content" hidden></code>
+                <button id="source-window-next" class="source-window-edge" type="button" aria-label="Next source lines" hidden></button>
               </div>
               <div class="source-editor-status">
                 <span id="source-position">Line 1, Column 1</span>
-                <span id="source-size">0 bytes</span>
-                <span id="source-view-kind">Original evidence</span>
+                <span id="source-selection" hidden></span>
+                <span id="source-view-kind">Original</span>
                 <span id="source-language">Plain text</span>
+                <button id="source-pretty" class="source-status-button" type="button" aria-label="Pretty print source" aria-pressed="false" title="Pretty print source" disabled>{ }</button>
+                <span id="source-size">0 bytes</span>
                 <span id="source-hash" class="source-hash"></span>
               </div>
 
@@ -814,8 +824,10 @@
     <script src="float32_inspector.js"></script>
     <script src="evidence_comparison.js"></script>
     <script src="source_syntax.js"></script>
+    <script src="source_format.js"></script>
     <script src="source_facts.js"></script>
     <script src="source_search.js"></script>
+    <script src="source_tree.js"></script>
     <script src="traffic_view.js"></script>
     <script src="network_scope.js"></script>
     <script src="request_tabs.js"></script>

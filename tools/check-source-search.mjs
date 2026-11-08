@@ -206,7 +206,7 @@ async function checkAppWiring(root) {
     renderSourcePane: () => calls.push(['pane', sandbox.state.sourcePane]),
     capturedSources: () => sandbox.state.artifacts.filter(value => value.kind !== 'canvas_data_url').map(value => ({...value, source_type: 'artifact'})),
     sourceIdentity: source => source ? sandbox.sourceFactsIdentity({...source, source_type: 'artifact'}) : null,
-    sourceDisplayName: source => `${source.artifact_id}.js · artifact ${source.artifact_id}`, sourceIcon: source => source.kind === 'wasm' ? 'W' : 'JS',
+    sourceDisplayName: source => `${source.artifact_id}.js`, sourceIcon: source => source.kind === 'wasm' ? 'W' : 'JS',
     selectArtifact: (id, line, options) => { calls.push(['select', id, line, plain(options)]); return true; },
     showScreen: name => { calls.push(['screen', name]); screen = name; },
     investigationScreen: () => screen, renderSourceHealth: () => calls.push(['health', sandbox.state.sourceNotice])

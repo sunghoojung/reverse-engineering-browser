@@ -1415,7 +1415,7 @@ const ownershipFunctionNames = ['sourceIdentity', 'isSourceArtifact', 'sourceIsC
   'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
   'closeSource',
   'sourceDisplayName', 'sourceKindLabel', 'sourceIcon', 'renderSourceWindowControls', 'revealSourceColumn', 'moveSourceWindow', 'syncSourceDisplayControls', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent',
-  'sourceArtifactIdentityMatches', 'selectArtifact', 'sourceFormattedView', 'syncFloat32Panel', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
+  'sourceArtifactIdentityMatches', 'selectArtifact', 'sourceFormattedView', 'sourceFormatWanted', 'sourcePositionText', 'syncFloat32Panel', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
   'discardStaticCleanup', 'toggleStaticCleanupComparison', 'updateDeobfuscationView', 'setDeobfuscationDisclosure', 'revealDeobfuscationChange', 'deobfuscationButton', 'deobfuscationDisclosure', 'renderDeobfuscationReport'];
 const canvasProductionRules=runInNewContext(
   appSection('      const nativeCanvasCaptureDisplayLimit =','      const nativeCanvasDrawingMethods')+
@@ -1444,7 +1444,7 @@ function ownedContext(patch = {}) {
     sourceFactsPanel:{original:()=>undefined,cancel(){}}, investigationBeforeSelection(){}, investigationPassiveSource:false, location:{protocol:'http:'}, document:{querySelector:()=>({hidden:true})},
     renderSources(){}, renderSourceHealth(){}, renderShellStatus(){}, renderFingerprintActivity(){}, applySourceSearch(){},
     elements:{signalRenderList:new TrafficFixtureNode()}, ...canvasProductionRules,
-    sourceName:source=>source.url, evidencePackagePanel:{sync(){}}, evidenceWorkspace:{sync(){}},
+    sourceName:source=>source.url, sourceTreeFileIcon:()=>'file', evidencePackagePanel:{sync(){}}, evidenceWorkspace:{sync(){}},
     ...patch, state};
   const functions = [...(patch.productionFunctions ?? ownershipFunctionNames), ...(patch.functions ?? [])];
   return {state, sandbox, api:runInNewContext(ownershipModels + ownershipSyntax + ownershipProvenanceSite + functions.map(sourceProductionFunction).join('\n') +
@@ -1500,6 +1500,43 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   sourceOwnershipReceipt.push({test:'session_reuse_retires_late_preview',status:'passed'});
 }
 {
+  // The catalog is the whole manifest, read forward in 5,000-record pages
+  // like get_artifacts: a one-record probe carries the ETag, growth is read
+  // from the last boundary and any other change from the start, up to 50,000.
+  const template=await ownedArtifact('1');
+  const records=(count,from=1,url='p')=>Array.from({length:count},(_,i)=>({...template,artifact_id:String(from+i),url:`https://fixture.invalid/${url}/${from+i}.js`}));
+  let manifest=records(12001);const lists=[];
+  const {state,api}=ownedContext({fetch:async(url,options)=>{
+    if(!url.startsWith('/api/artifacts?'))return new Response('const a = 1;');
+    lists.push(url);const query=new URL(url,'http://fixture.invalid').searchParams,after=Number(query.get('after')),limit=Number(query.get('limit'));
+    const etag=`"${manifest.length}:${manifest[0]?.artifact_id}:${url}"`;
+    if(options.headers['If-None-Match']===etag)return new Response(null,{status:304});
+    if(after>manifest.length)return Response.json({error:'The cursor is not a record boundary'},{status:400});
+    const page=manifest.slice(after,after+limit),next=String(after+page.length);
+    return Response.json({count:page.length,artifacts:page,artifact_receiver_configured:true,artifact_receiver_connected:true,
+      query:{direction:'forward',limit,returned:page.length,store_end:String(manifest.length),next_after:next,next_before:null,
+        limited:page.length===limit,budget_exhausted:false,filters:{},scope:'all',scan_start:String(after),scan_end:next}},{headers:{ETag:etag}});
+  }});
+  await api.refreshArtifacts();
+  assert.equal(state.artifacts.length,12001,'Every retained record is loaded, not the newest 500');
+  assert.deepEqual(lists,['/api/artifacts?after=0&limit=1','/api/artifacts?after=0&limit=5000','/api/artifacts?after=5000&limit=5000','/api/artifacts?after=10000&limit=5000']);
+  assert.equal(state.artifactCatalogLimit,0);
+  const catalog=state.artifacts,first=catalog[0];lists.length=0;
+  await api.refreshArtifacts();assert.deepEqual(lists,['/api/artifacts?after=0&limit=1']);assert.equal(state.artifacts,catalog,'An unchanged manifest is one 304 probe');
+  manifest=[...manifest,...records(2,12002)];lists.length=0;await api.refreshArtifacts();
+  assert.deepEqual(lists,['/api/artifacts?after=0&limit=1','/api/artifacts?after=12001&limit=5000'],'Growth is read from the last boundary');
+  assert.equal(state.artifacts.length,12003);assert.equal(state.artifacts[0],first,'Appending keeps retained owners');
+  manifest=records(3,90000,'replaced');lists.length=0;await api.refreshArtifacts();
+  assert.deepEqual(lists,['/api/artifacts?after=0&limit=1','/api/artifacts?after=0&limit=5000'],'A replaced manifest is read from the start');
+  assert.deepEqual([...state.artifacts.map(value=>value.artifact_id)],['90000','90001','90002']);
+  manifest=records(50003);lists.length=0;await api.refreshArtifacts();
+  assert.equal(state.artifacts.length,50000);assert.equal(state.artifactCatalogLimit,50000,'Loading stops at 50,000 records, visibly');
+  manifest=[...manifest,...records(1,60000)];lists.length=0;await api.refreshArtifacts();
+  assert.deepEqual(lists,['/api/artifacts?after=0&limit=1'],'A capped catalog reads no further pages');assert.equal(state.artifacts.length,50000);
+  manifest=[];lists.length=0;await api.refreshArtifacts();assert.equal(state.artifacts.length,0,'An emptied live manifest clears the catalog');
+  sourceOwnershipReceipt.push({test:'catalog_pages_whole_manifest',status:'passed',records:12003});
+}
+{
   const artifact=await ownedArtifact('1'); let reads=0, bytes='const b = 1;';
   const {state,api}=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'1'},fetch:async()=>{reads++;return new Response(bytes);}});
   await api.loadArtifactContent(artifact); assert.match(artifact.loadError,/SHA-256/); assert.equal(artifact.content,undefined);
@@ -1544,7 +1581,7 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   const {state,api}=ownedContext({state:{artifacts,openArtifactIds:artifacts.map(value=>value.artifact_id)},fetch:async()=>new Response(text)});
   for(const artifact of artifacts){state.selectedArtifactId=artifact.artifact_id;await api.loadArtifactContent(artifact);}
   const loaded=artifacts.filter(value=>value.content!==undefined), characters=loaded.reduce((sum,value)=>sum+value.content.length,0);
-  assert(loaded.length<=8 && characters<=8*1024*1024); assert.equal(artifacts[0].content,undefined);
+  assert(loaded.length<=8 && characters<=32*1024*1024); assert.equal(artifacts[0].content,undefined);
   state.selectedArtifactId='1';await api.loadArtifactContent(artifacts[0]);assert.equal(artifacts[0].content,text);
   const binary=new Uint8Array(2097152);const wasm={...await ownedArtifact('99'),kind:'wasm',mime_type:'application/wasm',byte_size:binary.length,sha256:await ownershipHash(binary)};
   const hex=ownedContext({state:{artifacts:[wasm],selectedArtifactId:'99'},fetch:async()=>new Response(binary)});
@@ -1555,6 +1592,25 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   assert(wasm.content.includes('Hex preview limited'));
   assert(wasm.content.split('\n').length > 20003);
   sourceOwnershipReceipt.push({test:'preview_byte_budget_and_bounded_hex',status:'passed',retainedPreviews:loaded.length,retainedUTF16TextBytes:characters*2,hexRows:wasm.content.split('\n').length});
+}
+{
+  // A 12 MiB one-line bundle loads whole and verified in 2 MiB pages, then opens
+  // pretty-printed; past the 16 MiB cap the first 16 MiB show with a limit notice.
+  const page=2097152,line='var a=1;'.repeat(12*1024*1024/8),big=await ownedArtifact('12',line),bytes=new TextEncoder().encode(line);
+  const over={...await ownedArtifact('17','x'),byte_size:16*1024*1024+1},urls=[];
+  const serve=(body,total)=>async url=>{urls.push(url);const offset=Number(/offset=(\d+)/.exec(url)?.[1]??0);
+    return new Response(body.subarray(offset,offset+page),{headers:{'X-Artifact-Total-Bytes':String(total)}});};
+  const ctx=ownedContext({state:{artifacts:[big],selectedArtifactId:'12',sourceFormatChoices:new Map()},fetch:serve(bytes,bytes.length)});
+  await ctx.api.loadArtifactContent(big);
+  assert.equal(big.content,line);assert.equal(big.contentVerified,true);assert.equal(big.contentTruncated,false);assert.equal(big.contentLongLine,true);
+  assert.deepEqual([urls[0],urls.at(-1),urls.length],['/api/artifacts/12/content?limit=2097152',`/api/artifacts/12/content?offset=${5*page}&limit=2097152`,6]);
+  assert.equal(ctx.state.sourceFormatted,true,'A minified bundle opens pretty-printed');
+  ctx.state.sourceFormatChoices.set(ctx.api.sourceIdentity(big),false);assert.equal(ctx.api.sourceFormatWanted(big),false,'The researcher choice is remembered for the artifact');
+  const overCtx=ownedContext({state:{artifacts:[over],selectedArtifactId:'17'},fetch:serve(new Uint8Array(over.byte_size).fill(0x61),over.byte_size)});
+  await overCtx.api.loadArtifactContent(over);
+  assert.equal(over.loadError,null);assert.equal(over.contentTruncated,true);assert.equal(over.sourceTextLength,16*1024*1024);
+  assert(over.content.endsWith('[Viewer preview limited to the first 16 MiB; original bytes are unchanged]'));
+  sourceOwnershipReceipt.push({test:'paged_preview_to_cap_and_limit_notice',status:'passed',pages:urls.length});
 }
 {
   const artifact=await ownedArtifact('1');artifact.content='const a = 1;';let reads=0;

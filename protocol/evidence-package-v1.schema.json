@@ -581,6 +581,8 @@
             "response_headers",
             "cookie_list",
             "response_body",
+            "request_initiator_stack",
+            "script_identity",
             "capture_exclusion",
             "tab_set",
             "request_tab_link",
@@ -784,7 +786,9 @@
             "webassembly_instantiate",
             "canvas_to_data_url",
             "native_wasm_guest",
-            "network_request"
+            "network_request",
+            "request_stack",
+            "stack_script"
           ]
         },
         "kind": {
@@ -801,7 +805,8 @@
             "request_target",
             "request_headers",
             "response_headers",
-            "cookie_list"
+            "cookie_list",
+            "stack"
           ]
         },
         "byte_size": {

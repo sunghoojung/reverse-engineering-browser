@@ -242,7 +242,7 @@ fn step(value: &Value, relation: &str, confidence: &str) -> Result<Value> {
 // text; Traffic decodes their fields. The Swift builder writes the same summary.
 fn binary_record_summary(value: &Value, size: usize) -> Option<String> {
     let operation = value["type"].as_str()?;
-    (value["category"] == "network"
+    let network = value["category"] == "network"
         && matches!(
             operation,
             "request_target"
@@ -252,11 +252,26 @@ fn binary_record_summary(value: &Value, size: usize) -> Option<String> {
                 | "response_headers"
                 | "cookie_list"
                 | "script_cookie"
-        ))
-    .then(|| {
-        format!(
-            "Binary {operation} record, {size} bytes, not shown as text; Traffic shows its fields"
-        )
+                | "request_initiator_stack"
+                | "script_identity"
+                | "request_watch_match"
+        );
+    let observation = value["category"] == "runtime"
+        && matches!(
+            operation,
+            "listener_dispatch"
+                | "timer_observation"
+                | "csp_violation"
+                | "exception_observation"
+                | "dom_mutation"
+        );
+    let where_shown = if network {
+        "Traffic shows its fields"
+    } else {
+        "decoded on read"
+    };
+    (network || observation).then(|| {
+        format!("Binary {operation} record, {size} bytes, not shown as text; {where_shown}")
     })
 }
 fn gap(reason: &str, after: usize, detail: &str) -> Value {

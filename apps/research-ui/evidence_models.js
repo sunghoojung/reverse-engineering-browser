@@ -35,8 +35,8 @@
           'wasm_indirect_observation', 'wasm_execution_outcome', 'js_dispatch_observation', 'js_invocation_start', 'js_invocation_settle',
           'js_invocation_request', 'wasm_dispatch_overflow', 'wasm_indirect_overflow',
           'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target', 'response_body',
-          'request_headers', 'response_headers', 'cookie_list', 'script_cookie',
-          'capture_exclusion', 'tab_set', 'request_tab_link'
+          'request_headers', 'response_headers', 'cookie_list', 'script_cookie', 'request_initiator_stack',
+          'script_identity', 'capture_exclusion', 'tab_set', 'request_tab_link'
         ])
       };
       // Scheme classes of protocol/native-network-v3.md; absent means 0.
@@ -73,7 +73,7 @@
       // Children of a lifecycle record (protocol/native-network-v2.md and v3).
       // They describe a request; they never advance its lifecycle rank.
       const networkRequestDetailTypes = new Set(['request_target', 'request_body', 'response_body', 'request_headers',
-        'response_headers', 'cookie_list']);
+        'response_headers', 'cookie_list', 'request_initiator_stack']);
       // Session-level network records the backend keeps in its network window.
       const networkContextTypes = new Set(['capture_exclusion', 'tab_set', 'request_tab_link']);
       const networkRequestArtifactKinds = new Set(['request_body', 'request_target', 'request_headers', 'response_headers',
@@ -81,13 +81,13 @@
       const artifactKinds = new Set([
         'javascript', 'wasm', 'source_map', 'response_body', 'canvas_data_url',
         'bytecode_buffer', 'wasm_guest_adapter', 'request_body', 'request_target', 'request_headers', 'response_headers',
-        'cookie_list'
+        'cookie_list', 'stack'
       ]);
       const artifactCaptureOrigins = new Set([
         'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
         'webassembly_module', 'webassembly_instantiate', 'canvas_to_data_url',
         'runtime_typed_array',
-        'runtime_allocating_script', 'native_wasm_guest', 'network_request'
+        'runtime_allocating_script', 'native_wasm_guest', 'network_request', 'request_stack', 'stack_script'
       ]);
       const canvasReplayProperties = new Set([
         'fillStyle', 'strokeStyle', 'font', 'textBaseline', 'textAlign',
@@ -1129,8 +1129,9 @@
         if (Object.hasOwn(artifact, 'execution_context_id')) {
           if (!isCanonicalInteger(artifact.execution_context_id, 0n, uint64Max) ||
             !artifactCaptureOrigins.has(artifact.capture_origin) ||
-            (['dynamic_javascript', 'runtime_allocating_script'].includes(artifact.capture_origin) &&
+            (['dynamic_javascript', 'runtime_allocating_script', 'stack_script'].includes(artifact.capture_origin) &&
               (artifact.kind !== 'javascript' || artifact.execution_context_id === '0')) ||
+            ((artifact.kind === 'stack') !== (artifact.capture_origin === 'request_stack')) ||
             (artifact.capture_origin.startsWith('webassembly_') &&
               (artifact.kind !== 'wasm' || artifact.execution_context_id === '0')) ||
             (artifact.capture_origin === 'canvas_to_data_url' &&
@@ -1426,7 +1427,7 @@
         }
 
         const requestId = integerText(event, 'request_id');
-        if (event.type === 'request_initiated') {
+        if (event.type === 'request_initiated' || event.type === 'request_initiator_stack') {
           return rendererRequestIdentity(event);
         }
         const hasInitiator = event.initiator_process_id > 0;

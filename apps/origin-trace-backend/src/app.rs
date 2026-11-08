@@ -36,7 +36,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 38] = [
+const UI_ASSETS: [&str; 39] = [
     "index.html",
     "app.css",
     "command_palette.js",
@@ -52,6 +52,7 @@ const UI_ASSETS: [&str; 38] = [
     "investigation_notebook.js",
     "evidence_names.js",
     "invocation_sites.js",
+    "request_stack.js",
     "traffic_view.js",
     "network_scope.js",
     "request_tabs.js",
@@ -427,6 +428,14 @@ impl App {
                 }
                 self.live_wasm.state()?
             }
+            "/api/native-debugger" => {
+                if !q.0.is_empty() {
+                    return Err(Error::bad(
+                        "Native debugger state takes no query parameters",
+                    ));
+                }
+                crate::native_debugger::state()?
+            }
             "/api/native-console" => self.native_console.state().await,
             "/api/native-console/document-start" => {
                 if q.0.keys().any(|key| key != "after_sequence") {
@@ -583,6 +592,21 @@ impl App {
                 )
                 .await?
                 .0
+            }
+            "/api/request-stack" => {
+                q.only(&["session_id", "process_id", "request_id"], &[])?;
+                let session = match q.one("session_id")? {
+                    Some(_) => Some(q.number("session_id", None, 64, true)?),
+                    None => None,
+                };
+                let process = q.number("process_id", None, 32, true)?;
+                let request = q.number("request_id", None, 64, true)?;
+                let (store, artifacts) =
+                    (self.options.store.clone(), self.options.artifacts.clone());
+                self.blocking(move || {
+                    crate::request_stack::document(&store, &artifacts, session, process, request)
+                })
+                .await?
             }
             "/api/deobfuscation" => {
                 let artifact = q.required("artifact_id")?;
@@ -1463,6 +1487,7 @@ impl App {
                 _ => Err(Error::bad("Analyst workspace action is invalid")),
             },
             "/api/live-wasm/actions" => self.live_wasm.action(value),
+            "/api/native-debugger/actions" => crate::native_debugger::action(value),
             "/api/native-console/actions" => self.native_console.action(value).await,
             "/api/js-invocation-sites/actions" => {
                 validation::schema("JsInvocationSiteAction", value, 400)?;

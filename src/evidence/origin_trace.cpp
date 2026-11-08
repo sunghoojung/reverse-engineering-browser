@@ -48,11 +48,11 @@ bool IsRequestEvidence(const EventRecord& event) noexcept {
                                           event.header.category == EventCategory::kArtifact);
 }
 
-// Request target, body, response body, header and cookie list records
-// (protocol/native-network-v2.md and v3) are children of one lifecycle record
-// and join it only through their explicit parent. They
-// never become the request's latest lifecycle record, so the next lifecycle
-// record links to the previous lifecycle record, not to a child.
+// Request target, body, response body, header, cookie list and initiator stack
+// records (protocol/native-network-v2.md and v3) are children of one lifecycle
+// record and join it only through their explicit parent. They never become the
+// request's latest lifecycle record, so the next lifecycle record links to the
+// previous lifecycle record, not to a child.
 bool IsRequestChildRecord(const EventRecord& event) noexcept {
   return event.header.category == EventCategory::kNetwork &&
          (event.header.type == EventType::kRequestTarget ||
@@ -60,7 +60,8 @@ bool IsRequestChildRecord(const EventRecord& event) noexcept {
           event.header.type == EventType::kResponseBody ||
           event.header.type == EventType::kRequestHeaders ||
           event.header.type == EventType::kResponseHeaders ||
-          event.header.type == EventType::kCookieList);
+          event.header.type == EventType::kCookieList ||
+          event.header.type == EventType::kRequestInitiatorStack);
 }
 
 }  // namespace

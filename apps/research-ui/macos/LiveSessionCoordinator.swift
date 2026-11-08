@@ -607,6 +607,12 @@ final class LiveSessionCoordinator {
     for name in ["REB_NATIVE_WASM_DISPATCH", "REB_NATIVE_WASM_CALL_INDIRECT"] {
       environment[name] = environment[name] ?? (allows(1536) ? "1" : "0")
     }
+    // Request call stacks need Network (256) and Artifact (1024). The default
+    // is dropped, with a launch log line, by a Brave that predates the flag.
+    if environment["REB_NATIVE_REQUEST_STACKS"] == nil {
+      environment["REB_NATIVE_REQUEST_STACKS"] = allows(1280) ? "1" : "0"
+      environment["REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED"] = "1"
+    }
     // Permission only: the capture browser may later arm a document-start
     // Console script, which still needs a live Console connection to a selected
     // document and a separate confirmed arm. Nothing runs until then. A browser

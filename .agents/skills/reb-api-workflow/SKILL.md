@@ -32,7 +32,7 @@ Tool names are OpenAPI operation IDs. The same names work with
 | Which scripts and Wasm modules were stored, with digests? | `get_artifacts` with `kind`, `frame_id`, `host`, `sha256` |
 | What does a stored Wasm module contain? | `inspect_wasm` with `artifact_id` and `sections` |
 | Wait until the browser produces something | `wait_for_events` |
-| How did a native request come about? | `get_origin_trace`, `get_request_signal_profile` |
+| How did a native request come about? | `get_origin_trace`, `get_request_signal_profile`, `get_request_stack` (the JavaScript and Wasm stack that started it) |
 | VM analysis of retained samples | `get_vm_analysis`, `get_vm_opcode_workspace`, `get_vm_host_links` (need `--allow-effects`: they write a derived cache) |
 | Start a session with named capture options | `start_live_session` (needs `--allow-effects --allow-session-start`) or `reb-api session start` |
 | Open a page in a session you started, or end it | `session_action` with `open_url` or `end` (listed with `--allow-session-start`; check `capture_observed`) |

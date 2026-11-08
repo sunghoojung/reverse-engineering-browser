@@ -107,6 +107,13 @@ EVENT_TYPES = {
     "request_failed",
     "request_headers",
     "request_initiated",
+    "request_initiator_stack",
+    "request_watch_match",
+    "listener_dispatch",
+    "timer_observation",
+    "csp_violation",
+    "exception_observation",
+    "dom_mutation",
     "request_redirected",
     "request_started",
     "request_target",
@@ -117,6 +124,7 @@ EVENT_TYPES = {
     "request_tab_link",
     "tab_set",
     "script_cookie",
+    "script_identity",
     "vm_finding",
     "vm_dispatch_sample",
     "wasm_dispatch_observation",
@@ -211,6 +219,120 @@ def valid_request_target(event: dict, payload: bytes) -> bool:
     return (valid_request_child(event, payload, (1, 2)) and retention_valid
             and payload[8] <= 4 and 0 not in payload[12:12 + prefix]
             and not any(payload[12 + prefix:]))
+
+
+def valid_stack_frame(frame: bytes, is_async: bool) -> bool:
+    """One 16-byte request stack frame, mirrored from include/reb/request_stack.hpp."""
+    kind, flags = frame[0], frame[1]
+    combinator = int.from_bytes(frame[2:4], "little")
+    script_id = int.from_bytes(frame[4:8], "little")
+    detail = int.from_bytes(frame[12:16], "little")
+    if kind == 1:
+        return not is_async and script_id != 0 and combinator == 0 and flags & ~3 == 0
+    if kind == 2:
+        return not is_async and script_id != 0 and combinator == 0 and flags == 0
+    if kind == 3:
+        return is_async and script_id != 0 and combinator == 0 and flags & ~2 == 0
+    if kind == 4:
+        return is_async and script_id == 0 and 1 <= combinator <= 3 and flags == 0 and detail == 0
+    return False
+
+
+def valid_stack_child(event: dict, payload: bytes) -> bool:
+    """Envelope of request_initiator_stack and script_identity (native-network-v3.md)."""
+    return (valid_request_child(event, payload) and event["artifact_id"] == "0"
+            and event["initiator_request_id"] == 0 and event["initiator_process_id"] == 0
+            and payload[6:8] == b"\0\0")
+
+
+def valid_request_stack(event: dict, payload: bytes) -> bool:
+    if not valid_stack_child(event, payload) or event["request_id"] == "0" or any(payload[80:]):
+        return False
+    return valid_stack_summary(payload)
+
+
+def ascii_name(field: bytes, length: int, required: bool) -> bool:
+    if length > len(field) or (required and length == 0):
+        return False
+    return (all(0x20 < c < 0x7F for c in field[:length]) and not any(field[length:]))
+
+
+def optional_js_frame(frame: bytes) -> bool:
+    return not any(frame) or (frame[0] == 1 and valid_stack_frame(frame, False))
+
+
+OBSERVATION_TYPES = frozenset((
+    "request_watch_match", "listener_dispatch", "timer_observation",
+    "csp_violation", "exception_observation", "dom_mutation"))
+
+
+def valid_observation(event: dict, payload: bytes) -> bool:
+    """Types 40-45, protocol/native-debugger-observation-v1.md."""
+    kind = event["type"]
+    request = kind == "request_watch_match"
+    if (event["category"] != ("network" if request else "runtime") or len(payload) != 128
+            or payload[:4] != b"\x01\x00\x80\x00" or payload[6:8] != b"\0\0"
+            or event["artifact_id"] != "0" or (event["request_id"] == "0") == request
+            or (request and event["parent_event_id"] == "0")
+            or not valid_stack_summary(payload)):
+        return False
+    t = payload[80:]
+    if request:
+        return t[0] < 8 and t[1] & ~1 == 0 and not any(t[2:])
+    if kind == "listener_dispatch":
+        return (t[0] < 16 and 1 <= t[1] <= 5 and optional_js_frame(t[4:20])
+                and ascii_name(t[21:48], t[20], True))
+    if kind == "timer_observation":
+        return (t[0] in (1, 2) and t[1] in (1, 2) and t[2] & ~1 == 0 and t[3] == 0
+                and optional_js_frame(t[12:28]) and not any(t[28:]))
+    if kind == "csp_violation":
+        return t[1] in (1, 2) and ascii_name(t[3:48], t[2], False)
+    if kind == "exception_observation":
+        return t[0] in (1, 2, 3) and not any(t[1:4]) and optional_js_frame(t[4:20]) and not any(t[20:])
+    return (t[0] in (1, 2, 3) and t[1] < 4 and ascii_name(t[5:37], t[4], t[0] == 1)
+            and (t[0] == 1 or t[4] == 0) and not any(t[37:]))
+
+
+def valid_stack_summary(payload: bytes) -> bool:
+    """Bytes 0-79 shared by request_initiator_stack and debugger observations."""
+    state, flags = payload[4], payload[5]
+    total, recorded, omitted = (int.from_bytes(payload[i:i + 4], "little") for i in (8, 12, 16))
+    async_frames = int.from_bytes(payload[20:22], "little")
+    segments = int.from_bytes(payload[22:24], "little")
+    wasm, scripts = (int.from_bytes(payload[i:i + 4], "little") for i in (24, 28))
+    digest, innermost = payload[32:64], payload[64:80]
+    if flags & ~0x0F:
+        return False
+    if state in (2, 3):
+        return flags & ~0x08 == 0 and not any(payload[8:80])
+    if state not in (1, 4, 5):
+        return False
+    return (1 <= recorded <= 1024 and recorded + omitted == total
+            and (omitted != 0) == bool(flags & 0x02) and (omitted == 0 or recorded == 1024)
+            and async_frames <= 32 and segments <= async_frames
+            and (not flags & 0x04 or async_frames == 32) and (not flags & 0x01 or state == 1)
+            and wasm <= recorded + async_frames and scripts <= recorded + async_frames
+            and any(digest) and valid_stack_frame(innermost, False))
+
+
+def valid_script_identity(event: dict, payload: bytes) -> bool:
+    if not valid_stack_child(event, payload) or event["request_id"] != "0" or any(payload[72:]):
+        return False
+    kind, flags = payload[4], payload[5]
+    script_id = int.from_bytes(payload[8:12], "little")
+    context = int.from_bytes(payload[24:32], "little")
+    length = int.from_bytes(payload[32:40], "little")
+    digest = payload[40:72]
+    retention = flags & 0x1E
+    if (any(payload[20:24]) or script_id == 0 or context == 0 or flags & ~0x1F
+            or retention & (retention - 1) or kind not in (1, 2)
+            or (kind == 2 and flags & ~0x0C) or (kind == 1 and retention == 0)):
+        return False
+    if retention == 0x08:
+        return length == 0 and not any(digest)
+    if retention == 0x04:
+        return length > 16 * 1024 * 1024 and not any(digest)
+    return 0 < length <= 16 * 1024 * 1024 and any(digest)
 
 
 def valid_request_body(event: dict, payload: bytes) -> bool:
@@ -827,6 +949,12 @@ def validate_event(event: object, line_number: int) -> None:
         raise ValueError(f"line {line_number}: native cookie list record is invalid")
     if event["type"] == "script_cookie" and not valid_script_cookie(event, payload):
         raise ValueError(f"line {line_number}: native script cookie record is invalid")
+    if event["type"] == "request_initiator_stack" and not valid_request_stack(event, payload):
+        raise ValueError(f"line {line_number}: native request initiator stack record is invalid")
+    if event["type"] == "script_identity" and not valid_script_identity(event, payload):
+        raise ValueError(f"line {line_number}: native script identity record is invalid")
+    if event["type"] in OBSERVATION_TYPES and not valid_observation(event, payload):
+        raise ValueError(f"line {line_number}: native debugger observation record is invalid")
     if event["type"].startswith("js_invocation_") and not valid_js_invocation(event, payload):
         raise ValueError(f"line {line_number}: native JavaScript invocation record is invalid")
     if event["type"] in ("wasm_guest_dispatch", "wasm_guest_invocation"):

@@ -329,7 +329,8 @@ bool ParseManifestRecord(const std::string_view line,
         capture_origin != "webassembly_module" && capture_origin != "webassembly_instantiate" &&
         capture_origin != "canvas_to_data_url" && capture_origin != "runtime_typed_array" &&
         capture_origin != "runtime_allocating_script" && capture_origin != "native_wasm_guest" &&
-        capture_origin != "network_request") {
+        capture_origin != "network_request" && capture_origin != "request_stack" &&
+        capture_origin != "stack_script") {
       return false;
     }
     position = origin_end + std::string_view("\",\"kind\":\"").size();
@@ -345,7 +346,7 @@ bool ParseManifestRecord(const std::string_view line,
   if (kind != "javascript" && kind != "wasm" && kind != "source_map" && kind != "response_body" &&
       kind != "canvas_data_url" && kind != "bytecode_buffer" && kind != "wasm_guest_adapter" &&
       kind != "request_body" && kind != "request_target" && kind != "request_headers" &&
-      kind != "response_headers" && kind != "cookie_list") {
+      kind != "response_headers" && kind != "cookie_list" && kind != "stack") {
     return false;
   }
   // Request content and header blocks are created by one browser network record
@@ -360,8 +361,12 @@ bool ParseManifestRecord(const std::string_view line,
   if ((!capture_origin.empty() && capture_origin != "unknown" &&
        capture_origin != "network_response" && capture_origin != "network_request" &&
        execution_context_id == 0) ||
-      ((capture_origin == "dynamic_javascript" || capture_origin == "runtime_allocating_script") &&
+      ((capture_origin == "dynamic_javascript" || capture_origin == "runtime_allocating_script" ||
+        capture_origin == "stack_script") &&
        kind != "javascript") ||
+      ((kind == "stack") != (capture_origin == "request_stack")) ||
+      ((capture_origin == "request_stack" || capture_origin == "stack_script") &&
+       !creator_event_id) ||
       (capture_origin.starts_with("webassembly_") && kind != "wasm") ||
       (capture_origin == "canvas_to_data_url" && kind != "canvas_data_url") ||
       (capture_origin == "runtime_typed_array" && kind != "bytecode_buffer") ||
@@ -488,11 +493,19 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
        (header.execution_context_id != 0 || header.creator_event_id == 0))) {
     return false;
   }
+  if ((header.kind == ArtifactKind::kStack) !=
+          (header.capture_origin == ArtifactCaptureOrigin::kRequestStack) ||
+      ((header.capture_origin == ArtifactCaptureOrigin::kRequestStack ||
+        header.capture_origin == ArtifactCaptureOrigin::kStackScript) &&
+       header.creator_event_id == 0)) {
+    return false;
+  }
   const bool valid_kind =
       header.kind == ArtifactKind::kJavaScript || header.kind == ArtifactKind::kWasm ||
       header.kind == ArtifactKind::kSourceMap || header.kind == ArtifactKind::kResponseBody ||
       header.kind == ArtifactKind::kCanvasDataUrl || header.kind == ArtifactKind::kBytecodeBuffer ||
-      header.kind == ArtifactKind::kWasmGuestAdapter || IsNetworkRequestArtifact(header.kind);
+      header.kind == ArtifactKind::kWasmGuestAdapter || IsNetworkRequestArtifact(header.kind) ||
+      header.kind == ArtifactKind::kStack;
   const bool valid_origin =
       header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
       header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
@@ -504,14 +517,19 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
       header.capture_origin == ArtifactCaptureOrigin::kRuntimeTypedArray ||
       header.capture_origin == ArtifactCaptureOrigin::kRuntimeAllocatingScript ||
       header.capture_origin == ArtifactCaptureOrigin::kNativeWasmGuest ||
-      header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest;
+      header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest ||
+      header.capture_origin == ArtifactCaptureOrigin::kRequestStack ||
+      header.capture_origin == ArtifactCaptureOrigin::kStackScript;
   const bool compatible_origin =
       header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest ||
       header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
       header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
       (header.kind == ArtifactKind::kJavaScript &&
        (header.capture_origin == ArtifactCaptureOrigin::kDynamicJavaScript ||
-        header.capture_origin == ArtifactCaptureOrigin::kRuntimeAllocatingScript)) ||
+        header.capture_origin == ArtifactCaptureOrigin::kRuntimeAllocatingScript ||
+        header.capture_origin == ArtifactCaptureOrigin::kStackScript)) ||
+      (header.kind == ArtifactKind::kStack &&
+       header.capture_origin == ArtifactCaptureOrigin::kRequestStack) ||
       (header.kind == ArtifactKind::kWasm &&
        (header.capture_origin == ArtifactCaptureOrigin::kWebAssemblyCompile ||
         header.capture_origin == ArtifactCaptureOrigin::kWebAssemblyModule ||
@@ -558,6 +576,8 @@ const char* ArtifactKindName(const ArtifactKind kind) noexcept {
       return "response_headers";
     case ArtifactKind::kCookieList:
       return "cookie_list";
+    case ArtifactKind::kStack:
+      return "stack";
     case ArtifactKind::kUnknown:
       return "unknown";
   }
@@ -586,6 +606,10 @@ const char* ArtifactCaptureOriginName(const ArtifactCaptureOrigin origin) noexce
       return "native_wasm_guest";
     case ArtifactCaptureOrigin::kNetworkRequest:
       return "network_request";
+    case ArtifactCaptureOrigin::kRequestStack:
+      return "request_stack";
+    case ArtifactCaptureOrigin::kStackScript:
+      return "stack_script";
     case ArtifactCaptureOrigin::kUnknown:
       return "unknown";
   }

@@ -22,7 +22,7 @@ define ignored-rust-test
 		{ echo "Expected exactly one passing ignored test: $(2)" >&2; exit 1; }
 endef
 
-check: native-wasm-golden-check native-js-golden-check network-request-wire-check network-scope-wire-check tab-link-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
+check: native-wasm-golden-check native-js-golden-check network-request-wire-check request-stack-wire-check debugger-observation-wire-check network-scope-wire-check tab-link-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	$(call ignored-rust-test,--lib,owned_vm_debugger::tests::owned_vm_real_helper_control_and_independent_goldens,\
@@ -163,6 +163,14 @@ network-scope-wire-check: $(NETWORK_SCOPE_TEST)
 .PHONY: tab-link-wire-check
 tab-link-wire-check: $(TAB_LINK_TEST)
 	REB_TAB_LINK_TEST="$(abspath $(TAB_LINK_TEST))" node tools/check-tab-link-wire.mjs
+
+.PHONY: request-stack-wire-check
+request-stack-wire-check: $(REQUEST_STACK_TEST) $(UI_STARTUP_DEPS)
+	REB_REQUEST_STACK_TEST="$(abspath $(REQUEST_STACK_TEST))" node tools/check-request-stack-wire.mjs
+
+.PHONY: debugger-observation-wire-check
+debugger-observation-wire-check: $(DEBUGGER_OBSERVATION_TEST)
+	REB_DEBUGGER_OBSERVATION_TEST="$(abspath $(DEBUGGER_OBSERVATION_TEST))" node tools/check-debugger-observation-wire.mjs
 
 native-proxy-policy-check: $(NATIVE_PROXY_POLICY_TEST)
 	$(NATIVE_PROXY_POLICY_TEST)

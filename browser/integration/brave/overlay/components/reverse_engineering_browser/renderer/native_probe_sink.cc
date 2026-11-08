@@ -1704,7 +1704,11 @@ void NativeProbeSink::CaptureGeneratedArtifact(
        capture_origin == NativeArtifactCaptureOrigin::kCanvasToDataUrl && creator_event_id != 0 &&
        execution_context_id == 0) ||
       (kind == NativeArtifactKind::kBytecodeBuffer &&
-       capture_origin == NativeArtifactCaptureOrigin::kRuntimeTypedArray);
+       capture_origin == NativeArtifactCaptureOrigin::kRuntimeTypedArray) ||
+      (kind == NativeArtifactKind::kStack &&
+       capture_origin == NativeArtifactCaptureOrigin::kRequestStack && creator_event_id != 0) ||
+      (kind == NativeArtifactKind::kJavaScript &&
+       capture_origin == NativeArtifactCaptureOrigin::kStackScript && creator_event_id != 0);
   if (!valid_kind_and_origin ||
       (kind != NativeArtifactKind::kCanvasDataUrl && execution_context_id == 0)) {
     return;

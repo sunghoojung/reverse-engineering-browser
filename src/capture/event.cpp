@@ -1,4 +1,5 @@
 #include "reb/event.hpp"
+#include "reb/debugger_observation.hpp"
 #include "reb/js_dispatch.hpp"
 #include "reb/js_invocation.hpp"
 #include "reb/network_cookies.hpp"
@@ -7,6 +8,7 @@
 #include "reb/network_response_body.hpp"
 #include "reb/network_scope.hpp"
 #include "reb/tab_link.hpp"
+#include "reb/request_stack.hpp"
 #include "reb/wasm_dispatch.hpp"
 #include "reb/wasm_guest.hpp"
 
@@ -90,6 +92,14 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kCaptureExclusion:
     case EventType::kTabSet:
     case EventType::kRequestTabLink:
+    case EventType::kRequestInitiatorStack:
+    case EventType::kScriptIdentity:
+    case EventType::kRequestWatchMatch:
+    case EventType::kListenerDispatch:
+    case EventType::kTimerObservation:
+    case EventType::kCspViolation:
+    case EventType::kExceptionObservation:
+    case EventType::kDomMutation:
       return true;
     case EventType::kUnknown:
       return false;
@@ -182,6 +192,13 @@ bool IsValidEvent(const EventRecord& event) noexcept {
   if (event.header.type == EventType::kWasmDispatchOverflow && !IsValidWasmDispatchOverflow(event))
     return false;
   if (event.header.type == EventType::kWasmIndirectOverflow && !IsValidWasmIndirectOverflow(event))
+    return false;
+  if (event.header.type == EventType::kRequestInitiatorStack && !IsValidRequestStackEvent(event))
+    return false;
+  if (event.header.type == EventType::kScriptIdentity && !IsValidScriptIdentityEvent(event))
+    return false;
+  if (event.header.type >= EventType::kRequestWatchMatch &&
+      event.header.type <= EventType::kDomMutation && !IsValidObservationEvent(event))
     return false;
   if ((event.header.type == EventType::kRequestHeaders ||
        event.header.type == EventType::kResponseHeaders) &&
@@ -408,6 +425,22 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "tab_set";
     case EventType::kRequestTabLink:
       return "request_tab_link";
+    case EventType::kRequestInitiatorStack:
+      return "request_initiator_stack";
+    case EventType::kScriptIdentity:
+      return "script_identity";
+    case EventType::kRequestWatchMatch:
+      return "request_watch_match";
+    case EventType::kListenerDispatch:
+      return "listener_dispatch";
+    case EventType::kTimerObservation:
+      return "timer_observation";
+    case EventType::kCspViolation:
+      return "csp_violation";
+    case EventType::kExceptionObservation:
+      return "exception_observation";
+    case EventType::kDomMutation:
+      return "dom_mutation";
     case EventType::kUnknown:
       return "unknown";
   }

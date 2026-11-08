@@ -80,12 +80,23 @@ enum class EventType : std::uint16_t {
   kCookieList = 32,
   // What happened to a response body, see protocol/native-network-v3.md.
   kResponseBody = 33,
+  // Request initiator stack and the script identities it names.
+  // See protocol/native-network-v3.md.
+  kRequestInitiatorStack = 34,
+  kScriptIdentity = 35,
   // Counted browser-internal exclusion; see protocol/native-network-v3.md.
   kCaptureExclusion = 36,
   // Worker client tabs and the request that names them; same contract.
   kTabSet = 37,
   kRequestTabLink = 38,
   kScriptCookie = 39,
+  // See protocol/native-debugger-observation-v1.md.
+  kRequestWatchMatch = 40,
+  kListenerDispatch = 41,
+  kTimerObservation = 42,
+  kCspViolation = 43,
+  kExceptionObservation = 44,
+  kDomMutation = 45,
 };
 
 enum class EventFlag : std::uint16_t {

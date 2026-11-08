@@ -697,7 +697,7 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 47, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 50, "Review route coverage when the API changes");
     assert!(ids.contains("get_request_headers"));
     assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
     assert!(
@@ -1137,6 +1137,17 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
         ),
         ("/api/wasm?artifact_id=missing", "/api/wasm", 400),
         ("/api/wasm?artifact_id=1&sections=exports", "/api/wasm", 400),
+        ("/api/request-stack?request_id=3", "/api/request-stack", 400),
+        (
+            "/api/request-stack?process_id=0&request_id=3",
+            "/api/request-stack",
+            400,
+        ),
+        (
+            "/api/request-stack?process_id=4&request_id=3",
+            "/api/request-stack",
+            200,
+        ),
     ] {
         assert_contract_response(server.get(path).await, "get", route, status).await;
     }

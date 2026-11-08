@@ -681,7 +681,11 @@ windows. Both panes stay within the available workspace height; the request
 ledger and inspector body scroll independently. Captured-tab and domain filters
 share a compact row at narrow widths. Native capture records the method, host,
 status and lifecycle timing of each request, and the request body's length,
-type and SHA-256. Content capture sessions add the path and query and bounded
+type and SHA-256. Initiator shows the request call stack natively recorded
+when the renderer started the request, innermost first with `await`
+separators and an omitted-frames marker; a frame opens Sources at its
+position, and a request started with no script on the stack reads "Parser".
+Content capture sessions add the path and query and bounded
 request body bytes, which General shows as text, response bodies, and request
 and response header blocks ([native network v3](../../protocol/native-network-v3.md)).
 Response
@@ -867,6 +871,7 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | `index.html`, `app.css` | Document structure and visual layout |
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
 | `invocation_sites.js` | Track calls: the saved invocation site pane, byte offsets of Sources positions and the titlebar tracking chip |
+| `request_stack.js` | Initiator tab: the native request call stack from `get_request_stack`, opening Sources at a frame, and the initiator chain |
 | `command_palette.js` | The ⌘ / Ctrl + K palette: provider registry, matching, ranking and caps, and its dialog controller; `app.js` supplies the built-in providers |
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
 | `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status/name search, the General coverage view, and the saved-capture export document |

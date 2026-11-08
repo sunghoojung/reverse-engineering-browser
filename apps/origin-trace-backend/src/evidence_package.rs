@@ -479,8 +479,10 @@ fn identities<'a>(
                     != Some(network_request || matches!(kind, "response_body" | "canvas_data_url"))
                     || (network_request != (origin == "network_request"))
                     || (value["execution_context_id"].is_null() && origin != "unknown")
-                    || (origin == "dynamic_javascript"
+                    || (matches!(origin, "dynamic_javascript" | "stack_script")
                         && (kind != "javascript" || context.is_none_or(|id| id == 0)))
+                    || ((kind == "stack") != (origin == "request_stack"))
+                    || (origin == "request_stack" && context.is_none_or(|id| id == 0))
                     || (origin.starts_with("webassembly_")
                         && (kind != "wasm" || context.is_none_or(|id| id == 0)))
                     || (origin == "canvas_to_data_url"

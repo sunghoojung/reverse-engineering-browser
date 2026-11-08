@@ -448,6 +448,16 @@ runtime buffer callback obtains its isolate from Blink's execution context,
 which is supported at the pinned V8 revision; a missing context emits the
 existing omission reason.
 
+## Request initiator stacks
+
+`REB_NATIVE_REQUEST_STACKS=1`, or `--js-flags=--reb-request-stacks`, records
+the JavaScript and Wasm stack and `await` chain each document request started
+from. The packaged app turns it on when Network and Artifact are captured.
+`patches/v8/0015-capture-native-request-stacks.patch` adds the walker and
+`patches/chromium/0025-record-request-initiator-stacks.patch` the Blink
+provider and the loader call. See
+[Native network v3](../../../protocol/native-network-v3.md).
+
 ## Native Wasm dispatch (opt-in)
 
 Rebuilt browsers can record physical `br_table` operands with

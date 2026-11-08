@@ -220,6 +220,14 @@ pub struct EventFilter {
     until_ns: Option<u64>,
 }
 impl EventFilter {
+    /// Exact type and identifier selection for an internal lookup.
+    pub fn exact(types: &[&str], ids: Vec<(&'static str, u64)>) -> Self {
+        Self {
+            types: types.iter().map(|t| (*t).to_owned()).collect(),
+            ids,
+            ..Self::default()
+        }
+    }
     pub fn matches(&self, event: &Value) -> bool {
         let named = |names: &[String], value: &Value| {
             names.is_empty()

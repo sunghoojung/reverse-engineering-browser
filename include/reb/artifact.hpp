@@ -44,6 +44,8 @@ enum class ArtifactKind : std::uint16_t {
   kRequestHeaders = 10,
   kResponseHeaders = 11,
   kCookieList = 12,
+  // Request initiator stack frames, protocol/native-network-v3.md.
+  kStack = 13,
 };
 
 enum class ArtifactCaptureOrigin : std::uint16_t {
@@ -58,6 +60,9 @@ enum class ArtifactCaptureOrigin : std::uint16_t {
   kRuntimeAllocatingScript = 8,
   kNativeWasmGuest = 9,
   kNetworkRequest = 10,
+  kRequestStack = 12,
+  // A JavaScript source retained because a request stack named it.
+  kStackScript = 13,
 };
 
 struct ArtifactHeader final {

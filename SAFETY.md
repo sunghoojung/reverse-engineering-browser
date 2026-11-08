@@ -64,6 +64,18 @@ it.
   or `js_invocation_saved_sites`), never inherited, and keep their own saved
   set, so an agent cannot read or change what the researcher's next capture
   arms.
+- Request call stacks (`REB_NATIVE_REQUEST_STACKS`, on by default in the
+  packaged app when Network and Artifact are captured) record script IDs and
+  positions of the stack that started each document request, never names or
+  values, and retain the source of each script a stack names as an artifact.
+  See [Native network v3](protocol/native-network-v3.md).
+- Debugger observation rules (Console `watch`) are off until armed on one
+  selected live document and never pause it. They record request matches,
+  listener dispatch, timers, CSP violations, exceptions and mutations of at most
+  4 selected elements as script IDs, positions, kinds, the blocked host and
+  attribute names, never values, text, paths or queries. Navigation, `unwatch`,
+  disconnect or a new capture disarms them. See
+  [Native debugger observation v1](protocol/native-debugger-observation-v1.md).
 - Standalone probes remain inactive without an enabled session. Enabled artifact
   capture retains raw source URLs locally; metadata is not necessarily secret-free.
 - With Network capture on, every native request records its body's length,
@@ -148,6 +160,10 @@ it.
   invent memory bytes or return values. A current Brave build does not implement
   that peer. Other Wasm evidence comes from native capture and stored artifacts.
   The owned VM debugger controls only the project's own native fixture helper.
+  A pausing page debugger is proposed in
+  [Native debugger v1](docs/product/native-debugger-v1.md) and is not policy
+  until a maintainer approves that wording here; `get_native_debugger` reports
+  it unsupported.
 - An agent starts, drives and ends a live capture session only through the
   session tools: `start_live_session` or `reb-api session start`, and
   `session_action` with `open_url` or `end`. They stay hidden until the

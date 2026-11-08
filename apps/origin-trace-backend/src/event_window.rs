@@ -308,6 +308,7 @@ fn is_network(event: &Value) -> bool {
                     | "request_target"
                     | "request_body"
                     | "request_initiator_stack"
+                    | "request_watch_match"
             )
         )
 }

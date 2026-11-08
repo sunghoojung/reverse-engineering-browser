@@ -358,12 +358,21 @@ enum OriginTraceDocumentBuilder {
   private static func binaryRecordSummary(
     category: String, operation: String, event: [String: Any]
   ) -> String? {
-    guard category == "network",
-      ["request_target", "request_body", "request_initiator_stack", "script_identity"].contains(
-        operation),
+    let network = [
+      "request_target", "request_body", "request_initiator_stack", "script_identity",
+      "request_watch_match",
+    ]
+    let observation = [
+      "listener_dispatch", "timer_observation", "csp_violation", "exception_observation",
+      "dom_mutation",
+    ]
+    let isNetwork = category == "network" && network.contains(operation)
+    guard
+      isNetwork || (category == "runtime" && observation.contains(operation)),
       let payload = event["payload"] as? String
     else { return nil }
-    return "Binary \(operation) record, \(payload.count / 2) bytes, not shown as text; Traffic shows its fields"
+    let whereShown = isNetwork ? "Traffic shows its fields" : "decoded on read"
+    return "Binary \(operation) record, \(payload.count / 2) bytes, not shown as text; \(whereShown)"
   }
 
   // Exactly one surviving candidate, or none. Two adjacent records are a tie

@@ -1790,10 +1790,14 @@ fn validate_command(command: &Value) -> Result<()> {
         "complete" => &["operation", "path", "prefix"],
         "await" | "release" | "store" | "cancel" | "source" | "listeners" | "monitor"
         | "unmonitor" => &["operation", "handle"],
-        "poll" | "clear" | "last" | "traffic" => &["operation"],
+        "poll" | "clear" | "last" | "traffic" | "unwatch" => &["operation"],
+        "watch" => &["operation", "rules"],
         _ => return Err(Error::bad("Invalid runtime operation")),
     };
     validation::fields(command, fields, "Runtime command")?;
+    if operation == "watch" {
+        crate::debugger_watch::validate(&command["rules"])?;
+    }
     if operation == "evaluate" {
         let source = validation::text(&command["source"], "JavaScript", SOURCE_LIMIT, false, true)?;
         if source.is_empty() || source.contains('\0') {

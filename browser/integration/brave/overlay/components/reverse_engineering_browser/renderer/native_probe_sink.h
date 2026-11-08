@@ -29,6 +29,7 @@
 
 namespace reb {
 
+class NativeDebuggerWatch;
 class NativeRequestStackWalk;
 
 // Maximum allocating-script source prefix scanned to admit a runtime buffer.
@@ -424,6 +425,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
 
  private:
   friend class base::NoDestructor<NativeProbeSink>;
+  friend class NativeDebuggerWatch;
   friend class NativeRequestStackWalk;
   NativeProbeSink() noexcept;
 

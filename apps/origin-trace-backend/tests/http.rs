@@ -697,7 +697,7 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 45, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 47, "Review route coverage when the API changes");
     assert!(
         ids.contains("get_js_invocation_sites")
             && ids.contains("resolve_js_invocation_site")
@@ -785,7 +785,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 45);
+    assert_eq!(operation_count, 47);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [

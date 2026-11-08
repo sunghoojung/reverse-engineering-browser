@@ -104,6 +104,8 @@ component("renderer_sink") {
     "common/native_vm_dispatch_emit.h",
     "common/native_worker_source.cc",
     "common/native_worker_source.h",
+    "renderer/native_debugger_observation.cc",
+    "renderer/native_debugger_observation.h",
     "renderer/native_probe_sink.cc",
     "renderer/native_probe_sink.h",
     "renderer/native_request_stack.cc",

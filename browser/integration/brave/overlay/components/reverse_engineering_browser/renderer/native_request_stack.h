@@ -6,12 +6,14 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_RENDERER_NATIVE_REQUEST_STACK_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_RENDERER_NATIVE_REQUEST_STACK_H_
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string_view>
 
 #include "base/component_export.h"
+#include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_request_stack.h"
 
 namespace reb {
@@ -64,6 +66,14 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
   // Called by the loader with RecordRequestInitiated's admitted sequence.
   // Zero, or no provider, returns after at most one atomic load.
   static void Record(std::int32_t request_id, std::uint64_t initiated_sequence) noexcept;
+  // One debugger observation, protocol/native-debugger-observation-v1.md:
+  // the current stack plus a 48-byte tail. Without a provider the record
+  // still goes out with stack state no_script. Main thread only.
+  static void RecordObservation(NativeProbeType type,
+                                std::int32_t request_id,
+                                std::uint64_t parent_sequence,
+                                std::uint64_t frame_id,
+                                const std::array<std::uint8_t, 48>& tail) noexcept;
 
   NativeRequestStackWalk(const NativeRequestStackWalk&) = delete;
   NativeRequestStackWalk& operator=(const NativeRequestStackWalk&) = delete;
@@ -88,11 +98,15 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
                          std::uint64_t generation,
                          std::int32_t request_id,
                          std::uint64_t parent_sequence,
-                         std::uint64_t frame_id) noexcept;
+                         std::uint64_t frame_id,
+                         NativeProbeType type = NativeProbeType::kRequestInitiatorStack,
+                         const std::array<std::uint8_t, 48>& tail = {}) noexcept;
   void Emit(const NativeRequestStackPayload& payload) noexcept;
 
   NativeRequestStackTables* const state_;
   const std::uint64_t generation_;
+  const NativeProbeType type_;
+  const std::array<std::uint8_t, 48> tail_;
   const std::int32_t request_id_;
   const std::uint64_t parent_sequence_;
   const std::uint64_t frame_id_;

@@ -132,12 +132,18 @@ std::uint32_t CountDistinctScripts(NativeRequestStackTables& state,
   return count;
 }
 
+bool IsObservation(const NativeProbeType type) noexcept {
+  return type >= NativeProbeType::kRequestWatchMatch && type <= NativeProbeType::kDomMutation;
+}
+
 NativeProbeEvent ChildEvent(const NativeProbeType type,
                             const std::uint64_t session_id,
                             const std::uint64_t frame_id,
                             const std::uint64_t parent) noexcept {
   NativeProbeEvent event;
-  event.header.category = NativeProbeCategory::kNetwork;
+  event.header.category = IsObservation(type) && type != NativeProbeType::kRequestWatchMatch
+                              ? NativeProbeCategory::kRuntime
+                              : NativeProbeCategory::kNetwork;
   event.header.type = type;
   event.header.payload_size = static_cast<std::uint32_t>(kNativeProbeInlinePayloadSize);
   event.header.session_id = session_id;
@@ -195,13 +201,60 @@ void NativeRequestStackWalk::Record(const std::int32_t request_id,
   walk.Emit(payload);
 }
 
+void NativeRequestStackWalk::RecordObservation(const NativeProbeType type,
+                                               const std::int32_t request_id,
+                                               const std::uint64_t parent_sequence,
+                                               const std::uint64_t frame_id,
+                                               const std::array<std::uint8_t, 48>& tail) noexcept {
+  if (!IsObservation(type) || g_walking) {
+    return;
+  }
+  NativeProbeSink& sink = NativeProbeSink::Get();
+  const std::uint64_t generation = sink.config_generation_.load(std::memory_order_acquire);
+  if ((generation & 1U) != 0) {
+    return;
+  }
+  // Zero means the current document's frame, as the request stack walk resolves.
+  std::uint64_t resolved_frame = frame_id;
+  if (resolved_frame == 0) {
+    const NativeProbeFrameIdProvider frame_ids =
+        sink.frame_id_provider_.load(std::memory_order_relaxed);
+    resolved_frame = frame_ids ? frame_ids() : 0;
+  }
+  const NativeRequestStackProvider provider = g_provider.load(std::memory_order_acquire);
+  NativeRequestStackWalk walk(provider ? g_state : nullptr, generation, request_id,
+                              parent_sequence, resolved_frame, type, tail);
+  NativeRequestStackWalkResult result = NativeRequestStackWalkResult::kNoScript;
+  if (provider) {
+    g_walking = true;
+    result = provider(walk);
+    g_walking = false;
+  }
+  if (result == NativeRequestStackWalkResult::kWalked) {
+    if (!walk.frames_ready_) {
+      walk.FramesReady(0, 0, 0, 0, false);
+    }
+    return;
+  }
+  NativeRequestStackPayload payload;
+  payload.state = static_cast<std::uint8_t>(result == NativeRequestStackWalkResult::kNoScript
+                                                ? NativeRequestStackState::kNoScript
+                                                : NativeRequestStackState::kUnsupportedThread);
+  payload.flags = kNativeRequestStackTaskCallersNotCaptured;
+  walk.Emit(payload);
+}
+
 NativeRequestStackWalk::NativeRequestStackWalk(NativeRequestStackTables* const state,
                                                const std::uint64_t generation,
                                                const std::int32_t request_id,
                                                const std::uint64_t parent_sequence,
-                                               const std::uint64_t frame_id) noexcept
+                                               const std::uint64_t frame_id,
+                                               const NativeProbeType type,
+                                               const std::array<std::uint8_t, 48>& tail) noexcept
     : state_(state),
       generation_(generation),
+      type_(type),
+      tail_(tail),
       request_id_(request_id),
       parent_sequence_(parent_sequence),
       frame_id_(frame_id) {}
@@ -239,11 +292,15 @@ void NativeRequestStackWalk::Emit(const NativeRequestStackPayload& payload) noex
     return;
   }
   NativeProbeEvent event =
-      ChildEvent(NativeProbeType::kRequestInitiatorStack,
-                 sink.session_id_.load(std::memory_order_relaxed), frame_id_, parent_sequence_);
-  event.header.request_id = static_cast<std::uint64_t>(static_cast<std::uint32_t>(request_id_));
+      ChildEvent(type_, sink.session_id_.load(std::memory_order_relaxed), frame_id_, parent_sequence_);
+  if (type_ == NativeProbeType::kRequestInitiatorStack ||
+      type_ == NativeProbeType::kRequestWatchMatch) {
+    event.header.request_id = static_cast<std::uint64_t>(static_cast<std::uint32_t>(request_id_));
+  }
   event.header.sequence_number = sink.next_sequence_.fetch_add(1, std::memory_order_relaxed);
-  event.inline_payload = EncodeNativeRequestStackRecord(payload);
+  NativeRequestStackPayload record = payload;
+  record.reserved1 = tail_;
+  event.inline_payload = EncodeNativeRequestStackRecord(record);
   if (sink.EmitStatus(event, generation_) == NativeProbeEmitStatus::kAdmitted) {
     stack_sequence_ = event.header.sequence_number;
   }

@@ -32,8 +32,9 @@ JS_DISPATCH_TEST := $(BUILD_DIR)/tests/js-dispatch-test
 NETWORK_REQUEST_TEST := $(BUILD_DIR)/tests/network-request-test
 JS_INVOCATION_TEST := $(BUILD_DIR)/tests/js-invocation-test
 REQUEST_STACK_TEST := $(BUILD_DIR)/tests/request-stack-test
+DEBUGGER_OBSERVATION_TEST := $(BUILD_DIR)/tests/debugger-observation-test
 ARTIFACT_TEST_BINARY := $(BUILD_DIR)/tests/artifact-test
-NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST) $(NATIVE_GUEST_TEST) $(JS_DISPATCH_TEST) $(NETWORK_REQUEST_TEST) $(JS_INVOCATION_TEST) $(REQUEST_STACK_TEST) $(NATIVE_CONSOLE_DOCUMENT_START_TEST)
+NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST) $(NATIVE_GUEST_TEST) $(JS_DISPATCH_TEST) $(NETWORK_REQUEST_TEST) $(JS_INVOCATION_TEST) $(REQUEST_STACK_TEST) $(DEBUGGER_OBSERVATION_TEST) $(NATIVE_CONSOLE_DOCUMENT_START_TEST)
 ORIGIN_TRACE_BACKEND := apps/origin-trace-backend/target/debug/origin-trace-backend
 VM_ANALYZER := apps/origin-trace-backend/target/debug/origin-trace-vm
 
@@ -180,6 +181,8 @@ $(NETWORK_REQUEST_TEST): $(BUILD_DIR)/tests/network_request_test.o $(BUILD_DIR)/
 $(BUILD_DIR)/tests/request_stack_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
 $(REQUEST_STACK_TEST): $(BUILD_DIR)/tests/request_stack_test.o $(BUILD_DIR)/src/capture/event.o \
 	$(BUILD_DIR)/src/evidence/artifact.o
+$(BUILD_DIR)/tests/debugger_observation_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
+$(DEBUGGER_OBSERVATION_TEST): $(BUILD_DIR)/tests/debugger_observation_test.o $(BUILD_DIR)/src/capture/event.o
 NATIVE_JS_DISPATCH_GOLDEN := $(BUILD_DIR)/reb-native-js-dispatch-golden
 .PHONY: native-js-dispatch-golden
 native-js-dispatch-golden: $(NATIVE_JS_DISPATCH_GOLDEN)

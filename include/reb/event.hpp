@@ -77,6 +77,13 @@ enum class EventType : std::uint16_t {
   // See protocol/native-network-v3.md.
   kRequestInitiatorStack = 34,
   kScriptIdentity = 35,
+  // See protocol/native-debugger-observation-v1.md.
+  kRequestWatchMatch = 40,
+  kListenerDispatch = 41,
+  kTimerObservation = 42,
+  kCspViolation = 43,
+  kExceptionObservation = 44,
+  kDomMutation = 45,
 };
 
 enum class EventFlag : std::uint16_t {

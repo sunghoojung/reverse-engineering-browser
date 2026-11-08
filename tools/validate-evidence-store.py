@@ -105,6 +105,12 @@ EVENT_TYPES = {
     "request_failed",
     "request_initiated",
     "request_initiator_stack",
+    "request_watch_match",
+    "listener_dispatch",
+    "timer_observation",
+    "csp_violation",
+    "exception_observation",
+    "dom_mutation",
     "request_redirected",
     "request_started",
     "request_target",
@@ -224,6 +230,53 @@ def valid_stack_child(event: dict, payload: bytes) -> bool:
 def valid_request_stack(event: dict, payload: bytes) -> bool:
     if not valid_stack_child(event, payload) or event["request_id"] == "0" or any(payload[80:]):
         return False
+    return valid_stack_summary(payload)
+
+
+def ascii_name(field: bytes, length: int, required: bool) -> bool:
+    if length > len(field) or (required and length == 0):
+        return False
+    return (all(0x20 < c < 0x7F for c in field[:length]) and not any(field[length:]))
+
+
+def optional_js_frame(frame: bytes) -> bool:
+    return not any(frame) or (frame[0] == 1 and valid_stack_frame(frame, False))
+
+
+OBSERVATION_TYPES = frozenset((
+    "request_watch_match", "listener_dispatch", "timer_observation",
+    "csp_violation", "exception_observation", "dom_mutation"))
+
+
+def valid_observation(event: dict, payload: bytes) -> bool:
+    """Types 40-45, protocol/native-debugger-observation-v1.md."""
+    kind = event["type"]
+    request = kind == "request_watch_match"
+    if (event["category"] != ("network" if request else "runtime") or len(payload) != 128
+            or payload[:4] != b"\x01\x00\x80\x00" or payload[6:8] != b"\0\0"
+            or event["artifact_id"] != "0" or (event["request_id"] == "0") == request
+            or (request and event["parent_event_id"] == "0")
+            or not valid_stack_summary(payload)):
+        return False
+    t = payload[80:]
+    if request:
+        return t[0] < 8 and t[1] & ~1 == 0 and not any(t[2:])
+    if kind == "listener_dispatch":
+        return (t[0] < 16 and 1 <= t[1] <= 5 and optional_js_frame(t[4:20])
+                and ascii_name(t[21:48], t[20], True))
+    if kind == "timer_observation":
+        return (t[0] in (1, 2) and t[1] in (1, 2) and t[2] & ~1 == 0 and t[3] == 0
+                and optional_js_frame(t[12:28]) and not any(t[28:]))
+    if kind == "csp_violation":
+        return t[1] in (1, 2) and ascii_name(t[3:48], t[2], False)
+    if kind == "exception_observation":
+        return t[0] in (1, 2, 3) and not any(t[1:4]) and optional_js_frame(t[4:20]) and not any(t[20:])
+    return (t[0] in (1, 2, 3) and t[1] < 4 and ascii_name(t[5:37], t[4], t[0] == 1)
+            and (t[0] == 1 or t[4] == 0) and not any(t[37:]))
+
+
+def valid_stack_summary(payload: bytes) -> bool:
+    """Bytes 0-79 shared by request_initiator_stack and debugger observations."""
     state, flags = payload[4], payload[5]
     total, recorded, omitted = (int.from_bytes(payload[i:i + 4], "little") for i in (8, 12, 16))
     async_frames = int.from_bytes(payload[20:22], "little")
@@ -643,6 +696,8 @@ def validate_event(event: object, line_number: int) -> None:
         raise ValueError(f"line {line_number}: native request initiator stack record is invalid")
     if event["type"] == "script_identity" and not valid_script_identity(event, payload):
         raise ValueError(f"line {line_number}: native script identity record is invalid")
+    if event["type"] in OBSERVATION_TYPES and not valid_observation(event, payload):
+        raise ValueError(f"line {line_number}: native debugger observation record is invalid")
     if event["type"].startswith("js_invocation_") and not valid_js_invocation(event, payload):
         raise ValueError(f"line {line_number}: native JavaScript invocation record is invalid")
     if event["type"] in ("wasm_guest_dispatch", "wasm_guest_invocation"):

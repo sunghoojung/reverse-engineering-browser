@@ -422,6 +422,14 @@ impl App {
                 }
                 self.live_wasm.state()?
             }
+            "/api/native-debugger" => {
+                if !q.0.is_empty() {
+                    return Err(Error::bad(
+                        "Native debugger state takes no query parameters",
+                    ));
+                }
+                crate::native_debugger::state()?
+            }
             "/api/native-console" => self.native_console.state().await,
             "/api/native-console/document-start" => {
                 if q.0.keys().any(|key| key != "after_sequence") {
@@ -1350,6 +1358,7 @@ impl App {
                 _ => Err(Error::bad("Analyst workspace action is invalid")),
             },
             "/api/live-wasm/actions" => self.live_wasm.action(value),
+            "/api/native-debugger/actions" => crate::native_debugger::action(value),
             "/api/native-console/actions" => self.native_console.action(value).await,
             "/api/js-invocation-sites/actions" => {
                 validation::schema("JsInvocationSiteAction", value, 400)?;

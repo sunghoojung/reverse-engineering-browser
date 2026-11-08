@@ -1,4 +1,5 @@
 #include "reb/event.hpp"
+#include "reb/debugger_observation.hpp"
 #include "reb/js_dispatch.hpp"
 #include "reb/js_invocation.hpp"
 #include "reb/network_request.hpp"
@@ -80,6 +81,12 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kWasmIndirectOverflow:
     case EventType::kRequestInitiatorStack:
     case EventType::kScriptIdentity:
+    case EventType::kRequestWatchMatch:
+    case EventType::kListenerDispatch:
+    case EventType::kTimerObservation:
+    case EventType::kCspViolation:
+    case EventType::kExceptionObservation:
+    case EventType::kDomMutation:
       return true;
     case EventType::kUnknown:
       return false;
@@ -176,6 +183,9 @@ bool IsValidEvent(const EventRecord& event) noexcept {
   if (event.header.type == EventType::kRequestInitiatorStack && !IsValidRequestStackEvent(event))
     return false;
   if (event.header.type == EventType::kScriptIdentity && !IsValidScriptIdentityEvent(event))
+    return false;
+  if (event.header.type >= EventType::kRequestWatchMatch &&
+      event.header.type <= EventType::kDomMutation && !IsValidObservationEvent(event))
     return false;
   return event.header.protocol_version == kEventProtocolVersion &&
          event.header.header_size == sizeof(EventHeader) &&
@@ -361,6 +371,18 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "request_initiator_stack";
     case EventType::kScriptIdentity:
       return "script_identity";
+    case EventType::kRequestWatchMatch:
+      return "request_watch_match";
+    case EventType::kListenerDispatch:
+      return "listener_dispatch";
+    case EventType::kTimerObservation:
+      return "timer_observation";
+    case EventType::kCspViolation:
+      return "csp_violation";
+    case EventType::kExceptionObservation:
+      return "exception_observation";
+    case EventType::kDomMutation:
+      return "dom_mutation";
     case EventType::kUnknown:
       return "unknown";
   }

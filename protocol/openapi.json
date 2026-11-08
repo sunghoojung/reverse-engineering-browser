@@ -3642,6 +3642,185 @@
         }
       }
     },
+    "/api/native-debugger": {
+      "get": {
+        "operationId": "get_native_debugger",
+        "summary": "Read the pausing native debugger state, or that it is unsupported",
+        "description": "availability unsupported with reason browser_debugger_unsupported means no Brave build serves the native debugger; that is not an empty breakpoint list, and no frames, scopes or values are invented. policy proposed_pending_approval means docs/product/native-debugger-v1.md has not been approved into SAFETY.md. Non-pausing observation rules are the Console watch command; their records arrive through get_events and wait_for_events.",
+        "tags": [
+          "native-debugger"
+        ],
+        "responses": {
+          "200": {
+            "description": "Debugger state, or an explicit unsupported reason.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeDebuggerState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unexpected query.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/native_debugger.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [
+            "Unsupported is not an idle debugger: nothing is attached and no page is paused by this backend."
+          ],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state only. The pausing debugger is a proposal behind --reb-native-debugger, off by default; see docs/product/native-debugger-v1.md.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/native_debugger.rs",
+              "symbol": "state"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/native-debugger/actions": {
+      "post": {
+        "operationId": "native_debugger_action",
+        "summary": "Set breakpoints, pause on exceptions, step, resume, or evaluate on a paused frame",
+        "description": "Every action names one selected live document (target_id) and its document_epoch; navigation makes the epoch stale. A pause holds a lease of at most 60 seconds that resumes the page visibly when it expires. Paused values are bounded, ephemeral and never added to evidence. Commands are never retried. Until a Brave build serves the debugger the response is 503 and nothing is sent.",
+        "tags": [
+          "native-debugger"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeDebuggerAction"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "Invalid or unconfirmed input. Nothing was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The request body deadline was exceeded. Nothing was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local failure before a command was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No Brave build serves the native debugger. Nothing was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-max-body-bytes": 65536,
+        "x-source": "apps/origin-trace-backend/src/native_debugger.rs",
+        "x-reb-execution": {
+          "kind": "action-dependent",
+          "effects": null,
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Resolve the exact request action and combine its prerequisites with these common operation guards. No action inherits a default effect classification.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::post"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/native-console": {
       "get": {
         "operationId": "get_native_console",
@@ -17583,6 +17762,712 @@
           }
         ]
       },
+      "NativeDebuggerState": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "contract_version",
+          "availability",
+          "reason",
+          "experiment_flag",
+          "policy",
+          "detectable",
+          "lease_limit_ms",
+          "lease",
+          "paused",
+          "breakpoints"
+        ],
+        "properties": {
+          "contract_version": {
+            "const": 1
+          },
+          "availability": {
+            "enum": [
+              "unsupported",
+              "available"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "browser_debugger_unsupported",
+              null
+            ]
+          },
+          "experiment_flag": {
+            "const": "--reb-native-debugger"
+          },
+          "policy": {
+            "enum": [
+              "proposed_pending_approval",
+              "approved"
+            ]
+          },
+          "detectable": {
+            "const": true
+          },
+          "lease_limit_ms": {
+            "const": 60000
+          },
+          "lease": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "lease_id",
+                  "expires_in_ms"
+                ],
+                "properties": {
+                  "lease_id": {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]{0,19}$"
+                  },
+                  "expires_in_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 60000
+                  }
+                }
+              }
+            ]
+          },
+          "paused": {
+            "type": "boolean"
+          },
+          "breakpoints": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "NativeDebuggerAction": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "script_id",
+              "line",
+              "column",
+              "confirm_pause"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "set_breakpoint"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "script_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295
+              },
+              "line": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295
+              },
+              "column": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "condition": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 1024
+              },
+              "log_message": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 1024
+              },
+              "confirm_pause": {
+                "const": true
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirm_pause",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "A line, conditional (condition) or logpoint (log_message, never pauses) breakpoint. A pause starts the lease.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "breakpoint_id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "remove_breakpoint"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "breakpoint_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Removes one breakpoint this connection set.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "mode",
+              "confirm_pause"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "pause_on_exceptions"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "uncaught",
+                  "all"
+                ]
+              },
+              "confirm_pause": {
+                "const": true
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirm_pause",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "none never pauses; uncaught and all pause at the throw and start the lease.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "lease_id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "resume"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "lease_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Ends the pause and its lease.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "lease_id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "step_over"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "lease_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "One step, then a new pause under the same lease.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "lease_id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "step_into"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "lease_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "One step into a call, then a new pause under the same lease.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "lease_id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "step_out"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "lease_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Runs to the caller, then a new pause under the same lease.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "lease_id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "release_lease"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "lease_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Resumes the page now and reports it, as an expired lease does.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "lease_id",
+              "call_frame_index",
+              "expression"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "evaluate_on_frame"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "lease_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "call_frame_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1055
+              },
+              "expression": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 8192
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "code-execution",
+                "live-target-mutation"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Watch and Console on a paused frame. The result is bounded, ephemeral text and is never added to evidence.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "lease_id",
+              "object_id",
+              "offset"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "get_properties"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "lease_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "object_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1048576
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "One page of a scope or object's properties; expand further pages by offset. Values are ephemeral.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          }
+        ]
+      },
       "NativeConsoleRuntimeCommand": {
         "oneOf": [
           {
@@ -17705,6 +18590,67 @@
             "required": [
               "operation"
             ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Arms non-pausing observation rules on the selected document, replacing any earlier set; protocol/native-debugger-observation-v1.md. Records arrive through get_events and wait_for_events. Nothing pauses and no value is read.",
+            "properties": {
+              "operation": { "type": "string", "enum": ["watch"] },
+              "rules": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "requests": {
+                    "type": "array",
+                    "maxItems": 8,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "url_contains": { "type": "string", "minLength": 1, "x-max-utf8-bytes": 256 },
+                        "method": { "type": "string", "pattern": "^[A-Z]{1,16}$" }
+                      },
+                      "required": ["url_contains"]
+                    }
+                  },
+                  "events": {
+                    "type": "array",
+                    "maxItems": 16,
+                    "uniqueItems": true,
+                    "items": { "type": "string", "pattern": "^[!-~]{1,27}$" }
+                  },
+                  "timers": { "type": "boolean" },
+                  "csp": { "type": "boolean" },
+                  "exceptions": { "type": "string", "enum": ["off", "uncaught", "all"] },
+                  "dom": {
+                    "type": "array",
+                    "maxItems": 4,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "handle": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" },
+                        "attributes": { "type": "boolean" },
+                        "subtree": { "type": "boolean" },
+                        "removal": { "type": "boolean" }
+                      },
+                      "required": ["handle"]
+                    }
+                  }
+                }
+              }
+            },
+            "required": ["operation", "rules"]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Disarms every observation rule of the selected document.",
+            "properties": {
+              "operation": { "type": "string", "enum": ["unwatch"] }
+            },
+            "required": ["operation"]
           }
         ]
       },

@@ -41,6 +41,7 @@ readonly sources
   "$fixture/main.cc" "$sources/renderer/native_probe_sink.cc" \
   "$sources/renderer/native_probe_transport.cc" "$sources/common/native_probe_queue.cc" \
   "$sources/renderer/native_request_stack.cc" \
+  "$sources/renderer/native_debugger_observation.cc" \
   "$root/src/analysis/owned_vm_guest_sampler.cpp" \
   "$root/src/analysis/owned_vm_fixture.cpp" \
   "$root/src/analysis/native_vm_recorder.cpp" \

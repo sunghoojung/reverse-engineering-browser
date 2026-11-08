@@ -19,6 +19,26 @@ invocationSitesPanel.refresh();
 const sourceFormatClient = createSourceFormatClient({
   onChange: source => { if (state.sourceFormatted && sourceIdentity(selectedSource()) === sourceIdentity(source)) renderSources(); }
 });
+const sourceTreeView = createSourceTree({
+  tree: elements.sourceTree, filter: document.querySelector('#source-tree-filter'),
+  expand: document.querySelector('#source-tree-expand'), collapse: document.querySelector('#source-tree-collapse'),
+  helpers: {isSource: isSourceArtifact, identity: sourceIdentity, reference: sourceReference, name: sourceDisplayName, isCurrent: sourceIsCurrent},
+  catalog: () => state.artifacts, collection: () => state.sourceCollection, selectedId: () => state.selectedArtifactId,
+  catalogLimit: () => state.artifactCatalogLimit, consoleDocuments: () => state.consoleDocuments,
+  kindLabel: source => sourceKindLabel(source.kind),
+  researcherName(source) {
+    const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
+    return names?.has('captured-artifact') ? names.nameFor('artifact', source) : null;
+  },
+  open: artifactId => selectArtifact(artifactId),
+  stale() {
+    state.sourceNoticeKind = 'warning';
+    state.sourceNotice = 'This exact source changed or is no longer available. Refresh the catalog before opening it.';
+    renderSourceHealth();
+  }
+});
+// The Console's document listing names frames and marks the top-level ones.
+document.addEventListener('reb:console-documents', event => { state.consoleDocuments = event.detail; renderSourceTree(); });
       const evidencePackagePanel = createEvidencePackagePanel({getContext: () => ({
         requestId: evidenceRequestKey(state.requests.find(request => request.id === state.selectedRequestId)),
         requestEvents: state.requests.find(request => request.id === state.selectedRequestId)?.events ?? [],
@@ -5959,9 +5979,10 @@ const sourceFormatClient = createSourceFormatClient({
         }
       }
 
-      function releaseSourcePreview(source) {
+      // Passing the catalog record keeps a whole-catalog release linear.
+      function releaseSourcePreview(source, owner = null) {
         const identity = sourceIdentity(source);
-        const preview = state.artifacts.find(value => sourceIdentity(value) === identity);
+        const preview = owner ?? state.artifacts.find(value => sourceIdentity(value) === identity);
         if (preview) {
           preview.controller?.abort();
           for (const field of ['content', 'sourceTextLength', 'contentTruncated', 'contentLongLine', 'loading', 'loadError', 'controller', 'previewUsed', 'contentVerified', 'contentLossy']) delete preview[field];
@@ -6011,21 +6032,18 @@ const sourceFormatClient = createSourceFormatClient({
         }
       }
 
-      function capturedSources() {
+      function capturedSources(artifactId = null) {
         return state.artifacts
-          .filter(isSourceArtifact)
+          .filter(artifact => isSourceArtifact(artifact) && (artifactId === null || artifact.artifact_id === artifactId))
           .map(artifact => {
             const key = `artifact:${artifact.artifact_id}`;
             return { ...artifact, source_type: 'artifact', key, deobfuscation: state.deobfuscationCache?.get(deobfuscationKey({...artifact, key})) ?? null };
           });
       }
 
-      function sourceOrigin(source) {
-        try { return source.url ? new URL(source.url).origin : '(anonymous)'; } catch { return '(generated)'; }
-      }
-
+      // Dynamic code has no file of its own; DevTools names it VM<id> too.
       function sourceDisplayName(source) {
-        return `${sourceName(source)} · artifact ${source.artifact_id}`;
+        return source?.capture_origin === 'dynamic_javascript' ? `VM${source.artifact_id}` : sourceName(source);
       }
 
       // Every artifact kind the evidence contract admits, labeled by what its
@@ -6036,298 +6054,18 @@ const sourceFormatClient = createSourceFormatClient({
           bytecode_buffer: ['BC', 'guest bytecode']}[kind] ?? null;
       }
 
-      function sourceDisplayMeta(source) {
-        return `${source.origin === 'sample' ? 'sample' : source.origin === 'demo' ? 'demo' : 'evidence'} · ${sourceKindLabel(source.kind)?.[1] ?? source.kind}`;
-      }
-
-      function sourcePathParts(source) {
-        try { return source.url ? new URL(source.url).pathname.split('/').filter(Boolean) : [sourceName(source)]; } catch { return [sourceName(source)]; }
-      }
-
       function sourceIcon(source) {
         return sourceKindLabel(source.kind)?.[0] ?? '?';
       }
 
       function selectedSource() {
-        const matches = capturedSources().filter(source => source.artifact_id === state.selectedArtifactId);
+        if (state.selectedArtifactId == null) return null;
+        const matches = capturedSources(state.selectedArtifactId);
         return matches.length === 1 ? matches[0] : null;
       }
 
-      // The navigator owns metadata and focus only. It never owns source bytes,
-      // editor state, analysis, or fetches. These caps also bound hostile paths.
-      const SOURCE_TREE_LIMITS = Object.freeze({catalog: 5000, nodes: 10000, visible: 1000, depth: 16, url: 4096, identity: 8192});
-
-      function sourceTreeModel(collection) {
-        const catalog = state.artifacts;
-        const nodes = new Map();
-        const rootKey = JSON.stringify([collection, 'root']);
-        const root = {key: rootKey, kind: 'root', label: 'top', depth: 0, parent: null, children: [], count: 0};
-        nodes.set(rootKey, root);
-        const limits = {catalog: Math.max(0, catalog.length - SOURCE_TREE_LIMITS.catalog), omitted: 0, deep: 0, ambiguous: 0};
-        const files = new Map();
-        const branch = (key, label, kind, parent) => {
-          if (!nodes.has(key)) {
-            const node = {key, label, kind, depth: parent.depth + 1, parent: parent.key, children: [], count: 0};
-            nodes.set(key, node); parent.children.push(key);
-          }
-          return nodes.get(key);
-        };
-        for (let index = 0; index < Math.min(catalog.length, SOURCE_TREE_LIMITS.catalog); index++) {
-          const raw = catalog[index];
-          if (!isSourceArtifact(raw)) continue;
-          // Refuse an overlong path before URL parsing or identity serialization.
-          if (typeof raw.url !== 'string' || raw.url.length > SOURCE_TREE_LIMITS.url) {limits.omitted++; continue;}
-          const source = {...sourceReference(raw), source_type: 'artifact'};
-          const identity = sourceIdentity(source);
-          if (!identity || identity.length > SOURCE_TREE_LIMITS.identity) {limits.omitted++; continue;}
-          const key = JSON.stringify([collection, 'source', identity]);
-          // Duplicate exact identities must never become two apparent choices.
-          if (files.has(key)) {files.get(key).ambiguous = true; limits.ambiguous++; continue;}
-          let origin = '(anonymous)', originIdentity = ['anonymous'], parts = [];
-          if (source.url) {
-            try {
-              const url = new URL(source.url);
-              origin = url.origin === 'null' ? url.protocol : url.origin;
-              originIdentity = ['url', origin];
-              parts = url.pathname.split('/');
-              if (url.pathname.startsWith('/')) parts.shift();
-            } catch {origin = '(generated)'; originIdentity = ['generated'];}
-          }
-          const directories = parts.slice(0, -1);
-          const bounded = directories.slice(0, SOURCE_TREE_LIMITS.depth);
-          const originKey = JSON.stringify([collection, 'origin', originIdentity]);
-          const directoryKeys = bounded.map((_, index) => JSON.stringify([collection, 'folder', originIdentity, bounded.slice(0, index + 1)]));
-          const newBranches = [originKey, ...directoryKeys].filter(value => !nodes.has(value)).length;
-          if (nodes.size + newBranches + 1 > SOURCE_TREE_LIMITS.nodes) {limits.omitted++; continue;}
-          if (directories.length > SOURCE_TREE_LIMITS.depth) limits.deep++;
-          let parent = branch(originKey, origin.replace(/^https?:\/\//, ''), 'origin', root);
-          const ancestors = [root, parent];
-          bounded.forEach((label, index) => {
-            parent = branch(directoryKeys[index], label || '(empty path segment)', 'folder', parent); ancestors.push(parent);
-          });
-          const node = {key, identity, kind: 'file', label: sourceDisplayName(source), source,
-            parent: parent.key, depth: parent.depth + 1, children: null};
-          nodes.set(key, node); files.set(key, node); parent.children.push(key);
-          for (const ancestor of ancestors) ancestor.count++;
-        }
-        for (const node of nodes.values()) {
-          if (!node.children) continue;
-          node.children.sort((a, b) => {
-            const left = nodes.get(a), right = nodes.get(b);
-            return Number(left.kind === 'file') - Number(right.kind === 'file') || left.label.localeCompare(right.label) || a.localeCompare(b);
-          });
-          node.children.forEach((key, index) => {const child = nodes.get(key); child.position = index + 1; child.size = node.children.length;});
-        }
-        root.position = 1; root.size = 1;
-        return {collection, rootKey, nodes, limits};
-      }
-
-      function sourceTreeVisible(model, collapsed) {
-        const visible = [], stack = model.nodes.get(model.rootKey).count ? [model.rootKey] : [];
-        while (stack.length && visible.length < SOURCE_TREE_LIMITS.visible) {
-          const node = model.nodes.get(stack.pop()); visible.push(node);
-          if (node.children && !collapsed.has(node.key)) {
-            for (let index = node.children.length - 1; index >= 0; index--) stack.push(node.children[index]);
-          }
-        }
-        return {visible, limited: stack.length > 0};
-      }
-
-      function sourceTreeState() {
-        return state.sourceNavigator ??= {scopes: new Map(), rows: new Map(), serial: 0, model: null, visible: []};
-      }
-
-      function sourceTreeScope(nav, collection) {
-        if (!nav.scopes.has(collection)) nav.scopes.set(collection, {collapsed: new Set(), focus: null, scrollTop: 0, scrollLeft: 0});
-        return nav.scopes.get(collection);
-      }
-
-      function sourceTreeFocus(key, reveal = false) {
-        const nav = sourceTreeState(), scope = sourceTreeScope(nav, nav.model.collection);
-        const entry = nav.rows.get(key);
-        if (!entry) return;
-        scope.focus = key;
-        for (const [rowKey, value] of nav.rows) value.row.tabIndex = rowKey === key ? 0 : -1;
-        entry.row.focus({preventScroll: true});
-        if (reveal) {
-          // Scroll only the navigator, never the editor or an outer workspace.
-          const row = entry.row.getBoundingClientRect(), pane = elements.sourceTree.getBoundingClientRect();
-          if (row.top < pane.top) elements.sourceTree.scrollTop += row.top - pane.top;
-          else if (row.bottom > pane.bottom) elements.sourceTree.scrollTop += row.bottom - pane.bottom;
-        }
-      }
-
-      function toggleSourceTree(key, expanded = null) {
-        const nav = sourceTreeState(), node = nav.model?.nodes.get(key);
-        if (!node?.children?.length) return;
-        const scope = sourceTreeScope(nav, nav.model.collection);
-        const open = expanded ?? scope.collapsed.has(key);
-        if (open) scope.collapsed.delete(key); else scope.collapsed.add(key);
-        renderSourceTree(false);
-      }
-
-      function sourceTreeKeydown(event, key) {
-        // Leave browser/history/OS chords and native button Enter/Space alone.
-        if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-        const nav = sourceTreeState(), node = nav.model?.nodes.get(key);
-        if (!node) return;
-        const scope = sourceTreeScope(nav, nav.model.collection);
-        const index = nav.visible.findIndex(value => value.key === key);
-        let next;
-        if (event.key === 'ArrowDown') next = nav.visible[Math.min(index + 1, nav.visible.length - 1)]?.key;
-        else if (event.key === 'ArrowUp') next = nav.visible[Math.max(0, index - 1)]?.key;
-        else if (event.key === 'Home') next = nav.visible[0]?.key;
-        else if (event.key === 'End') next = nav.visible.at(-1)?.key;
-        else if (event.key === 'ArrowRight') {
-          if (node.children?.length && scope.collapsed.has(key)) toggleSourceTree(key, true);
-          else if (node.children?.length) next = node.children[0];
-        } else if (event.key === 'ArrowLeft') {
-          if (node.children?.length && !scope.collapsed.has(key)) toggleSourceTree(key, false);
-          else next = node.parent;
-        } else return;
-        event.preventDefault(); event.stopPropagation();
-        if (next) sourceTreeFocus(next, true);
-      }
-
-      function sourceTreeRow(node, nav) {
-        const row = document.createElement('button');
-        row.type = 'button'; row.className = 'source-tree-row';
-        row.dataset.sourceTreeKey = node.key;
-        row.dataset.sourceTreeKind = node.kind;
-        row.setAttribute('role', 'treeitem');
-        const icon = document.createElement('span'); icon.setAttribute('aria-hidden', 'true');
-        const name = document.createElement('span'); name.className = 'source-tree-name';
-        // A researcher name leads the cell; the captured file label stays beside it.
-        const researcher = document.createElement('span'); researcher.className = 'researcher-name'; researcher.hidden = true;
-        const raw = document.createElement('span'); raw.className = 'source-tree-raw';
-        name.append(researcher, raw);
-        const detail = document.createElement('span'); detail.className = 'source-tree-meta';
-        row.append(icon, name, detail);
-        let group = null;
-        if (node.children) {
-          group = document.createElement('div'); group.setAttribute('role', 'group');
-          group.id = `source-tree-group-${++nav.serial}`;
-          // A button cannot contain interactive descendants. Own the adjacent
-          // group so the accessibility tree still has the real hierarchy.
-          row.setAttribute('aria-owns', group.id);
-        }
-        row.addEventListener('focus', () => {
-          const scope = sourceTreeScope(nav, nav.model.collection); scope.focus = node.key;
-          for (const [key, entry] of nav.rows) entry.row.tabIndex = key === node.key ? 0 : -1;
-        });
-        row.addEventListener('keydown', event => sourceTreeKeydown(event, node.key));
-        row.addEventListener('click', () => {
-          const current = nav.model?.nodes.get(node.key);
-          if (!current) return;
-          sourceTreeScope(nav, nav.model.collection).focus = node.key;
-          if (current.children) toggleSourceTree(node.key);
-          else if (sourceIsCurrent(current.source)) selectArtifact(current.source.artifact_id);
-          else {
-            state.sourceNoticeKind = 'warning';
-            state.sourceNotice = 'This exact source changed or is no longer available. Refresh the catalog before opening it.';
-            renderSourceHealth();
-          }
-        });
-        return {row, icon, name, raw, researcher, detail, group};
-      }
-
       function renderSourceTree(refresh = true) {
-        const nav = sourceTreeState(), tree = elements.sourceTree, previous = nav.model;
-        const activeKey = document.activeElement?.dataset?.sourceTreeKey;
-        const hadFocus = tree.contains(document.activeElement);
-        const previousScope = previous && sourceTreeScope(nav, previous.collection);
-        let anchor = null;
-        if (refresh && previous?.collection === state.sourceCollection && tree.scrollTop > 0 && tree.clientHeight > 0) {
-          const pane = tree.getBoundingClientRect();
-          for (const node of nav.visible) {
-            const bounds = nav.rows.get(node.key).row.getBoundingClientRect();
-            if (bounds.bottom > pane.top && bounds.top < pane.bottom) {anchor = {key: node.key, offset: bounds.top - pane.top}; break;}
-          }
-        }
-        if (previousScope) {previousScope.scrollTop = tree.scrollTop; previousScope.scrollLeft = tree.scrollLeft;}
-        if (refresh || !previous || previous.collection !== state.sourceCollection) nav.model = sourceTreeModel(state.sourceCollection);
-        const model = nav.model, scope = sourceTreeScope(nav, model.collection);
-        // Deleted branches cannot grow an unbounded preference history.
-        for (const key of scope.collapsed) if (!model.nodes.get(key)?.children) scope.collapsed.delete(key);
-        const {visible, limited} = sourceTreeVisible(model, scope.collapsed);
-        const keys = new Set(visible.map(node => node.key));
-        const nearest = key => {
-          for (let count = 0; key && count <= SOURCE_TREE_LIMITS.depth + 3; count++) {
-            if (keys.has(key)) return key;
-            key = (model.nodes.get(key) ?? previous?.nodes.get(key))?.parent;
-          }
-          return null;
-        };
-        const selectedCandidates = [...model.nodes.values()].filter(node => node.source && node.source.artifact_id === state.selectedArtifactId);
-        // Selection must agree with the authoritative raw catalog, including
-        // records omitted by path/node limits. Never scan beyond the catalog cap
-        // merely to decorate a row: an incomplete catalog cannot prove uniqueness.
-        const selected = !model.limits.catalog && selectedCandidates.length === 1 && !selectedCandidates[0].ambiguous &&
-          keys.has(selectedCandidates[0].key) && sourceIsCurrent(selectedCandidates[0].source) ? selectedCandidates[0] : null;
-        scope.focus = nearest(hadFocus ? activeKey : scope.focus) ?? selected?.key ?? visible[0]?.key ?? null;
-        const containers = new Map([[tree, []]]);
-        const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
-        const namedSources = Boolean(names?.has('captured-artifact'));
-        for (const node of visible) {
-          let entry = nav.rows.get(node.key);
-          if (!entry) {entry = sourceTreeRow(node, nav); nav.rows.set(node.key, entry);}
-          const {row, icon, name, raw, researcher, detail, group} = entry;
-          row.style.setProperty('--source-depth', String(Math.min(node.depth, 6)));
-          row.setAttribute('aria-level', String(node.depth + 1));
-          row.setAttribute('aria-posinset', String(node.position)); row.setAttribute('aria-setsize', String(node.size));
-          row.tabIndex = scope.focus === node.key ? 0 : -1;
-          const label = node.label.length > 512 ? node.label.slice(0, 509) + '…' : node.label;
-          if (raw.textContent !== label) raw.textContent = label;
-          const researcherName = namedSources && node.source ? names.nameFor('artifact', node.source) : null;
-          if (researcher.textContent !== (researcherName ?? '')) researcher.textContent = researcherName ?? '';
-          researcher.hidden = !researcherName;
-          name.title = researcherName ? `${researcherName} (researcher name) · ${node.source?.url || node.label}` : node.source?.url || node.label;
-          row.setAttribute('aria-label', researcherName ? `${researcherName} (researcher name), ${label}` : label);
-          icon.className = node.source ? `source-file-icon ${node.source.kind}` : 'tree-glyph';
-          icon.textContent = node.source ? sourceIcon(node.source) : scope.collapsed.has(node.key) ? '▸' : '▾';
-          icon.title = node.source ? sourceKindLabel(node.source.kind)?.[1] ?? node.source.kind : '';
-          detail.textContent = node.children ? String(node.count) : sourceDisplayMeta(node.source);
-          if (node.source) {
-            row.dataset.artifactId = node.source.artifact_id;
-            row.setAttribute('aria-selected', String(node === selected));
-          } else {
-            row.setAttribute('aria-expanded', String(!scope.collapsed.has(node.key)));
-            group.hidden = scope.collapsed.has(node.key); containers.set(group, []);
-          }
-          const container = node.parent ? nav.rows.get(node.parent).group : tree;
-          containers.get(container).push(row);
-          if (group) containers.get(container).push(group);
-        }
-        const notices = [];
-        if (model.limits.catalog) notices.push(`Only the first ${SOURCE_TREE_LIMITS.catalog.toLocaleString()} catalog records were inspected; ${model.limits.catalog.toLocaleString()} more records are outside this navigator. Selection markers are withheld until the full catalog fits this limit.`);
-        if (model.limits.omitted) notices.push(`${model.limits.omitted} sources exceed the navigator path, identity or node limit and are not listed.`);
-        if (model.limits.ambiguous) notices.push(`${model.limits.ambiguous} duplicate source identities are not shown twice; ambiguous sources cannot be opened.`);
-        if (model.limits.deep) notices.push(`${model.limits.deep} paths are shortened after ${SOURCE_TREE_LIMITS.depth} folders; file tooltips retain their full URLs.`);
-        if (limited) notices.push(`Showing the first ${SOURCE_TREE_LIMITS.visible.toLocaleString()} expanded rows. Collapse branches to see later rows, or use Open file.`);
-        if (!visible.length || notices.length) {
-          nav.notice ??= document.createElement('div'); nav.notice.className = 'source-tree-empty'; nav.notice.setAttribute('role', 'status');
-          nav.notice.textContent = notices.join(' ') || 'No source artifacts captured. Canvas images are shown in Fingerprinting.';
-          // Keep limit disclosures above the rows, including when the navigator
-          // itself is empty after filtering or rejecting over-limit paths.
-          containers.get(tree).unshift(nav.notice);
-        }
-        for (const [container, children] of containers) {
-          const wanted = new Set(children);
-          for (const child of [...container.children]) if (!wanted.has(child)) child.remove();
-          children.forEach((child, index) => {if (container.children[index] !== child) container.insertBefore(child, container.children[index] ?? null);});
-        }
-        for (const [key, entry] of nav.rows) if (!keys.has(key)) {entry.row.remove(); entry.group?.remove(); nav.rows.delete(key);}
-        nav.visible = visible;
-        tree.tabIndex = visible.length ? -1 : 0;
-        tree.scrollTop = scope.scrollTop; tree.scrollLeft = scope.scrollLeft;
-        if (anchor && nav.rows.has(anchor.key)) {
-          const bounds = nav.rows.get(anchor.key).row.getBoundingClientRect();
-          tree.scrollTop += bounds.top - tree.getBoundingClientRect().top - anchor.offset;
-        }
-        if (hadFocus) {
-          if (scope.focus) sourceTreeFocus(scope.focus, Boolean(activeKey && activeKey !== scope.focus));
-          else tree.focus({preventScroll: true});
-        }
+        sourceTreeView.render(refresh);
       }
 
       function renderSourceHealth() {
@@ -6369,25 +6107,32 @@ const sourceFormatClient = createSourceFormatClient({
           elements.sourceEditorTabs.replaceChildren(placeholder);
           return;
         }
+        const shared = new Map();
+        for (const source of sources) shared.set(sourceDisplayName(source), (shared.get(sourceDisplayName(source)) ?? 0) + 1);
         const tabs = sources.map((source, index) => {
+          const label = sourceDisplayName(source);
           const tab = document.createElement('button');
           tab.type = 'button';
           tab.className = 'source-editor-tab';
           tab.setAttribute('role', 'tab');
-          tab.setAttribute('aria-label', `${sourceDisplayName(source)}. Press Delete to close.`);
+          tab.setAttribute('aria-label', `${label}, artifact ${source.artifact_id}. Press Delete to close.`);
           tab.setAttribute('aria-keyshortcuts', 'Delete');
           tab.dataset.sourceIdentity = sourceIdentity(source);
-          tab.title = source.url || sourceDisplayName(source);
+          tab.title = `${source.url || label} · artifact ${source.artifact_id}`;
           const selected = source.artifact_id === state.selectedArtifactId;
           tab.setAttribute('aria-selected', String(selected));
           tab.tabIndex = selected ? 0 : -1;
           const icon = document.createElement('span');
-          icon.className = `source-file-icon ${source.kind}`;
+          icon.className = 'source-file-icon';
+          icon.dataset.icon = sourceTreeFileIcon(source);
           icon.textContent = sourceIcon(source);
           icon.title = sourceKindLabel(source.kind)?.[1] ?? source.kind;
           const name = document.createElement('span');
-          name.textContent = sourceDisplayName(source);
-          name.title = source.url || sourceDisplayName(source);
+          name.textContent = label;
+          name.title = tab.title;
+          const suffix = document.createElement('span');
+          suffix.className = 'source-tab-suffix';
+          suffix.textContent = shared.get(label) > 1 ? source.artifact_id : '';
           const close = document.createElement('span');
           close.className = 'source-tab-close';
           close.textContent = '×';
@@ -6398,9 +6143,9 @@ const sourceFormatClient = createSourceFormatClient({
             researcher.className = 'researcher-name';
             researcher.textContent = researcherName;
             researcher.title = `Researcher name: ${researcherName}`;
-            tab.setAttribute('aria-label', `${researcherName} (researcher name), ${sourceDisplayName(source)}. Press Delete to close.`);
-            tab.append(icon, researcher, name, close);
-          } else tab.append(icon, name, close);
+            tab.setAttribute('aria-label', `${researcherName} (researcher name), ${label}, artifact ${source.artifact_id}. Press Delete to close.`);
+            tab.append(icon, researcher, name, suffix, close);
+          } else tab.append(icon, name, suffix, close);
           tab.addEventListener('click', event => {
             if (event.target === close) {
               closeSource(source);
@@ -6878,7 +6623,7 @@ const sourceFormatClient = createSourceFormatClient({
         renderSourceTabs();
         renderSourceFacts(source);
         elements.sourceLocation.textContent = source?.url || (source ? sourceDisplayName(source) : 'Select a source');
-        elements.sourceLocation.title = source?.url || (source ? sourceDisplayName(source) : '');
+        elements.sourceLocation.title = source ? `${source.url || sourceDisplayName(source)} · artifact ${source.artifact_id}` : '';
         elements.sourceSize.textContent = source ? formatByteSize(source.byte_size) : '0 bytes';
         elements.sourceHash.textContent = source?.sha256 ? `sha256 ${source.sha256}` : '';
         syncSourceDisplayControls(source, view);
@@ -6902,6 +6647,7 @@ const sourceFormatClient = createSourceFormatClient({
       function renderSourcePane() {
         const search = state.sourcePane === 'search';
         elements.sourceTree.hidden = search;
+        document.querySelector('#source-tree-tools').hidden = search;
         document.querySelector('#source-search-all-panel').hidden = !search;
         document.querySelectorAll('.source-side-tab').forEach(tab => {
           const selected = search ? tab.id === 'source-tab-search' : tab.dataset.sourceCollection === state.sourceCollection;
@@ -7728,14 +7474,15 @@ const sourceFormatClient = createSourceFormatClient({
       function renderQuickOpen() {
         const needle = elements.quickOpenInput.value.trim().toLowerCase();
         const matches = capturedSources().map(sourceReference).filter(source =>
-          !needle || `${sourceDisplayName(source)} ${source.url}`.toLowerCase().includes(needle)
+          !needle || `${sourceDisplayName(source)} ${source.url} ${source.artifact_id}`.toLowerCase().includes(needle)
         );
-        const rows = matches.map(source => {
+        // The whole catalog can hold 50,000 files; the list shows the first 200.
+        const rows = matches.slice(0, 200).map(source => {
           const row = document.createElement('button');
           row.type = 'button';
           row.className = 'quick-open-row';
           const name = document.createElement('span'); name.textContent = sourceDisplayName(source);
-          const path = document.createElement('small'); path.textContent = source.url || '(anonymous)';
+          const path = document.createElement('small'); path.textContent = `${source.url || '(anonymous)'} · artifact ${source.artifact_id}`;
           row.append(name, path);
           row.addEventListener('click', () => {
             elements.quickOpen.hidden = true;
@@ -7743,6 +7490,7 @@ const sourceFormatClient = createSourceFormatClient({
           });
           return row;
         });
+        if (matches.length > rows.length) rows.push(textElement('p', 'quick-open-more', `${(matches.length - rows.length).toLocaleString()} more files match. Type more of the name or URL.`));
         elements.quickOpenResults.replaceChildren(...rows);
       }
 
@@ -7759,13 +7507,43 @@ const sourceFormatClient = createSourceFormatClient({
         if (state.artifactRefreshing || location.protocol === 'file:') return;
         state.artifactRefreshing = true;
         try {
-          const headers = state.artifactEtag ? { 'If-None-Match': state.artifactEtag } : {};
-          const response = await fetch('/api/artifacts?limit=500', { cache: 'no-store', headers });
-          if (response.status === 304) return;
-          if (!response.ok) throw new Error(`Artifact store returned ${response.status}`);
-          const body = await response.json();
-          if (!isArtifactResponse(body)) throw new TypeError('Malformed artifact response');
-          state.artifactEtag = response.headers.get('ETag');
+          // Pages the whole manifest; growth is read from the last boundary, up to 50,000 records.
+          const catalogLimit = 50000;
+          const read = async (query, etag = null) => {
+            const response = await fetch(`/api/artifacts?${query}`, {cache: 'no-store', headers: etag ? {'If-None-Match': etag} : {}});
+            if (response.status === 304) return null;
+            if (!response.ok) throw new Error(`Artifact store returned ${response.status}`);
+            const body = await response.json();
+            if (!isArtifactResponse(body) || (body.query !== undefined && !/^(0|[1-9][0-9]{0,19})$/.test(String(body.query?.next_after)))) {
+              throw new TypeError('Malformed artifact response');
+            }
+            return {body, etag: response.headers.get('ETag')};
+          };
+          const probe = await read('after=0&limit=1', state.artifactEtag);
+          if (!probe) return;
+          const {body} = probe;
+          let records = body.artifacts, appended = null, cursor = null, complete = true;
+          if (body.query) {
+            const first = body.artifacts.length ? JSON.stringify(body.artifacts[0]) : null, previous = state.artifactCursor;
+            const grown = first !== null && previous?.first === first && previous.catalog === state.artifacts;
+            const base = grown ? state.artifacts.length : 0;
+            let after = grown ? previous.after : '0';
+            records = []; complete = false;
+            for (let page = 0; page < 64 && base + records.length < catalogLimit; page++) {
+              const next = (await read(`after=${after}&limit=5000`))?.body;
+              if (!next) throw new TypeError('Malformed artifact response');
+              records.push(...next.artifacts);
+              if (!next.query) {complete = true; break;}
+              after = next.query.next_after;
+              if (!next.query.limited && !next.query.budget_exhausted) {complete = true; break;}
+            }
+            if (base + records.length > catalogLimit) {records.length = catalogLimit - base; complete = false;}
+            cursor = {first, after};
+            if (grown) appended = records;
+          }
+          const keepCursor = () => {state.artifactCursor = cursor && {...cursor, catalog: state.artifacts};};
+          state.artifactCatalogLimit = complete ? 0 : catalogLimit;
+          state.artifactEtag = probe.etag;
           if (typeof body.artifact_receiver_configured === 'boolean') {
             state.artifactReceiverConfigured = body.artifact_receiver_configured;
           }
@@ -7774,8 +7552,9 @@ const sourceFormatClient = createSourceFormatClient({
           }
           state.artifactReceiverError = null;
           renderShellStatus();
-          const catalogSignature = JSON.stringify(body.artifacts);
-          if (catalogSignature === state.artifactCatalogSignature) {
+          const catalogSignature = appended ? null : JSON.stringify(records);
+          if (appended ? !appended.length : catalogSignature === state.artifactCatalogSignature) {
+            keepCursor();
             if (canvasGalleryVisible()) renderFingerprintActivity();
             renderSourceHealth();
             return;
@@ -7783,10 +7562,10 @@ const sourceFormatClient = createSourceFormatClient({
           state.artifactCatalogSignature = catalogSignature;
           // A newly retained script can be another version of a saved one.
           if (typeof invocationSitesPanel !== 'undefined') invocationSitesPanel.refresh();
-          if (body.artifacts.length === 0) {
+          if (records.length === 0 && !appended) {
             if (state.sessionMode === 'live') {
               retireCanvasPreviews('Canvas previews released because the artifact catalog is empty.');
-              for (const artifact of state.artifacts) releaseSourcePreview(artifact);
+              for (const artifact of state.artifacts) releaseSourcePreview(artifact, artifact);
               state.artifacts = [];
               state.openArtifactIds = [];
               state.selectedArtifactId = null;
@@ -7794,17 +7573,21 @@ const sourceFormatClient = createSourceFormatClient({
             } else {
               renderSourceHealth();
             }
+            keepCursor();
             return;
           }
-          const existing = new Map(state.artifacts.map(artifact => [sourceIdentity(artifact), artifact]));
-          const incoming = new Set(body.artifacts.map(sourceIdentity));
-          for (const artifact of state.artifacts) if (!incoming.has(sourceIdentity(artifact))) releaseSourcePreview(artifact);
-          state.artifacts = body.artifacts.map(artifact => {
-            const prior = existing.get(sourceIdentity(artifact));
-            // Preserve the pending operation's owner, never clone loading state.
-            const descriptor = Object.fromEntries(sourceFactsFields.filter(field => Object.hasOwn(artifact, field)).map(field => [field, artifact[field]]));
-            return Object.assign(prior ?? {}, descriptor, {origin: state.sessionMode === 'live' ? 'live' : 'demo'});
-          });
+          const origin = state.sessionMode === 'live' ? 'live' : 'demo';
+          // Preserve the pending operation's owner, never clone loading state.
+          const retain = (artifact, prior = {}) => Object.assign(prior,
+            Object.fromEntries(sourceFactsFields.filter(field => Object.hasOwn(artifact, field)).map(field => [field, artifact[field]])), {origin});
+          if (appended) state.artifacts = state.artifacts.concat(appended.map(artifact => retain(artifact)));
+          else {
+            const existing = new Map(state.artifacts.map(artifact => [sourceIdentity(artifact), artifact]));
+            const incoming = new Set(records.map(sourceIdentity));
+            for (const artifact of state.artifacts) if (!incoming.has(sourceIdentity(artifact))) releaseSourcePreview(artifact, artifact);
+            state.artifacts = records.map(artifact => retain(artifact, existing.get(sourceIdentity(artifact))));
+          }
+          keepCursor();
           if (!canvasGalleryVisible()) retireCanvasPreviews();
           state.openArtifactIds = state.openArtifactIds.filter(id => state.artifacts.some(artifact => artifact.artifact_id === id));
           if (!state.artifacts.some(artifact => artifact.artifact_id === state.selectedArtifactId && isSourceArtifact(artifact))) {
@@ -7825,6 +7608,7 @@ const sourceFormatClient = createSourceFormatClient({
           }
           state.artifactReceiverError = error.message;
           state.artifactEtag = null;
+          state.artifactCursor = null;
           retireCanvasPreviews('Canvas previews released because the artifact catalog is unavailable.');
           if (canvasGalleryVisible()) renderFingerprintActivity();
           renderShellStatus();
@@ -8500,7 +8284,7 @@ const sourceFormatClient = createSourceFormatClient({
       function sourceSearchFiles() {
         const sources = capturedSources(), retained = new Set(sources.map(sourceIdentity));
         for (const key of sourceSearchCache.keys()) if (!retained.has(key)) sourceSearchCache.delete(key);
-        return sources.map(source => ({identity: sourceIdentity(source), artifactId: source.artifact_id, name: sourceDisplayName(source),
+        return sources.map(source => ({identity: sourceIdentity(source), artifactId: source.artifact_id, name: `${sourceDisplayName(source)} · artifact ${source.artifact_id}`,
           url: source.url ?? '', icon: sourceIcon(source), byteSize: source.byte_size, binary: sourceHexArtifact(source)}));
       }
       async function readSourceSearchText(entry, signal, limit) {
@@ -8950,7 +8734,7 @@ const sourceFormatClient = createSourceFormatClient({
         const files = {id: 'files', group: 'Files', search: () => capturedSources().map(source => {
           const id = source.artifact_id, identity = investigationArtifactIdentity(source);
           return {title: sourceDisplayName(source),
-            detail: [source.url || '(anonymous)', sourceKindLabel(source.kind)?.[1] ?? source.kind, formatByteSize(source.byte_size)].join(' · '),
+            detail: [source.url || '(anonymous)', sourceKindLabel(source.kind)?.[1] ?? source.kind, formatByteSize(source.byte_size), `artifact ${id}`].join(' · '),
             run() { if (identity) openInvestigation({kind: 'artifact', identity}); else { showScreen('sources'); selectArtifact(id); } }};
         })};
         function openPaletteFinding(id) {
@@ -9106,7 +8890,7 @@ const sourceFormatClient = createSourceFormatClient({
           add('Request', evidenceNames.identityFor('request', request), `${request.method} ${request.path}`, () => openNamedRequest(evidenceNames.identityFor('request', request)));
         }
         if (evidenceNames.has('captured-artifact')) for (const source of capturedSources()) {
-          add('Source', evidenceNames.identityFor('artifact', source), sourceDisplayName(source), () => openNamedSource(evidenceNames.identityFor('artifact', source)));
+          add('Source', evidenceNames.identityFor('artifact', source), `${sourceDisplayName(source)} · artifact ${source.artifact_id}`, () => openNamedSource(evidenceNames.identityFor('artifact', source)));
         }
         if (evidenceNames.has('vm-handler')) for (const finding of state.vmFindings) {
           const workspace = vmOpcodeWorkspaceForFinding(state.vmOpcodeWorkspace, finding);

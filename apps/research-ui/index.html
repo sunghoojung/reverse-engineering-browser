@@ -224,6 +224,11 @@
                 <button id="source-tab-search" class="source-side-tab" type="button" role="tab" aria-selected="false" aria-controls="source-search-all-panel" tabindex="-1">Search</button>
               </div>
               <div id="source-health" class="source-health" data-kind="warning" role="status" aria-live="polite" hidden></div>
+              <div id="source-tree-tools" class="source-tree-tools">
+                <input id="source-tree-filter" class="source-tree-filter" type="search" maxlength="512" autocomplete="off" spellcheck="false" placeholder="Filter files" aria-label="Filter files by name, URL or artifact ID" aria-controls="source-tree" />
+                <button id="source-tree-expand" class="source-tree-tool" type="button" data-icon="expand-all" aria-controls="source-tree" aria-label="Expand all" title="Expand all"></button>
+                <button id="source-tree-collapse" class="source-tree-tool" type="button" data-icon="collapse-all" aria-controls="source-tree" aria-label="Collapse all" title="Collapse all"></button>
+              </div>
               <div id="source-tree" class="source-tree" role="tree" aria-labelledby="source-tab-captured"></div>
               <section id="source-search-all-panel" class="source-search-all" role="tabpanel" aria-labelledby="source-tab-search" hidden>
                 <div class="source-search-all-form" role="search">
@@ -801,6 +806,7 @@
     <script src="source_format.js"></script>
     <script src="source_facts.js"></script>
     <script src="source_search.js"></script>
+    <script src="source_tree.js"></script>
     <script src="traffic_view.js"></script>
     <script src="captured_client.js"></script>
     <script src="captured_export_formats.js"></script>

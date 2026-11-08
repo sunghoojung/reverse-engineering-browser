@@ -214,7 +214,7 @@ decodes text or displays WASM as hex, and creates DOM text nodes. Captured HTML
 or JavaScript never enters an HTML parsing or execution sink.
 
 The Sources workspace follows a familiar source-browser organization: Captured
-navigator, origin and directory tree, editor tabs, line numbers, open-file and
+navigator with frame, group, origin and directory levels, editor tabs, line numbers, open-file and
 find shortcuts, a readable derived view, and a details side pane. It reads only
 the immutable artifact store; there is no live script catalog, debugger or
 runtime state. Wasm modules and native guest bytecode buffers display as an

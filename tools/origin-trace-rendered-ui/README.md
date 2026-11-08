@@ -47,6 +47,12 @@ No smoke flag or test hook exists in the product, and nothing here uses the
 Chrome DevTools Protocol. The evidence is synthetic; this suite does not
 establish live browser capture.
 
+`test2SourcesRetainedArtifact` finds tree rows by their `data-artifact-id`,
+since file rows show plain names and the ID only in the meta column. It checks
+the Dynamic and WebAssembly groups, End/Home/type-ahead with visible focus, and
+that **Filter files** keeps only `glue.js` under its origin (screenshot
+`sources-tree-filter-*`) until Escape restores the tree.
+
 `test17LiveCaptureDefaultsAreLabeled` checks what an app-started capture
 shows by default at both window sizes. The harness URL says the session
 retains request content, as the packaged app's Content mode does. The harness

@@ -674,19 +674,57 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let ui = try await prepare(size)
       try await show(ui, "sources")
       // Native guest artifacts are an adapter JSON recipe and a bytecode buffer, not JavaScript.
-      for (artifact, icon, kind) in [("artifact 108", "AD", "guest adapter JSON"), ("artifact 109", "BC", "guest bytecode")] {
-        let find = "[...document.querySelectorAll('#source-tree [role=treeitem]')].find(row => row.innerText.includes('\(artifact)'))"
+      for (artifact, icon, kind) in [("108", "AD", "guest adapter JSON"), ("109", "BC", "guest bytecode")] {
+        let find = "document.querySelector('#source-tree [role=treeitem][data-artifact-id=\"\(artifact)\"]')"
         let shown = try await ui.value("\(find)?.querySelector('.source-file-icon')?.innerText ?? ''") as? String ?? ""
-        XCTAssertEqual(shown, icon, "\(size.name): \(artifact) is labeled \(icon), not JS")
-        // The kind detail is collapsed in the navigator; it is still the row's text.
-        let detail = try await ui.value("\(find)?.textContent ?? ''") as? String ?? ""
-        XCTAssertTrue(detail.contains(kind), "\(size.name): \(artifact) names its kind: \(detail)")
+        XCTAssertEqual(shown, icon, "\(size.name): artifact \(artifact) is labeled \(icon), not JS")
+        let label = try await ui.value("\(find)?.getAttribute('aria-label') ?? ''") as? String ?? ""
+        XCTAssertTrue(label.contains(kind), "\(size.name): artifact \(artifact) names its kind: \(label)")
       }
       // The retained request body (artifact 320) is Traffic evidence, never a source file.
       let tree = try await ui.value("document.querySelector('#source-tree')?.textContent ?? ''") as? String ?? ""
       XCTAssertFalse(tree.contains(expected.requestBodyHost), "\(size.name): Sources lists no request body origin: \(tree)")
-      XCTAssertFalse(tree.contains("artifact 320"), "\(size.name): Sources lists no request body file")
-      try await ui.click("#source-tree [role=treeitem]", containing: "artifact 303")
+      let rows = try await ui.json("""
+        (() => { const row = document.querySelector('#source-tree [data-artifact-id="303"]');
+          return {name: row?.querySelector('.source-tree-raw')?.textContent ?? 'missing', meta: row?.querySelector('.source-tree-meta')?.textContent ?? '',
+            groups: [...document.querySelectorAll('#source-tree [data-source-tree-kind="group"] .source-tree-raw')].map(node => node.textContent),
+            body: Boolean(document.querySelector('#source-tree [data-artifact-id="320"]'))}; })()
+        """)
+      XCTAssertEqual(rows["body"] as? Bool, false, "\(size.name): Sources lists no request body file")
+      XCTAssertFalse((rows["name"] as? String ?? "artifact").contains("artifact"), "\(size.name): file rows show plain names: \(rows)")
+      XCTAssertEqual(rows["meta"] as? String, "303", "\(size.name): the artifact ID is the muted meta column: \(rows)")
+      let groups = rows["groups"] as? [String] ?? []
+      XCTAssertTrue(groups.contains("Dynamic (eval / new Function)") && groups.contains("WebAssembly"), "\(size.name): eval and Wasm sources have their own groups: \(groups)")
+      // The keyboard reaches the whole tree: End, Home and type-ahead, with visible focus.
+      let rowIndex = "Number(document.activeElement?.style.getPropertyValue('--source-row') ?? -1)"
+      _ = try await ui.value("document.querySelector('#source-tree [role=treeitem][tabindex=\"0\"]').focus({focusVisible:true})")
+      try await ui.key(119, "\u{F72B}", modifiers: [.function])
+      let last = try await ui.value("\(rowIndex) === document.querySelector('#source-tree .source-tree-canvas').offsetHeight / 24 - 1") as? Bool
+      XCTAssertEqual(last, true, "\(size.name): End reaches the last tree row")
+      let endFocus = try await ui.json("__rebUiProbe.focusState()")
+      XCTAssertEqual(endFocus["focusVisible"] as? Bool, true, "\(size.name): the focused tree row shows keyboard focus: \(endFocus)")
+      XCTAssertEqual(endFocus["inViewport"] as? Bool, true, "\(size.name): End scrolls the last row into view: \(endFocus)")
+      try await ui.key(115, "\u{F729}", modifiers: [.function])
+      let home = try await ui.value("\(rowIndex)") as? Int
+      XCTAssertEqual(home, 0, "\(size.name): Home reaches the first tree row")
+      try await ui.type("w")
+      let typed = try await ui.value("document.activeElement?.querySelector('.source-tree-raw')?.textContent ?? ''") as? String ?? ""
+      XCTAssertTrue(typed.lowercased().hasPrefix("w"), "\(size.name): type-ahead moves to a row starting with w: \(typed)")
+      // The filter keeps matching files and their folders; Escape restores the tree.
+      try await ui.click("#source-tree-filter")
+      try await ui.type("glue")
+      let filtered = try await ui.json("""
+        ({files: [...document.querySelectorAll('#source-tree [data-artifact-id]')].map(row => row.dataset.artifactId),
+          origin: [...document.querySelectorAll('#source-tree [data-source-tree-kind="origin"] .source-tree-raw')].map(node => node.textContent)})
+        """)
+      XCTAssertEqual(filtered["files"] as? [String], [expected.invocationArtifactId], "\(size.name): the filter keeps only matching files: \(filtered)")
+      XCTAssertEqual(filtered["origin"] as? [String], ["hcaptcha.test"], "\(size.name): a match keeps its origin: \(filtered)")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) sources filter")
+      try await ui.screenshot("sources-tree-filter-\(size.name)")
+      try await ui.key(53, "\u{1B}")
+      let cleared = try await ui.value("document.querySelector('#source-tree-filter').value === '' && document.querySelectorAll('#source-tree [data-artifact-id]').length > 1") as? Bool
+      XCTAssertEqual(cleared, true, "\(size.name): Escape clears the filter and restores the tree")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"303\"]")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('retainedLine')", "retained source did not render")
       let source = try await ui.value("document.querySelector('#source-code').innerText") as? String ?? ""
       XCTAssertTrue(source.contains(expected.hostileSourceMarker), "\(size.name): captured markup shows as source text")
@@ -1081,7 +1119,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("!document.querySelector('#captured-export-dialog').open", "Escape did not close export")
 
       try await show(ui, "sources")
-      try await ui.click("#source-tree [role=treeitem]", containing: "artifact 109")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"109\"]")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('00000000')", "golden guest bytecode did not render as hex")
       let golden = try await ui.value("document.querySelector('#source-code').innerText") as? String ?? ""
       XCTAssertTrue(golden.contains("00000000  00 42 00 00"), "\(size.name): real guest bytecode shows its bytes: \(golden)")
@@ -1090,7 +1128,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let language = try await ui.value("document.querySelector('#source-language').innerText") as? String
       XCTAssertEqual(language, "Guest bytecode hex", "\(size.name): bytecode is labeled as a hex view")
 
-      try await ui.click("#source-tree [role=treeitem]", containing: "artifact 310")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"310\"]")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('3c 69 6d 67')", "hostile bytecode did not render as hex")
       let hostile = try await ui.value("document.querySelector('#source-code').innerText") as? String ?? ""
       let prefix = String(expected.hostileBytecodeMarkup.prefix(16))
@@ -1315,7 +1353,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let ui = try await prepare(size)
       try await clearSavedSites(ui)
       try await show(ui, "sources")
-      try await ui.click("#source-tree [role=treeitem]", containing: "artifact \(expected.invocationArtifactId)")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"\(expected.invocationArtifactId)\"]")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('Mk().then')", "\(size.name): glue.js did not render")
       try await ui.waitUntil("!document.querySelector('#source-track-calls').disabled", "\(size.name): Track calls stayed disabled on an original JavaScript artifact")
       // The default position is top-level code, which is refused with its reason.
@@ -1398,7 +1436,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     for size in windowSizes {
       let ui = try await prepare(size)
       try await show(ui, "sources")
-      try await ui.click("#source-tree [role=treeitem]", containing: "artifact \(expected.minifiedArtifactId)")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"\(expected.minifiedArtifactId)\"]")
       let settled = "!/Formatting|coloring/.test(document.querySelector('#source-pretty').innerText + document.querySelector('#source-language').innerText)"
       try await ui.waitUntil("document.querySelector('#source-pretty').innerText.includes('Pretty-printed') && \(settled)", timeout: 30,
         "\(size.name): the one-line source map did not open pretty-printed")

@@ -846,6 +846,7 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status/name search, the General coverage view, and the saved-capture export document |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
+| `source_tree.js` | The Sources navigator: frame, group, origin and folder model, hand-parsed non-special URLs, mounted-window rows, keyboard, type-ahead and filter; `app.js` supplies the catalog and the open path |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
 | `source_format.js` | The backend JavaScript layout client and its whitespace-only mapping to the displayed evidence |
@@ -943,7 +944,9 @@ resource filters stay visible below search and wrap within narrow windows. Selec
 and below it on narrow windows. Session
 counts come from loaded requests, and sample evidence stays visibly labeled.
 Keep labels at least 10 px and reserve stronger color for selection, connection
-state, errors, and evidence confidence. Code is the exception: Sources and the
+state, errors, and evidence confidence. Sources file icons are the one chrome
+tint: JavaScript, WebAssembly, JSON, source map and HTML icons take their code
+color at low strength, while folders, origins and frames stay neutral. Code is the exception: Sources and the
 Native Console color code like the Rosé Pine Moon VS Code theme (Rosé Pine
 Dawn in light mode), with its token colors, bracket pair colors, editor colors
 and Menlo 12/18 px; the Analyst editor takes the same editor colors and font. With macOS Increase Contrast, comments and
@@ -1064,31 +1067,48 @@ correlation and exposes zero-count families instead of hiding coverage. The
 view never claims that an observed value was transmitted or that a particular
 fingerprinting vendor produced the activity.
 
-Sources navigation lists retained Captured artifacts.
-File rows reserve their remaining width for the filename, with full URLs in
-tooltips and source metadata in Details. Folder rows retain their item counts.
-The navigator initially expands branches to keep retained files directly visible.
-Click a branch, or press Enter/Space on it, to collapse or expand it. One tree row
-is in the Tab order; Up/Down move through visible rows, Right opens a branch or
-enters its first child, Left closes it or returns to its parent, and Home/End
-reach the first/last visible row. Modified arrows keep their browser/history
-meaning. Focus and the open document are separate: collapsing a selected file's
-ancestor leaves its editor, Find result and original-byte location unchanged and
-never reads source bytes or runs analysis. Ordinary catalog refresh keeps keyed
-rows, tree focus and scroll, returning a removed focused row to its closest
-surviving ancestor. Branch state is session-only; origins and full path
-segments have distinct identities.
+Sources navigation lists every retained Captured artifact (`source_tree.js`).
+The catalog is read forward from `get_artifacts` in 5,000-record pages; a
+one-record probe carries the ETag, a manifest that only grew is read from its
+last boundary, and loading stops at 50,000 records with a notice. The tree reads
+**top**, then one row per frame, then the **Workers** (no frame),
+**Dynamic (eval / new Function)**, **WebAssembly** (modules compiled from bytes
+and their guest artifacts), **Extensions** (by extension ID) and **Browser
+internals** groups, then origins, folders and files. The frame seen first is
+listed first, other frames by name. A frame is named by its Console document URL
+when the Console listing has one, which also marks top-level documents, and
+otherwise by the origin of its first eval or Wasm artifact. Extension and
+`chrome://` hosts are read by hand because their URL origin is `null`; browser
+internals start collapsed. A folder chain with one folder child reads as one row
+(`a/b/c`). Files show their plain name, eval code `VM<id>` as in DevTools, with
+a mask icon tinted by type and the two-letter kind code kept as its text. The
+artifact ID is in the muted meta column, the tooltip and Details; same-named
+siblings add a muted query or session suffix. Extension names are not captured,
+so extensions show their ID.
 
-The navigator inspects at most 5,000 catalog records, retains 10,000 metadata
-nodes and renders at most 1,000 expanded rows. Collapsed descendants have no DOM
-rows. It rejects URLs above 4,096 characters and identities above 8,192
-characters, shortens directory structure after 16 levels, and visibly discloses
-these limits rather than implying omitted sources are absent. Selection markers
-are withheld when the catalog cap prevents verifying a unique source. Empty path
-segments remain distinct, explicitly labeled folders. Collapse branches
-or use **Open file** to reach later catalog choices. Deep indentation is bounded
-for narrow sidebars; full source URLs remain available in tooltips. These limits
-do not evict open source text, change captured evidence, or relink documents.
+Only rows near the viewport are mounted; the focused row stays mounted while
+scrolled away. One row is in the Tab order. Up/Down move through rows, Right
+opens a branch or enters its first child, Left closes it or returns to its
+parent, Home/End reach the first/last row, and typing a name moves to the next
+row that starts with it (repeat a letter to cycle). Modified arrows keep their
+browser/history meaning; Enter/Space keep native button activation. **Filter
+files** above the tree matches file names, URLs and artifact IDs and shows each
+match with its folders; Down enters the tree and Escape clears it. Expansion
+under a filter is separate, so clearing it restores the saved expansion.
+**Expand all** and **Collapse all** act on the current view. Expansion is kept
+for the app session. Focus and the open document are separate: collapsing a
+selected file's ancestor never reads source bytes or runs analysis. Catalog
+refresh keeps keyed rows, focus and the first visible row in place, returning a
+removed focused row to its closest surviving ancestor.
+
+The navigator holds at most 120,000 metadata nodes, rejects URLs above 4,096
+characters and identities above 8,192 characters, shortens directory structure
+after 16 levels, and discloses each limit rather than implying omitted sources
+are absent. Selection markers are withheld when the catalog is capped, a source
+identity repeats, or an omitted record shares the selected ID. Empty path
+segments remain distinct, explicitly labeled folders. **Open file** lists the
+first 200 matches. These limits do not evict open source text, change captured
+evidence, or relink documents.
 Find searches the selected document's owned retained text, independently of
 which lines are mounted. It uses a case-insensitive single-line literal of at
 most 512 UTF-16 code units. Multiline pastes are refused before the browser can

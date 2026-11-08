@@ -352,7 +352,7 @@ async function checkPaletteProviders(root) {
 
   // Files open through the exact artifact link, or Quick Open's selection.
   const files = provider('files').search('file');
-  assert.deepEqual(plain(files.map(value => [value.title, value.detail])), [['file 300', 'https://checkout.acme.test/assets/cart.js · JavaScript · 396 B'], ['file 301', '(anonymous) · WebAssembly · 8 B']]);
+  assert.deepEqual(plain(files.map(value => [value.title, value.detail])), [['file 300', 'https://checkout.acme.test/assets/cart.js · JavaScript · 396 B · artifact 300'], ['file 301', '(anonymous) · WebAssembly · 8 B · artifact 301']]);
   calls.length = 0; files[0].run();
   assert.deepEqual(plain(calls), [['openInvestigation', {kind: 'artifact', identity: {type: 'captured-artifact', session: '1', artifact: '300', sha256: 'a'.repeat(64), bytes: 396}}]]);
   calls.length = 0; files[1].run(); assert.deepEqual(calls, [['showScreen', 'sources'], ['selectArtifact', '301']]);

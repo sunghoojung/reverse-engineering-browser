@@ -1432,7 +1432,7 @@ function ownedContext(patch = {}) {
     sourceFactsPanel:{original:()=>undefined,cancel(){}}, investigationBeforeSelection(){}, investigationPassiveSource:false, location:{protocol:'http:'}, document:{querySelector:()=>({hidden:true})},
     renderSources(){}, renderSourceHealth(){}, renderShellStatus(){}, renderFingerprintActivity(){}, applySourceSearch(){},
     elements:{signalRenderList:new TrafficFixtureNode()}, ...canvasProductionRules,
-    sourceName:source=>source.url, evidencePackagePanel:{sync(){}}, evidenceWorkspace:{sync(){}},
+    sourceName:source=>source.url, sourceTreeFileIcon:()=>'file', evidencePackagePanel:{sync(){}}, evidenceWorkspace:{sync(){}},
     ...patch, state};
   const functions = [...(patch.productionFunctions ?? ownershipFunctionNames), ...(patch.functions ?? [])];
   return {state, sandbox, api:runInNewContext(ownershipModels + ownershipSyntax + ownershipProvenanceSite + functions.map(sourceProductionFunction).join('\n') +
@@ -1486,6 +1486,43 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   assert.equal(state.artifacts[0].session_id,'2'); assert.equal(state.artifacts[0].content,'const newer = 2;');
   assert.equal(old.content,undefined); assert.equal(reads,2);
   sourceOwnershipReceipt.push({test:'session_reuse_retires_late_preview',status:'passed'});
+}
+{
+  // The catalog is the whole manifest, read forward in 5,000-record pages
+  // like get_artifacts: a one-record probe carries the ETag, growth is read
+  // from the last boundary and any other change from the start, up to 50,000.
+  const template=await ownedArtifact('1');
+  const records=(count,from=1,url='p')=>Array.from({length:count},(_,i)=>({...template,artifact_id:String(from+i),url:`https://fixture.invalid/${url}/${from+i}.js`}));
+  let manifest=records(12001);const lists=[];
+  const {state,api}=ownedContext({fetch:async(url,options)=>{
+    if(!url.startsWith('/api/artifacts?'))return new Response('const a = 1;');
+    lists.push(url);const query=new URL(url,'http://fixture.invalid').searchParams,after=Number(query.get('after')),limit=Number(query.get('limit'));
+    const etag=`"${manifest.length}:${manifest[0]?.artifact_id}:${url}"`;
+    if(options.headers['If-None-Match']===etag)return new Response(null,{status:304});
+    if(after>manifest.length)return Response.json({error:'The cursor is not a record boundary'},{status:400});
+    const page=manifest.slice(after,after+limit),next=String(after+page.length);
+    return Response.json({count:page.length,artifacts:page,artifact_receiver_configured:true,artifact_receiver_connected:true,
+      query:{direction:'forward',limit,returned:page.length,store_end:String(manifest.length),next_after:next,next_before:null,
+        limited:page.length===limit,budget_exhausted:false,filters:{},scope:'all',scan_start:String(after),scan_end:next}},{headers:{ETag:etag}});
+  }});
+  await api.refreshArtifacts();
+  assert.equal(state.artifacts.length,12001,'Every retained record is loaded, not the newest 500');
+  assert.deepEqual(lists,['/api/artifacts?after=0&limit=1','/api/artifacts?after=0&limit=5000','/api/artifacts?after=5000&limit=5000','/api/artifacts?after=10000&limit=5000']);
+  assert.equal(state.artifactCatalogLimit,0);
+  const catalog=state.artifacts,first=catalog[0];lists.length=0;
+  await api.refreshArtifacts();assert.deepEqual(lists,['/api/artifacts?after=0&limit=1']);assert.equal(state.artifacts,catalog,'An unchanged manifest is one 304 probe');
+  manifest=[...manifest,...records(2,12002)];lists.length=0;await api.refreshArtifacts();
+  assert.deepEqual(lists,['/api/artifacts?after=0&limit=1','/api/artifacts?after=12001&limit=5000'],'Growth is read from the last boundary');
+  assert.equal(state.artifacts.length,12003);assert.equal(state.artifacts[0],first,'Appending keeps retained owners');
+  manifest=records(3,90000,'replaced');lists.length=0;await api.refreshArtifacts();
+  assert.deepEqual(lists,['/api/artifacts?after=0&limit=1','/api/artifacts?after=0&limit=5000'],'A replaced manifest is read from the start');
+  assert.deepEqual([...state.artifacts.map(value=>value.artifact_id)],['90000','90001','90002']);
+  manifest=records(50003);lists.length=0;await api.refreshArtifacts();
+  assert.equal(state.artifacts.length,50000);assert.equal(state.artifactCatalogLimit,50000,'Loading stops at 50,000 records, visibly');
+  manifest=[...manifest,...records(1,60000)];lists.length=0;await api.refreshArtifacts();
+  assert.deepEqual(lists,['/api/artifacts?after=0&limit=1'],'A capped catalog reads no further pages');assert.equal(state.artifacts.length,50000);
+  manifest=[];lists.length=0;await api.refreshArtifacts();assert.equal(state.artifacts.length,0,'An emptied live manifest clears the catalog');
+  sourceOwnershipReceipt.push({test:'catalog_pages_whole_manifest',status:'passed',records:12003});
 }
 {
   const artifact=await ownedArtifact('1'); let reads=0, bytes='const b = 1;';

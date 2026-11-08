@@ -68,7 +68,8 @@ it.
   packaged app when Network and Artifact are captured) record script IDs and
   positions of the stack that started each document request, never names or
   values, and retain the source of each script a stack names as an artifact.
-  See [Native network v3](protocol/native-network-v3.md).
+  Agent-started sessions record them only when the start names
+  `request_stacks`. See [Native network v3](protocol/native-network-v3.md).
 - Debugger observation rules (Console `watch`) are off until armed on one
   selected live document and never pause it. They record request matches,
   listener dispatch, timers, CSP violations, exceptions and mutations of at most

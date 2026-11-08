@@ -10,6 +10,7 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // already be listening.
     let endpoint_file = options.endpoint_file.clone();
     let active_endpoint_file = options.active_endpoint_file.clone();
+    let owner = options.owner_pid;
     let app = App::new(options, address.port()).await;
     let endpoint = PublishedEndpoint::new(endpoint_file.as_deref(), address)?;
     // Only the live launcher opts into this alias. Idle/development backends
@@ -24,16 +25,27 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let mut termination =
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                         .expect("SIGTERM handler");
-                tokio::select! {_=tokio::signal::ctrl_c()=>(),_=termination.recv()=>()}
+                tokio::select! {_=tokio::signal::ctrl_c()=>(),_=termination.recv()=>(),_=owner_gone(owner)=>()}
             }
             #[cfg(not(unix))]
             {
+                let _ = owner;
                 let _ = tokio::signal::ctrl_c().await;
             }
             shutdown.stop().await;
         })
         .await?;
     Ok(())
+}
+
+#[cfg(unix)]
+async fn owner_gone(owner: Option<i32>) {
+    let Some(owner) = owner else {
+        return std::future::pending().await;
+    };
+    while unsafe { libc::getppid() } == owner {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

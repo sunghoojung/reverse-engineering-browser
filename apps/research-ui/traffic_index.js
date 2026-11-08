@@ -47,7 +47,7 @@ function createTrafficIndex({fetcher = (input, init) => fetch(input, init), onCh
         error = null;
         return;
       }
-      // A workspace without the index (the bundled reb:// one) is not asked again.
+      // A workspace without the index is not asked again.
       if (response.status === 404) unsupported = true;
       if (!response.ok) throw new Error(`the request index returned HTTP ${response.status}`);
       const document = await response.json();

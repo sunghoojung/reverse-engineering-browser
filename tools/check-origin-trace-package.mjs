@@ -67,6 +67,7 @@ export async function checkPackageContract() {
   const removedBytes = (await Promise.all([...publicAssets, 'analyst_runner_core.js'].map(async asset => (await stat(join(root, 'apps/research-ui', asset))).size))).reduce((a, b) => a + b, 0);
   await checkClientProjectScreenshotContract();
   await checkNativeDiagnosticsContract();
+  await checkStoredEvidenceContract(native, build);
   console.log(`PASS packaging contract: ${assets.length} canonical assets; ${publicAssets.length + 1} redundant copies removed (${removedBytes} bytes)`);
   return {assets, publicAssets};
 }
@@ -192,6 +193,28 @@ function nativeClientProjectDiagnostics(output){
   const errors=lines.filter(line=>line.includes('SMOKE_ERROR'));
   return ['','--- App-side native smoke (native-smoke.log) ---','Last stage: '+(last??'none recorded'),
     'App failure: '+(errors.join('\n')||'none recorded'),'Recent app lines:',...lines.slice(-60)].join('\n');
+}
+
+// reb:// answers Rust-only operations through the bundled backend, and its own
+// network window keeps the record types the Rust window keeps.
+async function checkStoredEvidenceContract(native, build) {
+  const forwarder = await readFile(join(root, 'apps/research-ui/macos/StoredEvidenceBackend.swift'), 'utf8');
+  const spec = JSON.parse(await readFile(join(root, 'protocol/openapi.json'), 'utf8'));
+  const routes = name => [...forwarder.match(new RegExp(`static let ${name}: Set<String> = \\[([^\\]]+)\\]`))[1].matchAll(/"([^"]+)"/g)].map(match => match[1]);
+  for (const [name, method] of [['getRoutes', 'get'], ['postRoutes', 'post']]) {
+    for (const route of routes(name)) {
+      assert(spec.paths[route]?.[method], `${route} is a ${method} operation`);
+      assert(!native.includes(`case "${route}"`), `${route} has no second native answer`);
+    }
+  }
+  assert(build.includes('"${stored_evidence_backend_source}" "${trace_document_source}"'), 'The app compiles the forwarder');
+  assert(build.includes('tools/check-stored-evidence-backend.swift') && build.includes('check-stored-evidence-backend" "${macos_path}/OriginTraceBackend"'),
+    'The native build runs the forwarder against the packaged backend');
+  const types = text => [...text.matchAll(/"([a-z_]+)"/g)].map(match => match[1]).sort();
+  const swift = await readFile(join(root, 'apps/research-ui/macos/StoredEventWindow.swift'), 'utf8');
+  const rust = await readFile(join(root, 'apps/origin-trace-backend/src/event_window.rs'), 'utf8');
+  assert.deepEqual(types(swift.match(/func isNetwork[\s\S]+?\]\.contains/)[0]), types(rust.match(/fn is_network[\s\S]+?\n}/)[0]),
+    'The Swift and Rust network windows keep the same record types');
 }
 
 async function checkNativeDiagnosticsContract(){

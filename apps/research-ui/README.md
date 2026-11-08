@@ -627,6 +627,16 @@ to the bundled native runner. `analyst_runner_node.js` remains available for the
 backend's supported Node fallback. The runners are not public UI routes.
 `OriginTrace.icns` and `run-live-session.sh` stay at the Resources root.
 
+The `reb://` workspace answers what only Rust implements (the request index,
+filtered `get_events` reads, request headers and cookies, cookie provenance,
+request stacks, the Oxc source layout and native debugger state) through the
+bundled `OriginTraceBackend`
+([`StoredEvidenceBackend.swift`](macos/StoredEvidenceBackend.swift)). The first
+such read starts it idle over the same stores on a loopback port only the app
+knows. It exits with the app (`--owner-pid`) and stops when a live workspace
+opens. The unfiltered event window stays in Swift and keeps the network record
+types the Rust window keeps.
+
 To package a new UI module, add its filename once to the explicit asset loop in
 [`build-research-app.sh`](../../scripts/build-research-app.sh). If it is served by
 the UI, also add its HTML reference and the existing native scheme and Rust
@@ -746,9 +756,8 @@ viewport do not move it or the selection. Selecting a row whose records are not
 all in the newest event window reads them with `get_events` from the row's first
 byte offset before the inspector opens. While the index is still indexing a large
 store, or counts unreadable or over-limit records, the footer says so. Until it
-first answers, and in the bundled `reb://` workspace, Traffic uses the newest
-network window and labels its counts that way; a later failed read keeps the
-last rows. The Rust native-event API returns separate newest general and network lifecycle
+first answers, Traffic uses the newest network window and labels its counts that
+way; a later failed read keeps the last rows. The Rust native-event API returns separate newest general and network lifecycle
 windows of up to 5,000 events each from at most the newest 64 MiB. Canvas/WebGL activity does not consume
 network slots within that byte budget. That network window, including
 redirect, failed, and response-completed outcomes, also supplies the inspector. Notices distinguish a capped

@@ -1414,6 +1414,7 @@ mkdir -p "$dir/profile" "$dir/artifacts"
 printf '%s\n' "$REB_NATIVE_WASM_DISPATCH $REB_CAPTURE_CATEGORY_MASK $REB_USE_SYSTEM_KEYCHAIN $REB_CONSOLE_DOCUMENT_START $REB_CAPTURE_REQUEST_CONTENT ${{REB_NATIVE_JS_INVOCATION_SITES-unset}} ${{REB_NATIVE_JS_INVOCATION_DIGESTS-unset}}" > "$dir/options"
 printf '%s\n' "${{REB_NATIVE_JS_INVOCATION_IF_SUPPORTED-unset}} ${{REB_JS_INVOCATION_SITE_STORE-unset}}" > "$dir/site-store"
 printf '%s\n' "${{REB_NATIVE_REQUEST_STACKS-unset}} ${{REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED-unset}}" > "$dir/stacks"
+printf '%s\n' "${{REB_REQUEST_CONTENT_BUDGET_MIB-unset}}" > "$dir/content-budget"
 labels=()
 if [[ -n "${{REB_NATIVE_JS_INVOCATION_SITES-}}" ]]; then
   cp "$REB_NATIVE_JS_INVOCATION_SITES" "$dir/sites"
@@ -1422,6 +1423,7 @@ if [[ -n "${{REB_NATIVE_JS_INVOCATION_SITES-}}" ]]; then
 fi
 [[ "$REB_CAPTURE_REQUEST_CONTENT" == 1 ]] && labels+=(--session-request-content)
 [[ "$REB_CONSOLE_DOCUMENT_START" == 1 ]] && labels+=(--session-document-start)
+[[ "${{REB_NATIVE_REQUEST_STACKS-0}}" == 1 ]] && labels+=(--session-request-stacks)
 ln -s "test-host-$$" "$dir/profile/SingletonLock"
 # The stand-in broker holds its event store guard for its life, as the real
 # broker does; the backend reads that lock as the broker running.
@@ -1498,6 +1500,7 @@ wait "$backend"
             .env("REB_NATIVE_JS_INVOCATION_IF_SUPPORTED", "1")
             .env("REB_NATIVE_REQUEST_STACKS", "1")
             .env("REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED", "1")
+            .env("REB_REQUEST_CONTENT_BUDGET_MIB", "999")
             .env(
                 "REB_JS_INVOCATION_SITE_STORE",
                 self.root.path().join("app-sites.json"),
@@ -1610,7 +1613,11 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
     );
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("stacks")).unwrap(),
-        "unset unset\n"
+        "0 unset\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4242").join("content-budget")).unwrap(),
+        "unset\n"
     );
     // Nor may it read or change the app's saved invocation sites.
     let store = std::fs::read_to_string(fixture.session("4242").join("site-store")).unwrap();
@@ -1752,6 +1759,14 @@ fn agent_session_options_are_named_never_inherited() {
             json!({"js_invocation_saved_sites": true}),
             "saved set, which is empty",
         ),
+        (
+            json!({"request_content_budget_mib": 64}),
+            "requires request_content",
+        ),
+        (
+            json!({"request_stacks": true, "category_mask": 256}),
+            "request_stacks needs Network and Artifact",
+        ),
     ] {
         let refused = call(&mut mcp, arguments.clone());
         assert_eq!(refused["result"]["isError"], true, "{arguments}");
@@ -1790,6 +1805,7 @@ fn agent_session_options_are_named_never_inherited() {
     let started = call(
         &mut mcp,
         json!({"document_start": true, "request_content": true,
+            "request_content_budget_mib": 64, "request_stacks": true,
             "confirm_sensitive_capture": true, "js_invocation_sites": agent_file,
             "timeout_seconds": 30}),
     );
@@ -1805,6 +1821,8 @@ fn agent_session_options_are_named_never_inherited() {
     for (option, value) in [
         ("document_start", json!(true)),
         ("request_content", json!(true)),
+        ("request_content_budget_mib", json!(64)),
+        ("request_stacks", json!(true)),
         ("js_invocation_saved_sites", json!(false)),
         ("js_invocation_digests", json!(false)),
         ("canvas_images", json!(false)),
@@ -1826,6 +1844,15 @@ fn agent_session_options_are_named_never_inherited() {
         std::fs::read_to_string(fixture.session("4242").join("sites")).unwrap(),
         site_file(&[120])
     );
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4242").join("stacks")).unwrap(),
+        "1 unset\n",
+        "named stacks are strict"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4242").join("content-budget")).unwrap(),
+        "64\n"
+    );
     let log = std::fs::read_to_string(launch_logs().last().unwrap()).unwrap();
     let first = log.lines().next().unwrap();
     let named: Value =
@@ -1838,7 +1865,7 @@ fn agent_session_options_are_named_never_inherited() {
     assert_eq!(
         context["capture_options"],
         json!({"source":"launcher","request_content":true,"canvas_images":false,
-            "request_stacks":false,"document_start":"permitted",
+            "request_stacks":true,"document_start":"permitted",
             "js_invocation":{"state":"armed","count":1,"digests":false}})
     );
 
@@ -1874,6 +1901,10 @@ fn agent_session_options_are_named_never_inherited() {
         std::fs::read_to_string(fixture.session("4243").join("sites")).unwrap(),
         site_file(&[120, 200])
     );
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4243").join("content-budget")).unwrap(),
+        "unset\n"
+    );
     let context = mcp.request("tools/call", json!({"name": "get_session_context"}));
     let context: Value = serde_json::from_str(tool_text(&context)).unwrap();
     assert_eq!(
@@ -1885,6 +1916,7 @@ fn agent_session_options_are_named_never_inherited() {
         "not_permitted"
     );
     assert_eq!(context["capture_options"]["request_content"], false);
+    assert_eq!(context["capture_options"]["request_stacks"], false);
 
     let ended = mcp.request(
         "tools/call",
@@ -1892,6 +1924,43 @@ fn agent_session_options_are_named_never_inherited() {
     );
     assert_eq!(ended["result"]["isError"], false, "{}", tool_text(&ended));
     fixture.wait_ended("4243");
+}
+
+/// The CLI keeps the start tool's gates: a request content budget needs
+/// request content, which needs the sensitive-capture confirmation.
+#[cfg(unix)]
+#[test]
+fn session_start_cli_gates_the_request_content_budget() {
+    for (arguments, needle) in [
+        (
+            &["--request-content-budget-mib", "64"][..],
+            "--request-content",
+        ),
+        (
+            &["--request-content", "--request-content-budget-mib", "64"][..],
+            "--confirm-sensitive-capture",
+        ),
+        (
+            &[
+                "--request-content",
+                "--confirm-sensitive-capture",
+                "--request-content-budget-mib",
+                "4097",
+            ][..],
+            "from 1 to 4096",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args(["session", "start"])
+            .args(arguments)
+            .env("REB_LIVE_SESSION_SCRIPT", "/nonexistent/launcher.sh")
+            .env_remove("REB_LIVE_SESSION_ROOT")
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{arguments:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(needle), "{arguments:?}: {stderr}");
+    }
 }
 
 #[test]

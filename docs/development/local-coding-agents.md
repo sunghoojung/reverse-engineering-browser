@@ -151,7 +151,8 @@ sending a request. `start_live_session` takes named capture options (`url`,
 `wasm_samples_per_indirect_site`, `wasm_function_allow`,
 `wasm_function_deny`, `wasm_module_allowlist`, `guest_adapter`, `js_dispatch_sites`,
 `quiet`, `category_mask`, `duration_seconds`, `localhost_only`,
-`document_start`, `request_content`, `js_invocation_sites`,
+`document_start`, `request_content`, `request_content_budget_mib`,
+`request_stacks`, `js_invocation_sites`,
 `js_invocation_saved_sites`, `js_invocation_digests` and others; all off
 unless named and never inherited from the environment, with sensitive capture
 behind `confirm_sensitive_capture`), starts the same launcher as `make live`
@@ -356,9 +357,10 @@ The researcher must choose an endpoint belonging to the intended session:
   parameters such as `native=1`. That is not the root URL accepted by the CLI;
   use the selected session's `research-ui.endpoint` instead.
 - A native **stored-evidence** `reb://app/` window uses Swift
-  `WKURLSchemeHandler` routes. It need not have an HTTP backend. `reb-api` cannot
-  call those custom-scheme handlers, and their capabilities are not identical
-  to the Rust service. Do not guess a port or start another backend over app
+  `WKURLSchemeHandler` routes, and answers Rust-only reads through a private
+  idle backend whose endpoint it never publishes. `reb-api` cannot call those
+  custom-scheme handlers, and their capabilities are not identical to the Rust
+  service. Do not guess a port or start another backend over app
   stores to work around the distinction. Continue with offline metadata and
   researcher-reviewed exports, or ask which supported session to use.
 

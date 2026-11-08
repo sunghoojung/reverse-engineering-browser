@@ -106,6 +106,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let decoderService: NativeDecoderService
   private let brokerSocketURL: URL?
   private let storedEvents = StoredEventWindowCache()
+  private let storedBackend: StoredEvidenceBackend
   private let demoEvidenceEnabled: Bool
   private let analystRunnerLock = NSLock()
   private var activeAnalystProcess: Process?
@@ -124,6 +125,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     analystRunnerCoreURL: URL,
     decoderExecutableURL: URL,
     brokerSocketURL: URL?,
+    storedBackend: StoredEvidenceBackend,
     demoEvidenceEnabled: Bool
   ) {
     self.indexURL = indexURL
@@ -139,7 +141,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     deobfuscationService = NativeDeobfuscationService(executableURL: decoderExecutableURL.deletingLastPathComponent().appendingPathComponent("OriginTraceDeobfuscator"))
     wasmService = NativeWasmService(executableURL: decoderExecutableURL.deletingLastPathComponent().appendingPathComponent("OriginTraceWasmInspector"))
     self.brokerSocketURL = brokerSocketURL
+    self.storedBackend = storedBackend
     self.demoEvidenceEnabled = demoEvidenceEnabled
+  }
+
+  func stopStoredBackend() {
+    storedBackend.stop()
   }
 
   deinit {
@@ -157,6 +164,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     }
     guard let requestURL = urlSchemeTask.request.url else {
       sendError("Invalid application URL", status: 400, to: urlSchemeTask)
+      return
+    }
+    if StoredEvidenceBackend.serves(urlSchemeTask.request) {
+      storedBackend.forward(urlSchemeTask.request) { body, status, contentType, headers in
+        self.send(body, contentType: contentType, status: status, headers: headers, to: urlSchemeTask)
+      }
       return
     }
 
@@ -200,11 +213,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         // Live workspaces use the bundled Rust HTTP backend instead.
         response = (try JSONSerialization.data(withJSONObject: [
           "error": "JavaScript facts are unavailable in stored-evidence native mode. Open a live workspace or the browser development UI.",
-          "code": "dependency_unavailable", "details": [:]
-        ]), "application/json; charset=utf-8", 503, [:])
-      case "/api/source-format":
-        response = (try JSONSerialization.data(withJSONObject: [
-          "error": "The Oxc layout needs a live workspace; stored evidence uses the in-page formatter.",
           "code": "dependency_unavailable", "details": [:]
         ]), "application/json; charset=utf-8", 503, [:])
       case "/api/deobfuscation":
@@ -2669,6 +2677,15 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let analystRunnerCoreURL = researchUIURL.appendingPathComponent("analyst_runner_core.js")
     let decoderExecutableURL = Bundle.main.bundleURL
       .appendingPathComponent("Contents/MacOS/OriginTraceDecoder")
+    let storedBackend = StoredEvidenceBackend(
+      executableURL: Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/OriginTraceBackend"),
+      arguments: [
+        "--store", eventStoreURL.path, "--trace-store", traceStoreURL.path,
+        "--signal-store", signalStoreURL.path, "--artifacts", artifactStoreURL.path,
+        "--api-collection", apiCollectionStoreURL.path, "--local-analyst", localAnalystStoreURL.path,
+        "--js-invocation-site-store", InvocationSiteSet.storeURL(
+          environment: ProcessInfo.processInfo.environment, applicationSupport: originTraceSupportURL()).path,
+      ])
     let handler = LocalContentHandler(
       indexURL: indexURL,
       eventStoreURL: eventStoreURL,
@@ -2681,6 +2698,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       analystRunnerCoreURL: analystRunnerCoreURL,
       decoderExecutableURL: decoderExecutableURL,
       brokerSocketURL: configuredBrokerSocket(),
+      storedBackend: storedBackend,
       demoEvidenceEnabled: CommandLine.arguments.contains("--demo-evidence")
     )
     contentHandler = handler
@@ -2839,6 +2857,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     clientProjectExport?.navigationWillStart()
     closeSmoke?.willTerminate()
     liveSessionCoordinator.stop()
+    contentHandler?.stopStoredBackend()
   }
 
   private let customBraveBundleIdentifier = "com.brave.Browser.development"
@@ -2985,6 +3004,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     closeGuard?.prepareForLoad(url)
     clientProjectExport?.prepareForLoad(url)
     webView?.load(URLRequest(url: url))
+    if url.scheme != "reb" { contentHandler?.stopStoredBackend() }
   }
 
   private var readyLiveWorkspaceURL: URL? {

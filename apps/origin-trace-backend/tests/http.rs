@@ -9341,3 +9341,54 @@ async fn request_index_reaches_every_request_of_a_large_session() {
         "the oldest request is read from its own offset"
     );
 }
+
+/// A private backend started with `--owner-pid` stops, and retires its
+/// endpoint, once the process that started it is gone.
+#[cfg(unix)]
+#[test]
+fn owned_backend_stops_when_its_owner_exits() {
+    let root = tempfile::tempdir().unwrap();
+    let endpoint = root.path().join("endpoint");
+    let output = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(
+            r#"backend="$1"; shift
+"$backend" --owner-pid $$ "$@" >/dev/null 2>&1 &
+pid=$!
+i=0; while [ ! -s "$ENDPOINT" ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i + 1)); done
+[ -s "$ENDPOINT" ] && echo "$pid""#,
+        )
+        .arg("sh")
+        .arg(env!("CARGO_BIN_EXE_origin-trace-backend"))
+        .args(["--port", "0", "--endpoint-file"])
+        .arg(&endpoint)
+        .arg("--store")
+        .arg(root.path().join("events.jsonl"))
+        .arg("--artifacts")
+        .arg(root.path().join("artifacts"))
+        .arg("--api-collection")
+        .arg(root.path().join("collection.json"))
+        .arg("--local-analyst")
+        .arg(root.path().join("analyst.json"))
+        .env("ENDPOINT", &endpoint)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "the owned backend published no endpoint"
+    );
+    let pid: i32 = String::from_utf8(output.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the owned backend outlived its owner"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!endpoint.exists(), "the endpoint is retired on the way out");
+}

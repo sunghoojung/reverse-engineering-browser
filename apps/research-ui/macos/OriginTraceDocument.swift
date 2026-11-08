@@ -361,6 +361,7 @@ enum OriginTraceDocumentBuilder {
     let network = [
       "request_target", "request_body", "response_body", "request_headers", "response_headers",
       "cookie_list", "script_cookie", "request_initiator_stack", "script_identity",
+      "navigation_initiator_stack", "navigation_initiator_link", "async_task_stack",
       "request_watch_match",
     ]
     let observation = [

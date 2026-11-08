@@ -1,0 +1,150 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/js_based_event_listener.cc b/third_party/blink/renderer/bindings/core/v8/js_based_event_listener.cc
+index 4444382..5b53a56 100644
+--- a/third_party/blink/renderer/bindings/core/v8/js_based_event_listener.cc
++++ b/third_party/blink/renderer/bindings/core/v8/js_based_event_listener.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "third_party/blink/renderer/bindings/core/v8/js_based_event_listener.h"
+ 
++#include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation_blink.h"
+ #include "third_party/blink/renderer/bindings/core/v8/binding_security.h"
+ #include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
+@@ -64,6 +65,32 @@ bool JSBasedEventListener::BelongsToTheCurrentWorld(
+   return false;
+ }
+ 
++namespace {
++
++// A Console event watch; see protocol/native-debugger-observation-v1.md.
++void ObserveNativeListener(ExecutionContext* context,
++                           const Event& event,
++                           v8::Local<v8::Value> listener) {
++  const std::uint64_t frame_id = reb::debugger_observation::FrameId(context);
++  if (!reb::NativeDebuggerWatch::Wants(frame_id, reb::kNativeWatchListeners)) {
++    return;
++  }
++  EventTarget* target = event.currentTarget();
++  std::uint8_t kind = 5;
++  std::uint16_t node_type = 0;
++  if (const Node* node = target->ToNode()) {
++    node_type = static_cast<std::uint16_t>(node->getNodeType());
++    kind = node->IsElementNode() ? 1 : node->IsDocumentNode() ? 2 : 4;
++  } else if (target->ToLocalDOMWindow()) {
++    kind = 3;
++  }
++  reb::NativeDebuggerWatch::Listener(
++      frame_id, reb::debugger_observation::Latin1(event.type()), kind,
++      node_type, reb::debugger_observation::FunctionFrame(listener));
++}
++
++}  // namespace
++
+ // Implements step 2. of "inner invoke".
+ // https://dom.spec.whatwg.org/#concept-event-listener-inner-invoke
+ void JSBasedEventListener::Invoke(
+@@ -184,6 +211,11 @@ void JSBasedEventListener::Invoke(
+       task_attribution_resource_timing_scope = SetTaskStateVariable(
+           resource_timing_context_, execution_context_of_event_target);
+     }
++    if (reb::NativeDebuggerWatch::Armed(reb::kNativeWatchListeners) &&
++        GetWorld().IsMainWorld()) [[unlikely]] {
++      ObserveNativeListener(execution_context_of_event_target, *event,
++                            GetListenerObject(*event->currentTarget()));
++    }
+     // Step 10: Call a listener with event's currentTarget as receiver and event
+     // and handle errors if thrown.
+     InvokeInternal(*event->currentTarget(), *event, js_event);
+diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
+index 3308cff..56e8ccd 100644
+--- a/third_party/blink/renderer/core/BUILD.gn
++++ b/third_party/blink/renderer/core/BUILD.gn
+@@ -261,6 +261,7 @@ component("core") {
+   visibility = [ "//third_party/blink/*" ]
+ 
+   sources = [
++    "//brave/components/reverse_engineering_browser/renderer/native_debugger_observation_blink.h",
+     "//brave/components/reverse_engineering_browser/renderer/native_worker_observation_blink.h",
+     "core_initializer.cc",
+     "core_initializer.h",
+diff --git a/third_party/blink/renderer/core/scheduler/dom_timer.cc b/third_party/blink/renderer/core/scheduler/dom_timer.cc
+index a9757ec..a255a6f 100644
+--- a/third_party/blink/renderer/core/scheduler/dom_timer.cc
++++ b/third_party/blink/renderer/core/scheduler/dom_timer.cc
+@@ -25,6 +25,7 @@
+  */
+ #include "third_party/blink/renderer/core/scheduler/dom_timer.h"
+ 
++#include <algorithm>
+ #include <limits>
+ 
+ #include "base/check_deref.h"
+@@ -32,6 +33,7 @@
+ #include "base/numerics/clamped_math.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/time/time.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation_blink.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/platform/task_type.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_union_string_trustedhtml.h"
+@@ -43,6 +45,7 @@
+ #include "third_party/blink/renderer/core/inspector/inspector_trace_events.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ #include "third_party/blink/renderer/core/scheduler/scheduled_action.h"
++#include "third_party/blink/renderer/platform/bindings/callback_function_base.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
+@@ -165,6 +168,30 @@ bool IsAllowed(ExecutionContext& context, bool is_eval, const String& source) {
+   return true;
+ }
+ 
++// A Console timer watch; see protocol/native-debugger-observation-v1.md.
++void ObserveNativeTimer(ExecutionContext* context,
++                        ScheduledAction& action,
++                        bool fired,
++                        bool interval,
++                        int timeout_id,
++                        base::TimeDelta delay) {
++  const std::uint64_t frame_id = reb::debugger_observation::FrameId(context);
++  if (!reb::NativeDebuggerWatch::Wants(frame_id, reb::kNativeWatchTimers)) {
++    return;
++  }
++  CallbackFunctionBase* callback = action.CallbackFunction();
++  reb::NativeStackFrame frame;
++  if (callback) {
++    v8::HandleScope scope(callback->GetIsolate());
++    frame = reb::debugger_observation::FunctionFrame(callback->CallbackObject());
++  }
++  reb::NativeDebuggerWatch::Timer(
++      frame_id, fired, interval, !callback, static_cast<std::uint32_t>(timeout_id),
++      static_cast<std::uint32_t>(std::clamp<int64_t>(
++          delay.InMilliseconds(), 0, std::numeric_limits<std::uint32_t>::max())),
++      frame);
++}
++
+ }  // namespace
+ 
+ int DOMTimer::setTimeout(ScriptState* script_state,
+@@ -353,6 +380,10 @@ DOMTimer::DOMTimer(ExecutionContext& context,
+   DEVTOOLS_TIMELINE_TRACE_EVENT_INSTANT(
+       "TimerInstall", inspector_timer_install_event::Data, &context,
+       timeout_id_, timeout, single_shot);
++  if (reb::NativeDebuggerWatch::Armed(reb::kNativeWatchTimers)) [[unlikely]] {
++    ObserveNativeTimer(&context, *action_, false, !single_shot, timeout_id_,
++                       timeout);
++  }
+   const char* name = single_shot ? "setTimeout" : "setInterval";
+   async_task_context_.Schedule(&context, name, scan_for_ads);
+   probe::BreakableLocation(&context, name);
+@@ -407,6 +438,10 @@ void DOMTimer::Fired() {
+   DEVTOOLS_TIMELINE_TRACE_EVENT("TimerFire", inspector_timer_fire_event::Data,
+                                 context, timeout_id_);
+   const bool is_interval = RepeatInterval().has_value();
++  if (reb::NativeDebuggerWatch::Armed(reb::kNativeWatchTimers)) [[unlikely]] {
++    ObserveNativeTimer(context, *action_, true, is_interval, timeout_id_,
++                       RepeatInterval().value_or(base::TimeDelta()));
++  }
+ 
+   probe::UserCallback probe(context, is_interval ? "setInterval" : "setTimeout",
+                             g_null_atom, true);

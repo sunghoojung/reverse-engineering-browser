@@ -5,6 +5,7 @@
 
 #include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_fetch_owner.h"
+#include "reb/debugger_observation.hpp"
 #include "request_stack_tests.h"
 
 namespace {
@@ -18,6 +19,7 @@ std::array<std::uint8_t, 48> ListenerTail() {
 }
 
 NativeRequestStackPayload ObservationPayload(const NativeProbeEvent& event) {
+  assert(reb::IsValidObservationEvent(std::bit_cast<reb::EventRecord>(event)));
   auto value = std::bit_cast<NativeRequestStackPayload>(event.inline_payload);
   auto prefix = value;
   prefix.reserved1 = {};
@@ -74,13 +76,34 @@ NativeRequestStackPayload ObservationPayload(const NativeProbeEvent& event) {
   Configure(queue, 53);
   scenario = {};
   reb::NativeWatchRules rules;
-  rules.request_count = 1;
-  const std::string_view api = "/api/x";
-  std::memcpy(rules.requests[0].url.data(), api.data(), api.size());
-  rules.requests[0].url_length = api.size();
-  rules.event_count = 1;
-  std::memcpy(rules.events[0].data(), "click", 5);
-  rules.event_lengths[0] = 5;
+  assert(rules.AddRequest("/api/x", "") && rules.AddEvent("click"));
+  // Rules the renderer could not hold exactly are refused and add nothing.
+  assert(!rules.AddRequest("", "") && !rules.AddRequest("x", "post") &&
+         !rules.AddRequest(std::string(257, 'x'), "") &&
+         !rules.AddRequest(std::string_view("a\0b", 3), "") &&
+         !rules.AddRequest("x", "VERYLONGMETHODNAME"));
+  assert(!rules.AddEvent("click") && !rules.AddEvent("cl ick") && !rules.AddEvent("") &&
+         !rules.AddEvent(std::string(28, 'e')));
+  assert(rules.request_count == 1 && rules.event_count == 1);
+  assert(!rules.AddDom(0, true, false, false) && !rules.AddDom(5, false, false, false));
+  assert(rules.AddDom(5, true, true, false) && !rules.AddDom(5, false, false, true));
+  for (int id = 6; id < 9; ++id) {
+    assert(rules.AddDom(id, false, false, true));
+  }
+  assert(!rules.AddDom(9, true, false, false) && rules.dom_count == 4);
+  rules.timers = rules.csp = rules.uncaught = rules.caught = true;
+  {
+    // Disarmed, every hook is one relaxed load: no walk, no record, no allocation.
+    const auto before = allocations.load();
+    reb::NativeDebuggerWatch::Listener(9, "click", 1, 1, NativeStackFrame{});
+    reb::NativeDebuggerWatch::Timer(9, false, false, false, 1, 0, NativeStackFrame{});
+    reb::NativeDebuggerWatch::Csp(9, 20, false, "cdn.example.test");
+    reb::NativeDebuggerWatch::Exception(9, 1, NativeStackFrame{});
+    reb::NativeDebuggerWatch::Mutation(9, reb::kNativeWatchAttribute,
+                                       reb::NativeDebuggerWatch::DomSlot(5, 1), 1, "class");
+    assert(allocations.load() == before && scenario.walks == 0 && Drain(queue) == 0);
+  }
+  assert(!reb::NativeDebuggerWatch::Arm(0, rules));
   assert(reb::NativeDebuggerWatch::Arm(9, rules));
   assert(reb::NativeDebuggerWatch::Armed(reb::kNativeWatchRequests | reb::kNativeWatchListeners));
 
@@ -112,10 +135,83 @@ NativeRequestStackPayload ObservationPayload(const NativeProbeEvent& event) {
 
   reb::NativeDebuggerWatch::Listener(9, "click", 1, 1,
                                      reb::NativeDebuggerWatch::FunctionFrame(10, 40));
-  assert(Pop(queue).header.type == NativeProbeType::kListenerDispatch);
-  // An unwatched event type is dropped.
+  {
+    const auto tail = ObservationPayload(Pop(queue)).reserved1;
+    const auto frame = std::bit_cast<NativeStackFrame>(std::array<std::uint8_t, 16>{
+        tail[4], tail[5], tail[6], tail[7], tail[8], tail[9], tail[10], tail[11], tail[12],
+        tail[13], tail[14], tail[15], tail[16], tail[17], tail[18], tail[19]});
+    assert(tail[0] == 0 && tail[1] == 1 && frame.script_id == 10 && frame.position == 40 &&
+           frame.detail == 40 && tail[20] == 5);
+  }
+  // An unwatched event type, another frame and frame 0 are dropped.
   reb::NativeDebuggerWatch::Listener(9, "scroll", 1, 1, NativeStackFrame{});
+  reb::NativeDebuggerWatch::Listener(10, "click", 1, 1, NativeStackFrame{});
+  reb::NativeDebuggerWatch::Listener(0, "click", 1, 1, NativeStackFrame{});
   assert(Drain(queue) == 0);
+
+  reb::NativeDebuggerWatch::Timer(9, true, true, true, 77, 16, NativeStackFrame{});
+  {
+    const NativeProbeEvent timer = Pop(queue);
+    const auto tail = ObservationPayload(timer).reserved1;
+    std::uint32_t id = 0;
+    std::memcpy(&id, tail.data() + 4, sizeof(id));
+    assert(timer.header.type == NativeProbeType::kTimerObservation && timer.header.frame_id == 9 &&
+           tail[0] == 2 && tail[1] == 2 && tail[2] == 1 && id == 77);
+  }
+  reb::NativeDebuggerWatch::Csp(9, 20, true, "cdn.example.test");
+  {
+    const auto tail = ObservationPayload(Pop(queue)).reserved1;
+    assert(tail[0] == 20 && tail[1] == 2 && tail[2] == 16 &&
+           std::string_view(reinterpret_cast<const char*>(tail.data() + 3), 16) ==
+               "cdn.example.test");
+  }
+  // A host that does not fit is left out rather than cut.
+  reb::NativeDebuggerWatch::Csp(9, 20, false, std::string(46, 'h'));
+  assert(ObservationPayload(Pop(queue)).reserved1[2] == 0);
+
+  for (const std::uint8_t kind : {std::uint8_t{1}, std::uint8_t{2}, std::uint8_t{3}}) {
+    reb::NativeDebuggerWatch::Exception(9, kind,
+                                        reb::NativeDebuggerWatch::FunctionFrame(11, 5, 30));
+    const auto tail = ObservationPayload(Pop(queue)).reserved1;
+    assert(tail[0] == kind && tail[4] == 1 && tail[8] == 11 && tail[12] == 30 && tail[16] == 5);
+  }
+  reb::NativeDebuggerWatch::Exception(9, 4, NativeStackFrame{});
+  assert(Drain(queue) == 0);
+
+  // Node 5 watches attributes and subtree; 6 to 8 watch removal only.
+  assert(reb::NativeDebuggerWatch::DomSlot(5, reb::kNativeWatchAttribute) == 0 &&
+         reb::NativeDebuggerWatch::DomSlot(5, reb::kNativeWatchRemoval) == -1 &&
+         reb::NativeDebuggerWatch::DomSlot(7, reb::kNativeWatchRemoval) == 2 &&
+         reb::NativeDebuggerWatch::DomSlot(99, reb::kNativeWatchAttribute) == -1);
+  reb::NativeDebuggerWatch::Mutation(9, reb::kNativeWatchAttribute, 0, 1, "data-state");
+  {
+    const auto tail = ObservationPayload(Pop(queue)).reserved1;
+    assert(tail[0] == 1 && tail[1] == 0 && tail[2] == 1 && tail[4] == 10);
+  }
+  reb::NativeDebuggerWatch::Mutation(9, reb::kNativeWatchRemoval, 2, 1, "");
+  assert(ObservationPayload(Pop(queue)).reserved1[0] == 3);
+  // A kind the slot does not watch, and an attribute without a name, record nothing.
+  reb::NativeDebuggerWatch::Mutation(9, reb::kNativeWatchRemoval, 0, 1, "");
+  reb::NativeDebuggerWatch::Mutation(9, reb::kNativeWatchAttribute, 0, 1, "");
+  assert(Drain(queue) == 0);
+
+  // The 1,024-record budget refuses the next record and leaves one gap.
+  {
+    assert(reb::NativeDebuggerWatch::Arm(9, rules));
+    std::uint32_t admitted = 0;
+    while (reb::NativeDebuggerWatch::Wants(9, reb::kNativeWatchTimers)) {
+      reb::NativeDebuggerWatch::Timer(9, false, false, false, admitted + 1, 0, NativeStackFrame{});
+      const NativeProbeEvent next = Pop(queue);
+      if (next.header.type == NativeProbeType::kGap) {
+        assert(admitted == reb::kNativeWatchBudget);
+        break;
+      }
+      ++admitted;
+    }
+    assert(!reb::NativeDebuggerWatch::Wants(9, reb::kNativeWatchTimers));
+    reb::NativeDebuggerWatch::Timer(9, false, false, false, 1, 0, NativeStackFrame{});
+    assert(Drain(queue) == 0);
+  }
 
   reb::NativeDebuggerWatch::Disarm(9);
   assert(!reb::NativeDebuggerWatch::Armed(reb::kNativeWatchRequests));
@@ -126,7 +222,8 @@ NativeRequestStackPayload ObservationPayload(const NativeProbeEvent& event) {
 
   transport.Disable();
   scenario = {};
-  std::cout << "PASS debugger observations: inactive, captured stack and tail, "
-               "request match identity, no-script stack, armed filtering and disarm\n";
+  std::cout << "PASS debugger observations: inactive, captured stack and tail, request match "
+               "identity, no-script stack, rule bounds, disarmed cost, per-hook tails, frame "
+               "filtering, budget gap and disarm\n";
 }
 }  // namespace

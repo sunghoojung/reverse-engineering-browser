@@ -7,12 +7,14 @@
 #include <vector>
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
+#include "brave/components/reverse_engineering_browser/common/native_navigation_initiator_hook.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_headers.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_headers_hook.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_lifecycle.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_request.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/common/native_request_namespace.h"
+#include "brave/components/reverse_engineering_browser/common/native_request_stack.h"
 #include "chromium_stubs.h"
 #include "crypto/hash.h"
 #include "reb/event.hpp"
@@ -842,6 +844,43 @@ void CookieLists() {
                "unparsed line, empty redirect list, sharing, early and late lists counted, "
                "2 MiB limit\n";
 }
+// A navigation's request start names the renderer stack its loader noted.
+void NavigationLinks() {
+  auto& sink = reb::NativeNetworkCaptureSink::Get();
+  events.clear();
+  network::ResourceRequest request;
+  request.devtools_request_id = "5E1F00D";
+  const auto navigation = reb::NativeBrowserLoaderKind(0);
+  assert(!reb::NotifyNativeNavigationInitiator("5E1F00D", 41, 9));
+  sink.SetEmitter(Emit, 23, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork), 200);
+  assert(!reb::NotifyNativeNavigationInitiator("", 41, 9) &&
+         !reb::NotifyNativeNavigationInitiator("5E1F00D", 0, 9) &&
+         !reb::NotifyNativeNavigationInitiator("5E1F00D", 41, 0));
+  assert(reb::NotifyNativeNavigationInitiator("5E1F00D", 41, 9));
+  sink.RecordRequestStarted(300, 0, 0, 4, 5, 11, 12, request, navigation);
+  const auto start = Last(reb::NativeProbeType::kRequestStarted);
+  const auto link = Last(reb::NativeProbeType::kNavigationInitiatorLink);
+  const auto payload = std::bit_cast<reb::NativeNavigationLinkPayload>(link.inline_payload);
+  assert(link.header.parent_event_id == start.header.sequence_number &&
+         link.header.request_id == 300 && link.header.tab_id == 4 && link.header.frame_id == 5 &&
+         reb::IsValidNativeNavigationLinkPayload(payload) && payload.renderer_process_id == 41 &&
+         payload.renderer_sequence == 9 && AllValid());
+  // Taken once; a subresource with the same ID never links.
+  sink.RecordRequestStarted(301, 0, 0, 4, 5, 11, 12, request, navigation);
+  assert(reb::NotifyNativeNavigationInitiator("5E1F00D", 41, 10));
+  sink.RecordRequestStarted(302, 0, 0, 4, 5, 11, 12, request);
+  assert(CountType(reb::NativeProbeType::kNavigationInitiatorLink) == 1);
+  // A new configuration forgets noted stacks; Network off observes nothing.
+  sink.SetEmitter(Emit, 24, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork), 200);
+  sink.RecordRequestStarted(303, 0, 0, 4, 5, 11, 12, request, navigation);
+  assert(CountType(reb::NativeProbeType::kNavigationInitiatorLink) == 1);
+  sink.SetEmitter(Emit, 24, 1, 200);
+  assert(!reb::NotifyNativeNavigationInitiator("5E1F00D", 41, 11));
+  sink.SetEmitter(nullptr, 0, 0, 0);
+  assert(!reb::NotifyNativeNavigationInitiator("5E1F00D", 41, 11));
+  std::cout << "PASS native navigation links: disabled, malformed notes, one link per noted "
+               "navigation start, never a subresource, configuration reset, Network off\n";
+}
 }  // namespace
 int main() {
   auto& sink = reb::NativeNetworkCaptureSink::Get();
@@ -939,4 +978,5 @@ int main() {
   RequestContent();
   HeaderBlocks();
   CookieLists();
+  NavigationLinks();
 }

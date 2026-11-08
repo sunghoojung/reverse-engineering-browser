@@ -23,7 +23,7 @@ use std::{
 pub const SIDECAR_SUFFIX: &str = ".requests-v1";
 const FORMAT: &str = "reb-request-index-v1";
 /// Sidecar row layout; a sidecar of another layout is rebuilt from byte 0.
-const LAYOUT: u32 = 4;
+const LAYOUT: u32 = 5;
 /// Bounds one call; a larger store reports partial coverage and continues next call.
 const SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const RECORD_BYTES: usize = 4096;
@@ -50,7 +50,7 @@ const MAX_IDENTITIES: usize = 16_384;
 const UNIDENTIFIED: &str = "Unidentified network event";
 /// Records that belong to a row without changing its lifecycle; a selected
 /// row reads them back by member (protocol/native-network-v2.md and v3).
-const CHILD_TYPES: [&str; 8] = [
+const CHILD_TYPES: [&str; 9] = [
     "request_target",
     "request_body",
     "response_body",
@@ -59,6 +59,7 @@ const CHILD_TYPES: [&str; 8] = [
     "cookie_list",
     "request_initiator_stack",
     "request_tab_link",
+    "navigation_initiator_link",
 ];
 
 pub const QUERY_KEYS: [&str; 18] = [
@@ -192,6 +193,8 @@ struct Row {
     scheme_class: u8,
     /// The renderer's request_initiator_stack state, or 0.
     stack_state: u8,
+    /// A navigation_initiator_link names the renderer stack that started it.
+    navigation_script: bool,
     stack_frame: Option<(String, u32, [u8; 16])>,
     /// The newest `request_tab_link`: its set key, kind and tab count.
     tab_set: Option<String>,
@@ -760,7 +763,7 @@ fn in_tab(row: &Row, sets: &HashMap<String, (u32, Vec<u64>)>, tab: u64) -> bool 
 fn initiator(row: &Row) -> Option<&'static str> {
     if row.worker_started {
         Some("worker")
-    } else if row.renderer && matches!(row.stack_state, 1 | 4 | 5) {
+    } else if row.navigation_script || (row.renderer && matches!(row.stack_state, 1 | 4 | 5)) {
         // A walked request_initiator_stack (protocol/native-network-v3.md).
         Some("script")
     } else if row.renderer && row.stack_state == 2 {
@@ -1353,6 +1356,7 @@ impl RequestIndex {
                             )
                         });
                     }
+                    row.navigation_script |= kind == "navigation_initiator_link";
                     if kind == "request_tab_link"
                         && let Some((set, link)) = tab_link(&event)
                     {
@@ -1426,6 +1430,7 @@ impl RequestIndex {
                     main_frame: false,
                     scheme_class: 0,
                     stack_state: 0,
+                    navigation_script: false,
                     stack_frame: None,
                     tab_set: None,
                     tab_link: (0, 0),
@@ -2402,6 +2407,47 @@ mod tests {
             ),
             (Some(1), json!([]))
         );
+    }
+
+    #[test]
+    fn navigations_script_started_read_as_script() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events.jsonl");
+        let mut store = Store {
+            events: Vec::new(),
+            sequence: 0,
+        };
+        let context =
+            json!({"tab_id": 3, "browser_context_id_high": "5", "browser_context_id_low": "6"});
+        let start = store.push(
+            7,
+            950,
+            "request_started",
+            b"GET www.example.test",
+            context.clone(),
+        );
+        let mut link = vec![1u8, 0, 128, 0, 41, 0, 0, 0, 9];
+        link.resize(128, 0);
+        store.push(
+            7,
+            950,
+            "navigation_initiator_link",
+            &link,
+            merge(context.clone(), json!({"parent_event_id": start})),
+        );
+        store.push(
+            7,
+            951,
+            "request_started",
+            b"GET typed.example.test",
+            context,
+        );
+        write(&path, &store);
+        let mut index = RequestIndex::new(&path);
+        let document = page(&mut index, "sort=capture&order=asc");
+        assert_eq!(document["requests"][0]["initiator"], "script");
+        assert_eq!(document["requests"][0]["initiator_frame"], Value::Null);
+        assert_eq!(document["requests"][1]["initiator"], "browser");
     }
 
     #[test]

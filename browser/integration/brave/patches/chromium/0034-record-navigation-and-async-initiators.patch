@@ -1,0 +1,323 @@
+diff --git a/content/browser/loader/navigation_url_loader_impl.cc b/content/browser/loader/navigation_url_loader_impl.cc
+index dc46922..861ecfb 100644
+--- a/content/browser/loader/navigation_url_loader_impl.cc
++++ b/content/browser/loader/navigation_url_loader_impl.cc
+@@ -25,6 +25,7 @@
+ #include "base/strings/string_number_conversions.h"
+ #include "base/task/common/task_annotator.h"
+ #include "base/trace_event/trace_event.h"
++#include "brave/components/reverse_engineering_browser/common/native_navigation_initiator_hook.h"
+ #include "build/build_config.h"
+ #include "components/download/public/common/download_stats.h"
+ #include "content/browser/about_url_loader_factory.h"
+@@ -68,6 +69,7 @@
+ #include "content/public/browser/download_utils.h"
+ #include "content/public/browser/frame_accept_header.h"
+ #include "content/public/browser/navigation_ui_data.h"
++#include "content/public/browser/render_process_host.h"
+ #include "content/public/browser/network_service_instance.h"
+ #include "content/public/browser/network_service_util.h"
+ #include "content/public/browser/shared_cors_origin_access_list.h"
+@@ -326,6 +328,21 @@ std::unique_ptr<network::ResourceRequest> CreateResourceRequest(
+   devtools_instrumentation::MaybeAssignResourceRequestId(
+       frame_tree_node, request_info.devtools_navigation_token.ToString(),
+       *new_request);
++  // REB: the renderer stack that started this navigation, by DevTools ID.
++  if (const uint64_t reb_sequence =
++          request_info.begin_params->reb_initiator_stack_sequence) {
++    RenderProcessHost* process =
++        RenderProcessHost::FromID(request_info.initiator_process_id);
++    const std::string id = request_info.devtools_navigation_token.ToString();
++    if (process && process->GetProcess().IsValid() &&
++        process->GetProcess().Pid() > 0 &&
++        reb::NotifyNativeNavigationInitiator(
++            id, static_cast<uint32_t>(process->GetProcess().Pid()),
++            reb_sequence) &&
++        !new_request->devtools_request_id) {
++      new_request->devtools_request_id = id;
++    }
++  }
+   if (request_info.begin_params->trust_token_params) {
+     new_request->trust_token_params =
+         *request_info.begin_params->trust_token_params;
+diff --git a/content/renderer/render_frame_impl.cc b/content/renderer/render_frame_impl.cc
+index 30196c3..dc16f03 100644
+--- a/content/renderer/render_frame_impl.cc
++++ b/content/renderer/render_frame_impl.cc
+@@ -6350,6 +6350,8 @@ void RenderFrameImpl::BeginNavigationInternal(
+           (info->initiator_frame_is_ad || info->is_ad_script_in_stack),
+           info->is_container_initiated, info->has_rel_opener,
+           info->script_tool_invocation_id);
++  begin_params->reb_initiator_stack_sequence =
++      info->reb_initiator_stack_sequence;
+ 
+   bool current_frame_has_download_sandbox_flag = !frame_->IsAllowedToDownload();
+   bool has_download_sandbox_flag =
+diff --git a/third_party/blink/public/mojom/navigation/navigation_params.mojom b/third_party/blink/public/mojom/navigation/navigation_params.mojom
+index e5c590a..6b8dd67 100644
+--- a/third_party/blink/public/mojom/navigation/navigation_params.mojom
++++ b/third_party/blink/public/mojom/navigation/navigation_params.mojom
+@@ -208,6 +208,9 @@ struct BeginNavigationParams {
+   // navigation with the tool that caused it.
+   // This is null for navigations that were not triggered by a script tool.
+   mojo_base.mojom.UnguessableToken? script_tool_invocation_id;
++
++  // The initiating renderer's REB navigation_initiator_stack sequence, or 0.
++  [MinVersion=1] uint64 reb_initiator_stack_sequence;
+ };
+ 
+ // Provided by the browser or the renderer -------------------------------------
+diff --git a/third_party/blink/public/web/web_navigation_params.h b/third_party/blink/public/web/web_navigation_params.h
+index c2e23b0..5c5d517 100644
+--- a/third_party/blink/public/web/web_navigation_params.h
++++ b/third_party/blink/public/web/web_navigation_params.h
+@@ -147,6 +147,9 @@ struct BLINK_EXPORT WebNavigationInfo {
+   // that will also be true if the initiator frame is ad.
+   bool is_ad_script_in_stack = false;
+ 
++  // REB navigation_initiator_stack sequence, or 0.
++  uint64_t reb_initiator_stack_sequence = 0;
++
+   // Whether this is a navigation in the opener frame initiated
+   // by the window.open'd frame.
+   bool is_opener_navigation = false;
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index c367ec1..dd2c9a7 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -52,7 +52,7 @@
+ #include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
+-#include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack_blink.h"
+ #include "build/build_config.h"
+ #include "components/crash/core/common/crash_key.h"
+ #include "services/metrics/public/cpp/ukm_builders.h"
+@@ -825,7 +825,8 @@ void NativeStackFramesReady(void* data, const v8::NativeStackCapture& capture) {
+   copy(0, capture.recorded);
+   copy(capture.sync_capacity, capture.async_frames);
+   walk.FramesReady(capture.total_depth, capture.recorded, capture.omitted,
+-                   capture.async_frames, capture.async_truncated);
++                   capture.async_frames, capture.async_truncated,
++                   capture.sync_truncated);
+ }
+ 
+ std::string NativeStackUtf8(v8::Isolate* isolate, v8::Local<v8::String> text,
+@@ -907,11 +908,16 @@ reb::NativeRequestStackWalkResult WalkNativeRequestStack(
+           ToExecutionContext(isolate->GetCurrentContext())) {
+     walk.SetExecutionContext(StableExecutionContextId(*execution_context));
+   }
++  reb::request_stack_blink::SetAsyncContext(walk, isolate);
+   NativeRequestStackCall call{walk, isolate};
+   v8::NativeStackCapture capture;
+   capture.frames = NativeStackFrames().data();
+-  capture.sync_capacity = reb::kNativeRequestStackSyncLimit;
+-  capture.async_capacity = reb::kNativeRequestStackAsyncLimit;
++  // A scheduling-time walk stops at its innermost frames, without awaits.
++  const bool task = walk.async_task_walk();
++  capture.sync_capacity = task ? reb::kNativeAsyncTaskFrameLimit
++                               : reb::kNativeRequestStackSyncLimit;
++  capture.async_capacity = task ? 0 : reb::kNativeRequestStackAsyncLimit;
++  capture.innermost_only = task;
+   v8::NativeStackCallbacks callbacks;
+   callbacks.data = &call;
+   callbacks.script_needed = NativeStackScriptNeeded;
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
+index 0067c3f..0695ab9 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
+@@ -29,6 +29,7 @@
+ #include "base/feature_list.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/time/time.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack_blink.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_worker_source_sink.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/public/common/features.h"
+@@ -935,6 +936,11 @@ v8::MaybeLocal<v8::Value> V8ScriptRunner::CallFunction(
+ 
+   probe::CallFunction probe(context, isolate->GetCurrentContext(), function,
+                             depth);
++  // REB async task callers; see protocol/native-network-v3.md.
++  std::optional<reb::request_stack_blink::TaskScope> reb_task_scope;
++  if (!depth) {
++    reb_task_scope = reb::request_stack_blink::AttributeAsyncTask(isolate);
++  }
+   v8::MaybeLocal<v8::Value> result = function->Call(
+       isolate, isolate->GetCurrentContext(), receiver, argc, argv);
+   CHECK(!isolate->IsDead());
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.cc b/third_party/blink/renderer/core/frame/local_dom_window.cc
+index 358e364..18bd616 100644
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -35,6 +35,7 @@
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/trace_event/trace_id_helper.h"
+ #include "base/trace_event/typed_macros.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
+ #include "build/build_config.h"
+ #include "cc/input/snap_selection_strategy.h"
+ #include "net/base/registry_controlled_domains/registry_controlled_domain.h"
+@@ -2559,6 +2560,8 @@ DOMWindow* LocalDOMWindow::open(v8::Isolate* isolate,
+   }
+ 
+   if (!completed_url.IsEmpty() || result.new_window) {
++    const reb::NativeNavigationKindScope reb_kind(
++        reb::NativeNavigationKind::kWindowOpen);
+     result.frame->Navigate(frame_request, WebFrameLoadType::kStandard);
+   }
+ 
+diff --git a/third_party/blink/renderer/core/frame/local_frame_client_impl.cc b/third_party/blink/renderer/core/frame/local_frame_client_impl.cc
+index 8771408..c7e35ae 100644
+--- a/third_party/blink/renderer/core/frame/local_frame_client_impl.cc
++++ b/third_party/blink/renderer/core/frame/local_frame_client_impl.cc
+@@ -38,6 +38,7 @@
+ #include "base/metrics/histogram_functions.h"
+ #include "base/time/time.h"
+ #include "base/types/optional_util.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack_blink.h"
+ #include "components/viz/common/frame_timing_details.h"
+ #include "mojo/public/cpp/bindings/pending_receiver.h"
+ #include "mojo/public/cpp/bindings/pending_remote.h"
+@@ -734,6 +735,10 @@ void LocalFrameClientImpl::BeginNavigation(
+     navigation_info->is_ad_script_in_stack = origin_frame->IsAdScriptInStack();
+   }
+ 
++  navigation_info->reb_initiator_stack_sequence =
++      reb::request_stack_blink::NavigationStack(web_frame_->GetFrame(),
++                                                form != nullptr);
++
+   navigation_info->has_rel_opener = has_rel_opener;
+ 
+   // The frame has navigated either by itself or by the action of the
+diff --git a/third_party/blink/renderer/core/frame/location.cc b/third_party/blink/renderer/core/frame/location.cc
+index 7586fc4..959fc99 100644
+--- a/third_party/blink/renderer/core/frame/location.cc
++++ b/third_party/blink/renderer/core/frame/location.cc
+@@ -28,6 +28,7 @@
+ 
+ #include "third_party/blink/renderer/core/frame/location.h"
+ 
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
+ #include "third_party/blink/renderer/bindings/core/v8/binding_security.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+@@ -342,6 +343,8 @@ void Location::SetLocation(const String& url,
+   if (set_location_policy == SetLocationPolicy::kReplaceThisFrame)
+     frame_load_type = WebFrameLoadType::kReplaceCurrentItem;
+ 
++  const reb::NativeNavigationKindScope reb_kind(
++      reb::NativeNavigationKind::kLocation);
+   dom_window_->GetFrame()->Navigate(request, frame_load_type);
+ }
+ 
+diff --git a/third_party/blink/renderer/core/html/forms/html_form_element.cc b/third_party/blink/renderer/core/html/forms/html_form_element.cc
+index 8650b66..c66ed20 100644
+--- a/third_party/blink/renderer/core/html/forms/html_form_element.cc
++++ b/third_party/blink/renderer/core/html/forms/html_form_element.cc
+@@ -29,6 +29,7 @@
+ #include <limits>
+ 
+ #include "base/auto_reset.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack_blink.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/common/security_context/insecure_request_policy.h"
+ #include "third_party/blink/public/mojom/devtools/inspector_issue.mojom-blink.h"
+@@ -1020,6 +1021,7 @@ void HTMLFormElement::ScheduleFormSubmission(const Event* event,
+     target_local_frame->Loader().CancelClientNavigation();
+   }
+ 
++  reb::request_stack_blink::FormNavigationScheduled(target_frame);
+   cancel_last_submission_ =
+       target_frame->ScheduleFormSubmission(scheduler, form_submission);
+ }
+diff --git a/third_party/blink/renderer/core/probe/async_task_context.cc b/third_party/blink/renderer/core/probe/async_task_context.cc
+index 8927833..e7d6478 100644
+--- a/third_party/blink/renderer/core/probe/async_task_context.cc
++++ b/third_party/blink/renderer/core/probe/async_task_context.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "base/trace_event/trace_id_helper.h"
+ #include "base/trace_event/typed_macros.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack_blink.h"
+ #include "third_party/blink/renderer/core/ad_tracker/ad_tracker.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/platform/bindings/thread_debugger.h"
+@@ -31,6 +32,8 @@ void AsyncTaskContext::Schedule(ExecutionContext* context,
+   if (!context)
+     return;
+ 
++  reb_segment_ = reb::request_stack_blink::ScheduleAsyncTask(context, name);
++
+   if (ThreadDebugger* debugger = ThreadDebugger::From(context->GetIsolate()))
+     debugger->AsyncTaskScheduled(name, Id(), true);
+ 
+diff --git a/third_party/blink/renderer/core/probe/async_task_context.h b/third_party/blink/renderer/core/probe/async_task_context.h
+index cd4f605..c5c5fe7 100644
+--- a/third_party/blink/renderer/core/probe/async_task_context.h
++++ b/third_party/blink/renderer/core/probe/async_task_context.h
+@@ -5,6 +5,7 @@
+ #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_PROBE_ASYNC_TASK_CONTEXT_H_
+ #define THIRD_PARTY_BLINK_RENDERER_CORE_PROBE_ASYNC_TASK_CONTEXT_H_
+ 
++#include <cstdint>
+ #include <optional>
+ 
+ #include "third_party/blink/renderer/core/ad_tracker/ad_script_identifier.h"
+@@ -81,6 +82,9 @@ class CORE_EXPORT AsyncTaskContext {
+   std::optional<AdScriptIdentifier> ad_identifier_;
+ 
+   v8::Isolate* isolate_ = nullptr;
++
++  // The REB scheduling stack segment; see protocol/native-network-v3.md.
++  std::uint64_t reb_segment_ = 0;
+ };
+ 
+ }  // namespace probe
+diff --git a/third_party/blink/renderer/core/probe/core_probes.cc b/third_party/blink/renderer/core/probe/core_probes.cc
+index 6f1cd5f..adfeb56 100644
+--- a/third_party/blink/renderer/core/probe/core_probes.cc
++++ b/third_party/blink/renderer/core/probe/core_probes.cc
+@@ -31,6 +31,7 @@
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ 
+ #include "base/trace_event/typed_macros.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
+ #include "third_party/blink/renderer/core/core_probes_inl.h"
+ #include "third_party/blink/renderer/core/inspector/inspector_trace_events.h"
+@@ -68,7 +69,11 @@ AsyncTask::AsyncTask(ExecutionContext* context,
+       task_context_(task_context),
+       recurring_(step),
+       ad_tracker_(enabled ? AdTracker::FromExecutionContext(context)
+-                          : nullptr) {
++                          : nullptr),
++      reb_previous_segment_(reb::NativeRequestStackWalk::EnterAsyncTask(
++          enabled && task_context
++              ? task_context->reb_segment_
++              : reb::NativeRequestStackWalk::CurrentAsyncTask())) {
+   // TODO(crbug.com/1275875): Verify that `task_context` was scheduled, but
+   // not yet canceled. Currently we don't have enough confidence that such
+   // a CHECK wouldn't break blink.
+@@ -83,6 +88,7 @@ AsyncTask::AsyncTask(ExecutionContext* context,
+ }
+ 
+ AsyncTask::~AsyncTask() {
++  reb::NativeRequestStackWalk::ExitAsyncTask(reb_previous_segment_);
+   if (debugger_) {
+     debugger_->AsyncTaskFinished(task_context_->Id());
+     if (!recurring_)
+diff --git a/third_party/blink/renderer/core/probe/core_probes.h b/third_party/blink/renderer/core/probe/core_probes.h
+index f0a848c..229d7d6 100644
+--- a/third_party/blink/renderer/core/probe/core_probes.h
++++ b/third_party/blink/renderer/core/probe/core_probes.h
+@@ -108,6 +108,8 @@ class CORE_EXPORT AsyncTask {
+ 
+   // This persistent is safe since the class is STACK_ALLOCATED.
+   Persistent<AdTracker> ad_tracker_;
++  // The REB segment this run replaced; see protocol/native-network-v3.md.
++  uint64_t reb_previous_segment_;
+ };
+ 
+ // Called from generated instrumentation code.

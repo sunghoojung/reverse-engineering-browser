@@ -88,12 +88,64 @@ bool NativeDebuggerWatch::Charge() noexcept {
   return true;
 }
 
+bool NativeWatchRules::AddRequest(const std::string_view url_contains,
+                                  const std::string_view method) noexcept {
+  const bool upper =
+      std::all_of(method.begin(), method.end(), [](const char c) { return c >= 'A' && c <= 'Z'; });
+  if (request_count == requests.size() || url_contains.empty() ||
+      url_contains.size() > kNativeWatchUrlBytes ||
+      url_contains.find('\0') != std::string_view::npos ||
+      method.size() > requests[0].method.size() || !upper) {
+    return false;
+  }
+  NativeWatchRequestRule& rule = requests[request_count++];
+  std::memcpy(rule.url.data(), url_contains.data(), url_contains.size());
+  rule.url_length = url_contains.size();
+  std::memcpy(rule.method.data(), method.data(), method.size());
+  rule.method_length = method.size();
+  return true;
+}
+
+bool NativeWatchRules::AddEvent(const std::string_view type) noexcept {
+  const bool printable =
+      std::all_of(type.begin(), type.end(), [](const char c) { return c > 0x20 && c < 0x7f; });
+  if (event_count == events.size() || type.empty() || type.size() > kNativeWatchEventBytes ||
+      !printable) {
+    return false;
+  }
+  for (std::size_t i = 0; i < event_count; ++i) {
+    if (std::string_view(events[i].data(), event_lengths[i]) == type) {
+      return false;
+    }
+  }
+  std::memcpy(events[event_count].data(), type.data(), type.size());
+  event_lengths[event_count++] = type.size();
+  return true;
+}
+
+bool NativeWatchRules::AddDom(const std::int32_t node_id,
+                              const bool attributes,
+                              const bool subtree,
+                              const bool removal) noexcept {
+  if (dom_count == dom.size() || node_id <= 0 || !(attributes || subtree || removal)) {
+    return false;
+  }
+  for (std::size_t i = 0; i < dom_count; ++i) {
+    if (dom[i].node_id == node_id) {
+      return false;
+    }
+  }
+  dom[dom_count++] = {node_id, attributes, subtree, removal};
+  return true;
+}
+
 bool NativeDebuggerWatch::Arm(const std::uint64_t frame_id,
                               const NativeWatchRules& rules) noexcept {
   NativeProbeSink& sink = NativeProbeSink::Get();
   const std::uint64_t generation = sink.config_generation_.load(std::memory_order_acquire);
-  if ((generation & 1U) != 0 || !sink.emitter_.load(std::memory_order_acquire)) {
+  if (frame_id == 0 || (generation & 1U) != 0 || !sink.emitter_.load(std::memory_order_acquire)) {
     mask_.store(0, std::memory_order_relaxed);
+    g_watch = ArmedWatch{};
     return false;
   }
   g_watch.generation = generation;
@@ -121,16 +173,25 @@ void NativeDebuggerWatch::Disarm(const std::uint64_t frame_id) noexcept {
   }
 }
 
+bool NativeDebuggerWatch::Wants(const std::uint64_t frame_id, const std::uint32_t kinds) noexcept {
+  if (!Armed(kinds) || frame_id == 0 ||
+      base::PlatformThread::CurrentId().raw() != g_watch_thread.load(std::memory_order_relaxed) ||
+      frame_id != g_watch.frame_id) {
+    return false;
+  }
+  const std::uint64_t generation =
+      NativeProbeSink::Get().config_generation_.load(std::memory_order_acquire);
+  return generation == g_watch.generation &&
+         (g_watch.budget < kNativeWatchBudget || !g_watch.budget_gap);
+}
+
 void NativeDebuggerWatch::Request(const std::int32_t request_id,
                                   const std::uint64_t initiated_sequence,
                                   const std::string_view method,
                                   const std::string_view url) noexcept {
-  if (!Armed(kNativeWatchRequests) ||
-      base::PlatformThread::CurrentId().raw() != g_watch_thread.load(std::memory_order_relaxed)) {
-    return;
-  }
-  const std::uint64_t frame_id = NativeRequestStackWalk::RequestFrameId();
-  if (frame_id != g_watch.frame_id) {
+  const std::uint64_t frame_id =
+      Armed(kNativeWatchRequests) ? NativeRequestStackWalk::RequestFrameId() : 0;
+  if (!Wants(frame_id, kNativeWatchRequests)) {
     return;
   }
   for (std::size_t slot = 0; slot < g_watch.rules.request_count; ++slot) {
@@ -140,8 +201,7 @@ void NativeDebuggerWatch::Request(const std::int32_t request_id,
       continue;
     }
     const std::string_view want_method(rule.method.data(), rule.method_length);
-    const bool method_match = rule.method_length == 0 || method == want_method;
-    if (rule.method_length != 0 && !method_match) {
+    if (rule.method_length != 0 && method != want_method) {
       continue;
     }
     if (!Charge()) {
@@ -149,7 +209,7 @@ void NativeDebuggerWatch::Request(const std::int32_t request_id,
     }
     std::array<std::uint8_t, 48> tail = Tail();
     tail[0] = static_cast<std::uint8_t>(slot);
-    tail[1] = method_match && rule.method_length != 0 ? 1 : 0;
+    tail[1] = rule.method_length != 0 ? 1 : 0;
     NativeRequestStackWalk::RecordObservation(NativeProbeType::kRequestWatchMatch, request_id,
                                               initiated_sequence, frame_id, tail);
     return;
@@ -161,7 +221,7 @@ void NativeDebuggerWatch::Listener(const std::uint64_t frame_id,
                                    const std::uint8_t target_kind,
                                    const std::uint16_t node_type,
                                    const NativeStackFrame& listener) noexcept {
-  if (!Armed(kNativeWatchListeners)) {
+  if (!Wants(frame_id, kNativeWatchListeners)) {
     return;
   }
   std::size_t slot = g_watch.rules.event_count;
@@ -172,7 +232,7 @@ void NativeDebuggerWatch::Listener(const std::uint64_t frame_id,
       break;
     }
   }
-  if (slot == g_watch.rules.event_count || !Charge()) {
+  if (slot == g_watch.rules.event_count || target_kind < 1 || target_kind > 5 || !Charge()) {
     return;
   }
   std::array<std::uint8_t, 48> tail = Tail();
@@ -185,13 +245,14 @@ void NativeDebuggerWatch::Listener(const std::uint64_t frame_id,
                                             tail);
 }
 
-void NativeDebuggerWatch::Timer(const bool fired,
+void NativeDebuggerWatch::Timer(const std::uint64_t frame_id,
+                                const bool fired,
                                 const bool interval,
                                 const bool string_callback,
                                 const std::uint32_t timer_id,
                                 const std::uint32_t delay_ms,
                                 const NativeStackFrame& callback) noexcept {
-  if (!Armed(kNativeWatchTimers) || !Charge()) {
+  if (!Wants(frame_id, kNativeWatchTimers) || !Charge()) {
     return;
   }
   std::array<std::uint8_t, 48> tail = Tail();
@@ -202,38 +263,54 @@ void NativeDebuggerWatch::Timer(const bool fired,
   std::memcpy(tail.data() + 4, &timer_id, sizeof(timer_id));
   std::memcpy(tail.data() + 8, &delay_ms, sizeof(delay_ms));
   PutFrame(tail, 12, callback);
-  NativeRequestStackWalk::RecordObservation(NativeProbeType::kTimerObservation, 0, 0, 0, tail);
+  NativeRequestStackWalk::RecordObservation(NativeProbeType::kTimerObservation, 0, 0, frame_id,
+                                            tail);
 }
 
-void NativeDebuggerWatch::Csp(const std::uint8_t directive,
+void NativeDebuggerWatch::Csp(const std::uint64_t frame_id,
+                              const std::uint8_t directive,
                               const bool report_only,
                               const std::string_view host) noexcept {
-  if (!Armed(kNativeWatchCsp) || !Charge()) {
+  const bool ascii =
+      std::all_of(host.begin(), host.end(), [](const char c) { return c > 0x20 && c < 0x7f; });
+  if (!Wants(frame_id, kNativeWatchCsp) || !Charge()) {
     return;
   }
   std::array<std::uint8_t, 48> tail = Tail();
   tail[0] = directive;
   tail[1] = report_only ? 2 : 1;
-  PutName(tail, 2, 3, host, kNativeWatchUrlBytes > 45 ? 45 : kNativeWatchUrlBytes);
-  NativeRequestStackWalk::RecordObservation(NativeProbeType::kCspViolation, 0, 0, 0, tail);
+  // A longer or non-ASCII host is left out rather than cut.
+  if (ascii && host.size() <= kNativeWatchHostBytes) {
+    PutName(tail, 2, 3, host, kNativeWatchHostBytes);
+  }
+  NativeRequestStackWalk::RecordObservation(NativeProbeType::kCspViolation, 0, 0, frame_id, tail);
 }
 
-void NativeDebuggerWatch::Exception(const std::uint8_t kind) noexcept {
-  const std::uint32_t want = kind == 1 ? kNativeWatchUncaught : kNativeWatchCaught;
-  if (!Armed(want) || !Charge()) {
+void NativeDebuggerWatch::Exception(const std::uint64_t frame_id,
+                                    const std::uint8_t kind,
+                                    const NativeStackFrame& site) noexcept {
+  if (kind < 1 || kind > 3 ||
+      !Wants(frame_id, kind == 2 ? kNativeWatchCaught : kNativeWatchUncaught) || !Charge()) {
     return;
   }
   std::array<std::uint8_t, 48> tail = Tail();
   tail[0] = kind;
-  NativeRequestStackWalk::RecordObservation(NativeProbeType::kExceptionObservation, 0, 0, 0, tail);
+  PutFrame(tail, 4, site);
+  NativeRequestStackWalk::RecordObservation(NativeProbeType::kExceptionObservation, 0, 0, frame_id,
+                                            tail);
 }
 
-int NativeDebuggerWatch::DomSlot(const void* node) noexcept {
-  if (!Armed(kNativeWatchDom)) {
+int NativeDebuggerWatch::DomSlot(const std::int32_t node_id, const std::uint8_t kind) noexcept {
+  if (!Armed(kNativeWatchDom) || node_id <= 0 ||
+      base::PlatformThread::CurrentId().raw() != g_watch_thread.load(std::memory_order_relaxed)) {
     return -1;
   }
   for (std::size_t i = 0; i < g_watch.rules.dom_count; ++i) {
-    if (g_watch.rules.dom[i].node == node) {
+    const NativeWatchDomNode& node = g_watch.rules.dom[i];
+    const bool wanted = (kind == kNativeWatchAttribute && node.attributes) ||
+                        (kind == kNativeWatchSubtree && node.subtree) ||
+                        (kind == kNativeWatchRemoval && node.removal);
+    if (node.node_id == node_id && wanted) {
       return static_cast<int>(i);
     }
   }
@@ -245,35 +322,36 @@ void NativeDebuggerWatch::Mutation(const std::uint64_t frame_id,
                                    const int slot,
                                    const std::uint16_t node_type,
                                    const std::string_view attribute) noexcept {
-  if (!Armed(kNativeWatchDom) || slot < 0 ||
-      static_cast<std::size_t>(slot) >= g_watch.rules.dom_count) {
+  if (!Wants(frame_id, kNativeWatchDom) || slot < 0 ||
+      static_cast<std::size_t>(slot) >= g_watch.rules.dom_count ||
+      DomSlot(g_watch.rules.dom[static_cast<std::size_t>(slot)].node_id, kind) != slot) {
     return;
   }
-  const NativeWatchDomNode& node = g_watch.rules.dom[static_cast<std::size_t>(slot)];
-  const bool want =
-      (kind == 1 && node.attributes) || (kind == 2 && node.subtree) || (kind == 3 && node.removal);
-  if (!want || !Charge()) {
+  const bool ascii = std::all_of(attribute.begin(), attribute.end(),
+                                 [](const char c) { return c > 0x20 && c < 0x7f; });
+  if ((kind == kNativeWatchAttribute && (attribute.empty() || !ascii)) || !Charge()) {
     return;
   }
   std::array<std::uint8_t, 48> tail = Tail();
   tail[0] = kind;
   tail[1] = static_cast<std::uint8_t>(slot);
   std::memcpy(tail.data() + 2, &node_type, sizeof(node_type));
-  if (kind == 1) {
-    PutName(tail, 4, 5, attribute, kNativeWatchEventBytes + 5);
+  if (kind == kNativeWatchAttribute) {
+    PutName(tail, 4, 5, attribute, kNativeWatchAttributeBytes);
   }
   NativeRequestStackWalk::RecordObservation(NativeProbeType::kDomMutation, 0, 0, frame_id, tail);
 }
 
 NativeStackFrame NativeDebuggerWatch::FunctionFrame(const int script_id,
-                                                    const int start_position) noexcept {
+                                                    const int start_position,
+                                                    const int position) noexcept {
   NativeStackFrame frame;
   if (script_id <= 0 || start_position < 0) {
     return frame;
   }
   frame.kind = static_cast<std::uint8_t>(NativeStackFrameKind::kJavaScript);
   frame.script_id = static_cast<std::uint32_t>(script_id);
-  frame.position = static_cast<std::uint32_t>(start_position);
+  frame.position = static_cast<std::uint32_t>(position < 0 ? start_position : position);
   frame.detail = static_cast<std::uint32_t>(start_position);
   return frame;
 }

@@ -1,0 +1,84 @@
+diff --git a/third_party/blink/public/web/web_node.h b/third_party/blink/public/web/web_node.h
+index e53f09b..f0cc8cf 100644
+--- a/third_party/blink/public/web/web_node.h
++++ b/third_party/blink/public/web/web_node.h
+@@ -198,6 +198,10 @@ class BLINK_EXPORT WebNode {
+ 
+   std::vector<WebConsoleListener> ConsoleEventListeners(v8::Isolate*,
+                                                         unsigned limit) const;
++  // The listeners of this document's window; empty for any other node.
++  std::vector<WebConsoleListener> ConsoleWindowEventListeners(
++      v8::Isolate*,
++      unsigned limit) const;
+   base::ScopedClosureRunner AddConsoleEventListener(
+       const WebString& type,
+       base::RepeatingCallback<void(WebDOMEvent)> handler);
+diff --git a/third_party/blink/renderer/core/exported/web_node.cc b/third_party/blink/renderer/core/exported/web_node.cc
+index 2a4395b..6a4649f 100644
+--- a/third_party/blink/renderer/core/exported/web_node.cc
++++ b/third_party/blink/renderer/core/exported/web_node.cc
+@@ -58,6 +58,7 @@
+ #include "third_party/blink/renderer/core/editing/serializers/serialization.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/exported/web_plugin_container_impl.h"
++#include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/html/html_collection.h"
+ #include "third_party/blink/renderer/core/html/html_element.h"
+ #include "third_party/blink/renderer/core/layout/layout_box.h"
+@@ -408,16 +409,17 @@ base::ScopedClosureRunner WebNode::AddEventListener(
+       &EventListener::RemoveListener, WrapWeakPersistent(listener.Get())));
+ }
+ 
+-std::vector<WebConsoleListener> WebNode::ConsoleEventListeners(
+-    v8::Isolate* isolate,
+-    unsigned limit) const {
++namespace {
++
++std::vector<WebConsoleListener> ConsoleListenersOf(EventTarget& target,
++                                                   v8::Isolate* isolate,
++                                                   unsigned limit) {
+   std::vector<WebConsoleListener> result;
+-  Node* node = private_.Get();
+   unsigned types = 0;
+-  for (const auto& type : node->EventTypes()) {
++  for (const auto& type : target.EventTypes()) {
+     if (++types > limit)
+       break;
+-    const auto* listeners = node->GetEventListeners(type);
++    const auto* listeners = target.GetEventListeners(type);
+     if (!listeners)
+       continue;
+     for (const auto& registered : *listeners) {
+@@ -431,7 +433,7 @@ std::vector<WebConsoleListener> WebNode::ConsoleEventListeners(
+       // JSEventListener::GetListenerObject directly returns CallbackObject.
+       // Other JSBasedEventListener implementations can compile inline code.
+       result.push_back({WebString(type),
+-                        listener ? listener->GetListenerObject(*node)
++                        listener ? listener->GetListenerObject(target)
+                                  : v8::Undefined(isolate).As<v8::Value>(),
+                         registered->Capture(), registered->Passive(),
+                         registered->Once()});
+@@ -440,6 +442,23 @@ std::vector<WebConsoleListener> WebNode::ConsoleEventListeners(
+   return result;
+ }
+ 
++}  // namespace
++
++std::vector<WebConsoleListener> WebNode::ConsoleEventListeners(
++    v8::Isolate* isolate,
++    unsigned limit) const {
++  return ConsoleListenersOf(*private_.Get(), isolate, limit);
++}
++
++std::vector<WebConsoleListener> WebNode::ConsoleWindowEventListeners(
++    v8::Isolate* isolate,
++    unsigned limit) const {
++  auto* document = blink::DynamicTo<Document>(private_.Get());
++  LocalDOMWindow* window = document ? document->domWindow() : nullptr;
++  return window ? ConsoleListenersOf(*window, isolate, limit)
++                : std::vector<WebConsoleListener>();
++}
++
+ base::ScopedClosureRunner WebNode::AddConsoleEventListener(
+     const WebString& type,
+     base::RepeatingCallback<void(WebDOMEvent)> handler) {

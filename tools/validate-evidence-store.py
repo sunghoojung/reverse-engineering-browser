@@ -101,6 +101,9 @@ EVENT_TYPES = {
     "js_invocation_start",
     "module_compiled",
     "module_instantiated",
+    "navigation_initiator_stack",
+    "navigation_initiator_link",
+    "async_task_stack",
     "property_read",
     "request_body",
     "request_completed",
@@ -246,9 +249,49 @@ def valid_stack_child(event: dict, payload: bytes) -> bool:
 
 
 def valid_request_stack(event: dict, payload: bytes) -> bool:
-    if not valid_stack_child(event, payload) or event["request_id"] == "0" or any(payload[80:]):
+    """Version 2 adds the task chain count at bytes 6-7."""
+    if (not valid_request_child(event, payload, (1, 2)) or event["artifact_id"] != "0"
+            or event["initiator_request_id"] != 0 or event["initiator_process_id"] != 0
+            or event["request_id"] == "0" or any(payload[80:])):
         return False
     return valid_stack_summary(payload)
+
+
+def parentless_stack_envelope(event: dict, payload: bytes) -> bool:
+    """navigation_initiator_stack and async_task_stack (native-network-v3.md)."""
+    zero = ("parent_event_id", "request_id", "artifact_id", "navigation_id",
+            "encoded_data_length", "decoded_body_length")
+    return (event["protocol_version"] == 3 and event["category"] == "network"
+            and event["flags"] == 0 and not event["payload_truncated"] and len(payload) == 128
+            and all(event[key] != "0" for key in ("session_id", "sequence_number"))
+            and all(event[key] == "0" for key in zero) and 1 <= event["process_id"] <= 0xFFFFFFFF
+            and event["status_code"] == 0 and event["error_code"] == 0
+            and event["resource_type"] == 0 and event["initiator_request_id"] == 0
+            and event["initiator_process_id"] == 0)
+
+
+def valid_navigation_stack(event: dict, payload: bytes) -> bool:
+    tail = payload[80:]
+    return (parentless_stack_envelope(event, payload) and payload[:4] == b"\x02\x00\x80\x00"
+            and payload[4] in (1, 4, 5) and 1 <= tail[0] <= 4 and not any(tail[1:8])
+            and any(tail[8:16]) and not any(tail[16:]) and valid_stack_summary(payload))
+
+
+def valid_async_task_stack(event: dict, payload: bytes) -> bool:
+    kind, flags = payload[4], payload[5]
+    recorded, wasm, scripts = (int.from_bytes(payload[i:i + 4], "little") for i in (8, 12, 16))
+    return (parentless_stack_envelope(event, payload) and payload[:4] == b"\x01\x00\x80\x00"
+            and 1 <= kind <= 8 and flags & ~1 == 0 and payload[6:8] == b"\0\0"
+            and not any(payload[20:32]) and not any(payload[80:]) and 1 <= recorded <= 128
+            and (not flags & 1 or recorded == 128) and wasm <= recorded and scripts <= recorded
+            and any(payload[32:64]) and valid_stack_frame(payload[64:80], False))
+
+
+def valid_navigation_link(event: dict, payload: bytes) -> bool:
+    """A browser child of the navigation's request_started."""
+    return (valid_request_child(event, payload) and event["artifact_id"] == "0"
+            and event["request_id"] != "0" and payload[4:8] != b"\0\0\0\0"
+            and any(payload[8:16]) and not any(payload[16:]))
 
 
 def ascii_name(field: bytes, length: int, required: bool) -> bool:
@@ -294,22 +337,27 @@ def valid_observation(event: dict, payload: bytes) -> bool:
 
 
 def valid_stack_summary(payload: bytes) -> bool:
-    """Bytes 0-79 shared by request_initiator_stack and debugger observations."""
+    """Bytes 0-79 shared by request, navigation and debugger observation stacks."""
+    tasks = payload[0] == 2
+    task_segments = int.from_bytes(payload[6:8], "little")
     state, flags = payload[4], payload[5]
     total, recorded, omitted = (int.from_bytes(payload[i:i + 4], "little") for i in (8, 12, 16))
     async_frames = int.from_bytes(payload[20:22], "little")
     segments = int.from_bytes(payload[22:24], "little")
     wasm, scripts = (int.from_bytes(payload[i:i + 4], "little") for i in (24, 28))
     digest, innermost = payload[32:64], payload[64:80]
-    if flags & ~0x0F:
+    if flags & ~(0x1F if tasks else 0x0F) or (not tasks and task_segments):
         return False
     if state in (2, 3):
-        return flags & ~0x08 == 0 and not any(payload[8:80])
+        return (flags & ~(0 if tasks else 0x08) == 0 and task_segments == 0
+                and not any(payload[8:80]))
     if state not in (1, 4, 5):
         return False
+    chain = (task_segments <= 32 and segments == async_frames + task_segments
+             and (not flags & 0x10 or task_segments == 32)) if tasks else segments <= async_frames
     return (1 <= recorded <= 1024 and recorded + omitted == total
             and (omitted != 0) == bool(flags & 0x02) and (omitted == 0 or recorded == 1024)
-            and async_frames <= 32 and segments <= async_frames
+            and async_frames <= 32 and chain
             and (not flags & 0x04 or async_frames == 32) and (not flags & 0x01 or state == 1)
             and wasm <= recorded + async_frames and scripts <= recorded + async_frames
             and any(digest) and valid_stack_frame(innermost, False))
@@ -953,6 +1001,12 @@ def validate_event(event: object, line_number: int) -> None:
         raise ValueError(f"line {line_number}: native request initiator stack record is invalid")
     if event["type"] == "script_identity" and not valid_script_identity(event, payload):
         raise ValueError(f"line {line_number}: native script identity record is invalid")
+    if event["type"] == "navigation_initiator_stack" and not valid_navigation_stack(event, payload):
+        raise ValueError(f"line {line_number}: native navigation initiator stack record is invalid")
+    if event["type"] == "navigation_initiator_link" and not valid_navigation_link(event, payload):
+        raise ValueError(f"line {line_number}: navigation initiator link record is invalid")
+    if event["type"] == "async_task_stack" and not valid_async_task_stack(event, payload):
+        raise ValueError(f"line {line_number}: native async task stack record is invalid")
     if event["type"] in OBSERVATION_TYPES and not valid_observation(event, payload):
         raise ValueError(f"line {line_number}: native debugger observation record is invalid")
     if event["type"].startswith("js_invocation_") and not valid_js_invocation(event, payload):

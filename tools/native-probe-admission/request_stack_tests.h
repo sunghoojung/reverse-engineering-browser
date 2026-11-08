@@ -22,6 +22,11 @@ struct StackScenario {
   std::uint32_t wasm = 0;
   std::uint32_t async = 0;
   std::uint64_t context = 77;
+  bool microtask = false;
+  std::uint32_t attribution = 0;
+  // A scheduling-time walk's depth; 0 means no script was running.
+  std::uint32_t task_depth = 3;
+  std::uint32_t task_seed = 0;
   unsigned walks = 0;
 };
 StackScenario scenario;
@@ -45,12 +50,58 @@ NativeStackFrame ScenarioFrame(const std::uint32_t index) {
 
 // Writes what V8's NativeStackBuilder writes: the innermost and outermost
 // halves of a deep stack, then the await chain at the async offset.
+void DescribeFixtureScripts(NativeRequestStackWalk& walk, const std::vector<std::uint32_t>& ids) {
+  for (const auto id : ids) {
+    reb::NativeStackScriptSource source;
+    source.script_id = id;
+    source.kind = id == 900 ? reb::NativeScriptIdentityKind::kWasm
+                            : reb::NativeScriptIdentityKind::kJavaScript;
+    source.is_eval = id == 11;
+    source.start_line = id == 10 ? 41 : 0;
+    source.start_column = id == 10 ? 12 : 0;
+    source.execution_context_id = scenario.context;
+    source.bytes =
+        std::span(reinterpret_cast<const std::uint8_t*>(kStackSource.data()), kStackSource.size());
+    source.url = "https://app.example.test/page";
+    walk.DescribeScript(source);
+  }
+}
+
+// What Blink's walker does at an async task's scheduling: at most 128
+// innermost frames, then the scripts they name.
+reb::NativeRequestStackWalkResult FixtureTaskWalk(NativeRequestStackWalk& walk) {
+  if (scenario.task_depth == 0) {
+    return reb::NativeRequestStackWalkResult::kNoScript;
+  }
+  const auto frames = walk.frames();
+  const std::uint32_t limit = reb::kNativeAsyncTaskFrameLimit;
+  const std::uint32_t recorded = std::min(scenario.task_depth, limit);
+  std::vector<std::uint32_t> needed;
+  for (std::uint32_t i = 0; i < recorded; ++i) {
+    frames[i] = NativeStackFrame{};
+    frames[i].kind = static_cast<std::uint8_t>(reb::NativeStackFrameKind::kJavaScript);
+    frames[i].script_id = 20 + i % 2;
+    frames[i].position = scenario.task_seed + i;
+    frames[i].detail = scenario.task_seed;
+    const auto id = frames[i].script_id;
+    if (std::find(needed.begin(), needed.end(), id) == needed.end() && walk.ScriptNeeded(id))
+      needed.push_back(id);
+  }
+  walk.FramesReady(recorded, recorded, 0, 0, false, scenario.task_depth > limit);
+  DescribeFixtureScripts(walk, needed);
+  return reb::NativeRequestStackWalkResult::kWalked;
+}
+
 reb::NativeRequestStackWalkResult FixtureWalk(NativeRequestStackWalk& walk) {
   ++scenario.walks;
   if (scenario.result != reb::NativeRequestStackWalkResult::kWalked) {
     return scenario.result;
   }
   walk.SetExecutionContext(scenario.context);
+  walk.SetAsyncContext(scenario.microtask, scenario.attribution);
+  if (walk.async_task_walk()) {
+    return FixtureTaskWalk(walk);
+  }
   const auto frames = walk.frames();
   assert(frames.size() == reb::kNativeRequestStackFrameCapacity);
   const std::uint32_t limit = reb::kNativeRequestStackSyncLimit;
@@ -59,7 +110,7 @@ reb::NativeRequestStackWalkResult FixtureWalk(NativeRequestStackWalk& walk) {
     const std::uint32_t index = i < limit / 2 ? i : scenario.depth - (recorded - i);
     frames[i] = ScenarioFrame(index);
   }
-  for (std::uint32_t i = 0; i < scenario.async; ++i) {
+  for (std::uint32_t i = 0; i < std::min(scenario.async, reb::kNativeRequestStackAsyncLimit); ++i) {
     NativeStackFrame frame;
     frame.kind = static_cast<std::uint8_t>(reb::NativeStackFrameKind::kAwait);
     frame.script_id = 10;
@@ -76,20 +127,7 @@ reb::NativeRequestStackWalkResult FixtureWalk(NativeRequestStackWalk& walk) {
   walk.FramesReady(scenario.depth, recorded, scenario.depth - recorded,
                    std::min(scenario.async, reb::kNativeRequestStackAsyncLimit),
                    scenario.async >= reb::kNativeRequestStackAsyncLimit);
-  for (const auto id : needed) {
-    reb::NativeStackScriptSource source;
-    source.script_id = id;
-    source.kind = id == 900 ? reb::NativeScriptIdentityKind::kWasm
-                            : reb::NativeScriptIdentityKind::kJavaScript;
-    source.is_eval = id == 11;
-    source.start_line = id == 10 ? 41 : 0;
-    source.start_column = id == 10 ? 12 : 0;
-    source.execution_context_id = scenario.context;
-    source.bytes =
-        std::span(reinterpret_cast<const std::uint8_t*>(kStackSource.data()), kStackSource.size());
-    source.url = "https://app.example.test/page";
-    walk.DescribeScript(source);
-  }
+  DescribeFixtureScripts(walk, needed);
   return reb::NativeRequestStackWalkResult::kWalked;
 }
 
@@ -130,13 +168,23 @@ std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
   NativeProbeQueue queue;
   Configure(queue);
   // Flag off: no provider, so a request start walks nothing and allocates
-  // nothing beyond its request_initiated record.
+  // nothing beyond its request_initiated record. Async task and navigation
+  // hooks are one atomic load each.
   {
     const auto before = allocations.load();
     const auto initiated =
         sink.RecordRequestInitiated(1, "GET", "https", "a.example.test").initiated_sequence;
     NativeRequestStackWalk::Record(1, initiated);
     NativeRequestStackWalk::Record(1, 0);
+    assert(!NativeRequestStackWalk::Enabled() &&
+           NativeRequestStackWalk::RecordAsyncTask(reb::NativeAsyncTaskKind::kSetTimeout) == 0 &&
+           NativeRequestStackWalk::EnterAsyncTask(5) == 0 &&
+           NativeRequestStackWalk::CurrentAsyncTask() == 0 &&
+           NativeRequestStackWalk::RecordNavigation(reb::NativeNavigationKind::kLocation, 9) == 0);
+    NativeRequestStackWalk::ExitAsyncTask(0);
+    NativeRequestStackWalk::AttributeAsyncTask(3, 5);
+    NativeRequestStackWalk::ScheduleFormNavigation(9);
+    assert(NativeRequestStackWalk::TakeFormNavigation(9) == 0);
     assert(allocations.load() == before && scenario.walks == 0 && Drain(queue) == 1);
   }
   NativeRequestStackWalk::SetProvider(&FixtureWalk);
@@ -156,10 +204,11 @@ std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
   scenario.depth = 150;
   auto [parent, stack] = Start(queue, 3);
   auto payload = StackPayload(stack);
-  assert(payload.state == 1 && payload.recorded == 150 && payload.total_depth == 150 &&
-         payload.omitted == 0 && payload.scripts == 3 &&
+  assert(payload.protocol_version == reb::kNativeRequestStackTaskPayloadVersion &&
+         payload.state == 1 && payload.recorded == 150 && payload.total_depth == 150 &&
+         payload.omitted == 0 && payload.scripts == 3 && payload.task_segments == 0 &&
          (payload.flags & reb::kNativeRequestStackArtifactQueued) != 0 &&
-         (payload.flags & reb::kNativeRequestStackTaskCallersNotCaptured) != 0 &&
+         (payload.flags & reb::kNativeRequestStackTaskChainCut) == 0 &&
          payload.innermost.script_id == 10 && payload.innermost.position == 0);
   for (std::uint32_t id = 10; id < 13; ++id) {
     const auto identity_event = Pop(queue);
@@ -274,5 +323,238 @@ std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
   transport.Disable();
   std::cout << "PASS request stacks: disabled, depth bounds, Wasm, await, dedupe, "
                "eviction, budgets and script identity\n";
+}
+
+reb::NativeAsyncTaskStackPayload TaskPayload(const NativeProbeEvent& event) {
+  assert(event.header.type == reb::NativeProbeType::kAsyncTaskStack &&
+         event.header.request_id == 0 && event.header.parent_event_id == 0);
+  auto value = std::bit_cast<reb::NativeAsyncTaskStackPayload>(event.inline_payload);
+  assert(reb::IsValidNativeAsyncTaskStackPayload(value));
+  return value;
+}
+
+// The task chain of the newest generated stack artifact, a version 2 one.
+std::vector<reb::NativeTaskSegment> GeneratedChain() {
+  const auto& bytes = reb::mojom::NativeProbeHost::generated;
+  reb::NativeStackArtifactHeader header;
+  assert(bytes.size() >= sizeof(header));
+  std::memcpy(&header, bytes.data(), sizeof(header));
+  assert(header.version == reb::kNativeStackArtifactTaskVersion);
+  const std::size_t at = sizeof(header) + reb::kNativeStackFrameSize *
+                                              (std::size_t{header.recorded} + header.async_frames);
+  assert(bytes.size() == at + reb::kNativeTaskSegmentSize * header.task_segments);
+  std::vector<reb::NativeTaskSegment> chain(header.task_segments);
+  std::memcpy(chain.data(), bytes.data() + at, bytes.size() - at);
+  for (const auto& segment : chain) {
+    assert(reb::IsValidNativeTaskSegment(segment));
+  }
+  return chain;
+}
+
+std::uint8_t Kind(const reb::NativeAsyncTaskKind kind) {
+  return static_cast<std::uint8_t>(kind);
+}
+
+// Scheduling-time segments linked through async task runs and task
+// attribution, and script-initiated navigations.
+[[gnu::noinline]] void NativeTaskChainsAndNavigations() {
+  using reb::NativeAsyncTaskKind;
+  NativeProbeQueue queue;
+  Configure(queue, 61);
+  scenario = {};
+  scenario.depth = 4;
+  scenario.scripts = 1;
+  scenario.seed = 300;
+
+  // A setTimeout scheduled with script on the stack: its stack goes out once
+  // as an async_task_stack record and artifact, with its scripts described.
+  const auto artifacts = reb::mojom::NativeProbeHost::artifacts.load();
+  const auto timeout = NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout);
+  assert(timeout != 0);
+  const auto scheduled = Pop(queue);
+  const auto task = TaskPayload(scheduled);
+  assert(task.kind == Kind(NativeAsyncTaskKind::kSetTimeout) && task.recorded == 3 &&
+         task.scripts == 2 && task.flags == 0 &&
+         reb::mojom::NativeProbeHost::generated_creator == scheduled.header.sequence_number &&
+         reb::mojom::NativeProbeHost::generated.size() == 32 + 3 * 16);
+  assert(IdentityPayload(Pop(queue)).script_id == 20 &&
+         IdentityPayload(Pop(queue)).script_id == 21);
+  assert(Drain(queue) == 0 && reb::mojom::NativeProbeHost::artifacts == artifacts + 3);
+  // The same call site again: a new segment, nothing re-sent.
+  const auto again = NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout);
+  assert(again != 0 && again != timeout && Drain(queue) == 0);
+  // No script running: no segment, no record.
+  scenario.task_depth = 0;
+  assert(NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kEvent) == 0 &&
+         Drain(queue) == 0);
+  scenario.task_depth = 3;
+
+  // A request inside the timer names the timer segment by its digest.
+  const auto outer = NativeRequestStackWalk::EnterAsyncTask(timeout);
+  assert(outer == 0 && NativeRequestStackWalk::CurrentAsyncTask() == timeout);
+  auto stack = StackPayload(Start(queue, 6001).second);
+  assert(stack.task_segments == 1 && stack.async_segments == 1 &&
+         (stack.flags & reb::kNativeRequestStackTaskChainCut) == 0);
+  auto chain = GeneratedChain();
+  assert(chain[0].kind == Kind(NativeAsyncTaskKind::kSetTimeout) && chain[0].state == 1 &&
+         chain[0].recorded == 3 && chain[0].digest == task.digest);
+  Drain(queue);
+
+  // A postMessage scheduled inside the timer: its run reaches back through it.
+  scenario.task_seed = 50;
+  const auto message = NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kPostMessage);
+  Drain(queue);
+  NativeRequestStackWalk::ExitAsyncTask(outer);
+  assert(NativeRequestStackWalk::CurrentAsyncTask() == 0);
+  const auto previous = NativeRequestStackWalk::EnterAsyncTask(message);
+  StackPayload(Start(queue, 6002).second);
+  chain = GeneratedChain();
+  assert(chain.size() == 2 && chain[0].kind == Kind(NativeAsyncTaskKind::kPostMessage) &&
+         chain[1].kind == Kind(NativeAsyncTaskKind::kSetTimeout));
+  Drain(queue);
+  // Promise reactions registered while this task ran carry its attribution.
+  NativeRequestStackWalk::AttributeAsyncTask(77, message);
+  NativeRequestStackWalk::ExitAsyncTask(previous);
+
+  // A microtask names the segment its task attribution was registered under,
+  // after a microtask hop whose registering stack is not recorded.
+  scenario.microtask = true;
+  scenario.attribution = 77;
+  stack = StackPayload(Start(queue, 6003).second);
+  chain = GeneratedChain();
+  assert(stack.task_segments == 3 && chain[0].kind == Kind(NativeAsyncTaskKind::kMicrotask) &&
+         chain[0].state == static_cast<std::uint8_t>(reb::NativeTaskSegmentState::kNotRecorded) &&
+         chain[1].kind == Kind(NativeAsyncTaskKind::kPostMessage) &&
+         (stack.flags & reb::kNativeRequestStackTaskChainCut) == 0);
+  Drain(queue);
+  // An attribution no segment was registered under cuts the chain visibly.
+  scenario.attribution = 78;
+  stack = StackPayload(Start(queue, 6004).second);
+  assert(stack.task_segments == 1 && (stack.flags & reb::kNativeRequestStackTaskChainCut) != 0);
+  Drain(queue);
+  // A task scheduled in that microtask keeps the hop and the cut.
+  const auto orphan = NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetInterval);
+  Drain(queue);
+  scenario.microtask = false;
+  scenario.attribution = 0;
+  NativeRequestStackWalk::ExitAsyncTask(NativeRequestStackWalk::EnterAsyncTask(orphan));
+  const auto inside_orphan = NativeRequestStackWalk::EnterAsyncTask(orphan);
+  stack = StackPayload(Start(queue, 6005).second);
+  chain = GeneratedChain();
+  assert(chain.size() == 2 && chain[0].kind == Kind(NativeAsyncTaskKind::kSetInterval) &&
+         chain[1].kind == Kind(NativeAsyncTaskKind::kMicrotask) &&
+         (stack.flags & reb::kNativeRequestStackTaskChainCut) != 0);
+  Drain(queue);
+  NativeRequestStackWalk::ExitAsyncTask(inside_orphan);
+
+  // 40 nested timers: 32 segments and the truncation flag.
+  std::uint64_t nested = 0;
+  for (std::uint32_t i = 0; i < 40; ++i) {
+    const auto saved = NativeRequestStackWalk::EnterAsyncTask(nested);
+    scenario.task_seed = 1000 + i;
+    nested = NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout);
+    NativeRequestStackWalk::ExitAsyncTask(saved);
+    Drain(queue);
+  }
+  auto saved = NativeRequestStackWalk::EnterAsyncTask(nested);
+  stack = StackPayload(Start(queue, 6006).second);
+  assert(stack.task_segments == 32 && stack.async_segments == 32 &&
+         (stack.flags & reb::kNativeRequestStackTaskChainTruncated) != 0 &&
+         GeneratedChain().size() == 32);
+  Drain(queue);
+  NativeRequestStackWalk::ExitAsyncTask(saved);
+
+  // A deep scheduling stack keeps its innermost 128 frames and says so.
+  scenario.task_depth = 500;
+  scenario.task_seed = 7000;
+  const auto deep = NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kEvent);
+  const auto bounded = TaskPayload(Pop(queue));
+  assert(bounded.recorded == 128 && (bounded.flags & reb::kNativeTaskSegmentBounded) != 0);
+  Drain(queue);
+  scenario.task_depth = 3;
+
+  // 2,048 later segments overwrite it: its chain is cut, never guessed.
+  for (std::uint32_t i = 0; i < reb::kNativeAsyncTaskRing; ++i) {
+    scenario.task_seed = 20000 + i % 8;
+    static_cast<void>(NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout));
+    Drain(queue);
+  }
+  saved = NativeRequestStackWalk::EnterAsyncTask(deep);
+  stack = StackPayload(Start(queue, 6007).second);
+  assert(stack.task_segments == 0 && (stack.flags & reb::kNativeRequestStackTaskChainCut) != 0);
+  Drain(queue);
+  NativeRequestStackWalk::ExitAsyncTask(saved);
+
+  // Without the Artifact category a segment is hashed but not retained.
+  Configure(queue, 62, kForever, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork));
+  scenario.task_seed = 9;
+  const auto unretained = NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kPostTask);
+  assert(unretained != 0 && Drain(queue) == 0);
+  saved = NativeRequestStackWalk::EnterAsyncTask(unretained);
+  stack = StackPayload(Start(queue, 6008).second);
+  assert(stack.state == 4 && stack.task_segments == 1);
+  Drain(queue);
+  NativeRequestStackWalk::ExitAsyncTask(saved);
+  // Network off: nothing walks.
+  Configure(queue, 63, kForever, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kRuntime));
+  const auto walks = scenario.walks;
+  assert(NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout) == 0 &&
+         NativeRequestStackWalk::RecordNavigation(reb::NativeNavigationKind::kLocation, 9) == 0 &&
+         scenario.walks == walks && Drain(queue) == 0);
+
+  // A location assignment from a timer: a navigation_initiator_stack with the
+  // navigation kind, the target frame and the task chain.
+  Configure(queue, 64);
+  scenario.task_seed = 40;
+  const auto timer = NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout);
+  Drain(queue);
+  saved = NativeRequestStackWalk::EnterAsyncTask(timer);
+  assert(reb::NativeNavigationKindScope::Current() == reb::NativeNavigationKind::kOtherScript);
+  std::uint64_t navigation = 0;
+  {
+    const reb::NativeNavigationKindScope kind(reb::NativeNavigationKind::kLocation);
+    navigation =
+        NativeRequestStackWalk::RecordNavigation(reb::NativeNavigationKindScope::Current(), 0x5151);
+  }
+  assert(reb::NativeNavigationKindScope::Current() == reb::NativeNavigationKind::kOtherScript);
+  NativeRequestStackWalk::ExitAsyncTask(saved);
+  const auto record = Pop(queue);
+  assert(navigation == record.header.sequence_number &&
+         record.header.type == reb::NativeProbeType::kNavigationInitiatorStack &&
+         record.header.request_id == 0 && record.header.parent_event_id == 0);
+  const auto value = std::bit_cast<NativeRequestStackPayload>(record.inline_payload);
+  const auto tail = std::bit_cast<reb::NativeNavigationStackTail>(value.reserved1);
+  assert(reb::IsValidNativeNavigationStackPayload(value) && value.task_segments == 1 &&
+         tail.kind == 1 && tail.target_frame_id == 0x5151 &&
+         reb::mojom::NativeProbeHost::generated_creator == navigation &&
+         GeneratedChain()[0].kind == Kind(NativeAsyncTaskKind::kSetTimeout));
+  Drain(queue);
+  // No script on the stack: no navigation record.
+  scenario.result = reb::NativeRequestStackWalkResult::kNoScript;
+  assert(NativeRequestStackWalk::RecordNavigation(reb::NativeNavigationKind::kOtherScript, 7) ==
+             0 &&
+         Drain(queue) == 0);
+  // form.submit(): recorded when scheduled, taken once by its navigation, and
+  // replaced by a later submission even without script.
+  scenario.result = reb::NativeRequestStackWalkResult::kWalked;
+  NativeRequestStackWalk::ScheduleFormNavigation(0x77);
+  const auto form = Pop(queue);
+  assert(std::bit_cast<reb::NativeNavigationStackTail>(
+             std::bit_cast<NativeRequestStackPayload>(form.inline_payload).reserved1)
+             .kind == 2);
+  Drain(queue);
+  assert(NativeRequestStackWalk::TakeFormNavigation(0x78) == 0 &&
+         NativeRequestStackWalk::TakeFormNavigation(0x77) == form.header.sequence_number &&
+         NativeRequestStackWalk::TakeFormNavigation(0x77) == 0);
+  NativeRequestStackWalk::ScheduleFormNavigation(0x77);
+  Drain(queue);
+  scenario.result = reb::NativeRequestStackWalkResult::kNoScript;
+  NativeRequestStackWalk::ScheduleFormNavigation(0x77);
+  assert(NativeRequestStackWalk::TakeFormNavigation(0x77) == 0 && Drain(queue) == 0);
+  scenario = {};
+  transport.Disable();
+  std::cout << "PASS async task chains and navigation stacks: disabled, scheduling-time segments "
+               "sent once, nested and microtask links, cut, 32-segment bound, 128-frame bound, "
+               "ring eviction, retention, location kind and form submission\n";
 }
 }  // namespace

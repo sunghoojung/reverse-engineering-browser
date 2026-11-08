@@ -1,0 +1,131 @@
+diff --git a/include/v8-native-stack.h b/include/v8-native-stack.h
+index 0665eec..6eac611 100644
+--- a/include/v8-native-stack.h
++++ b/include/v8-native-stack.h
+@@ -91,6 +91,30 @@ V8_EXPORT bool CaptureNativeStack(Isolate* isolate,
+                                   NativeStackCapture& capture,
+                                   const NativeStackCallbacks& callbacks);
+ 
++// REB debugger observations. While installed, Isolate::Throw calls the
++// observer on the isolate thread for every exception JavaScript can catch,
++// except a stack overflow, before any message is created. JavaScript
++// execution is disallowed inside it.
++using NativeThrowObserver = void (*)(Isolate* isolate);
++V8_EXPORT void SetNativeThrowObserver(Isolate* isolate,
++                                      NativeThrowObserver observer);
++
++enum class NativeThrowCatcher : uint8_t {
++  kNone = 1,        // Uncaught: reported to the page as an error event.
++  kJavaScript = 2,  // A try/catch, a promise or an await.
++  kEmbedder = 3,    // A v8::TryCatch with no JavaScript in between.
++};
++
++struct NativeThrow {
++  NativeThrowCatcher catcher = NativeThrowCatcher::kNone;
++  // The innermost JavaScript frame subject to debugging, or all zero.
++  NativeStackFrame site{};
++};
++
++// Inside a NativeThrowObserver only. Predicts the catcher as the debugger's
++// pause-on-exceptions does; walks the stack once.
++V8_EXPORT NativeThrow DescribeNativeThrow(Isolate* isolate);
++
+ }  // namespace v8
+ 
+ #endif  // INCLUDE_V8_NATIVE_STACK_H_
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index 9ac20f3..ddc31ab 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -2965,6 +2965,19 @@ Tagged<Object> Isolate::Throw(Tagged<Object> raw_exception,
+     set_pending_message(*message);
+   }
+ 
++  // REB debugger observations (include/v8-native-stack.h).
++  if (void (*observer)(v8::Isolate*) =
++          native_throw_observer_.load(std::memory_order_relaxed);
++      V8_UNLIKELY(observer != nullptr) && !is_stack_overflow &&
++      is_catchable_by_javascript(*exception)) {
++    DirectHandle<Object> message(pending_message(), this);
++    {
++      DisallowJavascriptExecution no_js(this);
++      observer(reinterpret_cast<v8::Isolate*>(this));
++    }
++    set_pending_message(*message);
++  }
++
+   // Generate the message if required.
+   if (requires_message && !rethrowing_message) {
+     MessageLocation computed_location;
+@@ -8804,4 +8817,48 @@ bool CaptureNativeStack(Isolate* isolate, NativeStackCapture& capture,
+                         callbacks);
+ }
+ 
++void SetNativeThrowObserver(Isolate* isolate, NativeThrowObserver observer) {
++  if (isolate) {
++    reinterpret_cast<internal::Isolate*>(isolate)->set_native_throw_observer(
++        observer);
++  }
++}
++
++NativeThrow DescribeNativeThrow(Isolate* isolate) {
++  NativeThrow result;
++  if (!isolate) return result;
++  internal::Isolate* i_isolate = reinterpret_cast<internal::Isolate*>(isolate);
++  internal::HandleScope scope(i_isolate);
++  switch (i_isolate->PredictExceptionCatcher()) {
++    case internal::Isolate::NOT_CAUGHT:
++      result.catcher = NativeThrowCatcher::kNone;
++      break;
++    case internal::Isolate::CAUGHT_BY_EXTERNAL:
++      result.catcher = NativeThrowCatcher::kEmbedder;
++      break;
++    default:
++      result.catcher = NativeThrowCatcher::kJavaScript;
++      break;
++  }
++#if V8_ENABLE_WEBASSEMBLY
++  internal::wasm::WasmCodeRefScope code_ref_scope;
++#endif  // V8_ENABLE_WEBASSEMBLY
++  internal::DebuggableStackFrameIterator it(i_isolate);
++  if (it.done()) return result;
++  internal::FrameSummary summary = it.GetTopValidFrame();
++  if (!summary.IsJavaScript() || !internal::IsScript(*summary.script())) {
++    return result;
++  }
++  summary.EnsureSourcePositionsAvailable();
++  internal::Tagged<internal::SharedFunctionInfo> shared =
++      summary.AsJavaScript().function()->shared();
++  result.site.kind = NativeStackFrameKind::kJavaScript;
++  result.site.script_id = static_cast<uint32_t>(
++      internal::Cast<internal::Script>(*summary.script())->id());
++  result.site.position =
++      static_cast<uint32_t>(std::max(0, summary.SourcePosition()));
++  result.site.detail = static_cast<uint32_t>(std::max(0, shared->StartPosition()));
++  return result;
++}
++
+ }  // namespace v8
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index cc6f4b3..8d4922c 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -2570,6 +2570,10 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+                                        DirectHandle<Name> name,
+                                        v8::ExceptionContext callback_kind);
+   void SetExceptionPropagationCallback(ExceptionPropagationCallback callback);
++  // REB debugger observations, include/v8-native-stack.h.
++  void set_native_throw_observer(void (*observer)(v8::Isolate*)) {
++    native_throw_observer_.store(observer, std::memory_order_relaxed);
++  }
+ 
+ #ifdef V8_ENABLE_WASM_SIMD256_REVEC
+   void set_wasm_revec_verifier_for_test(
+@@ -2909,6 +2913,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+ 
+   bool detailed_source_positions_for_profiling_;
+   bool preprocessing_exception_ = false;
++  std::atomic<void (*)(v8::Isolate*)> native_throw_observer_{nullptr};
+ 
+   OptimizingCompileDispatcher* optimizing_compile_dispatcher_ = nullptr;
+ 

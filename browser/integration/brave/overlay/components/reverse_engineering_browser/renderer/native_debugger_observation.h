@@ -30,7 +30,14 @@ inline constexpr std::size_t kNativeWatchEventRules = 16;
 inline constexpr std::size_t kNativeWatchDomNodes = 4;
 inline constexpr std::size_t kNativeWatchUrlBytes = 256;
 inline constexpr std::size_t kNativeWatchEventBytes = 27;
+inline constexpr std::size_t kNativeWatchHostBytes = 45;
+inline constexpr std::size_t kNativeWatchAttributeBytes = 32;
 inline constexpr std::uint32_t kNativeWatchBudget = 1024;
+
+inline constexpr std::size_t kNativeWatchAncestorLimit = 1024;
+inline constexpr std::uint8_t kNativeWatchAttribute = 1;
+inline constexpr std::uint8_t kNativeWatchSubtree = 2;
+inline constexpr std::uint8_t kNativeWatchRemoval = 3;
 
 struct NativeWatchRequestRule final {
   std::array<char, kNativeWatchUrlBytes> url{};
@@ -40,8 +47,8 @@ struct NativeWatchRequestRule final {
 };
 
 struct NativeWatchDomNode final {
-  // Identity only, never dereferenced; the Console holds the element alive.
-  const void* node = nullptr;
+  // Blink's DOMNodeId: never reused, so a collected node matches nothing.
+  std::int32_t node_id = 0;
   bool attributes = false;
   bool subtree = false;
   bool removal = false;
@@ -59,9 +66,18 @@ struct NativeWatchRules final {
   bool caught = false;
   std::array<NativeWatchDomNode, kNativeWatchDomNodes> dom{};
   std::size_t dom_count = 0;
+
+  // Each refuses, adding nothing, a rule the renderer could not hold exactly.
+  [[nodiscard]] bool AddRequest(std::string_view url_contains, std::string_view method) noexcept;
+  [[nodiscard]] bool AddEvent(std::string_view type) noexcept;
+  [[nodiscard]] bool AddDom(std::int32_t node_id,
+                            bool attributes,
+                            bool subtree,
+                            bool removal) noexcept;
 };
 
 // Main thread only, except Armed() and Request(). Hooks call Armed() first: one relaxed load.
+// Only the armed document's frame matches; frame id 0 never does.
 class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeDebuggerWatch final {
  public:
   [[nodiscard]] static bool Armed(const std::uint32_t kinds) noexcept {
@@ -70,36 +86,46 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeDebuggerWatch final {
   // False, arming nothing, without an active capture configuration.
   [[nodiscard]] static bool Arm(std::uint64_t frame_id, const NativeWatchRules& rules) noexcept;
   static void Disarm(std::uint64_t frame_id) noexcept;
+  // Whether a record of kinds from frame_id would be admitted now.
+  [[nodiscard]] static bool Wants(std::uint64_t frame_id, std::uint32_t kinds) noexcept;
 
   // Matches only the armed document's own main-thread requests.
   static void Request(std::int32_t request_id,
                       std::uint64_t initiated_sequence,
                       std::string_view method,
                       std::string_view url) noexcept;
-  // frame_id 0 means the frame of the current script context.
   static void Listener(std::uint64_t frame_id,
                        std::string_view event_type,
                        std::uint8_t target_kind,
                        std::uint16_t node_type,
                        const NativeStackFrame& listener) noexcept;
-  static void Timer(bool fired,
+  static void Timer(std::uint64_t frame_id,
+                    bool fired,
                     bool interval,
                     bool string_callback,
                     std::uint32_t timer_id,
                     std::uint32_t delay_ms,
                     const NativeStackFrame& callback) noexcept;
-  static void Csp(std::uint8_t directive, bool report_only, std::string_view host) noexcept;
-  static void Exception(std::uint8_t kind) noexcept;
-  // The slot of a watched node, or -1.
-  [[nodiscard]] static int DomSlot(const void* node) noexcept;
+  static void Csp(std::uint64_t frame_id,
+                  std::uint8_t directive,
+                  bool report_only,
+                  std::string_view host) noexcept;
+  // kind 1 uncaught, 2 caught by JavaScript, 3 rejected with no handler.
+  static void Exception(std::uint64_t frame_id,
+                        std::uint8_t kind,
+                        const NativeStackFrame& site) noexcept;
+  // The slot of a node watched for kind (kNativeWatchAttribute and so on), or -1.
+  [[nodiscard]] static int DomSlot(std::int32_t node_id, std::uint8_t kind) noexcept;
   static void Mutation(std::uint64_t frame_id,
                        std::uint8_t kind,
                        int slot,
                        std::uint16_t node_type,
                        std::string_view attribute) noexcept;
 
-  // A kind 1 frame at a function's start, or a zero frame for a native one.
-  [[nodiscard]] static NativeStackFrame FunctionFrame(int script_id, int start_position) noexcept;
+  // A kind 1 frame: a function's start, or a throw site inside it.
+  [[nodiscard]] static NativeStackFrame FunctionFrame(int script_id,
+                                                      int start_position,
+                                                      int position = -1) noexcept;
 
  private:
   // Charges the per-configuration budget; leaves one gap on first refusal.

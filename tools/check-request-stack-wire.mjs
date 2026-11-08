@@ -26,13 +26,16 @@ const {window, document} = parseHTML('<!doctype html><html><body><div id="tree">
 const context = {document, window, URL, URLSearchParams, DataView, Uint8Array, BigInt, Number, String, Object, Error,
   location: {protocol: 'http:'}};
 runInNewContext(`${fs.readFileSync(new URL('apps/research-ui/request_stack.js', root), 'utf8')}
-globalThis.api = {decodeRequestStackRecord, createRequestStackPanel};`, context);
-const {decodeRequestStackRecord, createRequestStackPanel} = context.api;
+globalThis.api = {decodeRequestStackRecord, decodeNavigationLink, createRequestStackPanel};`, context);
+const {decodeRequestStackRecord, decodeNavigationLink, createRequestStackPanel} = context.api;
 
 cases.forEach((item, index) => {
   assert.equal(verdicts[index], item.valid, `Python validator: ${item.name}`);
   if (item.event.type === 'request_initiator_stack') {
     assert.equal(decodeRequestStackRecord(item.event) !== null, item.valid, `Initiator decoder: ${item.name}`);
+  }
+  if (item.event.type === 'navigation_initiator_link') {
+    assert.equal(decodeNavigationLink(item.event) !== null, item.valid, `Navigation link decoder: ${item.name}`);
   }
 });
 console.log(`PASS request stack wire: ${cases.length} C++, Python and Initiator verdicts agree`);
@@ -53,15 +56,22 @@ const frames = [
     resolution: {status: 'resolved', artifact_id: '31', url: 'https://app.example.test/page', line: 20, column: 3,
       artifact_line: 10, artifact_column: 3, function_name: null}}
 ];
+const taskSegments = [
+  {index: 0, kind: 'set_timeout', state: 'captured', recorded: 1, bounded: false, frames_retained: true, frames: [
+    {index: 0, kind: 'javascript', async: false, script_id: 7, position: 80, eval: false,
+      resolution: {status: 'resolved', artifact_id: '31', url: 'https://app.example.test/page', line: 30, column: 5,
+        artifact_line: 20, artifact_column: 5, function_name: 'schedule'}}]},
+  {index: 1, kind: 'microtask', state: 'not_recorded', recorded: 0, bounded: false, frames_retained: false, frames: []}
+];
 let pending = null;
 let opened = null;
 let refreshed = 0;
 const panel = createRequestStackPanel({
   load: parameters => {
     assert.equal(parameters.request_id, stackEvent.request_id);
-    pending = Promise.resolve({status: 'recorded', request: {sequence_number: stackEvent.sequence_number},
-      frames_retained: true, frames, omitted: 3976, omitted_after_index: 2,
-      async_callers_not_shown: ['timers', 'event listeners', 'promise.then callbacks', 'message handlers']});
+    pending = Promise.resolve({status: 'recorded', state: 'captured', request: {sequence_number: stackEvent.sequence_number},
+      frames_retained: true, frames, omitted: 3976, omitted_after_index: 2, task_segments: taskSegments,
+      task_chain_cut: true, async_callers_not_shown: ['MessagePort and worker messages']});
     return pending;
   },
   refresh: () => { refreshed += 1; },
@@ -83,10 +93,15 @@ assert.deepEqual(lines, [
   '(script 40) @ offset 5 · source not retained',
   '3,976 frames omitted',
   'await',
-  '(anonymous) @ page:20:3'
+  '(anonymous) @ page:20:3',
+  'setTimeout',
+  'schedule @ page:30:5',
+  'Microtask',
+  'the call that registered it is not recorded',
+  'Earlier async callers were not recorded'
 ]);
 assert.equal(tree.querySelectorAll('img').length, 0, 'captured names are text, never markup');
-assert.match(tree.textContent, /Async callers not shown: timers, event listeners, promise.then callbacks, message handlers/);
+assert.match(tree.textContent, /Async callers not shown: MessagePort and worker messages\./);
 tree.querySelector('.request-stack-open').dispatchEvent(new window.Event('click'));
 assert.equal(opened.resolution.artifact_line, 3);
 
@@ -96,4 +111,31 @@ panel.render(tree, {events: [initiated], details: [parser]}, [chain]);
 assert.match(tree.textContent, /Request call stack\s*Parser/);
 panel.render(tree, {events: [initiated], details: []}, [chain]);
 assert.match(tree.textContent, /No request call stack record/);
-console.log('PASS Initiator panel: frames as text, Wasm, unresolved reason, omitted marker, await separator, Parser and no record');
+
+// A browser navigation row reads the renderer stack its link names.
+const linkCase = cases.find(item => item.name === 'navigation link');
+assert(linkCase?.valid, 'golden navigation link');
+const linkEvent = linkCase.event;
+const started = {...linkEvent, type: 'request_started', sequence_number: linkEvent.parent_event_id, parent_event_id: '0'};
+let navigationPending = null;
+const navigationPanel = createRequestStackPanel({
+  load: parameters => {
+    assert.deepEqual({...parameters}, {process_id: '41', navigation_sequence: '9', session_id: linkEvent.session_id});
+    navigationPending = Promise.resolve({status: 'recorded', state: 'captured', request: {sequence_number: '9'},
+      navigation: {kind: 'window_open'}, frames_retained: true, frames: [frames[0]], task_segments: [],
+      async_callers_not_shown: ['MessagePort and worker messages']});
+    return navigationPending;
+  },
+  refresh: () => {},
+  open: () => {}
+});
+navigationPanel.render(tree, {events: [started], details: [linkEvent]}, [chain]);
+assert.match(tree.textContent, /Script started this navigation/);
+await navigationPending;
+await new Promise(resolve => setTimeout(resolve, 0));
+navigationPanel.render(tree, {events: [started], details: [linkEvent]}, [chain]);
+assert.match(tree.textContent, /Started by window\.open\./);
+assert.deepEqual([...tree.querySelectorAll('li')].map(item => item.textContent), ['<img src=x onerror=alert(1)> @ page:13:10']);
+navigationPanel.render(tree, {events: [started], details: []}, [chain]);
+assert.match(tree.textContent, /no script navigation stack names this request/);
+console.log('PASS Initiator panel: frames as text, Wasm, unresolved reason, omitted marker, await, setTimeout and microtask segments, cut chain, navigation stacks, Parser and no record');

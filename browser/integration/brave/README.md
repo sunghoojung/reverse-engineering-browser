@@ -455,8 +455,22 @@ the JavaScript and Wasm stack and `await` chain each document request started
 from. The packaged app turns it on when Network and Artifact are captured.
 `patches/v8/0015-capture-native-request-stacks.patch` adds the walker and
 `patches/chromium/0029-record-request-initiator-stacks.patch` the Blink
-provider, the loader call and the Console request watch hook. See
-[Native network v3](../../../protocol/native-network-v3.md).
+provider, the loader call and the Console request watch hook. Chromium `0034`
+records script navigations and async task callers through
+`renderer/native_request_stack_blink.h`: the async task probes, task
+attribution at top-level callbacks, `BeginNavigation`, form scheduling and the
+browser navigation link; V8 `0017` bounds scheduling-time walks to 128 frames.
+See [Native network v3](../../../protocol/native-network-v3.md).
+
+## Debugger observations
+
+The Console `watch` command arms the Phase 1 hooks for one document.
+Chromium `0030` to `0032` add the listener, timer, CSP, rejection and DOM
+mutation call sites through `renderer/native_debugger_observation_blink.h`;
+`0033` lists window listeners for the Console; V8 `0016` adds the throw
+observer the Console installs only while exceptions are watched. Each hook
+costs one relaxed load while disarmed. See
+[native debugger observation v1](../../../protocol/native-debugger-observation-v1.md).
 
 ## Native Wasm dispatch (opt-in)
 

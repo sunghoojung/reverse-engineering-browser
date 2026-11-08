@@ -237,7 +237,11 @@ Request initiator stacks (`request_initiator_stack` and `script_identity`,
 events 34 and 35) use `common/native_request_stack.h` for the records and
 `renderer/native_request_stack.{h,cc}` for the walk: Blink installs the
 provider only under `--reb-request-stacks`, the sink sends each new stack once
-as a `stack` artifact and each new script's source once. See the
+as a `stack` artifact and each new script's source once. The same walk records
+script navigations (event 46) and async task scheduling stacks (event 48) with
+their task chain; `renderer/native_request_stack_blink.h` holds the Blink-side
+hooks and `common/native_navigation_initiator_hook.h` carries a navigation's
+renderer stack to the browser link (event 47). See the
 [contract](../../../../../../protocol/native-network-v3.md).
 
 Renderer code never writes files or sockets directly.

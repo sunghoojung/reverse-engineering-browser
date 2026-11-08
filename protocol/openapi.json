@@ -1838,8 +1838,8 @@
     "/api/request-stack": {
       "get": {
         "operationId": "get_request_stack",
-        "summary": "Read the JavaScript and Wasm call stack that started one renderer request",
-        "description": "Newest request_initiator_stack record (34) for one renderer request, named by the renderer's process_id and request_id as its request_initiated record carries them, with every recorded frame innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact (network, dynamic_javascript or stack_script), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Async frames follow the synchronous ones; timers, event listeners, promise.then callbacks and message handlers are not shown. status is not_recorded when no stack record exists. See protocol/native-network-v3.md.",
+        "summary": "Read the JavaScript and Wasm call stack that started one renderer request or script navigation",
+        "description": "Newest request_initiator_stack record (34) for one renderer request, named by the renderer's process_id and request_id as its request_initiated record carries them, or with navigation_sequence the navigation_initiator_stack record (46) a browser navigation_initiator_link (47) names, with every recorded frame innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact (network, dynamic_javascript or stack_script), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Await frames follow the synchronous ones. A version 2 record adds task_segments, nearest first: each async task (timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or observer) with the stack that scheduled it, resolved from its async_task_stack (48) artifact, and microtask hops linked through task attribution. task_chain_cut says an earlier caller was not recorded; MessagePort and worker messages are not shown. status is not_recorded when no stack record exists. See protocol/native-network-v3.md.",
         "tags": [
           "events"
         ],
@@ -1859,8 +1859,17 @@
           {
             "name": "request_id",
             "in": "query",
-            "required": true,
-            "description": "Renderer request ID of the request_initiated record.",
+            "required": false,
+            "description": "Renderer request ID of the request_initiated record. Required unless navigation_sequence is given.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "navigation_sequence",
+            "in": "query",
+            "required": false,
+            "description": "Sequence of the renderer's navigation_initiator_stack, as a navigation_initiator_link payload names it with the renderer process_id. Excludes request_id.",
             "schema": {
               "$ref": "#/components/schemas/NonzeroUint64String"
             }
@@ -2046,7 +2055,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, navigation_initiator_stack, navigation_initiator_link, async_task_stack, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -2578,7 +2587,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, navigation_initiator_stack, navigation_initiator_link, async_task_stack, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -4385,8 +4394,8 @@
     "/api/native-debugger": {
       "get": {
         "operationId": "get_native_debugger",
-        "summary": "Read the pausing native debugger state, or that it is unsupported",
-        "description": "availability unsupported with reason browser_debugger_unsupported means no Brave build serves the native debugger; that is not an empty breakpoint list, and no frames, scopes or values are invented. policy proposed_pending_approval means docs/product/native-debugger-v1.md has not been approved into SAFETY.md. Non-pausing observation rules are the Console watch command; their records arrive through get_events and wait_for_events.",
+        "summary": "Read Phase 1 threads, watch rules and observations, and the pausing debugger state",
+        "description": "Phase 1 is served: threads lists Console documents and recorded workers, watch is what the renderer confirmed armed through the Console watch command, and observations are the newest decoded records; wait on them with wait_for_events. availability unsupported with reason browser_debugger_unsupported means no Brave build serves the pausing debugger; that is not an empty breakpoint list, and no frames, scopes or values are invented. policy proposed_pending_approval means docs/product/native-debugger-v1.md has not been approved into SAFETY.md.",
         "tags": [
           "native-debugger"
         ],
@@ -8248,13 +8257,29 @@
             "type": "array",
             "maxItems": 1056,
             "items": {
+              "$ref": "#/components/schemas/RequestStackFrame"
+            }
+          },
+          "task_chain_cut": {
+            "type": "boolean",
+            "description": "Version 2: the task chain stops at a caller that was not recorded."
+          },
+          "task_chain_truncated": {
+            "type": "boolean",
+            "description": "The task chain reached 32 segments and continues."
+          },
+          "task_segments": {
+            "type": "array",
+            "maxItems": 32,
+            "description": "Version 2 task chain, nearest first.",
+            "items": {
               "type": "object",
               "required": [
                 "index",
                 "kind",
-                "async",
-                "script_id",
-                "resolution"
+                "state",
+                "frames_retained",
+                "frames"
               ],
               "properties": {
                 "index": {
@@ -8263,53 +8288,71 @@
                 },
                 "kind": {
                   "enum": [
-                    "javascript",
-                    "wasm",
-                    "await",
-                    "promise_all",
-                    "promise_all_settled",
-                    "promise_any"
+                    "set_timeout",
+                    "set_interval",
+                    "request_animation_frame",
+                    "request_idle_callback",
+                    "post_message",
+                    "xhr_send",
+                    "post_task",
+                    "event",
+                    "microtask"
                   ]
                 },
-                "async": {
+                "state": {
+                  "enum": [
+                    "captured",
+                    "not_retained_artifact_unavailable",
+                    "not_retained_budget",
+                    "not_recorded"
+                  ]
+                },
+                "recorded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 128
+                },
+                "bounded": {
+                  "type": "boolean",
+                  "description": "The scheduling walk stopped at 128 frames."
+                },
+                "digest": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "frames_retained": {
                   "type": "boolean"
                 },
-                "script_id": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "position": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "function_position": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "function_index": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "module_offset": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "promise_index": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "constructor": {
-                  "type": "boolean"
-                },
-                "top_level": {
-                  "type": "boolean"
-                },
-                "eval": {
-                  "type": "boolean"
-                },
-                "resolution": {
-                  "$ref": "#/components/schemas/RequestStackResolution"
+                "frames": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "$ref": "#/components/schemas/RequestStackFrame"
+                  }
                 }
+              }
+            }
+          },
+          "navigation": {
+            "type": "object",
+            "description": "Navigation stacks only.",
+            "required": [
+              "kind",
+              "target_frame_id"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "location",
+                  "form_submission",
+                  "window_open",
+                  "other_script"
+                ]
+              },
+              "target_frame_id": {
+                "$ref": "#/components/schemas/NonzeroUint64String"
               }
             }
           }
@@ -16253,7 +16296,7 @@
               "browser",
               null
             ],
-            "description": "Who started the request: script or the parser in a renderer (from its request_initiator_stack), a renderer without a stack record, a service worker, or the browser process; null without a versioned record."
+            "description": "Who started the request: script or the parser in a renderer (from its request_initiator_stack), script that started a navigation (a navigation_initiator_link), a renderer without a stack record, a service worker, or the browser process; null without a versioned record."
           },
           "initiator_frame": {
             "oneOf": [
@@ -20513,7 +20556,11 @@
           "lease_limit_ms",
           "lease",
           "paused",
-          "breakpoints"
+          "breakpoints",
+          "threads",
+          "watch",
+          "observations",
+          "observations_malformed"
         ],
         "properties": {
           "contract_version": {
@@ -20585,6 +20632,493 @@
             "items": {
               "type": "object"
             }
+          },
+          "threads": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "console",
+              "frames",
+              "workers"
+            ],
+            "description": "Console documents (frames, including out-of-process frames) and the workers whose requests the renderer recorded. Not a pausable thread list.",
+            "properties": {
+              "console": {
+                "type": "string",
+                "maxLength": 32
+              },
+              "frames": {
+                "type": "array",
+                "maxItems": 256,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "target_id",
+                    "label",
+                    "origin",
+                    "frame",
+                    "out_of_process"
+                  ],
+                  "properties": {
+                    "target_id": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    },
+                    "label": {
+                      "type": "string",
+                      "x-max-utf8-bytes": 256
+                    },
+                    "origin": {
+                      "type": "string",
+                      "x-max-utf8-bytes": 512
+                    },
+                    "frame": {
+                      "enum": [
+                        "top",
+                        "child"
+                      ]
+                    },
+                    "out_of_process": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              },
+              "workers": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "session_id",
+                    "process_id",
+                    "context_id",
+                    "last_sequence",
+                    "requests"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "dedicated_worker",
+                        "shared_worker",
+                        "service_worker"
+                      ]
+                    },
+                    "session_id": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    },
+                    "process_id": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "context_id": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    },
+                    "last_sequence": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    },
+                    "requests": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 2048
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "watch": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "state",
+              "armed"
+            ],
+            "description": "Rules the renderer last confirmed armed through the Console watch command. busy means a Console action holds the session; read again.",
+            "properties": {
+              "state": {
+                "enum": [
+                  "none",
+                  "armed",
+                  "busy"
+                ]
+              },
+              "armed": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "session_id",
+                      "target_id",
+                      "rules"
+                    ],
+                    "properties": {
+                      "session_id": {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]{0,19})$"
+                      },
+                      "target_id": {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]{0,19})$"
+                      },
+                      "rules": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "observations": {
+            "type": "array",
+            "maxItems": 32,
+            "description": "The newest Phase 1 records, decoded; the same records get_events and wait_for_events return with hex payloads. Identities, kinds, positions and names only.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "type",
+                "session_id",
+                "process_id",
+                "frame_id",
+                "sequence_number",
+                "parent_event_id",
+                "request_id",
+                "monotonic_time_ns",
+                "stack",
+                "detail"
+              ],
+              "properties": {
+                "type": {
+                  "enum": [
+                    "request_watch_match",
+                    "listener_dispatch",
+                    "timer_observation",
+                    "csp_violation",
+                    "exception_observation",
+                    "dom_mutation"
+                  ]
+                },
+                "session_id": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "process_id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "frame_id": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "sequence_number": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "parent_event_id": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "request_id": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "monotonic_time_ns": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "stack": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "state",
+                    "total_depth",
+                    "recorded",
+                    "async_frames",
+                    "digest",
+                    "innermost"
+                  ],
+                  "properties": {
+                    "state": {
+                      "enum": [
+                        "captured",
+                        "no_script",
+                        "unsupported_thread",
+                        "not_retained_artifact_unavailable",
+                        "not_retained_budget"
+                      ]
+                    },
+                    "total_depth": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "recorded": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "async_frames": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "digest": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "innermost": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "kind",
+                            "script_id",
+                            "position",
+                            "detail"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 2
+                            },
+                            "script_id": {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            "position": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "detail": {
+                              "type": "integer",
+                              "minimum": 0
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                "detail": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "rule": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 15
+                    },
+                    "method_matched": {
+                      "type": "boolean"
+                    },
+                    "target": {
+                      "enum": [
+                        "element",
+                        "document",
+                        "window",
+                        "node",
+                        "other"
+                      ]
+                    },
+                    "node_type": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 65535
+                    },
+                    "listener": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "script_id",
+                            "position",
+                            "function_start"
+                          ],
+                          "properties": {
+                            "script_id": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 4294967295
+                            },
+                            "position": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            },
+                            "function_start": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "callback": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "script_id",
+                            "position",
+                            "function_start"
+                          ],
+                          "properties": {
+                            "script_id": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 4294967295
+                            },
+                            "position": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            },
+                            "function_start": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "site": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "script_id",
+                            "position",
+                            "function_start"
+                          ],
+                          "properties": {
+                            "script_id": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 4294967295
+                            },
+                            "position": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            },
+                            "function_start": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "event_type": {
+                      "type": "string",
+                      "pattern": "^[!-~]{1,27}$"
+                    },
+                    "phase": {
+                      "enum": [
+                        "scheduled",
+                        "fired"
+                      ]
+                    },
+                    "kind": {
+                      "enum": [
+                        "timeout",
+                        "interval",
+                        "uncaught",
+                        "caught",
+                        "unhandled_rejection",
+                        "attribute",
+                        "subtree",
+                        "removal"
+                      ]
+                    },
+                    "string_callback": {
+                      "type": "boolean"
+                    },
+                    "timer_id": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "delay_ms": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "directive": {
+                      "type": "string",
+                      "maxLength": 32
+                    },
+                    "directive_value": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 255
+                    },
+                    "disposition": {
+                      "enum": [
+                        "enforce",
+                        "report"
+                      ]
+                    },
+                    "blocked_host": {
+                      "type": "string",
+                      "pattern": "^[!-~]{0,45}$"
+                    },
+                    "node_slot": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 3
+                    },
+                    "attribute": {
+                      "type": "string",
+                      "pattern": "^[!-~]{0,32}$"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "observations_malformed": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32,
+            "description": "Newest records the core rules refuse; counted, never shown."
           }
         }
       },
@@ -23304,7 +23838,10 @@
               "timer_observation",
               "csp_violation",
               "exception_observation",
-              "dom_mutation"
+              "dom_mutation",
+              "navigation_initiator_stack",
+              "navigation_initiator_link",
+              "async_task_stack"
             ]
           },
           "status_code": {
@@ -32049,6 +32586,71 @@
           "message": {
             "type": "string",
             "maxLength": 512
+          }
+        }
+      },
+      "RequestStackFrame": {
+        "type": "object",
+        "required": [
+          "index",
+          "kind",
+          "async",
+          "script_id",
+          "resolution"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "kind": {
+            "enum": [
+              "javascript",
+              "wasm",
+              "await",
+              "promise_all",
+              "promise_all_settled",
+              "promise_any"
+            ]
+          },
+          "async": {
+            "type": "boolean"
+          },
+          "script_id": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "position": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "function_position": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "function_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "module_offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "promise_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "constructor": {
+            "type": "boolean"
+          },
+          "top_level": {
+            "type": "boolean"
+          },
+          "eval": {
+            "type": "boolean"
+          },
+          "resolution": {
+            "$ref": "#/components/schemas/RequestStackResolution"
           }
         }
       }

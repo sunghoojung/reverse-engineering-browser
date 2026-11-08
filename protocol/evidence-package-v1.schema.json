@@ -592,7 +592,10 @@
             "timer_observation",
             "csp_violation",
             "exception_observation",
-            "dom_mutation"
+            "dom_mutation",
+            "navigation_initiator_stack",
+            "navigation_initiator_link",
+            "async_task_stack"
           ]
         },
         "status_code": {

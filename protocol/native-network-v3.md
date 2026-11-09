@@ -1089,9 +1089,12 @@ provenance. Values are inserted as text after a size and SHA-256 check.
 `get_request_headers` (`GET /api/request-headers?session_id=&request_id=`)
 returns each hop's request and response blocks with their state, source,
 counts, digest, referrer policy, remote endpoint and parsed headers. Values of
-`Authorization`, `Proxy-Authorization`, `Cookie` and `Set-Cookie` are withheld
-as `value_withheld: true` with their byte length: like request bodies, they
-stay in the binary artifact, which MCP never inlines.
+`Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie` and any header
+whose name has a credential word (`auth`, `token`, `secret`, `password`, `csrf`,
+`session`, `api key` and similar) are withheld as `value_withheld: true` with
+their byte length: like request bodies, they stay in the binary artifact, which
+MCP never inlines. Withholding goes by name, so another value, such as a
+`Location` query, is returned as captured.
 
 ### Consumers
 

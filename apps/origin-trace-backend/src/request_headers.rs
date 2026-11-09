@@ -1,7 +1,9 @@
 //! One request's header blocks per hop (protocol/native-network-v3.md), for
 //! `get_request_headers`. Records are validated again here and joined only to
-//! an exact lifecycle parent of the request. Credential values stay in the
-//! binary artifact, which MCP never inlines, like request bodies.
+//! an exact lifecycle parent of the request. Values of headers named as
+//! credentials stay in the binary artifact, which MCP never inlines, like
+//! request bodies. Withholding goes by name: a value under any other name, such
+//! as a `Location` query, is returned as captured.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -11,11 +13,45 @@ use sha2::{Digest, Sha256};
 use crate::evidence;
 
 const BLOCK_LIMIT: usize = 320 * 1024;
-const CREDENTIALS: [&str; 4] = [
+/// Header names that carry a credential in common traffic, as whole names.
+const CREDENTIALS: [&str; 10] = [
     "authorization",
     "proxy-authorization",
     "cookie",
+    "cookie2",
     "set-cookie",
+    "set-cookie2",
+    "x-functions-key",
+    "x-rapidapi-key",
+    "ocp-apim-subscription-key",
+    "x-wsse",
+];
+/// A `-`, `_` or `:` separated word that marks a header name as a credential,
+/// such as `X-Auth-Token`, `X-CSRF-Token` or `X-Session-Id`. Whole words only,
+/// so `:authority` and `Author` stay readable.
+const CREDENTIAL_WORDS: [&str; 22] = [
+    "auth",
+    "authentication",
+    "authorization",
+    "oauth",
+    "bearer",
+    "jwt",
+    "token",
+    "apikey",
+    "secret",
+    "password",
+    "passwd",
+    "pwd",
+    "otp",
+    "credential",
+    "credentials",
+    "csrf",
+    "xsrf",
+    "csrftoken",
+    "xsrftoken",
+    "requestverificationtoken",
+    "session",
+    "sessionid",
 ];
 const SOURCES: [&str; 4] = ["", "browser", "network", "early_hints"];
 pub(crate) const STATES: [&str; 9] = [
@@ -184,11 +220,25 @@ fn address(block: &Block) -> Value {
     }
 }
 
+/// Whether a header's value is withheld. Decided from the name alone.
+fn credential_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if CREDENTIALS.contains(&name.as_str()) {
+        return true;
+    }
+    let words: Vec<&str> = name
+        .split(['-', '_', ':'])
+        .filter(|word| !word.is_empty())
+        .collect();
+    words.iter().any(|word| CREDENTIAL_WORDS.contains(word))
+        || words.windows(2).any(|pair| pair == ["api", "key"])
+}
+
 fn headers(lines: Vec<(String, String)>) -> Vec<Value> {
     lines
         .into_iter()
         .map(|(name, value)| {
-            if CREDENTIALS.contains(&name.to_ascii_lowercase().as_str()) {
+            if credential_name(&name) {
                 json!({"name": name, "value_withheld": true, "value_bytes": value.len()})
             } else {
                 json!({"name": name, "value": value})
@@ -446,6 +496,61 @@ mod tests {
         assert_eq!(hop1["request"][0]["artifact"], "verified");
         assert!(!result.to_string().contains("secret"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn credential_names_are_withheld_and_ordinary_names_stay_readable() {
+        for name in [
+            "Authorization",
+            "Proxy-Authorization",
+            "Cookie",
+            "Set-Cookie",
+            "X-Api-Key",
+            "api-key",
+            "apikey",
+            "X-Goog-Api-Key",
+            "X-Auth-Token",
+            "X-Access-Token",
+            "X-Amz-Security-Token",
+            "X-CSRF-Token",
+            "X-XSRF-TOKEN",
+            "X-CSRFToken",
+            "RequestVerificationToken",
+            "Authentication",
+            "X-Session-Id",
+            "X-Client-Secret",
+            "Ocp-Apim-Subscription-Key",
+            "X-Functions-Key",
+            "X-RapidAPI-Key",
+        ] {
+            assert!(credential_name(name), "{name}");
+        }
+        for name in [
+            ":authority",
+            ":path",
+            "Accept",
+            "User-Agent",
+            "Location",
+            "Referer",
+            "WWW-Authenticate",
+            "Sec-WebSocket-Key",
+            "Idempotency-Key",
+            "X-Frame-Options",
+            "Content-Security-Policy",
+        ] {
+            assert!(!credential_name(name), "{name}");
+        }
+        let shown = headers(vec![
+            ("X-Api-Key".into(), "secret-value".into()),
+            ("Accept".into(), "*/*".into()),
+        ]);
+        assert_eq!(
+            shown,
+            vec![
+                json!({"name": "X-Api-Key", "value_withheld": true, "value_bytes": 12}),
+                json!({"name": "Accept", "value": "*/*"})
+            ]
+        );
     }
 
     #[test]

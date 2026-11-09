@@ -2850,6 +2850,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         });
         while (elements.requestDomain.children.length > options.length) elements.requestDomain.lastElementChild.remove();
         elements.requestDomain.value = state.requestDomain;
+        // A long domain truncates in the closed control; the tooltip holds the full value.
+        elements.requestDomain.title = elements.requestDomain.selectedOptions?.[0]?.textContent ?? '';
       }
 
       // A row linked to several tabs is in each of them; no tab is a capture error.

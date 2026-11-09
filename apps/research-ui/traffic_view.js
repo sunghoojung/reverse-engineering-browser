@@ -81,9 +81,11 @@ function trafficBodyCapture(body) {
   }[body.state] ?? 'Unknown capture state.';
 }
 
-function trafficBodyRows(body) {
+function trafficBodyRows(body, artifact = null) {
   if (!body || body.malformed) return [];
-  const digest = body.sha256 ?? (body.state === 'no_body' ? 'No body'
+  // The manifest digest covers the retained bytes when the record carries none (over its 4 MiB bound).
+  const stored = body.sha256 ? null : artifact?.sha256 ?? null;
+  const digest = body.sha256 ?? stored ?? (body.state === 'no_body' ? 'No body'
     : body.state === 'not_captured_credential_form' ? 'Withheld for a password form'
       : body.digestSizeLimit ? `Not computed: the body exceeds the ${body.read ? '16' : '4'} MiB digest bound`
         : body.read ? 'Not computed: the read did not finish'
@@ -94,7 +96,8 @@ function trafficBodyRows(body) {
     ['Body length', body.state === 'no_body' ? 'No body'
       : `${trafficByteCount(body.bodyLength)}${!body.lengthPartial ? '' : body.read ? ' read before the read stopped' : ' in memory; file, blob and stream parts are not counted'}`,
     body.state === 'no_body' ? 'prose' : 'value'],
-    ['SHA-256', digest, body.sha256 ? 'value' : 'prose'],
+    ['SHA-256', digest, body.sha256 || stored ? 'value' : 'prose'],
+    ...(stored ? [['Digest source', `Artifact manifest, over the ${trafficByteCount(artifact.byte_size)} retained; the request record carries no digest.`, 'prose']] : []),
     ['Body kind', `${TRAFFIC_BODY_KIND_LABELS[body.kind] ?? 'Unrecognized part'} · ${body.elementCount} ${body.elementCount === 1 ? 'part' : 'parts'}`, 'value']
   ];
 }

@@ -720,13 +720,13 @@ function trafficPayloadBodySection(body, view, shown, panel) {
   return controller;
 }
 
-function trafficPayloadDetails(body) {
+function trafficPayloadDetails(body, view) {
   const details = trafficNode('details', 'traffic-payload-details');
   details.toggleAttribute('open', trafficPayloadPrefs.details === true);
   details.addEventListener('toggle', () => {trafficPayloadPrefs.details = details.hasAttribute('open');});
   details.append(trafficNode('summary', '', 'Capture details'));
   const rows = body === undefined ? [['Capture', 'This row has no native body record.', 'prose']]
-    : [['Capture', trafficBodyCapture(body), 'prose'], ...trafficBodyRows(body)];
+    : [['Capture', trafficBodyCapture(body), 'prose'], ...trafficBodyRows(body, view?.artifact)];
   if (['captured', 'captured_truncated'].includes(body?.state)) {
     rows.push(['Retained', `${trafficByteCount(body.capturedLength)} of ${trafficByteCount(body.bodyLength)}`, 'value'],
       ['Artifact ID', body.artifactId, 'value']);

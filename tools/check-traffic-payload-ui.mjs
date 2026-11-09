@@ -302,6 +302,9 @@ for (const [body, pattern] of [
   [record({state: 'metadata_only', contentCapture: false, capturedLength: '0', artifactId: '0'}), /content capture was off/],
   [record({kind: 'file', state: 'not_captured_body_kind', lengthPartial: true, sha256: null, capturedLength: '0', artifactId: '0'}), /file upload parts were described, not read/],
   [record({kind: 'chunked_data_pipe', state: 'not_captured_read_incomplete', lengthPartial: true, read: true, sha256: null, capturedLength: '0', artifactId: '0'}), /a file, blob or stream part was not read whole/],
+  [record({state: 'not_captured_artifact_unavailable', capturedLength: '0', artifactId: '0'}), /artifact channel was unavailable/],
+  [record({state: 'not_captured_session_budget', capturedLength: '0', artifactId: '0'}), /request body budget/],
+  [record({state: 'not_captured_credential_form', sha256: null, capturedLength: '0', artifactId: '0'}), /password form submission\. Bytes and digest are withheld/],
 ]) {
   render(body === undefined ? {...request(null), origin: 'sample'} : request(body), null);
   assert.match(text('[data-section="payload"]'), pattern);
@@ -313,6 +316,16 @@ const details = panel.querySelector('details.traffic-payload-details');
 assert.equal(details.hasAttribute('open'), false, 'Capture details starts collapsed');
 assert.match(details.textContent, /SHA-256(ab){32}Body kindIn-memory bytes · 1 partRetained.*Artifact ID901/);
 assert.doesNotMatch(panel.textContent, /artifact URL/i, 'the duplicate URL row is gone');
+// A password form keeps neither bytes nor a digest, and says so.
+render(request(record({state: 'not_captured_credential_form', sha256: null, capturedLength: '0', artifactId: '0'})), null);
+assert.match(panel.querySelector('details.traffic-payload-details').textContent, /Withheld for a password form/);
+// Over its 4 MiB bound the record has no digest, and the manifest's SHA-256 stands in.
+const overDigest = request(record({sha256: null, digestSizeLimit: true, bodyLength: '5242880', capturedLength: '5242880'}));
+render(overDigest, null);
+assert.match(panel.querySelector('details.traffic-payload-details').textContent, /Not computed: the body exceeds the 4 MiB digest bound/);
+render(overDigest, ready('{}', {artifact: {sha256: 'cd'.repeat(32), byte_size: 5242880}}));
+assert.match(panel.querySelector('details.traffic-payload-details').textContent,
+  /SHA-256(cd){32}Digest sourceArtifact manifest, over the 5,242,880 bytes retained; the request record carries no digest/);
 console.log('PASS Payload states without bytes: no record, missing, malformed, no body, empty, metadata-only, file; Capture details collapsed without the URL row');
 
 // The capture limit, a digest mismatch and a failed re-read.

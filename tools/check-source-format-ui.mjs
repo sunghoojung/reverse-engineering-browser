@@ -27,7 +27,7 @@ export async function checkSourceFormatUI(root) {
     }
   };
 
-  // JavaScript: the issue's scope table on the formatted sample.
+  // JavaScript: the kinds rendered VS Code gives the formatted sample.
   const formatted = await fixture('minified.prettier.js');
   const javascript = kinds({kind: 'javascript'}, formatted);
   expectKinds(javascript, [
@@ -35,25 +35,42 @@ export async function checkSourceFormatUI(root) {
     ['=', 'operator'], ['+', 'operator'], ['??', 'operator'], ['=>', 'operator'], ['?.', 'operator'], ['.', 'operator'], ['!', 'operator'], ['++', 'operator'],
     [',', 'punctuation'], [';', 'punctuation'], [':', 'punctuation'],
     ['a', 'function'], ['t', 'function'], ['fetch', 'function'], ['fn', 'function'],
-    ['e', 'parameter'], ['JSON', 'constant'], ['stringify', 'builtin-function'], ['length', 'builtin'],
-    ['null', 'number'], ['0', 'number'], ['"POST"', 'string'], ['ok', 'property'], ['n', 'property']
+    ['e', 'parameter'], ['JSON', 'variable-other'], ['stringify', 'function'], ['length', 'builtin'],
+    ['null', 'number'], ['0', 'number'], ['"POST"', 'string'], ['ok', 'property'], ['n', 'variable-other']
   ], 'JavaScript');
   assert.deepEqual(javascript.filter(token => /^bracket-/.test(token.type)).slice(0, 4).map(token => [token.text, token.type]),
     [['(', 'bracket-0'], [')', 'bracket-0'], ['{', 'bracket-0'], ['(', 'bracket-1']], 'Bracket pairs take depth colors');
+  assert.deepEqual(kinds({kind: 'javascript'}, '((((((((').map(token => token.type),
+    ['bracket-0', 'bracket-1', 'bracket-2', 'bracket-3', 'bracket-4', 'bracket-5', 'bracket-0', 'bracket-1'], 'Bracket depth cycles through six colors');
   expectKinds(kinds({kind: 'javascript'}, 'class A extends B.C { m(p, q = 1) { console.log(`x${this.y}\\n`, /re+/g); window.addEventListener("x", f) } } // note'), [
-    ['class', 'keyword'], ['A', 'type'], ['B', 'inherited'], ['C', 'inherited'], ['m', 'function'], ['p', 'parameter'], ['q', 'parameter'],
-    ['console', 'builtin'], ['log', 'builtin-function'], ['this', 'keyword'], ['${', 'bracket-0'], ['\\n', 'escape'], ['/re+/g', 'regexp'],
-    ['window', 'builtin'], ['addEventListener', 'builtin-function'], ['//', 'comment-mark'], [' note', 'comment']
+    ['class', 'keyword'], ['A', 'type'], ['B', 'type'], ['C', 'inherited'], ['m', 'function'], ['p', 'parameter'], ['q', 'parameter'],
+    ['console', 'variable-other'], ['log', 'function'], ['this', 'this'], ['${', 'bracket-3'], ['\\n', 'escape'], ['/re', 'regexp'], ['+', 'keyword'], ['/', 'regexp'], ['g', 'keyword'],
+    ['window', 'variable-other'], ['addEventListener', 'function'], ['//', 'comment-mark'], [' note', 'comment']
   ], 'JavaScript scopes');
+  // Constructs the grammar scopes apart from plain variables and calls.
+  expectKinds(kinds({kind: 'javascript'}, `import { x as y } from "./m.js"; import * as ns from "m";
+class Foo { static count = 0; #priv = 1; #run() {} f = () => 1; constructor(a) { super(a); this.#priv = 2; } }
+const arrow = (m) => m, one = z => z; let plain = () => 1;
+var big = 10n, re = /a(?:b)[c-d]{1,2}\\.$/gi, ok = s instanceof Object, d = new Date(), p = new Promise(r => r());
+var {key: value} = o, e = Foo.prototype, m = module.exports; o = {x: 1}; label: for (;;) { break label; }`), [
+    ['as', 'keyword'], ['y', 'variable-other'], ['*', 'number'], ['count', 'variable'], ['#priv', 'variable'], ['#priv', 'variable-other'], ['#', 'text'], ['run', 'function'], ['f', 'function'],
+    ['constructor', 'keyword'], ['super', 'variable-other'], ['arrow', 'variable'], ['one', 'variable'], ['plain', 'function'], ['10', 'number'], ['n', 'keyword'],
+    ['(?:', 'punctuation'], [')[', 'punctuation'], ['c-d', 'keyword'], ['{1,2}\\.$', 'keyword'], ['gi', 'keyword'],
+    ['Object', 'type'], ['Date', 'function'], ['Promise', 'builtin'], ['key', 'variable'], ['Foo', 'builtin'], ['prototype', 'builtin'], ['module', 'builtin'], ['exports', 'builtin'],
+    ['x', 'property'], ['label', 'function']
+  ], 'JavaScript constructs');
   expectKinds(kinds({kind: 'source_map'}, await fixture('sample.json')), [
     ['name', 'key'], ['"', 'punctuation'], ['"fixture"', 'string'], ['-2.5', 'number'], ['true', 'number'], ['null', 'number'], ['\\n', 'escape'], [',', 'punctuation'], ['":', 'punctuation']
   ], 'JSON');
   expectKinds(kinds({kind: 'style', mime_type: 'text/css'}, await fixture('sample.css')), [
-    ['@media', 'keyword'], ['max-width', 'key'], ['a', 'tag'], [':hover', 'attribute'], ['.note', 'attribute'], ['color', 'key'], ['#fff', 'keyword'],
-    ['4', 'number'], ['px', 'unit'], ['!important', 'keyword'], ['--gap', 'variable'], ['calc', 'builtin-function'], ['/*', 'comment-mark']
+    ['@', 'punctuation'], ['media', 'keyword'], ['max-width', 'key'], ['a', 'tag'], [':', 'attribute-mark'], ['hover', 'attribute'], ['.', 'attribute-mark'], ['note', 'attribute'], ['::', 'attribute-mark'], ['before', 'attribute'],
+    ['color', 'key'], ['#', 'punctuation'], ['fff', 'keyword'], ['4', 'number'], ['px', 'unit'], ['!important', 'keyword'], ['--gap', 'variable'], ['--gap', 'variable-other'], ['calc', 'builtin-function'], ['/*', 'comment-mark']
   ], 'CSS');
+  expectKinds(kinds({kind: 'style', mime_type: 'text/css'}, '@keyframes k { from { top: 0 } } a[b^="c" i] { d: url(e.png); f: 1px/2; } .g { &:hover { h: i; } }'), [
+    ['k', 'parameter'], ['from', 'text'], ['b', 'attribute'], ['^=', 'keyword'], ['i', 'keyword'], ['url', 'builtin-function'], ['e.png', 'parameter'], ['/', 'constant'], ['&', 'tag'], ['hover', 'attribute']
+  ], 'CSS constructs');
   expectKinds(kinds({kind: 'document', mime_type: 'text/html'}, await fixture('sample.html')), [
-    ['<!', 'tag-mark'], ['DOCTYPE', 'tag'], ['div', 'tag'], ['class', 'attribute'], ['"note"', 'string'], ['main', 'string'], ['&amp;', 'escape'], ['<!--', 'comment-mark']
+    ['<!', 'tag-mark'], ['DOCTYPE', 'tag'], ['div', 'tag'], ['class', 'attribute'], ['"note"', 'string'], ['main', 'string'], ['&', 'punctuation'], ['amp', 'escape'], [';', 'punctuation'], ['Tom', 'text'], ['Jerry', 'text'], ['<!--', 'comment-mark']
   ], 'HTML');
   const limited = model.createSourceTokenizer({kind: 'javascript'});
   limited.coloredTokens = model.SOURCE_HIGHLIGHT_TOKEN_LIMIT;
@@ -65,9 +82,9 @@ export async function checkSourceFormatUI(root) {
   const value = (text, name) => text.match(new RegExp(`${name}:\\s*(#[0-9a-f]+)`, 'i'))?.[1];
   const palettes = {
     ':root': {comment: '#6e6a86', punctuation: '#908caa', keyword: '#3e8fb0', string: '#f6c177', number: '#ea9a97', type: '#9ccfd8', 'support-function': '#eb6f92', parameter: '#c4a7e7',
-      'bracket-1': '#eb6f9280', 'bracket-2': '#3e8fb080', 'bracket-3': '#f6c17780', bg: '#232136', text: '#e0def4', 'line-number': '#908caa', 'line-highlight': '#817c9c14', selection: '#817c9c26', 'indent-guide': '#817c9c4d'},
+      'bracket-1': '#eb6f9280', 'bracket-2': '#3e8fb080', 'bracket-3': '#f6c17780', 'bracket-4': '#9ccfd880', 'bracket-5': '#ea9a9780', 'bracket-6': '#c4a7e780', bg: '#232136', text: '#e0def4', 'line-number': '#908caa', 'line-highlight': '#817c9c14', selection: '#817c9c26', 'indent-guide': '#817c9c4d'},
     ':root[data-theme="light"]': {comment: '#9893a5', punctuation: '#797593', keyword: '#286983', string: '#ea9d34', number: '#d7827e', type: '#56949f', 'support-function': '#b4637a', parameter: '#907aa9',
-      'bracket-1': '#b4637a80', 'bracket-2': '#28698380', 'bracket-3': '#ea9d3480', bg: '#faf4ed', text: '#575279', 'line-number': '#797593', 'line-highlight': '#6e6a860d', selection: '#6e6a8614', 'indent-guide': '#6e6a8626'}
+      'bracket-1': '#b4637a80', 'bracket-2': '#28698380', 'bracket-3': '#ea9d3480', 'bracket-4': '#56949f80', 'bracket-5': '#d7827e80', 'bracket-6': '#907aa980', bg: '#faf4ed', text: '#575279', 'line-number': '#797593', 'line-highlight': '#6e6a860d', selection: '#6e6a8614', 'indent-guide': '#6e6a8626'}
   };
   for (const [selector, palette] of Object.entries(palettes)) {
     const text = block(`      ${selector}`);
@@ -76,13 +93,14 @@ export async function checkSourceFormatUI(root) {
       assert.equal(value(text, variable), color, `${selector} ${variable}`);
     }
   }
-  const rule = kind => css.match(new RegExp(`[^}]*\\.syntax-${kind}\\b[^{]*\\{([^}]*)\\}`))?.[1] ?? '';
+  const rule = kind => css.match(new RegExp(`[^}]*\\.syntax-${kind}(?![\\w-])[^{]*\\{([^}]*)\\}`))?.[1] ?? '';
   for (const [kind, variable, italic] of [
     ['comment', '--syntax-comment', true], ['keyword', '--syntax-keyword'], ['operator', '--syntax-keyword'], ['punctuation', '--syntax-punctuation'],
     ['string', '--syntax-string'], ['regexp', '--syntax-string'], ['number', '--syntax-number'], ['function', '--syntax-number'],
     ['type', '--syntax-type'], ['builtin', '--syntax-type'], ['key', '--syntax-type'], ['tag', '--syntax-type'], ['builtin-function', '--syntax-support-function', true],
-    ['parameter', '--syntax-parameter'], ['attribute', '--syntax-parameter', true], ['inherited', '--syntax-parameter', true], ['property', '--code-text'],
-    ['bracket-0', '--syntax-bracket-1'], ['bracket-1', '--syntax-bracket-2'], ['bracket-2', '--syntax-bracket-3']
+    ['parameter', '--syntax-parameter', true], ['attribute', '--syntax-parameter', true], ['inherited', '--syntax-parameter', true], ['property', '--code-text'], ['text', '--code-text'],
+    ['variable-other', '--code-text', true], ['this', '--syntax-keyword', true], ['attribute-mark', '--syntax-punctuation', true],
+    ['bracket-0', '--syntax-bracket-1'], ['bracket-1', '--syntax-bracket-2'], ['bracket-2', '--syntax-bracket-3'], ['bracket-3', '--syntax-bracket-4'], ['bracket-4', '--syntax-bracket-5'], ['bracket-5', '--syntax-bracket-6']
   ]) {
     assert(rule(kind).includes(`var(${variable})`), `.syntax-${kind} uses ${variable}`);
     assert.equal(rule(kind).includes('italic'), Boolean(italic), `.syntax-${kind} font style`);

@@ -39,6 +39,9 @@
         --syntax-bracket-1: #eb6f9280;
         --syntax-bracket-2: #3e8fb080;
         --syntax-bracket-3: #f6c17780;
+        --syntax-bracket-4: #9ccfd880;
+        --syntax-bracket-5: #ea9a9780;
+        --syntax-bracket-6: #c4a7e780;
         --selection: #44415a;
         --stripe: #2a283e;
         --shadow: rgba(0, 0, 0, 0.34);
@@ -85,6 +88,9 @@
         --syntax-bracket-1: #b4637a80;
         --syntax-bracket-2: #28698380;
         --syntax-bracket-3: #ea9d3480;
+        --syntax-bracket-4: #56949f80;
+        --syntax-bracket-5: #d7827e80;
+        --syntax-bracket-6: #907aa980;
         --selection: #0964d5;
         --stripe: #f4f5f6;
         --shadow: rgba(24, 31, 42, 0.15);
@@ -1279,22 +1285,27 @@ var(--panel);
       .source-line.current-line { background: var(--code-line-highlight); }
       .source-line.current-line .source-gutter { color: var(--code-line-number-active); }
       .source-indent { background: repeating-linear-gradient(to right, var(--code-indent-guide) 0 1px, transparent 1px 2ch); }
+      /* The rendered result of the theme's rules: `variable` sets italic, and `variable.other`, `variable.parameter` and `variable.language` keep it. */
       .syntax-comment { color: var(--syntax-comment); font-style: italic; }
-      .syntax-comment-mark { color: var(--syntax-punctuation); font-style: italic; }
+      .syntax-comment-mark, .syntax-attribute-mark { color: var(--syntax-punctuation); font-style: italic; }
       .syntax-punctuation { color: var(--syntax-punctuation); }
       .syntax-keyword, .syntax-operator, .syntax-escape, .syntax-unit { color: var(--syntax-keyword); }
+      .syntax-this { color: var(--syntax-keyword); font-style: italic; }
       .syntax-string, .syntax-regexp, .syntax-constant { color: var(--syntax-string); }
       .syntax-number, .syntax-function { color: var(--syntax-number); }
       .syntax-variable { color: var(--syntax-number); font-style: italic; }
+      .syntax-variable-other { color: var(--code-text); font-style: italic; }
       .syntax-type, .syntax-builtin, .syntax-tag, .syntax-key { color: var(--syntax-type); }
       .syntax-builtin-function { color: var(--syntax-support-function); font-style: italic; }
-      .syntax-parameter { color: var(--syntax-parameter); }
-      .syntax-inherited, .syntax-attribute { color: var(--syntax-parameter); font-style: italic; }
+      .syntax-parameter, .syntax-inherited, .syntax-attribute { color: var(--syntax-parameter); font-style: italic; }
       .syntax-tag-mark { color: var(--syntax-tag-mark); }
-      .syntax-property { color: var(--code-text); }
+      .syntax-property, .syntax-text { color: var(--code-text); }
       .syntax-bracket-0 { color: var(--syntax-bracket-1); }
       .syntax-bracket-1 { color: var(--syntax-bracket-2); }
       .syntax-bracket-2 { color: var(--syntax-bracket-3); }
+      .syntax-bracket-3 { color: var(--syntax-bracket-4); }
+      .syntax-bracket-4 { color: var(--syntax-bracket-5); }
+      .syntax-bracket-5 { color: var(--syntax-bracket-6); }
       /* Comments (3.0:1) and keywords (4.3:1) are dim on Moon; Increase Contrast brightens them. */
       @media (prefers-contrast: more) {
         :root { --syntax-comment: #908caa; --syntax-keyword: #4fa0c1; }

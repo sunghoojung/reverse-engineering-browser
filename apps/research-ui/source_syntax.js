@@ -720,42 +720,9 @@
         'throw', 'typeof', 'void', 'yield'
       ]);
       const SOURCE_LITERALS = new Set(['false', 'Infinity', 'NaN', 'null', 'true', 'undefined']);
-      const SOURCE_BUILTINS = new Set([
-        'Array', 'ArrayBuffer', 'Atomics', 'BigInt', 'BigInt64Array', 'BigUint64Array', 'Boolean',
-        'DataView', 'Date', 'Error', 'EvalError', 'Float32Array', 'Float64Array', 'Function',
-        'Int8Array', 'Int16Array', 'Int32Array', 'Intl', 'Map', 'Number', 'Object', 'Promise',
-        'Proxy', 'RangeError', 'ReferenceError', 'Reflect', 'RegExp', 'Set', 'SharedArrayBuffer',
-        'String', 'Symbol', 'SyntaxError', 'TextDecoder', 'TextEncoder', 'TypeError', 'Uint8Array',
-        'Uint8ClampedArray', 'Uint16Array', 'Uint32Array', 'URIError', 'URL', 'URLSearchParams',
-        'WeakMap', 'WeakSet', 'WebAssembly', 'console', 'document', 'event', 'navigator',
-        'performance', 'screen', 'window', 'process', 'Buffer', 'module', 'exports', 'global',
-        '__dirname', '__filename'
-      ]);
-      // support.constant, which the theme colors like strings.
-      const SOURCE_BUILTIN_CONSTANTS = new Set(['JSON', 'Math']);
-      const SOURCE_BUILTIN_FUNCTIONS = new Set([
-        'clearInterval', 'clearTimeout', 'decodeURI', 'decodeURIComponent', 'encodeURI',
-        'encodeURIComponent', 'escape', 'eval', 'isFinite', 'isNaN', 'parseFloat', 'parseInt',
-        'require', 'setInterval', 'setTimeout', 'unescape', 'uneval'
-      ]);
-      const SOURCE_MEMBER_FUNCTIONS = {
-        console: new Set(['assert', 'clear', 'count', 'debug', 'dir', 'error', 'group', 'groupCollapsed',
-          'groupEnd', 'info', 'log', 'profile', 'profileEnd', 'table', 'time', 'timeEnd', 'timeStamp', 'trace', 'warn']),
-        JSON: new Set(['parse', 'stringify']),
-        Math: new Set(['abs', 'acos', 'acosh', 'asin', 'asinh', 'atan', 'atan2', 'atanh', 'cbrt', 'ceil',
-          'clz32', 'cos', 'cosh', 'exp', 'expm1', 'floor', 'fround', 'hypot', 'imul', 'log', 'log10',
-          'log1p', 'log2', 'max', 'min', 'pow', 'random', 'round', 'sign', 'sin', 'sinh', 'sqrt', 'tan', 'tanh', 'trunc'])
-      };
-      // support.function.dom: a subset of the grammar's DOM method list.
-      const SOURCE_DOM_FUNCTIONS = new Set([
-        'addEventListener', 'appendChild', 'cancelAnimationFrame', 'cloneNode', 'closest',
-        'createDocumentFragment', 'createElement', 'createTextNode', 'dispatchEvent',
-        'getAttribute', 'getBoundingClientRect', 'getComputedStyle', 'getElementById',
-        'getElementsByClassName', 'getElementsByName', 'getElementsByTagName', 'hasAttribute',
-        'insertBefore', 'preventDefault', 'querySelector', 'querySelectorAll', 'removeAttribute',
-        'removeChild', 'removeEventListener', 'replaceChild', 'requestAnimationFrame',
-        'scrollIntoView', 'setAttribute', 'stopImmediatePropagation', 'stopPropagation'
-      ]);
+      // The grammar scopes only these names; window, JSON, Math and the like render as ordinary variables.
+      const SOURCE_SUPPORT_NAMES = new Set(['Promise', 'exports', 'module']);
+      const SOURCE_BINDINGS = new Set(['const', 'let', 'var']);
       const SOURCE_BUILTIN_PROPERTIES = new Set(['__proto__', 'constructor', 'length', 'prototype']);
       const SOURCE_NUMBER_PATTERN = /(?:0[xX][\da-fA-F](?:_?[\da-fA-F])*n?|0[bB][01](?:_?[01])*n?|0[oO][0-7](?:_?[0-7])*n?|(?:\d(?:_?\d)*(?:\.(?:\d(?:_?\d)*)?)?|\.\d(?:_?\d)*)(?:[eE][+-]?\d(?:_?\d)*)?n?)/y;
       const SOURCE_IDENTIFIER_PATTERN = /[\p{ID_Start}$_][\p{ID_Continue}$‌‍]*/uy;
@@ -768,6 +735,19 @@
       const SOURCE_FUNCTION_VALUE = /\s*(?::|=(?![=>]))\s*(?:async\s*)?(?:function\b|\([^()]*\)\s*=>|[\p{ID_Start}$_][\p{ID_Continue}$]*\s*=>)/uy;
       const SOURCE_ACCESSOR_NAME = /\s+[#\p{ID_Start}$_][\p{ID_Continue}$]*\s*\(/uy;
       const SOURCE_FROM_STRING = /\s*['"]/y;
+      const SOURCE_ASYNC_TARGET = /\s*(?:function\b|[(*#[]|[\p{ID_Start}$_])/uy;
+      const SOURCE_AS_TARGET = /\s+[\p{ID_Start}$_]/uy;
+      const SOURCE_FOLLOWED_PROTOTYPE = /\s*\.\s*prototype\b/y;
+      const SOURCE_FOLLOWED_DOT = /\s*\??\./y;
+      const SOURCE_DOTTED_CALL = /(?:\s*\.\s*[\p{ID_Start}$_][\p{ID_Continue}$]*)+\s*\(/uy;
+      const SOURCE_REGEXP_ESCAPE = /\\(?:x[\da-fA-F]{2}|u\{[\da-fA-F]+\}|u[\da-fA-F]{4}|c[A-Za-z]|[1-9]\d*|[\s\S])/y;
+      const SOURCE_REGEXP_QUANTIFIER = /\{(?:\d+(?:,\d*)?|,\d+)\}/y;
+      const SOURCE_REGEXP_GROUP = /\(\?(?:[:=!]|<[=!])/y;
+      const SOURCE_REGEXP_NAME = /\(\?<([\p{ID_Start}$_][\p{ID_Continue}$]*)>/uy;
+      const SOURCE_REGEXP_BACKREFERENCE = /\\k<([\p{ID_Start}$_][\p{ID_Continue}$]*)>/uy;
+      const SOURCE_CSS_NESTED = /[^;{}]*\{/y;
+      const SOURCE_CSS_ATTRIBUTE_OPERATOR = /[~|^$*]?=/y;
+      const SOURCE_CSS_NTH_ARGUMENT = /\s*[+-]?\d*n?(?:\s*[+-]\s*\d+)?\s*(?=\))/y;
       const SOURCE_CSS_COLOR_PATTERN = /#[\da-fA-F]{3,8}\b/y;
       const SOURCE_CSS_NUMBER_PATTERN = /[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/y;
       const SOURCE_CSS_UNIT_PATTERN = /%|[a-zA-Z]+/y;
@@ -819,11 +799,23 @@
           previousKind: '',
           member: '',
           declaration: '',
+          // The depth a `class` head started at and the depths of open class bodies.
+          classHead: -1,
+          classBodies: [],
+          // The current const/let/var statement, its depth, and a destructuring pattern's depth.
+          varKind: '',
+          varDepth: 0,
+          binding: 0,
+          // An `instanceof` operand continues as a type across its dots.
+          typeChain: false,
           pendingParams: false,
           params: null,
           cssValue: false,
           cssBlocks: [],
           cssAtRule: '',
+          cssParens: 0,
+          // 'name' or 'value' inside an [attribute] selector.
+          cssAttribute: '',
           coloredTokens: 0,
           truncated: false,
           // Line position of the next token; only tokens inside the clip are emitted.
@@ -841,7 +833,7 @@
 
       function sourceTokenizerSnapshot(tokenizer) {
         return {...tokenizer, templates: tokenizer.templates.slice(), ternaries: tokenizer.ternaries.slice(),
-          cssBlocks: tokenizer.cssBlocks.slice(), params: tokenizer.params && {...tokenizer.params}};
+          classBodies: tokenizer.classBodies.slice(), cssBlocks: tokenizer.cssBlocks.slice(), params: tokenizer.params && {...tokenizer.params}};
       }
 
       function pushSourceToken(tokens, tokenizer, type, text) {
@@ -853,7 +845,8 @@
         if (to <= from) return;
         if (from > start || to < tokenizer.cursor) text = text.slice(from - start, to - start);
         let boundedType = type;
-        if (type !== 'plain') {
+        // Plain and text cost nothing to paint; text only makes visible characters clickable.
+        if (type !== 'plain' && type !== 'text') {
           if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
             boundedType = 'plain';
             tokenizer.truncated = true;
@@ -909,7 +902,7 @@
 
       function pushSourceBracket(tokens, tokenizer, text, opening) {
         if (!opening) tokenizer.depth = Math.max(0, tokenizer.depth - 1);
-        pushSourceToken(tokens, tokenizer, `bracket-${tokenizer.depth % 3}`, text);
+        pushSourceToken(tokens, tokenizer, `bracket-${tokenizer.depth % 6}`, text);
         if (opening) tokenizer.depth += 1;
       }
 
@@ -917,7 +910,7 @@
       function sourceParameterList(line, open, tokenizer) {
         const before = tokenizer.previous;
         if (tokenizer.pendingParams) return true;
-        if (['if', 'for', 'while', 'switch', 'with', 'catch'].includes(before)) return false;
+        if (['if', 'for', 'while', 'switch', 'with', 'catch', 'extends'].includes(before)) return false;
         let depth = 0;
         const limit = Math.min(line.length, open + 512);
         for (let index = open; index < limit; index += 1) {
@@ -932,30 +925,115 @@
         return false;
       }
 
-      function sourceIdentifierType(line, end, name, tokenizer) {
-        const afterDot = tokenizer.previous === '.' || tokenizer.previous === '?.';
-        const key = (tokenizer.previous === '{' || tokenizer.previous === ',') && sourceFollowedBy(SOURCE_FOLLOWED_KEY, line, end);
+      // One regular expression, in the grammar's parts: bytes stay strings, syntax takes the keyword color.
+      function pushSourceRegexp(tokens, tokenizer, text) {
+        if (!tokens) { tokenizer.cursor += text.length; return; }
+        const push = (type, value) => pushSourceToken(tokens, tokenizer, type, value);
+        const close = text.lastIndexOf('/');
+        let index = 1, plainFrom = 1;
+        const flush = () => { push('regexp', text.slice(plainFrom, index)); };
+        const take = (type, length) => { flush(); push(type, text.slice(index, index + length)); index += length; plainFrom = index; };
+        push('regexp', '/');
+        while (index < close) {
+          const character = text[index];
+          if (character === '\\') {
+            const reference = sourceMatchAt(SOURCE_REGEXP_BACKREFERENCE, text, index);
+            if (reference) {
+              take('keyword', 3);
+              take('variable-other', reference.length - 4);
+              take('keyword', 1);
+            } else {
+              take('keyword', sourceMatchAt(SOURCE_REGEXP_ESCAPE, text, index)?.length ?? 2);
+            }
+          } else if ('|^$.'.includes(character)) {
+            take('keyword', 1);
+          } else if ('*+?'.includes(character)) {
+            take('keyword', 1);
+          } else if (character === '{') {
+            const quantifier = sourceMatchAt(SOURCE_REGEXP_QUANTIFIER, text, index);
+            if (quantifier) take('keyword', quantifier.length); else index += 1;
+          } else if (character === '(') {
+            const named = sourceMatchAt(SOURCE_REGEXP_NAME, text, index);
+            if (named) {
+              take('punctuation', 3);
+              take('variable-other', named.length - 4);
+              take('punctuation', 1);
+            } else {
+              take('punctuation', sourceMatchAt(SOURCE_REGEXP_GROUP, text, index)?.length ?? 1);
+            }
+          } else if (character === ')') {
+            take('punctuation', 1);
+          } else if (character === '[') {
+            take('punctuation', 1);
+            while (index < close && text[index] !== ']') {
+              if (text[index] === '\\') take('keyword', sourceMatchAt(SOURCE_REGEXP_ESCAPE, text, index)?.length ?? 2);
+              else {
+                const start = index;
+                while (index < close && text[index] !== ']' && text[index] !== '\\') index += 1;
+                push('keyword', text.slice(start, index));
+                plainFrom = index;
+              }
+            }
+            if (index < close) take('punctuation', 1);
+          } else {
+            index += 1;
+          }
+        }
+        flush();
+        push('regexp', '/');
+        push('keyword', text.slice(close + 1));
+      }
+
+      // A class member begins after these, or first on its own line when a field omits the semicolon.
+      function sourceClassMemberStart(line, start, tokenizer) {
+        return ['{', ';', '}', 'static', 'async', 'get', 'set', '*'].includes(tokenizer.previous) || !line.slice(0, start).trim();
+      }
+
+      // Kinds follow what the grammar and the theme render, not what a name means: `JSON` is a
+      // variable and `JSON.stringify(` an ordinary function call, as in VS Code.
+      function sourceIdentifierType(line, end, name, tokenizer, start) {
+        const {previous} = tokenizer;
+        const afterDot = previous === '.' || previous === '?.';
+        const key = (previous === '{' || previous === ',') && sourceFollowedBy(SOURCE_FOLLOWED_KEY, line, end);
+        const member = !afterDot && tokenizer.classBodies.at(-1) === tokenizer.depth && sourceClassMemberStart(line, start, tokenizer);
+        const call = sourceFollowedBy(SOURCE_FOLLOWED_CALL, line, end);
         if (!afterDot && !key) {
           if (SOURCE_LITERALS.has(name)) return 'number';
+          if (name === 'this') return 'this';
+          if (name === 'super') return 'variable-other';
+          if (name === 'constructor' && member && call) return 'keyword';
+          if (name === 'async') return sourceFollowedBy(SOURCE_ASYNC_TARGET, line, end) ? 'keyword' : 'variable-other';
+          if (name === 'static') return member ? 'keyword' : 'variable-other';
           if ((name === 'get' || name === 'set') && sourceFollowedBy(SOURCE_ACCESSOR_NAME, line, end)) return 'keyword';
           if (name === 'from' && sourceFollowedBy(SOURCE_FROM_STRING, line, end)) return 'keyword';
+          if (name === 'as' && (tokenizer.previousKind === 'word' || previous === '*') && sourceFollowedBy(SOURCE_AS_TARGET, line, end)) return 'keyword';
           if (SOURCE_KEYWORDS.has(name)) return 'keyword';
         }
         if (tokenizer.declaration === 'class') return 'type';
-        if (tokenizer.declaration === 'extends') return 'inherited';
-        if (tokenizer.declaration === 'function') return 'function';
-        if (tokenizer.params && !tokenizer.params.defaults) return 'parameter';
-        const call = sourceFollowedBy(SOURCE_FOLLOWED_CALL, line, end);
-        if (afterDot) {
-          if (call) return SOURCE_MEMBER_FUNCTIONS[tokenizer.member]?.has(name) || SOURCE_DOM_FUNCTIONS.has(name) ? 'builtin-function' : 'function';
-          if (SOURCE_BUILTIN_PROPERTIES.has(name)) return 'builtin';
-          return sourceFollowedBy(SOURCE_FUNCTION_VALUE, line, end) ? 'function' : 'property';
+        if (tokenizer.declaration === 'extends') {
+          if (sourceFollowedBy(SOURCE_DOTTED_CALL, line, end)) { tokenizer.declaration = ''; return 'variable-other'; }
+          return sourceFollowedBy(SOURCE_FOLLOWED_DOT, line, end) ? 'type' : 'inherited';
         }
+        if (tokenizer.declaration === 'function') return 'function';
+        if (tokenizer.params && !tokenizer.params.defaults) return key ? 'variable' : 'parameter';
+        const functionValue = sourceFollowedBy(SOURCE_FUNCTION_VALUE, line, end);
+        if (afterDot) {
+          if (tokenizer.typeChain) return 'type';
+          if (call) return 'function';
+          if (SOURCE_BUILTIN_PROPERTIES.has(name)) return 'builtin';
+          if ((tokenizer.member === 'module' && name === 'exports') || (tokenizer.member === 'import' && name === 'meta') || (tokenizer.member === 'new' && name === 'target')) return 'builtin';
+          return functionValue ? 'function' : 'variable-other';
+        }
+        if (previous === 'instanceof') return 'type';
+        // entity.name.label: `break x`, and a name opening its statement before a colon.
+        if (previous === 'break' || previous === 'continue' || (['', ';', '}'].includes(previous) && !tokenizer.ternaries.length && sourceFollowedBy(SOURCE_FOLLOWED_KEY, line, end))) return 'function';
         if (sourceFollowedBy(SOURCE_FOLLOWED_ARROW, line, end)) return 'parameter';
-        if (SOURCE_BUILTINS.has(name)) return 'builtin';
-        if (SOURCE_BUILTIN_CONSTANTS.has(name)) return 'constant';
-        if (call) return SOURCE_BUILTIN_FUNCTIONS.has(name) ? 'builtin-function' : 'function';
-        return sourceFollowedBy(SOURCE_FUNCTION_VALUE, line, end) ? 'function' : 'property';
+        if (SOURCE_SUPPORT_NAMES.has(name) || sourceFollowedBy(SOURCE_FOLLOWED_PROTOTYPE, line, end)) return 'builtin';
+        if (call) return 'function';
+        if (key) return functionValue ? 'function' : tokenizer.binding ? 'variable' : 'property';
+        if (member) return functionValue ? 'function' : 'variable';
+        if (functionValue) return tokenizer.varKind === 'const' && tokenizer.varDepth === tokenizer.depth && (previous === 'const' || previous === ',') ? 'variable' : 'function';
+        return 'variable-other';
       }
 
       function sourceRegexAllowed(tokenizer) {
@@ -1001,6 +1079,8 @@
         const significant = (text, kind) => { tokenizer.previous = text; tokenizer.previousKind = kind; };
         let index = from;
         tokenizer.cursor = from;
+        // Without a trailing comma, a new line ends a statement that omitted its semicolon.
+        if (from === 0 && tokenizer.previous !== ',') tokenizer.varKind = '';
         while (index < stop) {
           if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
             tokenizer.truncated = true;
@@ -1050,17 +1130,34 @@
           const number = sourceMatchAt(SOURCE_NUMBER_PATTERN, line, index + sign);
           if (number && (sign || /\d/.test(character) || (character === '.' && /\d/.test(next)))) {
             const text = line.slice(index, index + sign + number.length);
-            push('number', text); significant(text, 'value'); index += text.length; continue;
+            const bigint = !json && text.endsWith('n');
+            push('number', bigint ? text.slice(0, -1) : text);
+            if (bigint) push('keyword', 'n');
+            significant(text, 'value'); index += text.length; continue;
+          }
+          if (!json && character === '#') {
+            const name = sourceMatchAt(SOURCE_IDENTIFIER_PATTERN, line, index + 1);
+            if (name) {
+              const end = index + 1 + name.length, afterDot = tokenizer.previous === '.' || tokenizer.previous === '?.';
+              const call = sourceFollowedBy(SOURCE_FOLLOWED_CALL, line, end);
+              const member = !afterDot && tokenizer.classBodies.at(-1) === tokenizer.depth && sourceClassMemberStart(line, index, tokenizer);
+              if (afterDot) push(call ? 'function' : 'variable-other', `#${name}`);
+              else if (member && !call) push('variable', `#${name}`);
+              else { push('text', '#'); push(call ? 'function' : 'variable-other', name); }
+              significant(name, 'word'); index = end; continue;
+            }
           }
           const identifier = sourceMatchAt(SOURCE_IDENTIFIER_PATTERN, line, index);
           if (identifier) {
             const end = index + identifier.length;
-            const type = json ? (SOURCE_LITERALS.has(identifier) ? 'number' : 'plain') : sourceIdentifierType(line, end, identifier, tokenizer);
+            const type = json ? (SOURCE_LITERALS.has(identifier) ? 'number' : 'text') : sourceIdentifierType(line, end, identifier, tokenizer, index);
             push(type, identifier);
+            tokenizer.typeChain = type === 'type' && sourceFollowedBy(SOURCE_FOLLOWED_DOT, line, end);
             if (type === 'keyword') {
               if (identifier === 'function') { tokenizer.declaration = 'function'; tokenizer.pendingParams = true; }
-              else if (identifier === 'class') tokenizer.declaration = 'class';
+              else if (identifier === 'class') { tokenizer.declaration = 'class'; tokenizer.classHead = tokenizer.depth; }
               else if (identifier === 'extends') tokenizer.declaration = 'extends';
+              else if (SOURCE_BINDINGS.has(identifier)) { tokenizer.varKind = identifier; tokenizer.varDepth = tokenizer.depth; }
             } else if (tokenizer.declaration === 'function' || tokenizer.declaration === 'class') {
               tokenizer.declaration = '';
             }
@@ -1070,13 +1167,17 @@
           if (!json && character === '/' && sourceRegexAllowed(tokenizer)) {
             const end = regexpSourceEnd(line, index);
             if (end > index + 1) {
-              push('regexp', line.slice(index, end)); significant('/', 'value'); index = end; continue;
+              pushSourceRegexp(tokens, tokenizer, line.slice(index, end)); significant('/', 'value'); index = end; continue;
             }
           }
           if ('([{'.includes(character)) {
             const params = character === '(' && !json && sourceParameterList(line, index, tokenizer);
-            if (character === '{' && tokenizer.declaration === 'extends') tokenizer.declaration = '';
+            if (tokenizer.declaration === 'extends' || (character === '{' && tokenizer.declaration === 'class')) tokenizer.declaration = '';
+            const classBody = character === '{' && tokenizer.classHead === tokenizer.depth;
+            const binding = character === '{' && SOURCE_BINDINGS.has(tokenizer.previous);
             pushSourceBracket(tokens, tokenizer, character, true);
+            if (classBody) { pushSourceState(tokenizer.classBodies, tokenizer.depth); tokenizer.classHead = -1; }
+            if (binding) tokenizer.binding = tokenizer.depth;
             if (params) tokenizer.params = {depth: tokenizer.depth, defaults: false};
             tokenizer.pendingParams = false;
             if (tokenizer.declaration === 'function') tokenizer.declaration = '';
@@ -1090,7 +1191,9 @@
               index += 1; continue;
             }
             if (tokenizer.params?.depth === tokenizer.depth && character === ')') tokenizer.params = null;
+            if (character === '}' && tokenizer.classBodies.at(-1) === tokenizer.depth) tokenizer.classBodies.pop();
             pushSourceBracket(tokens, tokenizer, character, false);
+            if (tokenizer.binding > tokenizer.depth) tokenizer.binding = 0;
             while (tokenizer.ternaries.length && tokenizer.ternaries.at(-1) > tokenizer.depth) tokenizer.ternaries.pop();
             significant(character, 'close'); index += 1; continue;
           }
@@ -1098,6 +1201,10 @@
             if (tokenizer.params?.depth === tokenizer.depth) tokenizer.params.defaults = false;
             if (tokenizer.declaration !== 'extends') tokenizer.declaration = '';
             tokenizer.pendingParams = false;
+            if (character === ';') {
+              tokenizer.classHead = -1;
+              if (tokenizer.varDepth === tokenizer.depth) tokenizer.varKind = '';
+            }
             push('punctuation', character); significant(character, 'punctuation'); index += 1; continue;
           }
           if (character === ':') {
@@ -1113,11 +1220,19 @@
             if (operator === '=' && tokenizer.params?.depth === tokenizer.depth) tokenizer.params.defaults = true;
             if (operator === '.' || operator === '?.') tokenizer.member = tokenizer.previousKind === 'word' ? tokenizer.previous : '';
             else if (operator !== '=>' && tokenizer.declaration === 'extends') tokenizer.declaration = '';
-            push('operator', operator); significant(operator, 'operator'); index += operator.length; continue;
+            // The namespace star of an import or export is the grammar's constant.language.
+            push(operator === '*' && (tokenizer.previous === 'import' || tokenizer.previous === 'export') ? 'number' : 'operator', operator);
+            significant(operator, 'operator'); index += operator.length; continue;
           }
-          push('plain', character); index += 1;
+          push('text', character); index += 1;
         }
         return tokens;
+      }
+
+      // In a declaration block, a `{` before the next `;` or `}` makes this a nested selector, not `name: value`.
+      function sourceCssNestedSelector(line, index) {
+        SOURCE_CSS_NESTED.lastIndex = index;
+        return SOURCE_CSS_NESTED.test(line);
       }
 
       function tokenizeCssSourceLine(line, tokenizer, from = 0, stop = line.length, tokens = []) {
@@ -1155,26 +1270,52 @@
           const declarations = tokenizer.cssBlocks.at(-1) === 'declarations' || Boolean(tokenizer.cssAtRule);
           if ('{[('.includes(character)) {
             if (character === '{') {
-              pushSourceState(tokenizer.cssBlocks, /^(?:media|supports|document|layer|container|scope|starting-style|(?:-\w+-)?keyframes)$/.test(tokenizer.cssAtRule) ? 'rules' : 'declarations');
-              tokenizer.cssAtRule = ''; tokenizer.cssValue = false;
+              pushSourceState(tokenizer.cssBlocks, /^(?:-\w+-)?keyframes$/.test(tokenizer.cssAtRule) ? 'keyframes'
+                : /^(?:media|supports|document|layer|container|scope|starting-style)$/.test(tokenizer.cssAtRule) ? 'rules' : 'declarations');
+              tokenizer.cssAtRule = ''; tokenizer.cssValue = false; tokenizer.cssParens = 0;
+            } else if (character === '(') {
+              tokenizer.cssParens += 1;
+            } else if (!value) {
+              tokenizer.cssAttribute = 'name';
             }
             pushSourceBracket(tokens, tokenizer, character, true); index += 1; continue;
           }
           if ('}])'.includes(character)) {
-            if (character === '}') { tokenizer.cssBlocks.pop(); tokenizer.cssValue = false; }
-            if (character === ')' && tokenizer.cssAtRule) tokenizer.cssValue = false;
+            if (character === '}') { tokenizer.cssBlocks.pop(); tokenizer.cssValue = false; tokenizer.cssParens = 0; }
+            if (character === ')') {
+              tokenizer.cssParens = Math.max(0, tokenizer.cssParens - 1);
+              if (tokenizer.cssAtRule) tokenizer.cssValue = false;
+            }
+            if (character === ']') tokenizer.cssAttribute = '';
             pushSourceBracket(tokens, tokenizer, character, false); index += 1; continue;
           }
           if (character === ';' || character === ',') {
-            if (character === ';') { tokenizer.cssValue = false; tokenizer.cssAtRule = ''; }
+            if (character === ';') { tokenizer.cssValue = false; tokenizer.cssAtRule = ''; tokenizer.cssParens = 0; }
             push('punctuation', character); index += 1; continue;
           }
-          if (character === ':' && declarations && !value) {
+          if (tokenizer.cssBlocks.at(-1) === 'keyframes') {
+            const offset = line.slice(index).match(/^[^\s{},;/]+/)?.[0];
+            if (offset) { push('text', offset); index += offset.length; continue; }
+          }
+          if (tokenizer.cssAttribute) {
+            const comparison = sourceMatchAt(SOURCE_CSS_ATTRIBUTE_OPERATOR, line, index);
+            if (comparison) { tokenizer.cssAttribute = 'value'; push('keyword', comparison); index += comparison.length; continue; }
+            const word = sourceMatchAt(SOURCE_CSS_IDENTIFIER_PATTERN, line, index);
+            if (word) {
+              push(tokenizer.cssAttribute === 'name' ? 'attribute' : /^[is]$/i.test(word) ? 'keyword' : 'string', word);
+              index += word.length; continue;
+            }
+          }
+          if (character === ':' && declarations && !value && (tokenizer.cssAtRule || !sourceCssNestedSelector(line, index))) {
             tokenizer.cssValue = true; push('punctuation', ':'); index += 1; continue;
           }
           if (value) {
+            if (line.startsWith('--', index)) {
+              const custom = sourceMatchAt(SOURCE_CSS_IDENTIFIER_PATTERN, line, index);
+              if (custom) { push('variable-other', custom); index += custom.length; continue; }
+            }
             const color = sourceMatchAt(SOURCE_CSS_COLOR_PATTERN, line, index);
-            if (color) { push('keyword', color); index += color.length; continue; }
+            if (color) { push('punctuation', '#'); push('keyword', color.slice(1)); index += color.length; continue; }
             const number = /[\d.+-]/.test(character) ? sourceMatchAt(SOURCE_CSS_NUMBER_PATTERN, line, index) : null;
             if (number && /\d/.test(number)) {
               push('number', number); index += number.length;
@@ -1183,31 +1324,52 @@
               continue;
             }
             if (line.startsWith('!important', index)) { push('keyword', '!important'); index += 10; continue; }
-            if ('+-*/'.includes(character)) { push('operator', character); index += 1; continue; }
+            // A slash is arithmetic only inside a function; `font: 12px/1.5` keeps the value color.
+            if ('+-*/'.includes(character)) { push(character === '/' && !tokenizer.cssParens ? 'constant' : 'operator', character); index += 1; continue; }
+            if (character === '!') { push('constant', character); index += 1; continue; }
           }
           if (character === '@') {
             const name = sourceMatchAt(SOURCE_CSS_IDENTIFIER_PATTERN, line, index + 1) ?? '';
             tokenizer.cssAtRule = name.toLowerCase();
-            push('keyword', `@${name}`); index += name.length + 1; continue;
+            push('punctuation', '@'); push('keyword', name); index += name.length + 1; continue;
           }
           const identifier = sourceMatchAt(SOURCE_CSS_IDENTIFIER_PATTERN, line, index);
           if (identifier) {
             const following = line[index + identifier.length] ?? '';
             const custom = identifier.startsWith('--');
+            const atRule = !value && tokenizer.cssAtRule;
             const type = following === '(' ? 'builtin-function'
-              : value ? (custom ? 'property' : 'constant')
-                : declarations && sourceNextSignificant(line, index + identifier.length) === ':' ? (custom ? 'variable' : 'key')
-                  : 'tag';
-            push(type, identifier); index += identifier.length; continue;
+              : atRule && /keyframes$/.test(atRule) ? 'parameter'
+                : atRule && /^(?:and|not|only|or)$/i.test(identifier) ? 'keyword'
+                  : value ? 'constant'
+                    : declarations && sourceNextSignificant(line, index + identifier.length) === ':' && (atRule || !sourceCssNestedSelector(line, index)) ? (custom ? 'variable' : 'key')
+                      : atRule ? 'constant' : 'tag';
+            push(type, identifier); index += identifier.length;
+            if (following === '(' && /^url$/i.test(identifier)) {
+              // An unquoted url is one token up to its closing parenthesis.
+              pushSourceBracket(tokens, tokenizer, '(', true); tokenizer.cssParens += 1; index += 1;
+              const argument = line.slice(index).match(/^[^)"']+/)?.[0];
+              if (argument) { push('parameter', argument); index += argument.length; }
+            }
+            continue;
           }
           if ((character === '.' || character === '#' || character === ':') && !value) {
             const colons = line.startsWith('::', index) ? '::' : character;
             const name = sourceMatchAt(SOURCE_CSS_IDENTIFIER_PATTERN, line, index + colons.length);
-            if (name) { push('attribute', colons + name); index += colons.length + name.length; continue; }
+            if (name) {
+              push('attribute-mark', colons); push('attribute', name); index += colons.length + name.length;
+              if (/^nth-/i.test(name) && line[index] === '(') {
+                const argument = sourceMatchAt(SOURCE_CSS_NTH_ARGUMENT, line, index + 1);
+                pushSourceBracket(tokens, tokenizer, '(', true); tokenizer.cssParens += 1; index += 1;
+                if (argument) { push('number', argument); index += argument.length; }
+              }
+              continue;
+            }
           }
+          if (character === '&' && !value) { push('tag', '&'); index += 1; continue; }
           if (character === '*' && !value) { push('tag', '*'); index += 1; continue; }
           if ('>+~'.includes(character) && !value) { push('operator', character); index += 1; continue; }
-          push('plain', character); index += 1;
+          push('text', character); index += 1;
         }
         return tokens;
       }
@@ -1227,7 +1389,7 @@
           const character = text[index];
           if (character === '"' || character === "'") {
             const end = quotedSourceEnd(text, index, character);
-            push('string', text.slice(index, end)); index = end; continue;
+            tokenizeMarkupEntities(text.slice(index, end), tokens, tokenizer, 'string'); index = end; continue;
           }
           if (character === '>' || (character === '/' && text[index + 1] === '>')) {
             const mark = character === '>' ? '>' : '/>';
@@ -1244,7 +1406,7 @@
             push(tagSeen ? 'attribute' : 'tag', identifier);
             tagSeen = true; index += identifier.length; continue;
           }
-          push('plain', character); index += 1;
+          push(/\s/.test(character) ? 'plain' : 'text', character); index += 1;
         }
       }
 
@@ -1287,13 +1449,31 @@
       }
 
       function tokenizeMarkupText(text, tokens, tokenizer) {
+        tokenizeMarkupEntities(text, tokens, tokenizer, 'text');
+      }
+
+      // `&` and the closing `;` of a named reference are punctuation; a numeric reference keeps its `#` and `;` in the keyword color.
+      function tokenizeMarkupEntities(text, tokens, tokenizer, type) {
+        const run = value => {
+          if (type !== 'text') { pushSourceToken(tokens, tokenizer, type, value); return; }
+          const lead = value.match(/^\s*/)[0].length, trail = value.slice(lead).match(/\s*$/)[0].length;
+          pushSourceToken(tokens, tokenizer, 'plain', value.slice(0, lead));
+          pushSourceToken(tokens, tokenizer, 'text', value.slice(lead, value.length - trail));
+          pushSourceToken(tokens, tokenizer, 'plain', value.slice(value.length - trail));
+        };
         let last = 0;
-        for (const match of text.matchAll(/&(?:#\d+|#x[\da-fA-F]+|[A-Za-z][\w]*);/g)) {
-          pushSourceToken(tokens, tokenizer, 'plain', text.slice(last, match.index));
-          pushSourceToken(tokens, tokenizer, 'escape', match[0]);
+        for (const match of text.matchAll(/&(#\d+;|#x[\da-fA-F]+;|[A-Za-z][\w]*(;))/g)) {
+          run(text.slice(last, match.index));
+          pushSourceToken(tokens, tokenizer, 'punctuation', '&');
+          if (match[2]) {
+            pushSourceToken(tokens, tokenizer, 'escape', match[1].slice(0, -1));
+            pushSourceToken(tokens, tokenizer, 'punctuation', ';');
+          } else {
+            pushSourceToken(tokens, tokenizer, 'escape', match[1]);
+          }
           last = match.index + match[0].length;
         }
-        pushSourceToken(tokens, tokenizer, 'plain', text.slice(last));
+        run(text.slice(last));
       }
 
       function tokenizeWasmSourceLine(line, tokenizer, from = 0, stop = line.length, tokens = []) {

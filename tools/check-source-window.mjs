@@ -136,7 +136,7 @@ function checkCheckpointedColors(model) {
   const late = model.sourceDocumentMatches(original, needle).matches;
   assert.equal(late.length, 1);
   const lateWindow = model.sourceDocumentWindow(original, late[0].line, late[0].column), lateColors = originalColors.highlighter.rows(lateWindow.rows);
-  assert(lateWindow.rows[0].columnStart > 12000000 && ['regexp', 'type', 'inherited', 'builtin-function'].every(type => lateColors.rows[0].some(token => token.type === type)),
+  assert(lateWindow.rows[0].columnStart > 12000000 && ['regexp', 'type', 'inherited', 'function'].every(type => lateColors.rows[0].some(token => token.type === type)),
     'A clipped late column keeps its colors');
   started = performance.now();
   const formatted = model.prettyPrintSource(javascript, bundle);

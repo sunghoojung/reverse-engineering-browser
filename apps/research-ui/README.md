@@ -1105,8 +1105,9 @@ state, errors, and evidence confidence. Sources file icons are the one chrome
 tint: JavaScript, WebAssembly, JSON, source map and HTML icons take their code
 color at low strength, while folders, origins and frames stay neutral. Code is the exception: Sources and the
 Native Console color code like the Rosé Pine Moon VS Code theme (Rosé Pine
-Dawn in light mode), with its token colors, bracket pair colors, editor colors
-and Menlo 12/18 px; the Analyst editor and the Traffic Payload and Response
+Dawn in light mode), with the colors and styles VS Code renders for each token
+(so `JSON.stringify(` is an ordinary italic-free call and `JSON` an italic variable,
+as there), its six bracket pair colors, editor colors and Menlo 12/18 px; the Analyst editor and the Traffic Payload and Response
 code views take the same editor colors and font. Payload, Response, Native
 Console and Analyst use one code view (`code_view.js`) with the Sources lexer
 and theme; Analyst colors its text behind the textarea, which keeps editing. With macOS Increase Contrast, comments and

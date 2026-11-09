@@ -357,7 +357,23 @@ const ranged = request(record({bodyLength: '300000', capturedLength: '300000'}))
 render(ranged, ready(prefix, {verified: false, complete: false, loaded: 262144, total: 300000, key: '7:901:x'}));
 assert.match(text('[data-section="payload"]'), /Showing the first 262,144 bytes of 300,000 bytes retained/);
 assert.equal(panel.querySelector('.traffic-body-more')?.dataset.contentKey, '7:901:x');
+assert.equal(panel.querySelector('.traffic-body-more')?.textContent, 'Show the next 2 MiB');
 assert.doesNotMatch(text('[data-section="payload"]'), /not valid JSON/, 'a partly read body is not judged invalid');
+render(ranged, ready(prefix, {verified: false, complete: false, loaded: 262000, total: 300000, key: '7:901:x', lossy: true}));
+assert.match(text('[data-section="payload"]'), /Not valid UTF-8; shown with replacement characters/);
+assert.equal(context.trafficPayloadParses({contentType: 'application/json'}, {}), true, 'JSON needs every byte to parse');
+assert.equal(context.trafficPayloadParses({contentType: 'application/x-www-form-urlencoded'}, {}), true);
+assert.equal(context.trafficPayloadParses({contentType: 'multipart/form-data'}, {}), true);
+assert.equal(context.trafficPayloadParses({contentType: 'text/plain'}, {text: 'plain text'}), false, 'Plain text pages on request');
+assert.equal(context.trafficPayloadParses({contentType: ''}, {text: ' {"a":1'}), true, 'Untyped JSON text is parsed');
+assert.equal(context.trafficPayloadParses({contentType: 'application/octet-stream'}, {text: '{'}), false, 'Binary is never parsed');
+// A next range keeps the reader's place in the same request.
+const rangedText = Array.from({length: 400}, (_, index) => `line ${index}`).join('\n');
+const rangedPlain = request(record({bodyLength: '300000', capturedLength: '300000', contentType: 'text/plain'}));
+render(rangedPlain, ready(rangedText, {verified: false, complete: false, loaded: 262144, total: 300000, key: '7:901:y'}));
+panel.querySelector('.traffic-payload-view').scrollTop = 72;
+render(rangedPlain, ready(`${rangedText}\nmore`, {verified: false, complete: false, loaded: 280000, total: 300000, key: '7:901:y'}));
+assert.equal(panel.querySelector('.traffic-payload-view').scrollTop, 72, 'the next range keeps the scroll position');
 render(ranged, ready(json, {complete: true, loaded: json.length, total: json.length}));
 assert.equal(panel.querySelector('.traffic-body-more'), null, 'a complete body has no next-range control');
 assert(tree(), 'the whole body parses once every byte is read');

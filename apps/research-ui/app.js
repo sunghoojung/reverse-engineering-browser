@@ -7776,7 +7776,7 @@ const entropyMap = createEntropyMap({
       }
 
       function showScreen(name, trigger = null) {
-        sourceGraphPanel.setScreenVisible(name === 'sources');
+        if (typeof sourceGraphPanel !== 'undefined') sourceGraphPanel.setScreenVisible(name === 'sources');
         const screenName = name === 'backtraces' ? 'backtrace' : name;
         if (!document.getElementById(`screen-${screenName}`)) return;
         investigationBeforeScreen(screenName);

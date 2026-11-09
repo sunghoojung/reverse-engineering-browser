@@ -1353,7 +1353,11 @@ pub async fn serve(
     let gated = session_operations(spec);
     // True while the bound session is one this connection started.
     let mut started_here = false;
-    for tool in &listed {
+    // Each compiled schema costs several megabytes, so this eager check peaked
+    // near 360 MB. The in-app agent starts this server on demand and needs that
+    // to stay small: every call still compiles and enforces its own schema, and
+    // the test suite compiles every listed schema.
+    for tool in listed.iter().filter(|_| !omit_content) {
         jsonschema::validator_for(&tool["inputSchema"]).map_err(|error| {
             format!(
                 "OpenAPI MCP input schema for {} did not compile: {error}",

@@ -652,7 +652,8 @@ void NativeNetworkCaptureSink::EmitRequestTarget(const NativeProbeEmitter emitte
 void NativeNetworkCaptureSink::EmitRequestBody(const NativeProbeEmitter emitter,
                                                const NativeProbeHeader& parent,
                                                const network::ResourceRequest& request,
-                                               const bool capture_content) noexcept {
+                                               const bool capture_content,
+                                               const NativeBrowserRequestOwner& owner) noexcept {
   NativeRequestBodySummary summary;
   if (capture_content) {
     summary.flags |= kNativeRequestBodyContentCapture;
@@ -689,7 +690,9 @@ void NativeNetworkCaptureSink::EmitRequestBody(const NativeProbeEmitter emitter,
       !request.request_body->contains_sensitive_info() &&
       NativeRequestBodyReader::CanRead(*request.request_body)) {
     std::string url = ArtifactUrlOf(request.url, TargetOf(request.url));
-    if (!NativeArtifactCaptureSink::Get().IsEnabled()) {
+    if (!NativeRequestBodyReader::MayReadFiles(*request.request_body, owner)) {
+      deferred_state = NativeRequestBodyState::kNotCapturedReadIncomplete;
+    } else if (!NativeArtifactCaptureSink::Get().IsEnabled()) {
       deferred_state = NativeRequestBodyState::kNotCapturedArtifactUnavailable;
     } else if (url.empty() || url.size() > kNativeArtifactMaxUrlBytes) {
       deferred_state = NativeRequestBodyState::kNotCapturedUrl;
@@ -721,6 +724,9 @@ void NativeNetworkCaptureSink::EmitRequestBody(const NativeProbeEmitter emitter,
                                     : NativeRequestBodyState::kMetadataOnly;
     if (deferred_state) {
       summary.state = *deferred_state;
+      if (summary.state == NativeRequestBodyState::kNotCapturedReadIncomplete) {
+        summary.flags |= kNativeRequestBodyRead;
+      }
     }
   } else {
     if (summary.body_length <= kNativeRequestBodyDigestBytes) {
@@ -855,7 +861,7 @@ void NativeNetworkCaptureSink::RecordRequestStarted(
   if (capture_content) {
     EmitRequestTarget(emitter, event.header, request.url);
   }
-  EmitRequestBody(emitter, event.header, request, capture_content);
+  EmitRequestBody(emitter, event.header, request, capture_content, owner);
   if (!capture_content) {
     return;
   }

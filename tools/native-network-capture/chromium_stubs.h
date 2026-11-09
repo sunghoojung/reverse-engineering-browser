@@ -210,8 +210,13 @@ struct NativeRequestBodyReadOutcome final {
 };
 using NativeRequestBodyRecorder =
     base::OnceCallback<std::uint64_t(const NativeRequestBodyReadOutcome&)>;
+struct NativeBrowserRequestOwner;
 class NativeRequestBodyReader {
  public:
+  static bool MayReadFiles(const network::ResourceRequestBody&,
+                           const NativeBrowserRequestOwner&) noexcept {
+    return true;
+  }
   static bool CanRead(const network::ResourceRequestBody& body) noexcept {
     bool readable = false;
     for (const auto& element : *body.elements()) {

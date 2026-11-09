@@ -24,6 +24,8 @@
 #include "base/task/thread_pool.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h"
+#include "content/public/browser/child_process_security_policy.h"
+#include "content/public/common/child_process_id.h"
 #include "mojo/public/cpp/bindings/callback_helpers.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
@@ -501,6 +503,32 @@ bool NativeRequestBodyReader::CanRead(const network::ResourceRequestBody& body) 
     }
   }
   return readable;
+}
+
+bool NativeRequestBodyReader::MayReadFiles(const network::ResourceRequestBody& body,
+                                           const NativeBrowserRequestOwner& owner) noexcept {
+  auto* const policy = content::ChildProcessSecurityPolicy::GetInstance();
+  for (const network::DataElement& element : *body.elements()) {
+    const auto* const file = element.TryAs<network::DataElementFile>();
+    if (!file) {
+      continue;
+    }
+    switch (owner.body_files) {
+      case NativeBodyFileAccess::kNavigationValidated:
+        break;
+      case NativeBodyFileAccess::kRendererChecked:
+        // The same check the file-upload path makes for this renderer.
+        if (policy->CanReadFile(
+                content::ChildProcessId::FromUnsafeValue(owner.body_file_process_id),
+                file->path())) {
+          break;
+        }
+        return false;
+      case NativeBodyFileAccess::kRefused:
+        return false;
+    }
+  }
+  return true;
 }
 
 bool NativeRequestBodyReader::Start(network::ResourceRequestBody& body,

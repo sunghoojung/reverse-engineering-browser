@@ -80,10 +80,24 @@ using NativeExtensionId = std::array<char, 32>;
   return true;
 }
 
-// A frameless browser record's link: a service-worker version's clients or an extension.
+// Who answers for the file paths in a request body the browser would read. A
+// renderer names those paths, so the browser never reads one on its word alone.
+enum class NativeBodyFileAccess : std::uint8_t {
+  // Nothing vouches for the paths: the parts are not read.
+  kRefused,
+  // CanReadRequestBody already checked them when the navigation began.
+  kNavigationValidated,
+  // Checked path by path with CanReadFile for `body_file_process_id`.
+  kRendererChecked,
+};
+
+// A frameless browser record's link: a service-worker version's clients or an
+// extension, and whose access a file body is read under.
 struct NativeBrowserRequestOwner final {
   std::int64_t service_worker_version = -1;
   std::optional<NativeExtensionId> extension;
+  NativeBodyFileAccess body_files = NativeBodyFileAccess::kRefused;
+  int body_file_process_id = 0;
 };
 
 // Frame ids and worker context ids share this fold of a 128-bit token.

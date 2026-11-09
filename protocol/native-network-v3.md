@@ -712,7 +712,7 @@ and kind 2 to 5 (a stream has one element). With bit 6:
 | 5 `captured_truncated` | Exact length over 16 MiB, captured 16 MiB, bit 2, bit 3 clear, artifact |
 | 8 `not_captured_transfer_refused` | The pool or queue refused it while reading; bit 3 set |
 | 10 `not_captured_session_budget` | The read passed its budget allowance; bit 3 set |
-| 12 `not_captured_read_incomplete` | A part changed or failed, the upload was cancelled, or capture ended; bit 3 set |
+| 12 `not_captured_read_incomplete` | A part changed or failed, the upload was cancelled, capture ended, or the requesting renderer may not read a named file (`ChildProcessSecurityPolicy::CanReadFile`, the check the network service's upload path makes); bit 3 set |
 
 For states 8, 10 and 12 the length counts what was read; no digest and no
 artifact. Without bit 6, kinds 2 to 5 may also carry states 7 to 10 when the
@@ -1043,9 +1043,12 @@ while the table is full is recorded alone with bit 3.
 `get_request_cookies` (`GET /api/request-cookies?session_id=&request_id=`)
 returns each hop's sent and received cookies with every attribute, exclusion
 and warning reason. `get_cookie_provenance`
-(`GET /api/cookie-provenance?session_id=&name=`) lists everything in the
-newest records that touched a cookie name: the responses that set it, the
-script writes and reads with their frame, and the requests that sent it. Each
+(`GET /api/cookie-provenance?session_id=&name=`) lists what touched a cookie
+name in the newest 5,000 network records within the last 64 MiB of events: the
+responses that set it, the script writes and reads with their frame, and the
+requests that sent it. `coverage` says what was read, so an absent entry is not
+proof when `coverage.complete` is false (see
+[request index v1](request-index-v1.md#per-request-detail-reads)). Each
 script call's `stack` resolves like `get_request_stack`: through
 `script_identity` records in the same window to line, column and function name,
 with every walked frame when its digest names a retained stack artifact; at
@@ -1294,7 +1297,9 @@ configuration; an evicted script is described again.
 
 `get_request_stack` (`GET /api/request-stack?process_id=&request_id=`, the
 renderer identity) returns the newest stack record for that request with its
-frames:
+frames, reading the bytes the [request index](request-index-v1.md#per-request-detail-reads)
+names for it. `status` is `outside_scan`, not `not_recorded`, when the read did
+not reach them all; `coverage` says what was read:
 
 - A JavaScript frame resolves through `(process_id, script_id)` to its identity
   record, then by SHA-256 to a retained `javascript` artifact, to one-based line

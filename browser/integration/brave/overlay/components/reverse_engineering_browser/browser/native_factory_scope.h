@@ -74,6 +74,19 @@ struct NativeFactoryPolicy final {
   return scope;
 }
 
+// Only renderer-issued subresource loads name a renderer whose access decides a
+// file part. A navigation's paths were checked when it began, for the initiator
+// rather than this factory's commit process. No other factory carries a page's
+// upload, so the browser reads nothing for them.
+[[nodiscard]] inline NativeBodyFileAccess DecideNativeBodyFileAccess(
+    const int factory_type) noexcept {
+  if (factory_type == static_cast<int>(NativeUrlLoaderFactoryKind::kNavigation)) {
+    return NativeBodyFileAccess::kNavigationValidated;
+  }
+  return NativeRendererIssuedRequestId(factory_type) ? NativeBodyFileAccess::kRendererChecked
+                                                     : NativeBodyFileAccess::kRefused;
+}
+
 // The renderer or drain counts renderer-issued extension and internal-scheme requests.
 struct NativeRequestExclusion final {
   std::uint8_t exclusion_class = 0;

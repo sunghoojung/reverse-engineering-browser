@@ -148,7 +148,8 @@ class NativeNetworkCaptureSink final {
   void EmitRequestBody(NativeProbeEmitter emitter,
                        const NativeProbeHeader& parent,
                        const network::ResourceRequest& request,
-                       bool capture_content) noexcept;
+                       bool capture_content,
+                       const NativeBrowserRequestOwner& owner) noexcept;
   void EmitNavigationLink(NativeProbeEmitter emitter,
                           const NativeProbeHeader& parent,
                           std::string_view devtools_request_id) noexcept;

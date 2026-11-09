@@ -1051,6 +1051,19 @@ void FactoryOwners() {
          !reb::ParseNativeExtensionId(std::string(31, 'a'), bad));
   sink.SetEmitter(nullptr, 0, 0, 0);
   events.clear();
+  using Files = reb::NativeBodyFileAccess;
+  assert(reb::DecideNativeBodyFileAccess(static_cast<int>(Factory::kNavigation)) ==
+             Files::kNavigationValidated &&
+         reb::DecideNativeBodyFileAccess(static_cast<int>(Factory::kDocumentSubResource)) ==
+             Files::kRendererChecked &&
+         reb::DecideNativeBodyFileAccess(static_cast<int>(Factory::kWorkerSubResource)) ==
+             Files::kRendererChecked &&
+         reb::DecideNativeBodyFileAccess(static_cast<int>(Factory::kServiceWorkerSubResource)) ==
+             Files::kRendererChecked &&
+         reb::DecideNativeBodyFileAccess(static_cast<int>(Factory::kDownload)) == Files::kRefused &&
+         reb::DecideNativeBodyFileAccess(static_cast<int>(Factory::kWorkerMainResource)) ==
+             Files::kRefused &&
+         reb::DecideNativeBodyFileAccess(-1) == Files::kRefused);
   std::cout
       << "PASS native factory scope: DevTools, extension, WebUI and internal-scheme loads are "
          "counted where they are not recorded; frameless scripts link to clients or extensions\n";

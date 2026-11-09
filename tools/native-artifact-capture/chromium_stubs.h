@@ -420,9 +420,14 @@ struct NativeRequestBodyReadResult final {
   std::uint64_t body_length = 0;
 };
 using NativeRequestBodyReadEnd = NativeRequestBodyReadResult::End;
+struct NativeBrowserRequestOwner;
 class NativeRequestBodyReader {
  public:
   using Done = base::OnceCallback<void(NativeRequestBodyReadResult)>;
+  static bool MayReadFiles(const network::ResourceRequestBody&,
+                           const NativeBrowserRequestOwner&) noexcept {
+    return !refuse_files;
+  }
   static bool CanRead(const network::ResourceRequestBody& body) noexcept {
     bool readable = false;
     for (const auto& element : *body.elements()) {
@@ -477,6 +482,7 @@ class NativeRequestBodyReader {
     Done done;
   };
   static inline bool refuse = false;
+  static inline bool refuse_files = false;
   static inline std::vector<Read> reads;
 };
 class NativeProbeHost;

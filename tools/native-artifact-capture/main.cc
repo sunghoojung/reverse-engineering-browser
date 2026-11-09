@@ -629,8 +629,8 @@ void RequestContentLimits() {
   // The copy path names the artifact in its record before the copy runs, so a
   // stream lost in that window is one failure joined to the record, and the end
   // frame the writer would drop is never sent.
-  configure(reb::kNativeRequestContentDefaultBudgetBytes);
-  const auto copying = post(with_body("{\"c\":3}"));
+  configure(reb::kNativeRequestContentMinBudgetBytes);
+  const auto copying = post(with_body(std::string(reb::kNativeRequestContentMinBudgetBytes, 'c')));
   const auto failures_of_copy = [] {
     return std::ranges::count_if(events, [](const auto& e) {
       return e.header.type == NativeProbeType::kArtifactCaptureFailed;
@@ -650,8 +650,7 @@ void RequestContentLimits() {
   NativeArtifactCaptureSink::TransferCompleted(copying.header.artifact_id,
                                                reb::NativeArtifactReceiveStatus::kAccepted);
   Check(events.size() == copy_events_before, "The lost copy leaves no pending entry behind");
-  Check(state_of(post(with_body(
-            std::string(reb::kNativeRequestContentDefaultBudgetBytes, 'g').substr(0, 8 * 1024)))) ==
+  Check(state_of(post(with_body(std::string(reb::kNativeRequestContentMinBudgetBytes, 'g')))) ==
             reb::RequestBodyState::kCaptured,
         "The lost copy returned its budget share");
   base::ThreadPool::RunPending();
@@ -944,7 +943,24 @@ void ReadRequestBodies(const std::filesystem::path& output) {
   Check(events.size() == events_after_failure, "A loss is reported for its stream once");
   transfers.clear();
 
+  // A file part its renderer may not read is never opened, and the record says
+  // the read did not complete.
+  configure(reb::kNativeRequestContentDefaultBudgetBytes);
+  reb::NativeRequestBodyReader::refuse_files = true;
+  const auto reads_before_refusal = reads.size();
+  start(file);
+  reb::NativeRequestBodyReader::refuse_files = false;
+  const auto refused_file = LastOf(NativeProbeType::kRequestBody);
+  const auto refused_file_record = record(refused_file);
+  Check(state(refused_file_record) == reb::RequestBodyState::kNotCapturedReadIncomplete &&
+            refused_file.header.artifact_id == 0 && reads.size() == reads_before_refusal &&
+            transfers.empty() && (refused_file_record.flags & reb::kRequestBodyRead) != 0 &&
+            (refused_file_record.flags & reb::kRequestBodyLengthPartial) != 0 &&
+            reb::IsValidRequestBodyPayload(refused_file_record, false),
+        "A file part the renderer may not read is not read and the record says so");
+
   // A receiver without --allow-sensitive refuses the stream after its record.
+  configure(reb::kNativeRequestContentDefaultBudgetBytes);
   start(file);
   reb::NativeRequestBodyReader::Finish(reads.size() - 1, fits, Read::kComplete, fits.size());
   const auto refused_record = LastOf(NativeProbeType::kRequestBody);

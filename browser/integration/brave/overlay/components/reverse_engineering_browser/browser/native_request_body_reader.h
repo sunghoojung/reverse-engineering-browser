@@ -11,6 +11,7 @@
 
 #include "base/functional/callback.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_stream.h"
+#include "brave/components/reverse_engineering_browser/common/native_tab_link.h"
 
 namespace network {
 class ResourceRequestBody;
@@ -48,6 +49,10 @@ class NativeRequestBodyReader final {
   // Whether the body has a file, blob or stream part and no part this reader
   // cannot identify.
   [[nodiscard]] static bool CanRead(const network::ResourceRequestBody& body) noexcept;
+  // UI sequence. Whether every file part may be read for `owner`; a renderer
+  // must not get a file it could not upload itself read into the evidence store.
+  [[nodiscard]] static bool MayReadFiles(const network::ResourceRequestBody& body,
+                                         const NativeBrowserRequestOwner& owner) noexcept;
   // `done` runs once on the calling sequence. False, with nothing started,
   // when no background sequence is available.
   [[nodiscard]] static bool Start(network::ResourceRequestBody& body,

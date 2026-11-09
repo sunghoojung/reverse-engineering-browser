@@ -27,6 +27,8 @@ NativeFactoryScope NativeFactoryScopeOf(content::BrowserContext* context,
       IsNativeBrowserInternalProcess(render_process_id),
       {.record_browser_internal = command_line.HasSwitch(kNativeCaptureBrowserInternalSwitch),
        .record_extensions = command_line.HasSwitch(kNativeCaptureExtensionTrafficSwitch)});
+  scope.owner.body_files = DecideNativeBodyFileAccess(factory_type);
+  scope.owner.body_file_process_id = render_process_id;
   // Observing before a session starts keeps the workers and frames that predate it.
   NativeTabRegistry& registry = NativeTabRegistry::Get();
   registry.ObserveContext(context);

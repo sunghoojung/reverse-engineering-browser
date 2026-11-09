@@ -98,8 +98,9 @@ start dialog opens at once and the test continues offline.
 
 `test24AgentPanel` opens the Agent dock at both window sizes. It stays off
 until the disclosure names tool results and their URLs and hosts, then a turn
-runs through a local stand-in provider (`REB_AGENT_PROVIDER_BASE_URL`, loopback
-only, no key) and the real tool server: the tool call and its result are visible,
+runs through the bundled LangGraph runtime, the native fixed-endpoint proxy, a
+local stand-in provider (`REB_AGENT_PROVIDER_BASE_URL`, loopback only, no key)
+and the real tool server: the tool call and its result are visible,
 hostile model markup stays text, an invented citation is labeled *not verified*,
 and a real one opens Sources. An action waits on Allow once or Deny, a 400-row
 conversation mounts only nearby rows, the switch stops the tool server, and

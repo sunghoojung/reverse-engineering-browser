@@ -754,7 +754,8 @@
       const height = node.getBoundingClientRect().height;
       if (height) heights.set(node.dataset.rowId, height);
     }
-    if (view.follow) log.scrollTop = log.scrollHeight;
+    // Code blocks and wrapped text can settle after this frame; follow once more.
+    if (view.follow) { log.scrollTop = log.scrollHeight; requestAnimationFrame(() => { if (view.follow) log.scrollTop = log.scrollHeight; }); }
   }
 
   function olderBanner(stats) {

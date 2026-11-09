@@ -2943,7 +2943,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           return;
         }
         state.trafficRenderedView = null;
-        if (index) {
+        if (index && (index.answer() || !state.requests.length)) {
           renderIndexedRequests(index);
           return;
         }
@@ -3095,10 +3095,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         state.trafficFilterKey = filterKey;
         const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
-        const filter = trafficParseFilter(elements.requestFilter.value);
-        const query = trafficIndexParameters({sort: state.trafficSort, direction: state.trafficSortDirection, needle: filter.needle,
-          tabId: state.requestTabId, domain: state.requestDomain, type: state.requestType, named: trafficNamedRoots(names, filter.text, origin),
-          flags: state.trafficFlags, range: state.trafficRange});
+        const query = trafficIndexQuery(origin, names);
         const covering = candidate => candidate?.query === query && candidate.origin === origin ? candidate : null;
         const known = covering(answer)?.document.matching ?? 0;
         const start = trafficBlockStart(container, known, state.trafficWindowStart);

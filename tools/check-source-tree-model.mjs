@@ -292,7 +292,11 @@ export async function checkSourceTreeModel(root) {
     assert(Math.max(...nav.list.map(value=>value.depth))<=20);assert.match(t.tree.children[0].textContent,/not listed/);assert.match(t.tree.children[0].textContent,/shortened/);
     for(const value of nav.rows.values()){assert.equal(value.row.children.length,4);assert.equal(value.raw.children.length,0,'Labels never create markup');}
     assert(entry(t,file(t,4).key).raw.textContent.length<=t.api.SOURCE_TREE_LIMITS.label);
-    t.state.artifacts=Array.from({length:7000},(_,i)=>artifact(i,`https://a${i}.invalid/${Array.from({length:16},(_,j)=>`p${j}`).join('/')}/leaf.js`));t.api.renderSourceTree();
+    // 20,000 sources each under 16 unique folders, the worst layout, are all listed; more than that can reach the bound, which is shown.
+    const deep=count=>Array.from({length:count},(_,i)=>artifact(i,`https://a${i}.invalid/${Array.from({length:16},(_,j)=>`p${j}`).join('/')}/leaf.js`));
+    t.state.artifacts=deep(20000);t.api.renderSourceTree();
+    assert.equal(nav.model.limits.omitted,0,'20,000 sources in the deepest layout lose no row');assert.equal(nav.model.files.size,20000);
+    t.state.artifacts=deep(23000);t.api.renderSourceTree();
     assert(nav.model.limits.omitted>0);assert.match(t.tree.children[0].textContent,/node limit/);
     t.state.artifacts=[artifact(1),artifact(1)];t.api.renderSourceTree();assert.equal(nav.model.limits.ambiguous,1);assert.match(t.tree.children[0].textContent,/ambiguous/);
     assert(rows(t).every(row=>row.getAttribute('aria-selected')!=='true'),'An ambiguous identity cannot claim a selected document');

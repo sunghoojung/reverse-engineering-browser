@@ -1272,7 +1272,8 @@ selected file's ancestor never reads source bytes or runs analysis. Catalog
 refresh keeps keyed rows, focus and the first visible row in place, returning a
 removed focused row to its closest surviving ancestor.
 
-The navigator holds at most 120,000 metadata nodes, rejects URLs above 4,096
+The navigator holds at most 400,000 metadata nodes, counted before one-folder
+chains collapse, which 20,000 sources cannot exceed in any folder layout. It rejects URLs above 4,096
 characters and identities above 8,192 characters, shortens directory structure
 after 16 levels, and discloses each limit rather than implying omitted sources
 are absent. Selection markers are withheld when the catalog is capped, a source

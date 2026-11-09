@@ -1,5 +1,9 @@
 /* Sources navigator: frames, groups, origins and folders; only rows near the viewport are mounted. */
-const SOURCE_TREE_LIMITS = Object.freeze({nodes: 120000, depth: 16, url: 4096, identity: 8192, filter: 512, label: 512,
+// The node bound is counted before folder chains collapse, so it is sized for
+// the worst case of 20,000 sources: each adds at most a frame or group, an
+// origin, 16 folders and its file (19 nodes), 380,001 with the root. A session
+// of 20,000 scripts can therefore never lose a row to it; past it, the omission is shown.
+const SOURCE_TREE_LIMITS = Object.freeze({nodes: 400000, depth: 16, url: 4096, identity: 8192, filter: 512, label: 512,
   row: 24, overscan: 64, frameDocuments: 64});
 
 const SOURCE_TREE_GROUPS = Object.freeze([

@@ -1007,7 +1007,9 @@ store. `kind` is `request`, `api` (a fingerprint API call or property read),
 `artifact` (optionally narrowed to a Wasm function or import with `byte_offset`)
 or `vm_handler`; malformed values return 400. A selection the store no longer
 holds, or whose identity is ambiguous, returns 200 with `selection.status`
-`unavailable` and a `reason` instead of rows.
+`unavailable` and a `reason` instead of rows. A `vm_handler` selection uses the
+analysis already cached in this backend and reports `analysis-not-ready` rather
+than computing one.
 
 Rows are links the stores already hold: the recorded parent event, the renderer
 request named as a request's initiator, its lifecycle events and captured

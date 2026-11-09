@@ -908,23 +908,21 @@ impl App {
             }
             "/api/xrefs" => {
                 let query = crate::xrefs::XrefQuery::parse(&q)?;
+                // Only the analysis already cached: this route never computes
+                // or publishes one.
                 let handler = match query.vm_target() {
                     Some((artifact, sha256, byte_offset, byte_size)) => {
-                        let _ = self.vm_documents().await?;
                         let cache = self.analysis.lock().await;
-                        let workspace = cache.as_ref().expect("VM analysis cache");
-                        Some(workspace.opcode_workspace.as_ref().map_or_else(
-                            |_| crate::xrefs::VmHandlerInput::default(),
-                            |document| {
-                                crate::xrefs::vm_handler_input(
-                                    document,
-                                    &artifact,
-                                    &sha256,
-                                    byte_offset,
-                                    byte_size,
-                                )
-                            },
-                        ))
+                        Some(match cache.as_ref().map(|c| c.opcode_workspace.as_ref()) {
+                            Some(Ok(document)) => crate::xrefs::vm_handler_input(
+                                document,
+                                &artifact,
+                                &sha256,
+                                byte_offset,
+                                byte_size,
+                            ),
+                            _ => crate::xrefs::VmHandlerInput::not_ready(),
+                        })
                     }
                     None => None,
                 };

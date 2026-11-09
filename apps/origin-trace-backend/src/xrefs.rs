@@ -271,11 +271,21 @@ pub struct Stores {
 /// The retained handler row and its samples, extracted under the analysis lock.
 #[derive(Default, Clone)]
 pub struct VmHandlerInput {
+    not_ready: bool,
     found: bool,
     label: String,
     samples: Vec<Value>,
     sample_count: u64,
     omissions: Vec<String>,
+}
+
+impl VmHandlerInput {
+    pub fn not_ready() -> Self {
+        Self {
+            not_ready: true,
+            ..Self::default()
+        }
+    }
 }
 
 /// Copies only what a handler selection needs out of the opcode workspace, so
@@ -336,6 +346,7 @@ pub fn vm_handler_input(
         .as_str()
         .map_or_else(|| format!("handler @ {byte_offset}"), str::to_owned);
     VmHandlerInput {
+        not_ready: false,
         found: true,
         label,
         sample_count: row["sample_count"].as_u64().unwrap_or(samples.len() as u64),
@@ -787,6 +798,8 @@ impl WasmModule {
 }
 
 /// The state a page needs beyond the window: everything built once per selection.
+/// One value exists per selection, behind an `Arc`, so variant size is irrelevant.
+#[allow(clippy::large_enum_variant)]
 enum Plan {
     Unresolved {
         selection: Value,
@@ -1043,7 +1056,7 @@ fn artifact_plan(
             .cmp(&b.parse::<u64>().unwrap_or(0))
     });
     let mut capture = None;
-    let capture_needle = compile(&[format!(r#""type":"artifact_captured""#)])?;
+    let capture_needle = compile(&[r#""type":"artifact_captured""#.to_owned()])?;
     reader.lines(
         &stores.events,
         0,
@@ -1128,6 +1141,13 @@ fn artifact_plan(
 }
 
 fn vm_plan(input: VmHandlerInput, session: u64, pc: Option<u64>) -> Result<Plan> {
+    if input.not_ready {
+        return Ok(unresolved(
+            "vm_handler",
+            "analysis-not-ready",
+            "No VM analysis is loaded yet. Open VM to analyze this capture.",
+        ));
+    }
     if !input.found {
         return Ok(unresolved(
             "vm_handler",
@@ -1694,7 +1714,6 @@ fn static_rows(plan: &Plan, stores: &Stores, sinks: &mut [Sink; 2], needle: &str
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn artifact_row<'a>(
     kind: &'static str,
     name: String,
@@ -2160,16 +2179,15 @@ fn window_pass(
             sinks[index].matching = static_matching;
         }
         let mut start = 0;
-        if query.offset >= static_matching {
-            if let Some(anchor) = entry.anchors[index]
+        if query.offset >= static_matching
+            && let Some(anchor) = entry.anchors[index]
                 .iter()
                 .rev()
                 .find(|anchor| anchor.matching <= query.offset)
-            {
-                start = anchor.position;
-                sinks[index].total = anchor.total;
-                sinks[index].matching = anchor.matching;
-            }
+        {
+            start = anchor.position;
+            sinks[index].total = anchor.total;
+            sinks[index].matching = anchor.matching;
         }
         if !sinks[index].full() && !matches!(plan.as_ref(), Plan::Unresolved { .. }) {
             let mut facts = PassFacts {
@@ -2627,6 +2645,15 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap();
+        let waiting = run(
+            &query(&raw),
+            &fixture.stores,
+            &Cursors::default(),
+            Some(VmHandlerInput::not_ready()),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(waiting["selection"]["reason"], "analysis-not-ready");
         assert_eq!(document["selection"]["label"], "push");
         assert_eq!(document["counts"]["in"]["total"], 1);
         assert_eq!(

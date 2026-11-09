@@ -5670,7 +5670,7 @@
       "get": {
         "operationId": "get_xrefs",
         "summary": "Read paged cross-references for one selection",
-        "description": "Lists the evidence that points at a selection and the evidence it points at, using only links the stores already hold: parent events, request initiator and lifecycle, host links from retained dispatch samples, artifact creators, and Wasm import, export and direct-call uses. A link that was not recorded is listed under gaps, and no caller is inferred. Rows are counted across the whole store and returned one window at a time, oldest first, so a selection with a very large number of links stays bounded in memory. Pass the snapshot from the first response on later pages of one list. Read-only.",
+        "description": "Lists the evidence that points at a selection and the evidence it points at, using only links the stores already hold: parent events, request initiator and lifecycle, host links from retained dispatch samples, artifact creators, and Wasm import, export and direct-call uses. A link that was not recorded is listed under gaps, and no caller is inferred. Rows are counted across the whole store and returned one window at a time, oldest first, so a selection with a very large number of links stays bounded in memory. Pass the snapshot from the first response on later pages of one list. Read-only: a vm_handler selection uses the VM analysis already cached in this backend and reports analysis-not-ready rather than computing one.",
         "tags": [
           "analysis"
         ],
@@ -5863,7 +5863,55 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads stored events, the artifact manifest and retained Wasm bytes. Writes nothing and requests no browser mutation. A scan stops at a 30-second deadline and reports coverage.status partial.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/xrefs.rs",
+              "symbol": "run"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
         }
       }
     },

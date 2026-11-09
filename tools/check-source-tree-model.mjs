@@ -271,6 +271,14 @@ export async function checkSourceTreeModel(root) {
     key(t.document.activeElement,'Home');assert.equal(t.tree.scrollTop,0);assert.equal(t.document.activeElement,entry(t,nav.model.rootKey).row);
     key(t.document.activeElement,'End');assert.equal(t.document.activeElement,entry(t,nav.list.at(-1).key).row);
     assert.equal(t.tree.scrollTop,nav.list.length*24-240,'End scrolls the navigator to the last row');
+    // Page keys move focus one viewport less a row, stop at the ends and scroll that row into view.
+    const pageRows=9,lastIndex=nav.list.length-1;
+    assert(key(t.document.activeElement,'PageUp').prevented);assert.equal(nav.index.get(t.document.activeElement.dataset.sourceTreeKey),lastIndex-pageRows);
+    key(t.document.activeElement,'PageDown');assert.equal(nav.index.get(t.document.activeElement.dataset.sourceTreeKey),lastIndex);
+    key(t.document.activeElement,'Home');key(t.document.activeElement,'PageDown');assert.equal(nav.index.get(t.document.activeElement.dataset.sourceTreeKey),pageRows);
+    key(t.document.activeElement,'PageUp');assert.equal(nav.index.get(t.document.activeElement.dataset.sourceTreeKey),0);
+    key(t.document.activeElement,'PageUp');assert.equal(nav.index.get(t.document.activeElement.dataset.sourceTreeKey),0,'PageUp stops at the first row');
+    key(t.document.activeElement,'End');
     t.state.artifactCatalogLimit=100000;t.api.renderSourceTree();
     assert.match(t.tree.children[0].textContent,/More than 100,000 sources/);assert(rows(t).every(row=>row.getAttribute('aria-selected')!=='true'));
   }

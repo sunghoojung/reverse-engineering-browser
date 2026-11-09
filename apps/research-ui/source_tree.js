@@ -532,6 +532,9 @@ function createSourceTree(options) {
     } else if (event.key === 'ArrowLeft') {
       if (node.children?.length && !collapsed(node)) toggle(key, false);
       else next = node.parent;
+    } else if (event.key === 'PageDown' || event.key === 'PageUp') {
+      const page = Math.max(1, Math.floor(viewport() / ROW) - 1);
+      next = list[Math.max(0, Math.min(list.length - 1, index + (event.key === 'PageDown' ? page : -page)))]?.key;
     } else if (printable) next = typeahead(event.key, index);
     else return;
     event.preventDefault(); event.stopPropagation();

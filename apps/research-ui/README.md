@@ -1254,7 +1254,7 @@ so extensions show their ID.
 Only rows near the viewport are mounted; the focused row stays mounted while
 scrolled away. One row is in the Tab order. Up/Down move through rows, Right
 opens a branch or enters its first child, Left closes it or returns to its
-parent, Home/End reach the first/last row, and typing a name moves to the next
+parent, Home/End reach the first/last row, PageUp/PageDown move a viewport less one row, and typing a name moves to the next
 row that starts with it (repeat a letter to cycle). Modified arrows keep their
 browser/history meaning; Enter/Space keep native button activation. **Filter
 files** above the tree matches file names, URLs and artifact IDs and shows each

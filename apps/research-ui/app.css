@@ -1268,7 +1268,7 @@ var(--panel);
         align-items: center;
         justify-content: flex-end;
         gap: 4px;
-        padding-right: 8px;
+        padding: 0 8px 0 0;
         color: var(--code-line-number);
         border-right: 1px solid var(--line-soft);
         border-top: 0;

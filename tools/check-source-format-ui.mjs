@@ -114,6 +114,7 @@ var {key: value} = o, e = Foo.prototype, m = module.exports; o = {x: 1}; label: 
   assert(/background: transparent/.test(editorRule) && /-webkit-text-fill-color: transparent/.test(editorRule) && /font: 12px\/18px var\(--code-font\)/.test(editorRule), 'The Analyst textarea stays transparent in the code font');
 
   assert(/\.native-console-result pre \{[^}]*font: 12px\/18px var\(--code-font\)/.test(css), 'Console transcripts use the code font');
+  assert(/\.source-gutter \{[^}]*padding: 0 8px 0 0/.test(css), 'The gutter clears the button padding that made Sources rows 23 px tall');
   // Mapping: whitespace-only, exact by construction, refused otherwise. Every
   // non-whitespace character maps to the same-rank one in the evidence, in
   // any lookup order and across the 4 Ki-unit sync points.

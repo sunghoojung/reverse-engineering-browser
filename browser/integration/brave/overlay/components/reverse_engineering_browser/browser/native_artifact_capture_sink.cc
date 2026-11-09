@@ -550,11 +550,14 @@ void NativeArtifactCaptureSink::OnRequestBodyRead(const std::uint64_t generation
     outcome.state = NativeRequestBodyState::kEmpty;
     outcome.sha256 = stream.Digest();
   } else {
-    outcome.state = stream.truncated() ? NativeRequestBodyState::kCapturedTruncated
-                                       : NativeRequestBodyState::kCaptured;
+    // The reader stops offering bytes at the cap, so a body that lands exactly
+    // on it never reaches the stream's own truncation check.
+    const bool truncated = stream.truncated() || outcome.body_length > stream.kept();
+    outcome.state = truncated ? NativeRequestBodyState::kCapturedTruncated
+                              : NativeRequestBodyState::kCaptured;
     outcome.artifact_id = stream.artifact_id();
     outcome.captured_length = stream.kept();
-    if (!stream.truncated()) {
+    if (!truncated) {
       outcome.sha256 = stream.Digest();
     }
   }

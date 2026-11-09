@@ -730,6 +730,35 @@ void ReadRequestBodies(const std::filesystem::path& output) {
         "A read body past 16 MiB keeps its prefix, its exact length and the prefix digest");
   transfers.clear();
 
+  // A body of exactly the cap, or one byte past it, read in aligned chunks: the
+  // reader stops at the cap either way, so only the length tells them apart.
+  const auto aligned = [&](const std::size_t length) {
+    configure(reb::kNativeRequestContentDefaultBudgetBytes);
+    auto body = upload(network::DataElement(network::DataElementFile{}));
+    start(body);
+    reb::NativeRequestBodyReader::Finish(0, std::span(large).first(length), Read::kComplete,
+                                         length);
+    return LastOf(NativeProbeType::kRequestBody);
+  };
+  const auto cap = reb::kNativeArtifactMaxContentBytes;
+  const NativeProbeEvent whole_event = aligned(cap);
+  const auto whole = record(whole_event);
+  Check(state(whole) == reb::RequestBodyState::kCaptured && whole.body_length == cap &&
+            whole.captured_length == cap && (whole.flags & reb::kRequestBodyDigestPresent) != 0 &&
+            reb::IsValidRequestBodyPayload(whole, whole_event.header.artifact_id != 0) &&
+            transfers.at(whole_event.header.artifact_id)->content.size() == cap,
+        "A body of exactly 16 MiB read in aligned chunks is captured whole, with its digest");
+  const NativeProbeEvent over_event = aligned(cap + 1);
+  const auto one_over = record(over_event);
+  Check(state(one_over) == reb::RequestBodyState::kCapturedTruncated &&
+            one_over.body_length == cap + 1 && one_over.captured_length == cap &&
+            (one_over.flags & reb::kRequestBodyDigestSizeLimit) != 0 &&
+            (one_over.flags & reb::kRequestBodyDigestPresent) == 0 &&
+            reb::IsValidRequestBodyPayload(one_over, over_event.header.artifact_id != 0) &&
+            transfers.at(over_event.header.artifact_id)->content.size() == cap,
+        "A body of 16 MiB + 1 read in aligned chunks records truncation the broker accepts");
+  transfers.clear();
+
   // The budget gives a read an allowance; past it the record names the budget.
   configure(reb::kNativeRequestContentMinBudgetBytes);
   auto stream = upload(network::DataElement(network::DataElementChunkedDataPipe{}));

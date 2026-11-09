@@ -446,15 +446,18 @@ class NativeRequestBodyReader {
     reads.push_back({std::move(stream), allowance, std::move(done)});
     return true;
   }
-  // Feeds `bytes` as the reader would, stopping at the allowance, and ends
-  // the read with `end` and the parts' total length.
+  // Feeds `bytes` as PartsReader does: aligned chunks, stopping at the
+  // allowance and at the 16 MiB cap, so the stream never sees a byte past the
+  // prefix. Ends the read with `end` and the parts' total length.
   static void Finish(std::size_t index,
                      std::span<const std::uint8_t> bytes,
                      NativeRequestBodyReadEnd end,
                      std::uint64_t body_length) {
     Read& read = reads.at(index);
     constexpr std::size_t kChunk = 64U * 1024U;
-    for (std::size_t offset = 0; offset < bytes.size() && read.stream.is_open(); offset += kChunk) {
+    for (std::size_t offset = 0; offset < bytes.size() && read.stream.is_open() &&
+                                 read.stream.kept() < kNativeArtifactMaxContentBytes;
+         offset += kChunk) {
       const auto chunk = bytes.subspan(offset, std::min(kChunk, bytes.size() - offset));
       const auto keeps = std::min<std::uint64_t>(
           chunk.size(), kNativeArtifactMaxContentBytes - read.stream.kept());

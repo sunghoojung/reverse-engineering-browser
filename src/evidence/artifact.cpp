@@ -466,6 +466,63 @@ bool IsNetworkRequestArtifact(const ArtifactKind kind) noexcept {
          kind == ArtifactKind::kCookieList;
 }
 
+std::string StreamFileName(const std::uint64_t artifact_id) {
+  return "artifact-" + std::to_string(artifact_id) + ".part";
+}
+
+// Whether `name` is a file StreamFileName produced.
+[[nodiscard]] bool IsStreamFileName(const std::string_view name) noexcept {
+  constexpr std::string_view kPrefix = "artifact-";
+  constexpr std::string_view kSuffix = ".part";
+  if (!name.starts_with(kPrefix) || !name.ends_with(kSuffix) ||
+      name.size() <= kPrefix.size() + kSuffix.size()) {
+    return false;
+  }
+  const std::string_view digits =
+      name.substr(kPrefix.size(), name.size() - kPrefix.size() - kSuffix.size());
+  return std::all_of(digits.begin(), digits.end(),
+                     [](const char value) { return value >= '0' && value <= '9'; });
+}
+
+// Unlinks the partial stream files a killed receiver left. The evidence guard
+// is exclusive, so none can belong to a live stream. They sit outside the
+// manifest and the byte limit, and a request or response body is sensitive, so
+// they must not outlive the session that wrote them.
+[[nodiscard]] bool RemoveAbandonedStreamFiles(const int directory, std::uint64_t& removed) {
+  const int iterator_descriptor = dup(directory);
+  DIR* const entries = iterator_descriptor < 0 ? nullptr : fdopendir(iterator_descriptor);
+  if (!entries) {
+    if (iterator_descriptor >= 0) {
+      close(iterator_descriptor);
+    }
+    return false;
+  }
+  rewinddir(entries);
+  std::vector<std::string> names;
+  bool valid = true;
+  while (true) {
+    errno = 0;
+    const auto* entry = readdir(entries);
+    if (!entry) {
+      valid = errno == 0;
+      break;
+    }
+    if (IsStreamFileName(entry->d_name)) {
+      names.emplace_back(entry->d_name);
+    }
+  }
+  rewinddir(entries);
+  closedir(entries);
+  for (const std::string& name : names) {
+    if (unlinkat(directory, name.c_str(), 0) != 0) {
+      valid = false;
+      break;
+    }
+    ++removed;
+  }
+  return valid;
+}
+
 }  // namespace
 
 bool IsValidArtifactHeader(const ArtifactHeader& stream_header) noexcept {
@@ -652,6 +709,9 @@ ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
     throw std::runtime_error("Artifact store is busy or has an unsupported evidence guard");
   }
   const int directory = evidence_guard_.Directory();
+  if (!RemoveAbandonedStreamFiles(directory, removed_stream_files_)) {
+    throw std::runtime_error("Unable to remove partial artifact stream files");
+  }
   if (!blob_directory_.Open(directory, "blobs")) {
     throw std::runtime_error("Unable to open safe artifact blob directory");
   }
@@ -858,7 +918,7 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveWhole(std::istream& stream,
   }
 
   const int directory = evidence_guard_.Directory();
-  const std::string temporary_name = "artifact-" + std::to_string(header.artifact_id) + ".part";
+  const std::string temporary_name = StreamFileName(header.artifact_id);
   EvidenceFile temporary;
   temporary.Open(EvidenceGuard::OpenFile(directory, temporary_name, O_WRONLY | O_CREAT | O_EXCL),
                  true);
@@ -1031,7 +1091,7 @@ ArtifactReceiveStatus ArtifactReceiver::Checkpoint(Stream& open, const ArtifactS
     return Reject(ArtifactReceiveStatus::kInvalid, "Artifact checkpoint SHA-256 mismatch");
   }
   const int directory = evidence_guard_.Directory();
-  const std::string snapshot_name = "artifact-" + std::to_string(snapshot_id) + ".part";
+  const std::string snapshot_name = StreamFileName(snapshot_id);
   EvidenceFile source;
   source.Open(EvidenceGuard::OpenFile(directory, open.temporary_name, O_RDONLY), false);
   EvidenceFile copy;
@@ -1251,6 +1311,10 @@ std::uint16_t ArtifactReceiver::ProtocolVersion() const noexcept {
 
 std::size_t ArtifactReceiver::OpenStreams() const noexcept {
   return streams_.size();
+}
+
+std::uint64_t ArtifactReceiver::RemovedStreamFiles() const noexcept {
+  return removed_stream_files_;
 }
 
 std::uint64_t ArtifactReceiver::RecoveredManifestBytes() const noexcept {

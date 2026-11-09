@@ -327,6 +327,10 @@ int main(const int argc, char* argv[]) {
     limits.allow_sensitive = options.allow_sensitive;
     reb::ArtifactReceiver receiver(options.store_path, limits);
     std::cerr << "Artifact store ready\n";
+    if (receiver.RemovedStreamFiles() != 0) {
+      std::cerr << "Artifact store: removed " << receiver.RemovedStreamFiles()
+                << " partial stream files left by an interrupted receiver\n";
+    }
     if (receiver.RecoveredManifestBytes() != 0) {
       std::cerr << "Artifact manifest: removed an unacknowledged final record of "
                 << receiver.RecoveredManifestBytes() << " bytes left by an interrupted append\n";

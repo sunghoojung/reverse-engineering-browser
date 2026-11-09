@@ -222,6 +222,8 @@ class ArtifactReceiver final {
   [[nodiscard]] ArtifactStreamPosition StreamPosition() const noexcept;
   // Bytes of an unacknowledged final manifest record that construction cut
   // away; nonzero only after an interrupted append.
+  // Partial stream files a killed receiver left, removed at startup.
+  [[nodiscard]] std::uint64_t RemovedStreamFiles() const noexcept;
   [[nodiscard]] std::uint64_t RecoveredManifestBytes() const noexcept;
 
  private:
@@ -262,6 +264,7 @@ class ArtifactReceiver final {
   // size, whatever the outcome of the frame that changed them.
   std::uint64_t stored_bytes_ = 0;
   std::uint64_t manifest_bytes_ = 0;
+  std::uint64_t removed_stream_files_ = 0;
   std::uint64_t recovered_manifest_bytes_ = 0;
   std::uint64_t last_artifact_id_ = 0;
   std::unordered_set<std::uint64_t> artifact_ids_;

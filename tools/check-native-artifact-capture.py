@@ -422,9 +422,44 @@ def check_receiver_recovery(receiver: str) -> None:
         )
         assert b"removed an unacknowledged" not in resumed.stderr
         assert len(manifest.read_bytes().splitlines()) == 2
+        # A receiver killed with streams open leaves their partial files, and
+        # no later clean exit would reach them.
+        killed = subprocess.Popen(
+            [receiver, "--store", str(store)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        partial = [store / "artifact-500.part", store / "artifact-501.part"]
+        try:
+            assert killed.stdin is not None
+            killed.stdin.write(
+                open_frame(500)
+                + open_frame(501)
+                + stream_frame(OP_DATA, 500, b"partial();")
+            )
+            killed.stdin.flush()
+            deadline = time.monotonic() + 10
+            while not all(path.exists() for path in partial):
+                assert killed.poll() is None and time.monotonic() < deadline, "partial stream files"
+                time.sleep(0.01)
+        finally:
+            killed.kill()
+            killed.communicate(timeout=10)
+        assert killed.returncode == -signal.SIGKILL
+        assert all(path.exists() for path in partial), "SIGKILL leaves the partial files"
+        restarted = subprocess.Popen(
+            [receiver, "--store", str(store)], stdin=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        _, errors = restarted.communicate(artifact_frame(3, b"three();"), timeout=10)
+        assert restarted.returncode == 0, errors.decode()
+        assert b"removed 2 partial stream files" in errors, errors.decode()
+        assert not list(store.glob("*.part")), "no partial stream file survives a restart"
+        assert len(manifest.read_bytes().splitlines()) == 3, "capture resumes on the same store"
     print(
-        "PASS artifact receiver recovery: an interrupted final record is cut back with a note "
-        "and capture resumes on the same store"
+        "PASS artifact receiver recovery: an interrupted final record is cut back with a note, "
+        "partial stream files from a killed receiver are removed and counted, and capture "
+        "resumes on the same store"
     )
 
 

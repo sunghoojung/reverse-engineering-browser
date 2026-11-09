@@ -341,6 +341,23 @@ void CheckStreams() {
     Expect(Receive(receiver, sized) == Status::kInvalid, "an open header declares no size");
   }
   {
+    // A killed receiver leaves its partial files. Nothing else in the store is
+    // removed, including a name that only resembles one.
+    const std::filesystem::path killed = store / "killed";
+    { const reb::ArtifactReceiver first(killed, Limits()); }
+    std::ofstream(killed / "artifact-40.part") << "partial body";
+    std::ofstream(killed / "artifact-41.part") << "";
+    std::ofstream(killed / "artifact-x.part") << "keep";
+    std::ofstream(killed / "note.part") << "keep";
+    const reb::ArtifactReceiver restarted(killed, Limits());
+    Expect(restarted.RemovedStreamFiles() == 2 &&
+               !std::filesystem::exists(killed / "artifact-40.part") &&
+               !std::filesystem::exists(killed / "artifact-41.part") &&
+               std::filesystem::exists(killed / "artifact-x.part") &&
+               std::filesystem::exists(killed / "note.part"),
+           "startup removes only partial stream files and counts them");
+  }
+  {
     auto limits = Limits();
     limits.max_artifacts = 2;
     reb::ArtifactReceiver bounded(store / "bounded", limits);

@@ -923,6 +923,8 @@ void NativeNetworkCaptureSink::EmitNavigationLink(
   NativeProbeEvent event = MakeChildEvent(NativeProbeType::kNavigationInitiatorLink, parent);
   event.inline_payload = std::bit_cast<decltype(event.inline_payload)>(payload);
   emitter(event);
+}
+
 void NativeNetworkCaptureSink::ForgetSharedBlock(const std::uint64_t artifact_id) noexcept {
   base::AutoLock lock(header_lock_);
   std::erase_if(shared_header_blocks_,
@@ -941,8 +943,6 @@ void NativeNetworkCaptureSink::FlushDeferredBodies() noexcept {
   }
   unread_body_.reset();
   reading_bodies_.clear();
-}
-
 }
 
 void NativeNetworkCaptureSink::AssignNetworkHeadersId(const std::uint64_t request_id,

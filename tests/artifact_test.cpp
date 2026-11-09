@@ -341,6 +341,71 @@ void CheckStreams() {
     Expect(Receive(receiver, sized) == Status::kInvalid, "an open header declares no size");
   }
   {
+    auto limits = Limits();
+    limits.allow_sensitive = true;
+    reb::ArtifactReceiver checkpoints(store / "checkpoints", limits);
+    Expect(Receive(checkpoints, Frame(1, "one();")) == Status::kAccepted &&
+               Receive(checkpoints, Open(70)) == Status::kAccepted &&
+               Receive(checkpoints, Chunk(Op::kData, 70, "ab")) == Status::kAccepted,
+           "checkpoint fixture");
+    Expect(Receive(checkpoints, Chunk(Op::kCheckpoint, 70, "", 1, 2)) == Status::kConflict &&
+               checkpoints.OpenStreams() == 1,
+           "a checkpoint naming an existing artifact is refused and the stream stays open");
+    Expect(Receive(checkpoints, Chunk(Op::kCheckpoint, 70, "", 71, 2, 0xab)) == Status::kInvalid &&
+               checkpoints.LastArtifactId() == 71 && checkpoints.OpenStreams() == 0,
+           "a checkpoint with the wrong digest is refused and drops the stream");
+
+    auto counted = Limits();
+    counted.max_artifacts = 1;
+    reb::ArtifactReceiver full(store / "checkpoint-count", counted);
+    Expect(Receive(full, Open(72)) == Status::kAccepted &&
+               Receive(full, Chunk(Op::kData, 72, "ab")) == Status::kAccepted &&
+               Receive(full, Chunk(Op::kCheckpoint, 72, "", 73, 2)) == Status::kTooLarge,
+           "a checkpoint past the artifact count limit is refused");
+
+    // Streaming bytes count against the store before they publish.
+    auto bounded = Limits();
+    bounded.max_artifact_bytes = 1024;
+    bounded.max_store_bytes = 1024;
+    reb::ArtifactReceiver tight(store / "streaming-bytes", bounded);
+    Expect(Receive(tight, Open(74)) == Status::kAccepted &&
+               Receive(tight, Chunk(Op::kData, 74, std::string(600, 'a'))) == Status::kAccepted,
+           "a stream holds 600 of the store's 1024 bytes");
+    Expect(Receive(tight, Chunk(Op::kCheckpoint, 74, "", 75, 600)) == Status::kTooLarge,
+           "a checkpoint needing bytes the open stream already holds is refused");
+    Expect(Receive(tight, Frame(76, std::string(500, 'b'))) == Status::kTooLarge,
+           "a whole frame cannot use bytes an open stream holds");
+    Expect(Receive(tight, Open(77)) == Status::kAccepted &&
+               Receive(tight, Chunk(Op::kData, 77, std::string(500, 'c'))) == Status::kTooLarge,
+           "a second stream cannot use bytes the first holds");
+    Expect(Receive(tight, Chunk(Op::kAbort, 74)) == Status::kAccepted &&
+               Receive(tight, Frame(76, std::string(500, 'b'))) == Status::kAccepted,
+           "an aborted stream returns its bytes");
+  }
+  {
+    // The open-stream cap: the 129th open is refused and the connection stays usable.
+    reb::ArtifactReceiver capped(store / "stream-cap", Limits());
+    for (std::uint64_t id = 1; id <= reb::kMaxOpenArtifactStreams; ++id) {
+      Expect(Receive(capped, Open(id)) == Status::kAccepted, "open within the stream cap");
+    }
+    Expect(Receive(capped, Open(reb::kMaxOpenArtifactStreams + 1)) == Status::kTooLarge &&
+               capped.StreamPosition() == reb::ArtifactStreamPosition::kFrameBoundary &&
+               capped.OpenStreams() == reb::kMaxOpenArtifactStreams,
+           "an open past the stream cap is refused at a frame boundary");
+    Expect(Receive(capped, Chunk(Op::kAbort, 1)) == Status::kAccepted &&
+               Receive(capped, Open(reb::kMaxOpenArtifactStreams + 1)) == Status::kAccepted,
+           "closing a stream makes room for another");
+  }
+  {
+    // A sensitive stream needs the receiver started for sensitive capture.
+    const std::filesystem::path plain = store / "not-sensitive";
+    reb::ArtifactReceiver refusing(plain, Limits());
+    Expect(Receive(refusing, Open(80, true)) == Status::kSensitiveCaptureDisabled &&
+               refusing.StreamPosition() == reb::ArtifactStreamPosition::kFrameBoundary &&
+               refusing.OpenStreams() == 0 && !std::filesystem::exists(plain / "artifact-80.part"),
+           "a sensitive stream open is refused and leaves no file");
+  }
+  {
     // A killed receiver leaves its partial files. Nothing else in the store is
     // removed, including a name that only resembles one.
     const std::filesystem::path killed = store / "killed";

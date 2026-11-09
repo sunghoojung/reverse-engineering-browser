@@ -1389,6 +1389,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       function renderRequestCount(visibleCount, loadedCount, scope = 'loaded') {
+        if (visibleCount === null) {
+          elements.requestCount.textContent = 'No';
+          elements.requestCountLabel.textContent = 'requests read yet';
+          return;
+        }
         elements.requestCount.textContent = visibleCount.toLocaleString('en-US');
         if (scope === 'session') {
           elements.requestCountLabel.textContent = visibleCount === loadedCount ? loadedCount === 1 ? 'request' : 'requests'
@@ -2779,7 +2784,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             : state.requestTabId === 'unresolved' ? unresolved : groups.find(group => group.id === state.requestTabId)?.count ?? 0};
       }
 
-      function renderRequestScopes(scopes = trafficLocalScopes()) {
+      // `countsKnown` is false until anything has been read; zero would misstate the session.
+      function renderRequestScopes(scopes = trafficLocalScopes(), countsKnown = true) {
         const groups = scopes.groups;
         const availableTabs = new Set(groups.map(group => group.id));
         if (state.requestTabId !== 'all' && !availableTabs.has(state.requestTabId) &&
@@ -2813,7 +2819,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           button.setAttribute('aria-selected', String(state.requestTabId === scope.id));
           button.tabIndex = state.requestTabId === scope.id ? 0 : -1;
           if (button.children[0].textContent !== scope.label) button.children[0].textContent = scope.label;
-          if (button.children[1].textContent !== String(scope.count)) button.children[1].textContent = String(scope.count);
+          const count = countsKnown ? String(scope.count) : '';
+          if (button.children[1].textContent !== count) button.children[1].textContent = count;
           button.title = scope.id === 'all' ? 'Show requests from every captured browser tab, each once'
             : scope.id.startsWith('extension:') ? `Extension ${scope.id.slice(10)} · ${scope.domains.join(', ')}`
               : `${scope.label} · ${scope.domains.join(', ')} · tab id ${scope.id}`;
@@ -2843,7 +2850,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const domains = scopes.domains.map(([domain]) => domain);
         if (state.requestDomain !== 'all' && !domains.includes(state.requestDomain)) state.requestDomain = 'all';
         const oldOptions = new Map([...elements.requestDomain.children].map(option => [option.value, option]));
-        const options = [['all', `All domains (${scopes.scopedCount})`], ...scopes.domains.map(([domain, count]) => [domain, `${domain} (${count})`])]
+        const options = [['all', countsKnown ? `All domains (${scopes.scopedCount})` : 'All domains'], ...scopes.domains.map(([domain, count]) => [domain, `${domain} (${count})`])]
           .map(([value, label]) => {
             const option = oldOptions.get(value) ?? document.createElement('option'); option.value = value;
             if (option.textContent !== label) option.textContent = label;
@@ -2883,7 +2890,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const sizes = totals ? ` · ${bytes(totals.sizes.transferred)} transferred · ${bytes(totals.sizes.resources)} resources` : '';
         const hidden = totals?.hiddenInternal ? ` · ${totals.hiddenInternal.toLocaleString('en-US')} browser-internal hidden` : '';
         const excluded = globalThis.RebNetworkScope?.captureExclusionNotice(state.captureExclusions) ?? '';
-        const message = `${visibleCount === null ? '' : `${visibleCount.toLocaleString('en-US')} / `}${totalCount.toLocaleString('en-US')} requests${sizes}${hidden}${excluded ? ` · ${excluded}` : ''}${outside ? ' · Selection outside filter' : ''}${note ? ` · ${note}` : ''}`;
+        // A null total is a session nothing has been read from yet: no counts, the note leads.
+        const counts = totalCount === null ? '' : `${visibleCount === null ? '' : `${visibleCount.toLocaleString('en-US')} / `}${totalCount.toLocaleString('en-US')} requests${sizes}${hidden}`;
+        const rest = `${excluded ? ` · ${excluded}` : ''}${outside ? ' · Selection outside filter' : ''}${note ? ` · ${note}` : ''}`;
+        const message = counts ? counts + rest : rest.slice(3).replace(/^./, letter => letter.toUpperCase());
         const status = document.querySelector('#request-window-status');
         if (status.textContent !== message) status.textContent = message;
         const unresolved = totals?.unresolved ?? state.requests.filter(request => globalThis.RebRequestTabs?.isUnresolved(request)).length;
@@ -2930,6 +2940,15 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           : 'No requests match the current filters. Clear the filter or choose another type.';
       }
 
+      // Until a poll or an index read answers, the session's requests are
+      // unknown, not zero: say so with the connection reason and show no counts.
+      function trafficUnreadReason() {
+        if (state.eventPollAnswered || state.trafficIndex?.answer()) return null;
+        return {connecting: 'the local evidence broker has not answered yet',
+          unresponsive: 'the local evidence broker did not answer within 10 seconds',
+          unreachable: 'the local evidence broker is disconnected', malformed: 'the broker returned malformed event data'}[state.connection] ?? null;
+      }
+
       // Until the index first answers, or without a backend, the newest window serves Traffic.
       function trafficIndexActive() {
         const index = state.trafficIndex;
@@ -2957,7 +2976,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         // Until the index first answers, the newest window's rows serve and the first read starts.
         if (index) wantTrafficIndex(index, {start: 0});
-        renderRequestScopes();
+        const unread = state.requests.length === 0 ? trafficUnreadReason() : null;
+        renderRequestScopes(undefined, !unread);
         const filter = trafficParseFilter(elements.requestFilter.value);
         const scoped = state.requests.filter(request =>
           requestInScope(request) &&
@@ -2998,17 +3018,20 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.trafficWindowStart = window.start;
         state.trafficWindowAnchor = window.rows[0]?.id ?? null;
         const outside = id => id !== null && !state.trafficSearchMatches.has(id);
-        const note = state.trafficIndex?.error() ? 'request index unavailable; newest window shown' : 'newest window';
-        renderTrafficWindowStatus(visible.length, state.requests.length, outside(state.selectedRequestId), note, totals);
+        const indexError = state.trafficIndex?.error();
+        const note = unread ? `nothing read yet${indexError ? ` · request index unavailable (${indexError})` : ''}`
+          : indexError ? 'request index unavailable; newest window shown' : 'newest window';
+        const counted = unread ? {visible: null, total: null, totals: null} : {visible: visible.length, total: state.requests.length, totals};
+        renderTrafficWindowStatus(counted.visible, counted.total, outside(state.selectedRequestId), note, counted.totals);
         const renderedView = {requests: state.requests, retainedCount: state.requests.length, filterKey, start: window.start, anchor: state.trafficWindowAnchor,
-          answer: undefined, visibleCount: visible.length, totalCount: state.requests.length, outside, note, totals, mounted: null};
+          answer: undefined, visibleCount: counted.visible, totalCount: counted.total, outside, note, totals: counted.totals, mounted: null};
         renderTrafficSortButtons();
         elements.requestRows.setAttribute('role', 'listbox');
         if (visible.length === 0) {
-          renderTrafficEmpty(trafficEmptyText(state.requests.length));
+          renderTrafficEmpty(unread ? `Nothing has been read yet: ${unread}.` : trafficEmptyText(state.requests.length));
           state.trafficPendingCount = 0;
           elements.requestLatest.hidden = true;
-          renderRequestCount(0, state.requests.length);
+          renderRequestCount(counted.visible, counted.total);
           state.trafficRenderedView = renderedView;
           if (selectionCleared) {
             updateSelectionSummary(null);
@@ -3123,7 +3146,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             if (block.options.pending !== pending) renderTrafficRows(container, block.requests, {...block.options, pending, newIds: new Set()});
             renderTrafficRowSelection(container, state.selectedRequestId);
           }
-          renderTrafficWindowStatus(null, answer?.document.total ?? 0, false,
+          renderTrafficWindowStatus(null, answer ? answer.document.total : null, false,
             failure ? `${trafficIndexNote(null, failure)}, filter not applied` : 'reading the request index');
           return;
         }
@@ -8374,6 +8397,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           let body;
           try { body = JSON.parse(rawBody); } catch { throw new TypeError('Malformed broker response'); }
           if (!isBrokerResponse(body)) throw new TypeError('Malformed broker response');
+          state.eventPollAnswered = true;
           state.eventEtag = response.headers.get('ETag');
           const brokerConnected = body.broker_connected !== false;
           state.captureStopped = body.capture_stopped === true;

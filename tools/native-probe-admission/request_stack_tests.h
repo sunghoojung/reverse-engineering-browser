@@ -28,6 +28,7 @@ struct StackScenario {
   std::uint32_t task_depth = 3;
   std::uint32_t task_seed = 0;
   unsigned walks = 0;
+  unsigned described = 0;
 };
 StackScenario scenario;
 const std::string kStackSource = "function wrapper(){ return fetch('/x'); }";
@@ -51,7 +52,12 @@ NativeStackFrame ScenarioFrame(const std::uint32_t index) {
 // Writes what V8's NativeStackBuilder writes: the innermost and outermost
 // halves of a deep stack, then the await chain at the async offset.
 void DescribeFixtureScripts(NativeRequestStackWalk& walk, const std::vector<std::uint32_t>& ids) {
+  // Blink's callback returns here, before converting any source to UTF-8.
+  if (!walk.has_admitted_record()) {
+    return;
+  }
   for (const auto id : ids) {
+    ++scenario.described;
     reb::NativeStackScriptSource source;
     source.script_id = id;
     source.kind = id == 900 ? reb::NativeScriptIdentityKind::kWasm
@@ -384,8 +390,10 @@ std::uint8_t Kind(const reb::NativeAsyncTaskKind kind) {
     static_cast<void>(sink.RecordRequestInitiated(1, "GET", "https", "fill.example.test"));
   }
   const auto artifacts_before = reb::mojom::NativeProbeHost::artifacts.load();
+  scenario.described = 0;
   const auto dropped = NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout);
-  assert(dropped != 0 && reb::mojom::NativeProbeHost::artifacts == artifacts_before);
+  assert(dropped != 0 && reb::mojom::NativeProbeHost::artifacts == artifacts_before &&
+         scenario.described == 0);
   Drain(queue);
   const auto inside = NativeRequestStackWalk::EnterAsyncTask(dropped);
   StackPayload(Start(queue, 6000).second);

@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index 56496ac..699a008 100644
+index 56496ac..43e408a 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 @@ -43,6 +43,7 @@
@@ -26,7 +26,7 @@ index 56496ac..699a008 100644
  #include "v8/include/v8-profiler.h"
  #include "v8/include/v8.h"
  
-@@ -782,6 +785,142 @@ reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
+@@ -782,6 +785,146 @@ reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
    return result;
  }
  
@@ -87,6 +87,10 @@ index 56496ac..699a008 100644
 +
 +void NativeStackScriptDescribed(void* data, const v8::NativeStackScript& script) {
 +  auto& call = *static_cast<NativeRequestStackCall*>(data);
++  // A walk with no admitted record keeps nothing, so skip the UTF-8 conversion.
++  if (!call.walk.has_admitted_record()) {
++    return;
++  }
 +  ExecutionContext* execution_context =
 +      script.context.IsEmpty() ? nullptr : ToExecutionContext(script.context);
 +  if (!execution_context || script.script_id <= 0) {
@@ -169,7 +173,7 @@ index 56496ac..699a008 100644
  std::uint8_t PollNativeWasmExecution() {
    // No V8 handles and no document walk. The stack check calls this.
    return static_cast<std::uint8_t>(
-@@ -2027,6 +2166,12 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -2027,6 +2170,12 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
      isolate->SetJsInvocationCallbacks(js_invocation);
      reb::NativeProbeSink::Get().SetNativeJsInvocationContextProvider(
          CurrentJsInvocation);

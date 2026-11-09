@@ -128,6 +128,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
   [[nodiscard]] bool async_task_walk() const noexcept;
   // Whether a frame's script still needs a description in this configuration.
   [[nodiscard]] bool ScriptNeeded(std::uint32_t script_id) const noexcept;
+  // Whether this walk's record was admitted. A walk with none keeps nothing, so
+  // Blink skips the UTF-8 conversion of the scripts it would otherwise describe.
+  [[nodiscard]] bool has_admitted_record() const noexcept { return stack_sequence_ != 0; }
   // Emits the stack record, and the stack artifact when it is new.
   void FramesReady(std::uint32_t total_depth,
                    std::uint32_t recorded,

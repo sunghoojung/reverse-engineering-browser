@@ -205,7 +205,7 @@ function createRequestStackPanel({open, refresh, load = null}) {
       const reason = REQUEST_STACK_TASK_NOTES[segment.state === 'captured' && !segment.frames_retained ? 'artifact_missing' : segment.state];
       if (reason && (!frames.length || !segment.frames_retained)) list.append(row(reason, 'request-stack-note'));
       for (const frame of frames) list.append(frameItem(frame));
-      if (segment.bounded) list.append(row('stopped at 128 frames', 'request-stack-separator'));
+      if (segment.bounded) list.append(row('stopped at 256 frames', 'request-stack-separator'));
     }
     if (stack.task_chain_cut) list.append(row('Earlier async callers were not recorded', 'request-stack-separator'));
     return list;

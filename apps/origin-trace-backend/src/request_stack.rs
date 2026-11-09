@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 const SYNC_LIMIT: u32 = 1024;
 const ASYNC_LIMIT: u32 = 32;
 const TASK_LIMIT: u32 = 32;
-const TASK_FRAME_LIMIT: u32 = 128;
+const TASK_FRAME_LIMIT: u32 = 256;
 const HEADER: usize = 32;
 const FRAME: usize = 16;
 const SEGMENT: usize = 48;

@@ -44,17 +44,24 @@ async function writeBlob(root, bytes) {
   return hash;
 }
 
-// A deterministic 1 MiB module for the Sources Map: structure, a repetitive
-// data segment and a noisy one, so entropy and kind both have regions to show.
+// A deterministic module for the Sources Map: structure, a repetitive data
+// segment and a noisy one, so entropy and kind both have regions to show. About
+// 1 MiB by default. REB_RENDERED_UI_MAP_MIB raises it for a memory measurement;
+// the bytes are generated at test time and never committed.
 function mapFixtureModule() {
+  const mebibytes = Number(process.env.REB_RENDERED_UI_MAP_MIB ?? 1);
+  assert(Number.isSafeInteger(mebibytes) && mebibytes >= 1 && mebibytes <= 512, 'REB_RENDERED_UI_MAP_MIB must be 1 to 512');
+  const segmentBytes = mebibytes * 420 * 1024;
   const leb = value => { const out = []; do { let byte = value & 0x7f; value >>>= 7; if (value) byte |= 0x80; out.push(byte); } while (value); return out; };
   const section = (id, body) => Buffer.concat([Buffer.from([id, ...leb(body.length)]), body]);
   let state = 0x2545f491;
-  const noise = Buffer.from(Array.from({length: 420 * 1024}, () => {
+  const noise = Buffer.alloc(segmentBytes);
+  const pattern = Buffer.alloc(segmentBytes);
+  for (let index = 0; index < segmentBytes; index += 1) {
     state ^= state << 13; state ^= state >>> 17; state ^= state << 5; state >>>= 0;
-    return state & 0xff;
-  }));
-  const pattern = Buffer.from(Array.from({length: 420 * 1024}, (_, index) => (index >> 12) & 0x0f));
+    noise[index] = state & 0xff;
+    pattern[index] = (index >> 12) & 0x0f;
+  }
   const segment = bytes => Buffer.concat([Buffer.from([0, 0x41, 0, 0x0b, ...leb(bytes.length)]), bytes]);
   const body = Buffer.concat([Buffer.from([0]), Buffer.alloc(180 * 1024, 0x01), Buffer.from([0x0b])]);
   const code = Buffer.concat([Buffer.from([1, ...leb(body.length)]), body]);

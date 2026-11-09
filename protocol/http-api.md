@@ -1033,7 +1033,7 @@ reads captured source bodies.
 `GET /api/artifact-map?artifact_id=<id>` (`get_artifact_map`) returns a fixed-size
 entropy and kind summary of one captured artifact. It reads the blob
 incrementally and verifies its hash in that read, so the response stays near
-70 KB for an artifact of any size. The [artifact map contract](artifact-map-v1.md)
+46 KB for an artifact of any size. The [artifact map contract](artifact-map-v1.md)
 states the 256-byte minimum window, the 7.0 bits per byte threshold, the kind
 sources and the error statuses.
 

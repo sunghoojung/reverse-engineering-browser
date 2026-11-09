@@ -1850,6 +1850,22 @@ final class OriginTraceRenderedUITests: XCTestCase {
     XCTAssertEqual(ui.webView.url, harnessURL)
   }
 
+  // Resident size of this view's WebContent process, from ps. It is a noisy
+  // whole-process figure, reported beside the bounded allocations it contains.
+  @MainActor
+  private func webContentResidentKilobytes(_ ui: Harness) -> Int {
+    guard let pid = ui.webView.value(forKey: "_webProcessIdentifier") as? Int32, pid > 0 else { return -1 }
+    let process = Process()
+    let pipe = Pipe()
+    process.executableURL = URL(fileURLWithPath: "/bin/ps")
+    process.arguments = ["-o", "rss=", "-p", String(pid)]
+    process.standardOutput = pipe
+    guard (try? process.run()) != nil else { return -1 }
+    process.waitUntilExit()
+    let text = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    return Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
+  }
+
   // The Sources Map paints one canvas for a whole artifact: a segmented mode
   // control, hover and keyboard cells, a thin summary, and the hex row it opens.
   @MainActor
@@ -1859,12 +1875,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await show(ui, "sources")
       try await ui.click("#source-tree [role=treeitem]", containing: "map-module")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('00000000')", "the fixture module did not open as hex")
+      let idleRSS = webContentResidentKilobytes(ui)
       try await ui.click("#source-map")
-      try await ui.waitUntil("!document.querySelector('.map-body').hidden && document.querySelector('.map-canvas').width === 64", "the map did not load")
+      try await ui.waitUntil("!document.querySelector('.map-body').hidden && document.querySelector('.map-canvas').width > 0", timeout: 90, "the map did not load")
+      let side = try await ui.value("document.querySelector('.map-canvas').width") as? Int ?? 0
+      let openRSS = webContentResidentKilobytes(ui)
       XCTAssertEqual(try await ui.value("document.querySelector('#source-map').getAttribute('aria-pressed')") as? String, "true")
       XCTAssertEqual(try await ui.value("document.querySelector('#source-code-wrap').hidden") as? Bool, true, "\(size.name): the map replaces the code view")
       let stats = try await ui.value("document.querySelector('.map-stats').innerText") as? String ?? ""
-      XCTAssertTrue(stats.contains("Hilbert 64×64"), "\(size.name): the header states the grid: \(stats)")
+      XCTAssertTrue(stats.contains("Hilbert \(side)×\(side)"), "\(size.name): the header states the grid: \(stats)")
       XCTAssertTrue(stats.contains("per cell"), "\(size.name): the header states the cell size: \(stats)")
       let summary = try await ui.value("document.querySelector('.map-summary').innerText") as? String ?? ""
       XCTAssertTrue(summary.contains("≥ 7.0"), "\(size.name): the threshold is stated: \(summary)")
@@ -1906,6 +1925,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let position = try await ui.value("document.querySelector('#source-position').innerText") as? String ?? ""
       XCTAssertTrue(position.contains("hex row"), "\(size.name): Sources lands at the byte: \(position)")
       XCTAssertEqual(try await ui.value("document.querySelector('.map-canvas').width") as? Int, 0, "\(size.name): the bitmap is released")
+      print("RENDERED_UI_MAP_RSS \(size.name) idle_kb=\(idleRSS) open_kb=\(openRSS) released_kb=\(webContentResidentKilobytes(ui)) side=\(side)")
     }
   }
 }

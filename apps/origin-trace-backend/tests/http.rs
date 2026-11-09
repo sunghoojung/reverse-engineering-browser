@@ -9338,6 +9338,37 @@ async fn js_invocation_sites_real_worker_resolves_names_and_positions() {
 /// Twenty thousand requests outnumber the 5,000-event network window four to
 /// one. The request index still counts, filters, pages and locates each one,
 /// and get_events reads any row's records from its first offset.
+/// Capture keeps up to 256 frames per task segment; the contract must allow it.
+#[test]
+fn request_stack_contract_admits_a_full_256_frame_task_segment() {
+    let spec: Value = serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap();
+    let frame = json!({"index": 0, "kind": "javascript", "async": false, "script_id": 1, "position": 1,
+        "resolution": {"status": "unresolved", "reason": "script_identity_missing"}});
+    let stack = |frames: usize, recorded: usize| {
+        json!({"status": "recorded", "request": {"process_id": 1, "request_id": "2"},
+            "task_segments": [{"index": 0, "kind": "set_timeout", "state": "captured",
+                "recorded": recorded, "bounded": true, "digest": null,
+                "frames_retained": true, "frames": vec![frame.clone(); frames]}]})
+    };
+    let schema = json!({"$ref": "#/components/schemas/RequestStack"});
+    assert_schema(&spec, &schema, &stack(256, 256), "256-frame segment");
+    let validator = jsonschema::validator_for(&json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": "#/checked",
+        "checked": schema,
+        "components": spec["components"],
+    }))
+    .unwrap();
+    assert!(
+        !validator.is_valid(&stack(257, 256)),
+        "257 frames stays out of contract"
+    );
+    assert!(
+        !validator.is_valid(&stack(256, 257)),
+        "257 recorded stays out of contract"
+    );
+}
+
 #[tokio::test]
 async fn request_detail_routes_report_what_their_read_covered() {
     let server = Server::start().await;

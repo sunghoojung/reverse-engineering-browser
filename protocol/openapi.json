@@ -8388,11 +8388,11 @@
                 "recorded": {
                   "type": "integer",
                   "minimum": 0,
-                  "maximum": 128
+                  "maximum": 256
                 },
                 "bounded": {
                   "type": "boolean",
-                  "description": "The scheduling walk stopped at 128 frames."
+                  "description": "The scheduling walk stopped at 256 frames."
                 },
                 "digest": {
                   "type": [
@@ -8405,7 +8405,7 @@
                 },
                 "frames": {
                   "type": "array",
-                  "maxItems": 128,
+                  "maxItems": 256,
                   "items": {
                     "$ref": "#/components/schemas/RequestStackFrame"
                   }

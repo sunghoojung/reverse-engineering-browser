@@ -461,7 +461,7 @@ provider, the loader call and the Console request watch hook. Chromium `0034`
 records script navigations and async task callers through
 `renderer/native_request_stack_blink.h`: the async task probes, task
 attribution at top-level callbacks, `BeginNavigation`, form scheduling and the
-browser navigation link; V8 `0017` bounds scheduling-time walks to 128 frames.
+browser navigation link; V8 `0017` bounds scheduling-time walks to 256 frames.
 See [Native network v3](../../../protocol/native-network-v3.md).
 
 ## Debugger observations

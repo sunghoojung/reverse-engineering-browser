@@ -3694,8 +3694,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           trafficResponse.render(document.querySelector('#response-inspector'), selected, state.inspectorTab);
           return;
         }
-        if (!selected || (state.inspectorTab === 'payload' ? !['captured', 'captured_truncated'].includes(selected.body?.state)
-          : state.inspectorTab !== 'general' || selected.fullTarget?.retention !== 'retained')) return;
+        const target = selected?.fullTarget?.retention === 'retained';
+        if (!selected || (state.inspectorTab === 'payload' ? !target && !['captured', 'captured_truncated'].includes(selected.body?.state)
+          : !['general', 'headers'].includes(state.inspectorTab) || !target)) return;
         if (requestContentViewKey(selected) !== state.requestBodyViewKey) renderInspector();
       }
 

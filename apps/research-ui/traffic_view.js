@@ -242,7 +242,7 @@ function trafficSizeCell(request) {
   const lines = [served === '(service worker)' ? 'Served by a service worker.' : served ? 'Served from the HTTP cache.' : '',
     transfer === null ? 'Transferred: no completion record.' : `Transferred: ${exact(transfer)}.`,
     resource === null ? 'Resource: not recorded.' : `Resource: ${exact(resource)}.`].filter(Boolean);
-  return {transfer: served ?? (transfer === null ? '—' : trafficBytesLabel(transfer)),
+  return {transfer: served ?? (transfer === null ? '—' : trafficBytesLabel(transfer)), served: Boolean(served),
     resource: resource === null ? '' : trafficBytesLabel(resource), title: lines.join('\n')};
 }
 
@@ -305,7 +305,9 @@ function trafficStatusCell(request) {
   }
   const className = !Number.isInteger(code) || code < 100 ? 'status-neutral' : code >= 500 ? 'status-error status-server'
     : code >= 400 ? 'status-error status-client' : code >= 300 ? 'status-redirect' : code >= 200 ? 'status-ok' : 'status-neutral';
-  return {text: String(request.status), className, title: `HTTP status ${request.status}`};
+  // Headers arrived; the code stands while the body is still in flight, and Time reads a dash.
+  return {text: String(request.status), className,
+    title: `HTTP status ${request.status}${request.time === 'pending' ? '. No terminal record yet.' : ''}`};
 }
 
 // Bar geometry in percent of the scale, from recorded timestamps only. A
@@ -546,7 +548,8 @@ function renderTrafficRows(container, requests, options) {
       const initiator = cell('initiator', 'request-initiator', initiatorFrame?.label ?? initiatorLabel ?? '—',
         initiatorFrame?.title ?? (initiatorLabel ? TRAFFIC_INITIATOR_TITLES[request.initiator] : 'No versioned lifecycle record says who started this request.'));
       const sizeCell = trafficSizeCell(request);
-      const size = cell('size', 'request-size', undefined, sizeCell.title);
+      // A served row's label fills the default column; app.css shows its resource size once the column is widened.
+      const size = cell('size', `request-size${sizeCell.served ? ' is-served' : ''}`, undefined, sizeCell.title);
       size.append(trafficNode('span', 'size-transfer', sizeCell.transfer));
       if (sizeCell.resource) size.append(trafficNode('span', 'size-resource', sizeCell.resource));
       const timeLabel = trafficTimeLabel(request.time);
@@ -558,6 +561,9 @@ function renderTrafficRows(container, requests, options) {
         const bar = trafficNode('span', `waterfall-bar${geometry.pending ? ' is-pending' : ''}`);
         bar.style.left = `${geometry.left}%`;
         bar.style.width = `${geometry.width}%`;
+        // The newest rows start at the end of the scale. Pull the 2 px minimum
+        // bar back inside the cell, which clips anything past its edge.
+        bar.style.marginLeft = `min(0px, calc(${100 - geometry.left}% - 2px))`;
         const wait = trafficNode('span', 'waterfall-wait');
         wait.style.width = `${geometry.width > 0 ? geometry.wait * 100 / geometry.width : 100}%`;
         bar.append(wait);
@@ -587,11 +593,14 @@ function renderTrafficRows(container, requests, options) {
   spacers[0].style.height = `${from * height}px`;
   spacers[1].style.height = `${below * height}px`;
   const nodes = [...(from > 0 ? [spacers[0]] : []), ...rows, ...(below > 0 ? [spacers[1]] : [])];
+  // Remove first, so a row that stays is never moved. WebKit drops a click whose
+  // pressed row was reparented before the release, and scrolling would move all of them.
+  const kept = new Set(nodes);
+  for (const child of [...container.children]) if (!kept.has(child)) child.remove();
   nodes.forEach((node, index) => {
     const current = container.children[index];
     if (current !== node) container.insertBefore(node, current ?? null);
   });
-  while (container.children.length > nodes.length) container.lastElementChild.remove();
   if ((container.scrollTop || 0) !== top) container.scrollTop = top;
   if (focusedId && document.activeElement !== focused) {
     // A focused row scrolled out of the mounted rows leaves focus on the list; it returns when the row does.

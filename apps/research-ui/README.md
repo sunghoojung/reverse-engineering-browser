@@ -925,8 +925,9 @@ Protocol is available from the header menu.
 - **Name** is the last path segment and the query, with the host as a muted
   sublabel only when the path was captured. The full URL is the tooltip.
 - **Status** colors 3xx, 4xx and 5xx apart. Failed names its net error,
-  Pending has no terminal record, and No loader means only the renderer
-  recorded the request.
+  Pending has no response yet, and No loader means only the renderer recorded
+  the request. Once `response_started` arrives the row shows that HTTP code,
+  and until a terminal record follows, Time reads a dash and the tooltip says so.
 - **Type** comes from the resource type, then the response MIME type when the
   resource type says only "other". Its tooltip has the MIME type.
 - **Initiator** names a script start's innermost frame as `file:line` when the
@@ -935,9 +936,11 @@ Protocol is available from the header menu.
   one, Service worker or Browser.
 - **Size** is the terminal record's `encoded_data_length` (transferred) and
   `decoded_body_length` (resource), or (disk cache) and (service worker) from
-  the response flags. Units are decimal; the tooltip has exact bytes.
+  the response flags. A served row shows its resource size only when the column
+  is wide enough for both. Units are decimal; the tooltip has exact bytes.
 - **Waterfall** draws each request from its first to its last record, lighter
   until `response_started`, over the matching requests or the selected range.
+  A bar at the end of the scale is pulled inside its cell at its 2 px minimum.
 
 Drag a column edge, or press Shift+Left or Shift+Right on a header, to resize it.
 Right-click the header, or press Shift+F10 on it, to show or hide columns. The

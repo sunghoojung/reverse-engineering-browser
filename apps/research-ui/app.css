@@ -1435,7 +1435,7 @@ var(--panel);
       .native-console-output { display: block; }
       .native-console-empty { margin: 0; padding: 12px 10px; color: var(--faint); font: 11px/1.6 var(--sans); }
       .native-console-result { position: relative; padding: 6px 10px; border-bottom: 1px solid var(--line-soft); }
-      .native-console-result pre { margin: 0; font: 12px/18px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+      .native-console-result pre { margin: 0; font: 12px/18px var(--code-font); white-space: pre-wrap; overflow-wrap: anywhere; }
       .native-console-expression { padding-left: 16px; padding-right: 60px; text-indent: -16px; color: var(--muted); }
       .native-console-value { position: relative; padding-left: 16px; color: var(--text); }
       .native-console-value::before { content: '←'; position: absolute; left: 0; color: var(--faint); font-size: 10px; }

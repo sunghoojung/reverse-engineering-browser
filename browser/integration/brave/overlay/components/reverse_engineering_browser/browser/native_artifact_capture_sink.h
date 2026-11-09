@@ -55,8 +55,8 @@ struct NativeRequestContent final {
   std::string url;
   std::string mime_type;
   std::size_t size = 0;
-  scoped_refptr<network::ResourceRequestBody> body;
-  std::string text;
+  scoped_refptr<network::ResourceRequestBody> body{};
+  std::string text{};
 };
 
 enum class NativeRequestContentAdmission : std::uint8_t {

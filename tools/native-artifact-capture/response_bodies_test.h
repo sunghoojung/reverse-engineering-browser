@@ -24,7 +24,7 @@ struct ResponseHead {
   std::string mime = "application/json";
   int resource_type = 13;
   int status = 200;
-  std::optional<std::string> encoding;
+  std::optional<std::string> encoding{};
   std::int64_t declared = 0;
   bool service_worker = false;
   bool still_encoded = false;

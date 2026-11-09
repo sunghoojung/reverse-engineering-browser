@@ -180,6 +180,23 @@ export async function checkAgentPanel() {
   await settle();
   assert.equal(posted.length, before, 'a closed panel does no work');
   assert.ok(posted.some(message => message.op === 'panel' && message.visible === false), 'native is told the panel closed');
+  // One right-side dock at a time, in either order, without stealing focus.
+  const agentDock = doc.getElementById('agent-dock'), xrefsDock = doc.getElementById('xrefs-dock');
+  doc.getElementById('agent-toggle').click();
+  await settle();
+  assert.equal(agentDock.hidden, false);
+  doc.getElementById('xrefs-toggle').click();
+  await settle();
+  assert.equal(agentDock.hidden, true, 'opening Cross-references closes the agent dock');
+  assert.equal(xrefsDock.hidden, false);
+  assert.equal(doc.getElementById('workspace').dataset.agentDock, undefined, 'the agent gives up the dock column');
+  doc.getElementById('agent-toggle').click();
+  await settle();
+  assert.equal(xrefsDock.hidden, true, 'opening the agent closes Cross-references');
+  assert.equal(agentDock.hidden, false);
+  assert.equal(doc.getElementById('workspace').dataset.xrefsOpen, undefined, 'Cross-references gives up the dock column');
+  doc.getElementById('agent-toggle').click();
+  await settle();
   assert.deepEqual(asyncErrors, [], 'no asynchronous errors');
   release();
   console.log('PASS agent panel: safe markdown, verified citations, byte budget, consent, approvals and closed-panel behavior (not rendered QA)');

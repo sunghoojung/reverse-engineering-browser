@@ -1073,8 +1073,13 @@
 
   // Listeners live only while the dock is open.
   const workspaceActivity = () => { if (!framePending) scheduleRender(); };
-  function setOpen(open) {
+  // One right-side dock at a time: opening this one closes Cross-references
+  // through its own toggle, and Cross-references opening closes this one.
+  const xrefsToggle = document.getElementById('xrefs-toggle');
+  const otherDock = new MutationObserver(() => { if (workspace.dataset.xrefsOpen === 'true') setOpen(false, {focus: false}); });
+  function setOpen(open, {focus = true} = {}) {
     if (view.open === open) return;
+    if (open && workspace.dataset.xrefsOpen === 'true') xrefsToggle?.click();
     view.open = open;
     dock.hidden = !open;
     if (open) workspace.dataset.agentDock = 'open'; else delete workspace.dataset.agentDock;
@@ -1082,6 +1087,7 @@
     toggle.setAttribute('aria-pressed', String(open));
     if (open) {
       if (sourcesEditor) { sourcesEditorWidth = 0; editorWidthWatch.observe(sourcesEditor); }
+      otherDock.observe(workspace, {attributes: true, attributeFilter: ['data-xrefs-open']});
       workspace.addEventListener('pointerup', workspaceActivity);
       workspace.addEventListener('keyup', workspaceActivity);
       document.addEventListener('selectionchange', workspaceActivity);
@@ -1092,12 +1098,13 @@
       (input.disabled ? switchInput : input).focus();
     } else {
       editorWidthWatch.disconnect();
+      otherDock.disconnect();
       requestAnimationFrame(recomputeEditorRows);
       workspace.removeEventListener('pointerup', workspaceActivity);
       workspace.removeEventListener('keyup', workspaceActivity);
       document.removeEventListener('selectionchange', workspaceActivity);
       if (view.native) call('panel', {visible: false}).catch(() => {});
-      toggle.focus();
+      if (focus) toggle.focus();
     }
     window.dispatchEvent(new Event('resize'));
   }

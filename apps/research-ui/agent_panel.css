@@ -3,18 +3,20 @@
  * needs a decision, red for an error). */
 
 .workspace { position: relative; }
-/* Right-side dock toggles sit at the titlebar's right edge, opposite the
- * traffic lights, so the sidebar keeps its height at the 560 px minimum. */
+/* Right-side dock toggles share the titlebar's right edge, opposite the
+ * traffic lights, so the sidebar keeps its height at the 560 px minimum. The
+ * Agent toggle sits just left of the Cross-references one, at the same size.
+ * Only one right-side dock is open at a time (agent_panel.js). */
 .titlebar { position: relative; }
-.titlebar-dock-toggle { position: absolute; top: 50%; right: 10px; transform: translateY(-50%); width: 22px; height: 20px; display: grid; place-items: center;
-  padding: 0; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--faint); }
-.titlebar-dock-toggle svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.titlebar-dock-toggle { position: absolute; top: 50%; right: 38px; transform: translateY(-50%); width: 26px; height: 22px; display: grid; place-items: center;
+  padding: 0; border: 1px solid transparent; border-radius: var(--control-radius); background: transparent; color: var(--muted); }
+.titlebar-dock-toggle svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .titlebar-dock-toggle:hover { color: var(--text); background: var(--panel-3); }
-.titlebar-dock-toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--line); }
+.titlebar-dock-toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--line); background: var(--panel-3); }
 .titlebar-dock-toggle:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
-#workspace[data-agent-dock="open"] { grid-template-columns: minmax(0, 1fr) 340px; column-gap: 0; }
+#workspace[data-agent-dock="open"] { grid-template-columns: minmax(0, 1fr) 340px; }
 .agent-dock { grid-column: 2; grid-row: 1 / -1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
-  background: var(--panel); border-left: 1px solid var(--line-soft); }
+  background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--panel-radius); }
 
 .agent-head { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px 0 12px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
 .agent-title { font: 600 12px var(--sans); color: var(--text); }
@@ -132,9 +134,15 @@
 .agent-text-button:hover { color: var(--text); background: var(--panel-3); }
 .agent-hint { margin: 0; color: var(--faint); font: 10px/1.4 var(--sans); overflow-wrap: anywhere; }
 
-/* The workspace keeps usable width on a narrow window; the dock lays over it
- * instead of forcing either side below its minimum. */
-@media (max-width: 1040px) {
+@media (min-width: 1001px) and (max-width: 1520px) {
+  /* The Traffic split needs more than the width left beside the dock. */
+  #workspace[data-agent-dock="open"] #screen-traffic .traffic-grid[data-detail-open="true"] { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 50%) minmax(0, 1fr); }
+  #workspace[data-agent-dock="open"] #screen-traffic .traffic-grid[data-detail-open="true"] .request-pane { border-right: 0; border-bottom: 1px solid var(--line); }
+}
+
+/* Below this width the dock covers the workspace edge instead of squeezing
+ * it, with the same geometry as the Cross-references dock. */
+@media (max-width: 1000px) {
   #workspace[data-agent-dock="open"] { grid-template-columns: minmax(0, 1fr); }
-  .agent-dock { grid-column: auto; grid-row: auto; position: absolute; top: 0; right: 0; bottom: 0; width: min(340px, 100%); z-index: 15; box-shadow: -8px 0 20px var(--shadow); }
+  .agent-dock { grid-column: auto; grid-row: auto; position: absolute; top: 6px; right: 6px; bottom: 6px; width: min(340px, calc(100% - 12px)); z-index: 30; box-shadow: var(--overlay-shadow); }
 }

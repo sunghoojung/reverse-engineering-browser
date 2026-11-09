@@ -52,7 +52,9 @@ NativeStackFrame ScenarioFrame(const std::uint32_t index) {
 // Writes what V8's NativeStackBuilder writes: the innermost and outermost
 // halves of a deep stack, then the await chain at the async offset.
 void DescribeFixtureScripts(NativeRequestStackWalk& walk, const std::vector<std::uint32_t>& ids) {
-  // Blink's callback returns here, before converting any source to UTF-8.
+  // Mirrors the check patch 0029 adds to Blink's NativeStackScriptDescribed. It
+  // tests has_admitted_record(), which the overlay owns; the patch line itself
+  // needs a Chromium build, so removing it does not fail this fixture.
   if (!walk.has_admitted_record()) {
     return;
   }

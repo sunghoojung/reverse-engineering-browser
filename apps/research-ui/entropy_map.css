@@ -39,11 +39,17 @@
   grid-row: 3;
   min-width: 0;
   min-height: 0;
+  position: relative;
   container-type: size;
   display: grid;
   grid-template-rows: 44px auto minmax(0, 1fr);
   background: var(--panel);
 }
+/* Fixed rows: the hidden state panel must not let the body slide into the
+   auto row, where WebKit sizes it to almost nothing. */
+#screen-sources .source-map-view > .map-head { grid-row: 1; }
+#screen-sources .source-map-view > .map-state { grid-row: 2; }
+#screen-sources .source-map-view > .map-body { grid-row: 3; }
 #screen-sources .source-map-view[hidden] { display: none; }
 /* Line windows and Find status describe the code view the map replaces. */
 #screen-sources .sources-editor:has(#source-map-view:not([hidden])) #source-window,

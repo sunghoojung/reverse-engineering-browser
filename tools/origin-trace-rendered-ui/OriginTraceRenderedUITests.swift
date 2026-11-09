@@ -1887,7 +1887,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let stats = try await ui.value("document.querySelector('.map-stats').innerText") as? String ?? ""
       XCTAssertTrue(stats.contains("Hilbert \(side)×\(side)"), "\(size.name): the header states the grid: \(stats)")
       XCTAssertTrue(stats.contains("per cell"), "\(size.name): the header states the cell size: \(stats)")
-      let summary = try await ui.value("document.querySelector('.map-summary').innerText") as? String ?? ""
+      let summary = try await ui.value("document.querySelector('.map-summary').textContent") as? String ?? ""
       XCTAssertTrue(summary.contains("≥ 7.0"), "\(size.name): the threshold is stated: \(summary)")
       XCTAssertTrue(summary.contains("Segments"), "\(size.name): data segments are counted: \(summary)")
       let body = try await ui.value("document.querySelector('#source-map-view').innerText") as? String ?? ""
@@ -1897,13 +1897,16 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let square = try await ui.json("(() => { const box = document.querySelector('.map-canvas').getBoundingClientRect(); return {width: box.width, height: box.height}; })()")
       XCTAssertEqual(square["width"] as? Double ?? 0, square["height"] as? Double ?? -1, accuracy: 1, "\(size.name): the map is square: \(square)")
       XCTAssertGreaterThan(square["width"] as? Double ?? 0, 150, "\(size.name): the map stays readable: \(square)")
+      // The square and its legend sit inside the view, not clipped by it.
+      try await assertFullyVisible(ui, ".map-frame", "\(size.name) map square")
+      try await assertFullyVisible(ui, ".map-ramp", "\(size.name) map legend")
       try await assertLayout(ui, "#source-map-view", "\(size.name) sources map")
       try await assertInert(ui, "\(size.name) sources map")
       try await ui.screenshot("sources-map-entropy-\(size.name)")
 
       try await ui.click(".map-modes [data-map-mode='kind']")
       try await ui.waitUntil("document.querySelector(\".map-modes [data-map-mode='kind']\").getAttribute('aria-pressed') === 'true' && !document.querySelector('.map-kind-legend').hidden", "kind mode did not apply")
-      let legend = try await ui.value("document.querySelector('.map-kind-legend').innerText") as? String ?? ""
+      let legend = try await ui.value("document.querySelector('.map-kind-legend').textContent") as? String ?? ""
       XCTAssertTrue(legend.contains("data"), "\(size.name): the legend names present kinds: \(legend)")
       try await assertLayout(ui, "#source-map-view", "\(size.name) sources map kind")
       try await ui.screenshot("sources-map-kind-\(size.name)")

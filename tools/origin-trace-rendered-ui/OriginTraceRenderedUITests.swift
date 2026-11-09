@@ -1374,8 +1374,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       _ = try await ui.value("(document.querySelector('#inspector-tab-response').focus(), true)")
       try await ui.key(123, "\u{F702}", modifiers: [.function, .numericPad])
       try await ui.waitUntil("document.activeElement?.id === 'inspector-tab-preview'", "arrow key did not reach Preview")
-      try await ui.waitUntil("document.querySelector('#response-inspector .traffic-json-tree') !== null", "JSON preview did not render")
-      let preview = try await ui.value("document.querySelector('#response-inspector .traffic-json-tree').textContent") as? String ?? ""
+      try await ui.waitUntil("document.querySelector('#response-inspector .traffic-payload-tree') !== null", "JSON preview did not render")
+      let preview = try await ui.value("document.querySelector('#response-inspector .traffic-payload-tree').textContent") as? String ?? ""
       XCTAssertTrue(preview.contains("challenge"), "\(size.name): the tree names its keys: \(preview)")
       XCTAssertTrue(preview.contains(escapedMarker), "\(size.name): tree strings are literal text")
       try await assertInert(ui, "\(size.name) response preview")

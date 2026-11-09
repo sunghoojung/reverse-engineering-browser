@@ -161,15 +161,27 @@ findAgain.value = '';
 findAgain.dispatchEvent(new window.Event('input'));
 await settle();
 
-// Preview: a bounded JSON tree of text nodes.
+// Preview: the Payload tree, every value reachable by keyboard without a node cap.
 await show(request(record(jsonArtifact)), 'preview');
-assert(panel.querySelector('.traffic-json-tree details > summary'));
+assert.equal(panel.querySelector('.traffic-payload-tree').getAttribute('role'), 'tree');
+assert(panel.querySelector('.traffic-payload-tree [role="treeitem"]'), 'the tree has tree items');
 assert.match(panel.textContent, /challenge: "c1"/);
 assert.match(panel.textContent, /Array\(3\)/);
 assert(panel.querySelector('b') === null);
-const wide = api.trafficJsonTree(Object.fromEntries(Array.from({length: 3000}, (_, index) => [`k${index}`, index])));
-assert.match(wide.textContent, /more not shown/);
-assert.match(wide.textContent, /first 2,000 values/);
+const keyInTree = key => {
+  const event = new window.Event('keydown', {bubbles: true});
+  Object.defineProperty(event, 'key', {value: key});
+  return panel.querySelector('.traffic-payload-tree [tabindex="0"]').dispatchEvent(event);
+};
+const wide = retain(JSON.stringify(Object.fromEntries(Array.from({length: 3000}, (_, index) => [`k${index}`, index]))), 'application/json');
+await show(request(record(wide)), 'preview');
+assert.match(panel.textContent, /\[0 … 99\]/, 'a wide object folds into ranges rather than stopping');
+assert.doesNotMatch(panel.textContent, /more not shown|first 2,000/);
+const rows = () => panel.querySelectorAll('.traffic-payload-tree [role="treeitem"]').length;
+const closed = rows();
+keyInTree('ArrowDown');
+keyInTree('ArrowRight');
+assert(rows() > closed, 'Arrow keys open a range in the Preview tree');
 
 // HTML is source in both tabs and never parsed into elements.
 const html = '<!doctype html><title>t</title><script>alert(1)</script><img src=x onerror=alert(2)><p>body';

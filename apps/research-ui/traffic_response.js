@@ -8,8 +8,8 @@ const TRAFFIC_RESPONSE_CACHE_BYTES = 48 * 1024 * 1024;
 const TRAFFIC_RESPONSE_RETRY_MS = 2000;
 const TRAFFIC_RESPONSE_FIND_LIMIT = 1000;
 const TRAFFIC_RESPONSE_HEX_BYTES = 256 * 1024;
-const TRAFFIC_JSON_NODE_LIMIT = 2000;
-const TRAFFIC_RESPONSE_CAP = 16 * 1024 * 1024;
+// Bytes of a cut, partial or stopped body can end inside a character.
+const TRAFFIC_RESPONSE_OPEN_ENDED = new Set(['captured_truncated', 'partial', 'aborted', 'cancelled']);
 
 const TRAFFIC_RESPONSE_CODINGS = Object.freeze({gzip: 'gzip', deflate: 'deflate', br: 'br', zstd: 'zstd',
   dcb: 'dcb (shared dictionary)', dcz: 'dcz (shared dictionary)', compress: 'compress', other: 'unrecognized'});
@@ -246,7 +246,29 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     return {code: view.box, view, matches: found.matches.length, truncated: Boolean(found.truncated), current};
   }
 
-  function toolbar(container, binary, prettyable, shown, text) {
+  // Preview shares the Payload tree, so its reach and keys are the same.
+  function jsonPreview(key, value) {
+    let shown = previews.get(key);
+    if (!shown) {
+      shown = {model: {json: {value}, keys: new WeakMap()}, expanded: new Set(['$']), selected: null,
+        find: {query: '', matches: [], current: -1, truncated: false}};
+      previews.set(key, shown);
+      while (previews.size > 8) previews.delete(previews.keys().next().value);
+    }
+    const holder = trafficNode('div', 'traffic-response-tree');
+    const draw = (focus = false, keepScroll = false) => {
+      const top = keepScroll ? previewArea?.box.scrollTop ?? 0 : 0;
+      previewArea?.dispose();
+      previewArea = trafficPayloadTreeArea(shown.model, shown, () => draw(true, true), 'Response JSON tree');
+      holder.replaceChildren(previewArea.box);
+      previewArea.box.scrollTop = top;
+      if (focus) previewArea.box.querySelector('[tabindex="0"]')?.focus();
+    };
+    draw();
+    return holder;
+  }
+
+  function toolbar(container, binary, prettyable, shown, text, copyNote) {
     const bar = trafficNode('div', 'traffic-response-toolbar');
     bar.setAttribute('role', 'toolbar');
     bar.setAttribute('aria-label', 'Response body view');
@@ -380,7 +402,7 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     const language = sourceSyntaxLanguage({kind: 'response_body', mime_type: artifact.mime_type, url: artifact.url});
     if (language === 'json' || /^\s*[[{]/.test(text)) {
       try {
-        return [trafficJsonTree(JSON.parse(text))];
+        return [...lossyNote, jsonPreview(`${artifact.session_id}:${artifact.artifact_id}:${artifact.sha256}`, JSON.parse(text))];
       } catch {
         if (language === 'json') return [trafficNode('p', 'traffic-body-note', 'Not valid JSON; the Response tab shows its text.'), trafficNode('pre', 'traffic-body-text', text)];
       }

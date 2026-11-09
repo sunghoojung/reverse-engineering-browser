@@ -2285,18 +2285,14 @@ var(--panel);
         background: var(--panel-2); color: var(--text); font: 12px var(--sans); }
       .traffic-response-find:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
       .traffic-response-count { color: var(--muted); font: 12px var(--sans); white-space: nowrap; }
-      .traffic-response-code, .traffic-json-tree { max-height: 60vh; padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; tab-size: 2; }
-      .traffic-response-code:focus-visible, .traffic-json-tree:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+      .traffic-response-status { color: var(--muted); font: 11px var(--sans); }
+      .traffic-response-code { max-height: 60vh; padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; tab-size: 2; }
+      .traffic-response-code:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
       .code-view-row { min-height: 18px; white-space: pre; }
       .code-view.is-wrapped .code-view-row { white-space: pre-wrap; overflow-wrap: anywhere; }
       .code-view-row.is-continued::before { content: "\21aa  "; color: var(--faint); }
       .code-view-raw { margin: 4px 0 0; color: var(--muted); font: 11px/1.5 var(--mono); overflow-wrap: anywhere; }
-      .traffic-json-tree { margin-top: 8px; }
-      .traffic-json-node > :not(summary), .traffic-json-more { margin-left: 14px; }
-      .traffic-json-node > summary { cursor: pointer; }
-      .traffic-json-node > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-      .traffic-json-leaf { margin-left: 14px; overflow-wrap: anywhere; }
-      .traffic-json-shape, .traffic-json-more { color: var(--muted); }
+      .traffic-response-tree { margin-top: 8px; }
       .traffic-response-image { margin: 8px 0 0; }
       .traffic-response-image img { display: block; max-width: 100%; max-height: 60vh; border: 1px solid var(--line); border-radius: 4px;
         background: repeating-conic-gradient(var(--panel-2) 0 25%, var(--panel) 0 50%) 0 0 / 16px 16px; }
@@ -2359,8 +2355,8 @@ var(--panel);
       .traffic-payload-note { margin: 0 0 8px; color: var(--muted); font: 12px/1.5 var(--sans); }
       .traffic-payload-view { max-height: max(160px, 55vh); padding: 4px 0; overflow: auto; border: 1px solid var(--line); border-radius: 4px; }
       /* Captured code reads on the Sources editor surface its syntax colors are tuned for. */
-      .traffic-response-code, .traffic-json-tree, .traffic-payload-view { background: var(--code-bg); color: var(--code-text); font: 12px/18px var(--code-font); }
-      :is(.traffic-response-code, .traffic-json-tree, .traffic-payload-view) ::selection { background: var(--code-selection); }
+      .traffic-response-code, .traffic-payload-view { background: var(--code-bg); color: var(--code-text); font: 12px/18px var(--code-font); }
+      :is(.traffic-response-code, .traffic-payload-view) ::selection { background: var(--code-selection); }
       .traffic-payload-view:focus-visible, .traffic-payload-view [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
       .traffic-payload-line { padding: 0 8px; }
       .code-view-mark { border-radius: 2px; background: color-mix(in srgb, var(--amber) 30%, transparent); color: inherit; }

@@ -470,7 +470,7 @@ function trafficPayloadPartsArea(parts, shown) {
     onSelect: index => {shown.selected = {section: 'payload', index};}});
 }
 
-function trafficPayloadTreeArea(model, shown, rerender) {
+function trafficPayloadTreeArea(model, shown, rerender, label = 'Request payload tree') {
   const visible = trafficPayloadVisible(model, shown.expanded);
   const marks = trafficPayloadMatchesBy(shown, 'payload');
   const selectedId = shown.selected?.section === 'payload' ? shown.selected.id : null;
@@ -484,7 +484,7 @@ function trafficPayloadTreeArea(model, shown, rerender) {
     rerender();
     return true;
   };
-  const area = trafficPayloadArea({className: 'traffic-payload-tree', label: 'Request payload tree', role: 'tree',
+  const area = trafficPayloadArea({className: 'traffic-payload-tree', label, role: 'tree',
     count: visible.length, selectable: true, selected: selectedId ? visible.findIndex(node => node.id === selectedId) : -1,
     makeRow: index => {
       const node = visible[index];

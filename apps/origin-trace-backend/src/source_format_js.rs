@@ -2058,6 +2058,19 @@ mod tests {
     }
 
     #[test]
+    fn a_line_comment_keeps_its_trailing_spaces() {
+        for (source, expected) in [
+            ("// hi   \na;\n", "// hi   \na;\n"),
+            ("a; // tail  \nb;", "a; // tail  \nb;\n"),
+            ("a; // end   ", "a; // end   \n"),
+            ("f(a, // first  \nb)", "f(\n  a, // first  \n  b\n)\n"),
+        ] {
+            assert_eq!(layout(source), expected, "{source}");
+            assert_eq!(layout(expected), expected, "{source}");
+        }
+    }
+
+    #[test]
     fn broken_syntax_and_output_growth_are_refused() {
         assert_eq!(format("function(){", 1 << 20), Err(Refusal::Parse));
         assert_eq!(

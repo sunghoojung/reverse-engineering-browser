@@ -146,6 +146,7 @@ impl Doc {
             doc: self,
             source,
             out: String::with_capacity(source.len() + source.len() / 2),
+            text_end: 0,
             modes: vec![Mode::Break],
             indents: vec![0],
             chosen: vec![Mode::Flat; self.groups.len()],
@@ -161,6 +162,9 @@ struct Printer<'d> {
     doc: &'d Doc,
     source: &'d str,
     out: String,
+    /// End of the last source slice in `out`. Spaces before it are source
+    /// text, such as a line comment's trailing spaces, and are never trimmed.
+    text_end: usize,
     modes: Vec<Mode>,
     indents: Vec<usize>,
     chosen: Vec<Mode>,
@@ -226,7 +230,7 @@ impl Printer<'_> {
             at += 1;
         }
         let trimmed = self.out.trim_end_matches([' ', '\n']).len();
-        self.out.truncate(trimmed);
+        self.out.truncate(trimmed.max(self.text_end));
         self.out.push('\n');
         Ok(self.out)
     }
@@ -327,6 +331,7 @@ impl Printer<'_> {
             self.line_start = false;
         }
         self.out.push_str(text);
+        self.text_end = self.out.len();
         match text.rfind('\n') {
             Some(at) => self.column = text[at + 1..].chars().count(),
             None => self.column += width(text, isize::MAX).0,
@@ -339,7 +344,7 @@ impl Printer<'_> {
 
     fn newline(&mut self, blank: bool) {
         let trimmed = self.out.trim_end_matches(' ').len();
-        self.out.truncate(trimmed);
+        self.out.truncate(trimmed.max(self.text_end));
         if self.out.is_empty() {
             return;
         }

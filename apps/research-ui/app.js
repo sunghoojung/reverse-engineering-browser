@@ -3610,6 +3610,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           artifact = found.artifact;
         }
         const key = `${artifact.session_id}:${artifact.artifact_id}:${artifact.sha256}`;
+        // A body kept whole is the bytes its record digested. A cut body's record digests more than was kept.
+        if (record.state === 'captured' && record.sha256 && record.sha256 !== artifact.sha256) {
+          return {status: 'error', error: "the request record's SHA-256 does not match the retained artifact", retryable: false, url: artifact.url, key};
+        }
         const view = requestBodyViews.get(key);
         // A body cut at the capture limit may end inside a character.
         const cut = record.state === 'captured_truncated';
@@ -3649,7 +3653,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const limit = Math.min(artifact.byte_size - loaded.length, page);
           const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?offset=${loaded.length}&limit=${limit}`,
             {cache: 'no-store', signal: controller.signal});
-          if (!response.ok) {response.body?.cancel().catch(() => {}); throw new Error(`the artifact store returned ${response.status}`);}
+          if (!response.ok) {
+            if (response.status === 500 && (await Promise.resolve(response.json?.()).catch(() => null))?.code === 'artifact_integrity') throw mismatch('its bytes do not match the retained SHA-256');
+            response.body?.cancel().catch(() => {});
+            throw new Error(`the artifact store returned ${response.status}`);
+          }
           const chunk = await sourceFactsReadBytes(response, limit, controller.signal);
           if (chunk.length !== limit) throw mismatch('its retained byte size changed');
           const bytes = new Uint8Array(loaded.length + chunk.length);
@@ -3671,8 +3679,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             lossy, verified, complete, cut, loaded: bytes.length, total: artifact.byte_size};
         } catch (error) {
           const message = controller.signal.aborted ? 'timed out after 10 seconds' : String(error?.message ?? error).replace(/\.$/, '');
-          // A failed next range keeps the bytes already shown.
-          view = previous ? {...previous, moreError: message}
+          // A failed next range keeps the bytes already shown; bytes that fail integrity are not shown.
+          view = previous && error?.integrity !== true ? {...previous, moreError: message}
             : {status: 'error', error: message, retryable: error?.integrity !== true, failedAt: Date.now()};
         } finally {
           clearTimeout(timeout);

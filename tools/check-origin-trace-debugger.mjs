@@ -1325,6 +1325,42 @@ console.log("PASS selected strip and inspector share current pending/response/fa
   assert.match(view.error, /do not match the retained SHA-256/); assert.equal(view.retryable, false);
   clock += 60000; body.requestBodyView(failingRequest); body.refreshSelectedRequestBody(); await settle();
   assert.equal(fetches.length, 5, "An integrity failure is not retried");
+  // The store names a blob that changed on disk: it is shown as a mismatch and not reread.
+  const altered = {...artifact, artifact_id: "905"};
+  const alteredRequest = {id: "a", body: {...request.body, artifactId: "905"}};
+  bodyState.artifacts.push(altered); bodyState.requests.push(alteredRequest); bodyState.selectedRequestId = "a";
+  respond.push(async () => new Response(JSON.stringify({error: "Artifact content integrity is invalid", code: "artifact_integrity"}), {status: 500}));
+  body.requestBodyView(alteredRequest); await settle();
+  view = body.requestBodyView(alteredRequest);
+  assert.match(view.error, /do not match the retained SHA-256/); assert.equal(view.retryable, false);
+  clock += 60000; body.requestBodyView(alteredRequest); body.refreshSelectedRequestBody(); await settle();
+  assert.equal(fetches.length, 6, "A blob the store reports as changed is not retried");
+  // A record digest that disagrees with the retained artifact is refused before any read.
+  bodyState.artifacts.push({...artifact, artifact_id: "906"});
+  const conflict = {id: "c", body: {...request.body, artifactId: "906", sha256: "cd".repeat(32)}};
+  bodyState.requests.push(conflict); bodyState.selectedRequestId = "c";
+  view = body.requestBodyView(conflict);
+  assert.match(view.error, /request record's SHA-256 does not match/); assert.equal(view.retryable, false);
+  assert.equal(fetches.length, 6, "A record digest mismatch reads nothing");
+  // A cut body's record digests more than was kept, so it is not compared.
+  bodyState.artifacts.push({...artifact, artifact_id: "907"});
+  const cut = {id: "t", body: {...request.body, state: "captured_truncated", artifactId: "907", sha256: "cd".repeat(32)}};
+  bodyState.requests.push(cut); bodyState.selectedRequestId = "t";
+  respond.push(async () => new Response(bytes));
+  assert.equal(body.requestBodyView(cut).status, "loading"); await settle();
+  assert.equal(body.requestBodyView(cut).status, "ready");
+  // Bytes that fail integrity on a later range are not kept.
+  const longBody = new Uint8Array(3 * 1024 * 1024).fill(97);
+  bodyState.artifacts.push({...artifact, artifact_id: "908", sha256: "ef".repeat(32), byte_size: longBody.length});
+  const long = {id: "g", body: {...request.body, artifactId: "908"}};
+  bodyState.requests.push(long); bodyState.selectedRequestId = "g";
+  respond.push(async () => new Response(longBody.slice(0, 2 * 1024 * 1024)));
+  body.requestBodyView(long); await settle();
+  view = body.requestBodyView(long);
+  respond.push(async () => new Response(longBody.slice(2 * 1024 * 1024)));
+  body.loadMoreRequestBody(view.key); await settle();
+  view = body.requestBodyView(long);
+  assert.equal(view.status, "error"); assert.equal(view.bytes, undefined, "A mismatch keeps no bytes"); assert.equal(view.retryable, false);
   // Bodies past one range load 2 MiB at a time, on request, and verify once whole.
   const large = new Uint8Array(3 * 1024 * 1024).map((_, index) => 97 + index % 26);
   const largeDigest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", large)), b => b.toString(16).padStart(2, "0")).join("");

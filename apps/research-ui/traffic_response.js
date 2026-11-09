@@ -133,7 +133,11 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       const limit = Math.min(artifact.byte_size - loaded.length, TRAFFIC_RESPONSE_PAGE_BYTES);
       const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?offset=${loaded.length}&limit=${limit}`,
         {cache: 'no-store', signal: controller.signal});
-      if (!response.ok) {response.body?.cancel().catch(() => {}); throw new Error(`the artifact store returned ${response.status}`);}
+      if (!response.ok) {
+        if (response.status === 500 && (await Promise.resolve(response.json?.()).catch(() => null))?.code === 'artifact_integrity') throw mismatch('its bytes do not match the retained SHA-256');
+        response.body?.cancel().catch(() => {});
+        throw new Error(`the artifact store returned ${response.status}`);
+      }
       const chunk = await sourceFactsReadBytes(response, limit, controller.signal);
       if (chunk.length !== limit) throw mismatch('its retained byte size changed');
       const bytes = new Uint8Array(loaded.length + chunk.length);

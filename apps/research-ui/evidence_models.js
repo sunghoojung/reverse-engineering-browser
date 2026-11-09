@@ -38,7 +38,8 @@
           'request_headers', 'response_headers', 'cookie_list', 'script_cookie', 'request_initiator_stack',
           'script_identity', 'capture_exclusion', 'tab_set', 'request_tab_link', 'navigation_initiator_stack',
           'navigation_initiator_link', 'async_task_stack',
-          'request_extension_link'
+          'request_extension_link', 'request_watch_match', 'listener_dispatch', 'timer_observation',
+          'csp_violation', 'exception_observation', 'dom_mutation'
         ])
       };
       // Scheme classes of protocol/native-network-v3.md; absent means 0.
@@ -79,7 +80,7 @@
         'response_headers', 'cookie_list', 'request_initiator_stack', 'navigation_initiator_link']);
       // Session-level network records the backend keeps in its network window.
       const networkContextTypes = new Set(['capture_exclusion', 'tab_set', 'request_tab_link',
-        'request_extension_link']);
+        'request_extension_link', 'request_watch_match']);
       const networkRequestArtifactKinds = new Set(['request_body', 'request_target', 'request_headers', 'response_headers',
         'cookie_list']);
       const artifactKinds = new Set([

@@ -1,6 +1,8 @@
 // The C++ core verdict on every debugger observation record
 // (tests/debugger_observation_test.cpp --golden) must match the Python
-// evidence validator. See protocol/native-debugger-observation-v1.md.
+// evidence validator, and the shipped UI poll validator must accept every
+// record the backend windows can carry, or one match fails each later poll.
+// See protocol/native-debugger-observation-v1.md.
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import fs from 'node:fs';
@@ -25,4 +27,21 @@ const verdicts = execFileSync('python3',
 cases.forEach((item, index) => {
   assert.equal(verdicts[index], item.valid, `Python validator disagrees on: ${item.name}`);
 });
-console.log(`PASS debugger observation wire: ${cases.length} C++ and Python verdicts agree`);
+
+const source = fs.readFileSync(new URL('apps/research-ui/evidence_models.js', root), 'utf8');
+const model = new Function(`${source}
+return {isBrokerEvent, isBrokerResponse, requestsFromEvents};`)();
+const types = new Set();
+for (const {name, valid, event} of cases) {
+  if (!valid) continue;
+  types.add(event.type);
+  assert(model.isBrokerEvent(event), `UI poll validator refused: ${name}`);
+  assert(model.isBrokerResponse({count: 1, events: [event]}), `UI poll response refused: ${name}`);
+  if (event.category === 'network') {
+    assert(model.isBrokerResponse({count: 1, events: [event], network_events: [event]}), `UI network window refused: ${name}`);
+    assert.deepEqual(model.requestsFromEvents([event], 'live'), [], `A watch match is not a request row: ${name}`);
+  }
+}
+assert.deepEqual([...types].sort(), ['csp_violation', 'dom_mutation', 'exception_observation', 'listener_dispatch',
+  'request_watch_match', 'timer_observation']);
+console.log(`PASS debugger observation wire: ${cases.length} C++ and Python verdicts agree; the UI poll accepts all ${types.size} record types`);

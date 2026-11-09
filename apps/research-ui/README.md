@@ -593,8 +593,9 @@ captured path and query, and its Payload tab shows them parsed:
 - **Capture details**, collapsed, holds the state, type, lengths, SHA-256,
   kind and artifact ID. A body cut at the capture limit or a cut target is
   noted at the top. Bodies are read 2 MiB at a time, and a body that parses
-  (JSON, form or multipart) reads on by itself until every byte is read; other
-  text uses **Show the next 2 MiB**.
+  (JSON, form or multipart) reads on by itself until every byte is read, showing
+  how much is read instead of its unparsed prefix; other text uses **Show the
+  next 2 MiB**.
 
 Without content capture, Payload still shows the body's length, type and digest
 and says that content capture was off. File, blob and stream bodies are read

@@ -639,6 +639,10 @@ function trafficPayloadBodySection(body, view, shown, panel) {
   } else if (view?.status === 'ready' && view.verified === false) note('The retained digest could not be rechecked in this view.');
   const parsed = Boolean(model.json || model.pairs || model.parts);
   const sourceMode = () => !parsed || trafficPayloadPrefs.source;
+  // app.js reads every range of a body that parses without a click. Until the
+  // last one its prefix does not parse, and coloring each 2 MiB prefix as code
+  // froze the page for most of a second per range, so progress is shown instead.
+  const reading = !parsed && view?.status === 'ready' && view.complete === false && !view.moreError && trafficPayloadParses(body, view);
   const options = trafficNode('div', 'traffic-payload-options');
   head.append(options);
   const holder = trafficNode('div', 'traffic-payload-holder');
@@ -648,6 +652,15 @@ function trafficPayloadBodySection(body, view, shown, panel) {
     render({focus = false, keepScroll = false} = {}) {
       const scroll = keepScroll ? area?.box.scrollTop ?? 0 : 0;
       area?.dispose();
+      if (reading) {
+        options.replaceChildren();
+        const progress = trafficNode('p', 'traffic-payload-note traffic-payload-progress',
+          `Reading the rest of the body to show it parsed: ${trafficByteCount(view.loaded)} of ${trafficByteCount(view.total)} read.`);
+        progress.setAttribute('role', 'status');
+        area = {box: progress, dispose() {}, reveal: () => null};
+        holder.replaceChildren(progress);
+        return;
+      }
       const source = sourceMode(), rows = source ? trafficPayloadSourceRows(model) : null;
       const focusedOption = options.contains(globalThis.document?.activeElement) ? document.activeElement.textContent : null;
       options.replaceChildren();
@@ -682,6 +695,7 @@ function trafficPayloadBodySection(body, view, shown, panel) {
       if (focus) area.box.querySelector('[tabindex="0"]')?.focus();
     },
     search(raw, needle) {
+      if (reading) return [];
       if (sourceMode()) {
         return findSourceOccurrences(trafficPayloadSourceRows(model).rows.map(row => row.text), raw, TRAFFIC_PAYLOAD_FIND_LIMIT).matches
           .map(({line, column, length}) => ({section: 'payload', row: line, column, length}));

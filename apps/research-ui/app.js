@@ -3253,6 +3253,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         retainTrafficRequest(request);
         state.trafficDetailOpen = true;
         state.trafficSelectionNotice = null;
+        clearTrafficUnreadSelection();
         state.originTrace = null;
         state.selectedTraceRow = null;
         state.originTraceStatus = 'idle';
@@ -3307,6 +3308,28 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
       }
 
+      // A row whose records could not be read keeps a notice that names it. The
+      // notice goes once that row, or any other, is selected.
+      function clearTrafficUnreadSelection() {
+        const failed = state.trafficUnreadSelection;
+        if (!failed) return;
+        state.trafficUnreadSelection = null;
+        const notice = document.querySelector('#investigation-notice');
+        if (!notice || notice.textContent !== failed.message) return;
+        notice.textContent = '';
+        const bar = document.querySelector('#investigation-navigation');
+        bar.dataset.status = 'ready';
+        const details = bar.querySelector('details');
+        if (details) details.open = false;
+        if (failed.barWasHidden && document.querySelector('#investigation-back')?.disabled && document.querySelector('#investigation-forward')?.disabled) bar.hidden = true;
+      }
+
+      function trafficUnreadSelectionText(indexed, reason, previous) {
+        const url = String(indexed.path ?? '');
+        const name = `${indexed.method} ${url.length > 120 ? `${url.slice(0, 119)}…` : url} (request ${indexed.id})`;
+        return `${name} was not opened: its records could not be read (${reason}).${previous ? ' The inspector still shows the request selected before it.' : ''} It opens when its records can be read.`;
+      }
+
       // A row the newest window does not hold whole is read from the store first.
       function selectTrafficRow(id) {
         const indexed = state.trafficIndex?.row(id) ?? null;
@@ -3349,9 +3372,15 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } catch (error) {
           if (controller.signal.aborted) return;
           if (select) {
-            state.trafficSelectionNotice = `The records of this request could not be read: ${deadline.aborted ? 'the backend did not answer within 10 seconds' : error.message}.`;
+            const reason = deadline.aborted ? 'the backend did not answer within 10 seconds' : error.message;
+            const message = trafficUnreadSelectionText(indexed, reason, state.selectedRequestId !== null);
+            const bar = document.querySelector('#investigation-navigation');
+            // A later valid poll reads it again (retryTrafficUnreadSelection).
+            state.trafficUnreadSelection = {id, indexed, message,
+              barWasHidden: state.trafficUnreadSelection?.barWasHidden ?? Boolean(bar?.hidden)};
+            state.trafficSelectionNotice = message;
             if (state.selectedRequestId === null) updateSelectionSummary(null);
-            else investigationNotice(state.trafficSelectionNotice, 'unavailable');
+            else investigationNotice(message, 'unavailable');
           }
         } finally {
           row?.removeAttribute('aria-busy');
@@ -8476,6 +8505,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // for minutes, bounded by its worker deadline) nor restarts it, so the
       // poll keeps the connection state current meanwhile.
       async function refreshPollDependents(eventsChanged) {
+        retryTrafficUnreadSelection();
         if (state.refreshingDependents) {
           if (eventsChanged) renderVmLab();
           return;
@@ -8490,6 +8520,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } finally {
           state.refreshingDependents = false;
         }
+      }
+
+      // A row whose records could not be read is read again after each valid
+      // poll, one read at a time, until it opens or another row is selected.
+      function retryTrafficUnreadSelection() {
+        const failed = state.trafficUnreadSelection;
+        if (!failed || state.trafficLoadingId !== null) return;
+        loadTrafficRequest(state.trafficIndex?.row(failed.id) ?? failed.indexed, true);
       }
 
       // The single transition for the event connection. 'connected' and

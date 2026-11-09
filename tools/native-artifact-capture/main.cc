@@ -1248,6 +1248,7 @@ void InFlightPool(NativeArtifactCaptureSink& sink,
     auto held = reb::NativeArtifactReservation::Acquire(
         sink.memory_pool(), reb::kNativeArtifactInFlightBytes - kChunk / 2);
     const auto queued = client.transfers.size();
+  StreamPastExpiry();
     Check(Finish(declared, true, std::span(source)) != 0, "A small body still fits");
     const int starved = Begin(request);
     const std::vector<std::uint8_t> quarter(256 * 1024, 'q');

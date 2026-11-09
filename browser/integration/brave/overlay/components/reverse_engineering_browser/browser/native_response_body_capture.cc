@@ -208,6 +208,13 @@ void NativeResponseBodyCapture::OnData(const Key key,
   }
   Body& body = found->second;
   NativeArtifactStream& stream = body.stream;
+  if (Now() >= expires_at_monotonic_ns_) {
+    // Flush ran before expiry; a body opened since can no longer be recorded,
+    // so neither its bytes nor a checkpoint reach the receiver past it.
+    stream.Abort();
+    bodies_.erase(found);
+    return;
+  }
   // The budget counts unique bytes, so it is charged once the digest is known.
   stream.Append(chunk);
   if (stream.state() == NativeArtifactStreamState::kMemoryLimit ||

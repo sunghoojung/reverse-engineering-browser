@@ -109,6 +109,32 @@ void CheckRetained(const NativeProbeEvent& record,
         label + ": exact bytes and digest, joined to its response_started creator");
 }
 
+// A body opened after the pre-expiry flush can no longer be recorded, so
+// neither its bytes nor a checkpoint reach the receiver.
+void StreamPastExpiry() {
+  ConfigureResponses();
+  auto& transfers = NativeArtifactSocketClient::Get().transfers;
+  transfers.clear();
+  const auto response = Respond(8100);
+  std::vector<std::uint8_t> chunk(64 * 1024, 'c');
+  NativeArtifactBodyTee::Deliver(response.pipe, chunk);
+  const auto streaming = transfers.size();
+  Check(streaming == 1, "The streaming body is open at the receiver");
+  base::test_now_ns = static_cast<std::int64_t>(kResponseExpiry) + 1;
+  const auto records_before = events.size();
+  NativeArtifactBodyTee::Deliver(response.pipe, chunk);
+  Check(transfers.empty() && events.size() == records_before,
+        "Bytes past expiry abort the stream and nothing more is sent");
+  NativeArtifactBodyTee::Deliver(response.pipe, chunk);
+  NativeArtifactBodyTee::End(response.pipe, reb::NativeArtifactBodyEnd::kSourceClosed);
+  Completed(response);
+  Check(transfers.empty() && events.size() == records_before,
+        "Later bytes and the end of the aborted body change nothing");
+  ConfigureResponses();
+  transfers.clear();
+  std::cout << "PASS response body stream past expiry is aborted\n";
+}
+
 void ResponseBodies(reb::ArtifactReceiver& receiver, const std::filesystem::path& output) {
   ConfigureResponses();
   auto& transfers = NativeArtifactSocketClient::Get().transfers;

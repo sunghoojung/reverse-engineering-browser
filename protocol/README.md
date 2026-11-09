@@ -339,6 +339,10 @@ pages and the local HTTP/CLI contract.
 method, target, experiment, digest and expiry format. Offline preparation remains;
 live fulfillment and CLI arming/disarming were removed with CDP.
 
+[Native compiled scripts](native-compiled-scripts-v1.md) adds artifact capture
+origin 14, `compiled_script`, valid only for JavaScript with a nonzero execution
+context, and retires Blink's code generation hook as the producer of origin 2.
+
 Runtime allocating-script provenance adds artifact capture origin 8,
 `runtime_allocating_script`, valid only for JavaScript with a nonzero execution
 context. The fixed 128-byte artifact ABI remains version 1. A runtime buffer's
@@ -394,6 +398,7 @@ use the names.
 | 27 | `wasm_execution_outcome` | `include/reb/wasm_dispatch.hpp` | [native Wasm execution outcomes](native-wasm-dispatch-v1.md#execution-outcomes) |
 | 28 | `wasm_dispatch_overflow` | `include/reb/wasm_dispatch.hpp` | [native Wasm overflow identities](native-wasm-dispatch-v1.md#overflow-identities) |
 | 29 | `wasm_indirect_overflow` | `include/reb/wasm_dispatch.hpp` | [native Wasm overflow identities](native-wasm-dispatch-v1.md#overflow-identities) |
+| 51 | `script_compiled` | `include/reb/compiled_script.hpp` | [native compiled scripts](native-compiled-scripts-v1.md) |
 
 `wasm_indirect_observation` payloads are version 2 and `wasm_guest_invocation`
 version 4: each adds the JavaScript invocation context in previously reserved

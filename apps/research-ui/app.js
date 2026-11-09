@@ -1283,6 +1283,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         // Hidden Traffic must not keep the previous request snapshot alive.
         state.trafficRenderedView = null;
         const loaded = state.trafficLoaded;
+        // The selection keeps its last window copy, so it survives leaving the window (#437).
+        const selected = state.selectedRequestId === null ? null : state.nativeRequests.find(request => request.id === state.selectedRequestId);
+        if (loaded && selected && trafficRecordCount(selected) >= trafficRecordCount(loaded.get(selected.id))) loaded.set(selected.id, selected);
         if (!loaded?.size) {
           state.requests = state.nativeRequests;
           return;
@@ -3207,7 +3210,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!request) return;
         investigationBeforeSelection();
         state.originTraceController?.abort();
+        // A store read still running for another row must not select it afterwards.
+        if (state.trafficLoadingId !== id) cancelTrafficLoad();
         state.selectedRequestId = id;
+        retainTrafficRequest(request);
         state.trafficDetailOpen = true;
         state.trafficSelectionNotice = null;
         state.originTrace = null;
@@ -3246,6 +3252,24 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         return (request?.events?.length ?? 0) + (request?.details?.length ?? 0);
       }
 
+      function cancelTrafficLoad() {
+        state.trafficLoadController?.abort();
+        state.trafficLoadController = null;
+        state.trafficLoadingId = null;
+      }
+
+      // Keeps a selected or store-read row selectable after the newest window moves on.
+      function retainTrafficRequest(request) {
+        const loaded = state.trafficLoaded;
+        if (!loaded) return;
+        loaded.delete(request.id);
+        loaded.set(request.id, request);
+        for (const key of loaded.keys()) {
+          if (loaded.size <= 32) break;
+          if (key !== state.selectedRequestId && key !== request.id) loaded.delete(key);
+        }
+      }
+
       // A row the newest window does not hold whole is read from the store first.
       function selectTrafficRow(id) {
         const indexed = state.trafficIndex?.row(id) ?? null;
@@ -3266,17 +3290,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         row?.setAttribute('aria-busy', 'true');
         try {
           const events = await state.trafficIndex.events(indexed.indexRow, AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]));
+          if (controller.signal.aborted) return;
           const request = requestsFromEvents(events, indexed.origin).find(candidate => candidate.id === id);
           if (!request) throw new Error('its stored records no longer form this request');
           // Tab sets and links have no request ID, so the store read lacks them; the index row has them.
           Object.assign(request, {tabIds: indexed.tabIds, tabLink: indexed.tabLink, tabLinkLabel: indexed.tabLinkLabel,
             extensionId: indexed.extensionId});
-          state.trafficLoaded.delete(id);
-          state.trafficLoaded.set(id, request);
-          for (const key of state.trafficLoaded.keys()) {
-            if (state.trafficLoaded.size <= 32) break;
-            if (key !== state.selectedRequestId && key !== id) state.trafficLoaded.delete(key);
-          }
+          retainTrafficRequest(request);
           rebuildTrafficRequests();
           if (select) {
             selectRequest(id);

@@ -3173,6 +3173,247 @@
         }
       }
     },
+    "/api/wasm/functions": {
+      "get": {
+        "operationId": "get_wasm_functions",
+        "summary": "List a captured WebAssembly module's functions",
+        "description": "Inert, bounded function list for a hash-verified core WASM artifact: each defined function's index, byte range and type index, without decoding an instruction. Names come from the name section, then exports, as escaped single-line text. The list is limited by a byte budget; a partial status and omissions name what was left out.",
+        "tags": [
+          "artifacts"
+        ],
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "description": "Canonical nonzero unsigned 64-bit artifact ID"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Versioned function index.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasmFunctionIndex"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "stored-wasm-artifact",
+              "condition": "artifact_id must identify a captured WebAssembly artifact that passes content verification and size limits."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Verifies captured artifact bytes and reads section framing only; the module is never executed and no instruction is decoded.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/wasm_graph.rs",
+              "symbol": "function_index"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/wasm/graph": {
+      "get": {
+        "operationId": "get_wasm_function_graph",
+        "summary": "Basic blocks for one WebAssembly function",
+        "description": "Declared static control flow for one defined function of a hash-verified core WASM artifact. Blocks and edges come from the same decoder as inspect_wasm; every edge carries a kind and an unresolved target stays labeled with a null destination. complete is always false: reachable here is not observed execution and the drawing is not a proof. Responses are bounded by the row text and structure byte budgets, and a partial status with omissions names what was cut. Never executes the module.",
+        "tags": [
+          "artifacts"
+        ],
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "description": "Canonical nonzero unsigned 64-bit artifact ID"
+            }
+          },
+          {
+            "name": "function",
+            "in": "query",
+            "required": true,
+            "description": "Function index, including imported function numbering. An imported or undefined index returns 404.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Versioned block graph.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasmBlockGraph"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "stored-wasm-artifact",
+              "condition": "artifact_id must identify a captured WebAssembly artifact that passes content verification and size limits."
+            },
+            {
+              "id": "defined-function",
+              "condition": "function must name a function with a body in this module."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Decodes one function body on request, one at a time, with no retained whole-module structure. Declared static flow only; the module is never executed.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/wasm_graph.rs",
+              "symbol": "function_graph"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/wasm": {
       "get": {
         "operationId": "inspect_wasm",
@@ -16136,6 +16377,312 @@
                 }
               }
             }
+          }
+        }
+      },
+      "WasmFunctionIndex": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "artifact_id",
+          "sha256",
+          "byte_size",
+          "status",
+          "imported_functions",
+          "defined_functions",
+          "listed_functions",
+          "function_fields",
+          "functions",
+          "names",
+          "omissions",
+          "limits",
+          "notice"
+        ],
+        "properties": {
+          "schema": {
+            "const": "wasm-function-index-v1"
+          },
+          "artifact_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "byte_size": {
+            "type": "integer",
+            "minimum": 8
+          },
+          "status": {
+            "enum": [
+              "decoded",
+              "partial"
+            ]
+          },
+          "imported_functions": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "defined_functions": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "listed_functions": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "function_fields": {
+            "const": [
+              "index",
+              "byte_offset",
+              "byte_end",
+              "type_index"
+            ]
+          },
+          "functions": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "minItems": 4,
+              "maxItems": 4
+            }
+          },
+          "names": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string",
+                  "maxLength": 512
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "omissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "notice": {
+            "type": "string"
+          }
+        }
+      },
+      "WasmBlockGraph": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "artifact_id",
+          "sha256",
+          "function_index",
+          "byte_offset",
+          "byte_end",
+          "type_index",
+          "evidence",
+          "complete",
+          "status",
+          "block_count",
+          "edge_count",
+          "instruction_count",
+          "edge_kinds",
+          "block_fields",
+          "flag_bits",
+          "edge_fields",
+          "blocks",
+          "edges",
+          "rows",
+          "row_count",
+          "omissions",
+          "limits",
+          "notice"
+        ],
+        "properties": {
+          "schema": {
+            "const": "wasm-block-graph-v1"
+          },
+          "artifact_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "function_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "byte_offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "byte_end": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "type_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "evidence": {
+            "const": "declared_static"
+          },
+          "complete": {
+            "const": false
+          },
+          "status": {
+            "enum": [
+              "decoded",
+              "partial"
+            ]
+          },
+          "block_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "edge_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "instruction_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "edge_kinds": {
+            "const": [
+              "fallthrough",
+              "branch",
+              "taken",
+              "not_taken",
+              "table",
+              "table_default",
+              "exception",
+              "unresolved"
+            ]
+          },
+          "block_fields": {
+            "const": [
+              "byte_offset",
+              "byte_end",
+              "first_row",
+              "row_count",
+              "instruction_count",
+              "flags"
+            ]
+          },
+          "flag_bits": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "edge_fields": {
+            "const": [
+              "from",
+              "to",
+              "kind",
+              "label"
+            ]
+          },
+          "blocks": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "minItems": 6,
+              "maxItems": 6
+            }
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 7
+                },
+                {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 512
+                }
+              ],
+              "minItems": 4,
+              "maxItems": 4
+            }
+          },
+          "rows": {
+            "type": "string",
+            "description": "Newline-terminated rows of hex byte offset, mnemonic and operands. A run of identical block openers is one row with a count suffix."
+          },
+          "row_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "omissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "notice": {
+            "type": "string"
           }
         }
       },

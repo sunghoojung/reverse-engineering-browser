@@ -6,6 +6,8 @@ globals, data and custom sections, then read function disassembly with original
 byte offsets. Every instruction keeps its function index, including imported
 function numbering. Selecting an enabled offset returns to the original hex.
 **Hex** preserves the existing evidence view; **Find** searches either view.
+**Graph** draws one function at a time as basic blocks with typed edges beside
+the linear view, computed when selected and labeled as declared static flow.
 
 Inspection is an explicit static action. It uses the existing pinned
 `wasmparser` dependency, verifies artifact integrity, and never executes the

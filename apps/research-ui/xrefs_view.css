@@ -1,6 +1,13 @@
 /* Cross-references dock. Rows are fixed-height and absolutely positioned so
    only the visible ones exist in the DOM; heights match ROW and GROUP in
    xrefs_view.js. */
+/* The toggle sits at the right end of the title bar, clear of its centered
+   session labels, so the sidebar rail keeps its height at the minimum window. */
+.titlebar { position: relative; }
+.xrefs-toggle { position: absolute; top: 50%; right: 8px; width: 26px; height: 22px; display: grid; place-items: center; padding: 0; border: 1px solid transparent; border-radius: var(--control-radius); background: transparent; color: var(--muted); transform: translateY(-50%); }
+.xrefs-toggle svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.xrefs-toggle:hover { background: var(--panel-3); color: var(--text); }
+.xrefs-toggle[aria-pressed="true"] { border-color: var(--line); background: var(--panel-3); color: var(--accent); }
 #workspace > .main { grid-column: 1; grid-row: 1; }
 #workspace > .native-console-panel { grid-column: 1; grid-row: 2; }
 .workspace[data-xrefs-open="true"] { grid-template-columns: minmax(0, 1fr) clamp(260px, 26%, 400px); }

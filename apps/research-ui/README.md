@@ -200,8 +200,8 @@ for the identity boundary, retained limits and integration points.
 
 ## Cross-references
 
-**Xrefs** at the foot of the sidebar, or X outside a text field, opens a dock on
-the right that follows the current selection: a request in Traffic, a source in
+The cross-references button at the right end of the title bar, or X outside a
+text field, opens a dock on the right that follows the current selection: a request in Traffic, a source in
 Sources (or one Wasm inspection row, by click or by tabbing to its gutter), a
 handler in VM, or an API call in Fingerprinting. It lists the evidence pointing
 at that selection and the evidence it points at, using only recorded links:

@@ -1013,6 +1013,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let firstRows = loaded["rows"] as? [String] ?? []
       XCTAssertTrue(firstRows.first?.contains("initiator") == true, "\(size.name): the renderer initiator is listed: \(firstRows)")
       try await assertLayout(ui, "#xrefs-dock", "\(size.name) dock")
+      // The toggle lives in the title bar so the sidebar rail fits the minimum window.
+      try await assertLayout(ui, ".titlebar", "\(size.name) title bar")
+      try await assertLayout(ui, ".sidebar", "\(size.name) sidebar beside the dock")
       try await assertInert(ui, "\(size.name) dock")
       try await ui.screenshot("xrefs-dock-\(size.name)")
 

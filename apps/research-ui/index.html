@@ -17,6 +17,7 @@
         <span id="session-mode" class="session-mode">Connecting</span>
         <span id="session-content" class="session-mode" data-kind="content" hidden>Content capture</span>
         <button id="invocation-tracking" class="session-tracking" type="button" aria-controls="invocation-sites-details" hidden></button>
+        <button id="xrefs-toggle" class="xrefs-toggle" type="button" aria-controls="xrefs-dock" aria-expanded="false" aria-pressed="false" aria-label="Cross-references" aria-keyshortcuts="X" title="Cross-references for the selection (X)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5h6m-2-2 2 2-2 2M16 15h-6m2-2-2 2 2 2M4 10h12"/></svg></button>
       </header>
 
       <aside id="sidebar" class="sidebar" aria-label="Origin Trace">
@@ -42,7 +43,6 @@
           </div>
         </nav>
         <div class="sidebar-actions">
-          <button id="xrefs-toggle" class="sidebar-action" type="button" aria-controls="xrefs-dock" aria-expanded="false" aria-pressed="false" aria-label="Cross-references" aria-keyshortcuts="X" title="Cross-references for the selection (X)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5h6m-2-2 2 2-2 2M16 15h-6m2-2-2 2 2 2M4 10h12"/></svg><span class="nav-label">Xrefs</span><kbd class="nav-shortcut" aria-hidden="true">X</kbd></button>
           <button id="native-console-toggle" class="sidebar-action" type="button" aria-controls="native-console-panel" aria-expanded="false" aria-pressed="false" aria-label="Console" aria-keyshortcuts="Meta+J Control+J" title="Toggle console (⌘ / Ctrl + J)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3 5 5 5-5 5m8 0h6"/></svg><span class="nav-label">Console</span><kbd class="nav-shortcut" aria-hidden="true">J</kbd></button>
           <button id="open-investigation-notebook" class="sidebar-action" type="button" aria-haspopup="dialog" aria-label="Open investigation notebook" title="Investigation notebook"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3h11v14H5zM3 6h4M3 10h4M3 14h4M9 7h4M9 10h4"/></svg><span class="nav-label">Notebook</span></button>
           <button id="theme-toggle" class="sidebar-action" type="button" aria-label="Appearance" title="Switch color theme"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3a7 7 0 1 0 0 14 7 7 0 0 0 0-14zm0 0v14"/></svg><span class="nav-label">Appearance</span></button>

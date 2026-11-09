@@ -776,7 +776,7 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   std::memcpy(&magic, prefix.data(), sizeof(magic));
   if (magic == kArtifactStreamMagic) {
     ArtifactStreamFrame frame;
-    std::memcpy(&frame, prefix.data(), prefix.size());
+    std::memcpy(reinterpret_cast<char*>(&frame), prefix.data(), prefix.size());
     stream.read(reinterpret_cast<char*>(&frame) + prefix.size(),
                 static_cast<std::streamsize>(sizeof(frame) - prefix.size()));
     if (stream.gcount() != static_cast<std::streamsize>(sizeof(frame) - prefix.size())) {
@@ -787,7 +787,7 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
     return ReceiveStreamFrame(stream, frame);
   }
   ArtifactHeader header{};
-  std::memcpy(&header, prefix.data(), prefix.size());
+  std::memcpy(reinterpret_cast<char*>(&header), prefix.data(), prefix.size());
   stream.read(reinterpret_cast<char*>(&header) + prefix.size(),
               static_cast<std::streamsize>(sizeof(header) - prefix.size()));
   if (stream.gcount() != static_cast<std::streamsize>(sizeof(header) - prefix.size())) {

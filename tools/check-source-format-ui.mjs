@@ -90,6 +90,10 @@ export async function checkSourceFormatUI(root) {
   const contrast = css.slice(css.indexOf('@media (prefers-contrast: more)'));
   assert(/--syntax-comment: #908caa; --syntax-keyword: #4fa0c1/.test(contrast), 'Increase Contrast brightens Moon comments and keywords');
   assert(/font: 12px\/18px var\(--code-font\)/.test(block('      .source-code')) && css.includes('--code-font: Menlo, Monaco, "Courier New", monospace;'), 'VS Code macOS editor font');
+  // The textarea stays transparent over its color mirror. The form-control rule sets an opaque
+  // background and another font at (1,2,1), so this selector must outrank it.
+  const editorRule = css.match(/#screen-analyst \.analyst-form \.code-edit > textarea#analyst-content \{([^}]*)\}/)?.[1] ?? '';
+  assert(/background: transparent/.test(editorRule) && /-webkit-text-fill-color: transparent/.test(editorRule) && /font: 12px\/18px var\(--code-font\)/.test(editorRule), 'The Analyst textarea stays transparent in the code font');
 
   // Mapping: whitespace-only, exact by construction, refused otherwise. Every
   // non-whitespace character maps to the same-rank one in the evidence, in

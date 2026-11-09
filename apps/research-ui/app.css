@@ -1607,9 +1607,10 @@ var(--panel);
       .analyst-form input, .analyst-form textarea, .analyst-form select { width: 100%; min-height: 30px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); font: 11px/1.45 var(--mono); text-transform: none; }
       /* The shared code view colors the text behind a transparent textarea that keeps editing. */
       .code-edit { position: relative; min-height: 280px; height: 100%; }
-      .code-edit-colors { position: absolute; inset: 0; margin: 0; padding: 6px 8px; overflow: hidden; border: 1px solid transparent; border-radius: 4px;
+      .code-edit-colors { position: absolute; inset: 0; margin: 0; padding: 6px 8px; overflow: hidden; border: 1px solid transparent; border-radius: 6px;
         background: var(--code-bg); color: var(--code-text); font: 12px/18px var(--code-font); letter-spacing: 0; tab-size: 2; white-space: pre; pointer-events: none; }
-      .analyst-form .code-edit > textarea#analyst-content { position: relative; display: block; background: transparent; color: transparent;
+      /* Outranks the shared form control rule: an opaque background would hide the colors, and another font would misplace the caret. */
+      #screen-analyst .analyst-form .code-edit > textarea#analyst-content { position: relative; display: block; background: transparent; color: transparent;
         -webkit-text-fill-color: transparent; caret-color: var(--code-text); font: 12px/18px var(--code-font); letter-spacing: 0; }
       .code-edit > textarea::placeholder { -webkit-text-fill-color: var(--faint); color: var(--faint); }
       .code-edit > textarea::selection { -webkit-text-fill-color: transparent; background: var(--code-selection); }
@@ -3037,6 +3038,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .source-excerpt-notice { color: var(--amber); font: 10px var(--mono); user-select: none; }
 /* Go to line (Ctrl+G) and the More menu open over the code, under the toolbar. */
 .source-editor-toolbar { position: relative; }
+.source-limit-notice { flex: 1 0 100%; box-sizing: border-box; margin: 0; padding: 4px 8px; border-left: 2px solid var(--amber); background: var(--panel); color: var(--text); font: 11px/1.45 var(--sans); overflow-wrap: anywhere; }
 .source-window { position: absolute; top: calc(100% + 4px); right: 8px; z-index: 20; display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
   max-width: calc(100% - 16px); padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); box-shadow: 0 8px 24px var(--shadow);
   color: var(--muted); font: 11px var(--sans); }

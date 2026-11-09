@@ -138,6 +138,14 @@ export async function checkSourceTreeModel(root) {
     same([24,25].map(id=>entry(t,file(t,id).key).detail.textContent),['24','25']);
     same(t.nav().list.filter(value=>value.kind==='frame').map(value=>`${value.label} ${value.suffix ?? ''}`.trim()),['frame frame 3','frame frame 7','frame frame 8']);
   }
+  // A page with only network scripts names its frame from the retained HTML document.
+  {
+    const t=fixture([artifact(30,'https://shop.invalid/app.js',{frame_id:'11'}),
+      artifact(31,'https://shop.invalid/cart',{frame_id:'11',kind:'response_body',mime_type:'text/html; charset=utf-8',capture_origin:'network_response'}),
+      artifact(32,'https://other.invalid/feed.json',{frame_id:'12',kind:'response_body',mime_type:'application/json',capture_origin:'network_response'})]);
+    t.api.renderSourceTree();
+    same(t.nav().list.filter(value=>value.kind==='frame').map(value=>value.label),['shop.invalid','frame']);
+  }
   // Keyed refresh, focus, scroll anchoring and collapse without source actions.
   {
     const t=fixture();t.api.renderSourceTree();const nav=t.nav();

@@ -12,6 +12,12 @@ const SOURCE_TREE_GROUPS = Object.freeze([
 const SOURCE_TREE_INTERNAL_SCHEMES = new Set(['chrome:', 'chrome-untrusted:', 'chrome-search:', 'brave:', 'devtools:']);
 // Renderer-generated artifacts carry their execution context's URL: the frame's document.
 const SOURCE_TREE_DOCUMENT_ORIGINS = new Set(['dynamic_javascript', 'webassembly_compile', 'webassembly_module', 'webassembly_instantiate']);
+// Content sessions retain the HTML of a navigation as a response body with the frame's ID.
+function sourceTreeDocumentArtifact(source) {
+  const mime = String(source.mime_type ?? '').split(';', 1)[0].trim().toLowerCase();
+  return SOURCE_TREE_DOCUMENT_ORIGINS.has(source.capture_origin) ||
+    (source.kind === 'response_body' && (mime === 'text/html' || mime === 'application/xhtml+xml'));
+}
 const sourceTreeCollate = new Intl.Collator(undefined, {numeric: true, sensitivity: 'base'}).compare;
 
 // Non-special schemes have a 'null' origin, so their host is read by hand.
@@ -93,7 +99,7 @@ function sourceTreeModel(collection, catalog, helpers, {consoleDocuments = null,
     if (frameId[2] !== '0') {
       const frame = frames.get(frameId.join(':')) ?? {first: index, documents: new Set(), documentOrigin: null};
       frames.set(frameId.join(':'), frame);
-      if (SOURCE_TREE_DOCUMENT_ORIGINS.has(source.capture_origin) && url.identity[0] === 'url') {
+      if (sourceTreeDocumentArtifact(source) && url.identity[0] === 'url') {
         frame.documentOrigin ??= url.origin;
         if (frame.documents.size < SOURCE_TREE_LIMITS.frameDocuments) frame.documents.add(source.url);
       }
@@ -134,7 +140,7 @@ function sourceTreeModel(collection, catalog, helpers, {consoleDocuments = null,
   return {collection, rootKey, nodes, files, byArtifact, limits};
 }
 
-// A frame is named by its Console document URL, else its first eval/Wasm artifact's origin.
+// A frame is named by its Console document URL, else the origin of its first document artifact.
 function sourceTreeFrames(nodes, root, frames, consoleDocuments) {
   const shortUrl = value => {
     try { const url = new URL(value); return sourceTreeOriginLabel(`${sourceTreeUrl(value).origin}${url.origin === 'null' ? '' : url.pathname}`); } catch { return value; }

@@ -192,8 +192,8 @@ struct NativeRequestContent final {
   std::string url;
   std::string mime_type;
   std::size_t size = 0;
-  std::shared_ptr<network::ResourceRequestBody> body;
-  std::string text;
+  std::shared_ptr<network::ResourceRequestBody> body{};
+  std::string text{};
 };
 enum class NativeRequestContentAdmission : std::uint8_t {
   kQueued,

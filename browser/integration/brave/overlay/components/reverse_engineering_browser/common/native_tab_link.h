@@ -95,7 +95,7 @@ enum class NativeBodyFileAccess : std::uint8_t {
 // extension, and whose access a file body is read under.
 struct NativeBrowserRequestOwner final {
   std::int64_t service_worker_version = -1;
-  std::optional<NativeExtensionId> extension;
+  std::optional<NativeExtensionId> extension{};
   NativeBodyFileAccess body_files = NativeBodyFileAccess::kRefused;
   int body_file_process_id = 0;
 };

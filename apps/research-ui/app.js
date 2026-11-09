@@ -6844,7 +6844,7 @@ const entropyMap = createEntropyMap({
 
       function renderSources() {
         const source = selectedSource();
-        sourceGraphPanel.sync(source);
+        if (typeof sourceGraphPanel !== 'undefined') sourceGraphPanel.sync(source);
         sourceFactsPanel.sync(source);
         syncInvestigationRange(source);
         const view = source?.content !== undefined ? sourceDisplayView(source) : null;

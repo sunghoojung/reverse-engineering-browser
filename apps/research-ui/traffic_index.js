@@ -41,8 +41,11 @@ function createTrafficIndex({fetcher = (input, init) => fetch(input, init), onCh
     const through = answer?.query === request.query ? answer.document.through : null;
     const target = url(request, through);
     const headers = target === etagUrl && etag ? {'If-None-Match': etag} : {};
+    // WebKit rejects a timed-out fetch with AbortError, not TimeoutError, so
+    // the deadline itself says whether the limit was reached.
+    const deadline = AbortSignal.timeout(TRAFFIC_INDEX_DEADLINE_MS);
     try {
-      const response = await fetcher(target, {cache: 'no-store', headers, signal: AbortSignal.timeout(TRAFFIC_INDEX_DEADLINE_MS)});
+      const response = await fetcher(target, {cache: 'no-store', headers, signal: deadline});
       if (response.status === 304 && answer) {
         error = null;
         return;
@@ -63,7 +66,7 @@ function createTrafficIndex({fetcher = (input, init) => fetch(input, init), onCh
       error = null;
     } catch (failure) {
       etag = null;
-      error = failure?.name === 'TimeoutError' ? 'the request index did not answer within 10 seconds' : String(failure?.message ?? failure);
+      error = deadline.aborted ? 'the request index did not answer within 10 seconds' : String(failure?.message ?? failure);
     } finally {
       inFlight = null;
       onChange();

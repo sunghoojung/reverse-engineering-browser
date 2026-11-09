@@ -3302,8 +3302,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.trafficLoadingId = id;
         const row = [...elements.requestRows.querySelectorAll('.request-row')].find(node => node.dataset.requestId === id);
         row?.setAttribute('aria-busy', 'true');
+        // WebKit rejects a timed-out fetch with AbortError; the deadline says whether it was reached.
+        const deadline = AbortSignal.timeout(10000);
         try {
-          const {events, partial} = await state.trafficIndex.events(indexed.indexRow, AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]));
+          const {events, partial} = await state.trafficIndex.events(indexed.indexRow, AbortSignal.any([controller.signal, deadline]));
           if (controller.signal.aborted) return;
           const request = requestsFromEvents(events, indexed.origin).find(candidate => candidate.id === id);
           if (!request) throw new Error('its stored records no longer form this request');
@@ -3324,7 +3326,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } catch (error) {
           if (controller.signal.aborted) return;
           if (select) {
-            state.trafficSelectionNotice = `The records of this request could not be read: ${error?.name === 'TimeoutError' ? 'the backend did not answer within 10 seconds' : error.message}.`;
+            state.trafficSelectionNotice = `The records of this request could not be read: ${deadline.aborted ? 'the backend did not answer within 10 seconds' : error.message}.`;
             if (state.selectedRequestId === null) updateSelectionSummary(null);
             else investigationNotice(state.trafficSelectionNotice, 'unavailable');
           }

@@ -29814,6 +29814,7 @@
           "next_before",
           "limited",
           "budget_exhausted",
+          "malformed_lines",
           "filters"
         ],
         "properties": {
@@ -29859,6 +29860,11 @@
           "budget_exhausted": {
             "type": "boolean",
             "description": "The page stopped at the 64 MiB scan budget. Continue with a cursor."
+          },
+          "malformed_lines": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Lines in this read that were not valid events. They are counted and skipped, so a record among them is unknown, not absent."
           },
           "filters": {
             "type": "object",

@@ -230,6 +230,7 @@ pub struct Tally {
     queue_drops: u64,
     queue_drops_saturated: bool,
     named_gaps: Vec<NamedGap>,
+    malformed_lines: u64,
 }
 impl Tally {
     pub fn record(&mut self, event: &Value) -> Result<()> {
@@ -271,6 +272,10 @@ impl Tally {
             }
         }
         Ok(())
+    }
+    /// Lines this read skipped because they were not valid events.
+    pub fn malformed_lines(&self) -> u64 {
+        self.malformed_lines
     }
     pub fn named_gaps(&self) -> &[NamedGap] {
         &self.named_gaps
@@ -666,23 +671,36 @@ fn backward(
     Ok((end, false))
 }
 
-/// Parses and validates one stored event, counts it, and returns it when the
-/// filter selects it.
+/// A damaged line is not bounded by the record size. This keeps its read
+/// bounded while still counting a torn or corrupted line of any likely size.
+pub const DAMAGED_LINE_BYTES: usize = 1024 * 1024;
+
+/// The event on one stored line, or `None` for a line that cannot be one.
+fn stored_event(line: &[u8]) -> Option<Value> {
+    (line.len() <= EVENT_RECORD_BYTES)
+        .then(|| serde_json::from_slice::<Value>(line).ok())
+        .flatten()
+        .filter(|event| validate_event(event).is_ok())
+}
+
+/// Parses, validates and tallies one stored event and returns it when the
+/// filter selects it. A line that cannot be read is counted and skipped, as the
+/// request index does, so a torn record cannot fail a whole filtered read.
 pub fn event_visitor<'a>(
     filter: &'a EventFilter,
     tally: &'a mut Tally,
 ) -> impl FnMut(&[u8]) -> Result<Option<Value>> + 'a {
     move |line| {
-        let event: Value = serde_json::from_slice(line).map_err(|_| event_window::malformed())?;
-        validate_event(&event)?;
-        tally.record(&event)?;
-        Ok(filter.matches(&event).then_some(event))
+        let event = stored_event(line).filter(|event| tally.record(event).is_ok());
+        Ok(match event {
+            Some(event) => filter.matches(&event).then_some(event),
+            None => {
+                tally.malformed_lines += 1;
+                None
+            }
+        })
     }
 }
-
-/// A damaged line is not bounded by the record size. This keeps its read
-/// bounded while still counting a torn or corrupted line of any likely size.
-const DAMAGED_LINE_BYTES: usize = 1024 * 1024;
 
 /// Parses and validates one stored event without failing the read: a line that
 /// is unreadable or invalid is counted and skipped, as the request index does.
@@ -691,10 +709,7 @@ fn tolerant_visitor<'a>(
     malformed: &'a mut u64,
 ) -> impl FnMut(&[u8]) -> Result<Option<Value>> + 'a {
     move |line| {
-        let event = (line.len() <= EVENT_RECORD_BYTES)
-            .then(|| serde_json::from_slice::<Value>(line).ok())
-            .flatten()
-            .filter(|event| validate_event(event).is_ok());
+        let event = stored_event(line);
         Ok(match event {
             Some(event) => filter.matches(&event).then_some(event),
             None => {
@@ -741,6 +756,7 @@ pub fn events_document(
     };
     let mut query = page.paging(direction, limit);
     query["filters"] = filter.echo();
+    query["malformed_lines"] = json!(tally.malformed_lines());
     let mut document = json!({
         "count": page.records.len(),
         "event_window": {
@@ -979,6 +995,34 @@ mod tests {
         assert_eq!(forward.scan_end, ends[2]);
         assert!(!forward.exhausted);
         assert_eq!(current_boundary(&path).unwrap(), ends[2]);
+    }
+
+    #[test]
+    fn a_damaged_line_is_counted_and_read_past() {
+        let events: Vec<_> = (1..=3).map(|n| event(n, "api_call", 1)).collect();
+        let (_root, path, ends) = store(&events);
+        let mut bytes = fs::read(&path).unwrap();
+        // A torn line inside the store, then the rest of the capture after it.
+        bytes.splice(
+            ends[0] as usize..ends[0] as usize,
+            *b"{\"protocol_version\":3,\"sess\n",
+        );
+        fs::write(&path, &bytes).unwrap();
+        let filter = EventFilter::default();
+        let mut tally = Tally::default();
+        let page = read_page(
+            &path,
+            Cursor::After(0),
+            10,
+            SCAN_BYTES,
+            DAMAGED_LINE_BYTES,
+            event_visitor(&filter, &mut tally),
+        )
+        .unwrap();
+        assert_eq!(sequences(&page), vec![1, 2, 3]);
+        assert_eq!(tally.malformed_lines(), 1);
+        let document = events_document(&page, &tally, &filter, Cursor::After(0), 10);
+        assert_eq!(document["query"]["malformed_lines"], 1);
     }
 
     #[test]

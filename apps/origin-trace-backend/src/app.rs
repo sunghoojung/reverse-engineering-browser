@@ -1343,7 +1343,7 @@ impl App {
                     cursor,
                     limit,
                     event_query::SCAN_BYTES,
-                    event_query::EVENT_RECORD_BYTES,
+                    event_query::DAMAGED_LINE_BYTES,
                     event_query::event_visitor(&filter, &mut tally),
                 )?;
                 Ok((page, tally, filter))
@@ -1403,7 +1403,7 @@ impl App {
                             event_query::Cursor::After(cursor),
                             limit,
                             event_query::SCAN_BYTES,
-                            event_query::EVENT_RECORD_BYTES,
+                            event_query::DAMAGED_LINE_BYTES,
                             event_query::event_visitor(&filter, &mut tally),
                         )?;
                         Ok((page, tally, filter))

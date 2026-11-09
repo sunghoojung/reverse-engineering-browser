@@ -9386,6 +9386,16 @@ async fn request_detail_routes_report_what_their_read_covered() {
     // A damaged line past the request's bytes is outside this read.
     assert_eq!(indexed["coverage"]["malformed_lines"], 0);
 
+    // A filtered read keeps going past the damaged line and says it did, so
+    // Traffic and the agent recipe still read this request's records.
+    let filtered = read(
+        "/api/events?session_id=1&request_id=17&category=network",
+        "Events",
+    )
+    .await;
+    assert_eq!(filtered["count"], 2, "{filtered}");
+    assert_eq!(filtered["query"]["malformed_lines"], 1, "{filtered}");
+
     // No row names this request, and the whole small store was read.
     let unknown = read(
         "/api/request-cookies?session_id=1&request_id=99",

@@ -60,7 +60,7 @@ index 366dd2a1..0ac6546b 100644
        WasmAsyncResolvePromiseCallback callback);
  
 diff --git a/src/api/api.cc b/src/api/api.cc
-index ac1c8d0c..b7e10efb 100644
+index ac1c8d0c..c107928f 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
 @@ -2669,6 +2669,10 @@ MaybeLocal<UnboundScript> ScriptCompiler::CompileUnboundInternal(
@@ -80,7 +80,7 @@ index ac1c8d0c..b7e10efb 100644
    if (has_exception) return {};
 +  i::Compiler::ObserveCompiledScript(
 +      i_isolate, i::direct_handle(result->shared(), i_isolate),
-+      *Utils::OpenDirectHandle(*context), CompiledScriptKind::kFunction);
++      *context, CompiledScriptKind::kFunction);
    return api_scope.Escape(Utils::CallableToLocal(result));
  }
  
@@ -241,7 +241,7 @@ index cc6f4b31..63239148 100644
    V(WasmAsyncResolvePromiseCallback, wasm_async_resolve_promise_callback,   \
      DefaultWasmAsyncResolvePromiseCallback)                                 \
 diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
-index dcc68535..680444e1 100644
+index dcc68535..207e899e 100644
 --- a/test/cctest/test-api.cc
 +++ b/test/cctest/test-api.cc
 @@ -33155,3 +33155,229 @@ TEST(RebNativeJsInvocationAdmissionAndUnsupportedKinds) {
@@ -448,16 +448,16 @@ index dcc68535..680444e1 100644
 +  v8::Isolate* isolate = env.isolate();
 +  v8::HandleScope scope(isolate);
 +  RebCompiledScriptScope capture(isolate);
-+  const char* chunks[] = {"function rebStreamed() { return 13; } ",
-+                          "rebStreamed();", nullptr};
++  // The helper expects 13 as the script's value and, for a module, in Result.
++  const char* chunks[] = {"globalThis.Result = 13; ", "13;", nullptr};
 +  RunStreamingTest(chunks, v8::ScriptType::kClassic);
-+  const RebCompiledScriptRecord& classic = RebCompiledScriptWithSource(
-+      "function rebStreamed() { return 13; } rebStreamed();");
++  const RebCompiledScriptRecord& classic =
++      RebCompiledScriptWithSource("globalThis.Result = 13; 13;");
 +  CHECK_EQ(v8::CompiledScriptKind::kScript, classic.kind);
 +  reb_compiled_scripts.clear();
 +  RunStreamingTest(chunks, v8::ScriptType::kModule);
-+  const RebCompiledScriptRecord& module = RebCompiledScriptWithSource(
-+      "function rebStreamed() { return 13; } rebStreamed();");
++  const RebCompiledScriptRecord& module =
++      RebCompiledScriptWithSource("globalThis.Result = 13; 13;");
 +  CHECK_EQ(v8::CompiledScriptKind::kModule, module.kind);
 +}
 +

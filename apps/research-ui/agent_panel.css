@@ -3,6 +3,15 @@
  * needs a decision, red for an error). */
 
 .workspace { position: relative; }
+/* Right-side dock toggles sit at the titlebar's right edge, opposite the
+ * traffic lights, so the sidebar keeps its height at the 560 px minimum. */
+.titlebar { position: relative; }
+.titlebar-dock-toggle { position: absolute; top: 50%; right: 10px; transform: translateY(-50%); width: 22px; height: 20px; display: grid; place-items: center;
+  padding: 0; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--faint); }
+.titlebar-dock-toggle svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.titlebar-dock-toggle:hover { color: var(--text); background: var(--panel-3); }
+.titlebar-dock-toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--line); }
+.titlebar-dock-toggle:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
 #workspace[data-agent-dock="open"] { grid-template-columns: minmax(0, 1fr) 340px; column-gap: 0; }
 .agent-dock { grid-column: 2; grid-row: 1 / -1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
   background: var(--panel); border-left: 1px solid var(--line-soft); }

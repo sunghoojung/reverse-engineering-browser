@@ -300,7 +300,7 @@ concurrency.
 
 ## In-app agent
 
-The **Agent** dock (sidebar, or ⌘⇧A) puts Claude or ChatGPT beside the
+The **Agent** dock (the button at the titlebar's right edge, or ⌘⇧A) puts Claude or ChatGPT beside the
 evidence. It is closed by default, and the switch in its header is off by
 default. Turning it on is an explicit action for the current session, behind
 a disclosure, and stops completely when it is switched off.
@@ -419,7 +419,7 @@ stand-in, for tests; it never redirects a real key.
   `reb-api mcp` tool gates and the transcript's permissions.
 - `node tools/check-agent-panel.mjs` (`make native-only-check`) checks the dock's
   states, safe rendering, citations and budgets in a DOM model.
-- `test24AgentPanel` drives the packaged app.
+- `test0AgentPanel` drives the packaged app.
 
 ## Native console
 

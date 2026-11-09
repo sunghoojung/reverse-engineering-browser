@@ -96,7 +96,7 @@ Live Session…** again. The unsaved-work sheet must name the new session, keep
 page, the edit and the start dialog untouched. Once the edit is discarded, the
 start dialog opens at once and the test continues offline.
 
-`test24AgentPanel` opens the Agent dock at both window sizes. It stays off
+`test0AgentPanel` opens the Agent dock at both window sizes. It stays off
 until the disclosure names tool results and their URLs and hosts, then a turn
 runs through the bundled LangGraph runtime, the native fixed-endpoint proxy, a
 local stand-in provider (`REB_AGENT_PROVIDER_BASE_URL`, loopback only, no key)

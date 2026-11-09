@@ -1893,8 +1893,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // The dock's whole path through the packaged app: closed by default, explicit
   // consent, a turn through a local stand-in provider and the real tool server,
   // inert model text, a verified citation that opens Sources, and a full stop.
+  // It runs first: later tests load pages the app did not load itself, and the
+  // agent bridge, like client-project export, answers only the app's document.
   @MainActor
-  func test24AgentPanel() async throws {
+  func test0AgentPanel() async throws {
     let ui = try Harness()
     try await ui.waitForInitialLoad()
     let on = "document.querySelector('#agent-switch').checked"

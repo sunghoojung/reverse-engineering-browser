@@ -1310,6 +1310,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertFalse(details.contains("artifact URL"), "\(size.name): the duplicate URL row is gone: \(details)")
       try await ui.click("#payload-inspector button", containing: "Source")
       try await ui.waitUntil("document.querySelector('#payload-inspector .traffic-payload-lines .traffic-payload-line') !== null", "payload source did not render")
+      // Raw text shows until the backend's layout arrives.
+      try await ui.waitUntil("document.querySelector('#payload-inspector .traffic-payload-lines').innerText.includes('\"sitekey\": \"site-key\"')", "\(size.name): payload source was not laid out")
       let source = try await ui.value("document.querySelector('#payload-inspector .traffic-payload-lines').innerText") as? String ?? ""
       XCTAssertTrue(source.contains("\"sitekey\": \"site-key\""), "\(size.name): Source is pretty-printed: \(source.prefix(200))")
       try await assertInert(ui, "\(size.name) request payload source")
@@ -1378,6 +1380,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.key(123, "\u{F702}", modifiers: [.function, .numericPad])
       try await ui.waitUntil("document.activeElement?.id === 'inspector-tab-preview'", "arrow key did not reach Preview")
       try await ui.waitUntil("document.querySelector('#response-inspector .traffic-payload-tree') !== null", "JSON preview did not render")
+      // The tree opens at the root; the captured string is two levels down.
+      for key in ["tasks:", "0:"] {
+        try await ui.click("#response-inspector .traffic-payload-tree [role=\"treeitem\"]", containing: key)
+      }
+      try await ui.waitUntil("document.querySelector('#response-inspector .traffic-payload-tree').textContent.includes('note')", "\(size.name): the nested preview row did not open")
       let preview = try await ui.value("document.querySelector('#response-inspector .traffic-payload-tree').textContent") as? String ?? ""
       XCTAssertTrue(preview.contains("challenge"), "\(size.name): the tree names its keys: \(preview)")
       XCTAssertTrue(preview.contains(escapedMarker), "\(size.name): tree strings are literal text")

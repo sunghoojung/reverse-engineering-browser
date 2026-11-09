@@ -151,6 +151,19 @@ await new Promise(resolve => setTimeout(resolve, 0));
 outsidePanel.render(tree, request, [chain]);
 assert.match(tree.textContent, /not in the scanned range of the event store, so it is unknown rather than missing/);
 assert.equal(refreshes, 1, 'the panel repaints once when the unknown state arrives');
+// Past the indexed range another read would scan the same bytes, so the panel does not repeat it.
+for (const [behind, expected] of [[false, 1], [true, 2]]) {
+  let reads = 0, pending = null;
+  const panel = createRequestStackPanel({
+    load: () => { reads += 1; return pending = Promise.resolve({status: 'outside_scan', index_behind: behind, coverage: {complete: false, scope: 'bounded_range'}}); },
+    refresh: () => {}, open: () => {}
+  });
+  panel.render(tree, request, [chain]);
+  await pending;
+  await new Promise(resolve => setTimeout(resolve, 2100));
+  panel.render(tree, request, [chain]);
+  assert.equal(reads, expected, behind ? 'an index that is behind is asked again' : 'a settled answer is not read again');
+}
 const scriptOutside = createRequestStackPanel({
   load: () => outsidePending = Promise.resolve({status: 'recorded', state: 'captured', request: {sequence_number: stackEvent.sequence_number}, frames_retained: true,
     frames: [{index: 0, kind: 'javascript', async: false, script_id: 9, position: 1, resolution: {status: 'unresolved', reason: 'script_identity_outside_scan'}}],

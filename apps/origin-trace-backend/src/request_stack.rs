@@ -973,6 +973,15 @@ fn decode_navigation(payload: &[u8]) -> Option<(Record, &'static str, u64)> {
         .map(|record| (record, kind, target))
 }
 
+/// Decodes `RequestIndex::identities` payloads. A malformed one is left out,
+/// like a malformed identity record in a store scan.
+pub(crate) fn decode_indexed_identities(payloads: &HashMap<u32, String>) -> HashMap<u32, Identity> {
+    payloads
+        .values()
+        .filter_map(|payload| decode_identity(&hex::decode(payload).ok()?))
+        .collect()
+}
+
 /// Every frame's script identity, and whether an identity absent from them is
 /// absent from the store. The index keeps the whole session's identities, so
 /// the store is scanned only while the index cannot answer for all of them.
@@ -990,15 +999,7 @@ fn stored_identities(
             .blocking_lock()
             .identities(session, process_id as u32)?;
         known = exhaustive;
-        for payload in indexed.values() {
-            if let Some((script, identity)) = hex::decode(payload)
-                .ok()
-                .as_deref()
-                .and_then(decode_identity)
-            {
-                identities.insert(script, identity);
-            }
-        }
+        identities = decode_indexed_identities(&indexed);
     }
     if !known {
         let mut ids = vec![("process_id", process_id)];
@@ -1019,7 +1020,7 @@ fn stored_identities(
 
 /// A frame whose identity was not found cannot claim that it was never
 /// recorded when the identities were not all read.
-fn mark_identities_outside_scan(document: &mut Value) {
+pub(crate) fn mark_identities_outside_scan(document: &mut Value) {
     let mark = |frames: Option<&mut Vec<Value>>| {
         for frame in frames.into_iter().flatten() {
             if frame["resolution"]["reason"] == "script_identity_missing" {
@@ -1120,10 +1121,17 @@ pub fn document(
     let detail = event_query::read_newest_record(store, range, &filter)?;
     let coverage = detail.coverage;
     let Some(stack) = detail.records.into_iter().next_back() else {
+        // Only an index that has not reached the end can later name these bytes;
+        // otherwise another read would scan the same range to the same answer.
+        let index_behind = match range {
+            Some(range) => !range.indexed,
+            None => !requests.blocking_lock().is_caught_up(),
+        };
         return Ok(json!({
             "status": absent_status(coverage),
             "request": {"process_id": process_id, "request_id": request_id.to_string()},
             "coverage": coverage.to_json(),
+            "index_behind": index_behind,
         }));
     };
     let Some(record) = payload(&stack).as_deref().and_then(decode_record) else {

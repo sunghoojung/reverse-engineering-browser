@@ -123,6 +123,7 @@ pub struct Coverage {
     limited: bool,
     budget_exhausted: bool,
     malformed_lines: u64,
+    unterminated_tail_bytes: u64,
 }
 impl Coverage {
     /// Absence in the answer is a fact: the read covered its whole scope, or
@@ -140,6 +141,7 @@ impl Coverage {
             "limited": self.limited,
             "budget_exhausted": self.budget_exhausted,
             "malformed_lines": self.malformed_lines,
+            "unterminated_tail_bytes": self.unterminated_tail_bytes.to_string(),
         })
     }
 }
@@ -162,7 +164,9 @@ fn coverage(
             range.indexed
                 && (found_newest || (page.scan_start <= range.first && page.scan_end >= range.end))
         }
-        None => page.scan_start == 0 && page.scan_end == page.store_end,
+        // A Tail read starts at the last newline. Bytes after it are a record
+        // still being written, or torn when the writer stopped, not unread ones.
+        None => page.scan_start == 0,
     };
     Coverage {
         scope: match (covered, range) {
@@ -177,6 +181,11 @@ fn coverage(
         limited: page.limited && !covered && !found_newest,
         budget_exhausted: page.exhausted && !covered && !found_newest,
         malformed_lines,
+        unterminated_tail_bytes: if range.is_none() {
+            page.store_end - page.scan_end
+        } else {
+            0
+        },
     }
 }
 
@@ -189,8 +198,13 @@ fn read_detail(
     newest: bool,
 ) -> Result<Detail> {
     let cursor = match (range, newest) {
-        (Some(range), true) => Cursor::Before(range.end),
-        (Some(range), false) => Cursor::After(range.first),
+        // When the budget holds the whole range the newest read is exact.
+        (Some(range), true) if range.end - range.first <= budget => Cursor::Before(range.end),
+        // A longer range would be read backward from the wrong end: a record
+        // written once at a request's start would sit past the budget, and the
+        // read would fail after using the whole budget. Reading forward finds
+        // it in the request's first bytes and stops there.
+        (Some(range), _) => Cursor::After(range.first),
         (None, _) => Cursor::Tail,
     };
     let budget = range.map_or(budget, |range| budget.min(range.end - range.first));
@@ -213,7 +227,9 @@ pub fn read_request_records(
     read_detail(store, range, limit, filter, SCAN_BYTES, false)
 }
 
-/// The newest matching record, from the request's range when the index names one.
+/// The newest matching record, from the request's range when the index names
+/// one. A range longer than the scan budget is read forward instead, which is
+/// exact for a record the request writes once.
 pub fn read_newest_record(
     store: &Path,
     range: Option<RecordRange>,
@@ -1122,6 +1138,24 @@ mod tests {
         let missed = read_detail(&path, None, 1, &none_filter, ends[0], true).unwrap();
         assert_eq!(missed.coverage.scope, "bounded_range");
         assert!(!missed.coverage.complete && missed.coverage.budget_exhausted);
+
+        // A range longer than the budget is read from its start, so the record
+        // a long-lived request wrote first is found, without reading the rest.
+        let long_range = RecordRange {
+            first: 0,
+            end: ends[5],
+            indexed: true,
+        };
+        let first_record = read(Some(long_range), 1, ends[0], true);
+        assert_eq!(sequences_of(&first_record.records), vec![1]);
+        assert!(first_record.coverage.complete);
+        assert_eq!(first_record.coverage.scan_start, 0);
+        assert_eq!(first_record.coverage.scan_end, ends[0]);
+        let beyond_budget =
+            read_detail(&path, Some(long_range), 1, &none_filter, ends[0], true).unwrap();
+        assert!(beyond_budget.records.is_empty());
+        assert_eq!(beyond_budget.coverage.scope, "bounded_range");
+        assert!(!beyond_budget.coverage.complete && beyond_budget.coverage.budget_exhausted);
     }
 
     fn sequences_of(records: &[Value]) -> Vec<u64> {
@@ -1158,6 +1192,26 @@ mod tests {
         assert_eq!(read.coverage.scope, "store");
         assert!(read.coverage.complete);
         assert_eq!(read.coverage.to_json()["malformed_lines"], 3);
+    }
+
+    #[test]
+    fn an_unterminated_final_line_does_not_make_a_whole_read_partial() {
+        let events: Vec<_> = (1..=3).map(|n| event(n, "api_call", 1)).collect();
+        let (_root, path, ends) = store(&events);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.extend_from_slice(br#"{"protocol_version":3,"session"#);
+        fs::write(&path, &bytes).unwrap();
+        let filter = EventFilter::default();
+        let read = read_detail(&path, None, 100, &filter, SCAN_BYTES, false).unwrap();
+        assert_eq!(read.records.len(), 3);
+        assert!(read.coverage.complete(), "{:?}", read.coverage);
+        assert_eq!(read.coverage.scope, "store");
+        assert_eq!(read.coverage.scan_end, ends[2]);
+        let document = read.coverage.to_json();
+        assert_eq!(
+            document["unterminated_tail_bytes"],
+            (bytes.len() as u64 - ends[2]).to_string()
+        );
     }
 
     #[test]

@@ -8203,7 +8203,8 @@
           "store_end",
           "limited",
           "budget_exhausted",
-          "malformed_lines"
+          "malformed_lines",
+          "unterminated_tail_bytes"
         ],
         "properties": {
           "scope": {
@@ -8239,6 +8240,10 @@
             "type": "integer",
             "minimum": 0,
             "description": "Lines in the read that were not valid events; they are counted and skipped."
+          },
+          "unterminated_tail_bytes": {
+            "$ref": "#/components/schemas/Uint64String",
+            "description": "Bytes after the store's last newline when a read covered the store: a record still being written, or torn when the writer stopped. They are not part of any answer. Zero for a per-request range."
           }
         }
       },
@@ -8250,6 +8255,10 @@
           "request"
         ],
         "properties": {
+          "index_behind": {
+            "type": "boolean",
+            "description": "With outside_scan: the request index had not reached the end of the store, so a later read can name this request's bytes. False means another read would scan the same range."
+          },
           "coverage": {
             "$ref": "#/components/schemas/DetailCoverage"
           },

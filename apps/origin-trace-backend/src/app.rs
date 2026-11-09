@@ -30,7 +30,7 @@ use axum::{
 use serde_json::{Value, json};
 use sha2::Digest;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -993,10 +993,12 @@ impl App {
                 }
                 let filter = event_query::event_filter(&q)?;
                 let options = self.options.clone();
+                // Coverage also depends on how far the index has read, with no store change.
+                let progress = self.requests.lock().await.progress_marker();
                 etag = Some(evidence::resource_etag(
                     &options.store,
                     &format!(
-                        "{}:{session}:{request}",
+                        "{}:{session}:{request}:{progress}",
                         evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), "")
                     ),
                 ));
@@ -1034,10 +1036,11 @@ impl App {
                 }
                 let filter = event_query::event_filter(&q)?;
                 let options = self.options.clone();
+                let progress = self.requests.lock().await.progress_marker();
                 etag = Some(evidence::resource_etag(
                     &options.store,
                     &format!(
-                        "cookies:{}:{session}:{request}",
+                        "cookies:{}:{session}:{request}:{progress}",
                         evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), "")
                     ),
                 ));
@@ -1078,16 +1081,18 @@ impl App {
                     "session_id={session}&category=network"
                 )))?;
                 let options = self.options.clone();
+                let progress = self.requests.lock().await.progress_marker();
                 etag = Some(evidence::resource_etag(
                     &options.store,
                     &format!(
-                        "provenance:{}:{session}:{name}",
+                        "provenance:{}:{session}:{name}:{progress}",
                         evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), "")
                     ),
                 ));
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
+                let requests = self.requests.clone();
                 self.blocking(move || {
                     // A cookie spans the session, so no one request's bytes bound it.
                     let detail =
@@ -1101,12 +1106,25 @@ impl App {
                                     Some("stack" | "javascript" | "wasm")
                                 )
                         })?;
+                    let complete = detail.coverage.complete();
+                    let identities = |process: u64| {
+                        requests
+                            .blocking_lock()
+                            .identities(&session, process as u32)
+                            .map_or((HashMap::new(), complete), |(indexed, exhaustive)| {
+                                (
+                                    crate::request_stack::decode_indexed_identities(&indexed),
+                                    exhaustive || complete,
+                                )
+                            })
+                    };
                     let mut document = request_cookies::provenance(
                         &detail.records,
                         &artifacts,
                         &options.artifacts,
                         &session,
                         &name,
+                        &identities,
                     );
                     document["coverage"] = detail.coverage.to_json();
                     Ok(document)

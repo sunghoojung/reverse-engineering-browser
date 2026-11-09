@@ -1920,7 +1920,18 @@ impl RequestIndex {
         self.store_end.saturating_sub(indexed_to) <= RECORD_BYTES as u64
     }
 
+    /// Whether the index covers the store, as of the last refresh. A route uses
+    /// this to tell a transient "not named yet" from a final one.
+    pub fn is_caught_up(&self) -> bool {
+        self.state
+            .as_ref()
+            .is_some_and(|state| self.caught_up(state.indexed_to))
+    }
+
     /// The bytes of the rows that have this member, across rows when several do.
+    /// Without a process, a request number is ambiguous: renderers and the
+    /// browser count requests separately, so the same number can name unrelated
+    /// rows far apart. Only the browser's own row is chosen when one has it.
     pub fn member_range(
         &mut self,
         session: Option<&str>,
@@ -1929,24 +1940,47 @@ impl RequestIndex {
     ) -> Result<Option<RecordRange>> {
         self.refresh()?;
         let state = self.state.as_ref().expect("index state");
-        let mut range: Option<(u64, u64)> = None;
-        for row in &state.rows {
-            let named = row.members.iter().any(|member| {
+        let names = |row: &Row| {
+            row.members.iter().any(|member| {
                 member.request == request
                     && session.is_none_or(|session| member.session == session)
                     && process.is_none_or(|process| member.process == process)
-            });
-            if named {
-                let (first, end) = range.unwrap_or((row.first_offset, row.end_offset));
-                range = Some((first.min(row.first_offset), end.max(row.end_offset)));
-            }
-        }
+            })
+        };
+        // A row's browser identity is its request_started record's.
+        let browser_row = |row: &&Row| {
+            names(row)
+                && process.is_none()
+                && row.loader
+                && row.roots[0]
+                    .as_ref()
+                    .is_none_or(|root| root.request == request)
+        };
+        let chosen: Vec<&Row> = if state.rows.iter().filter(browser_row).next().is_some() {
+            state.rows.iter().filter(browser_row).collect()
+        } else {
+            state.rows.iter().filter(|row| names(row)).collect()
+        };
+        let range = chosen.iter().fold(None, |range: Option<(u64, u64)>, row| {
+            let (first, end) = range.unwrap_or((row.first_offset, row.end_offset));
+            Some((first.min(row.first_offset), end.max(row.end_offset)))
+        });
         let indexed = self.caught_up(state.indexed_to);
         Ok(range.map(|(first, end)| RecordRange {
             first,
             end,
             indexed,
         }))
+    }
+
+    /// Identifies how far the index has reached while it is behind the store,
+    /// so a validator on a detail answer changes as its coverage can change.
+    pub fn progress_marker(&self) -> String {
+        match &self.state {
+            Some(state) if !self.caught_up(state.indexed_to) => state.indexed_to.to_string(),
+            Some(_) => "caught-up".to_owned(),
+            None => "unopened".to_owned(),
+        }
     }
 
     /// `script_identity` payloads of one renderer by script ID, and whether a
@@ -2991,6 +3025,51 @@ mod tests {
         ] {
             assert!(RequestQuery::parse(&Query::new(bad), bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_shared_request_number_chooses_the_browser_row() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events.jsonl");
+        let mut store = Store {
+            events: Vec::new(),
+            sequence: 0,
+        };
+        // A renderer's own number 5 for one request, then unrelated traffic.
+        store.push(41, 5, "request_initiated", b"GET a.example.test", json!({}));
+        store.push(
+            41,
+            77,
+            "request_initiated",
+            b"GET x.example.test",
+            json!({}),
+        );
+        let renderer_end = store.bytes().len() as u64;
+        // The browser's request 5, which is what its header records name.
+        store.push(7, 5, "request_started", b"GET b.example.test", json!({}));
+        store.push(
+            7,
+            5,
+            "response_started",
+            b"text/plain",
+            json!({"status_code": 200}),
+        );
+        write(&path, &store);
+        let mut index = RequestIndex::new(&path);
+        let range = index.member_range(Some("1"), None, "5").unwrap().unwrap();
+        assert!(
+            range.first >= renderer_end,
+            "the browser row's range starts past the renderer's: {range:?}"
+        );
+        // A process still selects its own row.
+        let renderer = index
+            .member_range(Some("1"), Some(41), "5")
+            .unwrap()
+            .unwrap();
+        assert!(renderer.end <= renderer_end, "{renderer:?}");
+        // A number no browser row uses still finds its row.
+        let only = index.member_range(Some("1"), None, "77").unwrap().unwrap();
+        assert!(only.end <= renderer_end, "{only:?}");
     }
 
     #[test]

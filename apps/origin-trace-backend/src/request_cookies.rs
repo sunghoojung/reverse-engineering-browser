@@ -537,6 +537,10 @@ fn describe_script(event: &Value, script: &Script) -> Value {
     })
 }
 
+/// A renderer's script identities outside the records `provenance` read, and
+/// whether an identity absent from them is absent from the store.
+pub type IndexedIdentities = (HashMap<u32, request_stack::Identity>, bool);
+
 /// Everything in `events` that touched cookie `name` in `session_id`.
 pub fn provenance(
     events: &[Value],
@@ -544,6 +548,7 @@ pub fn provenance(
     root: &Path,
     session: &str,
     name: &str,
+    indexed_identities: &dyn Fn(u64) -> IndexedIdentities,
 ) -> Value {
     let wanted = name.as_bytes();
     let starts = hop_starts(events, session);
@@ -569,6 +574,7 @@ pub fn provenance(
                 .insert(script, identity);
         }
     }
+    let mut known_identities: HashMap<u64, bool> = HashMap::new();
     let no_identities = HashMap::new();
     let read = |artifact: &Value, limit: usize| evidence::content(root, artifact, limit);
     let mut stacks: HashMap<(u64, [u8; 16], [u8; 32]), Value> = HashMap::new();
@@ -594,7 +600,17 @@ pub fn provenance(
                         if let Some(stack) = stacks.get(&key) {
                             item["stack"] = stack.clone();
                         } else if stacks.len() < PROVENANCE_STACKS {
-                            let stack = request_stack::resolve_call(
+                            // The newest records need not hold this renderer's
+                            // identities; the index has the whole session's.
+                            let known = *known_identities.entry(process).or_insert_with(|| {
+                                let (indexed, exhaustive) = indexed_identities(process);
+                                let table = identities.entry(process).or_default();
+                                for (script, identity) in indexed {
+                                    table.entry(script).or_insert(identity);
+                                }
+                                exhaustive
+                            });
+                            let mut stack = request_stack::resolve_call(
                                 event,
                                 &script.frame,
                                 (script.flags & 4 != 0).then_some(script.stack),
@@ -602,6 +618,9 @@ pub fn provenance(
                                 artifacts,
                                 &read,
                             );
+                            if !known {
+                                request_stack::mark_identities_outside_scan(&mut stack);
+                            }
                             item["stack"] = stack.clone();
                             stacks.insert(key, stack);
                         } else {
@@ -679,6 +698,10 @@ pub fn provenance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn no_index(_process: u64) -> IndexedIdentities {
+        (HashMap::new(), true)
+    }
 
     fn record(kind: &str, sequence: u64, parent: u64, payload: &[u8], artifact: &str) -> Value {
         json!({"protocol_version":3,"session_id":"7","sequence_number":sequence.to_string(),
@@ -880,7 +903,7 @@ mod tests {
         assert_eq!(unparsed["line_bytes"], 6);
         assert!(!result.to_string().contains("token-"));
 
-        let origin = provenance(&events, &artifacts, &root, "7", "_abck");
+        let origin = provenance(&events, &artifacts, &root, "7", "_abck", &no_index);
         assert_eq!(
             origin["set_by"][0]["exclusion_reasons"],
             json!(["samesite_none_insecure"])
@@ -896,7 +919,7 @@ mod tests {
         );
         assert_eq!(origin["lists_read"], 2);
         assert!(!origin.to_string().contains("token-"));
-        let none = provenance(&events, &artifacts, &root, "7", "pref");
+        let none = provenance(&events, &artifacts, &root, "7", "pref", &no_index);
         assert_eq!(none["sent_with"][0]["blocked"], true);
         assert_eq!(none["script"], json!([]));
         let _ = std::fs::remove_dir_all(&root);
@@ -950,7 +973,7 @@ mod tests {
             record("script_identity", 6, 5, &identity, "0"),
         ];
         events[1]["request_id"] = json!("0");
-        let origin = provenance(&events, &artifacts, &root, "7", "sid");
+        let origin = provenance(&events, &artifacts, &root, "7", "sid", &no_index);
         let stack = &origin["script"][0]["stack"];
         let digest = hex::encode(Sha256::digest(&walked));
         assert_eq!(
@@ -980,7 +1003,7 @@ mod tests {
             },
             "0",
         );
-        let origin = provenance(&events, &artifacts, &root, "7", "sid");
+        let origin = provenance(&events, &artifacts, &root, "7", "sid", &no_index);
         let stack = &origin["script"][0]["stack"];
         assert_eq!(
             (stack["digest"].clone(), stack["frames_retained"].clone()),
@@ -988,6 +1011,29 @@ mod tests {
         );
         assert_eq!(stack["frames"][0]["resolution"]["line"], 3);
         assert_eq!(origin["stacks_unresolved"], 0);
+        // With no identity in the records read, the index answers for it.
+        let without = vec![events[0].clone()];
+        let resolution_of =
+            |origin: &Value| origin["script"][0]["stack"]["frames"][0]["resolution"].clone();
+        let from_index = |_process: u64| -> IndexedIdentities {
+            (
+                HashMap::from([request_stack::decode_identity(&identity).unwrap()]),
+                false,
+            )
+        };
+        let found = provenance(&without, &artifacts, &root, "7", "sid", &from_index);
+        assert_eq!(resolution_of(&found)["status"], "resolved");
+        // An index that cannot answer for every identity leaves it unknown.
+        let unknown = provenance(&without, &artifacts, &root, "7", "sid", &|_| {
+            (HashMap::new(), false)
+        });
+        assert_eq!(
+            resolution_of(&unknown)["reason"],
+            "script_identity_outside_scan"
+        );
+        // Only a whole-store answer can say it is missing.
+        let missing = provenance(&without, &artifacts, &root, "7", "sid", &no_index);
+        assert_eq!(resolution_of(&missing)["reason"], "script_identity_missing");
         let _ = std::fs::remove_dir_all(&root);
     }
 

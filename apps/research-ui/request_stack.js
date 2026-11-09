@@ -225,9 +225,10 @@ function createRequestStackPanel({open, refresh, load = null}) {
           next.status = body?.status === 'recorded' && body.request?.sequence_number === sequence ? 'ready' : 'error';
           next.document = body;
           if (body?.status === 'outside_scan') {
-            // Unknown, not absent; a later read may reach it once the index catches up.
+            // Unknown, not absent. Only an index still catching up can change the answer;
+            // otherwise another read would scan the same bytes to the same result.
             Object.assign(next, {error: 'This stack is not in the scanned range of the event store, so it is unknown rather than missing.',
-              retryable: true, failedAt: Date.now()});
+              retryable: body.index_behind === true, failedAt: Date.now()});
             return;
           }
           next.error = next.status === 'error' ? 'The stored stack no longer matches this request record.' : null;

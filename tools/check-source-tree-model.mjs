@@ -136,7 +136,7 @@ export async function checkSourceTreeModel(root) {
     t.api.renderSourceTree();
     same([20,21,22,23,24,25].map(id=>file(t,id).suffix),['?v=1','?v=2','session 1','session 2','#24','#25']);
     same([24,25].map(id=>entry(t,file(t,id).key).detail.textContent),['24','25']);
-    same(t.nav().list.filter(value=>value.kind==='frame').map(value=>`${value.label} ${value.suffix ?? ''}`.trim()),['frame frame 3','frame frame 7','frame frame 8']);
+    same(t.nav().list.filter(value=>value.kind==='frame').map(value=>`${value.label} ${value.suffix ?? ''}`.trim()),['frame · a.invalid','frame · c.invalid frame 7','frame · c.invalid frame 8']);
   }
   // A page with only network scripts names its frame from the retained HTML document.
   {
@@ -144,7 +144,7 @@ export async function checkSourceTreeModel(root) {
       artifact(31,'https://shop.invalid/cart',{frame_id:'11',kind:'response_body',mime_type:'text/html; charset=utf-8',capture_origin:'network_response'}),
       artifact(32,'https://other.invalid/feed.json',{frame_id:'12',kind:'response_body',mime_type:'application/json',capture_origin:'network_response'})]);
     t.api.renderSourceTree();
-    same(t.nav().list.filter(value=>value.kind==='frame').map(value=>value.label),['shop.invalid','frame']);
+    same(t.nav().list.filter(value=>value.kind==='frame').map(value=>value.label),['shop.invalid','frame · other.invalid']);
   }
   // Keyed refresh, focus, scroll anchoring and collapse without source actions.
   {
@@ -239,8 +239,8 @@ export async function checkSourceTreeModel(root) {
     const aFolder=node(t,value=>value.kind==='folder'&&value.key.includes('a.invalid'));t.api.sourceTreeView.toggle(aFolder.key,false);
     const saved=JSON.stringify([...nav.scopes.get('captured').open]);
     filter.value='ZETA';filter.dispatch('input');
-    same(labels(t),['top','frame','c.invalid','deep','zeta.js']);assert.equal(entry(t,nav.model.rootKey).detail.textContent,'1');
-    entry(t,node(t,value=>value.label==='deep').key).row.dispatch('click');same(labels(t),['top','frame','c.invalid','deep']);
+    same(labels(t),['top','frame · a.invalid','c.invalid','deep','zeta.js']);assert.equal(entry(t,nav.model.rootKey).detail.textContent,'1');
+    entry(t,node(t,value=>value.label==='deep').key).row.dispatch('click');same(labels(t),['top','frame · a.invalid','c.invalid','deep']);
     filter.value='30';filter.dispatch('input');same(nav.list.filter(value=>value.source).map(value=>value.source.artifact_id),['30']);
     filter.value='nothing-matches';filter.dispatch('input');assert.equal(nav.list.length,0);assert.match(t.tree.children[0].textContent,/No files match “nothing-matches”/);
     filter.value='nested';filter.dispatch('input');const down=key(filter,'ArrowDown');assert(down.prevented);assert(t.tree.contains(t.document.activeElement));
@@ -252,8 +252,8 @@ export async function checkSourceTreeModel(root) {
   // Expand all and Collapse all.
   {
     const t=fixture([artifact(1),artifact(2,'chrome://newtab/x.js')]);t.api.renderSourceTree();
-    t.controls['#source-tree-collapse'].dispatch('click');same(labels(t),['top','frame','Browser internals']);
-    t.controls['#source-tree-expand'].dispatch('click');same(labels(t),['top','frame','a.invalid','shared/nested','1.js','Browser internals','chrome://newtab','x.js']);
+    t.controls['#source-tree-collapse'].dispatch('click');same(labels(t),['top','frame · a.invalid','Browser internals']);
+    t.controls['#source-tree-expand'].dispatch('click');same(labels(t),['top','frame · a.invalid','a.invalid','shared/nested','1.js','Browser internals','chrome://newtab','x.js']);
   }
   // Scale: 20,000 retained scripts are all reachable while about one window of rows is mounted.
   let timing;

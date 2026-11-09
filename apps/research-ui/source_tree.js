@@ -97,8 +97,9 @@ function sourceTreeModel(collection, catalog, helpers, {consoleDocuments = null,
     }
     const frameId = ['frame', String(source.session_id), String(source.frame_id)];
     if (frameId[2] !== '0') {
-      const frame = frames.get(frameId.join(':')) ?? {first: index, documents: new Set(), documentOrigin: null};
+      const frame = frames.get(frameId.join(':')) ?? {first: index, documents: new Set(), documentOrigin: null, firstOrigin: null};
       frames.set(frameId.join(':'), frame);
+      if (url.identity[0] === 'url') frame.firstOrigin ??= url.origin;
       if (sourceTreeDocumentArtifact(source) && url.identity[0] === 'url') {
         frame.documentOrigin ??= url.origin;
         if (frame.documents.size < SOURCE_TREE_LIMITS.frameDocuments) frame.documents.add(source.url);
@@ -141,6 +142,7 @@ function sourceTreeModel(collection, catalog, helpers, {consoleDocuments = null,
 }
 
 // A frame is named by its Console document URL, else the origin of its first document artifact.
+// With neither, the origin of its first source is marked as such, because it may not be the frame's own.
 function sourceTreeFrames(nodes, root, frames, consoleDocuments) {
   const shortUrl = value => {
     try { const url = new URL(value); return sourceTreeOriginLabel(`${sourceTreeUrl(value).origin}${url.origin === 'null' ? '' : url.pathname}`); } catch { return value; }
@@ -151,11 +153,12 @@ function sourceTreeFrames(nodes, root, frames, consoleDocuments) {
     if (node.kind !== 'frame') continue;
     const frame = frames.get(node.frameKey);
     const match = Array.isArray(consoleDocuments) ? consoleDocuments.find(item => typeof item?.url === 'string' && frame.documents.has(item.url)) : null;
-    node.label = match ? shortUrl(match.url) : frame.documentOrigin ? sourceTreeOriginLabel(frame.documentOrigin) : 'frame';
+    node.label = match ? shortUrl(match.url) : frame.documentOrigin ? sourceTreeOriginLabel(frame.documentOrigin)
+      : frame.firstOrigin ? `frame · ${sourceTreeOriginLabel(frame.firstOrigin)}` : `frame ${node.frameId}`;
     node.top = Boolean(match?.main_frame);
     node.first = frame.first;
     node.documentOrigin = frame.documentOrigin;
-    node.title = `${match ? match.url : frame.documentOrigin ?? 'No document URL recorded'} · frame ${node.frameId} · session ${node.session}${node.top ? ' · top-level document' : ''}`;
+    node.title = `${match ? match.url : frame.documentOrigin ?? `No document URL recorded${frame.firstOrigin ? `; first source from ${frame.firstOrigin}` : ''}`} · frame ${node.frameId} · session ${node.session}${node.top ? ' · top-level document' : ''}`;
     if (!earliest || node.first < earliest.first) earliest = node;
   }
   // Without a Console listing the frame seen first is listed first.

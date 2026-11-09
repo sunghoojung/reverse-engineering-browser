@@ -1241,7 +1241,7 @@ and their guest artifacts), **Extensions** (by extension ID) and **Browser
 internals** groups, then origins, folders and files. The frame seen first is
 listed first, other frames by name. A frame is named by its Console document URL
 when the Console listing has one, which also marks top-level documents, and
-otherwise by the origin of its first document artifact: a retained HTML response or an eval or Wasm artifact. Extension and
+otherwise by the origin of its first document artifact: a retained HTML response or an eval or Wasm artifact. A frame with neither reads `frame · <origin>` from its first source. Extension and
 `chrome://` hosts are read by hand because their URL origin is `null`; browser
 internals start collapsed. A folder chain with one folder child reads as one row
 (`a/b/c`). Files show their plain name, eval code `VM<id>` as in DevTools, with

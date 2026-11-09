@@ -13,45 +13,37 @@ use sha2::{Digest, Sha256};
 use crate::evidence;
 
 const BLOCK_LIMIT: usize = 320 * 1024;
-/// Header names that carry a credential in common traffic, as whole names.
-const CREDENTIALS: [&str; 10] = [
-    "authorization",
-    "proxy-authorization",
-    "cookie",
-    "cookie2",
-    "set-cookie",
-    "set-cookie2",
-    "x-functions-key",
-    "x-rapidapi-key",
-    "ocp-apim-subscription-key",
-    "x-wsse",
-];
-/// A `-`, `_` or `:` separated word that marks a header name as a credential,
-/// such as `X-Auth-Token`, `X-CSRF-Token` or `X-Session-Id`. Whole words only,
-/// so `:authority` and `Author` stay readable.
-const CREDENTIAL_WORDS: [&str; 22] = [
-    "auth",
-    "authentication",
-    "authorization",
-    "oauth",
-    "bearer",
-    "jwt",
+/// Substrings that mark a header name as a credential even inside a compound
+/// such as `X-AuthToken`, `AccessToken` or `X-Amzn-Remapped-Set-Cookie`. Each is
+/// long or distinctive enough that an ordinary name does not contain it.
+const CREDENTIAL_ROOTS: [&str; 15] = [
     "token",
-    "apikey",
     "secret",
-    "password",
-    "passwd",
-    "pwd",
-    "otp",
-    "credential",
-    "credentials",
+    "passw",
+    "passphrase",
     "csrf",
     "xsrf",
-    "csrftoken",
-    "xsrftoken",
-    "requestverificationtoken",
-    "session",
+    "cookie",
+    "bearer",
+    "credential",
     "sessionid",
+    "sessid",
+    "signature",
+    "authoriz",
+    "authentication",
+    "oauth",
+];
+/// Words too short to match as substrings. Whole words only, so `:authority`
+/// and `Author` stay readable. A word ending in `key` is matched separately.
+const CREDENTIAL_WORDS: [&str; 6] = ["auth", "jwt", "otp", "pwd", "session", "wsse"];
+/// Standard names that a credential rule would catch, whose values are not
+/// credentials: a WebSocket nonce, a retry key, CORS's literal `true`, and pins.
+const READABLE_NAMES: [&str; 5] = [
+    "sec-websocket-key",
+    "idempotency-key",
+    "access-control-allow-credentials",
+    "public-key-pins",
+    "public-key-pins-report-only",
 ];
 const SOURCES: [&str; 4] = ["", "browser", "network", "early_hints"];
 pub(crate) const STATES: [&str; 9] = [
@@ -220,18 +212,18 @@ fn address(block: &Block) -> Value {
     }
 }
 
-/// Whether a header's value is withheld. Decided from the name alone.
+/// Whether a header's value is withheld. Decided from the name alone. A
+/// false match only keeps a value out of JSON; the binary artifact still has it.
 fn credential_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    if CREDENTIALS.contains(&name.as_str()) {
-        return true;
+    if READABLE_NAMES.contains(&name.as_str()) {
+        return false;
     }
-    let words: Vec<&str> = name
-        .split(['-', '_', ':'])
-        .filter(|word| !word.is_empty())
-        .collect();
-    words.iter().any(|word| CREDENTIAL_WORDS.contains(word))
-        || words.windows(2).any(|pair| pair == ["api", "key"])
+    CREDENTIAL_ROOTS.iter().any(|root| name.contains(root))
+        || name
+            .split(['-', '_', ':'])
+            .filter(|word| !word.is_empty())
+            .any(|word| CREDENTIAL_WORDS.contains(&word) || word.ends_with("key"))
 }
 
 fn headers(lines: Vec<(String, String)>) -> Vec<Value> {
@@ -522,6 +514,22 @@ mod tests {
             "Ocp-Apim-Subscription-Key",
             "X-Functions-Key",
             "X-RapidAPI-Key",
+            "X-AuthToken",
+            "X-AccessToken",
+            "AccessToken",
+            "IdToken",
+            "X-SessionToken",
+            "X-ApiToken",
+            "X-App-Key",
+            "X-Access-Key",
+            "X-Client-Key",
+            "X-Subscription-Key",
+            "X-AppKey",
+            "X-Cookie",
+            "X-Original-Cookie",
+            "X-Amzn-Remapped-Set-Cookie",
+            "X-Signature",
+            "X-WSSE",
         ] {
             assert!(credential_name(name), "{name}");
         }
@@ -537,6 +545,16 @@ mod tests {
             "Idempotency-Key",
             "X-Frame-Options",
             "Content-Security-Policy",
+            "Authority",
+            "Author",
+            "Keep-Alive",
+            "X-Request-Id",
+            "X-Forwarded-For",
+            "Sec-Fetch-Mode",
+            "Sec-CH-UA",
+            "Accept-Language",
+            "Access-Control-Allow-Credentials",
+            "Public-Key-Pins",
         ] {
             assert!(!credential_name(name), "{name}");
         }

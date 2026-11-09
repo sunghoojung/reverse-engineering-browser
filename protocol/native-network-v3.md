@@ -1099,8 +1099,11 @@ provenance. Values are inserted as text after a size and SHA-256 check.
 returns each hop's request and response blocks with their state, source,
 counts, digest, referrer policy, remote endpoint and parsed headers. Values of
 `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie` and any header
-whose name has a credential word (`auth`, `token`, `secret`, `password`, `csrf`,
-`session`, `api key` and similar) are withheld as `value_withheld: true` with
+whose name contains a credential root (`token`, `secret`, `passw`, `csrf`,
+`xsrf`, `cookie`, `bearer`, `signature`, `credential`, `sessionid`, `authoriz`
+and similar), has the whole word `auth`, `session`, `jwt`, `otp` or `pwd`, or
+has a word ending in `key`, except `Sec-WebSocket-Key`, `Idempotency-Key` and
+`Public-Key-Pins`, are withheld as `value_withheld: true` with
 their byte length: like request bodies, they stay in the binary artifact, which
 MCP never inlines. Withholding goes by name, so another value, such as a
 `Location` query, is returned as captured.

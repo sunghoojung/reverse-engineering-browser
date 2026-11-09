@@ -800,6 +800,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.key(115, "\u{F729}", modifiers: [.function])
       let home = try await ui.value("\(rowIndex)") as? Int
       XCTAssertEqual(home, 0, "\(size.name): Home reaches the first tree row")
+      // PageDown moves focus, so the focused row never stays behind out of view.
+      try await ui.key(121, "\u{F72D}", modifiers: [.function])
+      let paged = try await ui.value("\(rowIndex)") as? Int ?? 0
+      XCTAssertGreaterThan(paged, 0, "\(size.name): PageDown moves focus down the tree")
+      let pageFocus = try await ui.json("__rebUiProbe.focusState()")
+      XCTAssertEqual(pageFocus["inViewport"] as? Bool, true, "\(size.name): PageDown keeps the focused row in view: \(pageFocus)")
+      try await ui.key(115, "\u{F729}", modifiers: [.function])
       try await ui.type("w")
       let typed = try await ui.value("document.activeElement?.querySelector('.source-tree-raw')?.textContent ?? ''") as? String ?? ""
       XCTAssertTrue(typed.lowercased().hasPrefix("w"), "\(size.name): type-ahead moves to a row starting with w: \(typed)")
@@ -1754,6 +1761,16 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertInert(ui, "\(size.name) pretty-printed source map")
       try await assertLayout(ui, "#screen-sources", "\(size.name) pretty-printed source map")
       try await ui.screenshot("sources-pretty-printed-\(size.name)")
+      // A file past the preview limit states it above the code. The record is marked rather than
+      // retained at 16 MiB, which would dominate this suite; the loader has its own check.
+      _ = try await ui.value("(() => { state.artifacts.find(item => item.artifact_id === state.selectedArtifactId).contentTruncated = true; renderSources(); return true; })()")
+      try await ui.waitUntil("!document.querySelector('#source-limit-notice').hidden", "\(size.name): the limit notice did not appear")
+      let limit = try await ui.value("document.querySelector('#source-limit-notice').innerText") as? String ?? ""
+      XCTAssertTrue(limit.contains("first 16 MiB"), "\(size.name): the notice states the limit: \(limit)")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) source past the preview limit")
+      try await ui.screenshot("sources-limit-notice-\(size.name)")
+      _ = try await ui.value("(() => { state.artifacts.find(item => item.artifact_id === state.selectedArtifactId).contentTruncated = false; renderSources(); return true; })()")
+      try await ui.waitUntil("document.querySelector('#source-limit-notice').hidden", "\(size.name): the limit notice stayed after the record changed")
       try await ui.click("#source-window-next")
       try await ui.waitUntil("document.querySelector('.source-line[data-line=\"1001\"]') && \(settled) && document.querySelectorAll('#source-code .syntax-string').length > 0",
         "\(size.name): the window after line 1,000 lost its colors")

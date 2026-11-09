@@ -1,0 +1,16 @@
+{
+  "name": "origin-trace-agent-runtime",
+  "private": true,
+  "description": "LangGraph agent loop for the Origin Trace agent dock, bundled into one browser asset.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@langchain/anthropic": "1.6.0",
+    "@langchain/core": "1.3.0",
+    "@langchain/langgraph": "1.5.2",
+    "@langchain/openai": "1.7.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

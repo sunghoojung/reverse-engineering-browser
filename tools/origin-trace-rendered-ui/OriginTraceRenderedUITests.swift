@@ -1776,6 +1776,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#source-window-next")
       try await ui.waitUntil("document.querySelector('.source-line[data-line=\"1001\"]') && \(settled) && document.querySelectorAll('#source-code .syntax-string').length > 0",
         "\(size.name): the window after line 1,000 lost its colors")
+      let rowHeight = (try await ui.value("document.querySelector('#source-code .source-line').getBoundingClientRect().height") as? NSNumber)?.doubleValue ?? 0
+      XCTAssertEqual(rowHeight, 18, "\(size.name): Sources rows use the editor's 18 px line height")
       try await assertLayout(ui, "#screen-sources", "\(size.name) pretty-printed later window")
       try await ui.screenshot("sources-pretty-printed-later-\(size.name)")
       try await ui.key(3, "f", modifiers: [.command])

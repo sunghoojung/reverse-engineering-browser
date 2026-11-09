@@ -1199,6 +1199,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       // A horizontal scrollbar takes height from the strip and covers the tabs.
       let strip = try await ui.json("(() => { const strip = document.querySelector('#screen-traffic .inspector-tabs'); return {client: strip.clientHeight, content: strip.querySelector('.inspector-tab').offsetHeight}; })()")
       XCTAssertGreaterThanOrEqual(strip["client"] as? Int ?? 0, strip["content"] as? Int ?? 1, "\(size.name): the inspector tabs are not clipped: \(strip)")
+      let hiddenTabs = try await ui.value("(() => { const box = document.querySelector('#screen-traffic .inspector-tabs').getBoundingClientRect(); return [...document.querySelectorAll('#screen-traffic .inspector-tab')].filter(tab => { const rect = tab.getBoundingClientRect(); return rect.left < box.left || rect.right > box.right + 1 || rect.bottom > box.bottom + 1; }).map(tab => tab.innerText.trim()).join('|'); })()") as? String ?? "unknown"
+      XCTAssertEqual(hiddenTabs, "", "\(size.name): every inspector tab is inside the strip")
       try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) traffic general")
       try await ui.screenshot("traffic-general-\(size.name)")
 

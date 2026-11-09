@@ -2271,7 +2271,8 @@ var(--panel);
       .detail-pane { display: grid; grid-template-rows: auto auto minmax(0, 1fr); overflow: hidden; }
       .detail-pane.showing-exchange { grid-template-rows: auto auto minmax(0, 1fr); }
       .detail-pane.showing-exchange > .inspector-tabs { display: flex; }
-      .inspector-tabs { min-width: 0; min-height: 32px; flex-wrap: nowrap; overflow-x: auto; padding: 0 8px; gap: 14px; }
+      /* Ten tabs do not fit a narrow pane, and a clipped strip hides them with no sign; the strip's grid row is sized by content. */
+      .inspector-tabs { min-width: 0; min-height: 32px; flex-wrap: wrap; overflow: visible; padding: 0 8px; gap: 0 14px; }
       .inspector-tab { flex: 0 0 auto; height: 32px; padding: 0; font-size: 11px; }
       .request-inspector { overflow: auto; }
       .traffic-general { padding: 8px 12px; border-bottom: 1px solid var(--line); }

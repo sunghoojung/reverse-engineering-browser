@@ -56,7 +56,14 @@ const blockGraphLayout = (() => {
     for (let node = 0; node < graph.count; node += 1) {
       let chars = 0;
       const first = graph.firstRow[node], last = first + graph.rowCount[node];
-      for (let row = first; row < last; row += 1) chars = Math.max(chars, starts[row + 1] - starts[row] - 1);
+      for (let row = first; row < last; row += 1) {
+        // Matches the drawn row: offset, mnemonic padded to ten, then operands.
+        const start = starts[row], end = starts[row + 1] - 1;
+        let a = start; while (a < end && graph.rows.charCodeAt(a) !== 32) a += 1;
+        let b = a + 1; while (b < end && graph.rows.charCodeAt(b) !== 32) b += 1;
+        const mnemonic = Math.max(0, b - a - 1), rest = Math.max(0, end - b - 1);
+        chars = Math.max(chars, (a - start) + 1 + (rest ? Math.max(mnemonic, 10) + 1 + rest : mnemonic));
+      }
       const label = 9 + Math.ceil(Math.log10(Math.max(graph.offsets[node], 1) + 1));
       w[node] = Math.max(m.minW, Math.ceil(Math.min(chars, MAX_ROW_CHARS) * m.charW + m.padX * 2), Math.ceil(label * m.charW + 44));
       h[node] = m.headerH + m.padY * 2 + Math.max(1, graph.rowCount[node]) * m.rowH;
@@ -321,7 +328,8 @@ const blockGraphLayout = (() => {
     }
     const gapHeight = (box, g) => {
       const lanes = box.gaps[g]?.size ?? 0;
-      if (!lanes) return 0;
+      // An edge-free gap still separates rows, such as observed runs and gaps.
+      if (!lanes) return g > 0 && g < box.rows.length ? m.gapY : 0;
       return Math.max(m.gapY, 16 + lanes * m.lane + 12);
     };
 
@@ -428,10 +436,11 @@ const blockGraphLayout = (() => {
     const pointStart = new Uint32Array(edgeCount + 1);
     const flat = [];
     const box = new Float32Array(edgeCount * 4);
+    let edgeAnchor = 0;
     const pushPoint = (px, py) => {
       const length = flat.length;
-      if (length >= 2 && flat[length - 2] === px && flat[length - 1] === py) return;
-      if (length >= 4) {
+      if (length - edgeAnchor >= 2 && flat[length - 2] === px && flat[length - 1] === py) return;
+      if (length - edgeAnchor >= 4) {
         const ax = flat[length - 4], ay = flat[length - 3], bx = flat[length - 2], by = flat[length - 1];
         if ((ax === bx && bx === px) || (ay === by && by === py)) { flat[length - 2] = px; flat[length - 1] = py; return; }
       }
@@ -440,7 +449,7 @@ const blockGraphLayout = (() => {
     for (let e = 0; e < edgeCount; e += 1) {
       pointStart[e] = flat.length / 2;
       const from = graph.from[e], to = graph.to[e];
-      const anchor = flat.length;
+      const anchor = edgeAnchor = flat.length;
       if (to < 0) {
         const slot = stubCount[from]++;
         const sx = x[from] + nodeW[from] / 2 + (slot === 0 ? 0 : (slot % 2 ? 1 : -1) * Math.ceil(slot / 2) * 28);

@@ -56,6 +56,12 @@ const pointsOf = (layout, edge) => {
   const rails = new Set();
   edges.forEach(([from, to, kind], index) => { if (kind === KIND.branch) { const points = pointsOf(layout, index); rails.add(points[points.length - 2][0]); } });
   assert.equal(rails.size, 1, 'every back edge shares one rail beside the loop header');
+  edges.forEach(([from, to], index) => {
+    const points = pointsOf(layout, index), [x, y] = points[0], [endX, endY] = points.at(-1);
+    assert(x >= layout.x[from] && x <= layout.x[from] + layout.w[from] && Math.abs(y - (layout.y[from] + layout.h[from])) < 1, `edge ${index} starts at its source's bottom`);
+    assert(Math.abs(endX - (to === 0 ? layout.x[to] : layout.x[to] + layout.w[to] / 2)) < 1, `edge ${index} ends at its target`);
+    assert(endY >= layout.y[to] - 1 && endY <= layout.y[to] + layout.h[to], `edge ${index} reaches its target`);
+  });
   assert.equal(layout.direct, 0, 'a reducible dispatcher needs no direct edges');
 }
 {

@@ -12,6 +12,7 @@ const REQUEST_STACK_NOTES = Object.freeze({
 
 const REQUEST_STACK_REASONS = Object.freeze({
   script_identity_missing: 'no script identity record',
+  script_identity_outside_scan: 'not in the scanned range',
   source_unavailable: 'source unavailable',
   source_not_retained: 'source not retained',
   source_artifact_missing: 'source artifact missing',
@@ -223,6 +224,12 @@ function createRequestStackPanel({open, refresh, load = null}) {
         .then(body => {
           next.status = body?.status === 'recorded' && body.request?.sequence_number === sequence ? 'ready' : 'error';
           next.document = body;
+          if (body?.status === 'outside_scan') {
+            // Unknown, not absent; a later read may reach it once the index catches up.
+            Object.assign(next, {error: 'This stack is not in the scanned range of the event store, so it is unknown rather than missing.',
+              retryable: true, failedAt: Date.now()});
+            return;
+          }
           next.error = next.status === 'error' ? 'The stored stack no longer matches this request record.' : null;
         }, error => {
           Object.assign(next, {status: 'error', retryable: true, failedAt: Date.now(),

@@ -138,4 +138,28 @@ assert.match(tree.textContent, /Started by window\.open\./);
 assert.deepEqual([...tree.querySelectorAll('li')].map(item => item.textContent), ['<img src=x onerror=alert(1)> @ page:13:10']);
 navigationPanel.render(tree, {events: [started], details: []}, [chain]);
 assert.match(tree.textContent, /no script navigation stack names this request/);
-console.log('PASS Initiator panel: frames as text, Wasm, unresolved reason, omitted marker, await, setTimeout and microtask segments, cut chain, navigation stacks, Parser and no record');
+// A read that did not reach the request's records is unknown, not missing.
+let outsidePending = null;
+let refreshes = 0;
+const outsidePanel = createRequestStackPanel({
+  load: () => outsidePending = Promise.resolve({status: 'outside_scan', state: 'captured', coverage: {complete: false, scope: 'bounded_range'}}),
+  refresh: () => {refreshes += 1;}, open: () => {}
+});
+outsidePanel.render(tree, request, [chain]);
+await outsidePending;
+await new Promise(resolve => setTimeout(resolve, 0));
+outsidePanel.render(tree, request, [chain]);
+assert.match(tree.textContent, /not in the scanned range of the event store, so it is unknown rather than missing/);
+assert.equal(refreshes, 1, 'the panel repaints once when the unknown state arrives');
+const scriptOutside = createRequestStackPanel({
+  load: () => outsidePending = Promise.resolve({status: 'recorded', state: 'captured', request: {sequence_number: stackEvent.sequence_number}, frames_retained: true,
+    frames: [{index: 0, kind: 'javascript', async: false, script_id: 9, position: 1, resolution: {status: 'unresolved', reason: 'script_identity_outside_scan'}}],
+    task_segments: [], async_callers_not_shown: []}),
+  refresh: () => {}, open: () => {}
+});
+scriptOutside.render(tree, request, [chain]);
+await outsidePending;
+await new Promise(resolve => setTimeout(resolve, 0));
+scriptOutside.render(tree, request, [chain]);
+assert.match(tree.textContent, /not in the scanned range/);
+console.log('PASS Initiator panel: frames as text, Wasm, unresolved reason, omitted marker, await, setTimeout and microtask segments, cut chain, navigation stacks, Parser, no record and an outside-scan status');

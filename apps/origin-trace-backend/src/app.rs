@@ -2188,7 +2188,7 @@ mod tests {
         // A sparse over-byte-cap manifest selects fallback without expensive reads.
         std::fs::File::create(root.path().join("manifest.jsonl"))
             .unwrap()
-            .set_len(64 * 1024 * 1024 + 1)
+            .set_len(256 * 1024 * 1024 + 1)
             .unwrap();
         let cache = Arc::new(Mutex::new(ArtifactLookupCache::default()));
         let guard = cache.clone().lock_owned().await;

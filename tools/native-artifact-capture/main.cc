@@ -993,6 +993,128 @@ void ReadRequestBodies(const std::filesystem::path& output) {
                "receiver refusal joined to the deferred record\n";
 }
 
+// Shared header blocks, the request tracking limit and pre-expiry flushing of
+// bodies still being read, through the real network and artifact sinks.
+void HeaderAndExpiryEdges() {
+  record_corpus = false;
+  auto& network = reb::NativeNetworkCaptureSink::Get();
+  auto& sink = NativeArtifactCaptureSink::Get();
+  auto& transfers = NativeArtifactSocketClient::Get().transfers;
+  auto& reads = reb::NativeRequestBodyReader::reads;
+  const auto configure = [&] {
+    Configure();
+    sink.SetEmitter(Emit, kSession, kMask, 200, reb::kNativeRequestContentDefaultBudgetBytes);
+    network.SetEmitter(Emit, kSession, kMask, 200, true);
+    transfers.clear();
+    reads.clear();
+  };
+  std::uint64_t next_request = 5000;
+  const auto headers = [&] {
+    network::ResourceRequest request;
+    request.url = GURL("https://api.fixture.test/shared");
+    request.headers.SetHeader("Accept", "application/json");
+    network.RecordRequestStarted(next_request++, 0, 0, 1, kFrame, 11, 12, request);
+    const NativeProbeEvent record = LastOf(NativeProbeType::kRequestHeaders);
+    reb::HeaderBlockPayload payload;
+    Check(reb::DecodeHeaderBlockPayload(record.inline_payload, payload), "Decodes a header record");
+    return std::make_pair(record, payload);
+  };
+  const auto state_of = [](const reb::HeaderBlockPayload& payload) {
+    return static_cast<reb::HeaderState>(payload.state);
+  };
+
+  // A failed block is not shared: the next identical one gets its own attempt.
+  configure();
+  const auto [first, first_payload] = headers();
+  Check(state_of(first_payload) == reb::HeaderState::kCaptured, "The first block is retained");
+  const auto [repeat, repeat_payload] = headers();
+  Check(state_of(repeat_payload) == reb::HeaderState::kCapturedShared &&
+            repeat.header.artifact_id == first.header.artifact_id,
+        "An identical block shares the artifact");
+  NativeArtifactCaptureSink::TransferCompleted(first.header.artifact_id,
+                                               reb::NativeArtifactReceiveStatus::kIoError);
+  Check(events.back().header.type == NativeProbeType::kArtifactCaptureFailed,
+        "The failed block reports its failure");
+  const auto [retry, retry_payload] = headers();
+  Check(state_of(retry_payload) == reb::HeaderState::kCaptured &&
+            retry.header.artifact_id != first.header.artifact_id,
+        "A block after a failed transfer gets its own attempt, not the dead artifact");
+  const auto [kept, kept_payload] = headers();
+  Check(state_of(kept_payload) == reb::HeaderState::kCapturedShared &&
+            kept.header.artifact_id == retry.header.artifact_id,
+        "A block still in flight stays shareable");
+  NativeArtifactCaptureSink::TransferCompleted(retry.header.artifact_id,
+                                               reb::NativeArtifactReceiveStatus::kAccepted);
+  const auto [accepted, accepted_payload] = headers();
+  Check(state_of(accepted_payload) == reb::HeaderState::kCapturedShared &&
+            accepted.header.artifact_id == retry.header.artifact_id,
+        "An accepted block keeps being shared");
+
+  // Past the tracking limit a request can get no network block, and every
+  // later header record counts that.
+  configure();
+  for (std::size_t index = 0; index < reb::kNativeHeaderTrackedRequests; ++index) {
+    Check(headers().second.unattributed_blocks == 0, "Tracked requests lose nothing");
+  }
+  Check(headers().second.unattributed_blocks == 1 && headers().second.unattributed_blocks == 2,
+        "Each request past 4,096 tracked is counted on its own header record");
+
+  // Shortly before expiry a read in progress and a body never handed over are
+  // recorded while the session can still record them.
+  auto& runner = *base::SequencedTaskRunner::GetCurrentDefault();
+  runner.tasks.clear();
+  configure();
+  Check(!runner.tasks.empty(), "Configuration schedules the pre-expiry flush");
+  const auto upload = [&] {
+    network::ResourceRequest request;
+    request.method = "POST";
+    request.url = GURL("https://api.fixture.test/upload");
+    request.request_body = std::make_shared<network::ResourceRequestBody>();
+    request.request_body->elements_mutable()->push_back(
+        network::DataElement(network::DataElementFile{}));
+    return request;
+  };
+  auto reading = upload();
+  const auto read_id = next_request++;
+  network.RecordRequestStarted(read_id, 0, 0, 1, kFrame, 11, 12, reading);
+  network.TeeRequestBody(read_id, reading);
+  auto never_handed = upload();
+  network.RecordRequestStarted(next_request++, 0, 0, 1, kFrame, 11, 12, never_handed);
+  const auto count_bodies = [] {
+    return std::ranges::count_if(
+        events, [](const auto& e) { return e.header.type == NativeProbeType::kRequestBody; });
+  };
+  const auto before_flush = count_bodies();
+  runner.tasks.back().second();
+  Check(count_bodies() == before_flush + 2, "Both deferred bodies are recorded before expiry");
+  std::vector<NativeProbeEvent> flushed;
+  std::ranges::copy_if(events, std::back_inserter(flushed), [](const auto& e) {
+    return e.header.type == NativeProbeType::kRequestBody;
+  });
+  const auto incomplete = BodyPayload(flushed[flushed.size() - 2]);
+  const auto unread = BodyPayload(flushed.back());
+  Check(static_cast<reb::RequestBodyState>(incomplete.state) ==
+                reb::RequestBodyState::kNotCapturedBodyKind ||
+            static_cast<reb::RequestBodyState>(unread.state) ==
+                reb::RequestBodyState::kNotCapturedBodyKind,
+        "The body never handed over is named as unread");
+  Check(static_cast<reb::RequestBodyState>(incomplete.state) ==
+                reb::RequestBodyState::kNotCapturedReadIncomplete ||
+            static_cast<reb::RequestBodyState>(unread.state) ==
+                reb::RequestBodyState::kNotCapturedReadIncomplete,
+        "The read in progress is named as incomplete");
+  const auto after_flush = events.size();
+  reb::NativeRequestBodyReader::Finish(reads.size() - 1, std::vector<std::uint8_t>(1000, 'f'),
+                                       reb::NativeRequestBodyReadEnd::kComplete, 1000);
+  Check(events.size() == after_flush && transfers.empty(),
+        "A read finishing after the flush emits nothing and publishes nothing");
+  Configure();
+  transfers.clear();
+  reads.clear();
+  std::cout << "PASS header and expiry edges: a failed block is not shared, requests past the "
+               "tracking limit are counted, deferred bodies are recorded before expiry\n";
+}
+
 void RequestBodyPolicy(const std::filesystem::path& output) {
   record_corpus = false;
   Configure();
@@ -1046,6 +1168,7 @@ void RequestBodyPolicy(const std::filesystem::path& output) {
                "artifact channel are explicit\n";
   RequestContentLimits();
   ReadRequestBodies(output);
+  HeaderAndExpiryEdges();
 }
 
 #include "response_bodies_test.h"
@@ -1125,6 +1248,7 @@ void Corpus(reb::ArtifactReceiver& receiver, const std::filesystem::path& output
   WriteCases(output, cases);
   RequestBodies(receiver, output);
   ResponseBodies(receiver, output);
+  StreamPastExpiry();
   record_corpus = false;
   std::cout << "PASS actual sinks/receiver ACK: exact, missing ACK/creator, generated/runtime, "
                "BrowserContext request reuse, out-of-order body and ACK; uint64 roots > 2^53\n";
@@ -1248,7 +1372,6 @@ void InFlightPool(NativeArtifactCaptureSink& sink,
     auto held = reb::NativeArtifactReservation::Acquire(
         sink.memory_pool(), reb::kNativeArtifactInFlightBytes - kChunk / 2);
     const auto queued = client.transfers.size();
-  StreamPastExpiry();
     Check(Finish(declared, true, std::span(source)) != 0, "A small body still fits");
     const int starved = Begin(request);
     const std::vector<std::uint8_t> quarter(256 * 1024, 'q');

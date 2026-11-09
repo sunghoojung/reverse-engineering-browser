@@ -27,6 +27,7 @@
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h"
+#include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "brave/components/reverse_engineering_browser/browser/native_response_body_capture.h"
 #include "crypto/hash.h"
@@ -1117,8 +1118,8 @@ void NativeArtifactCaptureSink::ReclaimGuestGroups() {
 void NativeArtifactCaptureSink::FlushBeforeExpiry(const std::uint64_t generation) {
   if (generation != generation_.load(std::memory_order_acquire))
     return;
-  DrainGuestDependencies();
   NativeNetworkCaptureSink::Get().FlushDeferredBodies();
+  DrainGuestDependencies();
   FlushPendingWork("native_guest_pending_at_expiry", "native_wasm_dispatch_pending_at_expiry");
 }
 
@@ -1642,12 +1643,12 @@ void NativeArtifactCaptureSink::OnTransferCompleted(
   if (!IsCurrentCapture(context.session_id, context.generation)) {
     return;
   }
-  if (context.response_body) {
-    NativeResponseBodyCapture::Get().OnTransferCompleted(
   if (context.shared_block && status != NativeArtifactReceiveStatus::kAccepted) {
     // An identical block must get its own attempt, not share one that failed.
     NativeNetworkCaptureSink::Get().ForgetSharedBlock(artifact_id);
   }
+  if (context.response_body) {
+    NativeResponseBodyCapture::Get().OnTransferCompleted(
         artifact_id, status == NativeArtifactReceiveStatus::kAccepted);
   }
   if (auto receipt = guest_receipts_.find(artifact_id); receipt != guest_receipts_.end()) {

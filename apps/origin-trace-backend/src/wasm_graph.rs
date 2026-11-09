@@ -53,6 +53,8 @@ const ENTRY: u32 = 1;
 const REACHABLE: u32 = 2;
 const EXIT: u32 = 4;
 const TRAP: u32 = 8;
+/// Some of this block's rows fell outside the row text budget.
+const ROWS_CUT: u32 = 32;
 
 fn bad(error: wasmparser::BinaryReaderError) -> Error {
     Error::protocol(format!("WASM decoding failed: {error}"))
@@ -923,6 +925,13 @@ fn operands(op: &Operator<'_>) -> String {
         Operator::BrTable { targets } => {
             format!("[{} targets] default {}", targets.len(), targets.default())
         }
+        Operator::Block { blockty } | Operator::Loop { blockty } | Operator::If { blockty } => {
+            match blockty {
+                wasmparser::BlockType::Empty => String::new(),
+                wasmparser::BlockType::Type(ty) => ty.to_string(),
+                wasmparser::BlockType::FuncType(index) => format!("type {index}"),
+            }
+        }
         Operator::End
         | Operator::Else
         | Operator::Return
@@ -954,6 +963,18 @@ fn operands(op: &Operator<'_>) -> String {
             }
         }
     }
+}
+
+fn block_run_text(operand: &str, count: u32) -> String {
+    let mut text = String::from("block");
+    if count > 1 {
+        let _ = write!(text, " x{count}");
+    }
+    if !operand.is_empty() {
+        text.push(' ');
+        text.push_str(operand);
+    }
+    text
 }
 
 fn json_string(out: &mut String, value: &str) {
@@ -1035,8 +1056,8 @@ fn graph_document(
     for edge in &graph.edges {
         edges_by_block[edge.0 as usize] += 1;
     }
-    for block in 0..graph.leaders.len() {
-        structure_bytes += 64 + edges_by_block[block] * 56;
+    for (block, edge_count) in edges_by_block.iter().enumerate() {
+        structure_bytes += 64 + edge_count * 56;
         if structure_bytes > MAX_STRUCTURE_BYTES {
             kept = block;
             omissions.push(format!(
@@ -1060,32 +1081,58 @@ fn graph_document(
             .map_or(count as u32, |next| *next);
         let first_row = row_index;
         let mut included = 0u32;
-        for instruction in leader..end {
-            let (op, offset) = reader.read_with_offset().map_err(bad)?;
-            if text_stopped {
-                continue;
+        let mut emit = |rows: &mut String, offset: usize, text: String| {
+            if rows.len() + text.len() + 16 > MAX_ROW_TEXT_BYTES {
+                if !text_stopped {
+                    text_stopped = true;
+                    omissions.push(format!(
+                        "Instruction row byte budget reached at byte {offset:x}; later rows are not displayed. Block structure is unaffected."
+                    ));
+                }
+                return;
             }
-            let before = rows.len();
-            let _ = write!(rows, "{offset:x} {}", wasm::mnemonic(&op));
-            let text = operands(&op);
-            if !text.is_empty() {
-                rows.push(' ');
-                rows.push_str(&text);
-            }
-            if let Some(target) = branch_target(&decoded, instruction, &graph) {
-                let _ = write!(rows, " -> {target:x}");
-            }
-            rows.push('\n');
-            if rows.len() > MAX_ROW_TEXT_BYTES {
-                rows.truncate(before);
-                text_stopped = true;
-                omissions.push(format!(
-                    "Instruction row byte budget reached at byte {offset:x}; later rows are not displayed. Block structure is unaffected."
-                ));
-                continue;
-            }
+            let _ = writeln!(rows, "{offset:x} {text}");
             row_index += 1;
             included += 1;
+        };
+        // A run of identical `block` openers is structure, not behavior: a
+        // dispatcher opens hundreds before its br_table. One row carries the
+        // run's first offset and count, and the card's badge stays exact.
+        let mut run: Option<(usize, String, u32)> = None;
+        for instruction in leader..end {
+            let (op, offset) = reader.read_with_offset().map_err(bad)?;
+            if let Operator::Block { .. } = op {
+                let text = operands(&op);
+                match &mut run {
+                    Some((_, current, count)) if *current == text => *count += 1,
+                    _ => {
+                        if let Some((at, text, count)) = run.take() {
+                            emit(&mut rows, at, block_run_text(&text, count));
+                        }
+                        run = Some((offset, text, 1));
+                    }
+                }
+                continue;
+            }
+            if let Some((at, text, count)) = run.take() {
+                emit(&mut rows, at, block_run_text(&text, count));
+            }
+            let mut text = wasm::mnemonic(&op);
+            let args = operands(&op);
+            if !args.is_empty() {
+                text.push(' ');
+                text.push_str(&args);
+            }
+            if let Some(target) = branch_target(&decoded, instruction, &graph) {
+                let _ = write!(text, " -> {target:x}");
+            }
+            emit(&mut rows, offset, text);
+        }
+        if let Some((at, text, count)) = run.take() {
+            emit(&mut rows, at, block_run_text(&text, count));
+        }
+        if text_stopped {
+            graph.flags[block] |= ROWS_CUT;
         }
         block_rows.push((first_row, included, end - leader));
     }
@@ -1100,7 +1147,7 @@ fn graph_document(
     let range = body.range();
     let _ = write!(
         out,
-        ",\"function_index\":{function},\"byte_offset\":{},\"byte_end\":{},\"type_index\":{},\"evidence\":\"declared_static\",\"complete\":false,\"status\":\"{}\",\"block_count\":{kept},\"edge_count\":{},\"instruction_count\":{count},\"edge_kinds\":{},\"block_fields\":[\"byte_offset\",\"byte_end\",\"first_row\",\"row_count\",\"instruction_count\",\"flags\"],\"flag_bits\":{{\"entry\":1,\"reachable\":2,\"exit\":4,\"trap\":8}},\"edge_fields\":[\"from\",\"to\",\"kind\",\"label\"],\"blocks\":[",
+        ",\"function_index\":{function},\"byte_offset\":{},\"byte_end\":{},\"type_index\":{},\"evidence\":\"declared_static\",\"complete\":false,\"status\":\"{}\",\"block_count\":{kept},\"edge_count\":{},\"instruction_count\":{count},\"edge_kinds\":{},\"block_fields\":[\"byte_offset\",\"byte_end\",\"first_row\",\"row_count\",\"instruction_count\",\"flags\"],\"flag_bits\":{{\"entry\":1,\"reachable\":2,\"exit\":4,\"trap\":8,\"rows_cut\":32}},\"edge_fields\":[\"from\",\"to\",\"kind\",\"label\"],\"blocks\":[",
         range.start,
         range.end,
         ty.map_or_else(|| "null".to_owned(), |t| t.to_string()),
@@ -1112,7 +1159,7 @@ fn graph_document(
         graph.edges.len(),
         serde_json::to_string(&EDGE_KINDS).expect("JSON strings"),
     );
-    for block in 0..kept {
+    for (block, &(first, included, instructions)) in block_rows.iter().enumerate() {
         if block > 0 {
             out.push(',');
         }
@@ -1122,7 +1169,6 @@ fn graph_document(
             .leaders
             .get(block + 1)
             .map_or(decoded.byte_end, |next| decoded.offsets[*next as usize]);
-        let (first, included, instructions) = block_rows[block];
         let _ = write!(
             out,
             "[{start},{end},{first},{included},{instructions},{}]",

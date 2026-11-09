@@ -2312,15 +2312,25 @@ pub(crate) fn syntax_stack(source: &str) -> Option<usize> {
     let mut delimiters = Vec::new();
     let mut chain = 0usize;
     let mut stack = PARSER_STACK;
+    let mut after_call_or_index = false;
     for token in Lexer::new(source) {
         let text = &source.as_bytes()[token.start..token.end];
         let mut uncertain = 0;
+        // `f()()` and `a[0][1]` nest one level per link with no operator between.
+        if after_call_or_index && matches!(text[0], b'(' | b'[') {
+            chain += 1;
+        }
+        if token.kind != Kind::Comment {
+            after_call_or_index = token.kind == Kind::Close && matches!(text[0], b')' | b']');
+        }
         match token.kind {
             Kind::Open => {
                 delimiters.push(chain);
                 chain = 0;
             }
             Kind::Close => chain = delimiters.pop().unwrap_or(0),
+            // Each tagged template in `a`x``y`` nests one level as well.
+            Kind::TemplateText if text[0] == b'`' => chain += 1,
             Kind::Word
                 if matches!(
                     text,

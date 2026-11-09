@@ -595,4 +595,42 @@ mod tests {
             assert_eq!(deep["status"], expected, "{depth}");
         }
     }
+
+    #[tokio::test]
+    async fn long_call_and_index_chains_are_laid_out_or_refused_as_nesting() {
+        let service = SourceFormat::default();
+        let identity = |key: &str| json!({"artifact_id": "1", "sha256": key});
+        let format = async |key: &str, source: String| {
+            service
+                .format(source, identity(key), Language::JavaScript, None)
+                .await
+                .unwrap()
+        };
+        for (name, source, status) in [
+            ("calls", format!("f{};", "()".repeat(8_000)), "formatted"),
+            ("indexes", format!("f{};", "[0]".repeat(8_000)), "formatted"),
+            ("mixed", format!("f{};", "()[0]".repeat(4_000)), "formatted"),
+            (
+                "deep calls",
+                format!("f{};", "()".repeat(200_000)),
+                "unavailable",
+            ),
+            (
+                "deep indexes",
+                format!("f{};", "[0]".repeat(200_000)),
+                "unavailable",
+            ),
+            (
+                "deep tagged templates",
+                format!("f{};", "``".repeat(200_000)),
+                "unavailable",
+            ),
+        ] {
+            let result = format(name, source).await;
+            assert_eq!(result["status"], status, "{name}: {result}");
+            if status == "unavailable" {
+                assert_eq!(result["reason"], "nesting-limit", "{name}");
+            }
+        }
+    }
 }

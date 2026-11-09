@@ -1281,15 +1281,6 @@ impl<'s, 't> Layout<'s, 't> {
         self.rhs(&property.value, short);
     }
 
-    fn call(&mut self, call: &CallExpression) {
-        if self.member_chain(call) {
-            return;
-        }
-        self.expr(&call.callee);
-        self.emit_before_paren(call.span.end);
-        self.arguments(call.span.end, &call.arguments);
-    }
-
     /// Optional chaining and type arguments before `(`.
     fn emit_before_paren(&mut self, end: u32) {
         while self
@@ -1344,8 +1335,11 @@ impl<'s, 't> Layout<'s, 't> {
         }
     }
 
-    /// Prettier's member chain: `head.a().b().c()` breaks before each call group.
-    fn member_chain(&mut self, call: &CallExpression) -> bool {
+    /// One call and every call or member link under it, printed as a loop so
+    /// the source's left-deep chains need no stack and no repeated walk. It
+    /// breaks like Prettier's member chain, `head.a().b().c()`, before each
+    /// call group; an inner call of a chain too short to break is shorter still.
+    fn call(&mut self, call: &CallExpression) {
         enum Link<'x, 'a> {
             Call(&'x CallExpression<'a>),
             Member(&'x MemberExpression<'a>),
@@ -1407,8 +1401,19 @@ impl<'s, 't> Layout<'s, 't> {
                 _ => false,
             };
         let cutoff = if merge { 3 } else { 2 };
+        let print = |layout: &mut Self, link: &Link| match link {
+            Link::Call(call) => {
+                layout.emit_before_paren(call.span.end);
+                layout.arguments(call.span.end, &call.arguments);
+            }
+            Link::Member(member) => layout.member_link(member),
+        };
         if groups.len() <= cutoff || calls.len() < 3 {
-            return false;
+            self.expr(current);
+            for link in &links {
+                print(self, link);
+            }
+            return;
         }
         let complex = calls.iter().any(|call| {
             call.arguments.iter().any(|argument| {
@@ -1423,13 +1428,6 @@ impl<'s, 't> Layout<'s, 't> {
             self.doc.force_break();
         }
         self.expr(current);
-        let print = |layout: &mut Self, link: &Link| match link {
-            Link::Call(call) => {
-                layout.emit_before_paren(call.span.end);
-                layout.arguments(call.span.end, &call.arguments);
-            }
-            Link::Member(member) => layout.member_link(member),
-        };
         for link in &links[..first] {
             print(self, link);
         }
@@ -1448,7 +1446,6 @@ impl<'s, 't> Layout<'s, 't> {
         }
         self.doc.dedent();
         self.doc.close();
-        true
     }
 
     /// `in_test`: the enclosing parentheses own the group.

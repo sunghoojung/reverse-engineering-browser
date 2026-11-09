@@ -53,7 +53,8 @@ record counts (at most 8), and the byte boundaries of its first record and
 after its last. Record counts include the lifecycle records and their children
 (`request_target`, `request_body`, `response_body`, header blocks, cookie
 lists, `request_initiator_stack`, `navigation_initiator_link`,
-`request_tab_link` and `request_extension_link`). A link is no member; the row's
+`request_tab_link`, `request_extension_link` and `request_watch_match`). A link
+is no member; the row's
 `tab_link`, `tab_ids` and `extension_id` carry it. Reading a row's records is `get_events` per member with `category=network`,
 `after=first_offset` and the member's `records` as `limit`: the browser's
 `artifact` acknowledgements share the request ID and are not counted.

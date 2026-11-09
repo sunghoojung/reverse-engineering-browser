@@ -24,7 +24,7 @@ use std::{
 pub const SIDECAR_SUFFIX: &str = ".requests-v1";
 const FORMAT: &str = "reb-request-index-v1";
 /// Sidecar row layout; a sidecar of another layout is rebuilt from byte 0.
-const LAYOUT: u32 = 5;
+const LAYOUT: u32 = 6;
 /// Bounds one call; a larger store reports partial coverage and continues next call.
 const SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const RECORD_BYTES: usize = 4096;
@@ -51,7 +51,7 @@ const MAX_IDENTITIES: usize = 16_384;
 const UNIDENTIFIED: &str = "Unidentified network event";
 /// Records that belong to a row without changing its lifecycle; a selected
 /// row reads them back by member (protocol/native-network-v2.md and v3).
-const CHILD_TYPES: [&str; 10] = [
+const CHILD_TYPES: [&str; 11] = [
     "request_target",
     "request_body",
     "response_body",
@@ -62,6 +62,7 @@ const CHILD_TYPES: [&str; 10] = [
     "request_tab_link",
     "navigation_initiator_link",
     "request_extension_link",
+    "request_watch_match",
 ];
 
 pub const QUERY_KEYS: [&str; 18] = [
@@ -3062,6 +3063,23 @@ mod tests {
         assert!(!sidecar.exists(), "a clear removes the derived copy");
         fs::write(&path, b"").unwrap();
         assert_eq!(page(&mut reopened, "")["total"], 0);
+    }
+
+    #[test]
+    fn a_watch_match_counts_toward_its_renderer_member() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events.jsonl");
+        let mut store = Store {
+            events: Vec::new(),
+            sequence: 0,
+        };
+        store.push(42, 5, "request_initiated", b"", json!({}));
+        store.push(42, 5, "request_watch_match", &[0; 80], json!({}));
+        fs::write(&path, store.bytes()).unwrap();
+        let mut index = RequestIndex::new(&path);
+        let row = &page(&mut index, "")["requests"][0];
+        assert_eq!(row["records"], 2, "{row}");
+        assert_eq!(row["members"][0]["records"], 2);
     }
 
     #[test]

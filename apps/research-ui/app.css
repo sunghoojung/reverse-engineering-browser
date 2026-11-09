@@ -2155,7 +2155,8 @@ var(--panel);
       }
       /* Network ledger: fixed rows and explicit retained-window paging. All
          colors resolve to the existing Rosé Pine Moon / light theme tokens. */
-      #screen-traffic .traffic-grid { grid-template-columns: minmax(360px, 46%) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+      /* 440 px keeps every type chip on its line beside an open inspector. */
+      #screen-traffic .traffic-grid { grid-template-columns: minmax(440px, 46%) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
       #screen-traffic .traffic-grid[data-detail-open="false"] { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
       .detail-pane[hidden] { display: none; }
       .request-pane { border-right: 1px solid var(--line); border-bottom: 0; grid-template-rows: repeat(4, max-content) minmax(112px, 1fr); overflow-y: auto; }
@@ -4970,6 +4971,17 @@ details.decoder-card > header p { margin-top: 0; }
    set wraps only when the pane is narrower than all eleven. */
 #screen-traffic .request-filters .type-filters { width: fit-content; max-width: 100%; gap: 1px; padding: 2px; border: 1px solid var(--line-soft); border-radius: var(--control-radius); background: var(--bg); }
 #screen-traffic .request-filters .type-filter { height: 22px; padding: 0 4px; border: 1px solid transparent; }
+/* Filter and flags share one line and the type chips another at every width,
+   so opening the inspector cannot wrap the toolbar and move the rows. */
+#screen-traffic .network-tools { display: grid; grid-template-columns: minmax(130px, 1fr) auto; align-items: center; }
+#screen-traffic .request-filters { display: contents; }
+#screen-traffic .request-flags { grid-column: 2; grid-row: 1; }
+#screen-traffic .request-filters .type-filters { grid-column: 1 / -1; grid-row: 2; justify-self: start; }
+@media (max-width: 520px) {
+  #screen-traffic .network-tools { grid-template-columns: minmax(0, 1fr); }
+  #screen-traffic .request-flags { grid-column: 1; grid-row: 2; }
+  #screen-traffic .request-filters .type-filters { grid-row: 3; }
+}
 
 /* Command palette. The sidebar trigger reads like a search field with its
    shortcut; the rail shows only its icon, named by aria-label and tooltip.

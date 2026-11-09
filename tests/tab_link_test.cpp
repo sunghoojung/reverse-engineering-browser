@@ -16,6 +16,7 @@
 #include "components/reverse_engineering_browser/common/native_tab_link.h"
 #include "reb/event.hpp"
 #include "reb/tab_link.hpp"
+#include "request_child_check.hpp"
 
 namespace {
 
@@ -212,6 +213,8 @@ void TabSets() {
 
 void Links() {
   Case("link to one tab", Link({4}), true);
+  Check(reb_test::StaysRequestChild(BrowserLink({4})),
+        "browser-named tab link stays a request child");
   Case("link to two tabs", Link({4, 9}, reb::NativeTabLinkKind::kSharedWorkerClients), true);
   Case("dedicated worker link", Link({4}, reb::NativeTabLinkKind::kDedicatedWorker), true);
   Case("last clients link", Link({4}, reb::NativeTabLinkKind::kServiceWorkerLastClients), true);
@@ -266,6 +269,9 @@ void Links() {
 }
 
 void ExtensionLinks() {
+  Check(
+      reb_test::StaysRequestChild(ExtensionLink(reb::NativeLoaderKind::kServiceWorkerScript, true)),
+      "browser-named extension link stays a request child");
   Case("extension service-worker script",
        ExtensionLink(reb::NativeLoaderKind::kServiceWorkerScript, true), true);
   Case("extension worker main script",

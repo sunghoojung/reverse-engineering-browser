@@ -22,6 +22,7 @@
 #include "reb/artifact.hpp"
 #include "reb/event.hpp"
 #include "reb/request_stack.hpp"
+#include "request_child_check.hpp"
 
 namespace {
 
@@ -332,6 +333,7 @@ void CheckNavigationAndTaskRecords() {
   browser.header.tab_id = 4;
   browser.header.request_id = 300;
   check("navigation link", browser, true);
+  Check(reb_test::StaysRequestChild(browser), "navigation link stays a request child");
   const auto link_variant = [&](const std::string& name,
                                 const std::function<void(reb::EventRecord&)>& f) {
     auto copy = browser;

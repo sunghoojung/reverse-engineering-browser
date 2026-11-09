@@ -182,13 +182,15 @@ $(NETWORK_REQUEST_TEST): $(BUILD_DIR)/tests/network_request_test.o $(BUILD_DIR)/
 $(BUILD_DIR)/tests/network_scope_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
 $(NETWORK_SCOPE_TEST): $(BUILD_DIR)/tests/network_scope_test.o $(BUILD_DIR)/src/capture/event.o
 $(BUILD_DIR)/tests/tab_link_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
-$(TAB_LINK_TEST): $(BUILD_DIR)/tests/tab_link_test.o $(BUILD_DIR)/src/capture/event.o
+$(TAB_LINK_TEST): $(BUILD_DIR)/tests/tab_link_test.o $(BUILD_DIR)/src/capture/event.o \
+	$(BUILD_DIR)/src/evidence/origin_trace.o
 # Overlay producer and core consumer of request stack records and artifacts.
 $(BUILD_DIR)/tests/request_stack_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
 $(REQUEST_STACK_TEST): $(BUILD_DIR)/tests/request_stack_test.o $(BUILD_DIR)/src/capture/event.o \
-	$(BUILD_DIR)/src/evidence/artifact.o
+	$(BUILD_DIR)/src/evidence/artifact.o $(BUILD_DIR)/src/evidence/origin_trace.o
 $(BUILD_DIR)/tests/debugger_observation_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
-$(DEBUGGER_OBSERVATION_TEST): $(BUILD_DIR)/tests/debugger_observation_test.o $(BUILD_DIR)/src/capture/event.o
+$(DEBUGGER_OBSERVATION_TEST): $(BUILD_DIR)/tests/debugger_observation_test.o $(BUILD_DIR)/src/capture/event.o \
+	$(BUILD_DIR)/src/evidence/origin_trace.o
 NATIVE_JS_DISPATCH_GOLDEN := $(BUILD_DIR)/reb-native-js-dispatch-golden
 .PHONY: native-js-dispatch-golden
 native-js-dispatch-golden: $(NATIVE_JS_DISPATCH_GOLDEN)

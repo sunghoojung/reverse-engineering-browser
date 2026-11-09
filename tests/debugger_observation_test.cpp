@@ -11,6 +11,7 @@
 #include "components/reverse_engineering_browser/common/native_probe_event.h"
 #include "reb/debugger_observation.hpp"
 #include "reb/event.hpp"
+#include "request_child_check.hpp"
 
 namespace {
 
@@ -80,6 +81,10 @@ void ValidRecords() {
   auto match = Captured();
   match.stack.reserved1[1] = 1;
   Expect("request match captured stack", Record(reb::EventType::kRequestWatchMatch, match), true);
+  if (!reb_test::StaysRequestChild(Record(reb::EventType::kRequestWatchMatch, match))) {
+    std::cerr << "FAIL request match stays a request child\n";
+    ++failures;
+  }
 
   auto csp = Captured();
   csp.stack.reserved1[1] = 1;

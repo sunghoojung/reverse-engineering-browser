@@ -1,5 +1,5 @@
 use crate::{
-    error::{Error, Result},
+    error::{Code, Error, Result},
     validation,
 };
 use serde_json::{Value, json};
@@ -152,7 +152,8 @@ pub fn content(root: &Path, artifact: &Value, maximum: usize) -> Result<Vec<u8>>
     }
     let file = regular_file(&path)?;
     if file.metadata()?.len() != artifact["byte_size"].as_u64().unwrap_or(u64::MAX) {
-        return Err(Error::new(500, "Artifact content byte size is invalid"));
+        return Err(Error::new(500, "Artifact content byte size is invalid")
+            .with_code(Code::ArtifactIntegrity));
     }
     let mut bytes = Vec::new();
     file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
@@ -160,7 +161,9 @@ pub fn content(root: &Path, artifact: &Value, maximum: usize) -> Result<Vec<u8>>
         return Err(Error::bad("Artifact content exceeds its byte limit"));
     }
     if hex::encode(Sha256::digest(&bytes)) != artifact["sha256"].as_str().unwrap_or("") {
-        return Err(Error::new(500, "Artifact content hash is invalid"));
+        return Err(
+            Error::new(500, "Artifact content hash is invalid").with_code(Code::ArtifactIntegrity)
+        );
     }
     Ok(bytes)
 }
@@ -189,7 +192,8 @@ pub fn verified_range(
         .as_u64()
         .ok_or_else(|| Error::new(500, "Artifact content byte size is invalid"))?;
     if file.metadata()?.len() != expected {
-        return Err(Error::new(500, "Artifact content byte size is invalid"));
+        return Err(Error::new(500, "Artifact content byte size is invalid")
+            .with_code(Code::ArtifactIntegrity));
     }
     let started = std::time::Instant::now();
     let mut hash = Sha256::new();
@@ -220,14 +224,16 @@ pub fn verified_range(
             .checked_add(size)
             .ok_or_else(|| Error::new(500, "Artifact byte size overflow"))?;
         if position as u64 > expected {
-            return Err(Error::new(500, "Artifact changed during verification"));
+            return Err(Error::new(500, "Artifact changed during verification")
+                .with_code(Code::ArtifactIntegrity));
         }
     }
     if position as u64 != expected
         || file.metadata()?.len() != expected
         || hex::encode(hash.finalize()) != artifact["sha256"].as_str().unwrap_or("")
     {
-        return Err(Error::new(500, "Artifact content integrity is invalid"));
+        return Err(Error::new(500, "Artifact content integrity is invalid")
+            .with_code(Code::ArtifactIntegrity));
     }
     Ok(selected)
 }
@@ -1309,6 +1315,17 @@ mod frozen_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_bytes_that_changed_report_an_integrity_failure() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("blob.bin"), b"changed").unwrap();
+        let artifact = json!({"content_path": "blob.bin", "byte_size": 7,
+            "sha256": hex::encode(Sha256::digest(b"written"))});
+        let error = verified_range(root.path(), &artifact, 0, 7).unwrap_err();
+        assert_eq!(error.status, 500);
+        assert_eq!(error.reason.code, Code::ArtifactIntegrity);
+    }
 
     #[test]
     fn request_body_artifact_is_sensitive_and_created_by_its_body_record() {

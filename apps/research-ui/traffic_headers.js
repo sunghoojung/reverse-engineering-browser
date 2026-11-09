@@ -61,7 +61,10 @@ async function trafficLoadHeaderBlock(block, key, rerender) {
   try {
     const response = await fetch(`/api/artifacts/${encodeURIComponent(block.artifactId)}/content?limit=${block.blockLength}`,
       {cache: 'no-store', signal: controller.signal});
-    if (!response.ok) throw new Error(`the artifact store returned ${response.status}`);
+    if (!response.ok) {
+      if (response.status === 500 && (await Promise.resolve(response.json?.()).catch(() => null))?.code === 'artifact_integrity') throw mismatch('its bytes do not match the recorded SHA-256');
+      throw new Error(`the artifact store returned ${response.status}`);
+    }
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (bytes.length !== block.blockLength) throw mismatch('its retained size does not match the header record');
     if (globalThis.crypto?.subtle) {

@@ -601,8 +601,9 @@ and says that content capture was off. File, blob and stream bodies are read
 in content sessions; one that could not be read whole says why. Password form
 bodies keep neither bytes nor a digest. A body read
 that times out or gets an error status keeps the last read copy and its reason
-and is read again on the next refresh; a size or SHA-256 mismatch shows no bytes
-and is not reread. A path and query past the 116-byte row prefix is loaded from
+and is read again on the next refresh; a size or SHA-256 mismatch, whether the
+bytes differ, the store reports `artifact_integrity`, or the request record's digest
+differs from the artifact's, shows no bytes and is not reread. A path and query past the 116-byte row prefix is loaded from
 its retained full target for General's Request URL and Copy URL, or General
 says why it was not retained. Sources never lists or opens request bodies or
 full targets.
@@ -1106,8 +1107,8 @@ tint: JavaScript, WebAssembly, JSON, source map and HTML icons take their code
 color at low strength, while folders, origins and frames stay neutral. Code is the exception: Sources and the
 Native Console color code like the Rosé Pine Moon VS Code theme (Rosé Pine
 Dawn in light mode), with the colors and styles VS Code renders for each token
-(so `JSON.stringify(` is an ordinary italic-free call and `JSON` an italic variable,
-as there), its six bracket pair colors, editor colors and Menlo 12/18 px; the Analyst editor and the Traffic Payload and Response
+(there, `JSON` is an italic variable and `stringify(` a plain function call), its
+six bracket pair colors, editor colors and Menlo 12/18 px; the Analyst editor and the Traffic Payload and Response
 code views take the same editor colors and font. Payload, Response, Native
 Console and Analyst use one code view (`code_view.js`) with the Sources lexer
 and theme; Analyst colors its text behind the textarea, which keeps editing. With macOS Increase Contrast, comments and

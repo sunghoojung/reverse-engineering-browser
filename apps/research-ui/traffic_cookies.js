@@ -128,7 +128,10 @@ async function trafficLoadCookieList(list, key, rerender) {
   try {
     const response = await fetch(`/api/artifacts/${encodeURIComponent(list.artifactId)}/content?limit=${list.listLength}`,
       {cache: 'no-store', signal: controller.signal});
-    if (!response.ok) throw new Error(`the artifact store returned ${response.status}`);
+    if (!response.ok) {
+      if (response.status === 500 && (await Promise.resolve(response.json?.()).catch(() => null))?.code === 'artifact_integrity') throw mismatch('its bytes do not match the recorded SHA-256');
+      throw new Error(`the artifact store returned ${response.status}`);
+    }
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (bytes.length !== list.listLength) throw mismatch('its retained size does not match the cookie record');
     const digest = await trafficCookieHex(bytes);

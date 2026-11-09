@@ -28,6 +28,9 @@ pub enum Code {
     /// --require-live` reports it; the HTTP routes do not.
     NativeCaptureUnavailable,
     DebuggerUnavailable,
+    /// Retained bytes that no longer match the size or SHA-256 in their
+    /// manifest record. Rereading cannot fix them, unlike a failed read.
+    ArtifactIntegrity,
 }
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -226,6 +229,7 @@ mod tests {
             Code::IdleBackend,
             Code::NativeCaptureUnavailable,
             Code::DebuggerUnavailable,
+            Code::ArtifactIntegrity,
         ];
         assert_eq!(
             serde_json::to_value(codes).unwrap(),

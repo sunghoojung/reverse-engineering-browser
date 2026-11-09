@@ -204,6 +204,10 @@ exposes stored-evidence operations and returns explicit unavailable state or 409
 for live controls. Every retired `/api/debugger` route returns 410
 `debugger_unavailable`.
 
+A retained artifact whose bytes no longer match the size or SHA-256 in its
+manifest record answers 500 with `artifact_integrity`. Reading it again cannot
+help, unlike any other 500.
+
 Health, events, session context, session summary and capture action results
 report `capture_state`, the live capture lifecycle: `running`,
 `stop_requested`, `stopped`, `ended`, `lost`, or `not_live` for idle and demo

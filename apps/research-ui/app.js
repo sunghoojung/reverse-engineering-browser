@@ -2932,7 +2932,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         // this exact rendered snapshot and filter/window; all other entry
         // points (polls, search, sort, scrolling and history) take the full path.
         if (selectionOnly === true && previous?.requests === state.requests && previous.retainedCount === state.requests.length &&
-            previous.filterKey === trafficRequestFilterKey() && previous.answer === index?.answer() &&
+            previous.filterKey === trafficRequestFilterKey() && (previous.answer ?? null) === (index?.answer() ?? null) &&
             previous.start === state.trafficWindowStart && previous.anchor === state.trafficWindowAnchor &&
             (!previous.mounted || previous.mounted.has(state.selectedRequestId))) {
           renderTrafficRowSelection(elements.requestRows, state.selectedRequestId);
@@ -2944,6 +2944,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           renderIndexedRequests(index);
           return;
         }
+        // Until the index first answers, the newest window's rows serve and the first read starts.
+        if (index) wantTrafficIndex(index, {start: 0});
         renderRequestScopes();
         const filter = trafficParseFilter(elements.requestFilter.value);
         const scoped = state.requests.filter(request =>
@@ -3059,6 +3061,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         return notes.join(' · ');
       }
 
+      function trafficIndexQuery(origin, names = globalThis.RebEvidenceNames?.controller?.() ?? null) {
+        const filter = trafficParseFilter(elements.requestFilter.value);
+        return trafficIndexParameters({sort: state.trafficSort, direction: state.trafficSortDirection, needle: filter.needle,
+          tabId: state.requestTabId, domain: state.requestDomain, type: state.requestType, named: trafficNamedRoots(names, filter.text, origin),
+          flags: state.trafficFlags, range: state.trafficRange});
+      }
+
+      function wantTrafficIndex(index, {start, origin = state.sessionMode === 'demo' ? 'demo' : 'live', query = trafficIndexQuery(origin)}) {
+        return index.want({query, start, origin, locate: [state.selectedRequestId]});
+      }
+
       function renderIndexedRequests(index) {
         const container = elements.requestRows;
         const origin = state.sessionMode === 'demo' ? 'demo' : 'live', live = state.sessionMode === 'live';
@@ -3087,7 +3100,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const known = covering(answer)?.document.matching ?? 0;
         const start = trafficBlockStart(container, known, state.trafficWindowStart);
         state.trafficWindowStart = start;
-        answer = index.want({query, start, origin, locate: [state.selectedRequestId]});
+        answer = wantTrafficIndex(index, {start, origin, query});
         const current = covering(answer);
         renderTrafficSortButtons();
         container.setAttribute('role', 'listbox');

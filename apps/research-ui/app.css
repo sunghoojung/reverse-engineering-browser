@@ -2228,6 +2228,10 @@ var(--panel);
       .size-transfer { color: var(--text); }
       .size-resource { color: var(--faint); }
       .size-resource::before { content: " / "; }
+      /* A served label fills the default column. Its resource size stays in the
+         tooltip and returns once the column is wide enough for both. */
+      .request-size.is-served { container-type: inline-size; }
+      @container (max-width: 175px) { .is-served > .size-resource { display: none; } }
       .request-row > span.status-redirect { color: var(--accent); }
       .request-row > span.status-client { color: var(--amber); }
       .request-row > span.status-server { color: var(--red); }

@@ -5,6 +5,7 @@ import {canvasEvidenceFixture, checkCanvasFixture} from './check-canvas-ui.mjs';
 import {checkConsoleDOM} from './check-console-workspace.mjs';
 import {checkNativeConsoleLiveDocuments} from './check-native-console-live-documents.mjs';
 import {checkFloat32Model} from './check-float32-ui.mjs';
+import {checkAgentPanel} from './check-agent-panel.mjs';
 import { runInNewContext } from "node:vm";
 import {readFile, writeFile} from "node:fs/promises";
 import { join } from "node:path";
@@ -33,6 +34,7 @@ await checkCommandPalette(root);
 await checkNotebookCore(root);
 await checkAnalystController(root);
 await checkFloat32Model(root);
+await checkAgentPanel();
 // The fixture serves the same declared public leaves as the product. Inspect
 // raw origin-form paths before URL normalization, so encoded/traversing paths
 // cannot become an allowed asset accidentally.

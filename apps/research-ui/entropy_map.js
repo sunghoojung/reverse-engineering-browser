@@ -307,7 +307,7 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
     marker.style.left = `${bits / 8 * 100}%`;
     marker.hidden = mode !== 'entropy';
     if (mode === 'entropy') {
-      statusWord.textContent = cellHigh(index) ? 'high' : 'below';
+      statusWord.textContent = cellHigh(index) ? 'high-entropy' : 'under threshold';
       built.statusDot.hidden = !cellHigh(index);
     }
   }
@@ -425,7 +425,7 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
 
   function legendStatus() {
     const windows = map?.doc.high_entropy.windows ?? 0;
-    return mode === 'kind' ? '' : windows ? `${windows.toLocaleString()} high` : 'none high';
+    return mode === 'kind' ? '' : windows ? `${windows.toLocaleString()} ${windows === 1 ? 'window' : 'windows'} high` : 'no windows high';
   }
 
   function renderLegend() {

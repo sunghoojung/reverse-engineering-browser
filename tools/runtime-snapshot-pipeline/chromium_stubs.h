@@ -250,6 +250,17 @@ class NativeResponseBodyCapture {
   bool OnStreamRefused(std::uint64_t) { return false; }
   void Flush() {}
 };
+// This pipeline carries no header blocks and no deferred request bodies; the
+// real network sink runs against the artifact sink in tools/check-native-artifact-capture.py.
+class NativeNetworkCaptureSink {
+ public:
+  static NativeNetworkCaptureSink& Get() {
+    static NativeNetworkCaptureSink value;
+    return value;
+  }
+  void FlushDeferredBodies() {}
+  void HeaderBlockSettled(std::uint64_t, bool) {}
+};
 class NativeArtifactBodyTee {
  public:
   static mojo::ScopedDataPipeConsumerHandle Create(mojo::ScopedDataPipeConsumerHandle body,

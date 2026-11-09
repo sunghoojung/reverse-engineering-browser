@@ -30,8 +30,9 @@ disabled/expired/stale capture, rejected parent enqueue and missing source. The
 scope case directly invokes the browser boundary to check exact identity; it does
 not claim that its supplied creator IDs were emitted by a renderer.
 
-The narrow adapters replace Chromium platform types, Mojo delivery and the
-artifact socket queue. The renderer sink links without the transport implementation
+The narrow adapters replace Chromium platform types, Mojo delivery, the
+artifact socket queue and the network and response body sinks this path never
+reaches; `tools/check-native-artifact-capture.py` runs those sinks. The renderer sink links without the transport implementation
 or a replacement transport symbol, so this check also rejects a reverse link
 dependency from the shared sink into the renderer transport. Its injected emitter
 distinguishes admitted, policy-rejected and queue-full records. The test does

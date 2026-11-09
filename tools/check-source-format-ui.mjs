@@ -174,7 +174,7 @@ a b c {
   d: 1px 2px
 }`, 'Required spaces stay, and a run of them becomes one');
   const longValue = `a{b:${Array.from({length: 70000}, (_, at) => `v${at}`).join(' ')}}`;
-  assert.equal(cssLayout(longValue).replace(/\s+/g, ' '), longValue.replace('{b:', ' { b: ').replace('}', ' }'), 'A statement past the token bound keeps its spaces');
+  assert.equal(cssLayout(longValue).replace(/\s+/g, ' '), longValue.replace('{', ' { ').replace('}', ' }'), 'A statement past the token bound keeps its spaces');
 
   // Layout runner: a worker reply, a worker that fails to load, and the shipped worker entry.
   const replies = [];

@@ -68,8 +68,9 @@ it.
   packaged app when Network and Artifact are captured) record script IDs and
   positions of the stack that started each document request or script
   navigation, and of the stack that scheduled each async task it came from,
-  never names or values, and retain the source of each script a stack names
-  as an artifact. Agent-started sessions record them only when the start names
+  never names or values. Content capture sessions also retain the source of
+  each script a stack names as an artifact; metadata-only sessions do not.
+  Agent-started sessions record them only when the start names
   `request_stacks`.
   See [Native network v3](protocol/native-network-v3.md).
 - Debugger observation rules (Console `watch`) are off until armed on one
@@ -77,7 +78,8 @@ it.
   listener dispatch, timers, CSP violations, exceptions and mutations of at most
   4 selected elements as script IDs, positions, kinds, the blocked host and
   attribute names, never values, text, paths or queries. Navigation, `unwatch`,
-  disconnect or a new capture disarms them. See
+  a Console Stop or a new capture disarms them. A lost backend connection leaves
+  them armed until navigation or the capture ends. See
   [Native debugger observation v1](protocol/native-debugger-observation-v1.md).
 - Standalone probes remain inactive without an enabled session. Enabled artifact
   capture retains raw source URLs locally; metadata is not necessarily secret-free.
@@ -118,8 +120,8 @@ it.
 
 - Sensitive capture requires an enabled, visibly labeled session. Content mode
   is the default for captures the packaged app starts: for its bounded session
-  it turns on retention of request paths, queries and bodies up to 16 MiB each,
-  of request and response headers, including `Cookie`, `Set-Cookie` and
+  it turns on retention of request paths, queries and bodies and of response
+  bodies, up to 16 MiB each, of request and response headers, including `Cookie`, `Set-Cookie` and
   `Authorization`, of the cookies each request sent and received and the
   cookie names and value digests page script used, and of Canvas images, and
   the titlebar labels that session "Content capture". **Metadata

@@ -11,8 +11,10 @@ A 16-byte artifact content request still validated and parsed every JSON row in
 tracking. Repeating the request repeated that work. Blob hash verification is
 required and remains unchanged; manifest JSON parsing was the avoidable cost.
 
-The candidate retains at most 64 MiB of exact manifest bytes and 100,000 numeric
-ID/offset pairs, with no retained JSON trees or blob contents. It rereads the
+The candidate retains at most 256 MiB of exact manifest bytes and 262,144 numeric
+ID/offset pairs, with no retained JSON trees or blob contents. Those limits are
+the largest manifest a live session reaches at default budgets (see
+`scripts/run-live-session.sh`), so a default session stays on this path. It rereads the
 manifest and checks file identity/change stamps before reusing a byte-identical
 terminated prefix. Unchanged rows need no new JSON trees; append-only growth
 validates new rows, and the selected row alone is materialized for the API.
@@ -28,9 +30,10 @@ A same-size rewrite to fewer, larger rows can remain uncached, without changing
 validation. On non-Unix platforms, index reuse is conservatively disabled.
 
 This trades bounded extra memory and cold index-building work for faster repeated
-lookups. Previous and current manifest buffers can coexist, up to 128 MiB plus
-one bounded index. Every warm lookup still rereads bytes: this is not an O(1)
-disk lookup, a content-integrity cache, or a stopped-store lease.
+lookups. A warm lookup compares the validated prefix in place in fixed chunks, so
+only one manifest buffer is retained, up to 256 MiB plus one bounded index. It
+still rereads bytes: this is not an O(1) disk lookup, a content-integrity cache,
+or a stopped-store lease.
 
 ## Reproduction
 
@@ -118,6 +121,25 @@ The shared host is noisy; the regression tests assert semantic behavior and
 bounded work, not hardware-dependent wall-clock thresholds. Full blob hashing
 can dominate requests for larger content, so these gains must not be extrapolated
 to large-blob transfer or unrelated endpoints.
+
+## Default-budget limits
+
+Content capture's default budgets derive 262,144 artifacts and a 256 MiB manifest,
+above the original 100,000-record and 64 MiB limits, so those sessions could fall
+to the over-cap scan. Measured with release builds and authored synthetic rows
+(262,140 rows, 115 MiB) on a shared host at load average 23 to 28. Figures are
+medians over three rounds; they are observations, not guarantees.
+
+| Limits | Concurrent requests | Process-cold | Warm | After append |
+| --- | ---: | ---: | ---: | ---: |
+| 100,000 rows, 64 MiB | 1 (262,144 rows) | 1154 ms | 1206 ms | 1118 ms |
+| 100,000 rows, 64 MiB | 4 | HTTP 408 past the 5 s deadline | not measured | not measured |
+| 262,144 rows, 256 MiB | 1 | 1133 ms | 18 ms | 19 ms |
+| 262,144 rows, 256 MiB | 4 | 1280 ms | 72 ms | 69 ms |
+
+Budgets above the defaults can still exceed these limits and use the over-cap
+scan. Routes that select manifest records by kind or digest scan the manifest
+whatever these limits are.
 
 ## Regression coverage and validation
 

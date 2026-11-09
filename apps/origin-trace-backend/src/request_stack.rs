@@ -165,7 +165,7 @@ pub fn decode_record(payload: &[u8]) -> Option<Record> {
         digest: payload[32..64].try_into().unwrap(),
         innermost: Frame::read(&payload[64..80]),
     };
-    let frames = record.recorded + record.async_frames;
+    let frames = u64::from(record.recorded) + u64::from(record.async_frames);
     let chain = if tasks {
         record.task_segments <= TASK_LIMIT
             && record.async_segments == record.async_frames + record.task_segments
@@ -188,8 +188,8 @@ pub fn decode_record(payload: &[u8]) -> Option<Record> {
                 && chain
                 && (record.flags & 0x04 == 0 || record.async_frames == ASYNC_LIMIT)
                 && (record.flags & 0x01 == 0 || record.state == 1)
-                && record.wasm_frames <= frames
-                && record.scripts <= frames
+                && u64::from(record.wasm_frames) <= frames
+                && u64::from(record.scripts) <= frames
                 && record.digest.iter().any(|b| *b != 0)
                 && record.innermost.valid(false)
         }
@@ -203,7 +203,7 @@ pub fn decode_artifact(content: &[u8], record: &Record) -> Option<(Vec<Frame>, V
     if content.len() < HEADER || content.len() > MAX_ARTIFACT || u32_at(content, 0) != 0x4b53_4252 {
         return None;
     }
-    let count = (record.recorded + record.async_frames) as usize;
+    let count = (u64::from(record.recorded) + u64::from(record.async_frames)) as usize;
     let header_flags = if record.version == 2 { 0x1e } else { 0x06 };
     if u16_at(content, 4) != record.version
         || u16_at(content, 6) as usize != HEADER
@@ -1419,6 +1419,11 @@ mod tests {
             document["task_segments"][0]["frames"][0]["resolution"]["reason"],
             "script_identity_outside_scan"
         );
+    }
+
+    #[test]
+    fn frame_counts_past_their_limits_are_rejected_without_overflow() {
+        assert!(decode_record(&record_bytes(1, u32::MAX, u32::MAX, 1, [1; 32])).is_none());
     }
 
     #[test]

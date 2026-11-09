@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // In-app agent dock against the shipped scripts in an offline DOM model: the
-// safe markdown subset, citation validation, byte budgets and the panel states.
-// Not rendered QA. The native loop is tools/check-agent-core.swift and the
-// packaged app path is test24 in the rendered harness.
+// safe markdown subset, citation validation, byte budgets and the panel states,
+// with a stand-in for the LangGraph runtime. Not rendered QA. The bundled graph
+// is tools/check-agent-runtime.mjs, native is tools/check-agent-core.swift and
+// the packaged app path is test24 in the rendered harness.
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {runInContext} from 'node:vm';
@@ -75,16 +76,26 @@ export async function checkAgentPanel() {
   context.__agentPost = message => {
     posted.push(message);
     if (message.op === 'enable') {
-      engine = {...engine, phase: 'ready', childRunning: true, provider: message.provider, tools: [{name: 'get_events', readOnly: true}]};
-      return Promise.resolve(status());
+      engine = {...engine, phase: 'ready', childRunning: true, provider: message.provider, model: 'claude-opus-5-5', tools: [{name: 'get_events', readOnly: true}]};
+      return Promise.resolve({...status(), tools: [{name: 'get_events', description: 'Read', schema: {type: 'object'}, readOnly: true}]});
     }
     if (message.op === 'disable') { engine = {...engine, phase: 'off', childRunning: false}; return Promise.resolve(status()); }
-    if (message.op === 'send') return Promise.resolve({accepted: true});
+    if (message.op === 'turn' || message.op === 'transcriptAppend') return Promise.resolve({ok: true});
     if (message.op === 'transcript') return Promise.resolve({rows: [], before: null});
     if (message.op === 'models') return Promise.resolve({models: ['claude-opus-5-5'], defaultModel: 'claude-opus-5-5', fromProvider: true});
     return Promise.resolve(status());
   };
-  runInContext(`globalThis.webkit = {messageHandlers: {rebAgent: {postMessage: message => __agentPost(message)}}};
+  // The panel drives the graph through this interface; the real one is bundled.
+  const runtimeCalls = [];
+  context.__runtimeCalls = runtimeCalls;
+  runInContext(`globalThis.RebAgentRuntime = {createAgentRuntime(options) {
+      __runtimeCalls.push({op: 'create', provider: options.provider, model: options.model, tools: options.tools.map(tool => tool.name)});
+      globalThis.__runtimeEmit = options.emit;
+      return {running: false, send(turn) { __runtimeCalls.push({op: 'send', text: turn.text}); return Promise.resolve(); },
+        decide(callId, allow) { __runtimeCalls.push({op: 'decide', callId, allow}); return true; },
+        cancel() { __runtimeCalls.push({op: 'cancel'}); }, dispose() { __runtimeCalls.push({op: 'dispose'}); }};
+    }};
+    globalThis.webkit = {messageHandlers: {rebAgent: {postMessage: message => __agentPost(message)}}};
     globalThis.fetch = async () => new Response(JSON.stringify({instance_id: '100:200'}), {status: 200});
     globalThis.requestAnimationFrame = callback => { callback(0); return 0; };`, context);
   const doc = window.document;
@@ -119,8 +130,12 @@ export async function checkAgentPanel() {
   input.dispatchEvent(new window.Event('input'));
   doc.getElementById('agent-send').click();
   await settle();
-  assert.ok(posted.some(message => message.op === 'send' && message.text === 'What loaded?'));
-  const emit = event => runInContext(`__rebAgentEvent(${JSON.stringify(event)})`, context);
+  assert.deepEqual(copy(runtimeCalls.find(call => call.op === 'create')), {op: 'create', provider: 'claude', model: 'claude-opus-5-5', tools: ['get_events']},
+    'the graph is built from the native tool list');
+  assert.ok(runtimeCalls.some(call => call.op === 'send' && call.text === 'What loaded?'), 'the question goes to the graph');
+  assert.ok(posted.some(message => message.op === 'turn' && message.running === true), 'native knows a turn is running');
+  assert.ok(posted.some(message => message.op === 'transcriptAppend' && message.row.role === 'user'), 'the question is kept locally');
+  const emit = event => runInContext(`__runtimeEmit(${JSON.stringify(event)})`, context);
   emit({type: 'text', rowId: 'a1', turnId: 't', delta: 'Answer <img src=x onerror=alert(1)> [cite session=9 artifact=999]'});
   emit({type: 'tool', id: 'tool1', turnId: 't', name: 'get_events', arguments: '{"limit":5}', state: 'running', readOnly: true});
   emit({type: 'tool', id: 'tool1', turnId: 't', name: 'get_events', arguments: '{"limit":5}', state: 'done', result: '{"count":1}', resultBytes: 11, isError: false});
@@ -141,13 +156,18 @@ export async function checkAgentPanel() {
   assert.ok(![...logNode.querySelectorAll('button')].some(node => /always/i.test(node.textContent)), 'there is no Always allow');
   allow.click();
   await settle();
-  assert.deepEqual({...posted.find(message => message.op === 'decide')}, {op: 'decide', callId: 'c1', allow: true});
+  assert.deepEqual(copy(runtimeCalls.find(call => call.op === 'decide')), {op: 'decide', callId: 'c1', allow: true}, 'Allow once resumes the graph');
+  assert.ok(posted.some(message => message.op === 'transcriptAppend' && message.row.role === 'tool' && message.row.state === 'done'), 'tool rows are kept locally');
+  emit({type: 'turnEnd', turnId: 't'});
+  await settle();
+  assert.ok(posted.some(message => message.op === 'turn' && message.running === false), 'native knows the turn ended');
 
   // Off is a full stop and clears the view.
   switchInput.checked = false;
   switchInput.dispatchEvent(new window.Event('change'));
   await settle();
   assert.ok(posted.some(message => message.op === 'disable'));
+  assert.ok(runtimeCalls.some(call => call.op === 'dispose'), 'off disposes the graph');
   assert.match(doc.getElementById('agent-surface').textContent, /The agent is off/);
   assert.equal(doc.getElementById('agent-send').disabled, true);
 

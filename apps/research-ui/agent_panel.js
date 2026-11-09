@@ -704,7 +704,7 @@
   async function decide(row, allow) {
     transcript.update(row.id, {state: allow ? 'allowed' : 'denied'});
     scheduleTranscript(true);
-    await call('decide', {callId: row.callId, allow}).catch(error => appendNotice(bridgeFailure(error), 'error'));
+    if (!runtime?.decide(row.callId, allow)) appendNotice('This request is no longer waiting for a decision.', 'error');
   }
 
   function scheduleRender() { if (!view.open || framePending) return; framePending = true; requestAnimationFrame(() => { framePending = false; render(); }); }
@@ -847,11 +847,43 @@
     } catch { /* The default model remains selectable. */ }
   }
 
+  // The running state belongs to the graph in this page, not to native status.
   function syncEngine(engine) {
     if (!engine) return;
     view.phase = engine.phase;
-    view.running = engine.running;
     if (engine.phase !== 'off' && engine.provider) view.provider = engine.provider;
+  }
+
+  // The LangGraph bundle loads the first time the agent is turned on in this
+  // document, so a closed or never-used dock parses none of it.
+  let runtimeModule = null, runtime = null, fetchListener = null;
+  function loadRuntime() {
+    if (globalThis.RebAgentRuntime) return Promise.resolve(globalThis.RebAgentRuntime);
+    runtimeModule ??= new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'agent_runtime.js';
+      script.onload = () => globalThis.RebAgentRuntime ? resolve(globalThis.RebAgentRuntime) : reject(new Error('The agent runtime did not load.'));
+      script.onerror = () => { runtimeModule = null; script.remove(); reject(new Error('This build does not include the agent runtime.')); };
+      document.head.append(script);
+    });
+    return runtimeModule;
+  }
+
+  // What the graph shows is also what the local transcript keeps.
+  function persist(row) { call('transcriptAppend', {row}).catch(() => {}); }
+  function handleRuntimeEvent(event) {
+    if (event.type === 'tool' && event.state !== 'running') {
+      persist({role: 'tool', id: event.id, turnId: event.turnId, name: event.name, arguments: event.arguments, state: event.state,
+        result: event.result, isError: event.isError, resultBytes: event.resultBytes});
+    } else if (event.type === 'assistantDone') persist({role: 'assistant', rowId: event.rowId, turnId: event.turnId, delta: event.text});
+    else if (event.type === 'notice') persist({role: 'notice', text: event.text});
+    else if (event.type === 'error') persist({role: 'notice', text: event.message, kind: 'error'});
+    else if (event.type === 'turnEnd') {
+      view.running = false;
+      call('turn', {running: false}).catch(() => {});
+      render();
+    }
+    handleEvent(event);
   }
 
   function chooseProvider(id) {
@@ -900,6 +932,13 @@
       const key = await sessionKey();
       view.sessionKey = key;
       const result = await call('enable', {provider: view.provider, model: view.model[view.provider] ?? '', effects: view.effects, sessionKey: key});
+      let api;
+      try { api = await loadRuntime(); }
+      catch (error) { view.status = await call('disable'); syncEngine(view.status.engine); throw error; }
+      runtime = api.createAgentRuntime({
+        bridge: {call, onFetchEvent: listener => { fetchListener = listener; }},
+        provider: view.provider, model: result.engine?.model ?? view.model[view.provider], tools: result.tools ?? [], emit: handleRuntimeEvent,
+      });
       view.status = result;
       syncEngine(result.engine);
       const page = await call('transcript', {});
@@ -922,6 +961,10 @@
   }
 
   async function turnOff() {
+    runtime?.dispose();
+    runtime = null;
+    fetchListener = null;
+    view.running = false;
     try { const result = await call('disable'); view.status = result; syncEngine(result.engine); }
     catch (error) { appendNotice(bridgeFailure(error), 'error'); }
     view.consenting = false;
@@ -935,15 +978,24 @@
   }
 
   async function onSend() {
-    if (view.running) { await call('cancel').catch(() => {}); return; }
+    if (view.running) { runtime?.cancel(); return; }
     const text = input.value.trim();
-    if (!text || view.phase === 'off') return;
+    if (!text || view.phase === 'off' || !runtime) return;
     const turnId = rowId('turn');
     const pins = view.pins.map(item => ({label: item.label, text: item.text, truncated: item.truncated, totalBytes: item.totalBytes}));
     const context = selectionContext();
+    // Composer text and pins as the panel limits them, with room for encoding.
+    if (utf8Bytes(text) + utf8Bytes(context) + pins.reduce((total, pin) => total + utf8Bytes(pin.text), 0) > 1024 * 1024) {
+      appendNotice('This turn is larger than 1 MiB. Remove a pin or shorten the question.', 'error');
+      return;
+    }
     try {
-      await call('send', {turnId, text, context, pins});
-      transcript.add({id: `u-${turnId}`, role: 'user', text, pins: view.pins.map(item => ({label: item.label, bytes: item.bytes, truncated: item.truncated}))});
+      const pinRows = view.pins.map(item => ({label: item.label, bytes: item.bytes, truncated: item.truncated}));
+      view.running = true;
+      call('turn', {running: true}).catch(() => {});
+      runtime.send({turnId, text, context, pins});
+      persist({role: 'user', turnId, text, context, pins: pinRows});
+      transcript.add({id: `u-${turnId}`, role: 'user', text, pins: pinRows});
       input.value = '';
       input.style.height = 'auto';
       view.pins = [];
@@ -952,11 +1004,14 @@
       scheduleTranscript(true);
       render();
     } catch (error) {
+      view.running = false;
       appendNotice(bridgeFailure(error), 'error');
     }
   }
 
   function handleEvent(event) {
+    if (event.type === 'fetchChunk' || event.type === 'fetchEnd' || event.type === 'fetchError') { fetchListener?.(event); return; }
+    if (event.type === 'assistantDone') return;
     if (event.type === 'status') {
       if (view.status) view.status.engine = event;
       syncEngine(event);

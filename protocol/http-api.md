@@ -999,6 +999,33 @@ checks the store length every 200 ms and holds no reader between checks. At
 most eight waits run at once; a ninth returns 503 `resource_limit`. Waiting
 changes nothing in the browser or the stores.
 
+## Cross-references
+
+`get_xrefs` (`GET /api/xrefs`) lists, for one selection, the evidence that points
+at it and the evidence it points at. It is read-only and does not change any
+store. `kind` is `request`, `api` (a fingerprint API call or property read),
+`artifact` (optionally narrowed to a Wasm function or import with `byte_offset`)
+or `vm_handler`; malformed values return 400. A selection the store no longer
+holds, or whose identity is ambiguous, returns 200 with `selection.status`
+`unavailable` and a `reason` instead of rows.
+
+Rows are links the stores already hold: the recorded parent event, the renderer
+request named as a request's initiator, its lifecycle events and captured
+response, the host events whose exact parent is a retained dispatch sample of the
+selection, the artifact's creator event, parent and children, and Wasm import,
+export and direct-call uses. A link that was not recorded is listed under `gaps`
+with its reason. No caller is ever inferred, and this route does not replace
+`get_vm_host_links`.
+
+Totals cover the whole store up to `snapshot`; rows are one window at a time,
+oldest first, so a selection with hundreds of thousands of links costs the same
+memory as a small one. Pass `direction`, `offset`, `limit` and the first
+response's `snapshot` to page within one list. A store scan that exceeds its
+30-second deadline sets `coverage.status` to `partial` with `scan-deadline`, and
+counts cover only what was read; a malformed record is counted and skipped. The
+`filter` is a case-insensitive substring over the names on the rows and never
+reads captured source bodies.
+
 ## Exact native Traffic to VM selection
 
 `GET /api/analysis/vm` without selectors remains session analysis. A request

@@ -44,6 +44,7 @@ mod vm_request_links;
 pub mod wasm;
 mod worker;
 mod workspace;
+mod xrefs;
 mod workspace_lease;
 pub use app::App;
 pub use config::Options;

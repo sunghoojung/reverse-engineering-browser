@@ -358,6 +358,12 @@ void Corpus(reb::ArtifactReceiver& receiver, const std::filesystem::path& output
   CheckCapture(generated_id, 0, 0);
   cases.push_back({"generated", generated, {}});
 
+  const auto compiled_id = NativeArtifactCaptureSink::Get().CaptureGeneratedArtifact(
+      reb::NativeArtifactKind::kJavaScript, reb::NativeArtifactCaptureOrigin::kCompiledScript,
+      generated.response, 71, kFrame, "https://fixture.test/inline", mojo_base::BigBuffer(source));
+  Check(compiled_id != 0, "Compiled script text accepted in content capture");
+  Receive(receiver, compiled_id);
+
   const auto runtime = Start(105);
   std::vector<std::uint8_t> initialized(32, 0);
   initialized[0] = 1;
@@ -509,6 +515,17 @@ void Admission(const std::filesystem::path& output) {
         "Both reservations reusable after stale retirement");
   Finish(after_stale_a, false);
   Finish(after_stale_b, false);
+
+  // Page script text no response body carried needs the session's opt-in.
+  const std::vector<std::uint8_t> script_text{'e', 'v', 'a', 'l'};
+  reb::NativeProbeSession::Get().request_content = false;
+  for (const auto origin : {reb::NativeArtifactCaptureOrigin::kDynamicJavaScript,
+                            reb::NativeArtifactCaptureOrigin::kCompiledScript}) {
+    Check(sink.CaptureGeneratedArtifact(reb::NativeArtifactKind::kJavaScript, origin, 9, 1, kFrame,
+                                        "fixture://source", mojo_base::BigBuffer(script_text)) == 0,
+          "Page script text refused outside content capture");
+  }
+  reb::NativeProbeSession::Get().request_content = true;
 
   const std::vector<std::uint8_t> empty;
   Check(sink.CaptureGeneratedArtifact(reb::NativeArtifactKind::kJavaScript,
@@ -1097,6 +1114,10 @@ void NativeWasmSampleBudget(reb::ArtifactReceiver& receiver) {
 void NativeWasmExecutionOutcomes(reb::ArtifactReceiver& receiver) {
   record_corpus = false;
   Configure();
+  static_assert(static_cast<std::uint16_t>(reb::EventType::kScriptCompiled) ==
+                static_cast<std::uint16_t>(reb::NativeProbeType::kScriptCompiled));
+  static_assert(static_cast<std::uint16_t>(reb::ArtifactCaptureOrigin::kCompiledScript) ==
+                static_cast<std::uint16_t>(reb::NativeArtifactCaptureOrigin::kCompiledScript));
   static_assert(static_cast<std::uint16_t>(reb::EventType::kWasmExecutionOutcome) == 27);
   static_assert(static_cast<std::uint16_t>(reb::EventType::kWasmExecutionOutcome) ==
                 static_cast<std::uint16_t>(reb::NativeProbeType::kWasmExecutionOutcome));

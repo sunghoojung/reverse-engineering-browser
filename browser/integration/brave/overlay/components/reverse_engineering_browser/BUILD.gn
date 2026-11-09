@@ -97,6 +97,7 @@ component("renderer_sink") {
   defines = [ "IS_REB_NATIVE_PROBE_SINK_IMPL" ]
 
   sources = [
+    "common/native_compiled_script.h",
     "common/native_js_dispatch.h",
     "common/native_js_invocation.h",
     "common/native_probe_event.h",

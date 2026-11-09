@@ -83,7 +83,8 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
                                      const std::string& guest_adapter_json,
                                      const std::vector<std::uint8_t>& js_dispatch_sites,
                                      const std::vector<std::uint8_t>& js_invocation_sites,
-                                     const bool js_invocation_digests) {
+                                     const bool js_invocation_digests,
+                                     const bool capture_request_content) {
   Disable();
   const std::uint64_t now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
@@ -109,9 +110,10 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
   NativeProbeSink::Get().SetNativeWasmDispatchEmitter(&EmitWasmDispatch);
   NativeProbeSink::Get().SetNativeWasmIndirectEmitter(&EmitWasmIndirect);
   NativeProbeSink::Get().SetNativeWasmExecutionEmitter(&EmitWasmExecution);
-  NativeProbeSink::Get().SetEmitters(
-      &NativeProbeTransport::EmitStatus, &NativeProbeTransport::EmitArtifact, session_id,
-      category_mask, expires_at_monotonic_ns, capture_canvas_images, &CurrentFrameId);
+  NativeProbeSink::Get().SetEmitters(&NativeProbeTransport::EmitStatus,
+                                     &NativeProbeTransport::EmitArtifact, session_id, category_mask,
+                                     expires_at_monotonic_ns, capture_canvas_images,
+                                     &CurrentFrameId, capture_request_content);
   if (!guest_adapter_json.empty())
     NativeProbeSink::Get().ConfigureNativeWasmGuest(ParseNativeWasmGuestAdapter(guest_adapter_json),
                                                     &EmitNativeGuest, &EmitNativeGuestHost);

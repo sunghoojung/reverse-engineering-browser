@@ -1,0 +1,128 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index 56496ac..003479d 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -223,30 +223,77 @@ void CaptureGeneratedSource(v8::Local<v8::Context> context,
+       std::string_view(source_url.data(), source_url.length()), content);
+ }
+ 
+-void CaptureDynamicJavaScript(v8::Local<v8::Context> context,
+-                              v8::Local<v8::String> source) {
++static_assert(static_cast<int>(v8::CompiledScriptKind::kScript) ==
++              static_cast<int>(reb::NativeCompiledScriptKind::kScript));
++static_assert(static_cast<int>(v8::CompiledScriptKind::kModule) ==
++              static_cast<int>(reb::NativeCompiledScriptKind::kModule));
++static_assert(static_cast<int>(v8::CompiledScriptKind::kFunction) ==
++              static_cast<int>(reb::NativeCompiledScriptKind::kFunction));
++static_assert(static_cast<int>(v8::CompiledScriptKind::kEval) ==
++              static_cast<int>(reb::NativeCompiledScriptKind::kEval));
++static_assert(
++    static_cast<int>(v8::CompiledScriptKind::kFunctionConstructor) ==
++    static_cast<int>(reb::NativeCompiledScriptKind::kFunctionConstructor));
++
++bool NativeCompiledScriptCaptureEnabled() {
++  return reb::NativeProbeSink::Get().IsArtifactCaptureEnabled();
++}
++
++std::string NativeStringUtf8(v8::Isolate* isolate,
++                             v8::Local<v8::String> value,
++                             const std::size_t size) {
++  std::string utf8(size, '\0');
++  const std::size_t written =
++      value->WriteUtf8(isolate, utf8.data(), utf8.size(),
++                       v8::String::WriteFlags::kReplaceInvalidUtf8);
++  return written == size ? utf8 : std::string();
++}
++
++void CaptureCompiledScript(const v8::CompiledScript& script) {
++  ExecutionContext* execution_context = ToExecutionContext(script.context);
++  if (!execution_context) {
++    return;
++  }
+   reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
+-  if (!sink.IsArtifactCaptureEnabled()) {
++  reb::NativeCompiledScript compiled;
++  compiled.execution_context_id = StableExecutionContextId(*execution_context);
++  compiled.script_id = static_cast<std::uint32_t>(script.script_id);
++  if (!sink.CompiledScriptNeedsRecord(compiled.execution_context_id,
++                                      compiled.script_id)) {
+     return;
+   }
+   v8::Isolate* isolate = v8::Isolate::GetCurrent();
+-  if (!isolate) {
++  compiled.source_length = script.source->Utf8Length(isolate);
++  if (compiled.source_length == 0) {
+     return;
+   }
+-  const std::size_t utf8_size = source->Utf8Length(isolate);
+-  if (utf8_size == 0 || utf8_size > reb::kNativeArtifactMaxContentBytes) {
+-    return;
++  std::string source;
++  if (compiled.source_length <= reb::kNativeArtifactMaxContentBytes) {
++    source = NativeStringUtf8(isolate, script.source, compiled.source_length);
+   }
+-  std::vector<std::uint8_t> content(utf8_size);
+-  const std::size_t written = source->WriteUtf8(
+-      isolate, reinterpret_cast<char*>(content.data()), content.size(),
+-      v8::String::WriteFlags::kReplaceInvalidUtf8);
+-  if (written != content.size()) {
+-    return;
++  std::string script_url;
++  if (!script.name.IsEmpty()) {
++    const std::size_t size = script.name->Utf8Length(isolate);
++    if (size <= reb::kNativeArtifactMaxUrlBytes) {
++      script_url = NativeStringUtf8(isolate, script.name, size);
++    }
+   }
+-  CaptureGeneratedSource(context, reb::NativeArtifactKind::kJavaScript,
+-                         reb::NativeArtifactCaptureOrigin::kDynamicJavaScript,
+-                         content);
++  const std::string context_url = execution_context->Url().GetString().Utf8();
++  compiled.kind = static_cast<reb::NativeCompiledScriptKind>(script.kind);
++  compiled.start_line =
++      static_cast<std::uint32_t>(std::max(script.line_offset, 0));
++  compiled.start_column =
++      static_cast<std::uint32_t>(std::max(script.column_offset, 0));
++  compiled.creator_script_id =
++      static_cast<std::uint32_t>(script.creator_script_id);
++  compiled.creator_position =
++      static_cast<std::uint32_t>(script.creator_position);
++  compiled.frame_id = StableFrameId(*execution_context);
++  compiled.script_url = script_url;
++  compiled.context_url = context_url;
++  compiled.is_document = execution_context->IsWindow();
++  compiled.source = base::as_byte_span(source);
++  sink.RecordCompiledScript(compiled);
+ }
+ 
+ bool NativeWasmCallIndirectDispatchEnabled() {
+@@ -1667,18 +1714,14 @@ V8Initializer::CodeGenerationCheckCallbackInMainThread(
+   }
+ 
+   if (stringified_source.IsEmpty()) {
+-    if (source->IsString()) {
+-      CaptureDynamicJavaScript(context, source.As<v8::String>());
+-    }
+     return {true, v8::MaybeLocal<v8::String>()};
+   }
+ 
+-  v8::Local<v8::String> checked_source = stringified_source.ToLocalChecked();
+-  if (!ContentSecurityPolicyCodeGenerationCheck(context, checked_source)) {
++  if (!ContentSecurityPolicyCodeGenerationCheck(
++          context, stringified_source.ToLocalChecked())) {
+     return {false, v8::MaybeLocal<v8::String>()};
+   }
+ 
+-  CaptureDynamicJavaScript(context, checked_source);
+   return {true, std::move(stringified_source)};
+ }
+ 
+@@ -1988,6 +2031,8 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+   isolate->SetWasmInstanceCallback(WasmInstanceOverride);
+   isolate->SetWasmCallIndirectDispatchCallback(
+       CaptureWasmCallIndirectDispatch, NativeWasmCallIndirectDispatchEnabled);
++  isolate->SetCompiledScriptCallback(CaptureCompiledScript,
++                                     NativeCompiledScriptCaptureEnabled);
+   isolate->SetWasmModuleBytesCallback(CaptureWasmModuleBytes);
+   isolate->SetWasmBrTableDispatchCallback(CaptureWasmBrTableDispatch,
+                                         NativeWasmBrTableDispatchEnabled);

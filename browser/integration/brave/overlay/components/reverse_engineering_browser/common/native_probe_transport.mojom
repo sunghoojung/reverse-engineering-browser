@@ -23,7 +23,10 @@ interface NativeProbeClient {
             // for native JavaScript invocation identity; empty when not armed.
             array<uint8> js_invocation_sites,
             // The session's sensitive opt-in for settled-value digests.
-            bool js_invocation_digests);
+            bool js_invocation_digests,
+            // --reb-capture-request-content: compiled script source that no
+            // response body carries is retained only in content capture.
+            bool capture_request_content);
   // Fixed 524-byte sample-budget policy, or empty for the unrestricted
   // historical budgets. The next Configure publishes it. It does not arm
   // compilation, so a later session may replace it.

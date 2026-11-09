@@ -112,6 +112,7 @@ struct NativeProbeClient {
                          const std::string&,
                          const std::vector<std::uint8_t>&,
                          const std::vector<std::uint8_t>&,
+                         bool,
                          bool) = 0;
   virtual void SetWasmSampleBudget(const std::vector<std::uint8_t>&) = 0;
   virtual void ResetWasmSampleBudgets() = 0;

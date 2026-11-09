@@ -48,7 +48,8 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                  const std::string& guest_adapter_json = {},
                  const std::vector<std::uint8_t>& js_dispatch_sites = {},
                  const std::vector<std::uint8_t>& js_invocation_sites = {},
-                 bool js_invocation_digests = false) override;
+                 bool js_invocation_digests = false,
+                 bool capture_request_content = false) override;
   void SetWasmSampleBudget(const std::vector<std::uint8_t>& policy) override;
   void ResetWasmSampleBudgets() override;
   void Disable() override;

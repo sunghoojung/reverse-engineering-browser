@@ -104,8 +104,10 @@ Large artifact bytes use the separate 128-byte framed contract and 32-byte
 acknowledgment in `common/native_artifact_header.h`. Only the browser-process
 bridge owns that receiver connection. JavaScript and WASM response bodies are
 copied by an asynchronous Mojo tee with a 16 MiB per-artifact limit and a 32
-MiB active capture budget. Accepted dynamic JavaScript and WASM byte-buffer API
-inputs use a separate one-way Mojo submission with the same per-artifact cap.
+MiB active capture budget. Compiled script source that no response body carries
+and WASM byte-buffer API inputs use a separate one-way Mojo submission with the
+same per-artifact cap; see
+[native compiled scripts](../../../../../../protocol/native-compiled-scripts-v1.md).
 The browser copies renderer-owned shared memory before validation and records
 the stable execution context plus exact capture origin. A dedicated writer
 thread drains a 16-artifact, 32 MiB queue to the authenticated artifact socket.

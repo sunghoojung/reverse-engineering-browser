@@ -10,7 +10,8 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
                  const std::string&,
                  const std::vector<std::uint8_t>& js_dispatch_sites,
                  const std::vector<std::uint8_t>& js_invocation_sites,
-                 bool js_invocation_digests) override {
+                 bool js_invocation_digests,
+                 bool) override {
     configured_epoch = epoch;
     region = std::move(queue_region);
     js_sites = js_dispatch_sites;

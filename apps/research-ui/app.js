@@ -7261,7 +7261,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         });
       }
 
+      // The viewer's own limit, stated beside the code so it is never mistaken for captured text.
+      function sourceLimitText(source, view) {
+        if (!source?.contentTruncated || source.content === undefined || view?.wasmRows || view?.derived || sourceFactsPanel.original(source) !== undefined) return '';
+        const hex = sourceHexArtifact(source);
+        const shown = hex ? `${source.wasmHexBytes.toLocaleString()} bytes` : `${SOURCE_PREVIEW_BYTES / 1048576} MiB`;
+        return `${hex ? 'Hex preview' : 'Preview'} limited to the first ${shown} of this ${source.byte_size.toLocaleString()}-byte file. Later bytes are not shown or searched; the original bytes are unchanged.`;
+      }
+
       function syncSourceDisplayControls(source, view) {
+        const limit = sourceLimitText(source, view);
+        if (elements.sourceLimitNotice) {elements.sourceLimitNotice.textContent = limit; elements.sourceLimitNotice.hidden = !limit;}
         // The status bar names the evidence state; the full provenance is its tooltip.
         const label = sourceViewLabel(source, view);
         elements.sourceViewKind.textContent = (state.sourceWasm && source?.kind === 'wasm') || source?.content === undefined ? label
@@ -7954,9 +7964,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           artifact.content = content;
           artifact.wasmHexBytes = sourceHexArtifact(artifact) ? hexBytes : undefined;
           artifact.contentTruncated = artifact.byte_size > buffer.length || (sourceHexArtifact(artifact) && buffer.length > hexBytes);
-          if (artifact.contentTruncated) artifact.content += sourceHexArtifact(artifact)
-            ? `\n\n[Hex preview limited to the first ${hexBytes} bytes; original bytes are unchanged]`
-            : `\n\n[Viewer preview limited to the first ${previewBytes / 1048576} MiB; original bytes are unchanged]`;
           if (!canvasOwner) boundSourcePreviews();
           if (!canvasOwner && !state.sourceFormatted && sourceIdentity(selectedSource()) === identity) state.sourceFormatted = sourceFormatWanted(artifact);
         } catch (error) {

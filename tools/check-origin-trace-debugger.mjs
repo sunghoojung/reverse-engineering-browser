@@ -1425,7 +1425,7 @@ function sourceProductionFunction(name) {
   assert(end, name);
   return appSource.slice(start, start + end.index + end[0].length);
 }
-const ownershipFunctionNames = ['sourceIdentity', 'isSourceArtifact', 'sourceIsCurrent', 'sourceReference',
+const ownershipFunctionNames = ['sourceIdentity', 'isSourceArtifact', 'sourceIsCurrent', 'sourceReference', 'sourceLimitText',
   'retireSourceAnalysis', 'releaseSourcePreview', 'canvasGalleryVisible', 'releaseCanvasPreview', 'retireCanvasPreviews', 'syncCanvasPreviews', 'pumpCanvasPreviews', 'retryCanvasPreview', 'boundSourcePreviews', 'boundSourceAnalysis',
   'capturedSources', 'selectedSource', 'deobfuscationKey', 'validateSourceAnalysis', 'loadDeobfuscation',
   'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
@@ -1642,7 +1642,7 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   assert(wasm.contentTruncated);
   assert(wasm.wasmHexBytes < binary.length && wasm.wasmHexBytes % 16 === 0);
   assert(wasm.content.length <= 8 * 1024 * 1024);
-  assert(wasm.content.includes('Hex preview limited'));
+  assert.equal(wasm.contentTruncated,true);assert(!wasm.content.includes('preview limited'),'A viewer limit never enters the retained text');
   assert(wasm.content.split('\n').length > 20003);
   sourceOwnershipReceipt.push({test:'preview_byte_budget_and_bounded_hex',status:'passed',retainedPreviews:loaded.length,retainedUTF16TextBytes:characters*2,hexRows:wasm.content.split('\n').length});
 }
@@ -1662,7 +1662,7 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   const overCtx=ownedContext({state:{artifacts:[over],selectedArtifactId:'17'},fetch:serve(new Uint8Array(over.byte_size).fill(0x61),over.byte_size)});
   await overCtx.api.loadArtifactContent(over);
   assert.equal(over.loadError,null);assert.equal(over.contentTruncated,true);assert.equal(over.sourceTextLength,16*1024*1024);
-  assert(over.content.endsWith('[Viewer preview limited to the first 16 MiB; original bytes are unchanged]'));
+  assert.equal(over.content.length,16*1024*1024,'The retained prefix gains no text');assert(!over.content.includes('preview limited'));
   sourceOwnershipReceipt.push({test:'paged_preview_to_cap_and_limit_notice',status:'passed',pages:urls.length});
 }
 {
@@ -1765,6 +1765,18 @@ function sourceReviewDOM() {
   document.createTextNode=text=>{const node=new SourceReviewNode('text',document);node.textContent=text;return node;};
   const elements=Object.fromEntries(['sourceLanguage','sourceCode','sourceCodeEmpty','sourceCodeWrap','sourceEditorTabs','sourceTree','sourcePosition','sourceViewKind','sourceWasm','sourcePretty','sourceDeob','sourceHookPivot','deobfuscationReport','deobfuscationIntrinsics'].map(key=>[key,new SourceReviewNode('div',document)]));
   return {document,elements};
+}
+{
+  // What the reader sees: a notice beside the code that states the limit, in every text view.
+  const over={...await ownedArtifact('17','x'),byte_size:16*1024*1024+1,content:'x'.repeat(16),contentTruncated:true};
+  const {document:shownDocument,elements:shownElements}=sourceReviewDOM();
+  shownElements.sourceLimitNotice=shownDocument.createElement('p');shownElements.sourceLimitNotice.hidden=true;
+  const shown=ownedContext({state:{artifacts:[over],selectedArtifactId:'17'},document:shownDocument,elements:shownElements});
+  const noticeFor=view=>{shown.api.syncSourceDisplayControls(over,view);return shownElements.sourceLimitNotice;};
+  for(const view of [{},{formatted:{}},{formatPending:true}]){assert.equal(noticeFor(view).hidden,false);assert.equal(noticeFor(view).textContent,'Preview limited to the first 16 MiB of this 16,777,217-byte file. Later bytes are not shown or searched; the original bytes are unchanged.');}
+  for(const view of [{wasmRows:[]},{derived:{}}])assert.equal(noticeFor(view).hidden,true,'A view that is not the retained prefix states no limit');
+  over.contentTruncated=false;assert.equal(noticeFor({}).hidden,true,'A whole file states no limit');
+  sourceOwnershipReceipt.push({test:'over_cap_notice_is_rendered_beside_the_code',status:'passed'});
 }
 {
   const original='\ufeff'+Array.from({length:20001},(_,line)=>line===20000?'const lateNeedle="😀";':`// row ${line}`).join('\r\n');

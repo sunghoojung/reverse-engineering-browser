@@ -1762,7 +1762,8 @@ its session, hash or descriptor retires that read. Preview failures and deadline
 show **Retry source**; they do not silently retry during refresh. Preview bodies
 reuse the Facts bounded streaming reader in 2 MiB pages: a text preview reads
 the whole artifact up to the 16 MiB artifact cap, and a larger one keeps its first
-16 MiB with a visible limit notice. Binary previews read 2 MiB, and an analyzer
+16 MiB, and a notice above the code states the limit in the pretty-printed and
+Original views. Binary previews read 2 MiB, and an analyzer
 envelope 33 MiB, with at most 65,536 chunks per page. Analyzer deadlines are ten
 seconds; a preview has five seconds plus five per page, including SHA-256 work. Cancellation
 retires ownership without waiting for a stalled producer's cleanup. Full artifact

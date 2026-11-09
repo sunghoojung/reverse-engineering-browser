@@ -423,6 +423,7 @@
         sourceMore: document.querySelector('#source-more'),
         sourceGoto: document.querySelector('#source-goto'),
         sourceSize: document.querySelector('#source-size'),
+        sourceLimitNotice: document.querySelector('#source-limit-notice'),
         sourceViewKind: document.querySelector('#source-view-kind'),
         sourceLanguage: document.querySelector('#source-language'),
         sourceHash: document.querySelector('#source-hash'),

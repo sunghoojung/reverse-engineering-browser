@@ -298,6 +298,62 @@ through the normal selection paths. See the
 [names contract](../../docs/product/evidence-names-v1.md) for identities, bounds and
 concurrency.
 
+## In-app agent
+
+The **Agent** dock (sidebar, or ⌘⇧A) puts Claude or ChatGPT beside the
+evidence. It is closed by default, and the switch in its header is off by
+default. Turning it on is an explicit action for the current session, behind
+a disclosure, and stops completely when it is switched off.
+
+The native app owns everything sensitive. It makes the provider HTTPS calls
+directly, reads the key from the macOS Keychain, and starts one `reb-api mcp`
+child (the packaged `OriginTraceAPI`) with `--base-url` set to this workspace's
+loopback API. The web view never sees a key: **Add key** opens a native secure
+field. A workspace without a loopback API (the bundled offline workspace) and
+the browser-only `make ui` path say the agent is unavailable. The child runs only
+while the agent is on. It stops when the switch turns off, the session or
+document changes, the dock closes while no turn is running, or five idle
+minutes pass with the dock open. The next question starts it again.
+
+What leaves the machine, as the disclosure says: the question, excerpts the
+researcher pins, and every tool result, including its URLs, hosts, identifiers
+and counts. Tool calls and full results are visible in the transcript. The tool
+surface is `reb-api mcp` started without `--allow-effects`, so only read-only
+tools are listed, narrowed further to structural reads (`AgentCore.swift`).
+`--omit-content` makes every response structural: rows and identifiers stay,
+while source, bytecode, disassembly, bodies, and long strings do not. Those leave
+only when pinned. A provider never stores the conversation for the ChatGPT path
+(`store: false`). Researcher-pinned excerpts are bounded to 128 KiB each and 512
+KiB per turn, and a cut pin says so.
+
+**Actions** are off unless the researcher opts in during the disclosure step,
+which adds `--allow-effects` for that session. Every action then waits for its
+own **Allow once** or **Deny** in the transcript; there is no standing grant.
+
+Citations use the token form `[cite session=S process=P sequence=N]` or
+`[cite session=S artifact=A offset=B]`. Each is checked against retained evidence
+before it becomes a link that opens the existing Traffic, Sources,
+Fingerprinting or VM row. An identifier that cannot be found stays plain text
+labeled *not verified*. Model output is rendered as text plus a small markdown
+subset (paragraphs, lists, code fences); HTML is never interpreted, and the
+model is told captured content is data, not instructions.
+
+The transcript is written to
+`~/Library/Application Support/Origin Trace/agent-transcripts/`, user-only, one
+file per session, and is separate from the evidence store. Earlier rows are
+shown when the agent is turned back on and are not resent to the model.
+
+Memory is byte-budgeted. The web view keeps 6 MiB of transcript and mounts only
+rows near the viewport once there are many; older rows leave with a visible
+label and **Load earlier** reads them back. The native side keeps 2 MiB of
+conversation to resend, dropping whole older turns with a labeled notice.
+`REB_AGENT_PROVIDER_BASE_URL` accepts only a loopback stand-in, for tests; it
+never redirects a real key.
+
+Check it with `node tools/check-agent-panel.mjs`; `make app-build` runs the
+native loop against a stand-in provider and the real tool server
+(`tools/check-agent-core.swift`). `test24AgentPanel` covers the packaged app.
+
 ## Native console
 
 The **Console** bottom dock runs explicit mutable main-world JavaScript commands.

@@ -204,6 +204,8 @@
   if (!dock || !toggle || !workspace) return;
 
   // Read at use so the native capability is never cached across a reload.
+  // randomUUID needs a secure context; the offline reb:// page is not one.
+  const rowId = prefix => `${prefix}-${crypto.randomUUID?.() ?? Math.random().toString(36).slice(2)}`;
   const nativeBridge = () => globalThis.webkit?.messageHandlers?.rebAgent ?? null;
   const call = (op, fields = {}) => nativeBridge().postMessage({op, ...fields});
   const element = (tag, className, text) => {
@@ -504,7 +506,7 @@
   }
 
   function appendNotice(text, kind = 'info') {
-    transcript.add({id: `n-${crypto.randomUUID()}`, role: 'notice', text, kind});
+    transcript.add({id: rowId('n'), role: 'notice', text, kind});
     if (view.follow) log.scrollTop = 0;
     render();
     scheduleTranscript();
@@ -778,10 +780,10 @@
       if (row.role === 'assistant') {
         const previous = merged.at(-1);
         if (previous?.role === 'assistant' && previous.id === row.rowId) previous.text += row.delta;
-        else merged.push({id: row.rowId || `a-${crypto.randomUUID()}`, role: 'assistant', text: row.delta ?? '', restored: true});
-      } else if (row.role === 'user') merged.push({id: `u-${crypto.randomUUID()}`, role: 'user', text: row.text ?? '', pins: row.pins, restored: true});
-      else if (row.role === 'tool') merged.push({...row, id: row.id || `t-${crypto.randomUUID()}`, restored: true});
-      else merged.push({id: `n-${crypto.randomUUID()}`, role: 'notice', text: row.text ?? '', kind: row.kind, restored: true});
+        else merged.push({id: row.rowId || rowId('a'), role: 'assistant', text: row.delta ?? '', restored: true});
+      } else if (row.role === 'user') merged.push({id: rowId('u'), role: 'user', text: row.text ?? '', pins: row.pins, restored: true});
+      else if (row.role === 'tool') merged.push({...row, id: row.id || rowId('t'), restored: true});
+      else merged.push({id: rowId('n'), role: 'notice', text: row.text ?? '', kind: row.kind, restored: true});
     }
     transcript.prepend(merged);
   }
@@ -869,7 +871,7 @@
   }
 
   async function removeKey() {
-    if (!window.confirm('Remove this provider key from the Keychain?')) return;
+    // The native app shows the confirmation; the web view has no dialog surface.
     try { await call('clearKey', {provider: view.provider}); await refreshStatus(); }
     catch (error) { appendNotice(bridgeFailure(error), 'error'); }
   }
@@ -906,7 +908,7 @@
       transcript.clear();
       if (restored.length) {
         ingestRows(restored);
-        transcript.add({id: `n-${crypto.randomUUID()}`, role: 'notice', text: 'Earlier rows from this session. They are shown here and not resent to the model.'});
+        transcript.add({id: rowId('n'), role: 'notice', text: 'Earlier rows from this session. They are shown here and not resent to the model.'});
       }
       await call('panel', {visible: true});
     } catch (error) {
@@ -935,7 +937,7 @@
     if (view.running) { await call('cancel').catch(() => {}); return; }
     const text = input.value.trim();
     if (!text || view.phase === 'off') return;
-    const turnId = crypto.randomUUID();
+    const turnId = rowId('turn');
     const pins = view.pins.map(item => ({label: item.label, text: item.text, truncated: item.truncated, totalBytes: item.totalBytes}));
     const context = selectionContext();
     try {

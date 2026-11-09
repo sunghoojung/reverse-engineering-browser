@@ -43,6 +43,8 @@ const UI_ASSETS: [&str; 40] = [
     "app.css",
     "entropy_map.css",
     "entropy_map.js",
+    "agent_panel.css",
+    "agent_panel.js",
     "command_palette.js",
     "app_state.js",
     "evidence_models.js",

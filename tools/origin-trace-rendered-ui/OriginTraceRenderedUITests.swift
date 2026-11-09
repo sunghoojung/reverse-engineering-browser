@@ -1854,6 +1854,151 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // A web content process that stops leaves an empty window. The app reloads
   // its workspace once; if it stops again soon after, it asks before reloading.
   @MainActor
+  // One resident-size sample from `ps`: the app, its web content process, the
+  // backend and the agent's tool server. Values are KiB.
+  @MainActor
+  private func memorySample(_ ui: Harness, _ label: String) throws -> [String: Int] {
+    guard let web = (ui.webView.value(forKey: "_webProcessIdentifier") as? NSNumber)?.int32Value else {
+      throw HarnessError("WebKit did not name its web content process")
+    }
+    let app = ProcessInfo.processInfo.processIdentifier
+    let backend = Int32(try Harness.required(ProcessInfo.processInfo.environment, "REB_RENDERED_UI_BACKEND_PID")) ?? 0
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/ps")
+    process.arguments = ["-axo", "pid=,ppid=,rss=,comm="]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    try process.run()
+    let text = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    process.waitUntilExit()
+    var rss: [String: Int] = [:]
+    for line in text.split(separator: "\n") {
+      let fields = line.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
+      guard fields.count == 4, let pid = Int32(fields[0]), let parent = Int32(fields[1]), let value = Int(fields[2]) else { continue }
+      if pid == app { rss["app"] = value }
+      if pid == web { rss["web"] = value }
+      if pid == backend { rss["backend"] = value }
+      if parent == app && fields[3].hasSuffix("OriginTraceAPI") { rss["tool_server", default: 0] += value }
+    }
+    print("RENDERED_UI_AGENT_MEMORY \(label) app=\(rss["app"] ?? 0) web=\(rss["web"] ?? 0) backend=\(rss["backend"] ?? 0) tool_server=\(rss["tool_server"] ?? 0)")
+    return rss
+  }
+
+  @MainActor
+  private func agentLayoutIsClean(_ ui: Harness, _ state: String) async throws {
+    let issues = try await ui.value("__rebUiProbe.clippedText('#agent-dock')") as? [String] ?? ["no probe result"]
+    XCTAssertEqual(issues, [], "\(state): clipped text in the agent dock")
+    let box = try await ui.json("__rebUiProbe.box('#agent-dock')")
+    let width = (box["width"] as? Double) ?? 0
+    XCTAssert(width >= 280, "\(state): the dock is too narrow: \(box)")
+  }
+
+  // The dock's whole path through the packaged app: closed by default, explicit
+  // consent, a turn through a local stand-in provider and the real tool server,
+  // inert model text, a verified citation that opens Sources, and a full stop.
+  @MainActor
+  func test24AgentPanel() async throws {
+    let ui = try Harness()
+    try await ui.waitForInitialLoad()
+    let on = "document.querySelector('#agent-switch').checked"
+    for size in windowSizes {
+      try await ui.resize(width: size.width, height: size.height)
+      try await ui.reload()
+      _ = try memorySample(ui, "closed-\(size.name)")
+      XCTAssertEqual(try await ui.value("document.getElementById('agent-dock').hidden") as? Bool, true, "closed by default")
+      try await ui.click("#agent-toggle")
+      try await ui.waitUntil("__rebUiProbe.text('#agent-surface').includes('The agent is off')", "the off state did not show")
+      _ = try memorySample(ui, "open-off-\(size.name)")
+      try await agentLayoutIsClean(ui, "off")
+      try await ui.screenshot("agent-off-\(size.name)")
+      // Consent before anything starts.
+      try await ui.click(".agent-switch")
+      try await ui.waitUntil("__rebUiProbe.count('#agent-consent-accept') === 1", "the consent step did not show")
+      let consent = try await ui.value("__rebUiProbe.text('#agent-surface')") as? String ?? ""
+      XCTAssert(consent.contains("tool result"), "the disclosure names tool results: \(consent)")
+      XCTAssert(consent.contains("URLs, hosts"), "the disclosure says results can include URLs and hosts: \(consent)")
+      try await agentLayoutIsClean(ui, "consent")
+      try await ui.screenshot("agent-consent-\(size.name)")
+      try await ui.click("#agent-consent-accept")
+      try await ui.waitUntil("\(on) && __rebUiProbe.text('#agent-surface').includes('Ask about this session')", timeout: 20, "the agent did not turn on")
+      _ = try memorySample(ui, "on-idle-\(size.name)")
+      try await ui.screenshot("agent-empty-\(size.name)")
+      // Keyboard path: the composer takes focus, Return sends.
+      try await ui.click("#agent-input")
+      try await ui.type("What loaded?")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("__rebUiProbe.count('.agent-cite') === 1", timeout: 20, "the answer and its citation did not arrive")
+      let log = try await ui.value("__rebUiProbe.text('#agent-log')") as? String ?? ""
+      XCTAssert(log.contains("get_artifacts"), "the tool call is visible: \(log)")
+      XCTAssert(log.contains("not verified"), "the invented citation stays labeled: \(log)")
+      XCTAssert(log.contains("<img src=x"), "model markup is literal text: \(log)")
+      let inert = try await ui.json("__rebUiProbe.inertness([])")
+      XCTAssertEqual(inert["executed"] as? Bool, false, "model output must not execute: \(inert)")
+      XCTAssertEqual(inert["injectedElements"] as? Int, 0, "model output must not create elements: \(inert)")
+      try await agentLayoutIsClean(ui, "conversation")
+      try await ui.screenshot("agent-conversation-\(size.name)")
+      // Every result the provider received is open for inspection.
+      try await ui.click(".agent-tool summary")
+      try await ui.waitUntil("__rebUiProbe.count('.agent-tool-detail') === 1", "the tool result did not open")
+      try await ui.screenshot("agent-tool-result-\(size.name)")
+      try await ui.click(".agent-tool summary")
+      // A verified citation opens the existing row.
+      try await ui.click(".agent-cite")
+      try await ui.waitUntil("!document.getElementById('screen-sources').hidden", timeout: 10, "the citation did not open Sources")
+      // An action waits on an explicit decision.
+      _ = try await ui.webView.callAsyncJavaScript("__rebAgentEvent({type:'approval',turnId:'t',callId:'rendered',name:'capture_action',arguments:'{\\"action\\":\\"pause\\"}'}); return true;", contentWorld: .page)
+      try await ui.waitUntil("__rebUiProbe.count('[data-approve]') === 1", "the approval row did not show")
+      let approval = try await ui.value("__rebUiProbe.text('.agent-approval')") as? String ?? ""
+      XCTAssert(approval.contains("Allow once") && !approval.contains("Always"), "only Allow once and Deny are offered: \(approval)")
+      try await agentLayoutIsClean(ui, "approval")
+      try await ui.screenshot("agent-approval-\(size.name)")
+      // A long conversation keeps only nearby rows mounted.
+      _ = try await ui.webView.callAsyncJavaScript("""
+        for (let index = 0; index < 400; index += 1) {
+          __rebAgentEvent({type: 'tool', id: 'long-' + index, turnId: 't', name: 'get_events', arguments: '{"limit":50}', state: 'done',
+            result: JSON.stringify({events: Array.from({length: 80}, (_, row) => ({session_id: '1', process_id: '2', sequence_number: String(row), type: 'request_started'}))}),
+            resultBytes: 8000, isError: false});
+          __rebAgentEvent({type: 'text', rowId: 'long-text-' + index, turnId: 't', delta: 'Observation ' + index + ': ' + 'word '.repeat(120)});
+        }
+        return true;
+        """, contentWorld: .page)
+      try await ui.settle()
+      try await ui.waitUntil("__rebUiProbe.exists('.agent-rows .agent-row') > 0", "the long transcript did not render")
+      let mounted = try await ui.value("__rebUiProbe.exists('.agent-rows .agent-row')") as? Int ?? 0
+      XCTAssert(mounted < 200, "a long conversation mounts only nearby rows (\(mounted))")
+      _ = try memorySample(ui, "long-conversation-\(size.name)")
+      try await agentLayoutIsClean(ui, "long conversation")
+      try await ui.screenshot("agent-long-\(size.name)")
+      // The switch is a full stop.
+      try await ui.click(".agent-switch")
+      try await ui.waitUntil("!\(on) && __rebUiProbe.text('#agent-surface').includes('The agent is off')", timeout: 15, "the agent did not turn off")
+      let stopped = try await ui.value("webkit.messageHandlers.rebAgent.postMessage({op: 'status'}).then(status => status.engine.childRunning)") as? Bool
+      XCTAssertEqual(stopped, false, "turning off stops the tool server")
+      try await ui.click("#agent-close")
+      try await ui.waitUntil("document.getElementById('agent-dock').hidden", "the dock did not close")
+      _ = try memorySample(ui, "closed-after-\(size.name)")
+    }
+    // Both themes, at the default size.
+    try await ui.resize(width: windowSizes[0].width, height: windowSizes[0].height)
+    try await ui.reload()
+    try await ui.click("#theme-toggle")
+    try await ui.click("#agent-toggle")
+    try await ui.click(".agent-switch")
+    try await ui.waitUntil("__rebUiProbe.count('#agent-consent-accept') === 1", "the consent step did not show")
+    try await ui.screenshot("agent-consent-light")
+    try await ui.click("#agent-consent-accept")
+    try await ui.waitUntil(on, timeout: 20, "the agent did not turn on")
+    try await ui.click("#agent-input")
+    try await ui.type("Again")
+    try await ui.key(36, "\r")
+    try await ui.waitUntil("__rebUiProbe.count('.agent-cite') === 1", timeout: 20, "the light theme answer did not arrive")
+    try await agentLayoutIsClean(ui, "light")
+    try await ui.screenshot("agent-conversation-light")
+    try await ui.click(".agent-switch")
+    try await ui.click("#agent-close")
+    try await ui.click("#theme-toggle")
+  }
+
   func test23WorkspaceReloadsAfterContentProcessStops() async throws {
     let ui = try Harness()
     try await ui.waitForInitialLoad()

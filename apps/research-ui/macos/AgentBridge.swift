@@ -103,7 +103,8 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
       let kind = try provider(body)
       return ["stored": try await promptForKey(kind)]
     case "clearKey":
-      AgentKeychain.delete(try provider(body))
+      let kind = try provider(body)
+      if try await confirmRemoveKey(kind) { AgentKeychain.delete(kind) }
       return status()
     case "enable": return try await enable(body)
     case "disable":
@@ -217,6 +218,21 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
     webView.callAsyncJavaScript(
       "window.__rebAgentEvent && window.__rebAgentEvent(JSON.parse(payload));",
       arguments: ["payload": payload], in: nil, in: .page, completionHandler: nil)
+  }
+
+  private func confirmRemoveKey(_ kind: AgentProviderKind) async throws -> Bool {
+    guard let window, window.isVisible, window.attachedSheet == nil else {
+      throw AgentFailure(message: "Finish the current dialog first.")
+    }
+    let alert = NSAlert()
+    alert.messageText = "Remove the \(kind.vendor) key?"
+    alert.informativeText = "It is deleted from your Keychain. Add it again to use \(kind.label)."
+    alert.addButton(withTitle: "Remove")
+    alert.addButton(withTitle: "Cancel")
+    let response = await withCheckedContinuation { continuation in
+      alert.beginSheetModal(for: window) { continuation.resume(returning: $0) }
+    }
+    return response == .alertFirstButtonReturn
   }
 
   // The field is a native secure field, so the key never enters the web view.

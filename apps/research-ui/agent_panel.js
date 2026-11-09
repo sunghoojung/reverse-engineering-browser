@@ -371,7 +371,7 @@
       return {title: 'The agent is off', text: 'Turn it on for this session to ask about the evidence. Nothing is sent until you do.'};
     }
     if (view.phase === 'stopped' && !transcript.rows().length) {
-      return {title: 'Disconnected', text: view.surfaceError || 'The local tool server stopped. Turn the agent off and on to reconnect.'};
+      return {title: 'Disconnected', text: view.surfaceError || 'The local tool server stopped. Ask again to restart it.'};
     }
     if (view.phase !== 'off' && !transcript.rows().length) {
       return {title: 'Ask about this session', text: 'Select a request, script or VM row to attach it. Pin what the model should read.'};
@@ -420,7 +420,8 @@
     send.textContent = view.running ? 'Stop' : 'Send';
     send.classList.toggle('agent-send-stop', view.running);
     send.disabled = !on || (!view.running && !input.value.trim());
-    input.disabled = !on || view.phase === 'stopped';
+    // A stopped tool server restarts on the next question.
+    input.disabled = !on;
     input.placeholder = on ? 'Ask about this session' : 'Turn the agent on to ask';
     const pinNote = view.pins.length ? `${view.pins.length} pin${view.pins.length === 1 ? '' : 's'} attached. ` : '';
     hint.textContent = view.status?.standIn

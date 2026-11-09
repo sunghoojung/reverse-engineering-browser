@@ -474,7 +474,7 @@ fn identities<'a>(
                     ))
                     || ((kind == "request_body") != (origin == "network_request"))
                     || (value["execution_context_id"].is_null() && origin != "unknown")
-                    || (origin == "dynamic_javascript"
+                    || (matches!(origin, "dynamic_javascript" | "compiled_script")
                         && (kind != "javascript" || context.is_none_or(|id| id == 0)))
                     || (origin.starts_with("webassembly_")
                         && (kind != "wasm" || context.is_none_or(|id| id == 0)))
@@ -1743,6 +1743,7 @@ mod tests {
             "wasm_execution_outcome",
             "wasm_dispatch_overflow",
             "wasm_indirect_overflow",
+            "script_compiled",
         ] {
             let mut event: Value = serde_json::from_slice(first).unwrap();
             event["type"] = json!(kind);

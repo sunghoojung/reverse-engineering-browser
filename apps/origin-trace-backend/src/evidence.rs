@@ -394,6 +394,7 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
                 "runtime_allocating_script",
                 "native_wasm_guest",
                 "network_request",
+                "compiled_script",
             ]
             .contains(&origin)
             || (artifact["kind"] == "wasm_guest_adapter" && origin != "native_wasm_guest")
@@ -409,7 +410,10 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
                 ]
                 .iter()
                 .any(|k| !canonical(&artifact[*k], 64, true))))
-            || (matches!(origin, "dynamic_javascript" | "runtime_allocating_script")
+            || (matches!(
+                origin,
+                "dynamic_javascript" | "runtime_allocating_script" | "compiled_script"
+            )
                 && (artifact["kind"] != "javascript" || artifact["execution_context_id"] == "0"))
             || (origin.starts_with("webassembly_")
                 && (artifact["kind"] != "wasm" || artifact["execution_context_id"] == "0"))

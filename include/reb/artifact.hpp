@@ -54,6 +54,7 @@ enum class ArtifactCaptureOrigin : std::uint16_t {
   kRuntimeAllocatingScript = 8,
   kNativeWasmGuest = 9,
   kNetworkRequest = 10,
+  kCompiledScript = 14,
 };
 
 struct ArtifactHeader final {

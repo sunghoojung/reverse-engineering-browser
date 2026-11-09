@@ -1520,6 +1520,15 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
                "canvas_image_capture_disabled", result_category);
     return 0;
   }
+  // Inline source can embed per-user data, so the same applies to a script a
+  // stack names: a Metadata only session keeps its frames and digest, not its text.
+  if (kind == NativeArtifactKind::kJavaScript &&
+      capture_origin == NativeArtifactCaptureOrigin::kStackScript &&
+      !NativeProbeSession::Get().capture_request_content()) {
+    EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
+               "stack_script_content_capture_disabled", result_category);
+    return 0;
+  }
   const bool valid_kind_and_origin =
       (native_wasm_runtime &&
        ((kind == NativeArtifactKind::kWasm &&

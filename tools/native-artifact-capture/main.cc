@@ -1876,6 +1876,24 @@ void NativeWasmIndirect(reb::ArtifactReceiver& receiver) {
   Check(canvas() != 0 && transfers.size() == 1, "A Canvas image with the session opt-in is kept");
   reb::NativeProbeSession::Get().canvas_images = false;
   transfers.clear();
+  // Stack script source follows the session's content mode, whatever the renderer sends.
+  const std::string script = "function wrapper(){ return fetch('/x'); }";
+  const auto stack_script = [&] {
+    return sink.CaptureGeneratedArtifact(
+        reb::NativeArtifactKind::kJavaScript, reb::NativeArtifactCaptureOrigin::kStackScript, 5, 7,
+        kFrame, "https://app.fixture.test/page.js",
+        mojo_base::BigBuffer(
+            std::span(reinterpret_cast<const std::uint8_t*>(script.data()), script.size())));
+  };
+  reb::NativeProbeSession::Get().request_content = false;
+  Check(stack_script() == 0 && transfers.empty() &&
+            Payload(events.back()) == "stack_script_content_capture_disabled",
+        "Stack script source in a Metadata only session is refused explicitly");
+  reb::NativeProbeSession::Get().request_content = true;
+  Check(stack_script() != 0 && transfers.size() == 1,
+        "Stack script source in a content session is kept");
+  reb::NativeProbeSession::Get().request_content = false;
+  transfers.clear();
   std::cout << "PASS native Wasm call_indirect artifact ACK, shared module artifact, typed "
                "payload, document retirement, pre-expiry flush and separate budget\n";
 }

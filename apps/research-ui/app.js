@@ -8858,6 +8858,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           openSourceGoto();
         }
       });
+      // The raw range of formatted text, or '' when this view has none.
+      function sourceRawRangeText(editor, start, end) {
+        const view = editor?.view;
+        if (!view?.formatted || view.derived) return '';
+        const local = sourceWhitespaceRange(view.formatted.map, view.formatted.sourceInput ?? view.active, view.formatted.text, start, end);
+        if (!local) return '';
+        const base = view.formatted.base ?? 0, range = {start: local.start + base, end: local.end + base};
+        const original = editor.originalIndex ??= sourceDocumentIndex(view.active), from = sourceDocumentPosition(original, range.start), to = sourceDocumentPosition(original, range.end);
+        return from && to ? ` · raw ${from.line + 1}:${from.column + 1}–${to.line + 1}:${to.column + 1} (offsets ${range.start}–${range.end})` : '';
+      }
       // The status bar follows the caret and the selection in the mounted source text.
       function syncSourceSelection() {
         const editor = state.sourceEditorView, selection = globalThis.getSelection?.();
@@ -8876,7 +8886,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const length = focus ? Math.abs(focus.offset - anchor.offset) : 0;
         elements.sourceSelection.hidden = !length;
         elements.sourceSelection.textContent = length ? `${length} selected` : '';
-        if (focus) elements.sourcePosition.textContent = sourcePositionText(editor, focus.line, focus.column);
+        if (focus) {
+          const start = anchor.offset <= focus.offset ? anchor : focus;
+          const raw = length ? sourceRawRangeText(editor, start.offset, start.offset + length) : '';
+          elements.sourcePosition.textContent = raw ? `Line ${start.line + 1}, Column ${start.column + 1}${raw}` : sourcePositionText(editor, focus.line, focus.column);
+        }
       }
       let sourceSelectionFrame = 0;
       document.addEventListener('selectionchange', () => {
@@ -8940,24 +8954,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (state.sourceFormatted) sourceFormatClient.forget(source);
         renderSources();
       });
-      // A formatted token reports the exact raw range it was printed from.
+      // A click selects the formatted token, whose characters are its raw range; the status bar then names that range.
       elements.sourceCode.addEventListener('click', event => {
         const editor = state.sourceEditorView, view = editor?.view;
         const token = event.target instanceof Element ? event.target.closest('.source-text > span:not(.source-indent)') : null;
-        const row = token?.closest('.source-line');
-        if (!view?.formatted || view.derived || !token || !row || editor.identity !== sourceIdentity(selectedSource())) return;
-        let column = Number(row.dataset.columnStart ?? 0);
-        for (let node = token.previousSibling; node; node = node.previousSibling) column += node.textContent.length;
-        const start = sourceDocumentOffset(editor.index, Number(row.dataset.localLine)) + column, base = view.formatted.base ?? 0;
-        const local = sourceWhitespaceRange(view.formatted.map, view.formatted.sourceInput ?? view.active, view.formatted.text, start, start + token.textContent.length);
-        if (!local) return;
-        const range = {start: local.start + base, end: local.end + base};
-        const original = editor.originalIndex ??= sourceDocumentIndex(view.active), from = sourceDocumentPosition(original, range.start), to = sourceDocumentPosition(original, range.end);
-        if (!from || !to) return;
+        if (!view?.formatted || view.derived || !token || editor.identity !== sourceIdentity(selectedSource())) return;
+        codeViewSelectToken(token);
         // After the caret update that the same click schedules.
-        requestAnimationFrame(() => {
-          elements.sourcePosition.textContent = `Line ${row.dataset.line}, Column ${column + 1} · raw ${from.line + 1}:${from.column + 1}–${to.line + 1}:${to.column + 1} (offsets ${range.start}–${range.end})`;
-        });
+        requestAnimationFrame(syncSourceSelection);
       });
       // Search all files. Reads use the artifact content route with a 2 MiB
       // limit and the Sources preview's checks. A loaded preview is reused as is;

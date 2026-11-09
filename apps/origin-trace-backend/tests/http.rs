@@ -5554,6 +5554,15 @@ fn snapshot(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Strin
     ) {
         for entry in std::fs::read_dir(path).unwrap() {
             let entry = entry.unwrap();
+            // The backend rewrites its derived request index on its own 30-second
+            // timer, so a slow run can see it appear with no request causing it.
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("events.jsonl.requests-v1")
+            {
+                continue;
+            }
             let path = entry.path();
             let key = path.strip_prefix(root).unwrap().to_path_buf();
             if entry.file_type().unwrap().is_dir() {

@@ -1119,6 +1119,26 @@ void HeaderAndExpiryEdges() {
                                        reb::NativeRequestBodyReadEnd::kComplete, 1000);
   Check(events.size() == after_flush && transfers.empty(),
         "A read finishing after the flush emits nothing and publishes nothing");
+  // A body starting after the flush is named at once: a read could end past
+  // expiry, with no record left to follow it.
+  const auto reads_after_flush = reads.size();
+  auto too_late = upload();
+  const auto too_late_id = next_request++;
+  network.RecordRequestStarted(too_late_id, 0, 0, 1, kFrame, 11, 12, too_late);
+  const auto too_late_body = BodyPayload(LastOf(NativeProbeType::kRequestBody));
+  network.TeeRequestBody(too_late_id, too_late);
+  Check(static_cast<reb::RequestBodyState>(too_late_body.state) ==
+                reb::RequestBodyState::kNotCapturedReadIncomplete &&
+            (too_late_body.flags & reb::kRequestBodyRead) != 0 &&
+            reads.size() == reads_after_flush && transfers.empty(),
+        "A body starting after the pre-expiry flush is recorded unread, and no read starts");
+  // The flush closes only its own configuration.
+  configure();
+  auto next_session = upload();
+  const auto next_session_id = next_request++;
+  network.RecordRequestStarted(next_session_id, 0, 0, 1, kFrame, 11, 12, next_session);
+  network.TeeRequestBody(next_session_id, next_session);
+  Check(reads.size() == 1, "A new configuration reads deferred bodies again");
   Configure();
   transfers.clear();
   reads.clear();

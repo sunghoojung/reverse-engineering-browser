@@ -438,6 +438,7 @@ void NativeNetworkCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
   // Bodies still waiting or being read are recorded while the ending
   // configuration can still record them.
   FlushDeferredBodies();
+  deferred_bodies_flushed_ = false;
   emitter_.store(nullptr, std::memory_order_release);
   generation_.fetch_add(1, std::memory_order_acq_rel);
   session_id_.store(emitter ? session_id : 0, std::memory_order_relaxed);
@@ -682,7 +683,10 @@ void NativeNetworkCaptureSink::EmitRequestBody(const NativeProbeEmitter emitter,
       !request.request_body->contains_sensitive_info() &&
       NativeRequestBodyReader::CanRead(*request.request_body)) {
     std::string url = ArtifactUrlOf(request.url, TargetOf(request.url));
-    if (!NativeRequestBodyReader::MayReadFiles(*request.request_body, owner)) {
+    // Past the pre-expiry flush a read could end after expiry, when no record
+    // can follow it, so the body is recorded now and not read.
+    if (deferred_bodies_flushed_ ||
+        !NativeRequestBodyReader::MayReadFiles(*request.request_body, owner)) {
       deferred_state = NativeRequestBodyState::kNotCapturedReadIncomplete;
     } else if (!NativeArtifactCaptureSink::Get().IsEnabled()) {
       deferred_state = NativeRequestBodyState::kNotCapturedArtifactUnavailable;
@@ -958,6 +962,7 @@ void NativeNetworkCaptureSink::FlushDeferredBodies() noexcept {
   }
   unread_body_.reset();
   reading_bodies_.clear();
+  deferred_bodies_flushed_ = true;
 }
 
 void NativeNetworkCaptureSink::AssignNetworkHeadersId(const std::uint64_t request_id,

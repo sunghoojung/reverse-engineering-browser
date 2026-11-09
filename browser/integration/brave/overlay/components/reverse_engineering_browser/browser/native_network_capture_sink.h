@@ -255,6 +255,8 @@ class NativeNetworkCaptureSink final {
   std::optional<DeferredBody> unread_body_;
   std::map<std::uint64_t, DeferredBody> reading_bodies_;
   std::uint64_t next_read_id_ = 1;
+  // The flush before this configuration's expiry has run, so no new read starts.
+  bool deferred_bodies_flushed_ = false;
 };
 
 }  // namespace reb

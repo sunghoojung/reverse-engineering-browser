@@ -3299,7 +3299,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           rebuildTrafficRequests();
           if (select) {
             selectRequest(id);
-            focusRequestRow(id);
+            // The read can finish after the researcher moved on; never take focus from another control.
+            if (trafficListHoldsFocus()) focusRequestRow(id);
             // Selecting opens the inspector, which can cover the row.
             [...elements.requestRows.querySelectorAll('.request-row')].find(node => node.dataset.requestId === id)?.scrollIntoView({block: 'nearest'});
           } else if (state.selectedRequestId === id) {
@@ -3366,6 +3367,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (position === null) return;
         if (!view || document.activeElement !== elements.requestRows || position >= view.visibleCount) state.trafficFocusPosition = null;
         else if (trafficRowAt(position)?.dataset.requestId) focusTrafficPosition(position);
+      }
+
+      function trafficListHoldsFocus() {
+        const active = document.activeElement;
+        return !active || active === document.body || elements.requestRows.contains(active);
       }
 
       function focusRequestRow(id) {

@@ -283,6 +283,20 @@ const eventsOf = (id, records) => Array.from({length: records}, (_, sequence) =>
   assert.equal(t.state.selectedRequestId, 'request-5', 'A completed read selects its own row');
   assert.equal(t.state.trafficLoadingId, null);
   assert(t.state.trafficLoaded.has('request-5'), 'The store copy stays for the selection');
+  assert.equal(t.document.activeElement?.dataset?.requestId, 'request-5', 'With focus on nothing, the row takes focus');
+}
+{
+  // A store read finishing after the researcher moved to the filter box leaves focus there.
+  const t = indexFixture({windowCount: 1});
+  t.setIndexRows([t.row(5, 2)]);
+  t.api.renderRequests(); await quiet();
+  t.api.selectTrafficRow('request-5');
+  await quiet();
+  t.document.activeElement = t.elements.requestFilter;
+  t.pending[0].gate.resolve(t.answer({events: eventsOf('5', 2), query: {limited: false, budget_exhausted: false, next_after: '9'}}));
+  await quiet();
+  assert.equal(t.state.selectedRequestId, 'request-5', 'The late read still selects its row');
+  assert.equal(t.document.activeElement, t.elements.requestFilter, 'The late read does not take focus from the filter box');
 }
 {
   // H2: a selected row retained whole stays selected once it leaves the newest window.

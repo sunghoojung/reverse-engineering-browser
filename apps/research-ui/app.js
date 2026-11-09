@@ -6916,7 +6916,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!query) {
           state.sourceSearchIndex = 0;
           elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => row.classList.toggle('search-match', false));
-          elements.sourcePosition.textContent = `Line ${editor.window.line + 1}, Column ${editor.window.column + 1}`;
+          elements.sourcePosition.textContent = sourcePositionText(editor, editor.window.line, editor.window.column);
           status(`${coverage}. Find is a case-insensitive, single-line literal; no source is fetched.`);
           return;
         }
@@ -7055,13 +7055,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!editor || editor.identity !== sourceIdentity(source) || !Number.isSafeInteger(line) || line < 0 || line >= editor.index.lineCount ||
             !Number.isSafeInteger(column) || column < 0 || column > (bounds?.length ?? (paged ? Infinity : 0))) return false;
         if (!bounds) {
-          // Another page of a large layout; the editor moves once it is read.
+          // Another page of a large layout; the editor moves once it is read,
+          // and that render (applySourceSearch) writes the position. A page
+          // read earlier is shown at once.
           state.sourceWindow = {identity: editor.identity, representation: editor.representation, line, column};
           renderSourceContent(source, sourceDisplayView(source), {line, column, search: false});
-          elements.sourcePosition.textContent = `Line ${line + 1} · reading this part of the layout…`;
-          return true;
-        }
-        renderSourceContent(source, editor.view, {line, column, search: false});
+          if (!sourceDocumentLine(state.sourceEditorView.index, line)) {
+            elements.sourcePosition.textContent = `Line ${line + 1} · reading this part of the layout…`;
+            return true;
+          }
+        } else renderSourceContent(source, editor.view, {line, column, search: false});
         applySourceSearch(false, 0, {reveal: false});
         elements.sourcePosition.textContent = sourcePositionText(state.sourceEditorView, line, column);
         const row = elements.sourceCode.querySelector(`[data-local-line="${line}"]`);

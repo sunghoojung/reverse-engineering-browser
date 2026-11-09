@@ -183,6 +183,14 @@ before decoding fails with `ERR_ABORTED`.
 Not covered: synchronous XHR outside `data:`, a service worker failure before
 any response, and renderer memory-cache reuse, which creates no request.
 
+A synchronous XHR outside `data:` is issued on a Blink pool thread:
+`ResourceRequestSender::SendSync` posts `SendAsync` there and blocks the main
+thread until it returns. No fetch owner scope and no document main thread reach
+that send, so its `request_initiated` carries frame 0 and loader kind
+`script_context`, and its `request_initiator_stack` state is
+`unsupported_thread`. The owner scope in `RequestSynchronously` only names the
+owner of a `data:` URL, which Blink answers on the main thread.
+
 ### Request owners and tabs
 
 Every request record names the tab that caused it. A row without a tab is a
@@ -1185,7 +1193,7 @@ frame and renderer `request_id`. Payload 128 bytes, little endian:
 | ---: | --- |
 | 1 `captured` | Frames walked; the digest names the stack artifact queued with this record, or sent earlier in this configuration and not refused |
 | 2 `no_script` | No JavaScript or Wasm was on the stack: the parser, a preload, or a start the loader deferred |
-| 3 `unsupported_thread` | Not the document main thread (workers, worklets) |
+| 3 `unsupported_thread` | Not the document main thread: workers, worklets and synchronous XHR, which issues its request on a pool thread |
 | 4 `not_retained_artifact_unavailable` | Frames walked; Artifact category off or no artifact path |
 | 5 `not_retained_budget` | Frames walked; this configuration already sent 1,024 stacks |
 

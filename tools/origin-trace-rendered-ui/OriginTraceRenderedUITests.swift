@@ -1918,7 +1918,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await agentLayoutIsClean(ui, "consent")
       try await ui.screenshot("agent-consent-\(size.name)")
       try await ui.click("#agent-consent-accept")
-      try await ui.waitUntil("\(on) && __rebUiProbe.text('#agent-surface').includes('Ask about this session')", timeout: 20, "the agent did not turn on")
+      // Earlier rows from this session replace the empty state after a window change.
+      try await ui.waitUntil("\(on) && __rebUiProbe.count('#agent-consent-accept') === 0", timeout: 20, "the agent did not turn on")
+      try await ui.settle()
       _ = try memorySample(ui, "on-idle-\(size.name)")
       try await ui.screenshot("agent-empty-\(size.name)")
       // Keyboard path: the composer takes focus, Return sends.

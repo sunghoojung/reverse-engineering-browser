@@ -966,7 +966,6 @@
     if (event.type === 'text') {
       if (!transcript.get(event.rowId)) transcript.add({id: event.rowId, role: 'assistant', text: ''});
       transcript.appendText(event.rowId, event.delta);
-      view.running = true;
       heights.delete(event.rowId);
       scheduleTranscript();
       return;

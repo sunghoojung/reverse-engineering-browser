@@ -89,7 +89,7 @@ function trafficCookieList(bytes, direction, count) {
         bytes[offset + 28] <= 2
       : direction === 'received' && flags === 0 && !bytes.slice(offset + 16, offset + 36).some(Boolean) &&
         lengths.slice(0, 5).every(length => length === 0);
-    if (!shaped || (direction === 'sent' && lengths[5] !== 0)) return null;
+    if (!shaped || (direction === 'sent' && lengths[5] !== 0) || !Number.isFinite(new Date(cookie.expiry).getTime())) return null;
     cookie.blocked = cookie.exclusions.length > 0;
     cookie.size = strings[0].length + strings[1].length;
     cookies.push(cookie);

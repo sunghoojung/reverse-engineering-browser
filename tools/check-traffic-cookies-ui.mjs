@@ -107,6 +107,10 @@ assert.equal(api.trafficCookieList(sample, 'received', 2), null);
 assert.equal(api.trafficCookieList(sample.slice(0, -1), 'sent', 2), null);
 assert.equal(api.trafficCookieList(new Uint8Array(list('sent', [{strings: ['a', 'b', '', '', '', 'a=b']}])), 'sent', 1), null,
   'a sent cookie carries no line');
+assert.notEqual(api.trafficCookieList(new Uint8Array(list('sent', [{strings: ['a', 'b', '', '/', '', ''], flags: 1, expiry: 1700000000000n}])), 'sent', 1), null,
+  'the same cookie with an ordinary expiry parses');
+assert.equal(api.trafficCookieList(new Uint8Array(list('sent', [{strings: ['a', 'b', '', '/', '', ''], flags: 1, expiry: 9000000000000000n}])), 'sent', 1), null,
+  'an expiry a Date cannot hold is refused, not thrown on render');
 
 // A script write of sid's value, in the renderer record layout.
 const write = Buffer.alloc(128);

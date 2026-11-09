@@ -73,7 +73,7 @@ export async function checkPackageContract() {
   await checkClientProjectScreenshotContract();
   await checkNativeDiagnosticsContract();
   console.log(`PASS packaging contract: ${assets.length} canonical assets; ${publicAssets.length + 1} redundant copies removed (${removedBytes} bytes)`);
-  return {assets, publicAssets};
+  return {assets, publicAssets, builtAssets};
 }
 
 // Shared with the existing launcher check so the HTTP case uses its actual live
@@ -271,11 +271,16 @@ async function main() {
     // Relocate the signed product and use an unrelated cwd. No source UI override.
     await cp(join(root, 'build/Origin Trace.app'), app, {recursive: true});
     const resources = join(app, 'Contents/Resources');
-    assert.deepEqual((await readdir(join(resources, 'research-ui'))).sort(), [...contract.assets].sort());
+    assert.deepEqual((await readdir(join(resources, 'research-ui'))).sort(), [...contract.assets, ...contract.builtAssets].sort());
     for (const asset of contract.assets) {
       assert.deepEqual(await readFile(join(resources, 'research-ui', asset)), await readFile(join(root, 'apps/research-ui', asset)), asset);
       await assert.rejects(access(join(resources, asset)), {code: 'ENOENT'});
     }
+    // The agent bundles are the ones this build produced from the lockfile.
+    for (const asset of contract.builtAssets) {
+      assert.deepEqual(await readFile(join(resources, 'research-ui', asset)), await readFile(join(root, 'build/agent-runtime', asset)), asset);
+    }
+    assert((await stat(join(resources, 'AgentRuntimeLicenses.txt'))).size > 0, 'the bundled packages ship their license notices');
     assert((await stat(join(resources, 'OriginTrace.icns'))).size > 0);
     await access(join(resources, 'run-live-session.sh'), constants.X_OK);
     execFileSync('codesign', ['--verify', '--deep', '--strict', app], {cwd: temporary, stdio: 'pipe'});

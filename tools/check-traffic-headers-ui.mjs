@@ -77,6 +77,19 @@ const general = sections[0].textContent;
 assert.match(general, /127\.0\.0\.1:8443/);
 assert.match(general, /strict-origin-when-cross-origin/);
 assert.match(general, /Redirect hops1/);
+// A truncated URL names that it is cut and, once loaded, reads whole.
+{
+  const prefix = 'https://echo.test/final?a=1';
+  const cut = {id: 'cut', origin: 'live', method: 'GET', path: prefix, status: 200, hostOnly: false, urlTruncated: true, targetLength: 400,
+    fullTarget: {retention: 'retained'}, headerBlocks: []};
+  const cutPanel = document.createElement('div');
+  const generalText = () => [...cutPanel.querySelectorAll('details')][0].textContent;
+  api.renderTrafficHeaders(cutPanel, cut, () => {}, {status: 'loading'});
+  assert.match(generalText(), /truncated; the original path and query are 400 bytes; loading the retained full target/);
+  api.renderTrafficHeaders(cutPanel, cut, () => {}, {status: 'ready', complete: true, url: 'https://echo.test', text: '/final?a=1&b=2'});
+  assert.match(generalText(), /Request URLhttps:\/\/echo\.test\/final\?a=1&b=2/);
+  assert.doesNotMatch(generalText(), /truncated/);
+}
 assert.match(panel.textContent, /1 header record is malformed and not shown/);
 // Hop 1 has only its provisional block; hop 0 shows what the network sent.
 assert.match(sections[3].textContent, /Provisional headers are shown/);

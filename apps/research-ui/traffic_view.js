@@ -566,9 +566,19 @@ function trafficSearchRequests(requests, needle, nameOf = () => null) {
 
 function trafficNode(tag, className, text) {
   const node = document.createElement(tag);
-  node.className = className;
+  if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+// Copies captured text and reports the outcome in a status region.
+async function trafficCopyText(text, status, copied = 'Copied.') {
+  try {
+    await navigator.clipboard.writeText(text);
+    status.textContent = copied;
+  } catch {
+    status.textContent = 'Copy failed.';
+  }
 }
 
 function trafficOriginLabel(request) {

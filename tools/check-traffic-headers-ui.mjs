@@ -12,7 +12,8 @@ import {setImmediate as nextTurn} from 'node:timers/promises';
 
 const require = createRequire(import.meta.url);
 const {parseHTML} = require('./ui-startup-deps/node_modules/linkedom');
-const source = await readFile(new URL('../apps/research-ui/traffic_headers.js', import.meta.url), 'utf8');
+const source = await readFile(new URL('../apps/research-ui/traffic_view.js', import.meta.url), 'utf8') +
+  await readFile(new URL('../apps/research-ui/traffic_headers.js', import.meta.url), 'utf8');
 const {window, document} = parseHTML('<!doctype html><div id="panel"></div>');
 const reads = [], copied = [];
 const blobs = new Map();

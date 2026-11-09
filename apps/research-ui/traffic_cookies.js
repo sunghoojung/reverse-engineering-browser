@@ -46,13 +46,6 @@ const trafficCookieStateNotes = {
   not_captured_url: 'Not retained: not an HTTP(S) URL, longer than 8 KiB, or its hop was not tracked.'
 };
 
-function trafficCookieNode(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
 function trafficCookieReasons(bits, names) {
   const out = [];
   for (let bit = 0n; bits >> bit; bit += 1n) {
@@ -188,15 +181,6 @@ function trafficCookieFrameLabel(frame) {
   return `${file}:${frame.line ?? '?'}:${frame.column ?? '?'}${frame.function_name ? ` (${frame.function_name})` : ''}`;
 }
 
-async function trafficCopyCookie(text, status) {
-  try {
-    await navigator.clipboard.writeText(text);
-    status.textContent = 'Copied.';
-  } catch {
-    status.textContent = 'Copy failed.';
-  }
-}
-
 function trafficCookieExpires(cookie) {
   if (!cookie.parsed) return '';
   return cookie.expiry ? new Date(cookie.expiry).toISOString() : 'Session';
@@ -235,15 +219,15 @@ function trafficCookieTable(id, title, cookies, {received, onProvenance}) {
     });
   }
   const columns = trafficCookieColumns.filter(column => column[0] !== 'blocked' || rows.some(cookie => cookie.blocked));
-  const wrap = trafficCookieNode('div', 'traffic-cookie-table-wrap');
-  const table = trafficCookieNode('table', 'traffic-cookie-table');
+  const wrap = trafficNode('div', 'traffic-cookie-table-wrap');
+  const table = trafficNode('table', 'traffic-cookie-table');
   table.setAttribute('aria-label', title);
-  const head = trafficCookieNode('tr');
+  const head = trafficNode('tr');
   for (const [key, label] of columns) {
-    const cell = trafficCookieNode('th');
+    const cell = trafficNode('th');
     cell.scope = 'col';
     cell.setAttribute('aria-sort', sort.column === key ? (sort.direction > 0 ? 'ascending' : 'descending') : 'none');
-    const button = trafficCookieNode('button', 'traffic-cookie-sort', label);
+    const button = trafficNode('button', 'traffic-cookie-sort', label);
     button.type = 'button';
     button.dataset.column = key;
     button.addEventListener('click', () => {
@@ -253,19 +237,19 @@ function trafficCookieTable(id, title, cookies, {received, onProvenance}) {
     cell.append(button);
     head.append(cell);
   }
-  head.append(trafficCookieNode('th', 'traffic-cookie-actions', ''));
-  const thead = trafficCookieNode('thead');
+  head.append(trafficNode('th', 'traffic-cookie-actions', ''));
+  const thead = trafficNode('thead');
   thead.append(head);
-  const body = trafficCookieNode('tbody');
-  const status = trafficCookieNode('span', 'traffic-headers-status');
+  const body = trafficNode('tbody');
+  const status = trafficNode('span', 'traffic-headers-status');
   status.setAttribute('role', 'status');
   for (const cookie of rows) {
-    const row = trafficCookieNode('tr', cookie.blocked ? 'traffic-cookie-blocked' : '');
+    const row = trafficNode('tr', cookie.blocked ? 'traffic-cookie-blocked' : '');
     for (const [key, , read] of columns) {
       const text = String(read(cookie));
-      const cell = trafficCookieNode('td', `traffic-cookie-col-${key}`);
+      const cell = trafficNode('td', `traffic-cookie-col-${key}`);
       if (key === 'name' && cookie.parsed) {
-        const open = trafficCookieNode('button', 'traffic-cookie-name', text);
+        const open = trafficNode('button', 'traffic-cookie-name', text);
         open.type = 'button';
         open.title = `Show everything that touched ${text}`;
         open.addEventListener('click', () => onProvenance(cookie.name));
@@ -276,11 +260,11 @@ function trafficCookieTable(id, title, cookies, {received, onProvenance}) {
       }
       row.append(cell);
     }
-    const actions = trafficCookieNode('td', 'traffic-cookie-actions');
-    const copy = trafficCookieNode('button', 'traffic-header-copy', 'Copy');
+    const actions = trafficNode('td', 'traffic-cookie-actions');
+    const copy = trafficNode('button', 'traffic-header-copy', 'Copy');
     copy.type = 'button';
     copy.setAttribute('aria-label', `Copy ${cookie.parsed ? cookie.name : 'unparsed line'} value`);
-    copy.addEventListener('click', () => trafficCopyCookie(cookie.parsed ? cookie.value : cookie.line, status));
+    copy.addEventListener('click', () => trafficCopyText(cookie.parsed ? cookie.value : cookie.line, status));
     actions.append(copy);
     row.append(actions);
     body.append(row);
@@ -291,20 +275,20 @@ function trafficCookieTable(id, title, cookies, {received, onProvenance}) {
 }
 
 function trafficCookieSection(id, title, list, rerender, {received, onProvenance}) {
-  const details = trafficCookieNode('details', 'traffic-headers-section traffic-cookie-section');
+  const details = trafficNode('details', 'traffic-headers-section traffic-cookie-section');
   details.open = true;
   details.dataset.section = id;
   details.dataset.state = list.state;
-  const summary = trafficCookieNode('summary', '', title);
-  summary.append(trafficCookieNode('span', 'traffic-headers-count', String(list.cookieCount)));
+  const summary = trafficNode('summary', '', title);
+  summary.append(trafficNode('span', 'traffic-headers-count', String(list.cookieCount)));
   details.append(summary);
   const notes = [trafficCookieStateNotes[list.state] ?? '',
     list.state === 'captured_shared' ? 'Identical to an earlier list of this session, retained once.' : ''].filter(Boolean);
-  if (notes.length) details.append(trafficCookieNode('p', 'traffic-headers-note', notes.join(' ')));
+  if (notes.length) details.append(trafficNode('p', 'traffic-headers-note', notes.join(' ')));
   const view = trafficCookieView(list, rerender);
   let key = `${id}|${list.sequenceNumber}|${view?.status ?? list.state}`;
   if (view && view.status !== 'ready') {
-    details.append(trafficCookieNode('p', 'traffic-headers-note', view.status === 'loading' ? 'Loading retained cookies…'
+    details.append(trafficNode('p', 'traffic-headers-note', view.status === 'loading' ? 'Loading retained cookies…'
       : view.status === 'refused' ? `The artifact receiver refused this list${view.reason ? `: ${view.reason}` : ''}.`
         : view.status === 'unavailable' ? 'Retained cookies are read from the local backend, not from a file.'
           : `Could not read the retained list: ${view.error}.`));
@@ -314,8 +298,8 @@ function trafficCookieSection(id, title, list, rerender, {received, onProvenance
   let cookies = view.cookies;
   if (!received) {
     const filtered = cookies.filter(cookie => cookie.blocked).length;
-    const label = trafficCookieNode('label', 'traffic-cookie-filter');
-    const box = trafficCookieNode('input');
+    const label = trafficNode('label', 'traffic-cookie-filter');
+    const box = trafficNode('input');
     box.type = 'checkbox';
     box.checked = trafficCookieOptions.showFiltered;
     box.addEventListener('change', () => {
@@ -329,7 +313,7 @@ function trafficCookieSection(id, title, list, rerender, {received, onProvenance
   }
   key += `|${JSON.stringify(trafficCookieOptions.sort.get(id) ?? null)}`;
   details.append(cookies.length ? trafficCookieTable(id, title, cookies, {received, onProvenance})
-    : trafficCookieNode('p', 'traffic-headers-note', received ? 'No Set-Cookie in this response.' : 'This request sent no cookies.'));
+    : trafficNode('p', 'traffic-headers-note', received ? 'No Set-Cookie in this response.' : 'This request sent no cookies.'));
   return {section: details, key};
 }
 
@@ -347,11 +331,11 @@ function trafficCookieHops(request) {
 // script calls and the requests that sent it. Lists load on demand, at most
 // TRAFFIC_COOKIE_PROVENANCE_LISTS distinct ones.
 function trafficCookieProvenance(name, {requests = [], events = [], selectRequest, openFrame} = {}, rerender) {
-  const section = trafficCookieNode('section', 'traffic-cookie-provenance');
+  const section = trafficNode('section', 'traffic-cookie-provenance');
   section.setAttribute('aria-label', `Provenance of ${name}`);
-  const heading = trafficCookieNode('div', 'traffic-cookie-provenance-head');
-  heading.append(trafficCookieNode('h2', '', `Provenance of ${name}`));
-  const close = trafficCookieNode('button', 'secondary-button', 'Close');
+  const heading = trafficNode('div', 'traffic-cookie-provenance-head');
+  heading.append(trafficNode('h2', '', `Provenance of ${name}`));
+  const close = trafficNode('button', 'secondary-button', 'Close');
   close.type = 'button';
   close.addEventListener('click', () => {
     trafficCookieOptions.provenance = null;
@@ -385,9 +369,9 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
     }
   }
   const entry = (text, request) => {
-    const item = trafficCookieNode('li', '', text);
+    const item = trafficNode('li', '', text);
     if (request && selectRequest) {
-      const open = trafficCookieNode('button', 'traffic-cookie-request', 'Show request');
+      const open = trafficNode('button', 'traffic-cookie-request', 'Show request');
       open.type = 'button';
       open.addEventListener('click', () => selectRequest(request.id));
       item.append(' ', open);
@@ -395,9 +379,9 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
     return item;
   };
   const group = (title, items, empty) => {
-    section.append(trafficCookieNode('h3', '', `${title} (${items.length})`));
-    const list = trafficCookieNode('ul', 'traffic-cookie-provenance-list');
-    list.append(...(items.length ? items : [trafficCookieNode('li', 'traffic-headers-note', empty)]));
+    section.append(trafficNode('h3', '', `${title} (${items.length})`));
+    const list = trafficNode('ul', 'traffic-cookie-provenance-list');
+    list.append(...(items.length ? items : [trafficNode('li', 'traffic-headers-note', empty)]));
     section.append(list);
   };
   const where = (request, list) => `${request.method ?? ''} ${request.path ?? request.id}${list.hop ? ` · hop ${list.hop}` : ''}`.trim();
@@ -412,7 +396,7 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
       `${resolved ? ` at ${trafficCookieFrameLabel(resolved)}` : record.frame ? `, script ${record.frame.scriptId} at character ${record.frame.position}` : ', no script position'}` +
       `${record.stackDigest ? `, stack ${record.stackDigest.slice(0, 12)}` : ''}${record.nameTruncated ? ' (name matched by its first 24 bytes)' : ''}`);
     if (resolved?.artifact_id && openFrame) {
-      const open = trafficCookieNode('button', 'traffic-cookie-request', 'Show in Sources');
+      const open = trafficNode('button', 'traffic-cookie-request', 'Show in Sources');
       open.type = 'button';
       open.addEventListener('click', () => openFrame(resolved));
       item.append(' ', open);
@@ -428,7 +412,7 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
   const notes = [loading ? `Loading ${loading} cookie list${loading === 1 ? '' : 's'}…` : '',
     unread ? `${unread} cookie list${unread === 1 ? ' was' : 's were'} not read past the ${TRAFFIC_COOKIE_PROVENANCE_LISTS}-list limit.` : '']
     .filter(Boolean);
-  if (notes.length) section.append(trafficCookieNode('p', 'traffic-headers-note', notes.join(' ')));
+  if (notes.length) section.append(trafficNode('p', 'traffic-headers-note', notes.join(' ')));
   return {section, key: JSON.stringify([name, setBy.length, sentWith.length, scripts.length, loading, unread, frames?.size ?? null])};
 }
 
@@ -443,7 +427,7 @@ function renderTrafficCookies(container, request, rerender, context = {}) {
   }
   trafficCookieRerenders.set(container, rerender);
   if (!request) {
-    container.replaceChildren(trafficCookieNode('div', 'exchange-no-selection', 'Select a request to inspect its cookies.'));
+    container.replaceChildren(trafficNode('div', 'exchange-no-selection', 'Select a request to inspect its cookies.'));
     container.dataset.renderKey = '';
     return;
   }
@@ -472,7 +456,7 @@ function renderTrafficCookies(container, request, rerender, context = {}) {
   if (container.dataset.renderKey === key) return;
   container.dataset.renderKey = key;
   const nodes = parts.map(part => part.section);
-  if (message) nodes.unshift(trafficCookieNode('p', 'traffic-headers-note', message));
+  if (message) nodes.unshift(trafficNode('p', 'traffic-headers-note', message));
   container.replaceChildren(...nodes);
 }
 

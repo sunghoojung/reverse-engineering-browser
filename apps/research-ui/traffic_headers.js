@@ -15,13 +15,6 @@ const trafficHeaderStateNotes = {
   not_captured_url: 'Not retained: not an HTTP(S) URL, longer than 8 KiB, or its hop was not tracked.'
 };
 
-function trafficHeaderNode(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
 // `name: value` CRLF lines, split at the first colon after the first byte so
 // HTTP/2 and HTTP/3 pseudo-headers keep their leading colon.
 function trafficHeaderLines(text, count) {
@@ -92,61 +85,52 @@ async function trafficLoadHeaderBlock(block, key, rerender) {
   rerender?.();
 }
 
-async function trafficCopyHeaders(text, status) {
-  try {
-    await navigator.clipboard.writeText(text);
-    status.textContent = 'Copied.';
-  } catch {
-    status.textContent = 'Copy failed.';
-  }
-}
-
 function trafficHeaderSection(id, title, {count = null, note = '', view = null} = {}) {
   const saved = trafficHeaderSections.get(id) ?? {open: true, raw: false};
-  const details = trafficHeaderNode('details', 'traffic-headers-section');
+  const details = trafficNode('details', 'traffic-headers-section');
   details.open = saved.open;
   details.dataset.section = id;
   details.addEventListener('toggle', () =>
     trafficHeaderSections.set(id, {...(trafficHeaderSections.get(id) ?? saved), open: details.open}));
-  const summary = trafficHeaderNode('summary', '', title);
-  if (count !== null) summary.append(trafficHeaderNode('span', 'traffic-headers-count', String(count)));
+  const summary = trafficNode('summary', '', title);
+  if (count !== null) summary.append(trafficNode('span', 'traffic-headers-count', String(count)));
   details.append(summary);
-  if (note) details.append(trafficHeaderNode('p', 'traffic-headers-note', note));
+  if (note) details.append(trafficNode('p', 'traffic-headers-note', note));
   if (view?.status !== 'ready') {
     const message = view?.status === 'loading' ? 'Loading retained headers…'
       : view?.status === 'refused' ? `The artifact receiver refused this block${view.reason ? `: ${view.reason}` : ''}.`
         : view?.status === 'unavailable' ? 'Retained headers are read from the local backend, not from a file.'
           : view?.status === 'error' ? `Could not read the retained block: ${view.error}.` : '';
-    if (message) details.append(trafficHeaderNode('p', 'traffic-headers-note', message));
+    if (message) details.append(trafficNode('p', 'traffic-headers-note', message));
     return details;
   }
-  const tools = trafficHeaderNode('div', 'traffic-headers-tools');
-  const raw = trafficHeaderNode('button', 'secondary-button', 'Raw');
+  const tools = trafficNode('div', 'traffic-headers-tools');
+  const raw = trafficNode('button', 'secondary-button', 'Raw');
   raw.type = 'button';
   raw.setAttribute('aria-pressed', String(saved.raw));
-  const copyAll = trafficHeaderNode('button', 'secondary-button', 'Copy all');
+  const copyAll = trafficNode('button', 'secondary-button', 'Copy all');
   copyAll.type = 'button';
-  const status = trafficHeaderNode('span', 'traffic-headers-status');
+  const status = trafficNode('span', 'traffic-headers-status');
   status.setAttribute('role', 'status');
   tools.append(raw, copyAll, status);
-  copyAll.addEventListener('click', () => trafficCopyHeaders(view.text, status));
-  const body = trafficHeaderNode('div', 'traffic-headers-body');
+  copyAll.addEventListener('click', () => trafficCopyText(view.text, status));
+  const body = trafficNode('div', 'traffic-headers-body');
   const show = asRaw => {
     if (asRaw) {
-      const pre = trafficHeaderNode('pre', 'traffic-headers-raw', view.text);
+      const pre = trafficNode('pre', 'traffic-headers-raw', view.text);
       pre.tabIndex = 0;
       pre.setAttribute('aria-label', `${title}, raw`);
       body.replaceChildren(pre);
       return;
     }
     body.replaceChildren(...view.lines.map(line => {
-      const row = trafficHeaderNode('div', 'traffic-header-row');
-      const copy = trafficHeaderNode('button', 'traffic-header-copy', 'Copy');
+      const row = trafficNode('div', 'traffic-header-row');
+      const copy = trafficNode('button', 'traffic-header-copy', 'Copy');
       copy.type = 'button';
       copy.setAttribute('aria-label', `Copy ${line.name} value`);
-      copy.addEventListener('click', () => trafficCopyHeaders(line.value, status));
-      row.append(trafficHeaderNode('span', 'traffic-header-name', line.name),
-        trafficHeaderNode('span', 'traffic-header-value', line.value), copy);
+      copy.addEventListener('click', () => trafficCopyText(line.value, status));
+      row.append(trafficNode('span', 'traffic-header-name', line.name),
+        trafficNode('span', 'traffic-header-value', line.value), copy);
       return row;
     }));
   };
@@ -186,8 +170,8 @@ function trafficHeadersGeneral(request, hops) {
   if (unattributed) rows.push(['Unattributed blocks', `${unattributed} network header blocks arrived after their request ended`]);
   const section = trafficHeaderSection('general', 'General');
   for (const [label, value] of rows) {
-    const row = trafficHeaderNode('div', 'traffic-general-row');
-    row.append(trafficHeaderNode('span', '', label), trafficHeaderNode('span', 'traffic-general-value', value));
+    const row = trafficNode('div', 'traffic-general-row');
+    row.append(trafficNode('span', '', label), trafficNode('span', 'traffic-general-value', value));
     section.append(row);
   }
   return {section, key: JSON.stringify(rows)};
@@ -195,7 +179,7 @@ function trafficHeadersGeneral(request, hops) {
 
 function renderTrafficHeaders(container, request, rerender) {
   if (!request) {
-    container.replaceChildren(trafficHeaderNode('div', 'exchange-no-selection', 'Select a request to inspect its headers.'));
+    container.replaceChildren(trafficNode('div', 'exchange-no-selection', 'Select a request to inspect its headers.'));
     container.dataset.renderKey = '';
     return;
   }
@@ -228,7 +212,7 @@ function renderTrafficHeaders(container, request, rerender) {
   if (container.dataset.renderKey === key) return;
   container.dataset.renderKey = key;
   const nodes = parts.map(part => part.section);
-  if (message) nodes.splice(1, 0, trafficHeaderNode('p', 'traffic-headers-note', message));
+  if (message) nodes.splice(1, 0, trafficNode('p', 'traffic-headers-note', message));
   container.replaceChildren(...nodes);
 }
 

@@ -112,27 +112,20 @@ function trafficResponseText(bytes, open = false) {
   }
 }
 
-function trafficNodeText(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
 // A bounded tree of text nodes. Objects and arrays fold; strings stay inert.
 function trafficJsonTree(value) {
   let budget = TRAFFIC_JSON_NODE_LIMIT;
   const leaf = item => {
     const type = item === null ? 'null' : typeof item;
-    const span = trafficNodeText('span', `traffic-json-value syntax-${type === 'string' ? 'string' : type === 'number' ? 'number' : 'keyword'}`,
+    const span = trafficNode('span', `traffic-json-value syntax-${type === 'string' ? 'string' : type === 'number' ? 'number' : 'keyword'}`,
       type === 'string' ? JSON.stringify(item) : String(item));
     return span;
   };
   const build = (key, item, depth) => {
     budget -= 1;
-    const label = key === null ? null : trafficNodeText('span', 'traffic-json-key syntax-property', `${key}: `);
+    const label = key === null ? null : trafficNode('span', 'traffic-json-key syntax-property', `${key}: `);
     if (item === null || typeof item !== 'object') {
-      const row = trafficNodeText('div', 'traffic-json-leaf');
+      const row = trafficNode('div', 'traffic-json-leaf');
       if (label) row.append(label);
       row.append(leaf(item));
       return row;
@@ -143,21 +136,21 @@ function trafficJsonTree(value) {
     details.open = depth < 2;
     const summary = document.createElement('summary');
     if (label) summary.append(label);
-    summary.append(trafficNodeText('span', 'traffic-json-shape', Array.isArray(item) ? `Array(${entries.length})` : `{${entries.length} ${entries.length === 1 ? 'key' : 'keys'}}`));
+    summary.append(trafficNode('span', 'traffic-json-shape', Array.isArray(item) ? `Array(${entries.length})` : `{${entries.length} ${entries.length === 1 ? 'key' : 'keys'}}`));
     details.append(summary);
     for (const [name, entry] of entries) {
       if (budget <= 0 || depth >= 64) {
-        details.append(trafficNodeText('div', 'traffic-json-more', `${(entries.length - details.children.length + 1).toLocaleString('en-US')} more not shown`));
+        details.append(trafficNode('div', 'traffic-json-more', `${(entries.length - details.children.length + 1).toLocaleString('en-US')} more not shown`));
         break;
       }
       details.append(build(name, entry, depth + 1));
     }
     return details;
   };
-  const root = trafficNodeText('div', 'traffic-json-tree');
+  const root = trafficNode('div', 'traffic-json-tree');
   root.setAttribute('role', 'tree');
   root.append(build(null, value, 0));
-  if (budget <= 0) root.append(trafficNodeText('p', 'traffic-body-note', `The tree shows the first ${TRAFFIC_JSON_NODE_LIMIT.toLocaleString('en-US')} values.`));
+  if (budget <= 0) root.append(trafficNode('p', 'traffic-body-note', `The tree shows the first ${TRAFFIC_JSON_NODE_LIMIT.toLocaleString('en-US')} values.`));
   return root;
 }
 
@@ -284,11 +277,11 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
   }
 
   function toolbar(container, binary, prettyable, shown, text) {
-    const bar = trafficNodeText('div', 'traffic-response-toolbar');
+    const bar = trafficNode('div', 'traffic-response-toolbar');
     bar.setAttribute('role', 'toolbar');
     bar.setAttribute('aria-label', 'Response body view');
     const toggle = (control, label, pressed, disabled = false) => {
-      const button = trafficNodeText('button', 'secondary-button', label);
+      const button = trafficNode('button', 'secondary-button', label);
       button.type = 'button';
       button.dataset.control = control;
       button.setAttribute('aria-pressed', String(pressed));
@@ -298,7 +291,7 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     toggle('pretty', 'Pretty print', options.pretty && prettyable, !prettyable || options.hex);
     toggle('wrap', 'Wrap', options.wrap);
     toggle('hex', 'Hex', binary || options.hex, binary);
-    const copy = trafficNodeText('button', 'secondary-button', 'Copy');
+    const copy = trafficNode('button', 'secondary-button', 'Copy');
     copy.type = 'button';
     copy.dataset.control = 'copy';
     bar.append(copy);
@@ -311,7 +304,7 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     find.setAttribute('aria-label', 'Find in response body');
     bar.append(find);
     const findCount = shown.matches;
-    const count = trafficNodeText('span', 'traffic-response-count', !options.query ? '' : !findCount ? 'No matches'
+    const count = trafficNode('span', 'traffic-response-count', !options.query ? '' : !findCount ? 'No matches'
       : `${shown.current + 1} of ${findCount.toLocaleString('en-US')}${shown.truncated ? '+' : ''}`);
     count.setAttribute('aria-live', 'polite');
     bar.append(count);
@@ -355,7 +348,7 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     let value = text;
     let note = null;
     let layout = null;
-    const raw = trafficNodeText('p', 'traffic-body-note code-view-raw');
+    const raw = trafficNode('p', 'traffic-body-note code-view-raw');
     raw.setAttribute('role', 'status');
     if (binary || options.hex) {
       value = formatWasmHex(bytes.subarray(0, TRAFFIC_RESPONSE_HEX_BYTES));
@@ -372,11 +365,11 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       shown = codeView(value, artifact, language, {layout: layout?.status === 'ready' ? layout : null, status: raw});
     }
     nodes.push(toolbar(container, binary, prettyable, shown, value));
-    if (note) nodes.push(trafficNodeText('p', 'traffic-body-note', note));
+    if (note) nodes.push(trafficNode('p', 'traffic-body-note', note));
     nodes.push(shown.code);
     if (layout?.status === 'ready' && layout.map) nodes.push(raw);
     if (!view.complete) {
-      const button = trafficNodeText('button', 'secondary-button traffic-body-more', view.loadingMore ? 'Loading…' : 'Show the next 2 MiB');
+      const button = trafficNode('button', 'secondary-button traffic-body-more', view.loadingMore ? 'Loading…' : 'Show the next 2 MiB');
       button.type = 'button';
       button.dataset.control = 'more';
       // Not `disabled`, so keyboard focus stays on it while the range loads.
@@ -388,37 +381,37 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
   }
 
   function preview(artifact, view, record) {
-    if (!view.complete) return [trafficNodeText('p', 'traffic-body-note', 'Preview needs every retained byte. Show the rest on the Response tab.')];
+    if (!view.complete) return [trafficNode('p', 'traffic-body-note', 'Preview needs every retained byte. Show the rest on the Response tab.')];
     const bytes = view.bytes;
     const image = trafficImageType(bytes, artifact.mime_type);
     if (image) {
-      const figure = trafficNodeText('figure', 'traffic-response-image');
+      const figure = trafficNode('figure', 'traffic-response-image');
       const img = document.createElement('img');
       img.alt = 'Retained response image';
       img.decoding = 'async';
       let binary = '';
       for (let offset = 0; offset < bytes.length; offset += 32768) binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
       img.src = `data:${image};base64,${btoa(binary)}`;
-      const caption = trafficNodeText('figcaption', '', `${image} · ${trafficResponseBytes(bytes.length)}`);
+      const caption = trafficNode('figcaption', '', `${image} · ${trafficResponseBytes(bytes.length)}`);
       img.addEventListener('load', () => {caption.textContent = `${image} · ${img.naturalWidth} × ${img.naturalHeight} · ${trafficResponseBytes(bytes.length)}`;});
       img.addEventListener('error', () => {caption.textContent = 'The browser could not decode this image. Original evidence is unchanged.';});
       figure.append(img, caption);
       return [figure];
     }
     const text = trafficResponseText(bytes, record?.state === 'captured_truncated');
-    if (text === null) return [trafficNodeText('p', 'traffic-body-note', 'Binary body: no preview. The Response tab shows it as hex.')];
+    if (text === null) return [trafficNode('p', 'traffic-body-note', 'Binary body: no preview. The Response tab shows it as hex.')];
     const language = sourceSyntaxLanguage({kind: 'response_body', mime_type: artifact.mime_type, url: artifact.url});
     if (language === 'json' || /^\s*[[{]/.test(text)) {
       try {
         return [trafficJsonTree(JSON.parse(text))];
       } catch {
-        if (language === 'json') return [trafficNodeText('p', 'traffic-body-note', 'Not valid JSON; the Response tab shows its text.'), trafficNodeText('pre', 'traffic-body-text', text)];
+        if (language === 'json') return [trafficNode('p', 'traffic-body-note', 'Not valid JSON; the Response tab shows its text.'), trafficNode('pre', 'traffic-body-text', text)];
       }
     }
     if (language === 'markup') {
-      return [trafficNodeText('p', 'traffic-body-note', 'Markup is shown as source and never rendered.'), codeView(text, artifact, 'markup', {find: false}).code];
+      return [trafficNode('p', 'traffic-body-note', 'Markup is shown as source and never rendered.'), codeView(text, artifact, 'markup', {find: false}).code];
     }
-    const pre = trafficNodeText('pre', 'traffic-body-text', text);
+    const pre = trafficNode('pre', 'traffic-body-text', text);
     pre.tabIndex = 0;
     return [pre];
   }
@@ -434,23 +427,23 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     container.dataset.renderKey = key;
     const active = container.contains(document.activeElement) ? document.activeElement.dataset?.control : null;
     const caret = active === 'find' ? document.activeElement.selectionStart : null;
-    const nodes = [trafficNodeText('h2', '', tab === 'preview' ? 'Preview' : 'Response')];
+    const nodes = [trafficNode('h2', '', tab === 'preview' ? 'Preview' : 'Response')];
     if (!request) {
-      container.replaceChildren(trafficNodeText('div', 'exchange-no-selection', 'Select a request to inspect its response.'));
+      container.replaceChildren(trafficNode('div', 'exchange-no-selection', 'Select a request to inspect its response.'));
       return;
     }
     const rows = [['Capture', artifact && !record ? 'Retained as a source artifact by this response.' : trafficResponseCapture(request, contentSession()), 'prose'],
       ...trafficResponseRows(record)];
     if (artifact) rows.push(['Artifact', `${artifact.kind} ${artifact.artifact_id} · ${artifact.mime_type}`, 'value']);
     for (const [label, value, kind] of tab === 'preview' ? rows.slice(0, 1) : rows) {
-      const row = trafficNodeText('div', 'traffic-general-row');
-      const valueNode = trafficNodeText('span', 'traffic-general-value', String(value));
+      const row = trafficNode('div', 'traffic-general-row');
+      const valueNode = trafficNode('span', 'traffic-general-value', String(value));
       valueNode.dataset.kind = kind;
-      row.append(trafficNodeText('span', '', label), valueNode);
+      row.append(trafficNode('span', '', label), valueNode);
       nodes.push(row);
     }
     const note = contentNote(record, artifact, view ?? {}, refusal);
-    if (note) nodes.push(trafficNodeText('p', 'traffic-body-note', note));
+    if (note) nodes.push(trafficNode('p', 'traffic-body-note', note));
     if (view?.status === 'ready') nodes.push(...(tab === 'preview' ? preview(artifact, view, record) : responseBody(container, request, artifact, view)));
     container.replaceChildren(...nodes);
     container.dataset.state = record?.malformed ? 'malformed' : record?.state ?? (artifact ? 'source_artifact' : 'none');

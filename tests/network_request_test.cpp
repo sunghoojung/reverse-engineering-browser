@@ -468,7 +468,7 @@ void CheckTargets() {
             std::string_view(decoded.target_prefix.data(), decoded.target_prefix.size()) ==
                 std::string_view(path).substr(0, 116),
         "target prefix and original length survive");
-  for (const auto [name, retention] :
+  for (const auto& [name, retention] :
        {std::pair{"target not retained: artifact channel",
                   Retention::kNotRetainedArtifactUnavailable},
         std::pair{"target not retained: transfer refused", Retention::kNotRetainedTransferRefused},
@@ -1199,8 +1199,10 @@ void CheckResponseBodies() {
          value.coding_count = 1;
          value.codings[0] = reb::NativeResponseCoding::kGzip;
        })},
-      {"response type without flag", captured, 911,
-       summary([](auto& value) { value.flags &= ~reb::kNativeResponseBodyContentTypePresent; })},
+      {"response type without flag", captured, 911, summary([](auto& value) {
+         value.flags =
+             static_cast<std::uint8_t>(value.flags & ~reb::kNativeResponseBodyContentTypePresent);
+       })},
       {"response unnormalized type", captured, 911, byte(64, std::byte{'A'})},
       {"response type dirty tail", captured, 911, byte(127, std::byte{'x'})},
       {"response envelope flags", captured, 911,

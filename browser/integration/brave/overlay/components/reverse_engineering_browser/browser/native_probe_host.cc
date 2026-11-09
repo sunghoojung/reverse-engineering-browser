@@ -689,10 +689,27 @@ void NativeProbeHost::CaptureGeneratedArtifact(const std::uint16_t kind,
         std::move(allocating_script_source), std::move(content));
     return;
   }
+  const bool stack_artifact =
+      kind == static_cast<std::uint16_t>(NativeArtifactKind::kStack) &&
+      capture_origin == static_cast<std::uint16_t>(NativeArtifactCaptureOrigin::kRequestStack);
+  std::function<void()> on_refused;
+  if (stack_artifact) {
+    on_refused = [host = weak_factory_.GetWeakPtr(), creator_event_id] {
+      if (host) {
+        host->SendNativeStackArtifactRefused(creator_event_id);
+      }
+    };
+  }
   NativeArtifactCaptureSink::Get().CaptureGeneratedArtifact(
       static_cast<NativeArtifactKind>(kind),
       static_cast<NativeArtifactCaptureOrigin>(capture_origin), creator_event_id,
-      execution_context_id, frame_id, source_url, std::move(content));
+      execution_context_id, frame_id, source_url, std::move(content), 0, std::move(on_refused));
+}
+
+void NativeProbeHost::SendNativeStackArtifactRefused(const std::uint64_t creator_event_id) {
+  if (client_.is_bound()) {
+    client_->NativeStackArtifactRefused(creator_event_id);
+  }
 }
 
 void NativeProbeHost::Configure(const std::uint64_t session_id,

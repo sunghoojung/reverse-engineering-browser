@@ -141,6 +141,8 @@ class NativeArtifactCaptureSink final {
                                 std::string_view source_url,
                                 mojo_base::BigBuffer script_source,
                                 mojo_base::BigBuffer content);
+  // `on_refused`, if set, runs once when the artifact is refused or lost, so a
+  // renderer that claimed it captured can stop claiming it for later repeats.
   std::uint64_t CaptureGeneratedArtifact(NativeArtifactKind kind,
                                          NativeArtifactCaptureOrigin capture_origin,
                                          std::uint64_t creator_event_id,
@@ -148,7 +150,8 @@ class NativeArtifactCaptureSink final {
                                          std::uint64_t frame_id,
                                          std::string_view source_url,
                                          mojo_base::BigBuffer content,
-                                         std::uint64_t parent_artifact_id = 0);
+                                         std::uint64_t parent_artifact_id = 0,
+                                         std::function<void()> on_refused = {});
 
   // UI sequence. Copies off it; every loss, from stream open on, is one event
   // parented to the creator.
@@ -223,6 +226,7 @@ class NativeArtifactCaptureSink final {
     bool response_body = false;
     // A header block or cookie list another request can share by artifact ID.
     bool shared_block = false;
+    std::function<void()> on_refused = {};
     // A request body still being read: no record exists yet to parent a loss
     // to, so a report sets read_lost and OnRequestBodyRead records it.
     bool read_open = false;
@@ -316,7 +320,8 @@ class NativeArtifactCaptureSink final {
                                                  std::string_view source_url,
                                                  mojo_base::BigBuffer content,
                                                  std::uint64_t parent_artifact_id,
-                                                 bool native_wasm_runtime);
+                                                 bool native_wasm_runtime,
+                                                 std::function<void()> on_refused = {});
 
   void OnBodyData(std::uint64_t artifact_id, std::span<const std::uint8_t> chunk);
   void OnBodyComplete(std::uint64_t artifact_id, NativeArtifactBodyEnd end);

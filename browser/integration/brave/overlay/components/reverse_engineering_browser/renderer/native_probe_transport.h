@@ -58,6 +58,7 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   // as jitless. Not cleared by Disable: it reads process flags, not the session.
   using NativeWasmLimitProbe = void (*)() noexcept;
   static void SetNativeWasmLimitProbe(NativeWasmLimitProbe probe) noexcept;
+  void NativeStackArtifactRefused(std::uint64_t creator_event_id) override;
   void NativeGuestModuleStatus(std::uint64_t wasm_capture_epoch,
                                std::uint64_t module_token,
                                bool accepted) override;

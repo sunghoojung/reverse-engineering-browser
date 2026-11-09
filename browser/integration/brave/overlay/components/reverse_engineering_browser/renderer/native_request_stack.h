@@ -128,6 +128,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
   [[nodiscard]] bool async_task_walk() const noexcept;
   // Whether a frame's script still needs a description in this configuration.
   [[nodiscard]] bool ScriptNeeded(std::uint32_t script_id) const noexcept;
+  // The browser refused the stack artifact this walk's record created: forget
+  // its digest so an identical later stack is sent again. Renderer main thread.
+  static void StackArtifactRefused(std::uint64_t creator_sequence) noexcept;
   // Whether this walk's record was admitted. A walk with none keeps nothing, so
   // Blink skips the UTF-8 conversion of the scripts it would otherwise describe.
   [[nodiscard]] bool has_admitted_record() const noexcept { return stack_sequence_ != 0; }

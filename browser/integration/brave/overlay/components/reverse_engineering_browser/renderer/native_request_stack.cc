@@ -60,9 +60,17 @@ struct NativeRequestStackTables final {
     std::uint64_t target = 0;
     std::uint64_t sequence = 0;
   };
+  // A stack artifact this renderer queued, until a browser refusal needs it.
+  struct QueuedStack final {
+    std::uint64_t generation = 0;
+    std::uint64_t sequence = 0;
+    std::array<std::uint8_t, 32> digest{};
+  };
   std::array<NativeStackFrame, kNativeRequestStackFrameCapacity> frames{};
   std::array<std::uint8_t, kNativeStackArtifactMaxBytes> artifact{};
   std::array<Digest, kNativeRequestStackDigestTable> digests{};
+  std::array<QueuedStack, kNativeRequestStackDigestTable> queued_stacks{};
+  std::size_t queued_stack_next = 0;
   std::array<Script, kNativeRequestStackScriptTable> scripts{};
   std::array<std::uint64_t, std::bit_ceil(2 * kNativeRequestStackFrameCapacity)> distinct{};
   std::uint32_t distinct_stamp = 0;
@@ -837,6 +845,31 @@ void NativeRequestStackWalk::QueueStackArtifact(
   NativeRequestStackTables::Digest& slot = Slot(state.digests, hash, generation_, state.evict);
   slot.generation = generation_;
   slot.value = digest;
+  // Remembered so a browser refusal can forget this digest (StackArtifactRefused).
+  state.queued_stacks[state.queued_stack_next++ % state.queued_stacks.size()] = {
+      generation_, stack_sequence_, digest};
+}
+
+void NativeRequestStackWalk::StackArtifactRefused(const std::uint64_t creator_sequence) noexcept {
+  NativeRequestStackTables* const state = g_state;
+  if (!state || creator_sequence == 0) {
+    return;
+  }
+  const std::uint64_t generation =
+      NativeProbeSink::Get().config_generation_.load(std::memory_order_acquire);
+  const auto queued = std::find_if(
+      state->queued_stacks.begin(), state->queued_stacks.end(), [&](const auto& entry) {
+        return entry.generation == generation && entry.sequence == creator_sequence;
+      });
+  if (queued == state->queued_stacks.end()) {
+    return;
+  }
+  if (auto* digest = Find(state->digests, Mix(DigestKey(queued->digest)), [&](const auto& entry) {
+        return entry.generation == generation && entry.value == queued->digest;
+      })) {
+    *digest = {};
+  }
+  *queued = {};
 }
 
 void NativeRequestStackWalk::DescribeScript(const NativeStackScriptSource& script) noexcept {

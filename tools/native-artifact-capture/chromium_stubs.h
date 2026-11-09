@@ -653,6 +653,7 @@ class NativeProbeClient {
   virtual void ResetWasmSampleBudgets() = 0;
   virtual void Disable() = 0;
   virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
+  virtual void NativeStackArtifactRefused(std::uint64_t) = 0;
 };
 class NativeProbeHost {
  public:

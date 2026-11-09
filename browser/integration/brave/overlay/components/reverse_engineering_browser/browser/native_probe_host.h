@@ -151,6 +151,7 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   void EmitWorkerRequest(NativeProbeEvent& event);
   // Reports the browser verdict for module bytes sent with the guest dispatch
   // whose sequence number is module_token, if that configuration is current.
+  void SendNativeStackArtifactRefused(std::uint64_t creator_event_id);
   void SendNativeGuestModuleStatus(std::uint64_t capture_epoch,
                                    std::uint64_t module_token,
                                    bool accepted);

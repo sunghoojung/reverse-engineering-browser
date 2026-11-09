@@ -1183,7 +1183,7 @@ frame and renderer `request_id`. Payload 128 bytes, little endian:
 
 | State | Meaning |
 | ---: | --- |
-| 1 `captured` | Frames walked; the digest names the stack artifact |
+| 1 `captured` | Frames walked; the digest names the stack artifact queued with this record, or sent earlier in this configuration and not refused |
 | 2 `no_script` | No JavaScript or Wasm was on the stack: the parser, a preload, or a start the loader deferred |
 | 3 `unsupported_thread` | Not the document main thread (workers, worklets) |
 | 4 `not_retained_artifact_unavailable` | Frames walked; Artifact category off or no artifact path |
@@ -1255,9 +1255,9 @@ the omitted frames lie between index 511 and 512. Async frames follow the
 synchronous ones in chain order; each async frame is one segment.
 
 Each renderer remembers 256 digests it sent in the current configuration. A
-repeated stack sends no artifact. A digest that falls out of that table is sent
-again, never dropped. The renderer sends at most 1,024 stack artifacts per
-configuration.
+repeated stack sends no artifact. A digest that falls out of that table, or that
+the browser reports refused or lost (`NativeStackArtifactRefused`), is sent again,
+never dropped. The renderer sends at most 1,024 stack artifacts per configuration.
 
 ### `script_identity` (type 35)
 

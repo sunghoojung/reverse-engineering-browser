@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
 
 #include "base/functional/bind.h"
 #include "base/task/sequenced_task_runner.h"
@@ -166,6 +167,10 @@ void NativeProbeTransport::Disable() {
   NativeProbeSink::Get().SetNativeWasmExecutionEmitter(nullptr);
   NativeProbeSink::Get().SetEmitters(nullptr, nullptr, 0, 0, 0, false);
   queue_.store(nullptr, std::memory_order_release);
+}
+
+void NativeProbeTransport::NativeStackArtifactRefused(const std::uint64_t creator_event_id) {
+  NativeRequestStackWalk::StackArtifactRefused(creator_event_id);
 }
 
 void NativeProbeTransport::NativeGuestModuleStatus(const std::uint64_t wasm_capture_epoch,

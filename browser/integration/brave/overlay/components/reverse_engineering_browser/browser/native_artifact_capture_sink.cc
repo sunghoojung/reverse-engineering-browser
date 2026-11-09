@@ -1475,10 +1475,15 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifact(
     std::uint64_t frame_id,
     std::string_view source_url,
     mojo_base::BigBuffer content,
-    std::uint64_t parent_artifact_id) {
-  return CaptureGeneratedArtifactInternal(kind, capture_origin, creator_event_id,
-                                          execution_context_id, frame_id, source_url,
-                                          std::move(content), parent_artifact_id, false);
+    std::uint64_t parent_artifact_id,
+    std::function<void()> on_refused) {
+  const std::uint64_t artifact_id = CaptureGeneratedArtifactInternal(
+      kind, capture_origin, creator_event_id, execution_context_id, frame_id, source_url,
+      std::move(content), parent_artifact_id, false, on_refused);
+  if (artifact_id == 0 && on_refused) {
+    on_refused();
+  }
+  return artifact_id;
 }
 
 std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
@@ -1490,7 +1495,8 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
     const std::string_view source_url,
     mojo_base::BigBuffer content,
     const std::uint64_t parent_artifact_id,
-    const bool native_wasm_runtime) {
+    const bool native_wasm_runtime,
+    std::function<void()> on_refused) {
   const bool is_runtime_typed_array =
       kind == NativeArtifactKind::kBytecodeBuffer &&
       capture_origin == NativeArtifactCaptureOrigin::kRuntimeTypedArray;
@@ -1597,7 +1603,8 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
   pending_.emplace(artifact_id, PendingContext{.frame_id = frame_id,
                                                .session_id = capture_session_id,
                                                .generation = capture_generation,
-                                               .result_category = result_category});
+                                               .result_category = result_category,
+                                               .on_refused = std::move(on_refused)});
   return artifact_id;
 }
 
@@ -1642,6 +1649,9 @@ void NativeArtifactCaptureSink::OnTransferCompleted(
   pending_.erase(found);
   if (!IsCurrentCapture(context.session_id, context.generation)) {
     return;
+  }
+  if (context.on_refused && status != NativeArtifactReceiveStatus::kAccepted) {
+    context.on_refused();
   }
   if (context.shared_block && status != NativeArtifactReceiveStatus::kAccepted) {
     // An identical block must get its own attempt, not share one that failed.

@@ -236,6 +236,24 @@ std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
          (repeat.flags & reb::kNativeRequestStackArtifactQueued) == 0);
   assert(Drain(queue) == 0 && reb::mojom::NativeProbeHost::artifacts == artifacts + 4);
 
+  // A refused stack artifact is forgotten, so its repeat is sent again rather
+  // than claiming the artifact was captured.
+  scenario.seed = 8101;
+  const auto [refused_parent, refused_event] = Start(queue, 4100);
+  static_cast<void>(refused_parent);
+  const auto refused_first = StackPayload(refused_event);
+  assert((refused_first.flags & reb::kNativeRequestStackArtifactQueued) != 0);
+  Drain(queue);
+  transport.NativeStackArtifactRefused(refused_event.header.sequence_number);
+  const auto resent_payload = StackPayload(Start(queue, 4101).second);
+  assert(resent_payload.state == 1 &&
+         (resent_payload.flags & reb::kNativeRequestStackArtifactQueued) != 0 &&
+         resent_payload.digest == refused_first.digest);
+  Drain(queue);
+  const auto repeated = StackPayload(Start(queue, 4102).second);
+  assert((repeated.flags & reb::kNativeRequestStackArtifactQueued) == 0);
+  Drain(queue);
+
   // Runaway recursion keeps the innermost and outermost 512 frames.
   scenario.depth = 5000;
   scenario.scripts = 1;

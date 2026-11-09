@@ -2191,6 +2191,7 @@ int main(int argc, char** argv) {
     NativeProbeHostJsDispatchForwarding();
     NativeProbeHostBrowserInternalScope();
     NativeProbeHostWorkerTabLinks();
+    NativeProbeHostStackRefusal();
     RequestBodyPolicy(output);
     ResponseBodyLimits(receiver, output);
     event_wire.flush();

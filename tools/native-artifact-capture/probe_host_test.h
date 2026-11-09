@@ -28,6 +28,10 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
   void NativeGuestModuleStatus(std::uint64_t epoch, std::uint64_t token, bool accepted) override {
     verdicts.push_back({epoch, token, accepted});
   }
+  void NativeStackArtifactRefused(std::uint64_t creator) override {
+    refused_stacks.push_back(creator);
+  }
+  std::vector<std::uint64_t> refused_stacks;
   struct Verdict {
     std::uint64_t epoch, token;
     bool accepted;
@@ -473,6 +477,51 @@ void NativeProbeHostJsDispatchForwarding() {
 
 // protocol/native-network-v3.md: queue exclusion counters become cumulative
 // reports, and a renderer granted WebUI bindings leaves with what it queued.
+// A stack artifact the browser refuses reaches the renderer that claimed it.
+void NativeProbeHostStackRefusal() {
+  auto& session = reb::NativeProbeSession::Get();
+  session.active = true;
+  session.id = kSession;
+  session.mask = kMask;
+  session.expires = 200;
+  session.emitted = [](const NativeProbeEvent& event) { Emit(event); };
+  Configure(kSession, kMask);
+  auto& transfers = NativeArtifactSocketClient::Get().transfers;
+  transfers.clear();
+  RecordingProbeClient client;
+  reb::NativeProbeHost host(session, 1);
+  host.BindClient({&client});
+  const auto capture = [&](const std::uint64_t creator) {
+    const std::vector<std::uint8_t> bytes{1, 2, 3};
+    host.CaptureGeneratedArtifact(
+        static_cast<std::uint16_t>(reb::NativeArtifactKind::kStack),
+        static_cast<std::uint16_t>(reb::NativeArtifactCaptureOrigin::kRequestStack), creator, 77,
+        kFrame, "reb-stack:sha256-00", mojo_base::BigBuffer(std::span<const std::uint8_t>(bytes)),
+        0, false, mojo_base::BigBuffer(std::span<const std::uint8_t>()), 0);
+  };
+  capture(900);
+  Check(transfers.size() == 1 && client.refused_stacks.empty(),
+        "An artifact in flight is unjudged");
+  NativeArtifactCaptureSink::TransferCompleted(transfers.begin()->first,
+                                               reb::NativeArtifactReceiveStatus::kAccepted);
+  Check(client.refused_stacks.empty(), "An accepted stack artifact sends no refusal");
+  transfers.clear();
+  capture(901);
+  NativeArtifactCaptureSink::TransferCompleted(transfers.begin()->first,
+                                               reb::NativeArtifactReceiveStatus::kIoError);
+  Check(client.refused_stacks == std::vector<std::uint64_t>{901},
+        "A stack artifact lost after queueing is reported to its renderer");
+  transfers.clear();
+  NativeArtifactSocketClient::Get().reject_next = true;
+  capture(902);
+  Check(client.refused_stacks.size() == 2 && client.refused_stacks.back() == 902,
+        "A stack artifact the queue refuses is reported to its renderer");
+  transfers.clear();
+  session.active = false;
+  session.emitted = {};
+  std::cout << "PASS production NativeProbeHost reports refused stack artifacts to the renderer\n";
+}
+
 void NativeProbeHostBrowserInternalScope() {
   auto& session = reb::NativeProbeSession::Get();
   session.active = true;

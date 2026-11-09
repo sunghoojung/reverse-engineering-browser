@@ -3537,11 +3537,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       // Retained request content (protocol/native-network-v2.md) loads only for the
-      // selected request and by range: a body 256 KiB at a time, a full target in
+      // selected request and by range: a body 2 MiB at a time, a full target in
       // one read. The backend checks the catalog's size and SHA-256 on every read;
       // this view rechecks the digest once every byte is loaded. Text is only ever
       // assigned to textContent.
-      const REQUEST_BODY_PAGE_BYTES = 256 * 1024;
+      const REQUEST_BODY_PAGE_BYTES = 2 * 1024 * 1024;
       // The backend's largest range read, which is also Chromium's URL limit.
       const REQUEST_TARGET_READ_BYTES = 2 * 1024 * 1024;
       // Loaded bytes kept for recently selected requests, never the session's content.
@@ -3667,19 +3667,23 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const selected = state.requests.find(request => request.id === state.selectedRequestId);
         if (selected && requestContentViewKey(selected) !== state.requestBodyViewKey) renderInspector();
       }
-      function loadMoreRequestBody(key) {
+      function startMoreRequestBody(key) {
         const view = requestBodyViews.get(key);
-        if (view?.status !== 'ready' || view.complete) return;
+        if (view?.status !== 'ready' || view.complete) return false;
         requestBodyViews.set(key, {status: 'loading', previous: {...view, moreError: null}});
         void loadRequestContent(view.artifact, key, view, view.cut);
-        renderInspector();
+        return true;
+      }
+      function loadMoreRequestBody(key) {
+        if (startMoreRequestBody(key)) renderInspector();
       }
       function requestBodyViewKey(view) {
-        return view ? `${view.status}|${view.reason ?? view.error ?? ''}|${view.url ?? ''}|${view.loaded ?? ''}|${view.moreError ?? ''}|${view.loadingMore ?? ''}` : '';
+        return view ? `${view.status}|${view.unknown ?? ''}|${view.reason ?? view.error ?? ''}|${view.url ?? ''}|${view.loaded ?? ''}|${view.moreError ?? ''}|${view.loadingMore ?? ''}` : '';
       }
-      // General reads the full target; Payload reads the body.
+      // General and Headers read the full target; Payload reads the body and its query from the full target.
       function requestContentViewKey(request) {
-        return requestBodyViewKey(state.inspectorTab === 'payload' ? requestBodyView(request) : requestTargetView(request));
+        return state.inspectorTab === 'payload' ? `${requestBodyViewKey(requestBodyView(request))}#${requestBodyViewKey(requestTargetView(request))}`
+          : requestBodyViewKey(requestTargetView(request));
       }
       // Content whose acknowledgment arrives after selection becomes readable on
       // the next catalog refresh without reselecting the request. Unchanged
@@ -3783,8 +3787,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!payloadInspector.hidden) {
           elements.requestInspector.hidden = true;
           document.querySelector('.detail-pane').classList.add('showing-exchange');
+          // A parsed view needs every retained byte, so ranges are read on without a click.
+          const bodyView = requestBodyView(request);
+          if (bodyView?.status === 'ready' && bodyView.complete === false && !bodyView.loadingMore && !bodyView.moreError &&
+              trafficPayloadParses(request.body, bodyView)) startMoreRequestBody(bodyView.key);
           state.requestBodyViewKey = requestContentViewKey(request);
-          renderTrafficPayload(payloadInspector, request, requestBodyView(request));
+          renderTrafficPayload(payloadInspector, request, requestBodyView(request), requestTargetView(request));
           return;
         }
         if (showingGeneral) {

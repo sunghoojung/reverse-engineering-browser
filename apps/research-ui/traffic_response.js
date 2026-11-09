@@ -351,7 +351,14 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
   }
 
   function preview(artifact, view, record) {
-    if (!view.complete) return [trafficNode('p', 'traffic-body-note', 'Preview needs every retained byte. Show the rest on the Response tab.')];
+    if (!view.complete) {
+      if (!view.moreError) return [trafficNode('p', 'traffic-body-note', 'Reading every retained byte for Preview…')];
+      const retry = trafficNode('button', 'secondary-button traffic-body-more', 'Read the rest again');
+      retry.type = 'button';
+      retry.dataset.control = 'more';
+      retry.addEventListener('click', () => more(view.key));
+      return [trafficNode('p', 'traffic-body-note', 'Preview needs every retained byte, and the next range could not be read.'), retry];
+    }
     const bytes = view.bytes;
     const image = trafficImageType(bytes, artifact.mime_type);
     if (image) {
@@ -430,6 +437,8 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       control?.focus?.();
       if (caret !== null && control?.setSelectionRange) control.setSelectionRange(caret, caret);
     }
+    // A parsed preview needs every retained byte, so ranges are read on without a click.
+    if (tab === 'preview' && view?.status === 'ready' && !view.complete && !view.loadingMore && !view.moreError) more(view.key);
   }
 
   return {render, more};

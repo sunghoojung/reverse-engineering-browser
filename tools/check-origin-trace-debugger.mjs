@@ -1325,8 +1325,8 @@ console.log("PASS selected strip and inspector share current pending/response/fa
   assert.match(view.error, /do not match the retained SHA-256/); assert.equal(view.retryable, false);
   clock += 60000; body.requestBodyView(failingRequest); body.refreshSelectedRequestBody(); await settle();
   assert.equal(fetches.length, 5, "An integrity failure is not retried");
-  // Bodies past one range load 256 KiB at a time, on request, and verify once whole.
-  const large = new Uint8Array(300 * 1024).map((_, index) => 97 + index % 26);
+  // Bodies past one range load 2 MiB at a time, on request, and verify once whole.
+  const large = new Uint8Array(3 * 1024 * 1024).map((_, index) => 97 + index % 26);
   const largeDigest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", large)), b => b.toString(16).padStart(2, "0")).join("");
   bodyState.artifacts.push({...artifact, artifact_id: "903", sha256: largeDigest, byte_size: large.length});
   const largeRequest = {id: "l", body: {...request.body, artifactId: "903"}};

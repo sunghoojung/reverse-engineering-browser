@@ -594,6 +594,13 @@ function trafficPayloadQuerySection(query, shown, panel) {
     dispose: () => area?.dispose()};
 }
 
+// Whether this body parses into a table or tree, which needs every retained byte.
+function trafficPayloadParses(body, view) {
+  const type = body?.contentType ?? '';
+  if (type.startsWith('multipart/') || type === 'application/x-www-form-urlencoded' || /[/+]json$/.test(type)) return true;
+  return !TRAFFIC_PAYLOAD_BINARY_TYPES.test(type) && !view?.lossy && /^\s*[[{]/.test(view?.text ?? '');
+}
+
 function trafficPayloadBodySection(body, view, shown, panel) {
   const {element, head} = trafficPayloadSection('payload', 'Request Payload', body?.contentType ?? '');
   element.dataset.state = body === undefined ? 'none' : body === null ? 'missing' : body.malformed ? 'malformed' : body.state;
@@ -613,7 +620,7 @@ function trafficPayloadBodySection(body, view, shown, panel) {
   if (view?.status === 'ready' && view.complete === false) {
     // Ranged reads (protocol/native-network-v2.md): a prefix parses as source until every byte is read.
     note(trafficBodyContent(body, view).note);
-    const more = trafficNode('button', 'secondary-button traffic-body-more', view.loadingMore ? 'Loading…' : 'Show the next 256 KiB');
+    const more = trafficNode('button', 'secondary-button traffic-body-more', view.loadingMore ? 'Loading…' : 'Show the next 2 MiB');
     more.type = 'button';
     more.dataset.contentKey = view.key;
     // Not `disabled`, so keyboard focus stays on it while the range loads.

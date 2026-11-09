@@ -864,8 +864,9 @@ void NativeRequestStackWalk::DescribeScript(const NativeStackScriptSource& scrip
     payload.source_length = script.bytes.size();
     payload.sha256 = crypto::hash::Sha256(script.bytes);
     if (javascript) {
-      queue = sink.IsArtifactCaptureEnabled() && !script.url.empty() &&
-              script.url.size() <= kNativeArtifactMaxUrlBytes &&
+      // Inline source can embed per-user data; only content capture retains it.
+      queue = sink.IsArtifactCaptureEnabled() && sink.IsContentCaptureEnabled() &&
+              !script.url.empty() && script.url.size() <= kNativeArtifactMaxUrlBytes &&
               state.source_bytes + script.bytes.size() <= kNativeRequestStackSourceBytes;
       payload.flags |= queue ? kNativeScriptIdentitySourceQueued : kNativeScriptIdentityNotRetained;
     }

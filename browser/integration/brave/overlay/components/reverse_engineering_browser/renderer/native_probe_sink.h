@@ -124,6 +124,10 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   [[nodiscard]] bool CanAdmitEvent(const NativeProbeEvent& event,
                                    std::uint64_t config_generation) const noexcept;
   [[nodiscard]] bool IsArtifactCaptureEnabled() const noexcept;
+  // Whether this session opted in to retaining request and script content.
+  [[nodiscard]] bool IsContentCaptureEnabled() const noexcept {
+    return capture_request_content_.load(std::memory_order_relaxed);
+  }
   [[nodiscard]] bool IsVmCaptureEnabled() const noexcept;
   [[nodiscard]] bool IsCanvasImageCaptureEnabled() const noexcept;
   // One atomic load while inactive, for loaders that must convert before

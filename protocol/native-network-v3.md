@@ -1284,12 +1284,15 @@ and Artifact gate.
 
 Flags: bit 0 `eval` or `new Function` script; bit 1 the source was queued as
 an artifact with this record as creator; bit 2 source longer than 16 MiB, not
-hashed; bit 3 source unavailable; bit 4 not retained: Artifact category off or
-the source budget is spent. Exactly one of bit 1, bit 2, bit 3, bit 4 or none
+hashed; bit 3 source unavailable; bit 4 not retained: Artifact category off,
+content capture off, or the source budget is spent. Exactly one of bit 1, bit 2, bit 3, bit 4 or none
 (a Wasm module, never re-sent) holds. A digest is present unless bit 2 or 3.
 
-JavaScript sources are retained as kind 1 `javascript`, capture origin 13
-`stack_script`, at most 64 MiB of source per renderer configuration, with
+JavaScript sources are retained only in content capture
+(`--reb-capture-request-content`), so a Metadata only session keeps frames,
+script IDs, positions and digests but no script source. They are retained as
+kind 1 `javascript`, capture origin 13 `stack_script`, at most 64 MiB of
+source per renderer configuration, with
 the script URL, or the document URL for an inline script, as the artifact URL.
 Wasm modules are not re-sent: the compile-time Wasm artifacts join by SHA-256.
 A network script the body tee retained also joins by SHA-256.

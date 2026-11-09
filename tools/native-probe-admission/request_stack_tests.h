@@ -313,6 +313,17 @@ std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
   assert((identity.flags & reb::kNativeScriptIdentityNotRetained) != 0);
   assert(Drain(queue) == 0 && reb::mojom::NativeProbeHost::artifacts == no_artifacts);
 
+  // A metadata session keeps frames, positions and digests, never script source.
+  Configure(queue, 46, kForever, reb::kAllNativeProbeCategoryMask, false);
+  scenario.seed = 7;
+  const auto metadata_before = reb::mojom::NativeProbeHost::artifacts.load();
+  const auto metadata = StackPayload(Start(queue, 4003).second);
+  assert(metadata.state == 1 && (metadata.flags & reb::kNativeRequestStackArtifactQueued) != 0);
+  const auto metadata_identity = IdentityPayload(Pop(queue));
+  assert((metadata_identity.flags & reb::kNativeScriptIdentityNotRetained) != 0 &&
+         (metadata_identity.flags & reb::kNativeScriptIdentitySourceQueued) == 0);
+  assert(Drain(queue) == 0 && reb::mojom::NativeProbeHost::artifacts == metadata_before + 1);
+
   // Every frame from its own script: counting distinct scripts always ends.
   Configure(queue, 45);
   scenario.depth = reb::kNativeRequestStackSyncLimit;

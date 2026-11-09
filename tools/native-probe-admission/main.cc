@@ -56,8 +56,10 @@ auto& transport = reb::NativeProbeTransport::Get();
 void Configure(NativeProbeQueue& queue,
                std::uint64_t session = 42,
                std::uint64_t expires = kForever,
-               std::uint64_t mask = reb::kAllNativeProbeCategoryMask) {
-  transport.Configure(session, mask, expires, false, {&queue, sizeof(queue)});
+               std::uint64_t mask = reb::kAllNativeProbeCategoryMask,
+               const bool capture_content = true) {
+  transport.Configure(session, mask, expires, false, {&queue, sizeof(queue)}, 0, {}, {}, {}, false,
+                      capture_content);
 }
 void Record(std::atomic<std::uint64_t>& observed) {
   sink.RecordApiCallOnce(kRuntime, "Math.acos", observed);

@@ -9314,6 +9314,75 @@ async fn js_invocation_sites_real_worker_resolves_names_and_positions() {
 /// one. The request index still counts, filters, pages and locates each one,
 /// and get_events reads any row's records from its first offset.
 #[tokio::test]
+async fn request_detail_routes_report_what_their_read_covered() {
+    let server = Server::start().await;
+    let spec = specification();
+    let event = |sequence: u64, request: u64, kind: &str, parent: u64, payload: &[u8]| {
+        json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),
+            "monotonic_time_ns":(1000 * sequence).to_string(),"navigation_id":"0","frame_id":"9","artifact_id":"0",
+            "parent_event_id":parent.to_string(),"request_id":request.to_string(),"process_id":7,"thread_id":1,"tab_id":1,
+            "category":"network","type":kind,"flags":0,"status_code":0,"error_code":0,"encoded_data_length":"0",
+            "decoded_body_length":"0","resource_type":0,"initiator_process_id":0,"initiator_request_id":0,
+            "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len(),"payload_truncated":false})
+    };
+    let mut headers = vec![0u8; 128];
+    headers[0] = 1;
+    headers[2] = 128;
+    headers[4] = 2;
+    headers[5] = 3;
+    headers[48] = 1;
+    let events = vec![
+        event(1, 17, "request_started", 0, b""),
+        event(2, 17, "request_headers", 1, &headers),
+        event(3, 18, "request_started", 0, b""),
+    ];
+    server.file("events.jsonl", &jsonl(&events));
+    let read = async |path: &str, schema: &str| {
+        let document: Value = server.get(path).await.json().await.unwrap();
+        assert_schema(
+            &spec,
+            &json!({"$ref": format!("#/components/schemas/{schema}")}),
+            &document,
+            path,
+        );
+        document
+    };
+
+    let indexed = read(
+        "/api/request-headers?session_id=1&request_id=17",
+        "RequestHeaders",
+    )
+    .await;
+    assert_eq!(indexed["coverage"]["scope"], "request_range", "{indexed}");
+    assert_eq!(indexed["coverage"]["complete"], true);
+    assert_eq!(indexed["hops"][0]["request"][0]["state"], "empty");
+
+    // No row names this request, and the whole small store was read.
+    let unknown = read(
+        "/api/request-cookies?session_id=1&request_id=99",
+        "RequestCookies",
+    )
+    .await;
+    assert_eq!(unknown["coverage"]["scope"], "store", "{unknown}");
+    assert_eq!(unknown["coverage"]["complete"], true);
+
+    let provenance = read(
+        "/api/cookie-provenance?session_id=1&name=sid",
+        "CookieProvenance",
+    )
+    .await;
+    assert_eq!(provenance["coverage"]["scope"], "store", "{provenance}");
+
+    let stack = read(
+        "/api/request-stack?process_id=7&request_id=17",
+        "RequestStack",
+    )
+    .await;
+    assert_eq!(stack["status"], "not_recorded", "{stack}");
+    assert_eq!(stack["coverage"]["scope"], "request_range");
+}
+
+#[tokio::test]
 async fn request_index_reaches_every_request_of_a_large_session() {
     let server = Server::start().await;
     let mut lines = String::new();

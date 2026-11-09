@@ -4,14 +4,16 @@
 //! retained bytes: an unresolved frame keeps its raw identity and a reason.
 use crate::{
     error::Result,
-    event_query::{self, Cursor, EventFilter},
+    event_query::{self, EventFilter},
     evidence,
+    request_index::RequestIndex,
 };
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::Path,
 };
+use tokio::sync::Mutex;
 
 const SYNC_LIMIT: u32 = 1024;
 const ASYNC_LIMIT: u32 = 32;
@@ -945,19 +947,6 @@ fn payload(event: &Value) -> Option<Vec<u8>> {
     hex::decode(event["payload"].as_str()?).ok()
 }
 
-fn scan(store: &Path, filter: &EventFilter, limit: usize) -> Result<Vec<Value>> {
-    let mut tally = event_query::Tally::default();
-    Ok(event_query::read_page(
-        store,
-        Cursor::Tail,
-        limit,
-        event_query::SCAN_BYTES,
-        event_query::EVENT_RECORD_BYTES,
-        event_query::event_visitor(filter, &mut tally),
-    )?
-    .records)
-}
-
 /// Bytes 80-127 of a `navigation_initiator_stack`: its kind and target frame.
 fn decode_navigation(payload: &[u8]) -> Option<(Record, &'static str, u64)> {
     if payload.len() != 128
@@ -984,29 +973,81 @@ fn decode_navigation(payload: &[u8]) -> Option<(Record, &'static str, u64)> {
         .map(|record| (record, kind, target))
 }
 
-fn resolve_stored(
+/// Every frame's script identity, and whether an identity absent from them is
+/// absent from the store. The index keeps the whole session's identities, so
+/// the store is scanned only while the index cannot answer for all of them.
+fn stored_identities(
     store: &Path,
-    artifacts_root: &Path,
+    requests: &Mutex<RequestIndex>,
     stack: &Value,
-    record: &Record,
     process_id: u64,
-) -> Result<Value> {
-    let session = stack["session_id"]
-        .as_str()
-        .and_then(|s| s.parse::<u64>().ok());
-    let mut identity_ids = vec![("process_id", process_id)];
-    if let Some(session) = session {
-        identity_ids.push(("session_id", session));
-    }
+) -> Result<(HashMap<u32, Identity>, bool)> {
+    let session = stack["session_id"].as_str();
     let mut identities = HashMap::new();
-    if record.state != 2 && record.state != 3 {
-        let filter = EventFilter::exact(&["script_identity"], identity_ids);
-        for event in scan(store, &filter, IDENTITY_SCAN)? {
-            if let Some((script, identity)) = payload(&event).as_deref().and_then(decode_identity) {
+    let mut known = false;
+    if let Some(session) = session {
+        let (indexed, exhaustive) = requests
+            .blocking_lock()
+            .identities(session, process_id as u32)?;
+        known = exhaustive;
+        for payload in indexed.values() {
+            if let Some((script, identity)) = hex::decode(payload)
+                .ok()
+                .as_deref()
+                .and_then(decode_identity)
+            {
                 identities.insert(script, identity);
             }
         }
     }
+    if !known {
+        let mut ids = vec![("process_id", process_id)];
+        if let Some(session) = session.and_then(|session| session.parse().ok()) {
+            ids.push(("session_id", session));
+        }
+        let filter = EventFilter::exact(&["script_identity"], ids);
+        let detail = event_query::read_request_records(store, None, IDENTITY_SCAN, &filter)?;
+        known = detail.coverage.complete();
+        for event in &detail.records {
+            if let Some((script, identity)) = payload(event).as_deref().and_then(decode_identity) {
+                identities.insert(script, identity);
+            }
+        }
+    }
+    Ok((identities, known))
+}
+
+/// A frame whose identity was not found cannot claim that it was never
+/// recorded when the identities were not all read.
+fn mark_identities_outside_scan(document: &mut Value) {
+    let mark = |frames: Option<&mut Vec<Value>>| {
+        for frame in frames.into_iter().flatten() {
+            if frame["resolution"]["reason"] == "script_identity_missing" {
+                frame["resolution"]["reason"] = json!("script_identity_outside_scan");
+            }
+        }
+    };
+    mark(document["frames"].as_array_mut());
+    if let Some(segments) = document["task_segments"].as_array_mut() {
+        for segment in segments {
+            mark(segment["frames"].as_array_mut());
+        }
+    }
+}
+
+fn resolve_stored(
+    store: &Path,
+    artifacts_root: &Path,
+    requests: &Mutex<RequestIndex>,
+    stack: &Value,
+    record: &Record,
+    process_id: u64,
+) -> Result<Value> {
+    let (identities, known) = if record.state != 2 && record.state != 3 {
+        stored_identities(store, requests, stack, process_id)?
+    } else {
+        (HashMap::new(), true)
+    };
     let mut wanted: BTreeSet<String> = identities
         .values()
         .filter_map(|identity| identity.sha256.clone())
@@ -1040,40 +1081,68 @@ fn resolve_stored(
             artifacts.extend(select(&segments)?);
         }
     }
-    Ok(resolve(stack, record, &identities, &artifacts, &read))
+    let mut document = resolve(stack, record, &identities, &artifacts, &read);
+    if !known {
+        mark_identities_outside_scan(&mut document);
+    }
+    Ok(document)
 }
 
-/// Reads the newest stack record of one renderer request and resolves it.
+fn absent_status(coverage: event_query::Coverage) -> &'static str {
+    if coverage.complete() {
+        "not_recorded"
+    } else {
+        "outside_scan"
+    }
+}
+
+/// Reads the newest stack record of one renderer request and resolves it. The
+/// index names the request's bytes, so newer traffic does not hide its stack.
 pub fn document(
     store: &Path,
     artifacts_root: &Path,
+    requests: &Mutex<RequestIndex>,
     session_id: Option<u64>,
     process_id: u64,
     request_id: u64,
 ) -> Result<Value> {
+    let session = session_id.map(|session| session.to_string());
+    let range = requests.blocking_lock().member_range(
+        session.as_deref(),
+        Some(process_id as u32),
+        &request_id.to_string(),
+    )?;
     let mut ids = vec![("process_id", process_id), ("request_id", request_id)];
     if let Some(session) = session_id {
         ids.push(("session_id", session));
     }
     let filter = EventFilter::exact(&["request_initiator_stack"], ids);
-    let Some(stack) = scan(store, &filter, 1)?.pop() else {
+    let detail = event_query::read_newest_record(store, range, &filter)?;
+    let coverage = detail.coverage;
+    let Some(stack) = detail.records.into_iter().next_back() else {
         return Ok(json!({
-            "status": "not_recorded",
+            "status": absent_status(coverage),
             "request": {"process_id": process_id, "request_id": request_id.to_string()},
+            "coverage": coverage.to_json(),
         }));
     };
     let Some(record) = payload(&stack).as_deref().and_then(decode_record) else {
         return Ok(json!({"status": "malformed", "request": {
             "session_id": stack["session_id"], "process_id": stack["process_id"],
-            "request_id": stack["request_id"], "sequence_number": stack["sequence_number"]}}));
+            "request_id": stack["request_id"], "sequence_number": stack["sequence_number"]},
+            "coverage": coverage.to_json()}));
     };
-    resolve_stored(store, artifacts_root, &stack, &record, process_id)
+    let mut document =
+        resolve_stored(store, artifacts_root, requests, &stack, &record, process_id)?;
+    document["coverage"] = coverage.to_json();
+    Ok(document)
 }
 
 /// The `navigation_initiator_stack` a browser `navigation_initiator_link` names.
 pub fn navigation_document(
     store: &Path,
     artifacts_root: &Path,
+    requests: &Mutex<RequestIndex>,
     session_id: Option<u64>,
     process_id: u64,
     sequence: u64,
@@ -1083,20 +1152,27 @@ pub fn navigation_document(
         ids.push(("session_id", session));
     }
     let filter = EventFilter::exact(&["navigation_initiator_stack"], ids);
-    let Some(stack) = scan(store, &filter, 1)?.pop() else {
+    // Navigation stacks have no row, so only the newest bytes are read.
+    let detail = event_query::read_newest_record(store, None, &filter)?;
+    let coverage = detail.coverage;
+    let Some(stack) = detail.records.into_iter().next_back() else {
         return Ok(json!({
-            "status": "not_recorded",
+            "status": absent_status(coverage),
             "request": {"process_id": process_id, "sequence_number": sequence.to_string()},
+            "coverage": coverage.to_json(),
         }));
     };
     let Some((record, kind, target)) = payload(&stack).as_deref().and_then(decode_navigation)
     else {
         return Ok(json!({"status": "malformed", "request": {
             "session_id": stack["session_id"], "process_id": stack["process_id"],
-            "sequence_number": stack["sequence_number"]}}));
+            "sequence_number": stack["sequence_number"]},
+            "coverage": coverage.to_json()}));
     };
-    let mut document = resolve_stored(store, artifacts_root, &stack, &record, process_id)?;
+    let mut document =
+        resolve_stored(store, artifacts_root, requests, &stack, &record, process_id)?;
     document["navigation"] = json!({"kind": kind, "target_frame_id": target.to_string()});
+    document["coverage"] = coverage.to_json();
     Ok(document)
 }
 
@@ -1216,6 +1292,133 @@ mod tests {
             "script_identity_missing"
         );
         assert_eq!(frames.0.len(), 1);
+    }
+
+    /// A store where one request and its renderer records are followed by
+    /// more than one scan budget of newer traffic.
+    fn store_with_newer_traffic(records: &[(u64, u64, &str, Vec<u8>)]) -> tempfile::TempDir {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        let mut file = std::fs::File::create(root.path().join("events.jsonl")).unwrap();
+        let mut sequence = 0u64;
+        let mut write = |file: &mut std::fs::File,
+                         process: u64,
+                         request: u64,
+                         kind: &str,
+                         category: &str,
+                         payload: &[u8],
+                         pad: usize| {
+            sequence += 1;
+            let mut event = json!({"protocol_version":3,"session_id":"9",
+                "sequence_number":sequence.to_string(),"monotonic_time_ns":sequence.to_string(),
+                "navigation_id":"0","frame_id":"1","artifact_id":"0","parent_event_id":"0",
+                "request_id":request.to_string(),"process_id":process,"thread_id":1,"tab_id":0,
+                "category":category,"type":kind,"flags":0,"status_code":0,"error_code":0,
+                "encoded_data_length":"0","decoded_body_length":"0","resource_type":0,
+                "initiator_process_id":0,"initiator_request_id":0,"payload_encoding":"hex",
+                "payload":hex::encode(payload),"payload_size":payload.len(),"payload_truncated":false});
+            if pad != 0 {
+                event["pad"] = json!("x".repeat(pad));
+            }
+            let mut line = event.to_string().into_bytes();
+            line.push(b'\n');
+            file.write_all(&line).unwrap();
+            line.len() as u64
+        };
+        for (process, request, kind, payload) in records {
+            write(&mut file, *process, *request, kind, "network", payload, 0);
+        }
+        let mut written = 0;
+        while written <= event_query::SCAN_BYTES + (1 << 20) {
+            written += write(&mut file, 1000, 0, "api_call", "wasm", &[], 3000);
+        }
+        root
+    }
+
+    fn caught_up(index: &Mutex<RequestIndex>) {
+        for _ in 0..4 {
+            index.blocking_lock().refresh().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_stack_behind_newer_traffic_is_read_from_its_requests_bytes() {
+        let stack = vec![1, 0, 128, 0, 2, 0, 0, 0]
+            .into_iter()
+            .chain(std::iter::repeat_n(0, 120))
+            .collect::<Vec<u8>>();
+        let root = store_with_newer_traffic(&[
+            (42, 5, "request_initiated", Vec::new()),
+            (42, 5, "request_initiator_stack", stack),
+            (42, 6, "request_initiated", Vec::new()),
+        ]);
+        let store = root.path().join("events.jsonl");
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let index = Mutex::new(RequestIndex::new(&store));
+        caught_up(&index);
+        let read = |request| document(&store, &artifacts, &index, Some(9), 42, request).unwrap();
+
+        let recorded = read(5);
+        assert_eq!(recorded["status"], "recorded", "{recorded}");
+        assert_eq!(recorded["coverage"]["scope"], "request_range");
+        assert_eq!(recorded["coverage"]["complete"], true);
+
+        // Its own bytes were read, so this absence is a fact.
+        let absent = read(6);
+        assert_eq!(absent["status"], "not_recorded", "{absent}");
+        assert_eq!(absent["coverage"]["scope"], "request_range");
+
+        // No row names this request and the store outgrows the scan.
+        let unknown = read(7);
+        assert_eq!(unknown["status"], "outside_scan", "{unknown}");
+        assert_eq!(unknown["coverage"]["scope"], "bounded_range");
+        assert_eq!(unknown["coverage"]["complete"], false);
+        assert_eq!(unknown["coverage"]["budget_exhausted"], true);
+    }
+
+    #[test]
+    fn an_identity_outside_the_scan_is_not_reported_as_missing() {
+        let identity = identity_bytes(1, 0x02, 7, 1, 1, b"x");
+        let root = store_with_newer_traffic(&[
+            (42, 0, "script_identity", identity),
+            (42, 5, "request_initiated", Vec::new()),
+        ]);
+        let store = root.path().join("events.jsonl");
+        let stack = json!({"session_id": "9"});
+
+        // Before the index reaches the end, a miss is not reported as a fact.
+        let behind = Mutex::new(RequestIndex::new(&store));
+        let (found, known) = stored_identities(&store, &behind, &stack, 43).unwrap();
+        assert!(found.is_empty());
+        assert!(!known);
+
+        // The caught-up index holds every identity of the session.
+        let index = Mutex::new(RequestIndex::new(&store));
+        caught_up(&index);
+        let (found, known) = stored_identities(&store, &index, &stack, 42).unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found.contains_key(&7));
+        assert!(known);
+
+        let mut document = json!({
+            "frames": [{"resolution": {"reason": "script_identity_missing"}},
+                {"resolution": {"reason": "source_unavailable"}}],
+            "task_segments": [{"frames": [{"resolution": {"reason": "script_identity_missing"}}]}],
+        });
+        mark_identities_outside_scan(&mut document);
+        assert_eq!(
+            document["frames"][0]["resolution"]["reason"],
+            "script_identity_outside_scan"
+        );
+        assert_eq!(
+            document["frames"][1]["resolution"]["reason"],
+            "source_unavailable"
+        );
+        assert_eq!(
+            document["task_segments"][0]["frames"][0]["resolution"]["reason"],
+            "script_identity_outside_scan"
+        );
     }
 
     #[test]

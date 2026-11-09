@@ -3,6 +3,7 @@ use crate::{
     app::{Query, validate_event},
     durable,
     error::{Error, Result},
+    event_query::RecordRange,
     event_window::unsigned,
     evidence,
 };
@@ -1919,6 +1920,63 @@ impl RequestIndex {
         })
     }
 
+    /// Whether the index has folded every complete record in the store.
+    fn caught_up(&self, indexed_to: u64) -> bool {
+        self.store_end.saturating_sub(indexed_to) <= RECORD_BYTES as u64
+    }
+
+    /// The bytes of the rows that have this member, across rows when several do.
+    pub fn member_range(
+        &mut self,
+        session: Option<&str>,
+        process: Option<u32>,
+        request: &str,
+    ) -> Result<Option<RecordRange>> {
+        self.refresh()?;
+        let state = self.state.as_ref().expect("index state");
+        let mut range: Option<(u64, u64)> = None;
+        for row in &state.rows {
+            let named = row.members.iter().any(|member| {
+                member.request == request
+                    && session.is_none_or(|session| member.session == session)
+                    && process.is_none_or(|process| member.process == process)
+            });
+            if named {
+                let (first, end) = range.unwrap_or((row.first_offset, row.end_offset));
+                range = Some((first.min(row.first_offset), end.max(row.end_offset)));
+            }
+        }
+        let indexed = self.caught_up(state.indexed_to);
+        Ok(range.map(|(first, end)| RecordRange {
+            first,
+            end,
+            indexed,
+        }))
+    }
+
+    /// `script_identity` payloads of one renderer by script ID, and whether a
+    /// script missing from them is missing from the store.
+    pub fn identities(
+        &mut self,
+        session: &str,
+        process: u32,
+    ) -> Result<(HashMap<u32, String>, bool)> {
+        self.refresh()?;
+        let state = self.state.as_ref().expect("index state");
+        let prefix = format!("{session}:{process}:");
+        let identities = state
+            .identities
+            .iter()
+            .filter_map(|(key, payload)| {
+                let script = key.strip_prefix(&prefix)?.parse().ok()?;
+                Some((script, payload.clone()))
+            })
+            .collect();
+        let exhaustive =
+            self.caught_up(state.indexed_to) && state.identities.len() < MAX_IDENTITIES;
+        Ok((identities, exhaustive))
+    }
+
     pub fn respond(&mut self, query: &RequestQuery, etag: Option<&str>) -> Result<Answer> {
         self.refresh()?;
         let store_end = self.store_end;
@@ -1941,7 +1999,7 @@ impl RequestIndex {
         let failed = (0..through).filter(|&i| state.rows[i].failed).count();
         let index = json!({
             "epoch": state.epoch, "indexed_end": state.indexed_to.to_string(), "store_end": store_end.to_string(),
-            "complete": store_end.saturating_sub(state.indexed_to) <= RECORD_BYTES as u64,
+            "complete": self.caught_up(state.indexed_to),
             "malformed_records": state.malformed.to_string(), "unindexed_records": state.unindexed.to_string(),
             "request_limit": MAX_REQUESTS, "reopened": self.reopened,
             "persisted": self.persisted_at.is_some() && self.persist_error.is_none(), "persist_error": self.persist_error,

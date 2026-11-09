@@ -101,6 +101,127 @@ impl Page {
     }
 }
 
+/// The bytes that hold one indexed request's records
+/// (`RequestIndex::member_range`). `indexed` is false while the index has not
+/// reached the end of the store, when later records may lie past `end`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordRange {
+    pub first: u64,
+    pub end: u64,
+    pub indexed: bool,
+}
+
+/// What a per-request detail read covered. A record outside it is unknown,
+/// not absent, so a route reports this beside any empty answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Coverage {
+    scope: &'static str,
+    complete: bool,
+    scan_start: u64,
+    scan_end: u64,
+    store_end: u64,
+    limited: bool,
+    budget_exhausted: bool,
+}
+impl Coverage {
+    /// Absence in the answer is a fact: the read covered its whole scope, or
+    /// stopped because it found the one newest record it was asked for.
+    pub fn complete(&self) -> bool {
+        self.complete
+    }
+    pub fn to_json(self) -> Value {
+        json!({
+            "scope": self.scope,
+            "complete": self.complete,
+            "scan_start": self.scan_start.to_string(),
+            "scan_end": self.scan_end.to_string(),
+            "store_end": self.store_end.to_string(),
+            "limited": self.limited,
+            "budget_exhausted": self.budget_exhausted,
+        })
+    }
+}
+
+/// The records of one detail read and what that read covered.
+pub struct Detail {
+    pub records: Vec<Value>,
+    pub coverage: Coverage,
+}
+
+fn coverage(page: &Page, range: Option<RecordRange>, found_newest: bool) -> Coverage {
+    // The newest record of a request's bytes is the whole answer about them.
+    let covered = match range {
+        Some(range) => {
+            range.indexed
+                && (found_newest || (page.scan_start <= range.first && page.scan_end >= range.end))
+        }
+        None => page.scan_start == 0 && page.scan_end == page.store_end,
+    };
+    Coverage {
+        scope: match (covered, range) {
+            (false, _) => "bounded_range",
+            (true, Some(_)) => "request_range",
+            (true, None) => "store",
+        },
+        complete: covered || found_newest,
+        scan_start: page.scan_start,
+        scan_end: page.scan_end,
+        store_end: page.store_end,
+        limited: page.limited && !covered && !found_newest,
+        budget_exhausted: page.exhausted && !covered && !found_newest,
+    }
+}
+
+fn read_detail(
+    store: &Path,
+    range: Option<RecordRange>,
+    limit: usize,
+    filter: &EventFilter,
+    budget: u64,
+    newest: bool,
+) -> Result<Detail> {
+    let cursor = match (range, newest) {
+        (Some(range), true) => Cursor::Before(range.end),
+        (Some(range), false) => Cursor::After(range.first),
+        (None, _) => Cursor::Tail,
+    };
+    let budget = range.map_or(budget, |range| budget.min(range.end - range.first));
+    let mut tally = Tally::default();
+    let page = read_page(
+        store,
+        cursor,
+        limit,
+        budget,
+        EVENT_RECORD_BYTES,
+        event_visitor(filter, &mut tally),
+    )?;
+    let coverage = coverage(&page, range, newest && !page.records.is_empty());
+    Ok(Detail {
+        records: page.records,
+        coverage,
+    })
+}
+
+/// Records of one request, oldest first: its indexed byte range when the index
+/// names one, else the newest bytes of the store within the scan budget.
+pub fn read_request_records(
+    store: &Path,
+    range: Option<RecordRange>,
+    limit: usize,
+    filter: &EventFilter,
+) -> Result<Detail> {
+    read_detail(store, range, limit, filter, SCAN_BYTES, false)
+}
+
+/// The newest matching record, from the request's range when the index names one.
+pub fn read_newest_record(
+    store: &Path,
+    range: Option<RecordRange>,
+    filter: &EventFilter,
+) -> Result<Detail> {
+    read_detail(store, range, 1, filter, SCAN_BYTES, true)
+}
+
 /// Gap accounting with the same rules as the polling window, applied to the
 /// records a filtered read actually scanned.
 #[derive(Default)]
@@ -842,6 +963,83 @@ mod tests {
         assert_eq!(tally.sequence_gaps(), (2, false));
         assert_eq!(tally.queue_drops(), (1, false));
         assert_eq!(tally.named_gaps()[0].reason, "native_guest_sample_limit");
+    }
+
+    #[test]
+    fn detail_reads_report_what_they_covered() {
+        let events: Vec<_> = (1..=6).map(|n| event(n, "api_call", 1)).collect();
+        let (_root, path, ends) = store(&events);
+        let filter = EventFilter {
+            ids: vec![("session_id", 1)],
+            ..Default::default()
+        };
+        let range = RecordRange {
+            first: ends[1],
+            end: ends[3],
+            indexed: true,
+        };
+        let budget = SCAN_BYTES;
+        let read = |range, limit, budget, newest| {
+            read_detail(&path, range, limit, &filter, budget, newest).unwrap()
+        };
+
+        let inside = read(Some(range), 100, budget, false);
+        assert_eq!(inside.records.len(), 2);
+        assert_eq!(inside.coverage.scope, "request_range");
+        assert!(inside.coverage.complete);
+        assert!(!inside.coverage.limited && !inside.coverage.budget_exhausted);
+        assert_eq!(inside.coverage.scan_start, ends[1]);
+        assert_eq!(inside.coverage.scan_end, ends[3]);
+
+        // The byte budget ends the read inside the range.
+        let short = read(Some(range), 100, ends[0], false);
+        assert_eq!(short.coverage.scope, "bounded_range");
+        assert!(!short.coverage.complete && short.coverage.budget_exhausted);
+
+        // The record limit ends the read inside the range.
+        let limited = read(Some(range), 1, budget, false);
+        assert_eq!(limited.coverage.scope, "bounded_range");
+        assert!(!limited.coverage.complete && limited.coverage.limited);
+
+        // An index still catching up cannot prove the range ended.
+        let lagging = RecordRange {
+            indexed: false,
+            ..range
+        };
+        let behind = read(Some(lagging), 100, budget, false);
+        assert_eq!(behind.coverage.scope, "bounded_range");
+        assert!(!behind.coverage.complete);
+
+        let whole = read(None, 100, budget, false);
+        assert_eq!(whole.coverage.scope, "store");
+        assert!(whole.coverage.complete);
+        let tail = read(None, 100, ends[0] * 2 + 1, false);
+        assert_eq!(tail.records.len(), 2);
+        assert_eq!(tail.coverage.scope, "bounded_range");
+        assert!(tail.coverage.budget_exhausted && !tail.coverage.complete);
+
+        // Newest reads stop on a match, and only then is the stop the answer.
+        let newest = read(Some(range), 1, budget, true);
+        assert_eq!(sequences_of(&newest.records), vec![4]);
+        assert!(newest.coverage.complete && !newest.coverage.limited);
+        let none_filter = EventFilter {
+            ids: vec![("session_id", 2)],
+            ..Default::default()
+        };
+        let empty = read_detail(&path, Some(range), 1, &none_filter, budget, true).unwrap();
+        assert!(empty.records.is_empty());
+        assert_eq!(empty.coverage.scope, "request_range");
+        assert!(empty.coverage.complete);
+        let missed = read_detail(&path, None, 1, &none_filter, ends[0], true).unwrap();
+        assert_eq!(missed.coverage.scope, "bounded_range");
+        assert!(!missed.coverage.complete && missed.coverage.budget_exhausted);
+    }
+
+    fn sequences_of(records: &[Value]) -> Vec<u64> {
+        records
+            .iter()
+            .map(|event| event_window::unsigned(&event["sequence_number"]).unwrap())
+            .collect()
     }
 
     #[test]

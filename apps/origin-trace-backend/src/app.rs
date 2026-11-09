@@ -699,14 +699,17 @@ impl App {
                     Some(_) => 0,
                     None => q.number("request_id", None, 64, true)?,
                 };
-                let (store, artifacts) =
-                    (self.options.store.clone(), self.options.artifacts.clone());
+                let (store, artifacts, requests) = (
+                    self.options.store.clone(),
+                    self.options.artifacts.clone(),
+                    self.requests.clone(),
+                );
                 self.blocking(move || match navigation {
                     Some(sequence) => crate::request_stack::navigation_document(
-                        &store, &artifacts, session, process, sequence,
+                        &store, &artifacts, &requests, session, process, sequence,
                     ),
                     None => crate::request_stack::document(
-                        &store, &artifacts, session, process, request,
+                        &store, &artifacts, &requests, session, process, request,
                     ),
                 })
                 .await?
@@ -1000,25 +1003,25 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
+                let requests = self.requests.clone();
                 self.blocking(move || {
-                    let mut tally = event_query::Tally::default();
-                    let page = event_query::read_page(
-                        &options.store,
-                        event_query::Cursor::Tail,
-                        1024,
-                        event_query::SCAN_BYTES,
-                        event_query::EVENT_RECORD_BYTES,
-                        event_query::event_visitor(&filter, &mut tally),
-                    )?;
+                    let range =
+                        requests
+                            .blocking_lock()
+                            .member_range(Some(&session), None, &request)?;
+                    let detail =
+                        event_query::read_request_records(&options.store, range, 1024, &filter)?;
                     let artifacts =
-                        evidence::artifacts_named(&options.artifacts, &page.records, |_| false)?;
-                    Ok(request_headers::build(
-                        &page.records,
+                        evidence::artifacts_named(&options.artifacts, &detail.records, |_| false)?;
+                    let mut document = request_headers::build(
+                        &detail.records,
                         &artifacts,
                         &options.artifacts,
                         &session,
                         &request,
-                    ))
+                    );
+                    document["coverage"] = detail.coverage.to_json();
+                    Ok(document)
                 })
                 .await?
             }
@@ -1041,25 +1044,25 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
+                let requests = self.requests.clone();
                 self.blocking(move || {
-                    let mut tally = event_query::Tally::default();
-                    let page = event_query::read_page(
-                        &options.store,
-                        event_query::Cursor::Tail,
-                        1024,
-                        event_query::SCAN_BYTES,
-                        event_query::EVENT_RECORD_BYTES,
-                        event_query::event_visitor(&filter, &mut tally),
-                    )?;
+                    let range =
+                        requests
+                            .blocking_lock()
+                            .member_range(Some(&session), None, &request)?;
+                    let detail =
+                        event_query::read_request_records(&options.store, range, 1024, &filter)?;
                     let artifacts =
-                        evidence::artifacts_named(&options.artifacts, &page.records, |_| false)?;
-                    Ok(request_cookies::build(
-                        &page.records,
+                        evidence::artifacts_named(&options.artifacts, &detail.records, |_| false)?;
+                    let mut document = request_cookies::build(
+                        &detail.records,
                         &artifacts,
                         &options.artifacts,
                         &session,
                         &request,
-                    ))
+                    );
+                    document["coverage"] = detail.coverage.to_json();
+                    Ok(document)
                 })
                 .await?
             }
@@ -1086,31 +1089,27 @@ impl App {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
                 self.blocking(move || {
-                    let mut tally = event_query::Tally::default();
-                    let page = event_query::read_page(
-                        &options.store,
-                        event_query::Cursor::Tail,
-                        5000,
-                        event_query::SCAN_BYTES,
-                        event_query::EVENT_RECORD_BYTES,
-                        event_query::event_visitor(&filter, &mut tally),
-                    )?;
+                    // A cookie spans the session, so no one request's bytes bound it.
+                    let detail =
+                        event_query::read_request_records(&options.store, None, 5000, &filter)?;
                     // Script writes resolve through this session's stacks and sources.
                     let artifacts =
-                        evidence::artifacts_named(&options.artifacts, &page.records, |a| {
+                        evidence::artifacts_named(&options.artifacts, &detail.records, |a| {
                             a["session_id"].as_str() == Some(session.as_str())
                                 && matches!(
                                     a["kind"].as_str(),
                                     Some("stack" | "javascript" | "wasm")
                                 )
                         })?;
-                    Ok(request_cookies::provenance(
-                        &page.records,
+                    let mut document = request_cookies::provenance(
+                        &detail.records,
                         &artifacts,
                         &options.artifacts,
                         &session,
                         &name,
-                    ))
+                    );
+                    document["coverage"] = detail.coverage.to_json();
+                    Ok(document)
                 })
                 .await?
             }

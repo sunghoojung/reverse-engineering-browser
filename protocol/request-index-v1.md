@@ -75,6 +75,33 @@ request content (protocol/native-network-v2.md). Consumers insert them as text.
 A network record that is not valid JSON or fails event validation is counted,
 never dropped silently.
 
+### Per-request detail reads
+
+`get_request_headers`, `get_request_cookies` and `get_request_stack` read the
+bytes the index names for a request (from the first to the last record of each
+row that has it as a member) instead of the newest window, so a request stays
+readable after more than 64 MiB of newer events. Without a row they read the
+newest 64 MiB. `get_cookie_provenance` spans a session and has no byte range; it
+always reads the newest 64 MiB and 5,000 network records.
+
+Each answer carries `coverage`:
+
+| Field | Meaning |
+| --- | --- |
+| `scope` | `request_range` the request's indexed bytes answered the question, read to their end or to the newest record asked for; `store` the whole store was read; `bounded_range` only part was read |
+| `complete` | Absence in this answer is a fact: the read covered its whole scope, or found the one newest record it was asked for |
+| `scan_start`, `scan_end`, `store_end` | Decimal byte offsets of the read and the file length |
+| `limited` | The record limit stopped the read before its scope ended |
+| `budget_exhausted` | The 64 MiB budget stopped the read before its scope ended |
+
+An index still catching up with the store cannot prove a request ended, so its
+range reads as `bounded_range`. When `complete` is false, an empty list or a
+missing row is unknown. `get_request_stack` then reports status `outside_scan`
+instead of `not_recorded`, and a frame reports reason
+`script_identity_outside_scan` instead of `script_identity_missing` when its
+identity was not found and not every identity was read: the index keeps at most
+16,384 identities.
+
 ## Sidecar
 
 The index is kept beside the store as `<store>.requests-v1`, a private (0600)

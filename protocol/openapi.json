@@ -1271,7 +1271,7 @@
       "get": {
         "operationId": "get_request_headers",
         "summary": "get request headers",
-        "description": "Header blocks of one native request per redirect hop (protocol/native-network-v3.md), from the newest 1024 records of that request within the last 64 MiB of events. Recorded only in sessions that retain request content. Each block gives its source (browser: provisional, before the network stack; network: as sent; early_hints: a 103), state, header count, byte length, SHA-256, and its referrer policy or status and remote endpoint. Retained blocks are read after a size and SHA-256 check and parsed into ordered headers. Values of Authorization, Proxy-Authorization, Cookie and Set-Cookie are withheld as value_withheld with their byte length: like request bodies they stay in the binary artifact. A hop is provisional when it has only browser request blocks.",
+        "description": "Header blocks of one native request per redirect hop (protocol/native-network-v3.md), from the bytes the request index names for that request, or the newest 64 MiB of events when it names none, reading at most 1024 of its records; coverage says what was read. Recorded only in sessions that retain request content. Each block gives its source (browser: provisional, before the network stack; network: as sent; early_hints: a 103), state, header count, byte length, SHA-256, and its referrer policy or status and remote endpoint. Retained blocks are read after a size and SHA-256 check and parsed into ordered headers. Values of Authorization, Proxy-Authorization, Cookie and Set-Cookie are withheld as value_withheld with their byte length: like request bodies they stay in the binary artifact. A hop is provisional when it has only browser request blocks.",
         "tags": [
           "request-headers"
         ],
@@ -1405,7 +1405,7 @@
       "get": {
         "operationId": "get_request_cookies",
         "summary": "get request cookies",
-        "description": "Cookie lists of one native request per redirect hop (\"Cookies\" in protocol/native-network-v3.md), from the newest 1024 records of that request within the last 64 MiB of events. Recorded only in sessions that retain request content. Each hop has the cookies the network service sent with the request, including excluded ones, and the Set-Cookie cookies it received, each with state, counts, byte length and SHA-256. Retained lists are read after a size and SHA-256 check: every cookie has its name, domain, path, expiry, size, HttpOnly, Secure, SameSite, effective SameSite, partition key, priority, source scheme and port, and its exclusion and warning reasons. Values are withheld as value_withheld with their byte length and SHA-256, and a received line as line_withheld with its length: like credential headers they stay in the binary artifact.",
+        "description": "Cookie lists of one native request per redirect hop (\"Cookies\" in protocol/native-network-v3.md), from the bytes the request index names for that request, or the newest 64 MiB of events when it names none, reading at most 1024 of its records; coverage says what was read. Recorded only in sessions that retain request content. Each hop has the cookies the network service sent with the request, including excluded ones, and the Set-Cookie cookies it received, each with state, counts, byte length and SHA-256. Retained lists are read after a size and SHA-256 check: every cookie has its name, domain, path, expiry, size, HttpOnly, Secure, SameSite, effective SameSite, partition key, priority, source scheme and port, and its exclusion and warning reasons. Values are withheld as value_withheld with their byte length and SHA-256, and a received line as line_withheld with its length: like credential headers they stay in the binary artifact.",
         "tags": [
           "request-cookies"
         ],
@@ -1539,7 +1539,7 @@
       "get": {
         "operationId": "get_cookie_provenance",
         "summary": "get cookie provenance",
-        "description": "Everything that touched one cookie name in a session (\"Cookies\" in protocol/native-network-v3.md), from the newest 5000 network records within the last 64 MiB of events and at most 256 distinct retained cookie lists: the responses that set it, with attributes and block reasons; the document.cookie and Cookie Store API calls that wrote or read it, with frame, count, script frame and stack digest; and the requests that sent it. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256. A script record keeps 24 name bytes, so a longer name matches by length and prefix.",
+        "description": "What touched one cookie name in the newest part of a session (\"Cookies\" in protocol/native-network-v3.md): the newest 5000 network records within the last 64 MiB of events and at most 256 distinct retained cookie lists. coverage.complete is false when older records were not read, so an absent entry is unknown: the responses that set it, with attributes and block reasons; the document.cookie and Cookie Store API calls that wrote or read it, with frame, count, script frame and stack digest; and the requests that sent it. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256. A script record keeps 24 name bytes, so a longer name matches by length and prefix.",
         "tags": [
           "request-cookies"
         ],
@@ -1839,7 +1839,7 @@
       "get": {
         "operationId": "get_request_stack",
         "summary": "Read the JavaScript and Wasm call stack that started one renderer request or script navigation",
-        "description": "Newest request_initiator_stack record (34) for one renderer request, named by the renderer's process_id and request_id as its request_initiated record carries them, or with navigation_sequence the navigation_initiator_stack record (46) a browser navigation_initiator_link (47) names, with every recorded frame innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact (network, dynamic_javascript or stack_script), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Await frames follow the synchronous ones. A version 2 record adds task_segments, nearest first: each async task (timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or observer) with the stack that scheduled it, resolved from its async_task_stack (48) artifact, and microtask hops linked through task attribution. task_chain_cut says an earlier caller was not recorded; MessagePort and worker messages are not shown. status is not_recorded when no stack record exists. See protocol/native-network-v3.md.",
+        "description": "Newest request_initiator_stack record (34) inside the bytes the request index names for one renderer request (or the newest 64 MiB of events when it names none), named by the renderer's process_id and request_id as its request_initiated record carries them, or with navigation_sequence the navigation_initiator_stack record (46) a browser navigation_initiator_link (47) names, with every recorded frame innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact (network, dynamic_javascript or stack_script), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Await frames follow the synchronous ones. A version 2 record adds task_segments, nearest first: each async task (timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or observer) with the stack that scheduled it, resolved from its async_task_stack (48) artifact, and microtask hops linked through task attribution. task_chain_cut says an earlier caller was not recorded; MessagePort and worker messages are not shown. status is not_recorded when the read covered the request's indexed bytes or the whole store and found no stack record, and outside_scan when it did not reach all of them; coverage says what was read. A frame keeps reason script_identity_outside_scan when its identity was not found and not every identity was read. See protocol/native-network-v3.md.",
         "tags": [
           "events"
         ],
@@ -8190,6 +8190,52 @@
         },
         "x-source": "protocol/origin-trace-document-v1.schema.json"
       },
+      "DetailCoverage": {
+        "title": "What a per-request detail read covered",
+        "description": "scan_start and scan_end are the byte range read; store_end is the file length when the read started.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scope",
+          "complete",
+          "scan_start",
+          "scan_end",
+          "store_end",
+          "limited",
+          "budget_exhausted"
+        ],
+        "properties": {
+          "scope": {
+            "enum": [
+              "request_range",
+              "store",
+              "bounded_range"
+            ],
+            "description": "request_range: the bytes the request index names for this request answered the question, read to the end or to the newest record asked for. store: the whole store was read. bounded_range: only part was read, so a record outside it is unknown, not absent."
+          },
+          "complete": {
+            "type": "boolean",
+            "description": "Absence in this answer is a fact: the read covered its whole scope, or found the one newest record it was asked for."
+          },
+          "scan_start": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "scan_end": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "store_end": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "limited": {
+            "type": "boolean",
+            "description": "The record limit stopped the read before its scope ended."
+          },
+          "budget_exhausted": {
+            "type": "boolean",
+            "description": "The 64 MiB scan budget stopped the read before its scope ended."
+          }
+        }
+      },
       "RequestStack": {
         "title": "Request initiator stack",
         "type": "object",
@@ -8198,12 +8244,17 @@
           "request"
         ],
         "properties": {
+          "coverage": {
+            "$ref": "#/components/schemas/DetailCoverage"
+          },
           "status": {
             "enum": [
               "recorded",
               "not_recorded",
+              "outside_scan",
               "malformed"
-            ]
+            ],
+            "description": "not_recorded: the read covered the request's bytes or the whole store and found no stack. outside_scan: the read did not reach all of them, so the stack may exist; see coverage."
           },
           "request": {
             "type": "object"
@@ -8386,6 +8437,7 @@
           "reason": {
             "enum": [
               "script_identity_missing",
+              "script_identity_outside_scan",
               "source_unavailable",
               "source_not_retained",
               "source_artifact_missing",
@@ -8432,9 +8484,13 @@
           "request_id",
           "hops",
           "malformed_records",
-          "unattached_records"
+          "unattached_records",
+          "coverage"
         ],
         "properties": {
+          "coverage": {
+            "$ref": "#/components/schemas/DetailCoverage"
+          },
           "session_id": {
             "$ref": "#/components/schemas/NonzeroUint64String"
           },
@@ -8642,9 +8698,13 @@
           "request_id",
           "hops",
           "malformed_records",
-          "unattached_records"
+          "unattached_records",
+          "coverage"
         ],
         "properties": {
+          "coverage": {
+            "$ref": "#/components/schemas/DetailCoverage"
+          },
           "session_id": {
             "$ref": "#/components/schemas/NonzeroUint64String"
           },
@@ -8966,9 +9026,13 @@
           "lists_read",
           "lists_unread",
           "stacks_unresolved",
-          "malformed_records"
+          "malformed_records",
+          "coverage"
         ],
         "properties": {
+          "coverage": {
+            "$ref": "#/components/schemas/DetailCoverage"
+          },
           "session_id": {
             "$ref": "#/components/schemas/NonzeroUint64String"
           },

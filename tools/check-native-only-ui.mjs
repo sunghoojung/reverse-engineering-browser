@@ -63,7 +63,7 @@ for (const id of ['screen-memory', 'screen-experiments', 'debug-resume', 'watch-
 }
 for (const id of ['screen-sources', 'source-code', 'source-sidebar', 'screen-api-collection', 'screen-vm', 'vm-owned-debugger',
   'native-console-panel', 'captured-export-dialog', 'console-experiment-traffic', 'investigation-source-search',
-  'inspector-tab-general', 'exchange-inspector', 'open-captured-export']) {
+  'inspector-tab-general', 'exchange-inspector', 'open-captured-export', 'xrefs-dock', 'xrefs-toggle']) {
   assert(ids.has(id), `native/static feature ${id} must remain`);
 }
 for (const selector of ['.websocket-inspector', '.websocket-frames', '.runtime-hook-traffic', '.element-screenshot', '#screen-memory',
@@ -164,6 +164,51 @@ shell('live', false, false);
 assert.equal(contentLabel.hidden, true, 'a metadata-only session shows no content label');
 shell('demo', true, true);
 assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
+// Cross-references dock: no work while closed, inert captured names, one window
+// of rows, and a stored-evidence window that says it cannot read the backend.
+{
+  const dock = document.querySelector('#xrefs-dock'), toggle = document.querySelector('#xrefs-toggle');
+  assert.equal(dock.hidden, true, 'the cross-references dock starts closed');
+  const rows = document.querySelector('#xrefs-rows');
+  Object.defineProperty(rows, 'clientHeight', {value: 400}); rows.scrollTop = 0;
+  context.__xrefRequests = [];
+  context.__xrefDocument = {contract_version: 1, document_kind: 'reb-xrefs', selection: {kind: 'request', status: 'resolved', label: null}, filter: '', snapshot: '42',
+    counts: {in: {total: 1, matching: 1}, out: {total: 200, matching: 200}}, gaps: {in: [{reason: 'no-initiator-stack', name: 'No initiator recorded', detail: 'No caller is inferred.'}], out: []},
+    pages: {in: {offset: 0, limit: 128, returned: 1, rows: [{direction: 'in', kind: 'parent_event', name: '<img id=xref-injected src=x>', detail: '<b>detail</b>', source: 'network', operation: 'request_started', state: 'observed',
+      evidence: {type: 'event', session_id: '7', process_id: 1, sequence_number: '1'}, ids: {session_id: '7', process_id: 1, sequence_number: '1'}, time_ns: '1'}]}, out: {offset: 0, limit: 128, returned: 0, rows: []}},
+    coverage: {status: 'complete', scanned_bytes: '42', snapshot_bytes: '42', malformed_records: 0}};
+  runInContext(`const __priorFetch = fetch; globalThis.fetch = async (input, init) => {
+    if (String(input).startsWith('/api/xrefs')) { __xrefRequests.push(String(input)); return new Response(JSON.stringify(__xrefDocument), {status: 200}); }
+    return __priorFetch(input, init); };`, context);
+  await nextTurn();
+  assert.equal(context.__xrefRequests.length, 0, 'a closed dock must not query cross-references');
+  toggle.click();
+  await nextTurn();
+  assert.equal(dock.hidden, false, 'the toggle opens the dock');
+  assert.equal(context.__xrefRequests.length, 0, 'the offline file window has no backend to query');
+  assert.match(dock.textContent, /Open Traffic|stored-evidence|no exact retained identity|Select a request/, 'an unavailable selection stays visible text');
+  toggle.click();
+  await nextTurn();
+  assert.equal(dock.hidden, true, 'the toggle closes the dock');
+  window.location.protocol = 'http:';
+  runInContext(`showScreen('traffic'); state.requests = [{id: 'r1', origin: 'live', method: 'GET', path: 'x.test', hostOnly: true, traceable: false}]; state.selectedRequestId = 'r1'; investigationRequestIdentity = () => ({type: 'captured-request', session: '7', process: '1', sequence: '1', request: '5'});`, context);
+  toggle.click();
+  for (let turn = 0; turn < 8; turn += 1) await nextTurn();
+  assert.equal(context.__xrefRequests.length, 1, 'one query for one selection');
+  assert.match(context.__xrefRequests[0], /kind=request&session_id=7&process_id=1&sequence_number=1&request_id=5/, context.__xrefRequests[0]);
+  assert.match(context.__xrefRequests[0], /limit=128/, 'the first page is bounded');
+  const mounted = [...dock.querySelectorAll('.xrefs-row')];
+  assert(mounted.length > 0 && mounted.length < 200, `only visible rows mount: ${mounted.length}`);
+  assert(mounted.some(row => row.textContent.includes('<img id=xref-injected')), 'captured names render as literal text');
+  assert.equal(dock.querySelector('#xref-injected'), null, 'captured names never become elements');
+  assert(mounted.some(row => row.textContent.includes('No initiator recorded')), 'a missing link is an explicit gap row');
+  toggle.click();
+  await nextTurn();
+  assert.equal(dock.querySelectorAll('.xrefs-row').length, 0, 'closing releases the rows');
+  await nextTurn();
+  assert.equal(context.__xrefRequests.length, 1, 'closed dock stays idle');
+  window.location.protocol = 'file:';
+}
 assert.deepEqual(forbidden, [], 'startup/navigation must not attempt CDP transport');
 assert.deepEqual(asyncErrors, [], 'all asynchronous startup failures must be handled');
 release();

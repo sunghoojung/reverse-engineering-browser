@@ -178,9 +178,7 @@ impl XrefQuery {
                 artifact: required(q, "artifact_id", 64)?,
                 byte_offset: q
                     .one("byte_offset")?
-                    .map(|_| {
-                        small(q.number("byte_offset", None, 32, false)?, "byte_offset")
-                    })
+                    .map(|_| small(q.number("byte_offset", None, 32, false)?, "byte_offset"))
                     .transpose()?,
             },
             "vm_handler" => {
@@ -198,10 +196,7 @@ impl XrefQuery {
                     session,
                     artifact: required(q, "artifact_id", 64)?,
                     sha256,
-                    byte_offset: small(
-                        q.number("byte_offset", None, 32, false)?,
-                        "byte_offset",
-                    )?,
+                    byte_offset: small(q.number("byte_offset", None, 32, false)?, "byte_offset")?,
                     byte_size: small(q.number("byte_size", None, 32, false)?, "byte_size")?,
                     instruction_pointer: q
                         .one("instruction_pointer")?
@@ -252,7 +247,12 @@ impl XrefQuery {
                 byte_offset,
                 byte_size,
                 ..
-            } => Some((artifact.to_string(), sha256.clone(), *byte_offset, *byte_size)),
+            } => Some((
+                artifact.to_string(),
+                sha256.clone(),
+                *byte_offset,
+                *byte_size,
+            )),
             _ => None,
         }
     }
@@ -329,9 +329,7 @@ pub fn vm_handler_input(
         );
     }
     let mut omissions = Vec::new();
-    if row["sample_count"].as_u64().unwrap_or(0)
-        > samples_for("samples").len() as u64
-    {
+    if row["sample_count"].as_u64().unwrap_or(0) > samples_for("samples").len() as u64 {
         omissions.push("dispatch-sample-retention-limit".to_owned());
     }
     let label = matching[0]["label"]
@@ -674,7 +672,8 @@ fn field_pattern(field: &str, value: impl std::fmt::Display) -> String {
 }
 
 fn compile(alternatives: &[String]) -> Result<Regex> {
-    Regex::new(&alternatives.join("|")).map_err(|_| Error::new(500, "Cross-reference filter failed"))
+    Regex::new(&alternatives.join("|"))
+        .map_err(|_| Error::new(500, "Cross-reference filter failed"))
 }
 
 fn parse_event(record: &[u8]) -> Option<Value> {
@@ -714,7 +713,6 @@ fn find_events(
 }
 
 struct WasmModule {
-    bytes: Arc<Vec<u8>>,
     names: HashMap<u32, String>,
     imported: u32,
     target: Option<u32>,
@@ -723,14 +721,13 @@ struct WasmModule {
 
 /// Names and target of a retained module. A malformed module is a coverage
 /// note for the caller, never a panic.
-fn inspect_module(bytes: Vec<u8>, byte_offset: Option<u32>) -> Option<WasmModule> {
-    let bytes = Arc::new(bytes);
+fn inspect_module(bytes: &[u8], byte_offset: Option<u32>) -> Option<WasmModule> {
     let mut names = HashMap::new();
     let mut imported = 0u32;
     let mut defined = 0u32;
     let mut target = None;
     let mut target_is_import = false;
-    for payload in Parser::new(0).parse_all(&bytes) {
+    for payload in Parser::new(0).parse_all(bytes) {
         match payload.ok()? {
             Payload::ImportSection(reader) => {
                 for entry in reader.into_iter_with_offsets() {
@@ -763,9 +760,9 @@ fn inspect_module(bytes: Vec<u8>, byte_offset: Option<u32>) -> Option<WasmModule
                 let index = imported.checked_add(defined)?;
                 defined += 1;
                 let range = body.range();
-                if byte_offset
-                    .is_some_and(|offset| (offset as usize) >= range.start && (offset as usize) < range.end)
-                {
+                if byte_offset.is_some_and(|offset| {
+                    (offset as usize) >= range.start && (offset as usize) < range.end
+                }) {
                     target = Some(index);
                 }
             }
@@ -773,7 +770,6 @@ fn inspect_module(bytes: Vec<u8>, byte_offset: Option<u32>) -> Option<WasmModule
         }
     }
     Some(WasmModule {
-        bytes,
         names,
         imported,
         target,
@@ -809,6 +805,7 @@ enum Plan {
         category: String,
         event_type: String,
         payload: Value,
+        script_names: HashMap<String, String>,
     },
     Artifact {
         selection: Value,
@@ -825,6 +822,9 @@ enum Plan {
         children: Vec<(String, ArtifactRef)>,
         wasm: Option<WasmModule>,
         wasm_note: Option<String>,
+        /// The manifest row, to reread module bytes for the static rows of a
+        /// page. The bytes are not kept between requests.
+        record: Value,
     },
     VmHandler {
         selection: Value,
@@ -949,15 +949,16 @@ fn build_plan(
                     "This exact event is no longer retained in the event store.",
                 ),
                 [root]
-                    if FINGERPRINT_CATEGORIES.contains(&root["category"].as_str().unwrap_or(""))
-                        && matches!(
-                            root["type"].as_str(),
-                            Some("api_call" | "property_read")
-                        ) =>
+                    if FINGERPRINT_CATEGORIES
+                        .contains(&root["category"].as_str().unwrap_or(""))
+                        && matches!(root["type"].as_str(), Some("api_call" | "property_read")) =>
                 {
                     let payload = root["payload"].clone();
                     let mut patterns = vec![
-                        format!(r#""payload":"{}""#, regex::escape(payload.as_str().unwrap_or(""))),
+                        format!(
+                            r#""payload":"{}""#,
+                            regex::escape(payload.as_str().unwrap_or(""))
+                        ),
                         field_pattern("parent_event_id", sequence),
                     ];
                     let parent = unsigned(&root["parent_event_id"]);
@@ -972,6 +973,11 @@ fn build_plan(
                         category: root["category"].as_str().unwrap_or("").to_owned(),
                         event_type: root["type"].as_str().unwrap_or("").to_owned(),
                         payload,
+                        script_names: artifact_index(&stores.artifacts, *session)
+                            .0
+                            .iter()
+                            .map(|(id, record)| (id.clone(), artifact_ref(record).name))
+                            .collect(),
                     }
                 }
                 [_] => unresolved(
@@ -1019,7 +1025,11 @@ fn artifact_plan(
     let creator_id = unsigned(&record["creator_event_id"]);
     let parent_id = text_id(&record["parent_artifact_id"]);
     let parent = (parent_id != "0")
-        .then(|| index.get(&parent_id).map(|parent| (parent_id.clone(), artifact_ref(parent))))
+        .then(|| {
+            index
+                .get(&parent_id)
+                .map(|parent| (parent_id.clone(), artifact_ref(parent)))
+        })
         .flatten();
     let artifact_text = artifact.to_string();
     let mut children: Vec<_> = index
@@ -1033,17 +1043,21 @@ fn artifact_plan(
             .cmp(&b.parse::<u64>().unwrap_or(0))
     });
     let mut capture = None;
-    let capture_needle = compile(&[format!(
-        r#""type":"artifact_captured""#
-    )])?;
-    reader.lines(&stores.events, 0, end, Some(&capture_needle), &mut |_, record| {
-        let event = parse_event(record)?;
-        if same_session(&event, session) && unsigned(&event["artifact_id"]) == artifact {
-            capture = Some(event);
-            return Some(false);
-        }
-        Some(true)
-    })?;
+    let capture_needle = compile(&[format!(r#""type":"artifact_captured""#)])?;
+    reader.lines(
+        &stores.events,
+        0,
+        end,
+        Some(&capture_needle),
+        &mut |_, record| {
+            let event = parse_event(record)?;
+            if same_session(&event, session) && unsigned(&event["artifact_id"]) == artifact {
+                capture = Some(event);
+                return Some(false);
+            }
+            Some(true)
+        },
+    )?;
     let creator = if creator_id == 0 {
         None
     } else if let Some(capture) = &capture {
@@ -1067,7 +1081,7 @@ fn artifact_plan(
     };
     let (wasm, wasm_note) = if info.kind == "wasm" {
         match evidence::content(&stores.artifacts, record, wasm::MAX_BYTES) {
-            Ok(bytes) => match inspect_module(bytes, byte_offset) {
+            Ok(bytes) => match inspect_module(&bytes, byte_offset) {
                 Some(module) => (Some(module), None),
                 None => (
                     None,
@@ -1076,7 +1090,10 @@ fn artifact_plan(
             },
             Err(_) => (
                 None,
-                Some("The retained module bytes are unavailable or over the inspection limit.".to_owned()),
+                Some(
+                    "The retained module bytes are unavailable or over the inspection limit."
+                        .to_owned(),
+                ),
             ),
         }
     } else {
@@ -1106,6 +1123,7 @@ fn artifact_plan(
         children,
         wasm,
         wasm_note,
+        record: record.clone(),
     })
 }
 
@@ -1249,8 +1267,11 @@ fn classify_event(
                 } else {
                     ("parent_event", label.clone())
                 };
-                let detail = format!("recorded parent · {} · {}",
-                    event["category"].as_str().unwrap_or(""), event["type"].as_str().unwrap_or(""));
+                let detail = format!(
+                    "recorded parent · {} · {}",
+                    event["category"].as_str().unwrap_or(""),
+                    event["type"].as_str().unwrap_or("")
+                );
                 emit(sinks, Direction::In, event_row(kind, name, detail, event));
                 return;
             }
@@ -1263,7 +1284,16 @@ fn classify_event(
             {
                 facts.initiator_found = true;
                 let detail = format!("renderer process {process} · request {initiator_request}");
-                emit(sinks, Direction::In, event_row("request_initiator", "Renderer request".to_owned(), detail, event));
+                emit(
+                    sinks,
+                    Direction::In,
+                    event_row(
+                        "request_initiator",
+                        "Renderer request".to_owned(),
+                        detail,
+                        event,
+                    ),
+                );
                 return;
             }
             if process == root_process
@@ -1273,24 +1303,41 @@ fn classify_event(
                 facts.link_parents.insert((process, sequence));
                 let status = event["status_code"].as_u64().unwrap_or(0);
                 let detail = if status == 0 {
-                    event["type"].as_str().unwrap_or("").to_owned()
+                    "no status recorded".to_owned()
                 } else {
-                    format!("{} · status {status}", event["type"].as_str().unwrap_or(""))
+                    format!("status {status}")
                 };
-                emit(sinks, Direction::Out, event_row("request_event", label, detail, event));
+                emit(
+                    sinks,
+                    Direction::Out,
+                    event_row("request_event", label, detail, event),
+                );
                 return;
             }
             let parent_of = unsigned(&event["parent_event_id"]);
             if process == root_process && parent_of == root_sequence {
                 let detail = format!("child event · {}", event["category"].as_str().unwrap_or(""));
-                emit(sinks, Direction::Out, event_row("child_event", label, detail, event));
+                emit(
+                    sinks,
+                    Direction::Out,
+                    event_row("child_event", label, detail, event),
+                );
                 return;
             }
             if event["type"] == "artifact_captured"
                 && facts.link_parents.contains(&(process, parent_of))
             {
                 let detail = format!("artifact {}", text_id(&event["artifact_id"]));
-                emit(sinks, Direction::Out, event_row("response_artifact", "Captured response".to_owned(), detail, event));
+                emit(
+                    sinks,
+                    Direction::Out,
+                    event_row(
+                        "response_artifact",
+                        "Captured response".to_owned(),
+                        detail,
+                        event,
+                    ),
+                );
             }
         }
         Plan::Api {
@@ -1299,6 +1346,7 @@ fn classify_event(
             category,
             event_type,
             payload,
+            script_names,
             ..
         } => {
             if !same_session(event, *session) || event["type"] == "gap" {
@@ -1314,9 +1362,15 @@ fn classify_event(
                 let (kind, name) = if dispatch_sample(event) {
                     ("host_link", format!("Dispatch sample {sequence}"))
                 } else {
-                    ("parent_event", pretty(event["type"].as_str().unwrap_or("event")))
+                    (
+                        "parent_event",
+                        pretty(event["type"].as_str().unwrap_or("event")),
+                    )
                 };
-                let detail = format!("direct parent · {}", event["category"].as_str().unwrap_or(""));
+                let detail = format!(
+                    "direct parent · {}",
+                    event["category"].as_str().unwrap_or("")
+                );
                 emit(sinks, Direction::In, event_row(kind, name, detail, event));
             }
             if !is_root
@@ -1325,7 +1379,11 @@ fn classify_event(
             {
                 let name = pretty(event["type"].as_str().unwrap_or("event"));
                 let detail = format!("child event · {}", event["category"].as_str().unwrap_or(""));
-                emit(sinks, Direction::Out, event_row("child_event", name, detail, event));
+                emit(
+                    sinks,
+                    Direction::Out,
+                    event_row("child_event", name, detail, event),
+                );
             }
             if event["category"] == category.as_str()
                 && event["type"] == event_type.as_str()
@@ -1333,17 +1391,32 @@ fn classify_event(
             {
                 let frame = text_id(&event["frame_id"]);
                 let artifact = text_id(&event["artifact_id"]);
-                let detail = if artifact == "0" {
+                let caller = if artifact == "0" {
                     format!("frame {frame}")
                 } else {
-                    format!("frame {frame} · artifact {artifact}")
+                    script_names
+                        .get(&artifact)
+                        .cloned()
+                        .unwrap_or_else(|| format!("artifact {artifact}"))
+                };
+                let detail = if artifact == "0" {
+                    format!("no script recorded · tab {}", text_id(&event["tab_id"]))
+                } else {
+                    format!(
+                        "frame {frame} · tab {} · artifact {artifact}",
+                        text_id(&event["tab_id"])
+                    )
                 };
                 let name = if is_root {
-                    format!("{} (selected)", operation(event))
+                    format!("{caller} (selected call)")
                 } else {
-                    operation(event)
+                    caller
                 };
-                let kind = if event_type == "api_call" { "call" } else { "read" };
+                let kind = if event_type == "api_call" {
+                    "call"
+                } else {
+                    "read"
+                };
                 emit(sinks, Direction::In, event_row(kind, name, detail, event));
             }
         }
@@ -1358,15 +1431,31 @@ fn classify_event(
             }
             let target = wasm.as_ref().and_then(|module| module.target);
             if let Some(target) = target {
-                classify_wasm(event, *artifact, target, wasm.as_ref().expect("target"), facts, sinks, needle);
+                classify_wasm(
+                    event,
+                    *artifact,
+                    target,
+                    wasm.as_ref().expect("target"),
+                    facts,
+                    sinks,
+                    needle,
+                );
                 return;
             }
             if event["type"] == "gap" || unsigned(&event["artifact_id"]) != *artifact {
                 return;
             }
             let name = operation(event);
-            let detail = format!("{} · {}", event["category"].as_str().unwrap_or(""), event["type"].as_str().unwrap_or(""));
-            emit(sinks, Direction::Out, event_row("artifact_use", name, detail, event));
+            let detail = format!(
+                "{} · {}",
+                event["category"].as_str().unwrap_or(""),
+                event["type"].as_str().unwrap_or("")
+            );
+            emit(
+                sinks,
+                Direction::Out,
+                event_row("artifact_use", name, detail, event),
+            );
         }
         Plan::VmHandler {
             session, parents, ..
@@ -1374,13 +1463,24 @@ fn classify_event(
             if !same_session(event, *session) || !host_event(event) {
                 return;
             }
-            let key = (unsigned(&event["process_id"]), unsigned(&event["parent_event_id"]));
+            let key = (
+                unsigned(&event["process_id"]),
+                unsigned(&event["parent_event_id"]),
+            );
             if !parents.contains(&key) {
                 return;
             }
             let name = operation(event);
-            let detail = format!("dispatch parent {} · {}", key.1, event["category"].as_str().unwrap_or(""));
-            emit(sinks, Direction::Out, event_row("host_link", name, detail, event));
+            let detail = format!(
+                "dispatch parent {} · {}",
+                key.1,
+                event["category"].as_str().unwrap_or("")
+            );
+            emit(
+                sinks,
+                Direction::Out,
+                event_row("host_link", name, detail, event),
+            );
         }
     }
 }
@@ -1439,7 +1539,10 @@ fn classify_wasm(
                 let row = event_row(
                     "indirect_call",
                     function_name(callee),
-                    format!("call_indirect · slot {} · byte {offset}", observation["slot"]),
+                    format!(
+                        "call_indirect · slot {} · byte {offset}",
+                        observation["slot"]
+                    ),
                     event,
                 );
                 sinks[1].push(&row, Direction::Out, needle);
@@ -1460,7 +1563,10 @@ fn classify_wasm(
             let row = event_row(
                 "indirect_call",
                 function_name(function),
-                format!("call_indirect · slot {} · byte {offset}", observation["slot"]),
+                format!(
+                    "call_indirect · slot {} · byte {offset}",
+                    observation["slot"]
+                ),
                 event,
             );
             sinks[0].push(&row, Direction::In, needle);
@@ -1485,7 +1591,7 @@ fn classify_wasm(
 
 /// Rows known without reading events. Replayed by every page that starts
 /// inside them; their count is small next to the event rows.
-fn static_rows(plan: &Plan, sinks: &mut [Sink; 2], needle: &str) {
+fn static_rows(plan: &Plan, stores: &Stores, sinks: &mut [Sink; 2], needle: &str) {
     let Plan::Artifact {
         session_text,
         artifact_text,
@@ -1496,6 +1602,7 @@ fn static_rows(plan: &Plan, sinks: &mut [Sink; 2], needle: &str) {
         parent,
         children,
         wasm,
+        record,
         ..
     } = plan
     else {
@@ -1540,21 +1647,50 @@ fn static_rows(plan: &Plan, sinks: &mut [Sink; 2], needle: &str) {
         let row = event_row(
             "artifact_capture",
             "Artifact captured".to_owned(),
-            format!("capture event · {}", event["category"].as_str().unwrap_or("")),
+            format!(
+                "capture event · {}",
+                event["category"].as_str().unwrap_or("")
+            ),
             event,
         );
         sinks[0].push(&row, Direction::In, needle);
     }
     if let Some((id, parent)) = parent {
-        let row = artifact_row("parent_artifact", parent.name.clone(), format!("parent artifact {id}"), session_text, id, parent, None);
+        let row = artifact_row(
+            "parent_artifact",
+            parent.name.clone(),
+            format!("parent artifact {id}"),
+            session_text,
+            id,
+            parent,
+            None,
+        );
         sinks[0].push(&row, Direction::In, needle);
     }
     for (id, child) in children {
-        let row = artifact_row("child_artifact", child.name.clone(), format!("child artifact {id}"), session_text, id, child, None);
+        let row = artifact_row(
+            "child_artifact",
+            child.name.clone(),
+            format!("child artifact {id}"),
+            session_text,
+            id,
+            child,
+            None,
+        );
         sinks[1].push(&row, Direction::Out, needle);
     }
-    if let Some(module) = wasm {
-        emit_wasm_static(module, session_text, artifact_text, info, sinks, needle);
+    if let Some(module) = wasm
+        && let Ok(bytes) = evidence::content(&stores.artifacts, record, wasm::MAX_BYTES)
+    {
+        emit_wasm_static(
+            module,
+            &bytes,
+            session_text,
+            artifact_text,
+            info,
+            sinks,
+            needle,
+        );
     }
 }
 
@@ -1574,7 +1710,12 @@ fn artifact_row<'a>(
         detail,
         source: "artifact".to_owned(),
         operation: info.kind.clone(),
-        state: "observed",
+        // Import, export and call rows are decoded from retained module bytes.
+        state: if kind.starts_with("wasm_") {
+            "static"
+        } else {
+            "observed"
+        },
         target: Target::Artifact {
             session,
             id,
@@ -1587,6 +1728,7 @@ fn artifact_row<'a>(
 /// Walks the retained module once more, for one page, and keeps nothing.
 fn emit_wasm_static(
     module: &WasmModule,
+    bytes: &[u8],
     session: &str,
     artifact: &str,
     info: &ArtifactRef,
@@ -1595,7 +1737,7 @@ fn emit_wasm_static(
 ) {
     let mut defined = 0u32;
     let target = module.target;
-    for payload in Parser::new(0).parse_all(&module.bytes) {
+    for payload in Parser::new(0).parse_all(bytes) {
         let Ok(payload) = payload else { return };
         match payload {
             Payload::ImportSection(reader) if target.is_none() => {
@@ -1720,7 +1862,8 @@ fn gaps_for(plan: &Plan, facts: &PassFacts) -> [Vec<Value>; 2] {
                 gaps[0].push(gap(
                     "no-dispatch-sample",
                     "No dispatch sample for this call",
-                    "The selected call has no recorded parent event. No caller is inferred.".to_owned(),
+                    "The selected call has no recorded parent event. No caller is inferred."
+                        .to_owned(),
                 ));
             } else if !facts.parent_found {
                 gaps[0].push(gap(
@@ -1738,7 +1881,11 @@ fn gaps_for(plan: &Plan, facts: &PassFacts) -> [Vec<Value>; 2] {
             ..
         } => {
             if let Some(note) = wasm_note {
-                gaps[0].push(gap("static-inspection-unavailable", "Module not inspected", note.clone()));
+                gaps[0].push(gap(
+                    "static-inspection-unavailable",
+                    "Module not inspected",
+                    note.clone(),
+                ));
             }
             if *creator_id == 0 {
                 gaps[0].push(gap(
@@ -1837,7 +1984,9 @@ impl Cursors {
 
 fn anchor_positions(sinks: &[Sink; 2], position: u64, anchors: &mut [Vec<Anchor>; 2]) {
     for (index, sink) in sinks.iter().enumerate() {
-        if sink.matching >= sink.last_anchor + ANCHOR_EVERY || (sink.matching > 0 && anchors[index].is_empty()) {
+        if sink.matching >= sink.last_anchor + ANCHOR_EVERY
+            || (sink.matching > 0 && anchors[index].is_empty())
+        {
             let anchor = Anchor {
                 position,
                 total: sink.total,
@@ -1899,7 +2048,7 @@ fn full_pass(
     if let Plan::VmHandler { parents, .. } = plan.as_ref() {
         facts.link_parents = parents.clone();
     }
-    static_rows(&plan, &mut sinks, needle);
+    static_rows(&plan, stores, &mut sinks, needle);
     let static_counts = [
         (sinks[0].total, sinks[0].matching),
         (sinks[1].total, sinks[1].matching),
@@ -1929,7 +2078,11 @@ fn full_pass(
         facts.malformed = scanned.malformed;
     }
     let gaps = gaps_for(&plan, &facts);
-    let coverage = coverage_document(&facts, snapshot, matches!(plan.as_ref(), Plan::Unresolved { .. }));
+    let coverage = coverage_document(
+        &facts,
+        snapshot,
+        matches!(plan.as_ref(), Plan::Unresolved { .. }),
+    );
     let counts = [
         (sinks[0].total, sinks[0].matching),
         (sinks[1].total, sinks[1].matching),
@@ -1997,14 +2150,11 @@ fn window_pass(
     for direction in &query.directions {
         let index = direction.index();
         let (static_total, static_matching) = entry.static_counts[index];
-        let mut sinks = [
-            Sink::new(false, 0, 0),
-            Sink::new(false, 0, 0),
-        ];
+        let mut sinks = [Sink::new(false, 0, 0), Sink::new(false, 0, 0)];
         sinks[index] = Sink::new(true, query.offset, query.limit);
         let plan = &entry.plan;
         if query.offset < static_matching {
-            static_rows(plan, &mut sinks, needle);
+            static_rows(plan, stores, &mut sinks, needle);
         } else {
             sinks[index].total = static_total;
             sinks[index].matching = static_matching;
@@ -2087,6 +2237,7 @@ fn document(query: &XrefQuery, entry: &Entry, snapshot: u64) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
     use std::io::Write;
 
     struct Fixture {
@@ -2134,33 +2285,69 @@ mod tests {
     }
 
     fn page(fixture: &Fixture, cursors: &Cursors, raw: &str) -> Value {
-        run(&query(raw), &fixture.stores, cursors, None, &AtomicBool::new(false)).unwrap()
+        run(
+            &query(raw),
+            &fixture.stores,
+            cursors,
+            None,
+            &AtomicBool::new(false),
+        )
+        .unwrap()
     }
 
     #[test]
     fn a_request_lists_its_initiator_and_lifecycle_and_names_a_missing_initiator() {
         let events = [
-            event(1, json!({"process_id":9,"request_id":"5","type":"request_initiated"})),
-            event(2, json!({"request_id":"5","initiator_process_id":9,"initiator_request_id":5})),
-            event(3, json!({"request_id":"5","type":"response_completed","status_code":200})),
-            event(4, json!({"parent_event_id":"3","category":"artifact","type":"artifact_captured","artifact_id":"11"})),
+            event(
+                1,
+                json!({"process_id":9,"request_id":"5","type":"request_initiated"}),
+            ),
+            event(
+                2,
+                json!({"request_id":"5","initiator_process_id":9,"initiator_request_id":5}),
+            ),
+            event(
+                3,
+                json!({"request_id":"5","type":"response_completed","status_code":200}),
+            ),
+            event(
+                4,
+                json!({"parent_event_id":"3","category":"artifact","type":"artifact_captured","artifact_id":"11"}),
+            ),
             event(8, json!({"request_id":"6"})),
         ];
         let fixture = fixture(&events, &[]);
         let cursors = Cursors::default();
-        let document = page(&fixture, &cursors, "kind=request&session_id=7&process_id=42&sequence_number=2&request_id=5");
+        let document = page(
+            &fixture,
+            &cursors,
+            "kind=request&session_id=7&process_id=42&sequence_number=2&request_id=5",
+        );
         assert_eq!(document["selection"]["status"], "resolved");
         assert_eq!(document["counts"]["in"]["total"], 1);
-        assert_eq!(document["pages"]["in"]["rows"][0]["kind"], "request_initiator");
-        assert_eq!(document["pages"]["in"]["rows"][0]["evidence"]["process_id"], 9);
-        assert_eq!(document["pages"]["in"]["rows"][0]["ids"]["sequence_number"], "1");
+        assert_eq!(
+            document["pages"]["in"]["rows"][0]["kind"],
+            "request_initiator"
+        );
+        assert_eq!(
+            document["pages"]["in"]["rows"][0]["evidence"]["process_id"],
+            9
+        );
+        assert_eq!(
+            document["pages"]["in"]["rows"][0]["ids"]["sequence_number"],
+            "1"
+        );
         let out = document["pages"]["out"]["rows"].as_array().unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0]["kind"], "request_event");
-        assert_eq!(out[0]["detail"], "response_completed · status 200");
+        assert_eq!(out[0]["detail"], "status 200");
         assert_eq!(out[1]["kind"], "response_artifact");
         assert_eq!(document["gaps"]["in"], json!([]));
-        let orphan = page(&fixture, &Cursors::default(), "kind=request&session_id=7&process_id=42&sequence_number=8&request_id=6");
+        let orphan = page(
+            &fixture,
+            &Cursors::default(),
+            "kind=request&session_id=7&process_id=42&sequence_number=8&request_id=6",
+        );
         assert_eq!(orphan["counts"]["in"]["total"], 0);
         assert_eq!(orphan["gaps"]["in"][0]["reason"], "no-initiator-stack");
     }
@@ -2169,14 +2356,27 @@ mod tests {
     fn unknown_and_mismatched_selections_are_states_not_errors() {
         let fixture = fixture(&[event(2, json!({"request_id":"5"}))], &[]);
         let cursors = Cursors::default();
-        let missing = page(&fixture, &cursors, "kind=request&session_id=7&process_id=42&sequence_number=99&request_id=5");
+        let missing = page(
+            &fixture,
+            &cursors,
+            "kind=request&session_id=7&process_id=42&sequence_number=99&request_id=5",
+        );
         assert_eq!(missing["selection"]["status"], "unavailable");
         assert_eq!(missing["selection"]["reason"], "not-retained");
-        let wrong = page(&fixture, &cursors, "kind=request&session_id=7&process_id=42&sequence_number=2&request_id=6");
+        let wrong = page(
+            &fixture,
+            &cursors,
+            "kind=request&session_id=7&process_id=42&sequence_number=2&request_id=6",
+        );
         assert_eq!(wrong["selection"]["reason"], "identity-mismatch");
         assert!(XrefQuery::parse(&Query::new("kind=request&session_id=abc")).is_err());
         assert!(XrefQuery::parse(&Query::new("kind=unknown&session_id=1")).is_err());
-        assert!(XrefQuery::parse(&Query::new("kind=api&session_id=1&process_id=1&sequence_number=1&bogus=1")).is_err());
+        assert!(
+            XrefQuery::parse(&Query::new(
+                "kind=api&session_id=1&process_id=1&sequence_number=1&bogus=1"
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -2186,8 +2386,11 @@ mod tests {
         const LINKS: u64 = 12_000;
         let events: Vec<Value> = (1..=LINKS)
             .map(|sequence| {
-                event(sequence, json!({"category":"canvas","type":"api_call","payload":payload,
-                    "frame_id": (sequence % 7).to_string()}))
+                event(
+                    sequence,
+                    json!({"category":"canvas","type":"api_call","payload":payload,
+                    "frame_id": (sequence % 7).to_string()}),
+                )
             })
             .collect();
         let fixture = fixture(&events, &[]);
@@ -2207,22 +2410,46 @@ mod tests {
         assert_eq!(rows.len(), 64);
         assert_eq!(rows[0]["ids"]["sequence_number"], "10001");
         assert_eq!(later["counts"]["in"]["total"], LINKS);
-        let filtered = page(&fixture, &Cursors::default(), &format!("{raw}&filter=FRAME%205"));
+        let filtered = page(
+            &fixture,
+            &Cursors::default(),
+            &format!("{raw}&filter=FRAME%205"),
+        );
         assert_eq!(filtered["counts"]["in"]["total"], LINKS);
         assert_eq!(filtered["counts"]["in"]["matching"], 1714);
-        assert!(filtered["pages"]["in"]["rows"][0]["detail"].as_str().unwrap().contains("frame 5"));
+        assert!(
+            filtered["pages"]["in"]["rows"][0]["name"]
+                .as_str()
+                .unwrap()
+                .contains("frame 5")
+        );
     }
 
     #[test]
     fn a_malformed_record_is_counted_and_cancellation_stops_the_scan() {
-        let mut events = vec![event(1, json!({"category":"canvas","type":"api_call","payload":"41"}))];
-        events.extend((2..2200u64).map(|sequence| event(sequence, json!({"category":"canvas","type":"api_call","payload":"41"}))));
+        let mut events = vec![event(
+            1,
+            json!({"category":"canvas","type":"api_call","payload":"41"}),
+        )];
+        events.extend((2..2200u64).map(|sequence| {
+            event(
+                sequence,
+                json!({"category":"canvas","type":"api_call","payload":"41"}),
+            )
+        }));
         let fixture = fixture(&events, &[]);
-        let mut file = std::fs::OpenOptions::new().append(true).open(&fixture.stores.events).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&fixture.stores.events)
+            .unwrap();
         writeln!(file, "{{\"payload\":\"41\" not json").unwrap();
         drop(file);
         let cursors = Cursors::default();
-        let document = page(&fixture, &cursors, "kind=api&session_id=7&process_id=42&sequence_number=1");
+        let document = page(
+            &fixture,
+            &cursors,
+            "kind=api&session_id=7&process_id=42&sequence_number=1",
+        );
         assert_eq!(document["coverage"]["malformed_records"], 1);
         assert_eq!(document["counts"]["in"]["total"], 2199);
         let cancelled = AtomicBool::new(true);
@@ -2239,8 +2466,25 @@ mod tests {
         assert_eq!(result.err().map(|error| error.status), Some(499));
     }
 
+    fn dispatch_observation(sequence: u64, function: u32, caller: u32) -> Value {
+        let mut payload = [0u8; 128];
+        payload[0] = 3;
+        payload[2] = 128;
+        payload[4..8].copy_from_slice(&function.to_le_bytes());
+        payload[8..12].copy_from_slice(&40u32.to_le_bytes());
+        payload[12..16].copy_from_slice(&1u32.to_le_bytes());
+        payload[16..20].copy_from_slice(&3u32.to_le_bytes());
+        payload[32] = 1;
+        payload[36..40].copy_from_slice(&caller.to_le_bytes());
+        event(
+            sequence,
+            json!({"category":"vm","type":"wasm_dispatch_observation","artifact_id":"11","flags":0,
+                "payload_size":128,"payload_truncated":false,"payload":hex::encode(payload)}),
+        )
+    }
+
     #[test]
-    fn a_wasm_function_lists_imports_exports_and_calls_from_the_module_and_samples() {
+    fn a_wasm_function_lists_static_calls_exports_and_sampled_callers() {
         let bytes = wat::parse_str(
             r#"(module
               (import "env" "host" (func $host))
@@ -2248,17 +2492,120 @@ mod tests {
               (func $outer (export "outer") call $inner call $host))"#,
         )
         .unwrap();
-        let module = inspect_module(bytes, None).unwrap();
-        assert_eq!(module.imported, 1);
-        assert_eq!(module.names[&2], "outer");
+        let hash = hex::encode(sha2::Sha256::digest(&bytes));
+        let manifest = json!({"protocol_version":1,"artifact_id":"11","session_id":"7","navigation_id":"1","frame_id":"2",
+            "parent_artifact_id":"0","creator_event_id":"0","execution_context_id":"1","capture_origin":"unknown",
+            "kind":"wasm","url":"https://synthetic.test/m.wasm","mime_type":"application/wasm",
+            "byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+        let events = [
+            dispatch_observation(1, 1, 2),
+            event(
+                2,
+                json!({"parent_event_id":"1","category":"canvas","type":"api_call","payload":hex::encode("fillText")}),
+            ),
+            dispatch_observation(3, 2, 1),
+        ];
+        let fixture = fixture(&events, &[manifest]);
+        std::fs::create_dir_all(fixture.stores.artifacts.join("blobs")).unwrap();
+        std::fs::write(
+            fixture.stores.artifacts.join(format!("blobs/{hash}.bin")),
+            &bytes,
+        )
+        .unwrap();
+        let mut bodies = Vec::new();
+        for payload in Parser::new(0).parse_all(&bytes) {
+            if let Payload::CodeSectionEntry(body) = payload.unwrap() {
+                bodies.push(body.range().start);
+            }
+        }
+        let cursors = Cursors::default();
+        let document = page(
+            &fixture,
+            &cursors,
+            &format!(
+                "kind=artifact&session_id=7&artifact_id=11&byte_offset={}",
+                bodies[0]
+            ),
+        );
+        assert_eq!(document["selection"]["label"], "inner");
+        let incoming = document["pages"]["in"]["rows"].as_array().unwrap();
+        let kinds: Vec<_> = incoming
+            .iter()
+            .map(|row| row["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["wasm_export", "wasm_call", "direct_caller"]);
+        assert_eq!(incoming[1]["name"], "outer");
+        assert_eq!(incoming[2]["name"], "outer");
+        let outgoing = document["pages"]["out"]["rows"].as_array().unwrap();
+        let kinds: Vec<_> = outgoing
+            .iter()
+            .map(|row| row["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["wasm_call", "host_link", "direct_caller"]);
+        assert_eq!(outgoing[0]["name"], "env.host");
+        assert_eq!(outgoing[1]["name"], "fillText");
+        assert_eq!(document["gaps"]["in"][0]["reason"], "no-creator-event");
+        let module_level = page(
+            &fixture,
+            &Cursors::default(),
+            "kind=artifact&session_id=7&artifact_id=11",
+        );
+        let rows = module_level["pages"]["out"]["rows"].as_array().unwrap();
+        assert_eq!(rows[0]["kind"], "wasm_import");
+        assert_eq!(rows[0]["name"], "env.host");
+        assert_eq!(module_level["counts"]["in"]["matching"], 2);
+    }
+
+    #[test]
+    fn a_module_without_samples_names_the_gap() {
+        let bytes = wat::parse_str(r#"(module (func (export "f")))"#).unwrap();
+        let hash = hex::encode(sha2::Sha256::digest(&bytes));
+        let manifest = json!({"protocol_version":1,"artifact_id":"11","session_id":"7","navigation_id":"1","frame_id":"2",
+            "parent_artifact_id":"0","creator_event_id":"0","execution_context_id":"1","capture_origin":"unknown",
+            "kind":"wasm","url":"https://synthetic.test/m.wasm","mime_type":"application/wasm",
+            "byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+        let fixture = fixture(
+            &[event(1, json!({"category":"canvas","type":"api_call"}))],
+            &[manifest],
+        );
+        std::fs::create_dir_all(fixture.stores.artifacts.join("blobs")).unwrap();
+        std::fs::write(
+            fixture.stores.artifacts.join(format!("blobs/{hash}.bin")),
+            &bytes,
+        )
+        .unwrap();
+        let mut body = 0;
+        for payload in Parser::new(0).parse_all(&bytes) {
+            if let Payload::CodeSectionEntry(entry) = payload.unwrap() {
+                body = entry.range().start;
+            }
+        }
+        let document = page(
+            &fixture,
+            &Cursors::default(),
+            &format!("kind=artifact&session_id=7&artifact_id=11&byte_offset={body}"),
+        );
+        let reasons: Vec<_> = document["gaps"]["in"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|gap| gap["reason"].as_str().unwrap())
+            .collect();
+        assert!(reasons.contains(&"no-dispatch-samples"));
     }
 
     #[test]
     fn a_vm_handler_links_only_children_of_its_retained_samples() {
         let events = [
             event(2, json!({"category":"vm","type":"wasm_guest_dispatch"})),
-            event(3, json!({"parent_event_id":"2","category":"canvas","type":"api_call","payload":hex::encode("fillText")})),
-            event(4, json!({"parent_event_id":"9","category":"canvas","type":"api_call","payload":hex::encode("fillRect")})),
+            event(
+                3,
+                json!({"parent_event_id":"2","category":"canvas","type":"api_call","payload":hex::encode("fillText")}),
+            ),
+            event(
+                4,
+                json!({"parent_event_id":"9","category":"canvas","type":"api_call","payload":hex::encode("fillRect")}),
+            ),
         ];
         let fixture = fixture(&events, &[]);
         let workspace = json!({"workspaces":[{
@@ -2268,11 +2615,24 @@ mod tests {
         }]});
         let input = vm_handler_input(&workspace, "33", &"a".repeat(64), 12, 4);
         assert!(input.found);
-        let raw = format!("kind=vm_handler&session_id=7&artifact_id=33&sha256={}&byte_offset=12&byte_size=4", "a".repeat(64));
-        let document = run(&query(&raw), &fixture.stores, &Cursors::default(), Some(input), &AtomicBool::new(false)).unwrap();
+        let raw = format!(
+            "kind=vm_handler&session_id=7&artifact_id=33&sha256={}&byte_offset=12&byte_size=4",
+            "a".repeat(64)
+        );
+        let document = run(
+            &query(&raw),
+            &fixture.stores,
+            &Cursors::default(),
+            Some(input),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         assert_eq!(document["selection"]["label"], "push");
         assert_eq!(document["counts"]["in"]["total"], 1);
-        assert_eq!(document["pages"]["in"]["rows"][0]["kind"], "dispatch_sample");
+        assert_eq!(
+            document["pages"]["in"]["rows"][0]["kind"],
+            "dispatch_sample"
+        );
         assert_eq!(document["counts"]["out"]["total"], 1);
         assert_eq!(document["pages"]["out"]["rows"][0]["kind"], "host_link");
         assert_eq!(document["pages"]["out"]["rows"][0]["name"], "fillText");

@@ -31,8 +31,8 @@
   const directions = ['in', 'out'];
   const emptyView = () => ({key: null, selection: null, label: '', status: 'idle', error: '', generation: 0, controller: null, snapshot: null,
     counts: {in: {total: 0, matching: 0}, out: {total: 0, matching: 0}}, gaps: {in: [], out: []}, pages: {in: new Map(), out: new Map()},
-    pending: {in: null, out: null}, active: {in: true, out: true}, selected: null, coverage: null});
-  let view = emptyView(), open = false, selectionTimer = 0, settleTimer = 0, filterTimer = 0, pageTimer = 0, frame = 0, returnFocus = null;
+    pending: {in: null, out: null}, active: {in: true, out: true}, selected: null, coverage: null, pageError: ''});
+  let view = emptyView(), open = false, selectionTimer = 0, settleTimer = 0, filterTimer = 0, pageTimer = 0, frame = 0, returnFocus = null, pageNeeds = [];
   let wasmRow = null;
 
   const node = (tag, className, text) => {const element = document.createElement(tag); if (className) element.className = className; if (text !== undefined) element.textContent = String(text); return element;};
@@ -118,14 +118,21 @@
   }
 
   async function load(selection) {
-    resetView(selection);
+    // A filter change or retry of the same selection keeps its rows until the
+    // answer arrives, so a failure leaves the last understandable evidence.
+    const refreshing = selection.key === view.key && view.status === 'ready';
+    if (refreshing) {
+      view.controller?.abort();
+      for (const direction of directions) view.pending[direction]?.controller.abort();
+      view.generation += 1;
+      view.pageError = '';
+    } else resetView(selection);
     if (selection.empty) { view.status = 'empty'; view.error = selection.empty; render(); return; }
     if (!dockAvailable()) { view.status = 'unavailable'; view.error = 'Cross-references read the local backend, which this stored-evidence window does not run. Open a live workspace or the browser development UI.'; render(); return; }
     const generation = view.generation;
     const controller = new AbortController();
     view.controller = controller;
-    view.status = 'loading';
-    render();
+    if (!refreshing) { view.status = 'loading'; render(); }
     try {
       const response = await fetch(query({direction: 'both', limit: PAGE_SIZE}), {cache: 'no-store', signal: controller.signal});
       const document = await readJson(response);
@@ -134,8 +141,10 @@
       applyDocument(document);
     } catch (error) {
       if (generation !== view.generation || error.name === 'AbortError') return;
+      const message = error.message || 'Cross-references could not be read.';
+      if (refreshing) { view.pageError = message; renderStatus(); return; }
       view.status = 'error';
-      view.error = error.message || 'Cross-references could not be read.';
+      view.error = message;
       render();
     }
   }
@@ -195,9 +204,8 @@
       schedulePaint();
     } catch (error) {
       if (generation !== view.generation || error.name === 'AbortError') return;
-      view.status = 'error';
-      view.error = error.message || 'Cross-references could not be read.';
-      schedulePaint();
+      view.pageError = error.message || 'A page of cross-references could not be read.';
+      renderStatus();
     } finally {
       if (view.pending[direction]?.controller === controller) view.pending[direction] = null;
     }
@@ -283,9 +291,9 @@
       const gap = view.gaps[item.direction][item.offset];
       element.dataset.gap = 'true';
       const name = node('span', 'xrefs-name', gap.name), badge = node('span', 'xrefs-kind', 'gap');
-      const detail = node('span', 'xrefs-detail', gap.detail), reason = node('span', 'xrefs-id', gap.reason);
-      name.title = gap.name; detail.title = gap.detail; reason.title = gap.reason;
-      element.append(name, badge, detail, reason);
+      const detail = node('span', 'xrefs-detail', gap.detail);
+      name.title = gap.name; detail.title = gap.detail;
+      element.append(name, badge, detail);
       return element;
     }
     const row = rowAt(item.direction, item.offset);
@@ -308,14 +316,16 @@
     elements.space.style.height = `${height}px`;
     const top = elements.rows.scrollTop, bottom = top + elements.rows.clientHeight;
     const pieces = [];
+    pageNeeds = [];
     let cursor = 0, navBefore = 0;
     for (const group of visibleGroups) {
       const groupEnd = cursor + GROUP + (group.gaps.length + group.count) * ROW;
       if (groupEnd >= top - OVERSCAN * ROW && cursor <= bottom + OVERSCAN * ROW) {
         if (cursor + GROUP >= top - OVERSCAN * ROW && cursor <= bottom + OVERSCAN * ROW) {
           const heading = node('div', 'xrefs-group');
+          heading.setAttribute('role', 'presentation');
           heading.style.transform = `translateY(${cursor}px)`;
-          heading.append(node('span', '', group.direction === 'in' ? '←' : '→'), node('em', '', group.direction === 'in' ? 'referenced by' : 'points to'), node('b', '', counted(group.count + group.gaps.length)));
+          heading.append(node('span', '', group.direction === 'in' ? '←' : '→'), node('em', '', group.direction === 'in' ? 'referenced by' : 'points to'), node('b', '', counted(group.count)));
           pieces.push(heading);
         }
         const rowsTop = cursor + GROUP;
@@ -329,7 +339,7 @@
         }
         const rowFirst = Math.max(0, first - group.gaps.length), rowLast = Math.max(0, last - group.gaps.length);
         if (group.count > 0) {
-          neededPages(group.direction, rowFirst, Math.min(rowLast, group.count - 1));
+          pageNeeds.push([group.direction, rowFirst, Math.min(rowLast, group.count - 1)]);
           releaseFarPages(group.direction, rowFirst, rowLast);
         }
       }
@@ -337,6 +347,10 @@
       navBefore += group.gaps.length + group.count;
     }
     elements.space.replaceChildren(...pieces);
+    // A page is requested once the viewport rests, so a dragged scrollbar asks
+    // for the row it stops on and not for every page it passes.
+    clearTimeout(pageTimer);
+    pageTimer = setTimeout(() => { if (open) for (const need of pageNeeds) neededPages(...need); }, PAGE_DEBOUNCE_MS);
     const selectedElement = view.selected && elements.space.querySelector('[aria-selected="true"]');
     if (selectedElement) elements.rows.setAttribute('aria-activedescendant', selectedElement.id);
     else elements.rows.removeAttribute('aria-activedescendant');
@@ -348,19 +362,23 @@
     if (item.kind === 'gap') {
       const gap = view.gaps[item.direction][item.offset];
       elements.detail.hidden = false;
-      elements.detail.replaceChildren(node('strong', '', gap.name), node('p', '', gap.detail), node('code', '', gap.reason));
+      const head = node('div', 'xrefs-detail-head');
+      head.append(node('strong', '', gap.name));
+      elements.detail.replaceChildren(head, node('p', '', gap.detail), node('code', '', gap.reason));
       return;
     }
     const row = rowAt(item.direction, item.offset);
     if (!row) { elements.detail.hidden = true; return; }
-    const ids = Object.entries(row.ids).filter(([, value]) => value !== undefined && value !== null && String(value) !== '0')
-      .map(([key, value]) => `${key.replace('_id', '').replace('sequence_number', 'seq').replace('_', ' ')} ${value}`).join(' · ');
+    const ids = [['session_id', 'session'], ['process_id', 'process'], ['sequence_number', 'seq'], ['navigation_id', 'nav'], ['frame_id', 'frame'], ['artifact_id', 'artifact'], ['request_id', 'request'], ['parent_event_id', 'parent']]
+      .filter(([key]) => row.ids[key] !== undefined && row.ids[key] !== null && String(row.ids[key]) !== '0').map(([key, label]) => `${label} ${row.ids[key]}`).join(' · ');
     const time = row.time_ns ? ` · ${typeof evidenceMonotonicLabel === 'function' ? evidenceMonotonicLabel(row.time_ns) : `${row.time_ns} ns`} monotonic` : '';
-    const open = node('button', 'secondary-button', 'Open');
-    open.type = 'button'; open.id = 'xrefs-open-row';
-    open.addEventListener('click', () => openRow(row));
+    const button = node('button', 'secondary-button', 'Open');
+    button.type = 'button'; button.id = 'xrefs-open-row';
+    button.addEventListener('click', () => openRow(row));
+    const head = node('div', 'xrefs-detail-head');
+    head.append(node('strong', '', row.name), button);
     elements.detail.hidden = false;
-    elements.detail.replaceChildren(node('strong', '', row.name), node('p', '', `${kindLabel(row)} · ${row.state} · ${pretty(row.source)} · ${pretty(row.operation)}${time}`), node('p', '', row.detail), node('code', '', ids), open);
+    elements.detail.replaceChildren(head, node('p', '', `${kindLabel(row)} · ${row.state} · ${pretty(row.source)} · ${pretty(row.operation)}${time}`), node('p', '', row.detail), node('code', '', ids));
   }
 
   function render() {
@@ -409,12 +427,17 @@
     status.replaceChildren();
     status.hidden = true;
     delete status.dataset.kind;
-    if (view.status === 'error') {
+    if (view.status === 'error' || view.pageError) {
       status.hidden = false; status.dataset.kind = 'error';
-      status.append(document.createTextNode(`${view.error} `));
+      status.append(document.createTextNode(`${view.status === 'error' ? view.error : view.pageError} `));
       const retry = node('button', '', 'Retry');
       retry.type = 'button';
-      retry.addEventListener('click', refetchFiltered);
+      retry.addEventListener('click', () => {
+        if (view.status === 'error') { refetchFiltered(); return; }
+        view.pageError = '';
+        renderStatus();
+        schedulePaint();
+      });
       status.append(retry);
       return;
     }
@@ -594,6 +617,8 @@
     const source = selectedSource();
     if (!row || row.byte_offset == null || !source) return;
     wasmRow = {artifactId: source.artifact_id, byteOffset: row.byte_offset};
+    sourceCode.querySelector('.xrefs-source-selected')?.classList.remove('xrefs-source-selected');
+    element.classList.add('xrefs-source-selected');
     scheduleSync(0);
   };
   sourceCode?.addEventListener('click', noteWasmRow);

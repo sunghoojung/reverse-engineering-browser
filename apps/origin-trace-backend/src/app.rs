@@ -917,7 +917,11 @@ impl App {
                             |_| crate::xrefs::VmHandlerInput::default(),
                             |document| {
                                 crate::xrefs::vm_handler_input(
-                                    document, &artifact, &sha256, byte_offset, byte_size,
+                                    document,
+                                    &artifact,
+                                    &sha256,
+                                    byte_offset,
+                                    byte_size,
                                 )
                             },
                         ))

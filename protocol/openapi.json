@@ -25078,7 +25078,8 @@
           },
           "state": {
             "enum": [
-              "observed"
+              "observed",
+              "static"
             ]
           },
           "evidence": {

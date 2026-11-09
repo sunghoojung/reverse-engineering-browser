@@ -947,7 +947,10 @@ window and the enforced 760×560 minimum it checks:
   view with an unclipped kind icon;
 - keyboard order and visible focus for 30 stops (Option+Tab when Full Keyboard
   Access is off, as in Safari), and Shift+Tab reversal;
-- no removed CDP control or markup anywhere in the shipped screens.
+- no removed CDP control or markup anywhere in the shipped screens;
+- cross-references: the dock opens with X, follows the Traffic selection, lists the
+  recorded initiator and lifecycle links, and keeps arrow keys, the filter shortcut,
+  Escape, truncation and the light theme usable at both window sizes.
 
 Layout checks reject horizontal page overflow, controls cut off by a
 non-scrolling ancestor, controls covered at their hit-test point, overlapping

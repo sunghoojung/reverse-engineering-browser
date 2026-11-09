@@ -1449,7 +1449,7 @@ or the one a microtask's attribution names, then the task that scheduled it.
 | Offset | Size | Field |
 | ---: | ---: | --- |
 | 0 | 1 | task kind |
-| 1 | 1 | state: 1 captured, 4 not retained (Artifact off), 5 not retained (budget), 6 not recorded (kind 9 only) |
+| 1 | 1 | state: 1 captured, 4 not retained (Artifact off, or the browser refused its artifact), 5 not retained (budget), 6 not recorded (kind 9 only) |
 | 2 | 1 | flags: bit 0 the walk stopped at 256 frames |
 | 3 | 1 | reserved, zero |
 | 4 | 4 | frames in its stack: 1 to 256, or 0 for kind 9 |
@@ -1458,7 +1458,10 @@ or the one a microtask's attribution names, then the task that scheduled it.
 
 Each renderer remembers 2,048 segments and 4,096 task attribution IDs per
 configuration. A chain that reaches a forgotten segment, or a microtask whose
-attribution names none, sets bit 3 and stops; 32 segments set bit 4.
+attribution names none, sets bit 3 and stops; 32 segments set bit 4. When the
+browser refuses a stack artifact, every remembered segment naming that digest
+changes from state 1 to state 4, so later chains stop claiming it. Artifacts
+already sent keep the state they were written with.
 
 ### Script navigations
 

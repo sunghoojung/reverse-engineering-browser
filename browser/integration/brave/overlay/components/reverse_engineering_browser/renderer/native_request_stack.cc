@@ -69,7 +69,11 @@ struct NativeRequestStackTables final {
   std::array<NativeStackFrame, kNativeRequestStackFrameCapacity> frames{};
   std::array<std::uint8_t, kNativeStackArtifactMaxBytes> artifact{};
   std::array<Digest, kNativeRequestStackDigestTable> digests{};
-  std::array<QueuedStack, kNativeRequestStackDigestTable> queued_stacks{};
+  // As long as both artifact budgets: a task that blocks this thread can queue
+  // that many before the first refusal is delivered, and a forgotten entry
+  // would leave its segments claiming a captured artifact.
+  std::array<QueuedStack, kNativeRequestStackArtifactBudget + kNativeAsyncTaskArtifactBudget>
+      queued_stacks{};
   std::size_t queued_stack_next = 0;
   std::array<Script, kNativeRequestStackScriptTable> scripts{};
   std::array<std::uint64_t, std::bit_ceil(2 * kNativeRequestStackFrameCapacity)> distinct{};
@@ -868,6 +872,15 @@ void NativeRequestStackWalk::StackArtifactRefused(const std::uint64_t creator_se
         return entry.generation == generation && entry.value == queued->digest;
       })) {
     *digest = {};
+  }
+  // A segment names its artifact by digest, whether it queued that artifact or
+  // found the digest already remembered, so every one on this digest lost it.
+  for (NativeRequestStackTables::Segment& segment : state->segments) {
+    if (segment.generation == generation && segment.digest == queued->digest &&
+        segment.state == static_cast<std::uint8_t>(NativeTaskSegmentState::kCaptured)) {
+      segment.state =
+          static_cast<std::uint8_t>(NativeTaskSegmentState::kNotRetainedArtifactUnavailable);
+    }
   }
   *queued = {};
 }

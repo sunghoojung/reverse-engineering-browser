@@ -426,6 +426,63 @@ std::uint8_t Kind(const reb::NativeAsyncTaskKind kind) {
   std::cout << "PASS an async segment whose record was refused is not called captured\n";
 }
 
+// A browser refusal arrives after the segment was stored, so it has to reach the
+// ring: the segment that queued the artifact and one that found its digest known.
+[[gnu::noinline]] void NativeAsyncSegmentArtifactRefused() {
+  using reb::NativeAsyncTaskKind;
+  NativeProbeQueue queue;
+  Configure(queue, 67);
+  scenario = {};
+  scenario.depth = 4;
+  scenario.scripts = 1;
+  scenario.seed = 310;
+  scenario.task_seed = 9100;
+  const auto segment_state = [&](const std::uint64_t segment) {
+    const auto inside = NativeRequestStackWalk::EnterAsyncTask(segment);
+    StackPayload(Start(queue, 6010).second);
+    const auto chain = GeneratedChain();
+    Drain(queue);
+    NativeRequestStackWalk::ExitAsyncTask(inside);
+    assert(chain.size() == 1 && chain[0].kind == Kind(NativeAsyncTaskKind::kSetTimeout));
+    // Each call names a fresh top frame, so its stack artifact is sent again.
+    ++scenario.seed;
+    return chain[0];
+  };
+  const auto captured = static_cast<std::uint8_t>(reb::NativeTaskSegmentState::kCaptured);
+  const auto refused_state =
+      static_cast<std::uint8_t>(reb::NativeTaskSegmentState::kNotRetainedArtifactUnavailable);
+
+  const auto queued = NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout);
+  const auto record = Pop(queue);
+  const auto digest = TaskPayload(record).digest;
+  Drain(queue);
+  const auto known = NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout);
+  assert(known != 0 && known != queued && Drain(queue) == 0);
+  assert(segment_state(queued).state == captured && segment_state(known).state == captured);
+
+  transport.NativeStackArtifactRefused(record.header.sequence_number);
+  const auto queued_chain = segment_state(queued);
+  const auto known_chain = segment_state(known);
+  assert(queued_chain.state == refused_state && queued_chain.digest == digest &&
+         known_chain.state == refused_state && known_chain.digest == digest);
+
+  // A segment recorded after the refusal resends the stack and owns that attempt.
+  const auto artifacts_before = reb::mojom::NativeProbeHost::artifacts.load();
+  const auto resent = NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout);
+  assert(TaskPayload(Pop(queue)).digest == digest &&
+         reb::mojom::NativeProbeHost::artifacts == artifacts_before + 1);
+  Drain(queue);
+  assert(segment_state(resent).state == captured && segment_state(queued).state == refused_state);
+
+  // A refusal naming no stack this renderer queued changes nothing.
+  transport.NativeStackArtifactRefused(record.header.sequence_number + 100000);
+  assert(segment_state(resent).state == captured);
+  scenario = {};
+  transport.Disable();
+  std::cout << "PASS a refused async stack artifact stops every segment on its digest claiming "
+               "capture, and a later resend owns its own state\n";
+}
+
 // Scheduling-time segments linked through async task runs and task
 // attribution, and script-initiated navigations.
 [[gnu::noinline]] void NativeTaskChainsAndNavigations() {

@@ -26,7 +26,9 @@ inline constexpr std::uint16_t kNativeRequestStackTaskPayloadVersion = 2;
 inline constexpr std::uint32_t kNativeRequestStackSyncLimit = 1024;
 inline constexpr std::uint32_t kNativeRequestStackAsyncLimit = 32;
 inline constexpr std::uint32_t kNativeTaskSegmentLimit = 32;
-inline constexpr std::uint32_t kNativeAsyncTaskFrameLimit = 128;
+// Innermost frames kept per task segment: above DevTools' 200, so a framework's
+// wrapper frames do not hide the frames that scheduled the task.
+inline constexpr std::uint32_t kNativeAsyncTaskFrameLimit = 256;
 inline constexpr std::uint32_t kNativeStackArtifactMagic = 0x4b534252U;
 inline constexpr std::uint16_t kNativeStackArtifactVersion = 1;
 inline constexpr std::uint16_t kNativeStackArtifactTaskVersion = 2;

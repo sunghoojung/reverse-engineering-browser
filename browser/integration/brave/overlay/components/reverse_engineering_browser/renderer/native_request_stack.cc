@@ -69,7 +69,6 @@ struct NativeRequestStackTables final {
   std::size_t evict = 0;
   std::uint64_t budget_generation = 0;
   std::uint32_t stacks_sent = 0;
-  std::uint32_t sources_sent = 0;
   std::uint64_t source_bytes = 0;
   std::uint32_t async_sent = 0;
   std::array<Segment, kNativeAsyncTaskRing> segments{};
@@ -182,7 +181,6 @@ void ResetBudgets(NativeRequestStackTables& state, const std::uint64_t generatio
   if (state.budget_generation != generation) {
     state.budget_generation = generation;
     state.stacks_sent = 0;
-    state.sources_sent = 0;
     state.source_bytes = 0;
     state.async_sent = 0;
   }
@@ -868,7 +866,6 @@ void NativeRequestStackWalk::DescribeScript(const NativeStackScriptSource& scrip
     if (javascript) {
       queue = sink.IsArtifactCaptureEnabled() && !script.url.empty() &&
               script.url.size() <= kNativeArtifactMaxUrlBytes &&
-              state.sources_sent < kNativeRequestStackSourceBudget &&
               state.source_bytes + script.bytes.size() <= kNativeRequestStackSourceBytes;
       payload.flags |= queue ? kNativeScriptIdentitySourceQueued : kNativeScriptIdentityNotRetained;
     }
@@ -895,7 +892,6 @@ void NativeRequestStackWalk::DescribeScript(const NativeStackScriptSource& scrip
                                 NativeArtifactCaptureOrigin::kStackScript,
                                 event.header.sequence_number, script.execution_context_id,
                                 frame_id_, script.url, script.bytes);
-  ++state.sources_sent;
   state.source_bytes += script.bytes.size();
 }
 

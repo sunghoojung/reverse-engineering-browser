@@ -293,7 +293,7 @@ void CheckNavigationAndTaskRecords() {
 
   reb::NativeAsyncTaskStackPayload task;
   task.kind = static_cast<std::uint8_t>(reb::NativeAsyncTaskKind::kSetTimeout);
-  task.recorded = 128;
+  task.recorded = 256;
   task.flags = reb::kNativeTaskSegmentBounded;
   task.scripts = 2;
   task.digest.fill(0x33);
@@ -313,8 +313,8 @@ void CheckNavigationAndTaskRecords() {
         false);
   };
   task_variant("async task microtask kind", [](auto& v) { v.kind = 9; });
-  task_variant("async task bounded below 128", [](auto& v) { v.recorded = 127; });
-  task_variant("async task above 128 frames", [](auto& v) { v.recorded = 129; });
+  task_variant("async task bounded below 256", [](auto& v) { v.recorded = 255; });
+  task_variant("async task above 256 frames", [](auto& v) { v.recorded = 257; });
   task_variant("async task no digest", [](auto& v) { v.digest.fill(0); });
   task_variant("async task await innermost", [](auto& v) {
     v.innermost.kind = static_cast<std::uint8_t>(reb::NativeStackFrameKind::kAwait);

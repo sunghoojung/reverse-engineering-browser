@@ -67,7 +67,7 @@ void DescribeFixtureScripts(NativeRequestStackWalk& walk, const std::vector<std:
   }
 }
 
-// What Blink's walker does at an async task's scheduling: at most 128
+// What Blink's walker does at an async task's scheduling: at most 256
 // innermost frames, then the scripts they name.
 reb::NativeRequestStackWalkResult FixtureTaskWalk(NativeRequestStackWalk& walk) {
   if (scenario.task_depth == 0) {
@@ -317,8 +317,11 @@ std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
   Configure(queue, 45);
   scenario.depth = reb::kNativeRequestStackSyncLimit;
   scenario.scripts = reb::kNativeRequestStackSyncLimit;
+  const auto before_sources = reb::mojom::NativeProbeHost::artifacts.load();
   assert(StackPayload(Start(queue, 4002).second).scripts == reb::kNativeRequestStackSyncLimit);
   Drain(queue);
+  // Sources are bounded by bytes, not by a small count: every script is sent.
+  assert(reb::mojom::NativeProbeHost::artifacts - before_sources > 513);
   scenario.scripts = 3;
   transport.Disable();
   std::cout << "PASS request stacks: disabled, depth bounds, Wasm, await, dedupe, "
@@ -495,12 +498,12 @@ std::uint8_t Kind(const reb::NativeAsyncTaskKind kind) {
   Drain(queue);
   NativeRequestStackWalk::ExitAsyncTask(saved);
 
-  // A deep scheduling stack keeps its innermost 128 frames and says so.
+  // A deep scheduling stack keeps its innermost 256 frames and says so.
   scenario.task_depth = 500;
   scenario.task_seed = 7000;
   const auto deep = NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kEvent);
   const auto bounded = TaskPayload(Pop(queue));
-  assert(bounded.recorded == 128 && (bounded.flags & reb::kNativeTaskSegmentBounded) != 0);
+  assert(bounded.recorded == 256 && (bounded.flags & reb::kNativeTaskSegmentBounded) != 0);
   Drain(queue);
   scenario.task_depth = 3;
 
@@ -585,7 +588,7 @@ std::uint8_t Kind(const reb::NativeAsyncTaskKind kind) {
   scenario = {};
   transport.Disable();
   std::cout << "PASS async task chains and navigation stacks: disabled, scheduling-time segments "
-               "sent once, nested and microtask links, cut, 32-segment bound, 128-frame bound, "
+               "sent once, nested and microtask links, cut, 32-segment bound, 256-frame bound, "
                "ring eviction, retention, location kind and form submission\n";
 }
 }  // namespace

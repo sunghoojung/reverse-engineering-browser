@@ -24,7 +24,6 @@ inline constexpr std::size_t kNativeRequestStackFrameCapacity =
 inline constexpr std::size_t kNativeRequestStackDigestTable = 256;
 inline constexpr std::size_t kNativeRequestStackScriptTable = 1024;
 inline constexpr std::uint32_t kNativeRequestStackArtifactBudget = 1024;
-inline constexpr std::uint32_t kNativeRequestStackSourceBudget = 512;
 inline constexpr std::uint64_t kNativeRequestStackSourceBytes = 64ULL * 1024ULL * 1024ULL;
 inline constexpr std::size_t kNativeAsyncTaskRing = 2048;
 inline constexpr std::size_t kNativeTaskAttributionTable = 4096;

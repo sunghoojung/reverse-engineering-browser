@@ -1289,7 +1289,7 @@ the source budget is spent. Exactly one of bit 1, bit 2, bit 3, bit 4 or none
 (a Wasm module, never re-sent) holds. A digest is present unless bit 2 or 3.
 
 JavaScript sources are retained as kind 1 `javascript`, capture origin 13
-`stack_script`, at most 512 sources and 64 MiB per renderer configuration, with
+`stack_script`, at most 64 MiB of source per renderer configuration, with
 the script URL, or the document URL for an inline script, as the artifact URL.
 Wasm modules are not re-sent: the compile-time Wasm artifacts join by SHA-256.
 A network script the body tee retained also joins by SHA-256.
@@ -1381,7 +1381,7 @@ without `--reb-request-stacks`.
 
 At scheduling time Blink's async task probes
 (`probe::AsyncTaskContext::Schedule`, the identities DevTools' async stacks
-use) walk the innermost 128 frames when script is on the document main thread.
+use) walk the innermost 256 frames when script is on the document main thread.
 `probe::AsyncTask` marks that task's segment current while it runs. Promise
 reactions use Chromium's task attribution: a top-level
 `V8ScriptRunner::CallFunction` inside a task forks the current task state
@@ -1414,9 +1414,9 @@ sent in this configuration, with its artifact. Payload 128 bytes:
 | 0 | 2 | payload version, `1` |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | task kind, 1 to 8 |
-| 5 | 1 | flags: bit 0 the walk stopped at 128 frames |
+| 5 | 1 | flags: bit 0 the walk stopped at 256 frames |
 | 6 | 2 | reserved, zero |
-| 8 | 4 | recorded frames, 1 to 128 (128 with bit 0) |
+| 8 | 4 | recorded frames, 1 to 256 (256 with bit 0) |
 | 12 | 4 | Wasm frames |
 | 16 | 4 | distinct scripts |
 | 20 | 12 | reserved, zero |
@@ -1439,9 +1439,9 @@ or the one a microtask's attribution names, then the task that scheduled it.
 | ---: | ---: | --- |
 | 0 | 1 | task kind |
 | 1 | 1 | state: 1 captured, 4 not retained (Artifact off), 5 not retained (budget), 6 not recorded (kind 9 only) |
-| 2 | 1 | flags: bit 0 the walk stopped at 128 frames |
+| 2 | 1 | flags: bit 0 the walk stopped at 256 frames |
 | 3 | 1 | reserved, zero |
-| 4 | 4 | frames in its stack: 1 to 128, or 0 for kind 9 |
+| 4 | 4 | frames in its stack: 1 to 256, or 0 for kind 9 |
 | 8 | 8 | reserved, zero |
 | 16 | 32 | its `async_task_stack` artifact digest; zero for kind 9 |
 
@@ -1508,8 +1508,8 @@ each segment under its separator (`setTimeout`, `Microtask` and so on),
 
 - Flag off: one atomic load per scheduling, task run, top-level callback and
   navigation.
-- Active: a scheduling walk of at most 128 frames, one SHA-256 of at most
-  2,080 bytes, one ring entry, and an artifact only for a new stack. A
+- Active: a scheduling walk of at most 256 frames, one SHA-256 of at most
+  4,128 bytes, one ring entry, and an artifact only for a new stack. A
   top-level callback inside a task allocates one task state.
 - Fixed tables allocated with the provider, about 240 KiB: 2,048 segments,
   4,096 task attribution IDs, 8 pending form submissions.
@@ -1520,7 +1520,7 @@ each segment under its separator (`setTimeout`, `Microtask` and so on),
 to 48 and their envelopes; `make request-stack-wire-check` compares those
 verdicts with Python and the Initiator decoders and renders segments and a
 navigation stack. `make native-probe-admission-check` drives segments, nested
-and microtask links, cuts, the 32-segment and 128-frame bounds, ring eviction,
+and microtask links, cuts, the 32-segment and 256-frame bounds, ring eviction,
 retention, navigation kinds and form submissions through the real sink.
 `make native-network-capture-check` emits and validates the browser link. The
 backend resolves segment frames and navigation stacks.

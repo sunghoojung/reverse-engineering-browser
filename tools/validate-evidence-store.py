@@ -283,8 +283,8 @@ def valid_async_task_stack(event: dict, payload: bytes) -> bool:
     recorded, wasm, scripts = (int.from_bytes(payload[i:i + 4], "little") for i in (8, 12, 16))
     return (parentless_stack_envelope(event, payload) and payload[:4] == b"\x01\x00\x80\x00"
             and 1 <= kind <= 8 and flags & ~1 == 0 and payload[6:8] == b"\0\0"
-            and not any(payload[20:32]) and not any(payload[80:]) and 1 <= recorded <= 128
-            and (not flags & 1 or recorded == 128) and wasm <= recorded and scripts <= recorded
+            and not any(payload[20:32]) and not any(payload[80:]) and 1 <= recorded <= 256
+            and (not flags & 1 or recorded == 256) and wasm <= recorded and scripts <= recorded
             and any(payload[32:64]) and valid_stack_frame(payload[64:80], False))
 
 

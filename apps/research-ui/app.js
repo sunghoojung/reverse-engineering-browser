@@ -7329,11 +7329,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         });
         elements.sourceCode.replaceChildren(...nodes);
         elements.sourceCodeWrap.dataset.gutterDigits = String(Math.max(5, String(index.lineCount).length));
+        // Why the whitespace layout is used is stated in #source-limit-notice; the label stays short.
         const layout = view.formatPending ? ' · formatting…' : view.formatError ? ` · ${view.formatError}`
-          : view.formatted ? ` · ${view.formatted.engine === 'oxc' ? 'Oxc layout' : `whitespace layout${view.formatNotice ? `: ${view.formatNotice}` : ''}`}` : '';
+          : view.formatted ? ` · ${view.formatted.engine === 'oxc' ? 'Oxc layout' : 'whitespace layout'}` : '';
         elements.sourceLanguage.textContent = view.wasmRows ? 'WASM disassembly · byte offsets'
           : `${sourceSyntaxLabel(highlighter.language)}${!colors ? ' · coloring…' : colors.truncated ? ' · color limit reached' : ''}${layout}`;
-        elements.sourceLanguage.title = elements.sourceLanguage.textContent;
+        elements.sourceLanguage.title = `${elements.sourceLanguage.textContent}${view.formatted?.engine !== 'oxc' && view.formatNotice ? `: ${view.formatNotice}` : ''}`;
         elements.sourceCode.hidden = false;
         elements.sourceCodeEmpty.hidden = true;
         renderSourceWindowControls();
@@ -7410,7 +7411,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       function syncSourceDisplayControls(source, view) {
-        const limit = sourceLimitText(source, view);
+        // The full-width row above the code states the viewer's limits, and why a
+        // pretty-printed view uses the whitespace layout instead of Oxc's (such as a parse failure).
+        const fallback = view?.formatted && view.formatted.engine !== 'oxc' && view.formatNotice && !state.sourceDeobfuscated
+          ? `Pretty-printed with the whitespace layout because ${view.formatNotice}.` : '';
+        const limit = [sourceLimitText(source, view), fallback].filter(Boolean).join(' ');
         if (elements.sourceLimitNotice) {elements.sourceLimitNotice.textContent = limit; elements.sourceLimitNotice.hidden = !limit;}
         // The status bar names the evidence state; the full provenance is its tooltip.
         const label = sourceViewLabel(source, view);

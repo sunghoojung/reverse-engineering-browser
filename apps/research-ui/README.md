@@ -1455,8 +1455,8 @@ lexer state where it starts. The page shown stays while the next is read, and
 Find searches the complete evidence text and opens the page that shows each
 match. While the first page is read the original stays on screen. If
 the source does not parse, the backend is unavailable, or the text is derived,
-truncated or another language, the in-page formatter is used and the
-status bar says so. It runs in a Web Worker (on the page, after one task, where
+truncated or another language, the in-page formatter is used: the status bar
+names the whitespace layout and the row above the code says why. It runs in a Web Worker (on the page, after one task, where
 workers are unavailable). It can format either the original evidence or the
 active deobfuscated representation, so an unchanged deobfuscation result does
 not leave a minified bundle on one line. Pretty printing changes only display

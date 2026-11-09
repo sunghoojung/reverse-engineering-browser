@@ -341,6 +341,28 @@ void CheckStreams() {
     Expect(Receive(receiver, sized) == Status::kInvalid, "an open header declares no size");
   }
   {
+    // A store that failed answers a checkpoint under the snapshot's ID, as the
+    // writer expects, so the refusal is not mistaken for a lost connection.
+    const std::filesystem::path failed_store = store / "failed";
+    reb::ArtifactReceiver failed(failed_store, Limits());
+    const auto failed_manifest = failed_store / "manifest.jsonl";
+    Expect(Receive(failed, Frame(1, "one();")) == Status::kAccepted &&
+               Receive(failed, Open(50)) == Status::kAccepted &&
+               Receive(failed, Chunk(Op::kData, 50, "ab")) == Status::kAccepted,
+           "store with an open stream before its failure");
+    struct stat metadata {};
+    Expect(stat(failed_manifest.c_str(), &metadata) == 0, "failed store manifest inode");
+    g_failing_inode = metadata.st_ino;
+    g_failures_left = 1000;
+    Expect(Receive(failed, Frame(2, "two();")) == Status::kIoError,
+           "the store fails on an unrecoverable manifest append");
+    g_failures_left = 0;
+    g_failing_inode = 0;
+    Expect(Receive(failed, Chunk(Op::kCheckpoint, 50, "", 60, 2)) == Status::kIoError &&
+               failed.LastArtifactId() == 60,
+           "a failed store refuses a checkpoint under the snapshot's ID");
+  }
+  {
     auto limits = Limits();
     limits.allow_sensitive = true;
     reb::ArtifactReceiver checkpoints(store / "checkpoints", limits);

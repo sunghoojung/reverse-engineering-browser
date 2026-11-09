@@ -1011,11 +1011,12 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveStreamFrame(std::istream& stream,
     return Reject(ArtifactReceiveStatus::kInvalid,
                   "Artifact stream does not match the authenticated connection");
   }
+  // Every answer to a checkpoint names its snapshot, refusals included.
+  if (frame.op == ArtifactStreamOp::kCheckpoint) {
+    last_artifact_id_ = frame.value;
+  }
   const auto found = streams_.find(frame.artifact_id);
   if (found == streams_.end() || found->second->header.session_id != frame.session_id) {
-    if (frame.op == ArtifactStreamOp::kCheckpoint) {
-      last_artifact_id_ = frame.value;
-    }
     return RejectFrame(stream, 0, frame.data_size, ArtifactReceiveStatus::kInvalid,
                        "Unknown artifact stream");
   }
@@ -1071,7 +1072,6 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveStreamFrame(std::istream& stream,
 
 ArtifactReceiveStatus ArtifactReceiver::Checkpoint(Stream& open, const ArtifactStreamFrame& frame) {
   const std::uint64_t snapshot_id = frame.value;
-  last_artifact_id_ = snapshot_id;
   if (snapshot_id == 0 || open.creator_pending || frame.content_size != open.size) {
     DropStream(frame.artifact_id);
     return Reject(ArtifactReceiveStatus::kInvalid, "Invalid artifact stream checkpoint");

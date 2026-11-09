@@ -384,12 +384,21 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
     list.append(...(items.length ? items : [trafficNode('li', 'traffic-headers-note', empty)]));
     section.append(list);
   };
-  const where = (request, list) => `${request.method ?? ''} ${request.path ?? request.id}${list.hop ? ` · hop ${list.hop}` : ''}`.trim();
+  const sessionId = scripts.find(record => record.frame)?.sessionId ?? selectedSession;
+  const read = sessionId ? trafficCookieProvenanceRead(sessionId, name, rerender) : {status: 'unavailable'};
+  const answered = read.status === 'ready';
+  const unknownAbsence = what => !answered ? `Not in the loaded requests; ${read.status === 'error' ? 'the store could not be asked' : read.status === 'loading' ? 'asking the store' : 'the store cannot be asked here'}.`
+    : read.complete ? what
+      : 'Not in the scanned range: the backend reads the newest retained network records, so older records were not read.';
+  const backendWhere = item => `request ${item.request_id}${item.hop ? ` · hop ${item.hop}` : ''}`;
+  const seen = new Set([...setBy, ...sentWith].map(({list}) => list.sequenceNumber));
+  const beyond = items => (answered ? items : []).filter(item => !seen.has(item.sequence_number));
+  const where = (request, list) => `${request.method ?? ''} ${request.path ?? request.id}${request.urlTruncated ? '… (truncated)' : ''}${list.hop ? ` · hop ${list.hop}` : ''}`.trim();
   group('Set by responses', setBy.map(({request, list, cookie}) => entry(
-    `${where(request, list)}${cookie.blocked ? ` — ${trafficCookieBlockedText(cookie, true)}` : ''}`, request)),
-  'No retained response set it.');
-  const sessionId = scripts.find(record => record.frame)?.sessionId;
-  const frames = sessionId ? trafficCookieCallFrames(sessionId, name, rerender) : null;
+    `${where(request, list)}${cookie.blocked ? ` — ${trafficCookieBlockedText(cookie, true)}` : ''}`, request))
+    .concat(beyond(read.setBy ?? []).map(item => entry(`${backendWhere(item)}${item.blocked ? ` — ${trafficCookieBlockedText({exclusions: item.exclusion_reasons ?? []}, true)}` : ''}`))),
+  unknownAbsence('No retained response set it.'));
+  const frames = answered ? read.frames : null;
   group('Script access', scripts.map(record => {
     const resolved = record.frame ? frames?.get(`${record.processId}:${record.sequenceNumber}`) : null;
     const item = entry(`${record.api}${record.count > 1 ? ` × ${record.count}` : ''} in frame ${record.frameId}` +

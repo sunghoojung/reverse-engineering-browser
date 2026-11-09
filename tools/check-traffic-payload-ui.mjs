@@ -93,7 +93,24 @@ render(request(null), null);
 assert.equal(section('query'), null, 'a target without a query has no query section');
 render(request(null, {target: '/collect?'}), null);
 assert.match(text('[data-section="query"]'), /query string is empty/);
-console.log('PASS Payload query parameters: decoded and encoded, inert markup, copy, cut targets noted at the top, host-only and empty queries');
+// A retained full target supplies the whole query; only an unavailable one keeps a notice.
+const fullQuery = `/collect?${Array.from({length: 40}, (_, index) => `param${index}=value${index}`).join('&')}`;
+const truncated = request(null, {target: fullQuery.slice(0, 116), path: `https://api.test${fullQuery.slice(0, 116)}`, urlTruncated: true,
+  targetLength: fullQuery.length, fullTarget: {retention: 'retained'}});
+api.renderTrafficPayload(panel, truncated, null, {status: 'loading'});
+assert.match(text('.traffic-payload-notices'), /reading the retained full target/);
+assert(queryRows().length < 40, 'the prefix shows the captured parameters while the target loads');
+api.renderTrafficPayload(panel, truncated, null, {status: 'ready', complete: true, text: fullQuery, url: 'https://api.test', loaded: fullQuery.length});
+assert.equal(queryRows().length, 40, 'the retained full target gives every parameter');
+assert.equal(queryRows().at(-1), 'param39value39');
+assert.equal(panel.querySelector('.traffic-payload-notices'), null, 'a whole target has no cut notice');
+api.renderTrafficPayload(panel, truncated, null, {status: 'missing', unknown: true});
+assert.match(text('.traffic-payload-notices'), /not in the scanned range of the artifact manifest/);
+api.renderTrafficPayload(panel, truncated, null, {status: 'refused', reason: 'x'});
+assert.match(text('.traffic-payload-notices'), /was not retained by the artifact receiver/);
+api.renderTrafficPayload(panel, truncated, null, {status: 'error', error: 'timed out after 10 seconds'});
+assert.match(text('.traffic-payload-notices'), /could not be read: timed out after 10 seconds/);
+console.log('PASS Payload query parameters: decoded and encoded, inert markup, copy, cut targets noted at the top, host-only and empty queries, the full retained target parsed whole');
 
 // JSON: a tree that starts with the root open, plus pretty-printed source.
 const json = `{"sitekey":"site-key","note":${JSON.stringify(markup)},"nested":{"list":[1,2.5,true,null],"deep":{"x":"y"}},"big":12345678901234567890}`;

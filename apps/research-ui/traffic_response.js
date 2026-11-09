@@ -103,12 +103,14 @@ function trafficImageType(bytes, mime) {
 }
 
 // `open`: the bytes may end inside a character, which is left out rather than failed.
+// Text that is not UTF-8 shows with replacement characters; control bytes mean binary.
 function trafficResponseText(bytes, open = false) {
   try {
     const text = new TextDecoder('utf-8', {fatal: true}).decode(bytes, {stream: open});
-    return /\u0000/.test(text) ? null : text;
+    return /\u0000/.test(text) ? null : {text, lossy: false};
   } catch {
-    return null;
+    if (bytes.some(byte => (byte < 32 && ![9, 10, 12, 13].includes(byte)) || byte === 127)) return null;
+    return {text: new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(bytes, {stream: open}), lossy: true};
   }
 }
 
@@ -299,12 +301,14 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     const count = trafficNode('span', 'traffic-response-count', !options.query ? '' : !findCount ? 'No matches'
       : `${shown.current + 1} of ${findCount.toLocaleString('en-US')}${shown.truncated ? '+' : ''}`);
     count.setAttribute('aria-live', 'polite');
-    bar.append(count);
+    const status = trafficNode('span', 'traffic-response-status');
+    status.setAttribute('role', 'status');
+    bar.append(count, status);
     bar.addEventListener('click', event => {
       const control = event.target.closest('button')?.dataset.control;
       if (!control) return;
       if (control === 'copy') {
-        void navigator.clipboard?.writeText(text);
+        void trafficCopyText(text, status, copyNote);
         return;
       }
       options[control] = !options[control];
@@ -316,6 +320,7 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       options.current = 0;
       container.dataset.renderKey = '';
       onChange();
+      container.querySelector('.code-view-mark.is-current')?.scrollIntoView?.({block: 'center'});
     });
     find.addEventListener('keydown', event => {
       if (event.key !== 'Enter' || !findCount) return;
@@ -331,7 +336,8 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
   function responseBody(container, request, artifact, view) {
     const nodes = [];
     const bytes = view.bytes;
-    const text = trafficResponseText(bytes, !view.complete || request?.responseBody?.state === 'captured_truncated');
+    const decoded = trafficResponseText(bytes, !view.complete || TRAFFIC_RESPONSE_OPEN_ENDED.has(request?.responseBody?.state));
+    const text = decoded?.text ?? null;
     const binary = text === null;
     const source = {kind: 'response_body', mime_type: artifact.mime_type, url: artifact.url};
     const language = binary ? 'bytes' : sourceSyntaxLanguage(source);
@@ -339,13 +345,17 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     let shown;
     let value = text;
     let note = null;
+    let copyNote = 'Copied.';
     let layout = null;
     const raw = trafficNode('p', 'traffic-body-note code-view-raw');
     raw.setAttribute('role', 'status');
     if (binary || options.hex) {
       value = formatWasmHex(bytes.subarray(0, TRAFFIC_RESPONSE_HEX_BYTES));
       shown = codeView(value, artifact, 'text');
-      if (bytes.length > TRAFFIC_RESPONSE_HEX_BYTES) note = `Hex shows the first ${trafficResponseBytes(TRAFFIC_RESPONSE_HEX_BYTES)}.`;
+      if (bytes.length > TRAFFIC_RESPONSE_HEX_BYTES) {
+        note = `Hex shows the first ${trafficResponseBytes(TRAFFIC_RESPONSE_HEX_BYTES)}.`;
+        copyNote = `Copied the hex of the first ${trafficResponseBytes(TRAFFIC_RESPONSE_HEX_BYTES)} of ${trafficResponseBytes(bytes.length)}.`;
+      }
     } else {
       if (options.pretty && prettyable && view.complete) {
         layout = layouts.layout(artifact, text, source, null);
@@ -356,7 +366,9 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       }
       shown = codeView(value, artifact, language, {layout: layout?.status === 'ready' ? layout : null, status: raw});
     }
-    nodes.push(toolbar(container, binary, prettyable, shown, value));
+    if (!binary && !view.complete && !options.hex) copyNote = `Copied the ${trafficResponseBytes(bytes.length)} loaded so far; ${trafficResponseBytes(view.total - bytes.length)} more are retained.`;
+    nodes.push(toolbar(container, binary, prettyable, shown, value, copyNote));
+    if (decoded?.lossy && !options.hex) nodes.push(trafficNode('p', 'traffic-body-note', 'Not valid UTF-8; shown with replacement characters. Hex shows the exact bytes.'));
     if (note) nodes.push(trafficNode('p', 'traffic-body-note', note));
     nodes.push(shown.code);
     if (layout?.status === 'ready' && layout.map) nodes.push(raw);
@@ -397,8 +409,10 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       figure.append(img, caption);
       return [figure];
     }
-    const text = trafficResponseText(bytes, record?.state === 'captured_truncated');
-    if (text === null) return [trafficNode('p', 'traffic-body-note', 'Binary body: no preview. The Response tab shows it as hex.')];
+    const decoded = trafficResponseText(bytes, TRAFFIC_RESPONSE_OPEN_ENDED.has(record?.state));
+    if (decoded === null) return [trafficNode('p', 'traffic-body-note', 'Binary body: no preview. The Response tab shows it as hex.')];
+    const {text, lossy} = decoded;
+    const lossyNote = lossy ? [trafficNode('p', 'traffic-body-note', 'Not valid UTF-8; shown with replacement characters. The Response tab shows the bytes as hex.')] : [];
     const language = sourceSyntaxLanguage({kind: 'response_body', mime_type: artifact.mime_type, url: artifact.url});
     if (language === 'json' || /^\s*[[{]/.test(text)) {
       try {
@@ -408,11 +422,11 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       }
     }
     if (language === 'markup') {
-      return [trafficNode('p', 'traffic-body-note', 'Markup is shown as source and never rendered.'), codeView(text, artifact, 'markup', {find: false}).code];
+      return [...lossyNote, trafficNode('p', 'traffic-body-note', 'Markup is shown as source and never rendered.'), codeView(text, artifact, 'markup', {find: false}).code];
     }
     const pre = trafficNode('pre', 'traffic-body-text', text);
     pre.tabIndex = 0;
-    return [pre];
+    return [...lossyNote, pre];
   }
 
   function render(container, request, tab) {
@@ -448,7 +462,7 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       row.append(trafficNode('span', '', label), valueNode);
       nodes.push(row);
     }
-    const note = contentNote(record, artifact, view ?? {}, refusal);
+    const note = contentNote(record, artifact, view ?? {}, refusal, found);
     if (note) nodes.push(trafficNode('p', 'traffic-body-note', note));
     if (view?.status === 'ready') nodes.push(...(tab === 'preview' ? preview(artifact, view, record) : responseBody(container, request, artifact, view)));
     container.replaceChildren(...nodes);

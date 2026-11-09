@@ -3779,7 +3779,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!headersInspector.hidden || !cookiesInspector.hidden) {
           elements.requestInspector.hidden = true;
           document.querySelector('.detail-pane').classList.add('showing-exchange');
-          if (!headersInspector.hidden) renderTrafficHeaders(headersInspector, request, renderInspector);
+          if (!headersInspector.hidden) {
+            state.requestBodyViewKey = requestContentViewKey(request);
+            renderTrafficHeaders(headersInspector, request, renderInspector, requestTargetView(request));
+          }
           else renderTrafficCookies(cookiesInspector, request, renderInspector, {requests: state.requests, events: state.events, selectRequest,
             openFrame: openResolvedFrame});
           return;

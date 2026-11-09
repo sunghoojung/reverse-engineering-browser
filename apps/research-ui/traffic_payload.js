@@ -35,8 +35,9 @@ function trafficPayloadPair(pair, encoded = trafficPayloadPrefs.encoded) {
   return encoded ? {name: pair.name, value: pair.value} : {name: pair.decodedName ?? pair.name, value: pair.decodedValue ?? pair.value};
 }
 
-// The query of the captured target, never of a reconstructed URL.
-function trafficPayloadQuery(request) {
+// The query of the captured target, never of a reconstructed URL. A retained full
+// target replaces the 116-byte row prefix; the prefix's notice stays only until it does.
+function trafficPayloadQuery(request, targetView = null) {
   if (!request) return null;
   if (request.hostOnly) return {pairs: null, note: 'Path and query are recorded only in content capture sessions.'};
   let target = typeof request.target === 'string' ? request.target : '';
@@ -47,9 +48,18 @@ function trafficPayloadQuery(request) {
       target = '';
     }
   }
+  const whole = request.urlTruncated && targetView?.status === 'ready' && targetView.complete;
+  if (whole) target = targetView.text;
+  const retained = request.fullTarget?.retention === 'retained';
+  const reading = !targetView || targetView.status === 'loading';
+  const unread = targetView?.status === 'missing' ? (targetView.unknown ? 'is not in the scanned range of the artifact manifest' : 'is not in the artifact manifest')
+    : targetView?.status === 'refused' ? 'was not retained by the artifact receiver'
+      : targetView?.status === 'error' ? `could not be read: ${targetView.error}` : 'is not readable here';
+  const cut = !request.urlTruncated || whole ? ''
+    : retained && reading ? `Showing the captured start of the ${request.targetLength}-byte path and query; reading the retained full target.`
+      : retained ? `Showing the captured start of the ${request.targetLength}-byte path and query; the retained full target ${unread}.`
+        : `Only the first part of the ${request.targetLength}-byte path and query was captured; later parameters are missing and the last one shown may be cut.`;
   const at = target.indexOf('?');
-  const cut = request.urlTruncated
-    ? `Only the first part of the ${request.targetLength}-byte path and query was captured; later parameters are missing and the last one shown may be cut.` : '';
   return at < 0 ? (cut ? {pairs: null, cut} : null) : {pairs: trafficPayloadPairs(target.slice(at + 1)), raw: target.slice(at + 1), cut};
 }
 
@@ -812,12 +822,13 @@ function renderTrafficPayload(container, request, view, targetView = null) {
     shown.model = shown.source = null;
   }
   const key = JSON.stringify([identity, body, request?.path, request?.target, request?.urlTruncated, request?.hostOnly,
+    targetView?.status ?? null, targetView?.loaded ?? null, targetView?.unknown ?? null, targetView?.error ?? targetView?.reason ?? '',
     view?.status ?? null, view?.error ?? view?.reason ?? '', view?.verified ?? null, view?.loaded ?? null,
     Boolean(view?.loadingMore), view?.moreError ?? '', Boolean(shown.model)]);
   if (container.dataset.renderKey === key) return;
   container.dataset.renderKey = key;
   shown.dispose();
-  const query = trafficPayloadQuery(request);
+  const query = trafficPayloadQuery(request, targetView);
   const panel = {
     search() {
       const raw = shown.find.query, needle = raw.toLowerCase();

@@ -221,12 +221,64 @@ const large = 'x'.repeat(2 * 1024 * 1024 + 100);
 const largeRequest = request(record(retain(large, 'text/plain')));
 await show(largeRequest);
 assert.match(notes(), /Showing the first 2,097,152 bytes of 2,097,252 bytes retained/);
-await show(largeRequest, 'preview');
-assert.match(notes(), /Preview needs every retained byte/);
-await show(largeRequest);
+// Show the next 2 MiB keeps the reader's place in the shown text.
+const beforeMore = panel.querySelector('.traffic-response-code');
+beforeMore.scrollTop = 40;
 panel.querySelector('.traffic-body-more').click();
 await until(() => !panel.querySelector('.traffic-body-more'), 'the next range completes the body');
 assert.doesNotMatch(notes(), /Showing the first|could not be rechecked/);
+assert.equal(panel.querySelector('.traffic-response-code').scrollTop, 40, 'the next range keeps the scroll position');
+// Preview reads every range without a click, then shows the whole body.
+const autoRequest = request(record(retain(JSON.stringify({text: 'x'.repeat(2 * 1024 * 1024 + 100)}), 'application/json')));
+await show(autoRequest, 'preview');
+await until(() => panel.querySelector('.traffic-payload-tree'), 'Preview pages the whole body itself');
+assert.equal(reads.filter(url => url.includes(`/${state.artifacts.at(-1).artifact_id}/content`)).length, 2, 'Each retained range is read once');
+// Copy says what it wrote and how much remains, and survives a denied clipboard.
+const partialRequest = request(record(retain('y'.repeat(2 * 1024 * 1024 + 50), 'text/plain')));
+await show(partialRequest);
+await press('copy');
+await settle();
+assert.match(panel.querySelector('.traffic-response-status').textContent, /Copied the 2,097,152 bytes loaded so far; 50 bytes more are retained/);
+const clipboard = context.navigator.clipboard.writeText;
+context.navigator.clipboard.writeText = async () => {throw new Error('denied');};
+await press('copy');
+await settle();
+assert.match(panel.querySelector('.traffic-response-status').textContent, /Copy failed/);
+context.navigator.clipboard.writeText = clipboard;
+// Typing in Find reveals the first match, and Enter then moves to the next.
+await show(request(record(jsonArtifact)));
+let revealed = 0;
+const scrollIntoView = window.HTMLElement.prototype.scrollIntoView;
+window.HTMLElement.prototype.scrollIntoView = function reveal() {revealed += 1;};
+const typing = panel.querySelector('[data-control="find"]');
+typing.value = 'deep';
+typing.dispatchEvent(new window.Event('input'));
+await settle();
+assert.equal(panel.querySelector('.code-view-mark.is-current').textContent, 'deep');
+assert(revealed > 0, 'typing reveals the first match');
+window.HTMLElement.prototype.scrollIntoView = scrollIntoView;
+const emptied = panel.querySelector('[data-control="find"]');
+emptied.value = '';
+emptied.dispatchEvent(new window.Event('input'));
+await settle();
+// Text that is not UTF-8 keeps a text view and enables Hex.
+const latin = retain(Uint8Array.from(Buffer.from('caf\xe9 cr\xe8me\n', 'latin1')), 'text/plain');
+await show(request(record(latin)));
+assert.equal(panel.querySelector('[data-control="hex"]').disabled, false);
+assert.match(notes(), /Not valid UTF-8; shown with replacement characters/);
+assert.match(panel.querySelector('.traffic-response-code').textContent, /caf\uFFFD cr\uFFFDme/);
+await show(request(record(latin)), 'preview');
+assert.match(notes(), /Not valid UTF-8/);
+// A partial, aborted or cancelled UTF-8 body ending inside a character is text.
+for (const name of ['partial', 'aborted', 'cancelled', 'captured_truncated']) {
+  const cut = retain(new Uint8Array([...Buffer.from('{"k":"caf'), 0xc3]), 'application/json');
+  await show(request(record(cut, {state: name, partialIndex: 1, capturedLength: '10', bodyLength: '20'})));
+  assert.equal(panel.querySelector('[data-control="hex"]').disabled, false, `${name} keeps a text view`);
+  assert.doesNotMatch(panel.querySelector('.traffic-response-code').textContent, /^00000000/, `${name} is not shown as hex`);
+  assert.doesNotMatch(notes(), /Not valid UTF-8/, `${name} has no lossy notice: the character was cut`);
+  await show(request(record(cut, {state: name, partialIndex: 1, capturedLength: '10', bodyLength: '20'})), 'preview');
+  assert.doesNotMatch(panel.textContent, /Binary body/, `${name} keeps a preview`);
+}
 // A range that ends inside a character is still text.
 await show(request(record(retain('a'.repeat(2 * 1024 * 1024 - 1) + 'é' + 'b'.repeat(100), 'text/plain'))));
 assert.match(notes(), /Showing the first 2,097,152 bytes/);

@@ -156,11 +156,11 @@ function trafficHeaderBlockSection(id, title, block, rerender, extraNote = '') {
   return {section, key: `${id}|${block.sequenceNumber}|${view?.status ?? block.state}`};
 }
 
-function trafficHeadersGeneral(request, hops) {
+function trafficHeadersGeneral(request, hops, targetView) {
   const last = hops.at(-1);
   const response = last?.response.find(block => block.source === 'browser');
   const provisional = hops[0]?.request.find(block => block.source === 'browser');
-  const rows = [['Request URL', request.hostOnly ? `${request.path} (host only)` : request.path],
+  const rows = [['Request URL', trafficRequestUrl(request, targetView)],
     ['Request method', request.method],
     ['Status code', response?.statusCode ? String(response.statusCode) : String(request.status ?? 'Not captured')],
     ['Remote address', response?.remoteAddress ? `${response.remoteAddress}:${response.remotePort}` : 'Not captured'],
@@ -177,14 +177,14 @@ function trafficHeadersGeneral(request, hops) {
   return {section, key: JSON.stringify(rows)};
 }
 
-function renderTrafficHeaders(container, request, rerender) {
+function renderTrafficHeaders(container, request, rerender, targetView = null) {
   if (!request) {
     container.replaceChildren(trafficNode('div', 'exchange-no-selection', 'Select a request to inspect its headers.'));
     container.dataset.renderKey = '';
     return;
   }
   const hops = trafficHeaderHops(request);
-  const parts = [trafficHeadersGeneral(request, hops)];
+  const parts = [trafficHeadersGeneral(request, hops, targetView)];
   const malformed = (request.headerBlocks ?? []).filter(block => block.malformed).length;
   let message = '';
   if (!Array.isArray(request.headerBlocks)) message = 'This row has no native header record.';

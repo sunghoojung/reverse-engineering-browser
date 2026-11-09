@@ -56,6 +56,7 @@ pub mod wasm;
 mod worker;
 mod workspace;
 mod workspace_lease;
+mod xrefs;
 pub use app::App;
 pub use config::Options;
 pub use endpoint::{PublishedEndpoint, has_live_publisher};

@@ -1129,6 +1129,61 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // The dock follows the selection, lists recorded links only and is keyboard
+  // reachable. Long values stay inert text and truncate with an ellipsis.
+  @MainActor
+  func test24CrossReferencesDock() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      try await ui.click("#screen-traffic .request-row", containing: "adjacent.trace.test")
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      try await ui.key(7, "x")
+      try await ui.waitUntil("document.querySelector('#xrefs-counts').textContent.includes(' in')", "cross-references did not load")
+      let loaded = try await ui.json("""
+        ({counts: document.querySelector('#xrefs-counts').textContent, active: document.activeElement.id,
+          open: document.querySelector('#workspace').dataset.xrefsOpen ?? '',
+          rows: [...document.querySelectorAll('#xrefs-rows .xrefs-row')].map(row => row.innerText),
+          selected: document.querySelector('#xrefs-rows .xrefs-row[aria-selected="true"]')?.innerText ?? ''})
+        """)
+      XCTAssertEqual(loaded["open"] as? String, "true", "\(size.name): X opens the dock")
+      XCTAssertEqual(loaded["active"] as? String, "xrefs-rows", "\(size.name): X moves focus to the list")
+      XCTAssertEqual(loaded["counts"] as? String, "1 in · 2 out", "\(size.name): the request's recorded links: \(loaded)")
+      let firstRows = loaded["rows"] as? [String] ?? []
+      XCTAssertTrue(firstRows.first?.contains("initiator") == true, "\(size.name): the renderer initiator is listed: \(firstRows)")
+      try await assertLayout(ui, "#xrefs-dock", "\(size.name) dock")
+      // The toggle lives in the title bar so the sidebar rail fits the minimum window.
+      try await assertLayout(ui, ".titlebar", "\(size.name) title bar")
+      try await assertLayout(ui, ".sidebar", "\(size.name) sidebar beside the dock")
+      try await assertInert(ui, "\(size.name) dock")
+      try await ui.screenshot("xrefs-dock-\(size.name)")
+
+      try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
+      try await ui.waitUntil("document.querySelector('#xrefs-rows .xrefs-row[aria-selected=\"true\"]')?.innerText.includes('lifecycle')", "ArrowDown did not reach the next row")
+      let identity = try await ui.value("document.querySelector('#xrefs-detail code').textContent") as? String ?? ""
+      XCTAssertTrue(identity.contains("session") && identity.contains("seq"), "\(size.name): correlation identifiers stay reachable: \(identity)")
+
+      try await ui.key(44, "/")
+      try await ui.waitUntil("document.activeElement.id === 'xrefs-filter'", "/ did not focus the filter")
+      try await ui.screenshot("xrefs-filter-\(size.name)")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.activeElement.id === 'xrefs-rows'", "Escape did not return to the list")
+
+      try await ui.click("#theme-toggle")
+      try await ui.waitUntil("document.documentElement.dataset.theme === 'light'", "light theme did not apply")
+      try await assertLayout(ui, "#xrefs-dock", "\(size.name) dock light")
+      try await ui.screenshot("xrefs-dock-light-\(size.name)")
+      try await ui.click("#theme-toggle")
+
+      try await ui.click("#screen-traffic .request-row", containing: "scroll.test")
+      try await ui.waitUntil("document.querySelector('#xrefs-target').textContent.includes('scroll.test')", "the dock did not follow the selection")
+
+      try await ui.click("#xrefs-close")
+      try await ui.waitUntil("document.querySelector('#xrefs-dock').hidden && !document.querySelector('#workspace').dataset.xrefsOpen", "the dock did not close")
+      try await assertLayout(ui, "#screen-traffic", "\(size.name) traffic after dock")
+    }
+  }
+
   @MainActor
   func test5KeyboardFocusOrder() async throws {
     for size in windowSizes {

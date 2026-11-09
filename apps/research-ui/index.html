@@ -7,6 +7,7 @@
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23232136'/%3E%3Crect x='4' y='6' width='24' height='20' rx='2' fill='none' stroke='%23c4a7e7' stroke-width='2'/%3E%3Cpath d='M9 12h4l-2 3 2 3H9m7-6v6m3-6h4l-2 3 2 3h-4' fill='none' stroke='%23e0def4' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'/%3E%3C/svg%3E" />
     <title>Origin Trace - Reverse Engineering Browser</title>
     <link rel="stylesheet" href="app.css">
+    <link rel="stylesheet" href="xrefs_view.css">
   </head>
   <body>
     <div class="app">
@@ -16,6 +17,7 @@
         <span id="session-mode" class="session-mode">Connecting</span>
         <span id="session-content" class="session-mode" data-kind="content" hidden>Content capture</span>
         <button id="invocation-tracking" class="session-tracking" type="button" aria-controls="invocation-sites-details" hidden></button>
+        <button id="xrefs-toggle" class="xrefs-toggle" type="button" aria-controls="xrefs-dock" aria-expanded="false" aria-pressed="false" aria-label="Cross-references" aria-keyshortcuts="X" title="Cross-references for the selection (X)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5h6m-2-2 2 2-2 2M16 15h-6m2-2-2 2 2 2M4 10h12"/></svg></button>
       </header>
 
       <aside id="sidebar" class="sidebar" aria-label="Origin Trace">
@@ -719,6 +721,7 @@
             </div>
           </section>
         </main>
+        <aside id="xrefs-dock" class="xrefs-dock" aria-label="Cross-references" hidden></aside>
         <section id="native-console-panel" class="native-console-panel" aria-label="Native JavaScript console" hidden>
           <header class="native-console-head">
             <strong class="native-console-title">Console</strong>
@@ -867,5 +870,6 @@
 
     <script src="app.js"></script>
     <script src="vm_program_workspace.js"></script>
+    <script src="xrefs_view.js"></script>
   </body>
 </html>

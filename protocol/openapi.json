@@ -6911,6 +6911,255 @@
         }
       }
     },
+    "/api/xrefs": {
+      "get": {
+        "operationId": "get_xrefs",
+        "summary": "Read paged cross-references for one selection",
+        "description": "Lists the evidence that points at a selection and the evidence it points at, using only links the stores already hold: parent events, request initiator and lifecycle, host links from retained dispatch samples, artifact creators, and Wasm import, export and direct-call uses. A link that was not recorded is listed under gaps, and no caller is inferred. Rows are counted across the whole store and returned one window at a time, oldest first, so a selection with a very large number of links stays bounded in memory. Pass the snapshot from the first response on later pages of one list. Read-only: a vm_handler selection uses the VM analysis already cached in this backend and reports analysis-not-ready rather than computing one.",
+        "tags": [
+          "analysis"
+        ],
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "required": true,
+            "description": "What is selected. request and api name an exact event; artifact names a retained artifact, and byte_offset narrows a Wasm artifact to a function or import; vm_handler names a retained handler row.",
+            "schema": {
+              "enum": [
+                "request",
+                "api",
+                "artifact",
+                "vm_handler"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "description": "Session of the selection.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "process_id",
+            "in": "query",
+            "required": false,
+            "description": "Process of the selected event (request, api).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            }
+          },
+          {
+            "name": "sequence_number",
+            "in": "query",
+            "required": false,
+            "description": "Sequence of the selected event (request, api).",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": false,
+            "description": "Request identity of the selected event (request).",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": false,
+            "description": "Artifact identity (artifact, vm_handler).",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "sha256",
+            "in": "query",
+            "required": false,
+            "description": "Interpreter artifact SHA-256 (vm_handler).",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          {
+            "name": "byte_offset",
+            "in": "query",
+            "required": false,
+            "description": "Byte offset of a Wasm import, export or code row (artifact), or of the handler range (vm_handler).",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            }
+          },
+          {
+            "name": "byte_size",
+            "in": "query",
+            "required": false,
+            "description": "Size of the handler range (vm_handler).",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            }
+          },
+          {
+            "name": "instruction_pointer",
+            "in": "query",
+            "required": false,
+            "description": "Narrows a vm_handler to one retained position.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "description": "Pages to return. Counts always cover both directions.",
+            "schema": {
+              "enum": [
+                "in",
+                "out",
+                "both"
+              ],
+              "type": "string",
+              "default": "both"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Rows to skip within the selected direction.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum rows per direction, clamped to 1..512.",
+            "schema": {
+              "type": "integer",
+              "default": 128
+            }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "required": false,
+            "description": "Case-insensitive substring over the names already on the rows. It never reads captured source bodies.",
+            "schema": {
+              "type": "string",
+              "maxLength": 256
+            }
+          },
+          {
+            "name": "snapshot",
+            "in": "query",
+            "required": false,
+            "description": "Reads the event store only up to this byte, so pages of one list stay consistent while capture appends. Use the snapshot value of the first response.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Xrefs"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed selection or paging values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads stored events, the artifact manifest and retained Wasm bytes. Writes nothing and requests no browser mutation. A scan stops at a 30-second deadline and reports coverage.status partial.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/xrefs.rs",
+              "symbol": "run"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/analysis/vm/host-links": {
       "get": {
         "operationId": "get_vm_host_links",
@@ -29122,6 +29371,295 @@
                   }
                 }
               }
+            ]
+          }
+        }
+      },
+      "Xrefs": {
+        "type": "object",
+        "required": [
+          "contract_version",
+          "document_kind",
+          "selection",
+          "filter",
+          "snapshot",
+          "counts",
+          "pages",
+          "gaps",
+          "coverage"
+        ],
+        "properties": {
+          "contract_version": {
+            "const": 1
+          },
+          "document_kind": {
+            "const": "reb-xrefs"
+          },
+          "selection": {
+            "type": "object",
+            "required": [
+              "kind",
+              "status",
+              "label"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "request",
+                  "api",
+                  "artifact",
+                  "vm_handler"
+                ]
+              },
+              "status": {
+                "enum": [
+                  "resolved",
+                  "unavailable"
+                ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          },
+          "filter": {
+            "type": "string"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "counts": {
+            "type": "object",
+            "required": [
+              "in",
+              "out"
+            ],
+            "properties": {
+              "in": {
+                "$ref": "#/components/schemas/XrefCount"
+              },
+              "out": {
+                "$ref": "#/components/schemas/XrefCount"
+              }
+            }
+          },
+          "pages": {
+            "type": "object",
+            "properties": {
+              "in": {
+                "$ref": "#/components/schemas/XrefPage"
+              },
+              "out": {
+                "$ref": "#/components/schemas/XrefPage"
+              }
+            }
+          },
+          "gaps": {
+            "type": "object",
+            "required": [
+              "in",
+              "out"
+            ],
+            "properties": {
+              "in": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/XrefGap"
+                }
+              },
+              "out": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/XrefGap"
+                }
+              }
+            }
+          },
+          "coverage": {
+            "type": "object",
+            "required": [
+              "status",
+              "scanned_bytes",
+              "snapshot_bytes",
+              "malformed_records"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "complete",
+                  "partial"
+                ]
+              },
+              "reason": {
+                "enum": [
+                  "scan-deadline"
+                ]
+              },
+              "scanned_bytes": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "snapshot_bytes": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "malformed_records": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
+      "XrefCount": {
+        "type": "object",
+        "required": [
+          "total",
+          "matching"
+        ],
+        "properties": {
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "matching": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "XrefPage": {
+        "type": "object",
+        "required": [
+          "offset",
+          "limit",
+          "returned",
+          "rows"
+        ],
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "returned": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/XrefRow"
+            }
+          }
+        }
+      },
+      "XrefGap": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason",
+          "name",
+          "detail"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          }
+        }
+      },
+      "XrefRow": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "direction",
+          "kind",
+          "name",
+          "detail",
+          "source",
+          "operation",
+          "state",
+          "evidence",
+          "ids",
+          "time_ns"
+        ],
+        "properties": {
+          "direction": {
+            "enum": [
+              "in",
+              "out"
+            ]
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "observed",
+              "static"
+            ]
+          },
+          "evidence": {
+            "type": "object",
+            "required": [
+              "type",
+              "session_id"
+            ],
+            "properties": {
+              "type": {
+                "enum": [
+                  "event",
+                  "artifact"
+                ]
+              },
+              "session_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              }
+            }
+          },
+          "ids": {
+            "type": "object",
+            "required": [
+              "session_id"
+            ],
+            "properties": {
+              "session_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              }
+            }
+          },
+          "time_ns": {
+            "type": [
+              "string",
+              "null"
             ]
           }
         }

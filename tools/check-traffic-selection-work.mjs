@@ -301,10 +301,18 @@ const eventsOf = (id, records) => Array.from({length: records}, (_, sequence) =>
   t.state.nativeRequests = t.state.nativeRequests.map(request => request.id === newer.id ? {...newer} : request);
   t.api.rebuildTrafficRequests();
   assert.equal(t.state.trafficLoaded.get(newer.id).events.length, 2, 'A later window copy with as many records replaces the pinned one');
+  // F9: without an index answer the list is state.requests itself, so an earlier selection does not stay listed.
+  const other = {...t.state.requests[0]};
+  t.api.selectRequest(other.id);
+  t.state.nativeRequests = t.state.nativeRequests.filter(request => request.id !== other.id && request.id !== newer.id);
+  t.api.rebuildTrafficRequests();
+  assert(!t.state.requests.some(request => request.id === newer.id), 'A row selected earlier leaves the list once the window left it');
+  assert(t.state.requests.some(request => request.id === other.id), 'The current selection stays pinned');
+  assert.deepEqual([...t.state.trafficLoaded.keys()], [other.id], 'Only the selection is pinned without an index');
   // At most 32 rows stay, always including the selection.
   for (let index = 0; index < 40; index++) t.state.trafficLoaded.set(`extra-${index}`, {id: `extra-${index}`, events: [], details: []});
-  t.api.selectRequest(newer.id);
-  assert(t.state.trafficLoaded.size <= 32 && t.state.trafficLoaded.has(newer.id), 'Pinning stays bounded and keeps the selection');
+  t.api.selectRequest(other.id);
+  assert(t.state.trafficLoaded.size <= 32 && t.state.trafficLoaded.has(other.id), 'Pinning stays bounded and keeps the selection');
 }
 {
   // M1: an empty state drops the block, so a resize cannot remount the old rows.

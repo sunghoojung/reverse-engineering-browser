@@ -1286,6 +1286,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         // The selection keeps its last window copy, so it survives leaving the window (#437).
         const selected = state.selectedRequestId === null ? null : state.nativeRequests.find(request => request.id === state.selectedRequestId);
         if (loaded && selected && trafficRecordCount(selected) >= trafficRecordCount(loaded.get(selected.id))) loaded.set(selected.id, selected);
+        // Without an index answer this list is state.requests itself, so only the selection may stay.
+        if (loaded && !trafficIndexActive()) for (const id of loaded.keys()) if (id !== state.selectedRequestId) loaded.delete(id);
         if (!loaded?.size) {
           state.requests = state.nativeRequests;
           return;
@@ -8313,8 +8315,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const brokerConnected = body.broker_connected !== false;
           state.captureStopped = body.capture_stopped === true;
           state.captureControlsAvailable = body.capture_controls_available === true;
-          state.sessionMode = ['demo', 'idle'].includes(body.capture_mode)
+          const nextSessionMode = ['demo', 'idle'].includes(body.capture_mode)
             ? body.capture_mode : 'live';
+          // Rows read for another kind of session are not this session's.
+          if (nextSessionMode !== state.sessionMode) state.trafficLoaded.clear();
+          state.sessionMode = nextSessionMode;
           state.vmStealthSession = body.stealth_session === true ||
             body.native_stealth === true || body.quiet_mode === true;
           state.canvasRenderCaptures = body.canvas_render_captures ?? [];

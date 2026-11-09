@@ -150,7 +150,8 @@ class NativeArtifactCaptureSink final {
                                          mojo_base::BigBuffer content,
                                          std::uint64_t parent_artifact_id = 0);
 
-  // UI sequence. Copies off it; later losses are events parented to the creator.
+  // UI sequence. Copies off it; every loss, from stream open on, is one event
+  // parented to the creator.
   [[nodiscard]] NativeRequestContentAdmission CaptureRequestContent(NativeRequestContent content,
                                                                     std::uint64_t& artifact_id);
   // UI sequence. Reads a body with file, blob or stream parts through
@@ -220,6 +221,10 @@ class NativeArtifactCaptureSink final {
     std::uint64_t parent_event_id = 0;
     NativeProbeCategory result_category = NativeProbeCategory::kArtifact;
     bool response_body = false;
+    // A request body still being read: no record exists yet to parent a loss
+    // to, so a report sets read_lost and OnRequestBodyRead records it.
+    bool read_open = false;
+    bool read_lost = false;
     // Physical dispatch observations that share this module artifact.
     std::vector<std::pair<NativeProbeEvent, std::function<bool()>>> wasm_observations = {};
   };

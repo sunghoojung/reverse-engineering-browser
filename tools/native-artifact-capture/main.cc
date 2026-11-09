@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <ranges>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -625,6 +626,38 @@ void RequestContentLimits() {
             events.back().header.parent_event_id == queued.header.sequence_number,
         "A full queue after the copy is a failure joined to the record");
 
+  // The copy path names the artifact in its record before the copy runs, so a
+  // stream lost in that window is one failure joined to the record, and the end
+  // frame the writer would drop is never sent.
+  configure(reb::kNativeRequestContentDefaultBudgetBytes);
+  const auto copying = post(with_body("{\"c\":3}"));
+  const auto failures_of_copy = [] {
+    return std::ranges::count_if(events, [](const auto& e) {
+      return e.header.type == NativeProbeType::kArtifactCaptureFailed;
+    });
+  };
+  const auto copy_failures_before = failures_of_copy();
+  NativeArtifactCaptureSink::TransferCompleted(copying.header.artifact_id,
+                                               reb::NativeArtifactReceiveStatus::kIoError);
+  Check(failures_of_copy() == copy_failures_before + 1 &&
+            events.back().header.parent_event_id == copying.header.sequence_number &&
+            events.back().header.artifact_id == copying.header.artifact_id,
+        "A stream lost while its body is copied is a failure joined to the record");
+  const auto copy_events_before = events.size();
+  base::ThreadPool::RunPending();
+  Check(events.size() == copy_events_before && !transfers.contains(copying.header.artifact_id),
+        "The copy that follows a reported loss emits nothing more and ends nothing");
+  NativeArtifactCaptureSink::TransferCompleted(copying.header.artifact_id,
+                                               reb::NativeArtifactReceiveStatus::kAccepted);
+  Check(events.size() == copy_events_before, "The lost copy leaves no pending entry behind");
+  Check(state_of(post(with_body(
+            std::string(reb::kNativeRequestContentDefaultBudgetBytes, 'g').substr(0, 8 * 1024)))) ==
+            reb::RequestBodyState::kCaptured,
+        "The lost copy returned its budget share");
+  base::ThreadPool::RunPending();
+  transfers.clear();
+  configure(reb::kNativeRequestContentDefaultBudgetBytes);
+
   // Targets: the inline prefix is the whole target up to 116 bytes; past it the
   // full target is retained, or the record names why not.
   const auto get = [&](const std::string& url) {
@@ -856,6 +889,60 @@ void ReadRequestBodies(const std::filesystem::path& output) {
                 reb::RequestBodyState::kNotCapturedBodyKind &&
             reads.empty(),
         "A part the browser cannot identify is described, not read");
+
+  // The writer reports a stream it lost once, whenever it notices, and later
+  // frames for it are dropped without a report. That report must reach the record.
+  const auto newest_stream = [&] { return std::ranges::max(transfers | std::views::keys); };
+  const auto failures = [] {
+    return std::ranges::count_if(events, [](const auto& e) {
+      return e.header.type == NativeProbeType::kArtifactCaptureFailed;
+    });
+  };
+  start(file);
+  const std::uint64_t lost_stream = newest_stream();
+  const auto failures_before_loss = failures();
+  const auto bodies_before_loss = bodies();
+  NativeArtifactCaptureSink::TransferCompleted(lost_stream,
+                                               reb::NativeArtifactReceiveStatus::kIoError);
+  Check(bodies() == bodies_before_loss && failures() == failures_before_loss,
+        "A stream lost during its read waits for the read to end");
+  reb::NativeRequestBodyReader::Finish(reads.size() - 1, fits, Read::kComplete, fits.size());
+  const auto lost_event = LastOf(NativeProbeType::kRequestBody);
+  const auto lost_record = record(lost_event);
+  Check(state(lost_record) == reb::RequestBodyState::kNotCapturedTransferRefused &&
+            lost_event.header.artifact_id == 0 && lost_record.captured_length == 0 &&
+            (lost_record.flags & reb::kRequestBodyDigestPresent) == 0 &&
+            reb::IsValidRequestBodyPayload(lost_record, false) &&
+            !transfers.contains(lost_stream) && failures() == failures_before_loss,
+        "A stream lost during its read is recorded refused, never captured");
+  const auto events_after_lost = events.size();
+  NativeArtifactCaptureSink::TransferCompleted(lost_stream,
+                                               reb::NativeArtifactReceiveStatus::kIoError);
+  Check(events.size() == events_after_lost, "The settled read leaves no pending entry behind");
+  transfers.clear();
+
+  // Lost after the record went out: that record already names the artifact, so
+  // a failure parented to it is what corrects it.
+  start(file);
+  const std::uint64_t ended_stream = newest_stream();
+  reb::NativeRequestBodyReader::Finish(reads.size() - 1, fits, Read::kComplete, fits.size());
+  const auto ended = LastOf(NativeProbeType::kRequestBody);
+  Check(ended.header.artifact_id == ended_stream &&
+            state(record(ended)) == reb::RequestBodyState::kCaptured,
+        "A read whose stream is still open records its artifact");
+  const auto failures_after_end = failures();
+  NativeArtifactCaptureSink::TransferCompleted(ended_stream,
+                                               reb::NativeArtifactReceiveStatus::kIoError);
+  Check(failures() == failures_after_end + 1 &&
+            events.back().header.type == NativeProbeType::kArtifactCaptureFailed &&
+            events.back().header.parent_event_id == ended.header.sequence_number &&
+            events.back().header.artifact_id == ended_stream,
+        "A stream lost after its read ended is a failure joined to the record");
+  const auto events_after_failure = events.size();
+  NativeArtifactCaptureSink::TransferCompleted(ended_stream,
+                                               reb::NativeArtifactReceiveStatus::kAccepted);
+  Check(events.size() == events_after_failure, "A loss is reported for its stream once");
+  transfers.clear();
 
   // A receiver without --allow-sensitive refuses the stream after its record.
   start(file);

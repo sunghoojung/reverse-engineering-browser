@@ -402,6 +402,13 @@ NativeRequestContentAdmission NativeArtifactCaptureSink::CaptureRequestContent(
   if (!stream.is_open()) {
     return NativeRequestContentAdmission::kRefused;
   }
+  // From here the receiver can refuse or lose the stream, and the writer reports
+  // that once and only once, on this sequence.
+  pending_.emplace(id, PendingContext{.request_id = context->request_id,
+                                      .frame_id = context->frame_id,
+                                      .session_id = context->header.session_id,
+                                      .generation = context->generation,
+                                      .parent_event_id = content.creator_event_id});
   // A started body is immutable; the reference keeps it alive for the copy.
   if (!base::ThreadPool::PostTaskAndReplyWithResult(
           FROM_HERE,
@@ -410,6 +417,7 @@ NativeRequestContentAdmission NativeArtifactCaptureSink::CaptureRequestContent(
                          std::move(content.text), content.size, std::move(stream)),
           base::BindOnce(&NativeArtifactCaptureSink::OnRequestContentCopied, base::Unretained(this),
                          std::move(context)))) {
+    pending_.erase(id);
     return NativeRequestContentAdmission::kRefused;
   }
   request_content_used_ += content.size;
@@ -447,6 +455,13 @@ void NativeArtifactCaptureSink::OnRequestContentCopied(std::unique_ptr<CaptureCo
   const std::uint64_t creator = context->header.creator_event_id;
   const std::size_t size = copied.size;
   NativeArtifactStream& stream = copied.stream;
+  if (!pending_.contains(artifact_id)) {
+    // The stream was refused or lost during the copy, and that report already
+    // emitted the failure parented to this record.
+    stream.Abort();
+    RefundRequestContent(size);
+    return;
+  }
   const char* failure = stream.state() == NativeArtifactStreamState::kMemoryLimit
                             ? "active_memory_limit"
                         : !stream.is_open()     ? "transfer_queue_full_or_disconnected"
@@ -461,6 +476,7 @@ void NativeArtifactCaptureSink::OnRequestContentCopied(std::unique_ptr<CaptureCo
   }
   if (failure) {
     stream.Abort();
+    pending_.erase(artifact_id);
     RefundRequestContent(size);
     EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, context->request_id,
                context->frame_id, failure, NativeProbeCategory::kArtifact, creator);
@@ -471,11 +487,6 @@ void NativeArtifactCaptureSink::OnRequestContentCopied(std::unique_ptr<CaptureCo
   } else if (request_content_digests_.size() < kRequestContentDigestLimit) {
     request_content_digests_.insert(digest);
   }
-  pending_.emplace(artifact_id, PendingContext{.request_id = context->request_id,
-                                               .frame_id = context->frame_id,
-                                               .session_id = context->header.session_id,
-                                               .generation = context->generation,
-                                               .parent_event_id = creator});
 }
 
 NativeRequestContentAdmission NativeArtifactCaptureSink::ReadRequestBody(
@@ -514,11 +525,19 @@ NativeRequestContentAdmission NativeArtifactCaptureSink::ReadRequestBody(
   if (!stream.is_open()) {
     return NativeRequestContentAdmission::kRefused;
   }
+  const std::uint64_t generation = generation_.load(std::memory_order_acquire);
+  // The writer reports a refused or lost stream once. Until the read ends there
+  // is no record to parent a failure to, so the report waits here for it.
+  pending_.emplace(header.artifact_id, PendingContext{.request_id = request_id,
+                                                      .frame_id = frame_id,
+                                                      .session_id = header.session_id,
+                                                      .generation = generation,
+                                                      .read_open = true});
   if (!NativeRequestBodyReader::Start(
           *request.request_body, std::move(stream), allowance,
           base::BindOnce(&NativeArtifactCaptureSink::OnRequestBodyRead, base::Unretained(this),
-                         generation_.load(std::memory_order_acquire), request_id, frame_id,
-                         allowance, std::move(record)))) {
+                         generation, request_id, frame_id, allowance, std::move(record)))) {
+    pending_.erase(header.artifact_id);
     return NativeRequestContentAdmission::kRefused;
   }
   request_content_used_ += allowance;
@@ -535,12 +554,15 @@ void NativeArtifactCaptureSink::OnRequestBodyRead(const std::uint64_t generation
     return;
   }
   NativeArtifactStream& stream = result.stream;
+  const std::uint64_t stream_id = stream.artifact_id();
+  const auto open = pending_.find(stream_id);
+  const bool lost = open == pending_.end() || open->second.read_lost;
   NativeRequestBodyReadOutcome outcome;
   outcome.body_length = std::max(result.body_length, stream.observed());
   const bool complete = result.end == NativeRequestBodyReadEnd::kComplete && stream.is_open();
   if (result.end == NativeRequestBodyReadEnd::kBudget) {
     outcome.state = NativeRequestBodyState::kNotCapturedSessionBudget;
-  } else if (result.end == NativeRequestBodyReadEnd::kRefused ||
+  } else if (lost || result.end == NativeRequestBodyReadEnd::kRefused ||
              stream.state() == NativeArtifactStreamState::kMemoryLimit ||
              stream.state() == NativeArtifactStreamState::kRefused) {
     outcome.state = NativeRequestBodyState::kNotCapturedTransferRefused;
@@ -553,8 +575,8 @@ void NativeArtifactCaptureSink::OnRequestBodyRead(const std::uint64_t generation
     // The reader stops offering bytes at the cap, so a body that lands exactly
     // on it never reaches the stream's own truncation check.
     const bool truncated = stream.truncated() || outcome.body_length > stream.kept();
-    outcome.state = truncated ? NativeRequestBodyState::kCapturedTruncated
-                              : NativeRequestBodyState::kCaptured;
+    outcome.state =
+        truncated ? NativeRequestBodyState::kCapturedTruncated : NativeRequestBodyState::kCaptured;
     outcome.artifact_id = stream.artifact_id();
     outcome.captured_length = stream.kept();
     if (!truncated) {
@@ -570,6 +592,9 @@ void NativeArtifactCaptureSink::OnRequestBodyRead(const std::uint64_t generation
   const std::uint64_t artifact_id = outcome.artifact_id;
   if (artifact_id == 0) {
     stream.Abort();
+    if (open != pending_.end()) {
+      pending_.erase(open);
+    }
     std::move(record).Run(outcome);
     return;
   }
@@ -578,18 +603,16 @@ void NativeArtifactCaptureSink::OnRequestBodyRead(const std::uint64_t generation
     // A record that names an artifact the receiver never got is followed by
     // its failure.
     stream.Abort();
+    pending_.erase(open);
     if (creator != 0) {
       EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, request_id, frame_id,
                  "transfer_queue_full_or_disconnected", NativeProbeCategory::kArtifact, creator);
     }
     return;
   }
-  pending_.emplace(artifact_id,
-                   PendingContext{.request_id = request_id,
-                                  .frame_id = frame_id,
-                                  .session_id = session_id_.load(std::memory_order_relaxed),
-                                  .generation = generation,
-                                  .parent_event_id = creator});
+  // The end frame is queued: from here a report is an ACK for this record.
+  open->second.parent_event_id = creator;
+  open->second.read_open = false;
 }
 
 void NativeArtifactCaptureSink::RefundRequestContent(const std::size_t bytes) noexcept {
@@ -1605,6 +1628,11 @@ void NativeArtifactCaptureSink::OnTransferCompleted(
   }
   const auto found = pending_.find(artifact_id);
   if (found == pending_.end()) {
+    return;
+  }
+  if (found->second.read_open) {
+    // No record exists yet; OnRequestBodyRead names the loss in it.
+    found->second.read_lost = true;
     return;
   }
   const PendingContext context = found->second;

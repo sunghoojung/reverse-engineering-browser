@@ -1080,9 +1080,10 @@ provenance. Values are inserted as text after a size and SHA-256 check.
   retained individually.
 - Each block is measured, then serialized into a buffer reserved to its exact
   length, and hashed once on the UI sequence.
-- At most 4,096 in-flight requests are tracked for hops and `network` blocks;
-  the rest keep their provisional block, and their response blocks report hop
-  0 with state 8. Tracking ends at request completion.
+- At most 4,096 in-flight requests are tracked for hops and `network` blocks.
+  The rest keep their provisional block, their response blocks report hop 0
+  with state 8, and each adds one to the unattributed count. Tracking ends at
+  request completion.
 
 ### Agent access
 

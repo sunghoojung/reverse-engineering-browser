@@ -862,6 +862,14 @@ void NativeNetworkCaptureSink::RecordRequestStarted(
   NativeHeaderBlockSummary summary;
   summary.referrer_policy = ReferrerPolicyCode(request.referrer_policy);
   base::AutoLock lock(header_lock_);
+  const bool tracked_request = tracked_headers_.size() < kNativeHeaderTrackedRequests ||
+                               tracked_headers_.contains(request_id);
+  // No DevTools ID is assigned past the limit, so the network service sends no
+  // block for this request; it is counted as a block that has no home.
+  if (!tracked_request &&
+      unattributed_header_blocks_ != std::numeric_limits<std::uint32_t>::max()) {
+    ++unattributed_header_blocks_;
+  }
   EmitHeaderBlock(emitter, NativeProbeType::kRequestHeaders, event.header, summary, url,
                   [&request](const auto& visit) {
                     for (const auto& header : request.headers.GetHeaderVector()) {
@@ -871,8 +879,7 @@ void NativeNetworkCaptureSink::RecordRequestStarted(
                       visit(header.key, header.value);
                     }
                   });
-  if (tracked_headers_.size() < kNativeHeaderTrackedRequests ||
-      tracked_headers_.contains(request_id)) {
+  if (tracked_request) {
     TrackedHeaders& tracked = tracked_headers_[request_id];
     tracked = TrackedHeaders();
     tracked.open = HeaderHop{event.header, 0, std::move(url)};

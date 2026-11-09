@@ -2365,7 +2365,7 @@
             "description": "Comma-separated row IDs, at most 4. located gives each one's position in this filtered, sorted list, or null.",
             "schema": {
               "type": "string",
-              "maxLength": 1024
+              "maxLength": 512
             }
           },
           {

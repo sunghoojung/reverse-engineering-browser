@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::{
     error::Result,
     event_query::{self, Cursor, EventFilter},
-    request_stack,
+    request_stack::{self, u16_at, u32_at},
 };
 
 pub const TYPES: [&str; 6] = [
@@ -58,13 +58,6 @@ const DIRECTIVES: [&str; 30] = [
     "upgrade-insecure-requests",
     "worker-src",
 ];
-
-fn u16_at(bytes: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes([bytes[at], bytes[at + 1]])
-}
-fn u32_at(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
-}
 
 /// A kind 1 frame, or null for an all-zero one.
 fn frame(bytes: &[u8]) -> Option<Value> {

@@ -190,7 +190,6 @@ struct Row {
     loader: bool,
     renderer: bool,
     worker_started: bool,
-    versioned: bool,
     main_frame: bool,
     /// The newest nonzero envelope scheme class (protocol/native-network-v3.md).
     scheme_class: u8,
@@ -802,7 +801,7 @@ fn initiator(row: &Row) -> Option<&'static str> {
         Some("parser")
     } else if row.renderer {
         Some("renderer")
-    } else if row.versioned && row.loader {
+    } else if row.loader {
         Some("browser")
     } else {
         None
@@ -1467,7 +1466,6 @@ impl RequestIndex {
                     loader: false,
                     renderer: false,
                     worker_started: false,
-                    versioned: false,
                     main_frame: false,
                     scheme_class: 0,
                     stack_state: 0,
@@ -1493,14 +1491,10 @@ impl RequestIndex {
             && kind == "request_failed"
             && number(&event["error_code"]) == -3
             && ["proxy_destroyed", "redirect_handoff"].contains(&payload.as_str());
-        row.failed |= !interruption
-            && (kind == "request_failed" || (version >= 2 && number(&event["error_code"]) != 0));
+        row.failed |=
+            !interruption && (kind == "request_failed" || number(&event["error_code"]) != 0);
         row.interrupted |= interruption;
-        let code = if version >= 2 {
-            number(&event["status_code"])
-        } else {
-            0
-        };
+        let code = number(&event["status_code"]);
         if code > 0 && incoming >= row.status_rank {
             row.code = code;
             row.status_rank = incoming;
@@ -1517,9 +1511,7 @@ impl RequestIndex {
                 text(&event["sequence_number"]),
             ));
         }
-        let versioned = version >= 2;
         let flags = number(&event["flags"]);
-        row.versioned |= versioned;
         if let Some(class) = event["scheme_class"]
             .as_u64()
             .filter(|class| (1..=255).contains(class))
@@ -1527,14 +1519,12 @@ impl RequestIndex {
             row.scheme_class = class as u8;
         }
         row.loader |= kind != "request_initiated";
-        row.renderer |= kind == "request_initiated"
-            || (versioned && number(&event["initiator_process_id"]) > 0);
-        if versioned && kind == "request_started" {
+        row.renderer |= kind == "request_initiated" || number(&event["initiator_process_id"]) > 0;
+        if kind == "request_started" {
             row.worker_started |= flags & 4 != 0;
             row.main_frame |= number(&event["resource_type"]) == 0;
         }
-        let response =
-            (versioned && kind == "response_started").then(|| response_metadata(&payload));
+        let response = (kind == "response_started").then(|| response_metadata(&payload));
         if let Some((mime, protocol)) = &response {
             row.cache |= flags & 2 != 0;
             row.worker_served |= flags & 4 != 0;
@@ -1542,11 +1532,11 @@ impl RequestIndex {
             row.protocol = protocol.clone();
             row.response_ns.get_or_insert(time);
         }
-        if versioned && incoming == 5 {
+        if incoming == 5 {
             row.transfer = length(&event["encoded_data_length"]);
             row.decoded = length(&event["decoded_body_length"]);
         }
-        if versioned && number(&event["error_code"]) != 0 {
+        if number(&event["error_code"]) != 0 {
             row.error = number(&event["error_code"]);
         }
         let lower = payload.to_ascii_lowercase();
@@ -1555,7 +1545,7 @@ impl RequestIndex {
             .is_some_and(|rest| rest.is_empty() || rest.starts_with(';'))
         {
             row.resource = "wasm".into();
-        } else if versioned && kind == "request_started" {
+        } else if kind == "request_started" {
             row.resource = resource(number(&event["resource_type"])).into();
         } else if let Some((Some(mime), _)) = &response
             && row.resource == "other"

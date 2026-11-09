@@ -959,6 +959,18 @@ void ReadRequestBodies(const std::filesystem::path& output) {
             reb::IsValidRequestBodyPayload(refused_file_record, false),
         "A file part the renderer may not read is not read and the record says so");
 
+  // A stream element beside others is described, not read: only a lone one is teed.
+  network::ResourceRequest mixed_stream =
+      upload(network::DataElement(network::DataElementChunkedDataPipe{}));
+  mixed_stream.request_body->elements_mutable()->push_back(
+      network::DataElement(network::DataElementFile{}));
+  const auto reads_before_mixed = reads.size();
+  start(mixed_stream);
+  Check(state(record(LastOf(NativeProbeType::kRequestBody))) ==
+                reb::RequestBodyState::kNotCapturedBodyKind &&
+            reads.size() == reads_before_mixed,
+        "A chunked element beside another element is not read");
+
   // A receiver without --allow-sensitive refuses the stream after its record.
   configure(reb::kNativeRequestContentDefaultBudgetBytes);
   start(file);

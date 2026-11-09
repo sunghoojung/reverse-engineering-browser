@@ -431,6 +431,9 @@ class NativeRequestBodyReader {
   static bool CanRead(const network::ResourceRequestBody& body) noexcept {
     bool readable = false;
     for (const auto& element : *body.elements()) {
+      if (element.TryAs<network::DataElementChunkedDataPipe>() && body.elements()->size() != 1) {
+        return false;
+      }
       if (element.TryAs<network::DataElementFile>() ||
           element.TryAs<network::DataElementDataPipe>() ||
           element.TryAs<network::DataElementChunkedDataPipe>()) {

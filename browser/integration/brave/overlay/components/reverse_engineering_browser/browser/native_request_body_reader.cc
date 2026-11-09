@@ -494,6 +494,10 @@ class ChunkedTee final : public network::mojom::ChunkedDataPipeGetter {
 bool NativeRequestBodyReader::CanRead(const network::ResourceRequestBody& body) noexcept {
   bool readable = false;
   for (const network::DataElement& element : *body.elements()) {
+    // Start tees only a lone stream; a compromised renderer can send others.
+    if (element.TryAs<network::DataElementChunkedDataPipe>() && body.elements()->size() != 1) {
+      return false;
+    }
     if (element.TryAs<network::DataElementFile>() ||
         element.TryAs<network::DataElementDataPipe>() ||
         element.TryAs<network::DataElementChunkedDataPipe>()) {

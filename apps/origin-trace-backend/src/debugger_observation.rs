@@ -169,25 +169,19 @@ pub fn decode(event: &Value) -> Option<Value> {
     }))
 }
 
-fn tail(store: &Path, types: &[&str], limit: usize) -> Result<Vec<Value>> {
+/// The newest records and how many lines of the read were damaged.
+fn tail(store: &Path, types: &[&str], limit: usize) -> Result<(Vec<Value>, u64)> {
     let filter = EventFilter::exact(types, Vec::new());
-    let mut tally = event_query::Tally::default();
-    Ok(event_query::read_page(
-        store,
-        Cursor::Tail,
-        limit,
-        event_query::SCAN_BYTES,
-        event_query::EVENT_RECORD_BYTES,
-        event_query::event_visitor(&filter, &mut tally),
-    )?
-    .records)
+    let (page, malformed) =
+        event_query::read_tolerant(store, Cursor::Tail, limit, event_query::SCAN_BYTES, &filter)?;
+    Ok((page.records, malformed))
 }
 
 /// The newest records first; a record the core would refuse is counted, not shown.
 pub fn recent(store: &Path) -> Result<(Vec<Value>, usize)> {
-    let events = tail(store, &TYPES, RECENT)?;
+    let (events, damaged) = tail(store, &TYPES, RECENT)?;
     let decoded: Vec<Value> = events.iter().rev().filter_map(decode).collect();
-    let malformed = events.len() - decoded.len();
+    let malformed = events.len() - decoded.len() + damaged as usize;
     Ok((decoded, malformed))
 }
 
@@ -196,6 +190,7 @@ pub fn recent(store: &Path) -> Result<(Vec<Value>, usize)> {
 pub fn workers(store: &Path) -> Result<Vec<Value>> {
     let mut found: Vec<Value> = Vec::new();
     for event in tail(store, &["request_initiated"], WORKER_SCAN)?
+        .0
         .iter()
         .rev()
     {

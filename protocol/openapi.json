@@ -8202,7 +8202,8 @@
           "scan_end",
           "store_end",
           "limited",
-          "budget_exhausted"
+          "budget_exhausted",
+          "malformed_lines"
         ],
         "properties": {
           "scope": {
@@ -8233,6 +8234,11 @@
           "budget_exhausted": {
             "type": "boolean",
             "description": "The 64 MiB scan budget stopped the read before its scope ended."
+          },
+          "malformed_lines": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Lines in the read that were not valid events; they are counted and skipped."
           }
         }
       },

@@ -93,6 +93,7 @@ Each answer carries `coverage`:
 | `scan_start`, `scan_end`, `store_end` | Decimal byte offsets of the read and the file length |
 | `limited` | The record limit stopped the read before its scope ended |
 | `budget_exhausted` | The 64 MiB budget stopped the read before its scope ended |
+| `malformed_lines` | Lines in the read that were not valid events: counted and skipped, so a damaged record does not fail the answer |
 
 An index still catching up with the store cannot prove a request ended, so its
 range reads as `bounded_range`. When `complete` is false, an empty list or a

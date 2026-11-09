@@ -122,6 +122,7 @@ pub struct Coverage {
     store_end: u64,
     limited: bool,
     budget_exhausted: bool,
+    malformed_lines: u64,
 }
 impl Coverage {
     /// Absence in the answer is a fact: the read covered its whole scope, or
@@ -138,6 +139,7 @@ impl Coverage {
             "store_end": self.store_end.to_string(),
             "limited": self.limited,
             "budget_exhausted": self.budget_exhausted,
+            "malformed_lines": self.malformed_lines,
         })
     }
 }
@@ -148,7 +150,12 @@ pub struct Detail {
     pub coverage: Coverage,
 }
 
-fn coverage(page: &Page, range: Option<RecordRange>, found_newest: bool) -> Coverage {
+fn coverage(
+    page: &Page,
+    range: Option<RecordRange>,
+    found_newest: bool,
+    malformed_lines: u64,
+) -> Coverage {
     // The newest record of a request's bytes is the whole answer about them.
     let covered = match range {
         Some(range) => {
@@ -169,6 +176,7 @@ fn coverage(page: &Page, range: Option<RecordRange>, found_newest: bool) -> Cove
         store_end: page.store_end,
         limited: page.limited && !covered && !found_newest,
         budget_exhausted: page.exhausted && !covered && !found_newest,
+        malformed_lines,
     }
 }
 
@@ -186,16 +194,8 @@ fn read_detail(
         (None, _) => Cursor::Tail,
     };
     let budget = range.map_or(budget, |range| budget.min(range.end - range.first));
-    let mut tally = Tally::default();
-    let page = read_page(
-        store,
-        cursor,
-        limit,
-        budget,
-        EVENT_RECORD_BYTES,
-        event_visitor(filter, &mut tally),
-    )?;
-    let coverage = coverage(&page, range, newest && !page.records.is_empty());
+    let (page, malformed) = read_tolerant(store, cursor, limit, budget, filter)?;
+    let coverage = coverage(&page, range, newest && !page.records.is_empty(), malformed);
     Ok(Detail {
         records: page.records,
         coverage,
@@ -680,6 +680,51 @@ pub fn event_visitor<'a>(
     }
 }
 
+/// A damaged line is not bounded by the record size. This keeps its read
+/// bounded while still counting a torn or corrupted line of any likely size.
+const DAMAGED_LINE_BYTES: usize = 1024 * 1024;
+
+/// Parses and validates one stored event without failing the read: a line that
+/// is unreadable or invalid is counted and skipped, as the request index does.
+fn tolerant_visitor<'a>(
+    filter: &'a EventFilter,
+    malformed: &'a mut u64,
+) -> impl FnMut(&[u8]) -> Result<Option<Value>> + 'a {
+    move |line| {
+        let event = (line.len() <= EVENT_RECORD_BYTES)
+            .then(|| serde_json::from_slice::<Value>(line).ok())
+            .flatten()
+            .filter(|event| validate_event(event).is_ok());
+        Ok(match event {
+            Some(event) => filter.matches(&event).then_some(event),
+            None => {
+                *malformed += 1;
+                None
+            }
+        })
+    }
+}
+
+/// One page that reads past damaged lines and counts them.
+pub fn read_tolerant(
+    path: &Path,
+    cursor: Cursor,
+    limit: usize,
+    budget: u64,
+    filter: &EventFilter,
+) -> Result<(Page, u64)> {
+    let mut malformed = 0;
+    let page = read_page(
+        path,
+        cursor,
+        limit,
+        budget,
+        DAMAGED_LINE_BYTES,
+        tolerant_visitor(filter, &mut malformed),
+    )?;
+    Ok((page, malformed))
+}
+
 /// A filtered event page in the `Events` document shape. The polling-only
 /// network window is empty here: select network records with `category`.
 pub fn events_document(
@@ -1040,6 +1085,35 @@ mod tests {
             .iter()
             .map(|event| event_window::unsigned(&event["sequence_number"]).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn detail_reads_count_damaged_lines_and_keep_going() {
+        let mut bytes = Vec::new();
+        for (index, line) in [
+            serde_json::to_vec(&event(1, "api_call", 1)).unwrap(),
+            b"{\"protocol_version\":3,\"session".to_vec(),
+            b"{\"protocol_version\":99}".to_vec(),
+            vec![b'x'; EVENT_RECORD_BYTES + 1],
+            serde_json::to_vec(&event(2, "api_call", 1)).unwrap(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(index < 5);
+            bytes.extend(line);
+            bytes.push(b'\n');
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events.jsonl");
+        fs::write(&path, &bytes).unwrap();
+        let filter = EventFilter::default();
+        let read = read_request_records(&path, None, 100, &filter).unwrap();
+        assert_eq!(sequences_of(&read.records), vec![1, 2]);
+        assert_eq!(read.coverage.malformed_lines, 3);
+        assert_eq!(read.coverage.scope, "store");
+        assert!(read.coverage.complete);
+        assert_eq!(read.coverage.to_json()["malformed_lines"], 3);
     }
 
     #[test]

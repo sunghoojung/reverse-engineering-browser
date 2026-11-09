@@ -9336,7 +9336,9 @@ async fn request_detail_routes_report_what_their_read_covered() {
         event(2, 17, "request_headers", 1, &headers),
         event(3, 18, "request_started", 0, b""),
     ];
-    server.file("events.jsonl", &jsonl(&events));
+    let mut store = jsonl(&events);
+    store.extend_from_slice(b"{\"protocol_version\":3,\"session\n");
+    server.file("events.jsonl", &store);
     let read = async |path: &str, schema: &str| {
         let document: Value = server.get(path).await.json().await.unwrap();
         assert_schema(
@@ -9356,6 +9358,8 @@ async fn request_detail_routes_report_what_their_read_covered() {
     assert_eq!(indexed["coverage"]["scope"], "request_range", "{indexed}");
     assert_eq!(indexed["coverage"]["complete"], true);
     assert_eq!(indexed["hops"][0]["request"][0]["state"], "empty");
+    // A damaged line past the request's bytes is outside this read.
+    assert_eq!(indexed["coverage"]["malformed_lines"], 0);
 
     // No row names this request, and the whole small store was read.
     let unknown = read(
@@ -9365,6 +9369,7 @@ async fn request_detail_routes_report_what_their_read_covered() {
     .await;
     assert_eq!(unknown["coverage"]["scope"], "store", "{unknown}");
     assert_eq!(unknown["coverage"]["complete"], true);
+    assert_eq!(unknown["coverage"]["malformed_lines"], 1);
 
     let provenance = read(
         "/api/cookie-provenance?session_id=1&name=sid",

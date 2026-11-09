@@ -369,10 +369,17 @@ const eventsOf = (id, records) => Array.from({length: records}, (_, sequence) =>
   assert(index.answer() && /HTTP 503/.test(index.error()), 'A failed read keeps the last answer and states why');
   script = [() => respond(200, {format: 'wrong'})]; index.invalidate(); await quiet();
   assert(index.answer() && /malformed/.test(index.error()), 'A malformed answer keeps the last answer');
+  const beforeRetry = urls.length;
+  script = [() => respond(503)]; index.retry(); await quiet();
+  assert.equal(urls.length, beforeRetry + 1, 'A poll retries a failed read once and no more');
+  script = [() => respond(200, doc())]; index.retry(); await quiet();
+  assert.equal(index.error(), null, 'A retried read that answers clears the failure');
+  script = []; index.retry(); await quiet();
+  assert.equal(urls.length, beforeRetry + 2, 'A poll retries nothing when no read failed');
   script = [() => respond(404)]; index.invalidate(); await quiet();
   assert(/HTTP 404/.test(index.error()));
   script = []; index.invalidate(); await quiet();
-  assert.equal(urls.length, 6, 'A workspace without the index is not asked again');
+  assert.equal(urls.length, 8, 'A workspace without the index is not asked again');
   // Detail paging stops at the row's end, and a malformed page fails the read.
   const detailReads = [];
   const page = (events, next, limited) => respond(200, {events, query: {next_after: next, limited, budget_exhausted: false}});

@@ -778,7 +778,7 @@ retained body, full target and receiver refusal are read by artifact ID, so
 they do not depend on the catalog's first 50,000 records. While the index is still indexing a large
 store, or counts unreadable or over-limit records, the footer says so. Until it
 first answers, Traffic uses the newest network window and labels its counts that
-way; a later failed read keeps the last rows. The Rust native-event API returns separate newest general and network lifecycle
+way; a later failed read keeps the last rows. A changed filter, type, tab or sort keeps the last rows and their scroll position until the new query answers; a failed read says so in the footer and is read again on the next poll. The Rust native-event API returns separate newest general and network lifecycle
 windows of up to 5,000 events each from at most the newest 64 MiB. Canvas/WebGL activity does not consume
 network slots within that byte budget. That network window, including
 redirect, failed, and response-completed outcomes, also supplies the inspector. Notices distinguish a capped

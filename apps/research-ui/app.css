@@ -2300,6 +2300,7 @@ var(--panel);
       .traffic-response-status { color: var(--muted); font: 11px var(--sans); }
       .traffic-response-code { max-height: 60vh; padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; tab-size: 2; }
       .traffic-response-code:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      .code-view ::selection { background: var(--code-selection); }
       .code-view-row { min-height: 18px; white-space: pre; }
       .code-view.is-wrapped .code-view-row { white-space: pre-wrap; overflow-wrap: anywhere; }
       .code-view-row.is-continued::before { content: "\21aa  "; color: var(--faint); }

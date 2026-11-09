@@ -134,6 +134,11 @@ var {key: value} = o, e = Foo.prototype, m = module.exports; o = {x: 1}; label: 
   const at = formatted.indexOf('stringify');
   assert.deepEqual({...model.sourceWhitespaceRange(model.sourceWhitespaceMap(original, formatted), original, formatted, at, at + 9)},
     {start: original.indexOf('stringify'), end: original.indexOf('stringify') + 9});
+  // A token that starts with a space (a comment body) maps exactly; a run of only layout whitespace has no range.
+  const bodyInput = '/* keep */a=1;', bodyLayout = '/* keep */\na = 1;', bodyMap = model.sourceWhitespaceMap(bodyInput, bodyLayout);
+  assert.deepEqual({...model.sourceWhitespaceRange(bodyMap, bodyInput, bodyLayout, 2, 8)}, {start: 2, end: 8}, 'A comment body keeps its edge spaces');
+  assert.deepEqual({...model.sourceWhitespaceRange(bodyMap, bodyInput, bodyLayout, 10, 12)}, {start: 10, end: 11}, 'Layout whitespace is not part of a token');
+  assert.equal(model.sourceWhitespaceRange(bodyMap, bodyInput, bodyLayout, 10, 11), null, 'A whitespace run has no raw range');
   assert.equal(model.sourceWhitespaceMap('a=1', 'a = 2'), null, 'Any non-whitespace difference is refused');
   assert.equal(model.sourceWhitespaceMap('a\u0085b', 'ab'), null, 'NEL is not JavaScript whitespace');
   assert(model.sourceWhitespaceMap('\ufeffa=1; b', 'a = 1;\n  b'), 'BOM and line separators are layout whitespace');

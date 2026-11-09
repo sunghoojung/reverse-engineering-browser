@@ -249,12 +249,22 @@
         return low;
       }
 
-      // Original offsets of a formatted range whose ends are not whitespace.
+      // Original offsets of a formatted token. A token's edge whitespace (the space opening a comment
+      // body) counts only where the evidence holds those same characters; a range of only whitespace has none.
       function sourceWhitespaceRange(map, original, formatted, start, end) {
         if (!(end > start)) return null;
+        const firstVisible = sourceFirstNonSpace(formatted, start, end);
+        if (firstVisible === null) return null;
+        let lastVisible = end - 1;
+        while (sourceFormatSpace(formatted.charCodeAt(lastVisible))) lastVisible -= 1;
         const walk = sourceWhitespaceWalker(map, original, formatted);
-        const first = walk(start), last = walk(end - 1);
-        return first === null || last === null ? null : {start: first, end: last + 1};
+        const first = walk(firstVisible), last = walk(lastVisible);
+        if (first === null || last === null) return null;
+        const leading = firstVisible - start, trailing = end - 1 - lastVisible;
+        return {
+          start: original.slice(first - leading, first) === formatted.slice(start, firstVisible) ? first - leading : first,
+          end: original.slice(last + 1, last + 1 + trailing) === formatted.slice(lastVisible + 1, end) ? last + 1 + trailing : last + 1
+        };
       }
 
       function sourceName(source) {

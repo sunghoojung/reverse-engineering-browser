@@ -197,6 +197,7 @@ function createCodeView({text, rows = codeViewRows(text), syntax, label, classNa
     }
     const start = row.offset + column, range = sourceWhitespaceRange(layout.map, layout.input, text, start, start + token.textContent.length);
     if (!range) return;
+    codeViewSelectToken(token);
     rawIndex ??= sourceDocumentIndex(layout.input);
     onRaw({...range, line: row.line, column, from: sourceDocumentPosition(rawIndex, range.start), to: sourceDocumentPosition(rawIndex, range.end)});
   });
@@ -212,6 +213,15 @@ function createCodeView({text, rows = codeViewRows(text), syntax, label, classNa
       observer?.disconnect();
     }
   };
+}
+
+// Selects a clicked token on the page. Its characters are the raw range's, so copying it copies the evidence.
+function codeViewSelectToken(node) {
+  const selection = globalThis.getSelection?.();
+  if (!selection) return;
+  // A drag or double click inside this token keeps the researcher's own selection.
+  if (!selection.isCollapsed && selection.containsNode(node, true) && selection.toString() !== node.textContent) return;
+  selection.selectAllChildren(node);
 }
 
 function codeViewRawText(raw) {

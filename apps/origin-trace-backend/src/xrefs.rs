@@ -273,7 +273,7 @@ pub struct Stores {
 pub struct VmHandlerInput {
     not_ready: bool,
     found: bool,
-    label: String,
+    label: Option<String>,
     samples: Vec<Value>,
     sample_count: u64,
     omissions: Vec<String>,
@@ -342,9 +342,7 @@ pub fn vm_handler_input(
     if row["sample_count"].as_u64().unwrap_or(0) > samples_for("samples").len() as u64 {
         omissions.push("dispatch-sample-retention-limit".to_owned());
     }
-    let label = matching[0]["label"]
-        .as_str()
-        .map_or_else(|| format!("handler @ {byte_offset}"), str::to_owned);
+    let label = matching[0]["label"].as_str().map(str::to_owned);
     VmHandlerInput {
         not_ready: false,
         found: true,
@@ -421,6 +419,7 @@ fn operation(event: &Value) -> String {
             .as_str()
             .and_then(|hex_text| hex::decode(hex_text).ok())
             .and_then(|bytes| String::from_utf8(bytes).ok())
+            .filter(|text| !text.trim().is_empty())
     {
         return truncated(&text);
     }
@@ -1173,7 +1172,7 @@ fn vm_plan(input: VmHandlerInput, session: u64, pc: Option<u64>) -> Result<Plan>
         })
         .collect();
     Ok(Plan::VmHandler {
-        selection: resolved("vm_handler", Some(input.label)),
+        selection: resolved("vm_handler", input.label),
         prefilter: compile(&[r#""parent_event_id":"?[1-9]"#.to_owned()])?,
         session,
         samples,
@@ -2663,5 +2662,9 @@ mod tests {
         assert_eq!(document["counts"]["out"]["total"], 1);
         assert_eq!(document["pages"]["out"]["rows"][0]["kind"], "host_link");
         assert_eq!(document["pages"]["out"]["rows"][0]["name"], "fillText");
+        assert_eq!(
+            operation(&event(9, json!({"type":"api_call","payload":""}))),
+            "api_call"
+        );
     }
 }

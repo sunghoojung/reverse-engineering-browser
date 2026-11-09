@@ -160,7 +160,10 @@
     view.error = document.selection.status === 'resolved' ? '' : document.selection.detail ?? 'This selection cannot be resolved.';
     view.snapshot = document.snapshot;
     view.coverage = document.coverage;
-    view.label = document.selection.label || view.label;
+    // The view's own name wins, except for a Wasm row, which only the
+    // module can name.
+    const narrowed = view.selection.params?.kind === 'artifact' && view.selection.params.byte_offset !== undefined;
+    view.label = (narrowed ? document.selection.label || view.label : view.label || document.selection.label) || '';
     view.counts = document.counts;
     view.gaps = document.gaps;
     for (const direction of directions) view.pages[direction] = new Map([[0, document.pages?.[direction]?.rows ?? []]]);

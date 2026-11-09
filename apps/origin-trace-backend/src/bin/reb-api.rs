@@ -90,6 +90,11 @@ enum Action {
         /// Requires --allow-effects. Not authorization.
         #[arg(long, requires = "allow_effects")]
         allow_session_start: bool,
+        /// Apply the structural summary's omissions to every response, whatever
+        /// its size: rows and identifiers stay; source, bytecode, bodies and
+        /// long strings do not. For clients that forward results to a provider.
+        #[arg(long)]
+        omit_content: bool,
         /// Require live capture and a running or paused debugger at startup
         /// and before every tool call. Does not authorize capture or effects.
         #[arg(long)]
@@ -1023,6 +1028,7 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
             session_dir,
             allow_effects,
             allow_session_start,
+            omit_content,
             require_live,
             timeout,
         } => {
@@ -1071,6 +1077,7 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 mcp::Admission {
                     allow_effects,
                     allow_session_start,
+                    omit_content,
                 },
                 timeout,
                 guard,

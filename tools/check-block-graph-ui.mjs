@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Block graph model and layout. Offline: no rendered layout or focus is claimed.
-// Rendered acceptance is test24BlockGraphInSources in the packaged-app gate.
+// Rendered acceptance is test25BlockGraphInSources in the packaged-app gate.
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {createRequire} from 'node:module';

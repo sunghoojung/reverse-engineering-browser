@@ -19,6 +19,8 @@
 }
 /* The graph and the linear view share one split; pane_layout.js drags it. */
 #screen-sources .source-view-split { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr); }
+/* Map hides the code view and closes the graph; the empty split then yields the row. */
+#screen-sources .source-view-split:has(> #source-code-wrap[hidden]):has(> #source-graph-host[hidden]) { display: none; }
 #screen-sources .sources-editor[data-graph="true"] .source-view-split { grid-template-rows: minmax(0, 2fr) minmax(72px, 1fr); }
 #screen-sources .sources-editor[data-graph="true"][data-graph-linear-hidden] .source-view-split { grid-template-rows: minmax(0, 1fr); }
 #screen-sources .sources-editor[data-graph="true"][data-graph-linear-hidden] #source-code-wrap { display: none; }

@@ -3,9 +3,10 @@ const sourceGraphPanel = createSourceGraphPanel({
   host: document.querySelector('#source-graph-host'),
   editor: document.querySelector('#source-graph-host').closest('.sources-editor'),
   button: document.querySelector('#source-graph'),
-  revealOffset: offset => revealSourceByteOffset(offset)
+  // Graph and Map are alternative views of one artifact; opening Map closes Graph.
+  closeOn: document.querySelector('#source-map'),
+  revealOffset: offset => revealGraphByteOffset(offset)
 });
-document.querySelector('#source-graph').addEventListener('click', () => sourceGraphPanel.toggle());
 const sourceFactsPanel = createSourceFactsPanel({
   getSource: selectedSource, onNavigate: revealSourceFactRange,
   openSidebar() { state.sourceSidebarOpen = true; renderSourceSidebar(); }
@@ -6605,7 +6606,7 @@ const entropyMap = createEntropyMap({
       }
 
       /** Keeps the graph's disassembly or hex pane on a block's offset without taking focus. */
-      function revealSourceByteOffset(offset) {
+      function revealGraphByteOffset(offset) {
         const view = state.sourceEditorView?.view;
         const rows = view?.wasmRows;
         let line = Math.floor(offset / 16);

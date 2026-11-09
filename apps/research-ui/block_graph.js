@@ -510,7 +510,7 @@ function createBlockGraphRunner() {
 }
 
 /* Sources view mode for one captured WASM artifact. */
-function createSourceGraphPanel({host, editor, button, linearToggle, revealOffset}) {
+function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
   const view = createBlockGraphView(host, {
     onReveal: (offset) => revealOffset?.(offset),
     onSelect: () => {},
@@ -664,8 +664,11 @@ function createSourceGraphPanel({host, editor, button, linearToggle, revealOffse
   function applyResult(result) { view.setResult(result); renderTools(); }
   function open() { isOpen = true; host.hidden = false; editor.setAttribute('data-graph', 'true'); button.setAttribute('aria-pressed', 'true'); if (!linearChoice && innerHeight < 600) { editor.setAttribute('data-graph-linear-hidden', ''); } view.activate(); if (functions) { if (functionIndex !== null) loadFunction(functionIndex); else view.setState('empty', 'Select a function.'); } else loadIndex(); }
   function close() { isOpen = false; host.hidden = true; editor.removeAttribute('data-graph'); button.setAttribute('aria-pressed', 'false'); closeMenu(); view.release(); release(); }
+  const toggle = () => { if (isOpen) close(); else if (isWasmSource(source)) open(); };
+  button.addEventListener('click', toggle);
+  closeOn?.addEventListener('click', () => { if (isOpen) close(); });
   return {
-    toggle() { if (isOpen) close(); else if (isWasmSource(source)) open(); },
+    toggle,
     /** Called when the selected source may have changed. */
     sync(next) {
       const valid = isWasmSource(next);

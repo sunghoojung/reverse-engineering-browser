@@ -1815,7 +1815,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // A captured dispatcher draws as a block graph with its limits on screen, and
   // the keyboard moves through blocks and reveals the linear view.
   @MainActor
-  func test24BlockGraphInSources() async throws {
+  func test25BlockGraphInSources() async throws {
     for size in windowSizes {
       let ui = try await prepare(size)
       try await show(ui, "sources")

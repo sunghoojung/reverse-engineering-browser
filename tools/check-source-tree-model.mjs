@@ -127,14 +127,14 @@ export async function checkSourceTreeModel(root) {
     assert.match(node(t,value=>value.kind==='frame').title,/top-level document/);
     t.api.sourceTreeView.expandAll();assert(labels(t).includes('strings.js'),'Expand all opens Browser internals');
   }
-  // Same-named siblings: a query, a session or nothing but the meta ID tells them apart.
+  // Same-named siblings: a query, a session, a frame or the artifact ID tells them apart.
   {
     const t=fixture([artifact(20,'https://a.invalid/app.js?v=1'),artifact(21,'https://a.invalid/app.js?v=2'),
       artifact(22,'https://a.invalid/lib.js',{frame_id:'0'}),artifact(23,'https://a.invalid/lib.js',{frame_id:'0',session_id:'2'}),
       artifact(24,'https://a.invalid/same.js'),artifact(25,'https://a.invalid/same.js',{sha256:'b'.repeat(64)}),
       artifact(26,'https://c.invalid/x.js',{frame_id:'8'}),artifact(27,'https://c.invalid/x.js',{frame_id:'7'})]);
     t.api.renderSourceTree();
-    same([20,21,22,23,24,25].map(id=>file(t,id).suffix),['?v=1','?v=2','session 1','session 2','','']);
+    same([20,21,22,23,24,25].map(id=>file(t,id).suffix),['?v=1','?v=2','session 1','session 2','#24','#25']);
     same([24,25].map(id=>entry(t,file(t,id).key).detail.textContent),['24','25']);
     same(t.nav().list.filter(value=>value.kind==='frame').map(value=>`${value.label} ${value.suffix ?? ''}`.trim()),['frame frame 3','frame frame 7','frame frame 8']);
   }

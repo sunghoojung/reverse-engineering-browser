@@ -1247,7 +1247,7 @@ internals start collapsed. A folder chain with one folder child reads as one row
 (`a/b/c`). Files show their plain name, eval code `VM<id>` as in DevTools, with
 a mask icon tinted by type and the two-letter kind code kept as its text. The
 artifact ID is in the muted meta column, the tooltip and Details; same-named
-siblings add a muted query or session suffix. Extension names are not captured,
+siblings add a muted query, session or frame suffix, or their artifact ID when nothing else differs. Extension names are not captured,
 so extensions show their ID.
 
 Only rows near the viewport are mounted; the focused row stays mounted while

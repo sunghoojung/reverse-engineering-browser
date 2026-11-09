@@ -206,7 +206,7 @@ function sourceTreeArrange(nodes, root) {
   }
 }
 
-// Same-named siblings get a muted query, session or frame suffix.
+// Same-named siblings get a muted query, session or frame suffix; the artifact ID separates any that still match.
 function sourceTreeSuffixes(children) {
   const groups = new Map();
   for (const child of children) {
@@ -222,11 +222,15 @@ function sourceTreeSuffixes(children) {
       for (const member of members) member.suffix = sessions.size > 1 ? `session ${member.session}` : `frame ${member.frameId}`;
       continue;
     }
-    const queries = new Set(members.map(member => member.search));
+    const queries = new Set(members.map(member => member.search)), frames = new Set(members.map(member => member.source.frame_id));
     for (const member of members) {
       const query = member.search.length > 64 ? `${member.search.slice(0, 63)}…` : member.search;
-      member.suffix = queries.size > 1 ? query || '(no query)' : sessions.size > 1 ? `session ${member.source.session_id}` : '';
+      member.suffix = queries.size > 1 ? query || '(no query)' : sessions.size > 1 ? `session ${member.source.session_id}`
+        : frames.size > 1 ? `frame ${member.source.frame_id}` : '';
     }
+    const uses = new Map();
+    for (const member of members) uses.set(member.suffix, (uses.get(member.suffix) ?? 0) + 1);
+    for (const member of members) if (uses.get(member.suffix) > 1) member.suffix = `${member.suffix} #${member.source.artifact_id}`.trim();
   }
 }
 

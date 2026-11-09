@@ -2192,7 +2192,11 @@ var(--panel);
       .request-name { display: flex; flex-direction: row; align-items: center; gap: 8px; }
       .request-row[data-target-kind="host"] .request-name { text-decoration: none; }
       .request-resource { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 11px; }
-      .request-host { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 10px var(--sans); }
+      /* The name takes the space it needs and the host only what is left. A host
+         with under 7ch left wraps onto a second line the one-line cell hides. */
+      .request-name:not(:has(> .researcher-name)) { flex-wrap: wrap; align-content: flex-start; height: 14px; line-height: 14px; }
+      .request-name:not(:has(> .researcher-name)) > .request-host { min-width: 7ch; }
+      .request-host { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 10px var(--sans); }
       .request-type, .request-method, .request-time { color: var(--muted); }
       .request-type { font-family: var(--sans); }
       .request-time { text-align: right; font-variant-numeric: tabular-nums; }

@@ -155,7 +155,9 @@ enum SessionCommand {
         /// Store Canvas images, which can contain sensitive page content.
         #[arg(long, requires = "confirm_sensitive_capture")]
         canvas_images: bool,
-        /// Retain request paths, queries and bounded bodies (sensitive).
+        /// Retain request paths, queries and bounded bodies, request and response
+        /// headers including Cookie, Set-Cookie and Authorization, each request's
+        /// cookies, and response bodies (sensitive).
         #[arg(long, requires = "confirm_sensitive_capture")]
         request_content: bool,
         /// MiB of unique request bodies and targets to retain, 1..4096 (default 256).

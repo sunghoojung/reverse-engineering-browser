@@ -41,7 +41,9 @@ pub struct StartOptions {
     pub duration_seconds: Option<u32>,
     pub localhost_only: bool,
     pub canvas_images: bool,
-    /// Retain request paths, queries and bounded bodies. Sensitive.
+    /// Retain request paths, queries and bounded bodies, request and response
+    /// headers including Cookie, Set-Cookie and Authorization, each request's
+    /// cookies, and response bodies. Sensitive.
     pub request_content: bool,
     /// MiB of unique request bodies and targets a content session retains.
     pub request_content_budget_mib: Option<u32>,
@@ -254,7 +256,7 @@ impl StartOptions {
             );
         }
         if self.request_content && !self.confirm_sensitive_capture {
-            return Err("request_content retains request paths, queries and bodies and requires confirm_sensitive_capture".into());
+            return Err("request_content retains request paths, queries and bodies, headers including Cookie, Set-Cookie and Authorization, each request's cookies, and response bodies, and requires confirm_sensitive_capture".into());
         }
         if let Some(budget) = self.request_content_budget_mib {
             if !self.request_content {

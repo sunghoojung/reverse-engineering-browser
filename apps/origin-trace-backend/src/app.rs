@@ -2,7 +2,7 @@ use crate::{
     analysis_catalog,
     analyst::Analyst,
     artifact_lookup::ArtifactLookupCache,
-    artifact_query,
+    artifact_map, artifact_query,
     capture::{self, Capture, StopRefusal},
     config::{CaptureMode, Options},
     decoder::Decoder,
@@ -30,7 +30,7 @@ use sha2::Digest;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
@@ -38,6 +38,8 @@ use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAc
 const UI_ASSETS: [&str; 35] = [
     "index.html",
     "app.css",
+    "entropy_map.css",
+    "entropy_map.js",
     "command_palette.js",
     "app_state.js",
     "evidence_models.js",
@@ -474,6 +476,20 @@ impl App {
                     .transpose()?;
                 let root = self.options.artifacts.clone();
                 self.blocking(move || wasm::load(&root, &id, sections.as_ref()))
+                    .await?
+            }
+            "/api/artifact-map" => {
+                if q.0.keys().any(|key| key != "artifact_id") {
+                    return Err(Error::bad("Artifact map takes only artifact_id"));
+                }
+                let id = q.required("artifact_id")?.to_owned();
+                let artifact = self.find_artifact(&id).await?;
+                let root = self.options.artifacts.clone();
+                let cancelled = Arc::new(AtomicBool::new(false));
+                // Dropped when the client abandons the request, so a stale map
+                // stops reading instead of holding a shared reader permit.
+                let _stale = CancelOnDrop(cancelled.clone());
+                self.blocking(move || artifact_map::build(&root, &artifact, &cancelled))
                     .await?
             }
             "/api/api-collection" | "/api/local-analyst" => {
@@ -1796,6 +1812,13 @@ fn not_modified(etag: &str) -> Response {
         .headers_mut()
         .insert("etag", HeaderValue::from_str(etag).unwrap());
     response
+}
+/// Marks an artifact-map read as abandoned when its request future is dropped.
+struct CancelOnDrop(Arc<AtomicBool>);
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 fn bytes_response(bytes: Vec<u8>, mime: &'static str) -> Response {
     let mut response = Response::new(Body::from(bytes));

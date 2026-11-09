@@ -3482,6 +3482,63 @@ async fn wasm_inspection_preserves_offsets_identity_limits_and_original_bytes() 
 }
 
 #[tokio::test]
+async fn artifact_map_route_is_read_only_versioned_and_covers_the_whole_artifact() {
+    let server = Server::start().await;
+    let spec = specification();
+    let mut rows = String::new();
+    let mut put = |id: &str, bytes: &[u8], kind: &str, hash_override: Option<String>| {
+        let hash = hash_override.unwrap_or_else(|| hex::encode(Sha256::digest(bytes)));
+        let artifact = format!(
+            r#"{{"protocol_version":1,"artifact_id":"{id}","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"{kind}","url":"https://example.test/{id}","mime_type":"application/octet-stream","byte_size":{},"sha256":"{hash}","sensitive":false,"content_path":"blobs/{hash}.bin"}}"#,
+            bytes.len()
+        );
+        rows.push_str(&artifact);
+        rows.push('\n');
+        server.file("artifacts/manifest.jsonl", rows.as_bytes());
+        server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+    };
+    let mut module = b"\0asm\x01\0\0\0".to_vec();
+    module.extend([1, 4, 1, 0x60, 0, 0]);
+    module.extend(vec![0u8; 8192 - module.len()]);
+    put("1", &module, "wasm", None);
+    put("2", &[0x41; 1024], "javascript", None);
+    put("3", b"tampered bytes", "javascript", Some("0".repeat(64)));
+    let response = server.get("/api/artifact-map?artifact_id=1").await;
+    assert_eq!(response.status(), 200);
+    let report: Value = response.json().await.unwrap();
+    assert_schema(
+        &spec,
+        &spec["components"]["schemas"]["ArtifactMap"],
+        &report,
+        "artifact map",
+    );
+    assert_eq!(report["version"], 1);
+    assert_eq!(report["integrity"], "verified");
+    assert_eq!(report["byte_length"], 8192);
+    assert_eq!(report["grid"]["order"], "hilbert");
+    assert_eq!(report["grid"]["side"], 4);
+    assert_eq!(report["facts"]["source"], "wasm_section_frames");
+    for (query, status) in [
+        ("?artifact_id=1&extra=1", 400),
+        ("", 400),
+        ("?artifact_id=0", 404),
+        ("?artifact_id=99", 404),
+        ("?artifact_id=3", 500),
+    ] {
+        let route = format!("/api/artifact-map{query}");
+        assert_contract_response(server.get(&route).await, "get", "/api/artifact-map", status).await;
+    }
+    let map: Value = server
+        .get("/api/artifact-map?artifact_id=2")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(map["facts"]["source"], "javascript_lexer");
+}
+
+
+#[tokio::test]
 async fn wasm_section_requests_reach_late_tables_and_declare_what_they_left_out() {
     let server = Server::start().await;
     fn leb(mut n: usize) -> Vec<u8> {

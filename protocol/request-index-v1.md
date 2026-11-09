@@ -73,8 +73,11 @@ request content (protocol/native-network-v2.md). Consumers insert them as text.
 | Page | 500 rows | `limit` is clamped |
 | Domain facets | 512, plus the domain filter | `facets.domains_truncated` |
 
-A network record that is not valid JSON or fails event validation is counted,
-never dropped silently.
+A record that names `network` and is not valid JSON or fails event validation
+is counted in `index.malformed_records`, and so is any line that is not a whole
+JSON object, since it may have lost those bytes. A complete object without the
+bytes `network` is not parsed and is not counted: it cannot be told from a
+record of another category.
 
 ### Per-request detail reads
 

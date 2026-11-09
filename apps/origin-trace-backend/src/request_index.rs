@@ -1345,8 +1345,12 @@ impl RequestIndex {
         if line.iter().all(u8::is_ascii_whitespace) {
             return;
         }
-        // Only a network record names its category in its bytes.
+        // Only a network record names its category in its bytes. A line that is
+        // no complete object may have lost those bytes, so it cannot be skipped.
         if line.len() <= RECORD_BYTES && !line.windows(7).any(|window| window == b"network") {
+            if line.trim_ascii().first() != Some(&b'{') || line.trim_ascii().last() != Some(&b'}') {
+                state.malformed += 1;
+            }
             return;
         }
         let event = match serde_json::from_slice::<Value>(line) {
@@ -3063,6 +3067,24 @@ mod tests {
         assert!(!sidecar.exists(), "a clear removes the derived copy");
         fs::write(&path, b"").unwrap();
         assert_eq!(page(&mut reopened, "")["total"], 0);
+    }
+
+    #[test]
+    fn a_line_torn_before_its_category_is_counted() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events.jsonl");
+        let mut store = Store {
+            events: Vec::new(),
+            sequence: 0,
+        };
+        store.push(42, 5, "request_initiated", b"", json!({}));
+        let mut bytes = store.bytes();
+        bytes.extend_from_slice(b"{\"protocol_version\":3,\"session\n");
+        // A complete object of another category stays uncounted and unread.
+        bytes.extend_from_slice(b"{\"category\":\"wasm\"}\n");
+        fs::write(&path, bytes).unwrap();
+        let mut index = RequestIndex::new(&path);
+        assert_eq!(page(&mut index, "")["index"]["malformed_records"], "1");
     }
 
     #[test]

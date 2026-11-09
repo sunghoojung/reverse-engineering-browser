@@ -90,6 +90,14 @@ function createTrafficIndex({fetcher = (input, init) => fetch(input, init), onCh
       stale = true;
       schedule();
     },
+    // A poll that changed nothing still retries a failed read. Only polls call
+    // this and a read in flight is left alone, so a failing read runs once per
+    // poll at most and cannot spin.
+    retry() {
+      if (error === null || inFlight) return;
+      stale = true;
+      schedule();
+    },
     answer: () => answer,
     error: () => error,
     pending: () => Boolean(inFlight),

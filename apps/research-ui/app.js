@@ -3089,16 +3089,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         // Scopes first: a tab or domain the session no longer has resets its filter.
         if (answer) renderRequestScopes(trafficIndexScopes(answer.document));
         const filterKey = trafficRequestFilterKey();
-        const filterChanged = filterKey !== state.trafficFilterKey;
-        if (filterChanged) {
-          state.trafficNewIds.clear(); state.trafficPendingCount = 0; state.trafficSeenThrough = null;
-          state.trafficWindowStart = 0; state.trafficWindowAnchor = null;
-          if (state.trafficFilterKey !== null) container.scrollTop = 0;
-        }
-        state.trafficFilterKey = filterKey;
         const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
         const query = trafficIndexQuery(origin, names);
         const covering = candidate => candidate?.query === query && candidate.origin === origin ? candidate : null;
+        // The list moves to the new query only when it answers. Until then the
+        // last rows and their scroll position stay, even if the read fails.
+        if (covering(answer) && filterKey !== state.trafficFilterKey) {
+          state.trafficNewIds.clear(); state.trafficPendingCount = 0; state.trafficSeenThrough = null;
+          state.trafficWindowStart = 0; state.trafficWindowAnchor = null;
+          if (state.trafficFilterKey !== null) container.scrollTop = 0;
+          state.trafficFilterKey = filterKey;
+        }
         const known = covering(answer)?.document.matching ?? 0;
         const start = trafficBlockStart(container, known, state.trafficWindowStart);
         state.trafficWindowStart = start;
@@ -3109,7 +3110,15 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!current) {
           // Another query's rows stay until this one answers; they are never relabeled.
           if (!answer) renderTrafficEmpty('Reading the request index…');
-          renderTrafficWindowStatus(null, answer?.document.total ?? 0, false, 'reading the request index');
+          const failure = index.error();
+          const block = container.trafficBlock;
+          if (block) {
+            const pending = failure ? 'Not loaded: the request index is unavailable' : 'Loading…';
+            if (block.options.pending !== pending) renderTrafficRows(container, block.requests, {...block.options, pending, newIds: new Set()});
+            renderTrafficRowSelection(container, state.selectedRequestId);
+          }
+          renderTrafficWindowStatus(null, answer?.document.total ?? 0, false,
+            failure ? `${trafficIndexNote(null, failure)}, filter not applied` : 'reading the request index');
           return;
         }
         const page = current.document, matching = page.matching;
@@ -8338,7 +8347,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const response = await fetch('/api/events?limit=5000', { cache: 'no-store', headers, signal: deadline });
           if (stale()) { next = 'repeat'; return; }
           // A failed poll drops the entity tag, so 304 always follows a valid answer.
-          if (response.status === 304) { next = 'unchanged'; return; }
+          if (response.status === 304) {
+            state.trafficIndex?.retry();
+            next = 'unchanged';
+            return;
+          }
           if (!response.ok) throw new Error(`Broker returned ${response.status}`);
           const rawBody = await response.text();
           if (stale()) { next = 'repeat'; return; }

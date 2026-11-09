@@ -378,20 +378,22 @@ function trafficRowHeight(container) {
   return Number(container.dataset.rowHeight) || 28;
 }
 
-function trafficMountedRange(container, top, height, start, length) {
+// Follows the viewport, not the block: a position the block does not hold
+// mounts as a placeholder, so a scroll past a held block is never blank.
+function trafficMountedRange(container, top, height, total) {
   const first = Math.floor(Math.max(0, top || 0) / height);
   const shown = Math.ceil((container.clientHeight || 0) / height) || TRAFFIC_ROW_UNMEASURED;
-  const from = Math.max(start, Math.min(start + length, first - TRAFFIC_ROW_OVERSCAN));
-  return {from, to: Math.max(from, Math.min(start + length, first + shown + TRAFFIC_ROW_OVERSCAN))};
+  const from = Math.max(0, Math.min(total, first - TRAFFIC_ROW_OVERSCAN));
+  return {from, to: Math.max(from, Math.min(total, first + shown + TRAFFIC_ROW_OVERSCAN))};
 }
 
 function trafficRowsCover(container) {
   const block = container.trafficBlock;
   if (!block) return true;
-  const height = trafficRowHeight(container), end = block.start + block.requests.length;
+  const height = trafficRowHeight(container), total = block.options.total ?? block.requests.length;
   const first = Math.floor((container.scrollTop || 0) / height);
   const last = first + (Math.ceil((container.clientHeight || 0) / height) || TRAFFIC_ROW_UNMEASURED);
-  return Math.max(block.start, Math.min(first, end)) >= block.from && Math.min(end, last) <= block.to;
+  return Math.min(first, total) >= block.from && Math.min(last, total) <= block.to;
 }
 
 function remountTrafficRows(container) {
@@ -479,9 +481,9 @@ function renderTrafficRows(container, requests, options) {
   const anchor = scrollTop > 0 ? [...previousRows.values()].find(row => row.dataset.requestId && (Number(row.dataset.position) + 1) * height > scrollTop) : null;
   const anchorAt = anchor ? requests.findIndex(request => request?.id === anchor.dataset.requestId) : -1;
   const top = anchorAt >= 0 ? (start + anchorAt) * height - (Number(anchor.dataset.position) * height - scrollTop) : scrollTop;
-  const {from, to} = trafficMountedRange(container, top, height, start, requests.length);
+  const {from, to} = trafficMountedRange(container, top, height, total);
   container.trafficBlock = {requests, options, start, from, to};
-  const mounted = requests.slice(from - start, to - start);
+  const mounted = Array.from({length: to - from}, (_, index) => requests[from - start + index] ?? null);
   const selectedAt = requests.findIndex(request => request?.id === selectedId);
   if (selectedAt >= 0) container.dataset.selectedPosition = String(start + selectedAt); else delete container.dataset.selectedPosition;
   const selectedVisible = mounted.some(request => request?.id === selectedId);

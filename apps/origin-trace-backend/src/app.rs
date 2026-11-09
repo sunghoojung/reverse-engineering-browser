@@ -45,6 +45,7 @@ const UI_ASSETS: [&str; 40] = [
     "entropy_map.js",
     "agent_panel.css",
     "agent_panel.js",
+    "agent_runtime.js",
     "command_palette.js",
     "app_state.js",
     "evidence_models.js",

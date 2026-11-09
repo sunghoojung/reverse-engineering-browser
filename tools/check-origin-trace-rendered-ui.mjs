@@ -128,8 +128,8 @@ try {
   // the packaged app with no key and no network. The real tool server answers.
   const citedArtifact = (await (await fetch(`${endpoint}/api/artifacts?kind=javascript&limit=1`)).json()).artifacts[0];
   const sse = lines => lines.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('');
-  const toolTurn = sse([{type: 'message_start', message: {usage: {input_tokens: 40}}},
-    {type: 'content_block_start', index: 0, content_block: {type: 'tool_use', id: 'toolu_rendered', name: 'get_artifacts', input: {}}},
+  const toolTurn = () => sse([{type: 'message_start', message: {id: `msg_${Math.random().toString(36).slice(2)}`, type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, usage: {input_tokens: 40, output_tokens: 0}}},
+    {type: 'content_block_start', index: 0, content_block: {type: 'tool_use', id: `toolu_${Math.random().toString(36).slice(2)}`, name: 'get_artifacts', input: {}}},
     {type: 'content_block_delta', index: 0, delta: {type: 'input_json_delta', partial_json: '{"limit":3}'}},
     {type: 'content_block_stop', index: 0}, {type: 'message_delta', delta: {stop_reason: 'tool_use'}, usage: {output_tokens: 8}}, {type: 'message_stop'}]);
   const answer = `The session loaded **one** script. <img src=x onerror="window.__rebInjected=1"> See [cite session=${citedArtifact.session_id} artifact=${citedArtifact.artifact_id}] and an invented [cite session=${citedArtifact.session_id} artifact=999999].
@@ -140,7 +140,7 @@ fetch("/getcaptcha");
 
 - first observation
 - second observation`;
-  const textTurn = sse([{type: 'message_start', message: {usage: {input_tokens: 64}}},
+  const textTurn = () => sse([{type: 'message_start', message: {id: `msg_${Math.random().toString(36).slice(2)}`, type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, usage: {input_tokens: 64, output_tokens: 0}}},
     {type: 'content_block_start', index: 0, content_block: {type: 'text', text: ''}},
     {type: 'content_block_delta', index: 0, delta: {type: 'text_delta', text: answer}},
     {type: 'content_block_stop', index: 0}, {type: 'message_delta', delta: {stop_reason: 'end_turn'}, usage: {output_tokens: 32}}, {type: 'message_stop'}]);
@@ -156,7 +156,10 @@ fetch("/getcaptcha");
         return;
       }
       response.setHeader('Content-Type', 'text/event-stream');
-      response.end(body.includes('tool_result') ? textTurn : toolTurn);
+      // A turn's first request asks for a tool; the request carrying its result
+      // gets the answer. Earlier turns' results are history, not this signal.
+      const last = JSON.stringify(JSON.parse(body || '{}').messages?.at(-1) ?? '');
+      response.end(last.includes('tool_result') ? textTurn() : toolTurn());
     });
   });
   await new Promise(done => agentStandIn.listen(0, '127.0.0.1', done));

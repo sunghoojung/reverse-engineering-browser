@@ -77,6 +77,12 @@ mkdir -p "${research_ui_resources}"
 for asset in index.html app.css block_graph.css block_graph.js block_graph_layout.js entropy_map.css entropy_map.js command_palette.js app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_facts.js source_search.js traffic_view.js captured_client.js captured_export_formats.js vm_debugger.js vm_static.js vm_static_view.js vm_contextual.js vm_contextual_evidence.js vm_contextual_view.js vm_analysis_packs.js vm_opcode_ledger.js vm_opcode_ledger_view.js vm_semantics.js pane_layout.js native_console_completion.js native_console.js investigation_navigation.js investigation_notebook.js evidence_names.js invocation_sites.js app.js agent_panel.js agent_panel.css vm_program_workspace.js xrefs_view.js xrefs_view.css analyst_runner_core.js analyst_runner_node.js; do
   cp "${repo_root}/apps/research-ui/${asset}" "${research_ui_resources}/${asset}"
 done
+# The agent dock's LangGraph loop: one browser bundle built from the lockfile,
+# loaded from these resources only when the agent is turned on.
+"${repo_root}/scripts/build-agent-runtime.sh" "${repo_root}/build/agent-runtime"
+cp "${repo_root}/build/agent-runtime/agent_runtime.js" "${research_ui_resources}/agent_runtime.js"
+cp "${repo_root}/build/agent-runtime/agent_runtime.LICENSES.txt" "${resources_path}/AgentRuntimeLicenses.txt"
+node "${repo_root}/tools/check-agent-runtime.mjs" "${research_ui_resources}/agent_runtime.js"
 cargo build --locked --release --manifest-path "${repo_root}/apps/origin-trace-backend/Cargo.toml"
 cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-backend" "${macos_path}/OriginTraceBackend"
 cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-vm" "${macos_path}/OriginTraceVMAnalyzer"

@@ -21,7 +21,7 @@ async function checkTrafficActivation(root) {
     ({id: 'screen-' + name, hidden: name !== 'sources'}));
   const old = {id: 'old'}, added = {id: 'captured-while-hidden'};
   const state = {events: [], requests: [old], nativeRequests: [old], selectedRequestId: old.id,
-    signalKnownKeys: null, signalNewKeys: new Set(), refreshing: false};
+    signalKnownKeys: null, signalNewKeys: new Set(), refreshing: false, trafficLoaded: new Map()};
   let painted = [old], summary = old, inspector = old, status = 200, fetches = 0;
   let body = {events: [], network_events: [old, added], capture_mode: 'live', broker_connected: true};
   const context = {
@@ -55,6 +55,15 @@ async function checkTrafficActivation(root) {
   await api.refresh();
   assert.equal(state.eventFailureKind, null);
   assert.deepEqual(JSON.parse(JSON.stringify(state.requests)), [old, added], 'Native refresh retains requests received while Traffic is hidden');
+  // A row read from the store belongs to one session.
+  state.trafficLoaded.set('pinned', old);
+  await api.refresh();
+  assert.equal(state.trafficLoaded.has('pinned'), true, 'The same session keeps its pinned rows');
+  body = {...body, capture_mode: 'demo'};
+  await api.refresh();
+  assert.equal(state.trafficLoaded.size, 0, 'Another session mode drops pinned rows');
+  body = {...body, capture_mode: 'live'};
+  await api.refresh();
   const beforeActivation = fetches;
   api.showScreen('traffic', navigationButton);
   assert.equal(screens[0].hidden, false);

@@ -1653,9 +1653,9 @@ void NativeArtifactCaptureSink::OnTransferCompleted(
   if (context.on_refused && status != NativeArtifactReceiveStatus::kAccepted) {
     context.on_refused();
   }
-  if (context.shared_block && status != NativeArtifactReceiveStatus::kAccepted) {
-    // An identical block must get its own attempt, not share one that failed.
-    NativeNetworkCaptureSink::Get().ForgetSharedBlock(artifact_id);
+  if (context.shared_block) {
+    NativeNetworkCaptureSink::Get().HeaderBlockSettled(
+        artifact_id, status == NativeArtifactReceiveStatus::kAccepted);
   }
   if (context.response_body) {
     NativeResponseBodyCapture::Get().OnTransferCompleted(

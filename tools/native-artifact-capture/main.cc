@@ -1023,32 +1023,43 @@ void HeaderAndExpiryEdges() {
     return static_cast<reb::HeaderState>(payload.state);
   };
 
-  // A failed block is not shared: the next identical one gets its own attempt.
+  // Only an accepted block is shared. An identical block recorded while the
+  // first is in flight carries its own artifact, so the first one's failure
+  // cannot leave it naming an artifact that does not exist.
   configure();
   const auto [first, first_payload] = headers();
   Check(state_of(first_payload) == reb::HeaderState::kCaptured, "The first block is retained");
-  const auto [repeat, repeat_payload] = headers();
-  Check(state_of(repeat_payload) == reb::HeaderState::kCapturedShared &&
-            repeat.header.artifact_id == first.header.artifact_id,
-        "An identical block shares the artifact");
+  const auto [in_flight, in_flight_payload] = headers();
+  Check(state_of(in_flight_payload) == reb::HeaderState::kCaptured &&
+            in_flight.header.artifact_id != first.header.artifact_id &&
+            transfers.contains(in_flight.header.artifact_id),
+        "An identical block in flight gets its own artifact, not a share of an unconfirmed one");
   NativeArtifactCaptureSink::TransferCompleted(first.header.artifact_id,
                                                reb::NativeArtifactReceiveStatus::kIoError);
-  Check(events.back().header.type == NativeProbeType::kArtifactCaptureFailed,
-        "The failed block reports its failure");
+  Check(events.back().header.type == NativeProbeType::kArtifactCaptureFailed &&
+            events.back().header.artifact_id == first.header.artifact_id &&
+            events.back().header.parent_event_id == first.header.sequence_number,
+        "The failed block reports its failure against its own record");
   const auto [retry, retry_payload] = headers();
   Check(state_of(retry_payload) == reb::HeaderState::kCaptured &&
             retry.header.artifact_id != first.header.artifact_id,
         "A block after a failed transfer gets its own attempt, not the dead artifact");
-  const auto [kept, kept_payload] = headers();
-  Check(state_of(kept_payload) == reb::HeaderState::kCapturedShared &&
-            kept.header.artifact_id == retry.header.artifact_id,
-        "A block still in flight stays shareable");
-  NativeArtifactCaptureSink::TransferCompleted(retry.header.artifact_id,
+  NativeArtifactCaptureSink::TransferCompleted(in_flight.header.artifact_id,
                                                reb::NativeArtifactReceiveStatus::kAccepted);
+  Check(events.back().header.type == NativeProbeType::kArtifactCaptured &&
+            events.back().header.artifact_id == in_flight.header.artifact_id &&
+            events.back().header.parent_event_id == in_flight.header.sequence_number,
+        "The block that was in flight when the first failed still ends captured");
   const auto [accepted, accepted_payload] = headers();
   Check(state_of(accepted_payload) == reb::HeaderState::kCapturedShared &&
-            accepted.header.artifact_id == retry.header.artifact_id,
-        "An accepted block keeps being shared");
+            accepted.header.artifact_id == in_flight.header.artifact_id,
+        "A later identical block shares only the artifact the receiver accepted");
+  NativeArtifactCaptureSink::TransferCompleted(retry.header.artifact_id,
+                                               reb::NativeArtifactReceiveStatus::kAccepted);
+  const auto [kept, kept_payload] = headers();
+  Check(state_of(kept_payload) == reb::HeaderState::kCapturedShared &&
+            kept.header.artifact_id == in_flight.header.artifact_id,
+        "A second accepted copy leaves the first accepted artifact shared");
 
   // Past the tracking limit a request can get no network block, and every
   // later header record counts that.

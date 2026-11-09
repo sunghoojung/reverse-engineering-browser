@@ -92,8 +92,9 @@ class NativeNetworkCaptureSink final {
   // Content sessions only, after RecordRequestStarted: a request without a
   // DevTools ID gets `reb-<request_id>`, so the network service reports the
   // headers it sends (protocol/native-network-v3.md). No request byte changes.
-  // A failed header or cookie artifact may no longer be shared by later requests.
-  void ForgetSharedBlock(std::uint64_t artifact_id) noexcept;
+  // The receiver's verdict on a queued header block or cookie list. Only an
+  // accepted one can be shared by later requests.
+  void HeaderBlockSettled(std::uint64_t artifact_id, bool accepted) noexcept;
   // Records every deferred body while the session can still record them.
   void FlushDeferredBodies() noexcept;
   void AssignNetworkHeadersId(std::uint64_t request_id, network::ResourceRequest& request) noexcept;
@@ -225,7 +226,10 @@ class NativeNetworkCaptureSink final {
   // Header blocks of this configuration; content sessions only.
   base::Lock header_lock_;
   std::unordered_map<std::uint64_t, TrackedHeaders> tracked_headers_;
+  // Blocks the receiver accepted, by kind, length and digest.
   std::map<std::array<std::uint8_t, 37>, std::uint64_t> shared_header_blocks_;
+  // Queued blocks awaiting an ACK; the artifact queue bounds their number.
+  std::map<std::uint64_t, std::array<std::uint8_t, 37>> in_flight_header_blocks_;
   std::size_t header_bytes_ = 0;
   std::uint32_t unattributed_header_blocks_ = 0;
   std::uint32_t unattributed_cookie_lists_ = 0;

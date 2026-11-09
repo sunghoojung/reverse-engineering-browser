@@ -154,6 +154,7 @@ void HeaderBlocks() {
          provisional_call.url == "https://echo.test/start?a=1" &&
          Text(provisional_call.content) == provisional_text &&
          provisional.header.artifact_id == artifacts.next_artifact_id - 1);
+  const auto provisional_artifact = provisional.header.artifact_id;
 
   // Hop 0: the network stack's headers, pseudo-headers and Cookie included.
   reb::NotifyNativeNetworkHeaders(
@@ -243,14 +244,15 @@ void HeaderBlocks() {
   reb::NotifyNativeNetworkHeaders(kRaw, "preflight-token", Raw({{"origin", "x"}}));
   assert(events.empty());
 
-  // Identical provisional headers are retained once; the count shows the loss.
+  // Once accepted, identical provisional headers are retained once; the count
+  // shows the loss.
+  sink.HeaderBlockSettled(provisional_artifact, true);
   const auto calls = artifacts.header_calls.size();
   request.devtools_request_id.reset();
   start(501);
   value = Headers(Last(reb::NativeProbeType::kRequestHeaders));
   assert(AllValid() && value.state == static_cast<std::uint8_t>(HeaderState::kCapturedShared) &&
-         Last(reb::NativeProbeType::kRequestHeaders).header.artifact_id ==
-             provisional.header.artifact_id &&
+         Last(reb::NativeProbeType::kRequestHeaders).header.artifact_id == provisional_artifact &&
          value.unattributed_blocks == 1 && artifacts.header_calls.size() == calls);
 
   // A DevTools-owned ID is kept and matched by value.
@@ -862,8 +864,14 @@ void CookieLists() {
          Last(reb::NativeProbeType::kCookieList).header.artifact_id == 0 &&
          value.sha256 == crypto::hash::Sha256(std::string()));
 
-  // A later request sending the same cookies shares the retained list.
-  const auto calls = artifacts.header_calls.size();
+  // A later request sending the same cookies shares the accepted list.
+  sink.HeaderBlockSettled(list.header.artifact_id, true);
+  const auto cookie_list_calls = [&artifacts] {
+    return std::ranges::count_if(artifacts.header_calls, [](const auto& call) {
+      return call.kind == reb::NativeArtifactKind::kCookieList;
+    });
+  };
+  const auto calls = cookie_list_calls();
   start(701);
   events.clear();
   reb::NotifyNativeNetworkHeaders(kRaw, "reb-00000000000002bd", Raw({{"cookie", "sid=s3cret"}}),
@@ -872,7 +880,7 @@ void CookieLists() {
   assert(AllValid() &&
          value.state == static_cast<std::uint8_t>(reb::HeaderState::kCapturedShared) &&
          Last(reb::NativeProbeType::kCookieList).header.artifact_id == list.header.artifact_id &&
-         artifacts.header_calls.size() == calls);
+         cookie_list_calls() == calls);
 
   // A response with no raw request yet, and one after completion, are counted.
   start(702);

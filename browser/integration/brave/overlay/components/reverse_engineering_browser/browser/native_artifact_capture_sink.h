@@ -224,7 +224,8 @@ class NativeArtifactCaptureSink final {
     std::uint64_t parent_event_id = 0;
     NativeProbeCategory result_category = NativeProbeCategory::kArtifact;
     bool response_body = false;
-    // A header block or cookie list another request can share by artifact ID.
+    // A header block or cookie list; its ACK decides whether later requests
+    // can share it by artifact ID.
     bool shared_block = false;
     std::function<void()> on_refused = {};
     // A request body still being read: no record exists yet to parent a loss

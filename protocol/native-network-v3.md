@@ -844,7 +844,7 @@ transfer sizes and resource type zero, the parent's identity, and
 | State | Meaning |
 | ---: | --- |
 | 1 `captured` | Retained as the named artifact, created by this record |
-| 2 `captured_shared` | An identical block (kind, length and SHA-256) was already retained in this configuration; `artifact_id` names it |
+| 2 `captured_shared` | The receiver already accepted an identical block (kind, length and SHA-256) in this configuration; `artifact_id` names it. A block recorded before that acceptance gets its own artifact |
 | 3 `empty` | No headers |
 | 4 `not_captured_block_limit` | Longer than 320 KiB; count and length only |
 | 5 `not_captured_artifact_unavailable` | Artifact category off, receiver disconnected or session inactive |

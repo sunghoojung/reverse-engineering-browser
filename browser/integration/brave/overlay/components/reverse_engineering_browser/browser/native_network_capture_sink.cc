@@ -448,6 +448,7 @@ void NativeNetworkCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
     base::AutoLock lock(header_lock_);
     tracked_headers_.clear();
     shared_header_blocks_.clear();
+    in_flight_header_blocks_.clear();
     header_bytes_ = 0;
     unattributed_header_blocks_ = 0;
     unattributed_cookie_lists_ = 0;
@@ -550,9 +551,9 @@ NativeHeaderState NativeNetworkCaptureSink::RetainBlock(const NativeArtifactKind
     return NativeHeaderState::kNotCapturedTransferRefused;
   }
   header_bytes_ += size;
-  if (shared_header_blocks_.size() < kNativeHeaderShareEntries) {
-    shared_header_blocks_.emplace(key, event.header.artifact_id);
-  }
+  // Shared only after the receiver accepts it: until then a sharer would name
+  // an artifact that may never exist, and no later record could correct it.
+  in_flight_header_blocks_.emplace(event.header.artifact_id, key);
   return NativeHeaderState::kCaptured;
 }
 
@@ -925,10 +926,18 @@ void NativeNetworkCaptureSink::EmitNavigationLink(
   emitter(event);
 }
 
-void NativeNetworkCaptureSink::ForgetSharedBlock(const std::uint64_t artifact_id) noexcept {
+void NativeNetworkCaptureSink::HeaderBlockSettled(const std::uint64_t artifact_id,
+                                                  const bool accepted) noexcept {
   base::AutoLock lock(header_lock_);
-  std::erase_if(shared_header_blocks_,
-                [artifact_id](const auto& shared) { return shared.second == artifact_id; });
+  const auto found = in_flight_header_blocks_.find(artifact_id);
+  if (found == in_flight_header_blocks_.end()) {
+    return;
+  }
+  if (accepted && shared_header_blocks_.size() < kNativeHeaderShareEntries) {
+    // An identical block accepted while this one was in flight keeps its entry.
+    shared_header_blocks_.emplace(found->second, artifact_id);
+  }
+  in_flight_header_blocks_.erase(found);
 }
 
 void NativeNetworkCaptureSink::FlushDeferredBodies() noexcept {

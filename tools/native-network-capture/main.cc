@@ -547,7 +547,7 @@ void RequestContent() {
   // A read the artifact sink refuses at the hook is recorded at once, unread.
   request.request_body = std::make_shared<network::ResourceRequestBody>();
   request.request_body->elements_mutable()->emplace_back(network::DataElementFile{});
-  for (const auto [admission, state] :
+  for (const auto& [admission, state] :
        {std::pair{reb::NativeRequestContentAdmission::kSessionBudget,
                   State::kNotCapturedSessionBudget},
         std::pair{reb::NativeRequestContentAdmission::kRefused, State::kNotCapturedTransferRefused},
@@ -605,7 +605,7 @@ void RequestContent() {
              static_cast<std::uint8_t>(State::kNotCapturedArtifactUnavailable) &&
          retention() == reb::RequestTargetRetention::kNotRetainedArtifactUnavailable);
   artifacts.enabled = true;
-  for (const auto [admission, state, target_retention] :
+  for (const auto& [admission, state, target_retention] :
        {std::tuple{reb::NativeRequestContentAdmission::kRefused, State::kNotCapturedTransferRefused,
                    reb::RequestTargetRetention::kNotRetainedTransferRefused},
         std::tuple{reb::NativeRequestContentAdmission::kSessionBudget,
@@ -910,8 +910,8 @@ void CookieLists() {
   // A later request sending the same cookies shares the accepted list.
   sink.HeaderBlockSettled(list.header.artifact_id, true);
   const auto cookie_list_calls = [&artifacts] {
-    return std::ranges::count_if(artifacts.header_calls, [](const auto& call) {
-      return call.kind == reb::NativeArtifactKind::kCookieList;
+    return std::ranges::count_if(artifacts.header_calls, [](const auto& candidate) {
+      return candidate.kind == reb::NativeArtifactKind::kCookieList;
     });
   };
   const auto calls = cookie_list_calls();

@@ -1518,9 +1518,11 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
 {
   // The catalog is the whole manifest, read forward in 5,000-record pages
   // like get_artifacts: a one-record probe carries the ETag, growth is read
-  // from the last boundary and any other change from the start, up to 50,000.
+  // from the last boundary and any other change from the start. The first
+  // 50,000 records are every kind; later ones only the kinds Sources needs.
   const template=await ownedArtifact('1');
   const records=(count,from=1,url='p')=>Array.from({length:count},(_,i)=>({...template,artifact_id:String(from+i),url:`https://fixture.invalid/${url}/${from+i}.js`}));
+  const noise=(count,from)=>Array.from({length:count},(_,i)=>({...template,artifact_id:String(from+i),kind:'request_headers',capture_origin:'network_request',execution_context_id:'0',creator_event_id:'1',sensitive:true,url:`https://fixture.invalid/r/${from+i}`}));
   let manifest=records(12001);const lists=[];
   const {state,api}=ownedContext({fetch:async(url,options)=>{
     if(!url.startsWith('/api/artifacts?'))return new Response('const a = 1;');
@@ -1528,7 +1530,9 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
     const etag=`"${manifest.length}:${manifest[0]?.artifact_id}:${url}"`;
     if(options.headers['If-None-Match']===etag)return new Response(null,{status:304});
     if(after>manifest.length)return Response.json({error:'The cursor is not a record boundary'},{status:400});
-    const page=manifest.slice(after,after+limit),next=String(after+page.length);
+    const kinds=query.get('kind')?.split(','),page=[];let at=after;
+    while(at<manifest.length&&page.length<limit){const record=manifest[at++];if(!kinds||kinds.includes(record.kind))page.push(record);}
+    const next=String(at);
     return Response.json({count:page.length,artifacts:page,artifact_receiver_configured:true,artifact_receiver_connected:true,
       query:{direction:'forward',limit,returned:page.length,store_end:String(manifest.length),next_after:next,next_before:null,
         limited:page.length===limit,budget_exhausted:false,filters:{},scope:'all',scan_start:String(after),scan_end:next}},{headers:{ETag:etag}});
@@ -1545,10 +1549,24 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   manifest=records(3,90000,'replaced');lists.length=0;await api.refreshArtifacts();
   assert.deepEqual(lists,['/api/artifacts?after=0&limit=1','/api/artifacts?after=0&limit=5000'],'A replaced manifest is read from the start');
   assert.deepEqual([...state.artifacts.map(value=>value.artifact_id)],['90000','90001','90002']);
-  manifest=records(50003);lists.length=0;await api.refreshArtifacts();
-  assert.equal(state.artifacts.length,50000);assert.equal(state.artifactCatalogLimit,50000,'Loading stops at 50,000 records, visibly');
-  manifest=[...manifest,...records(1,60000)];lists.length=0;await api.refreshArtifacts();
-  assert.deepEqual(lists,['/api/artifacts?after=0&limit=1'],'A capped catalog reads no further pages');assert.equal(state.artifacts.length,50000);
+  // Request records past the first 50,000 records never push a source out of the catalog.
+  const pageKinds=/&kind=([a-z_,]+)$/;
+  manifest=[...noise(30000,1000000),...records(20000)];lists.length=0;await api.refreshArtifacts();
+  assert.equal(state.artifacts.length,50000);assert.equal(state.artifactCatalogLimit,0,'Exactly 50,000 records is a whole catalog, not a capped one');
+  manifest=[...noise(50000,1000000),...records(25000)];lists.length=0;await api.refreshArtifacts();
+  assert.equal(state.artifacts.length,75000);assert.equal(state.artifactCatalogLimit,0,'A source after 50,000 request records is still listed');
+  assert.equal(state.artifacts[0].kind,'request_headers','The unfiltered prefix keeps what Traffic, Evidence and packages read');
+  assert.equal(state.artifacts.at(-1).artifact_id,'25000','Manifest order is kept across the two reads');
+  assert.equal(lists.at(-1).match(pageKinds)[1].split(',').sort().join(),'bytecode_buffer,canvas_data_url,javascript,response_body,source_map,wasm,wasm_guest_adapter');
+  assert(!/request_|cookie_list|stack/.test(lists.at(-1)),'Past the prefix only the kinds this catalog alone supplies are read');
+  manifest=[...manifest,...noise(4,2000000),...records(2,30000)];lists.length=0;await api.refreshArtifacts();
+  assert.equal(state.artifacts.length,75002);assert.equal(lists.length,2);assert.match(lists[1],pageKinds,'Growth past the prefix continues as a filtered read');
+  manifest=[...records(49997),...noise(3,1000000),...records(100000,200000),...records(2,900000)];lists.length=0;await api.refreshArtifacts();
+  assert.equal(state.artifacts.filter(api.isSourceArtifact).length,100000);assert.equal(state.artifactCatalogLimit,100000,'Sources stop at a visible bound');
+  manifest=[...records(49997),...noise(3,1000000),...records(50003,200000)];lists.length=0;await api.refreshArtifacts();
+  assert.equal(state.artifacts.filter(api.isSourceArtifact).length,100000);assert.equal(state.artifactCatalogLimit,0,'Exactly the bound is not reported as over it');
+  manifest=[...manifest,...records(1,900000)];lists.length=0;await api.refreshArtifacts();
+  assert.equal(state.artifactCatalogLimit,100000);assert.deepEqual(lists.length,2,'A full catalog reads one record past its boundary and keeps none');
   manifest=[];lists.length=0;await api.refreshArtifacts();assert.equal(state.artifacts.length,0,'An emptied live manifest clears the catalog');
   sourceOwnershipReceipt.push({test:'catalog_pages_whole_manifest',status:'passed',records:12003});
 }
@@ -1568,7 +1586,7 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   assert.equal(state.artifacts.length,7);assert.equal(state.artifactCatalogLimit,0);
   manifest.length=0;for(let i=0;i<5000;i++)manifest.push({...template,artifact_id:String(i+1),url:`https://fixture.invalid/native/${i+1}.js`});
   await api.refreshArtifacts();
-  assert.equal(state.artifacts.length,5000);assert.equal(state.artifactCatalogLimit,50000,'A full unpaged answer is reported as partial');
+  assert.equal(state.artifacts.length,5000);assert.equal(state.artifactCatalogLimit,5000,'A full unpaged answer is reported as partial');
   sourceOwnershipReceipt.push({test:'catalog_reads_unpaged_native_reply',status:'passed',records:5000});
 }
 {

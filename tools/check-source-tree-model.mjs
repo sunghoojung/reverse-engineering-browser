@@ -271,8 +271,8 @@ export async function checkSourceTreeModel(root) {
     key(t.document.activeElement,'Home');assert.equal(t.tree.scrollTop,0);assert.equal(t.document.activeElement,entry(t,nav.model.rootKey).row);
     key(t.document.activeElement,'End');assert.equal(t.document.activeElement,entry(t,nav.list.at(-1).key).row);
     assert.equal(t.tree.scrollTop,nav.list.length*24-240,'End scrolls the navigator to the last row');
-    t.state.artifactCatalogLimit=50000;t.api.renderSourceTree();
-    assert.match(t.tree.children[0].textContent,/More than 50,000 artifact records/);assert(rows(t).every(row=>row.getAttribute('aria-selected')!=='true'));
+    t.state.artifactCatalogLimit=100000;t.api.renderSourceTree();
+    assert.match(t.tree.children[0].textContent,/More than 100,000 sources/);assert(rows(t).every(row=>row.getAttribute('aria-selected')!=='true'));
   }
   // Hostile, long, deep and over-limit catalogs.
   {

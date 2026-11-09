@@ -88,6 +88,9 @@
         'bytecode_buffer', 'wasm_guest_adapter', 'request_body', 'request_target', 'request_headers', 'response_headers',
         'cookie_list', 'stack'
       ]);
+      // Every kind Sources lists, plus Canvas images. Traffic reads a request's other
+      // records by ID, so only these need the artifact catalog past its unfiltered prefix.
+      const catalogOnlyArtifactKinds = [...artifactKinds].filter(kind => !networkRequestArtifactKinds.has(kind) && kind !== 'stack');
       const artifactCaptureOrigins = new Set([
         'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
         'webassembly_module', 'webassembly_instantiate', 'canvas_to_data_url',

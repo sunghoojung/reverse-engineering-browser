@@ -8068,7 +8068,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const matches = capturedSources().map(sourceReference).filter(source =>
           !needle || `${sourceDisplayName(source)} ${source.url} ${source.artifact_id}`.toLowerCase().includes(needle)
         );
-        // The whole catalog can hold 50,000 files; the list shows the first 200.
+        // The catalog can hold 100,000 sources; the list shows the first 200.
         const rows = matches.slice(0, 200).map(source => {
           const row = document.createElement('button');
           row.type = 'button';
@@ -8099,8 +8099,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (state.artifactRefreshing || location.protocol === 'file:') return;
         state.artifactRefreshing = true;
         try {
-          // Pages the whole manifest; growth is read from the last boundary, up to 50,000 records.
-          const catalogLimit = 50000;
+          // The first 50,000 records of every kind are read in manifest order. Past them, only the kinds
+          // this catalog alone supplies are read, so request records cannot crowd out scripts; Traffic
+          // reads a request's records by ID. Growth continues from the last boundary.
+          const catalogLimit = 50000, sourceLimit = 100000;
           const read = async (query, etag = null) => {
             const response = await fetch(`/api/artifacts?${query}`, {cache: 'no-store', headers: etag ? {'If-None-Match': etag} : {}});
             if (response.status === 304) return null;
@@ -8114,31 +8116,37 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const probe = await read('after=0&limit=1', state.artifactEtag);
           if (!probe) return;
           const {body} = probe;
-          let records = body.artifacts, appended = null, cursor = null, complete = true;
+          let records = body.artifacts, appended = null, cursor = null, complete = true, limit = sourceLimit;
           if (body.query) {
             const first = body.artifacts.length ? JSON.stringify(body.artifacts[0]) : null, previous = state.artifactCursor;
             const grown = first !== null && previous?.first === first && previous.catalog === state.artifacts;
-            const base = grown ? state.artifacts.length : 0;
-            let after = grown ? previous.after : '0';
+            let after = grown ? previous.after : '0', everyKind = grown ? previous.everyKind : 0, sources = grown ? previous.sources : 0;
             records = []; complete = false;
-            for (let page = 0; page < 64 && base + records.length < catalogLimit; page++) {
-              const next = (await read(`after=${after}&limit=5000`))?.body;
+            // A page is sized so a cursor never lands past a record that was not kept.
+            for (let page = 0; page < 256; page++) {
+              const unfiltered = everyKind < catalogLimit, full = !unfiltered && sources >= sourceLimit;
+              const size = unfiltered ? Math.min(5000, catalogLimit - everyKind) : full ? 1 : Math.min(5000, sourceLimit - sources);
+              const next = (await read(`after=${after}&limit=${size}${unfiltered ? '' : `&kind=${catalogOnlyArtifactKinds.join(',')}`}`))?.body;
               if (!next) throw new TypeError('Malformed artifact response');
+              // One record past the bound proves more remain, and it is not kept.
+              if (full && next.artifacts.length) break;
               records.push(...next.artifacts);
+              if (unfiltered) everyKind += next.artifacts.length;
+              sources += next.artifacts.filter(isSourceArtifact).length;
               if (!next.query) {complete = true; break;}
               after = next.query.next_after;
               if (!next.query.limited && !next.query.budget_exhausted) {complete = true; break;}
             }
-            if (base + records.length > catalogLimit) {records.length = catalogLimit - base; complete = false;}
-            cursor = {first, after};
+            cursor = {first, after, everyKind, sources};
             if (grown) appended = records;
           } else if (records.length) {
             // A reader that does not page answers the one-record probe with one record, so read what it can give.
             records = (await read('limit=5000'))?.body.artifacts ?? records;
             complete = records.length < 5000;
+            limit = 5000;
           }
           const keepCursor = () => {state.artifactCursor = cursor && {...cursor, catalog: state.artifacts};};
-          state.artifactCatalogLimit = complete ? 0 : catalogLimit;
+          state.artifactCatalogLimit = complete ? 0 : limit;
           state.artifactEtag = probe.etag;
           if (typeof body.artifact_receiver_configured === 'boolean') {
             state.artifactReceiverConfigured = body.artifact_receiver_configured;

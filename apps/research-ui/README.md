@@ -1229,9 +1229,12 @@ fingerprinting vendor produced the activity.
 
 Sources navigation lists every retained Captured artifact (`source_tree.js`).
 The catalog is read forward from `get_artifacts` in 5,000-record pages; a
-one-record probe carries the ETag, a manifest that only grew is read from its
-last boundary, and loading stops at 50,000 records with a notice. A stored
-session reads the same pages from the bundled backend. The tree reads
+one-record probe carries the ETag and a manifest that only grew is read from its
+last boundary. The first 50,000 records of every kind are read in manifest
+order, for Traffic, Evidence and packages; after them only the kinds this catalog
+alone supplies are read (`kind=`), so request records cannot push a script out.
+Loading stops at 100,000 sources with a notice. A stored session reads the same
+pages from the bundled backend. The tree reads
 **top**, then one row per frame, then the **Workers** (no frame),
 **Dynamic (eval / new Function)**, **WebAssembly** (modules compiled from bytes
 and their guest artifacts), **Extensions** (by extension ID) and **Browser

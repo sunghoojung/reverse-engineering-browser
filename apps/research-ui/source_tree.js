@@ -346,7 +346,7 @@ function createSourceTree(options) {
 
   function renderNotice(model) {
     const notices = [];
-    if (model.limits.catalog) notices.push(`More than ${model.limits.catalog.toLocaleString()} artifact records are retained; later records are not loaded. Selection markers are withheld until the whole catalog loads.`);
+    if (model.limits.catalog) notices.push(`More than ${model.limits.catalog.toLocaleString()} sources are retained; later ones are not loaded. Selection markers are withheld until the whole catalog loads.`);
     if (model.limits.omitted) notices.push(`${model.limits.omitted} sources exceed the navigator URL, identity or node limit and are not listed.`);
     if (model.limits.ambiguous) notices.push(`${model.limits.ambiguous} duplicate source identities are not shown twice; ambiguous sources cannot be opened.`);
     if (model.limits.deep) notices.push(`${model.limits.deep} paths are shortened after ${SOURCE_TREE_LIMITS.depth} folders; file tooltips keep their full URLs.`);

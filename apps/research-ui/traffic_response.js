@@ -30,7 +30,7 @@ function trafficResponseCapture(request, contentSession) {
         : 'The browser network proxy recorded no response for this request. Service-worker and memory-cache answers, and requests that failed first, never reach it.';
     }
     if (['js', 'wasm'].includes(request.type)) {
-      return 'Scripts and Wasm are retained as source artifacts. This one is not in the current catalog: its acknowledgment is pending, it was refused (see artifact_capture_failed in Evidence), or it is past the first 50,000 artifacts of the catalog.';
+      return 'Scripts and Wasm are retained as source artifacts. This one is not in the current catalog: its acknowledgment is pending, it was refused (see artifact_capture_failed in Evidence), or the session retains more than the 100,000 sources the catalog loads.';
     }
     return contentSession
       ? 'No response body record. The body may still be arriving, or its record left the retained window.'

@@ -3793,7 +3793,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             renderTrafficHeaders(headersInspector, request, renderInspector, requestTargetView(request));
           }
           else renderTrafficCookies(cookiesInspector, request, renderInspector, {requests: state.requests, events: state.events, selectRequest,
-            openFrame: openResolvedFrame});
+            openFrame: openResolvedFrame, storeRevision: state.eventEtag});
           return;
         }
         if (!payloadInspector.hidden) {

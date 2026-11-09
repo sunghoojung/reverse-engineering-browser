@@ -239,6 +239,32 @@ assert.match(older.textContent, /Not in the scanned range: the backend reads the
 assert.doesNotMatch(older.textContent, /No recorded document\.cookie/, 'A partial store read does not claim absence');
 panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
 await settle();
+// A settled answer is read again once the store changed, but not on every render.
+const refreshes = name => reads.filter(url => url === `/api/cookie-provenance?session_id=7&name=${name}`).length;
+{
+  const refreshRequest = {...request, cookieLists: [record('sent', [{strings: ['fresh', 'v', 'echo.test', '/', '', ''], flags: 1}])]};
+  const revised = {...ui, storeRevision: '"a"'};
+  const redraw = () => api.renderTrafficCookies(panel, refreshRequest, redraw, revised);
+  const open = async () => {redraw(); await settle();};
+  await open();
+  const nameButton = [...panel.querySelectorAll('.traffic-cookie-name')].find(node => node.textContent === 'fresh');
+  nameButton.dispatchEvent(new window.Event('click'));
+  await settle();
+  await open();
+  const first = refreshes('fresh');
+  assert(first >= 1, 'The name was read');
+  await open();
+  assert.equal(refreshes('fresh'), first, 'An unchanged store is not read again');
+  revised.storeRevision = '"b"';
+  await new Promise(resolve => setTimeout(resolve, 5100));
+  await open();
+  await settle();
+  assert.equal(refreshes('fresh'), first + 1, 'A changed store is read again after the interval');
+  panel.querySelector('.traffic-cookie-provenance button')?.dispatchEvent(new window.Event('click'));
+  await settle();
+  api.renderTrafficCookies(panel, request, rerender, ui);
+  await settle();
+}
 // A complete store read may state absence.
 provenanceAnswer = {set_by: [], sent_with: [], script: [], lists_read: 3, lists_unread: 0, stacks_unresolved: 0, malformed_records: 0, coverage: {complete: true}};
 const another = [...panel.querySelectorAll('.traffic-cookie-name')].find(node => node.textContent === 'track');
@@ -306,8 +332,8 @@ api.renderTrafficCookies(panel, {id: 'm', origin: 'live', method: 'GET', path: '
 assert.match(panel.textContent, /recorded only in content capture sessions/);
 api.renderTrafficCookies(panel, {id: 'l', origin: 'sample', method: 'GET', path: 'x', status: 200}, () => {});
 assert.match(panel.textContent, /no native cookie record/);
-assert.equal(reads.filter(url => url.startsWith('/api/artifacts/')).length, 4,
-  'one read per distinct retained list; refused and not-retained lists are not read');
+assert.equal(reads.filter(url => url.startsWith('/api/artifacts/')).length, 5,
+  'one read per distinct retained list, including the store-refresh block; refused and not-retained lists are not read');
 assert.equal(reads.filter(url => url.startsWith('/api/cookie-provenance?session_id=7&name=sid')).length, 2, 'a failed position read retries once');
 console.log('PASS Traffic Cookies tab: hops newest first, filtered-out request cookies and reasons, every response attribute ' +
   'and block reason, unparsed line, sort, tooltip and copy, provenance to response, script write at its resolved position and later request, ' +

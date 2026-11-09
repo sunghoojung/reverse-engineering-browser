@@ -4,6 +4,8 @@
 // name's provenance across the session. Lists are read after a size and
 // SHA-256 check; every captured value is assigned as text.
 const TRAFFIC_COOKIE_RETRY_MS = 2000;
+// A settled answer is read again once the store has changed, at most this often.
+const TRAFFIC_COOKIE_PROVENANCE_REFRESH_MS = 5000;
 const TRAFFIC_COOKIE_PROVENANCE_LISTS = 64;
 const trafficCookieViews = new Map();
 const trafficCookieProvenanceReads = new Map();
@@ -148,12 +150,17 @@ async function trafficLoadCookieList(list, key, rerender) {
 }
 
 // What get_cookie_provenance read for one name; a failed read keeps the loaded view and raw positions.
-function trafficCookieProvenanceRead(sessionId, name, rerender) {
+function trafficCookieProvenanceRead(sessionId, name, rerender, storeRevision = null) {
   if (typeof location === 'object' && location.protocol === 'file:') return {status: 'unavailable'};
   const key = `${sessionId}:${name}`;
   const known = trafficCookieProvenanceReads.get(key);
-  if (known && !(known.status === 'error' && Date.now() - known.failedAt >= TRAFFIC_COOKIE_RETRY_MS)) return known;
-  trafficCookieProvenanceReads.set(key, {status: 'loading'});
+  const retry = known?.status === 'error' && Date.now() - known.failedAt >= TRAFFIC_COOKIE_RETRY_MS;
+  const expired = known?.status === 'ready' && known.storeRevision !== storeRevision &&
+    Date.now() - known.readAt >= TRAFFIC_COOKIE_PROVENANCE_REFRESH_MS;
+  if (known && !retry && !expired) return known.previous ?? known;
+  // A settled answer stays on screen while it is read again, and on a failed read.
+  const previous = known?.status === 'ready' ? known : null;
+  trafficCookieProvenanceReads.set(key, {status: 'loading', previous});
   void (async () => {
     let entry;
     try {
@@ -168,9 +175,9 @@ function trafficCookieProvenanceRead(sessionId, name, rerender) {
       }
       entry = {status: 'ready', frames, setBy: answer.set_by ?? [], sentWith: answer.sent_with ?? [], script: answer.script ?? [],
         unread: answer.lists_unread ?? 0, malformed: answer.malformed_records ?? 0, stacksUnresolved: answer.stacks_unresolved ?? 0,
-        complete: answer.coverage?.complete === true && !answer.lists_unread};
+        complete: answer.coverage?.complete === true && !answer.lists_unread, storeRevision, readAt: Date.now()};
     } catch {
-      entry = {status: 'error', failedAt: Date.now()};
+      entry = previous ? {...previous, readAt: Date.now()} : {status: 'error', failedAt: Date.now()};
     }
     trafficCookieProvenanceReads.set(key, entry);
     while (trafficCookieProvenanceReads.size > 64) trafficCookieProvenanceReads.delete(trafficCookieProvenanceReads.keys().next().value);
@@ -337,7 +344,7 @@ function trafficCookieHops(request) {
 // the requests that sent it. Loaded lists read on demand, at most
 // TRAFFIC_COOKIE_PROVENANCE_LISTS distinct ones; get_cookie_provenance adds what the
 // session's newest records hold beyond them, so absence names the range that was read.
-function trafficCookieProvenance(name, {requests = [], events = [], selectRequest, openFrame, sessionId: selectedSession = null} = {}, rerender) {
+function trafficCookieProvenance(name, {requests = [], events = [], selectRequest, openFrame, sessionId: selectedSession = null, storeRevision = null} = {}, rerender) {
   const section = trafficNode('section', 'traffic-cookie-provenance');
   section.setAttribute('aria-label', `Provenance of ${name}`);
   const heading = trafficNode('div', 'traffic-cookie-provenance-head');
@@ -394,7 +401,7 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
     section.append(list);
   };
   const sessionId = scripts.find(record => record.frame)?.sessionId ?? selectedSession;
-  const read = sessionId ? trafficCookieProvenanceRead(sessionId, name, rerender) : {status: 'unavailable'};
+  const read = sessionId ? trafficCookieProvenanceRead(sessionId, name, rerender, storeRevision) : {status: 'unavailable'};
   const answered = read.status === 'ready';
   const unknownAbsence = what => !answered ? `Not in the loaded requests; ${read.status === 'error' ? 'the store could not be asked' : read.status === 'loading' ? 'asking the store' : 'the store cannot be asked here'}.`
     : read.complete ? what

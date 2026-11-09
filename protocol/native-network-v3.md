@@ -720,7 +720,7 @@ and kind 2 to 5 (a stream has one element). With bit 6:
 | 5 `captured_truncated` | Exact length over 16 MiB, captured 16 MiB, bit 2, bit 3 clear, artifact |
 | 8 `not_captured_transfer_refused` | The pool or queue refused it while reading; bit 3 set |
 | 10 `not_captured_session_budget` | The read passed its budget allowance; bit 3 set |
-| 12 `not_captured_read_incomplete` | A part changed or failed, the upload was cancelled, capture ended, or the requesting renderer may not read a named file (`ChildProcessSecurityPolicy::CanReadFile`, the check the network service's upload path makes); bit 3 set |
+| 12 `not_captured_read_incomplete` | A part changed or failed, the upload was cancelled, capture ended, the body started within the last 250 ms before expiry so it was not read, or the requesting renderer may not read a named file (`ChildProcessSecurityPolicy::CanReadFile`, the check the network service's upload path makes); bit 3 set |
 
 For states 8, 10 and 12 the length counts what was read; no digest and no
 artifact. Without bit 6, kinds 2 to 5 may also carry states 7 to 10 when the
@@ -849,7 +849,7 @@ transfer sizes and resource type zero, the parent's identity, and
 | 4 `not_captured_block_limit` | Longer than 320 KiB; count and length only |
 | 5 `not_captured_artifact_unavailable` | Artifact category off, receiver disconnected or session inactive |
 | 6 `not_captured_transfer_refused` | The bounded artifact queue refused it |
-| 7 `not_captured_session_budget` | This configuration already retained 64 MiB of header blocks |
+| 7 `not_captured_session_budget` | This configuration already holds 64 MiB of header blocks; a block the receiver refused, or a second accepted copy, returns its bytes |
 | 8 `not_captured_url` | Not HTTP(S), the URL is longer than 8 KiB, or the request is untracked so its hop URL is unknown |
 
 Rules, shared by the C++ core, the Python evidence validator, the Origin Trace
@@ -1268,7 +1268,8 @@ synchronous ones in chain order; each async frame is one segment.
 Each renderer remembers 256 digests it sent in the current configuration. A
 repeated stack sends no artifact. A digest that falls out of that table, or that
 the browser reports refused or lost (`NativeStackArtifactRefused`), is sent again,
-never dropped. The renderer sends at most 1,024 stack artifacts per configuration.
+never dropped. The renderer sends at most 1,024 stack artifacts per configuration;
+a refused attempt does not count.
 
 ### `script_identity` (type 35)
 
@@ -1301,7 +1302,8 @@ content capture off, or the source budget is spent. Exactly one of bit 1, bit 2,
 
 JavaScript sources are retained only in content capture
 (`--reb-capture-request-content`), so a Metadata only session keeps frames,
-script IDs, positions and digests but no script source. They are retained as
+script IDs, positions and digests but no script source; the browser refuses
+such an artifact from a renderer outside content capture. They are retained as
 kind 1 `javascript`, capture origin 13 `stack_script`, at most 64 MiB of
 source per renderer configuration, with
 the script URL, or the document URL for an inline script, as the artifact URL.
@@ -1442,7 +1444,8 @@ Its artifact is a version 1 stack artifact of the synchronous frames (total
 depth equal to recorded), kind 13, capture origin 12 `request_stack`, creator
 this record; scripts it names get `script_identity` children. Stacks share the
 256-digest table with request stacks, so a repeated scheduling site sends
-nothing; at most 1,024 scheduling stacks per configuration are sent.
+nothing; at most 1,024 scheduling stacks per configuration are sent, and a
+refused attempt does not count.
 
 #### Task segment
 

@@ -685,15 +685,20 @@ if ((category_mask & (512 | 1024))); then
   if [[ "${capture_canvas_images}" == 1 || "${capture_request_content}" == 1 ]]; then
     artifact_receiver_arguments+=(--allow-sensitive)
   fi
-  # Request content is bounded by its byte budget, not a count, so the store
-  # grows by that budget and admits small bodies past the default 4,096 items.
+  # The store is bounded by bytes and the item count follows from them at
+  # 4 KiB an artifact, so a capture of small headers, cookie lists and stacks
+  # reaches the byte budget, not the count. Content capture grows the budget.
+  artifact_store_mib=256
   if [[ "${capture_request_content}" == 1 ]]; then
-    artifact_receiver_arguments+=(
-      --max-store-bytes "$(((256 + request_content_budget_mib + response_body_budget_mib) * 1048576))"
-      --max-artifacts 65536
-      --max-manifest-bytes 268435456
-    )
+    artifact_store_mib=$((256 + request_content_budget_mib + response_body_budget_mib))
   fi
+  artifact_store_bytes=$((artifact_store_mib * 1048576))
+  artifact_item_limit=$((artifact_store_bytes / 4096))
+  artifact_receiver_arguments+=(
+    --max-store-bytes "${artifact_store_bytes}"
+    --max-artifacts "${artifact_item_limit}"
+    --max-manifest-bytes "$((artifact_item_limit * 1024))"
+  )
   "${artifact_receiver_binary}" "${artifact_receiver_arguments[@]}" \
     >"${artifact_receiver_log}" 2>&1 &
   artifact_receiver_pid=$!

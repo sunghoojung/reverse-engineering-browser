@@ -8,6 +8,7 @@
     <title>Origin Trace - Reverse Engineering Browser</title>
     <link rel="stylesheet" href="app.css">
     <link rel="stylesheet" href="xrefs_view.css">
+    <link rel="stylesheet" href="entropy_map.css">
   </head>
   <body>
     <div class="app">
@@ -247,6 +248,7 @@
                 <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" maxlength="512" placeholder="Find" aria-label="Find in source" title="Find retained text; Enter for next, Shift+Enter for previous (single-line literal, first 1000 matches)" /></label>
                 <button id="source-pretty" class="source-tool" type="button" aria-label="Pretty print source" title="Pretty print source" disabled>{ }</button>
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
+                <button id="source-map" class="source-tool" type="button" aria-label="Show artifact map" aria-pressed="false" hidden>Map</button>
                 <button id="investigation-decode-range" class="source-tool" type="button" title="First select an Original bytes link in Facts; this copies at most 64 KiB without running a transformation" disabled>Decode range</button>
                 <button id="source-facts-toggle" class="source-tool" type="button" aria-controls="source-facts-details" aria-expanded="false" disabled>Facts</button>
                 <button id="source-track-calls" class="source-tool" type="button" aria-controls="invocation-sites-details" disabled>Track calls</button>
@@ -269,6 +271,7 @@
                 <div id="source-code-empty" class="source-empty">Select a JavaScript file, WASM module, source map, or approved response body.</div>
                 <code id="source-code" class="source-code" aria-label="Source content" hidden></code>
               </div>
+              <section id="source-map-view" class="source-map-view" aria-label="Artifact map" hidden></section>
               <div class="source-editor-status">
                 <span id="source-position">Line 1, Column 1</span>
                 <span id="source-size">0 bytes</span>
@@ -818,6 +821,7 @@
     <script src="investigation_notebook.js"></script>
     <script src="evidence_names.js"></script>
     <script src="invocation_sites.js"></script>
+    <script src="entropy_map.js"></script>
 
     <script src="app.js"></script>
     <script src="vm_program_workspace.js"></script>

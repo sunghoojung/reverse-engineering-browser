@@ -3301,6 +3301,109 @@
         }
       }
     },
+    "/api/artifact-map": {
+      "get": {
+        "operationId": "get_artifact_map",
+        "summary": "Read a fixed-size entropy and kind map of one captured artifact",
+        "description": "Read-only whole-artifact summary for a selected captured script, WebAssembly module, or VM bytecode image. The blob is read incrementally, hash-verified in the same pass, and reduced to at most 128 by 128 windows of one byte each, so response size does not depend on artifact size and no bytes are omitted to save memory. entropy.cells holds Shannon entropy in whole units of 1/30 bit per byte; kind_map.cells names the dominant recorded kind of each window. Kinds come only from facts the store already has: Wasm section framing and the existing inspection data rows, the existing JavaScript lexer, and the published VM byte attributions. high_entropy states a numeric threshold; nothing in this document concludes that bytes are packed or encrypted. Never executes the artifact and writes nothing.",
+        "tags": [
+          "artifacts"
+        ],
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "description": "Canonical nonzero unsigned 64-bit artifact ID"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Versioned artifact map.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactMap"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier, unsupported input, missing artifact, or integrity failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Invalid identifier, unsupported input, missing artifact, or integrity failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The read exceeded its deadline.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Invalid identifier, unsupported input, missing artifact, or integrity failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "stored-artifact",
+              "condition": "artifact_id must identify a captured artifact whose stored bytes pass size and SHA-256 verification. Request bodies and Canvas images are refused, matching the Sources boundary."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads the stored blob in 64 KiB chunks with fixed memory and verifies its hash in the same pass. An abandoned request stops reading. Kind facts are reused, never inferred: an unknown kind is reported as such rather than guessed, and facts.notes names every limit that applied.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/artifact_map.rs",
+              "symbol": "build"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/live-wasm": {
       "get": {
         "operationId": "get_live_wasm",
@@ -15745,6 +15848,296 @@
         "type": "integer",
         "minimum": 1,
         "maximum": 9007199254740991
+      },
+      "ArtifactMap": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "version",
+          "schema",
+          "artifact_id",
+          "session_id",
+          "sha256",
+          "artifact_kind",
+          "byte_length",
+          "integrity",
+          "grid",
+          "entropy",
+          "high_entropy",
+          "kind_map",
+          "facts",
+          "highest_ranges"
+        ],
+        "properties": {
+          "version": {
+            "const": 1
+          },
+          "schema": {
+            "const": "artifact-map-v1"
+          },
+          "artifact_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "artifact_kind": {
+            "type": "string"
+          },
+          "byte_length": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "integrity": {
+            "const": "verified"
+          },
+          "grid": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "order",
+              "side",
+              "cell_count",
+              "window_bytes",
+              "min_window_bytes",
+              "below_min_window"
+            ],
+            "properties": {
+              "order": {
+                "const": "hilbert"
+              },
+              "side": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128,
+                "description": "Cells per side, a power of two, chosen so every window is at least min_window_bytes unless the artifact is shorter."
+              },
+              "cell_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16384
+              },
+              "window_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Whole bytes per window; windows differ by at most one byte."
+              },
+              "min_window_bytes": {
+                "const": 256,
+                "description": "Shannon entropy over W bytes cannot exceed log2(W), so a window shorter than the 256 possible byte values cannot reach the 0 to 8 scale."
+              },
+              "below_min_window": {
+                "type": "boolean"
+              }
+            }
+          },
+          "entropy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "encoding",
+              "units_per_bit",
+              "cells",
+              "mean_bits",
+              "max_bits"
+            ],
+            "properties": {
+              "encoding": {
+                "const": "base64"
+              },
+              "units_per_bit": {
+                "const": 30
+              },
+              "cells": {
+                "type": "string",
+                "description": "One byte per cell in byte order, base64. Divide by units_per_bit for bits per byte."
+              },
+              "mean_bits": {
+                "type": "number"
+              },
+              "max_bits": {
+                "type": "number"
+              }
+            }
+          },
+          "high_entropy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "threshold_bits",
+              "threshold_units",
+              "windows",
+              "bytes"
+            ],
+            "properties": {
+              "threshold_bits": {
+                "const": 7.0,
+                "description": "A stated numeric threshold. It is not a claim that bytes are compressed or encrypted."
+              },
+              "threshold_units": {
+                "const": 210
+              },
+              "windows": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "kind_map": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "encoding",
+              "mixed_flag",
+              "cells",
+              "kinds"
+            ],
+            "properties": {
+              "encoding": {
+                "const": "base64"
+              },
+              "mixed_flag": {
+                "const": 128,
+                "description": "Set on a cell when its window holds more than one kind."
+              },
+              "cells": {
+                "type": "string",
+                "description": "One byte per cell: an index into kinds, plus mixed_flag."
+              },
+              "kinds": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "label",
+                    "group",
+                    "bytes",
+                    "windows"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "group": {
+                      "enum": [
+                        "code",
+                        "data",
+                        "string",
+                        "structure",
+                        "custom",
+                        "undecoded",
+                        "unknown"
+                      ]
+                    },
+                    "bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "windows": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "facts": {
+            "type": "object",
+            "required": [
+              "source",
+              "complete",
+              "notes"
+            ],
+            "properties": {
+              "source": {
+                "enum": [
+                  "none",
+                  "wasm_section_frames",
+                  "javascript_lexer",
+                  "vm_byte_coverage"
+                ]
+              },
+              "complete": {
+                "type": "boolean"
+              },
+              "notes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "sections": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "data_segments": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "string_literals": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "string_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "analyzed_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "characterized_bytes": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false
+          },
+          "highest_ranges": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "start",
+                "end",
+                "peak_bits",
+                "high"
+              ],
+              "properties": {
+                "start": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "end": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "peak_bits": {
+                  "type": "number"
+                },
+                "high": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
       },
       "WasmInspection": {
         "type": "object",

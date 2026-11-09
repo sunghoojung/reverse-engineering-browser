@@ -209,6 +209,90 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   assert.equal(context.__xrefRequests.length, 1, 'closed dock stays idle');
   window.location.protocol = 'file:';
 }
+
+// Sources Map: production controller driven through scripted responses.
+assert.match(html, /id="source-map"/, 'Sources offers the Map view');
+for (const [path, assets] of [['scripts/build-research-app.sh', ['entropy_map.js', 'entropy_map.css']], ['apps/origin-trace-backend/src/app.rs', ['"entropy_map.js"', '"entropy_map.css"']],
+  ['apps/research-ui/macos/OriginTraceApp.swift', ['/entropy_map.js', '/entropy_map.css']]]) {
+  const text = await readFile(join(root, path), 'utf8');
+  for (const asset of assets) assert(text.includes(asset), `${path} ships ${asset}`);
+}
+const mapCss = await readFile(join(ui, 'entropy_map.css'), 'utf8');
+assert.equal((mapCss.replace(/:root(\[data-theme="light"\])? \{[^}]*\}/g, '').match(/#[0-9a-f]{3,8}\b/gi) ?? []).length, 0, 'map colors are tokens in both themes');
+for (const block of [/:root \{([^}]*)\}/, /:root\[data-theme="light"\] \{([^}]*)\}/]) {
+  const tokens = [...block.exec(mapCss)[1].matchAll(/--map-[a-z0-9-]+/g)].map(match => match[0]);
+  assert.equal(tokens.length, 14, 'both themes define the whole ramp and every kind');
+}
+for (const [side, ...rest] of [[1], [2], [8], [64], [128]]) {
+  const round = `Array.from({length: ${side * side}}, (_, i) => entropyMapHilbertIndex(${side}, ...entropyMapHilbertPoint(${side}, i)) === i).every(Boolean)`;
+  assert.equal(runInContext(round, context), true, `Hilbert order round-trips at side ${side}`);
+}
+assert.deepEqual(JSON.parse(runInContext("JSON.stringify(entropyMapTextPosition('ab\\nc', 3))", context)), {line: 1, column: 0});
+assert.equal(runInContext("entropyMapTextPosition('ab', 9)", context), null, 'an offset past the text is not placed');
+const mapDocument = (id, cells, side) => ({version: 1, schema: 'artifact-map-v1', artifact_id: id, session_id: '1', sha256: 'a'.repeat(64),
+  artifact_kind: 'wasm', byte_length: 1024 * side * side, integrity: 'verified',
+  grid: {order: 'hilbert', side, cell_count: side * side, window_bytes: 1024, min_window_bytes: 256, below_min_window: false},
+  entropy: {encoding: 'base64', units_per_bit: 30, cells, mean_bits: 3.25, max_bits: 7.5},
+  high_entropy: {threshold_bits: 7, threshold_units: 210, windows: 1, bytes: 1024},
+  kind_map: {encoding: 'base64', mixed_flag: 128, cells: Buffer.alloc(side * side).toString('base64'),
+    kinds: [{id: 'section_code', label: '<b>code section</b>', group: 'code', bytes: 1024, windows: 1}]},
+  facts: {source: 'wasm_section_frames', complete: true, sections: 3, data_segments: 1, notes: ['<img src=x onerror=alert(1)> note']},
+  highest_ranges: [{start: 0, end: 1024, peak_bits: 7.5, high: true}]});
+const mapSource = (id = '901', size = 4096) => ({artifact_id: id, sha256: 'a'.repeat(64), byte_size: size, source_type: 'artifact', kind: 'wasm'});
+context.mapReady = mapDocument('901', Buffer.from([225, 0, 0, 0]).toString('base64'), 2);
+context.mapMalformed = {...mapDocument('901', Buffer.from([225, 0, 0, 0]).toString('base64'), 2), grid: {order: 'hilbert', side: 3, cell_count: 9, window_bytes: 1024, min_window_bytes: 256, below_min_window: false}};
+context.mapEmpty = {...mapDocument('901', '', 0), byte_length: 4096, grid: {order: 'hilbert', side: 0, cell_count: 0, window_bytes: 0, min_window_bytes: 256, below_min_window: false}};
+context.mapSourceValue = mapSource();
+runInContext(`var mapFixture = (() => {
+  const make = tag => { const node = document.createElement(tag); document.body.append(node); return node; };
+  const button = make('button'), root = make('section'), codeWrap = make('div'), viewKind = make('span'), toolbar = make('div');
+  button.classList.add('source-tool');
+  root.hidden = true; let source = mapSourceValue; let revealed = [];
+  const controller = createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource: () => source, identityOf: value => value ? value.artifact_id + ':' + value.sha256 : null,
+    reveal: (value, offset, leave) => { revealed.push(offset); return offset > 2048 ? 'Past the hex view.' : (leave(), ''); }});
+  return {controller, button, root, codeWrap, viewKind, revealed, setSource(value) { source = value; }};
+})();`, context);
+const mapRoot = runInContext('mapFixture.root', context), mapWrap = runInContext('mapFixture.codeWrap', context);
+const openMap = async response => {
+  context.mapFetch = response;
+  runInContext(`fetch = async () => mapFetch(); mapFixture.controller.close(); mapFixture.controller.open();`, context);
+  await nextTurn(); await nextTurn(); await nextTurn();
+};
+const mapText = selector => mapRoot.querySelector(selector)?.textContent ?? '';
+const mapHidden = selector => mapRoot.querySelector(selector)?.hidden;
+let pendingMap; context.mapFetch = () => new Promise(resolve => { pendingMap = resolve; });
+runInContext(`fetch = async () => mapFetch(); mapFixture.controller.open();`, context);
+assert.equal(mapRoot.hidden, false); assert.equal(mapWrap.hidden, true, 'the map replaces the code view');
+assert.match(mapText('.map-state-text'), /Reading the whole artifact/, 'loading is stated');
+pendingMap(new context.Response('null', {status: 500}));
+await nextTurn(); await nextTurn();
+assert.equal(mapHidden('.map-retry'), false, 'an unusable response offers Retry');
+for (const [body, status, expected] of [[JSON.stringify({error: 'Artifact not found'}), 404, /Artifact not found/],
+  [JSON.stringify(context.mapMalformed), 200, /invalid artifact map/], [JSON.stringify({version: 2}), 200, /invalid artifact map/],
+  [JSON.stringify(context.mapEmpty), 200, /no bytes/]]) {
+  await openMap(() => new context.Response(body, {status, headers: {'content-type': 'application/json'}}));
+  assert.match(mapText('.map-state-text'), expected, `${status} ${body.slice(0, 40)}`);
+  assert.equal(mapHidden('.map-body'), true, 'no stale map remains visible');
+}
+await openMap(() => { throw new TypeError('offline'); });
+assert.match(mapText('.map-state-text'), /evidence store is unavailable/, 'a disconnected store is stated');
+assert.equal(mapHidden('.map-retry'), false, 'disconnection offers Retry');
+await openMap(() => new context.Response(JSON.stringify(context.mapReady), {status: 200, headers: {'content-type': 'application/json'}}));
+assert.equal(mapHidden('.map-body'), false, `the map renders: ${mapText('.map-state-text')}`);
+assert.match(mapText('.map-stats'), /Hilbert 2×2 · 1\.0 KB per cell/, 'the header states grid and cell size');
+assert.match(mapText('.map-facts'), /≥ 7\.0 bits\/byte/, 'the threshold is stated beside the map');
+assert.equal(mapRoot.querySelectorAll('img, b').length, 0, 'captured-derived text stays inert');
+assert.match(mapText('.map-notes'), /onerror/, 'notes are shown as text');
+assert.doesNotMatch(mapRoot.textContent, /packed|encrypted/i, 'the map draws no such conclusion');
+mapRoot.querySelector('.map-range').click();
+assert.equal(runInContext('mapFixture.controller.isOpen()', context), false, 'opening a reachable byte leaves the map');
+assert.deepEqual([...runInContext('mapFixture.revealed', context)], [0], 'a range row opens its first byte');
+assert.equal(mapWrap.hidden, false, 'the code view returns');
+await openMap(() => new context.Response(JSON.stringify(context.mapReady), {status: 200, headers: {'content-type': 'application/json'}}));
+runInContext(`mapFixture.setSource({...mapSourceValue, artifact_id: '902'}); mapFixture.controller.sync();`, context);
+assert.equal(runInContext('mapFixture.controller.isOpen()', context), false, 'a new selection retires the map');
+assert.equal(mapRoot.hidden, true, 'the retired map is hidden');
+assert.equal(mapRoot.querySelector('.map-facts').children.length, 0, 'the retired summary is released');
 assert.deepEqual(forbidden, [], 'startup/navigation must not attempt CDP transport');
 assert.deepEqual(asyncErrors, [], 'all asynchronous startup failures must be handled');
 release();

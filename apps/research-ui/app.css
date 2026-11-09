@@ -4329,11 +4329,19 @@ input[type="file"]:hover::file-selector-button { background: var(--panel-3); }
 
 /* The view kind says whether the editor shows original evidence or a derived
    display, so it carries the provenance dot. Position, size and hash stay meta.
-   Position and language yield width, with an ellipsis, before any control. */
+   The position never shrinks. app.js (fitSourceStatus) drops whole items
+   instead of squeezing them, listing them in data-compact. */
 #screen-sources .source-editor-status { gap: 16px; padding: 0 12px; }
-#screen-sources .source-editor-status > :is(#source-position, #source-language) { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-#screen-sources .source-editor-status > #source-language { flex-shrink: 1000; }
+#screen-sources .source-editor-status > :is(#source-position, #source-language) { flex-shrink: 0; }
+#screen-sources .source-editor-status[data-compact~="position"] > #source-position { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 #screen-sources .source-editor-status .source-hash { flex: 1 1 0; margin-left: 0; }
+#screen-sources .source-editor-status .source-hash:not(:empty) { min-width: 12ch; }
+#screen-sources .source-editor-status[data-compact~="hash"] > .source-hash,
+#screen-sources .source-editor-status[data-compact~="pretty"] .source-pretty-label,
+#screen-sources .source-editor-status[data-compact~="language"] > #source-language,
+#screen-sources .source-editor-status[data-compact~="size"] > #source-size,
+#screen-sources .source-editor-status[data-compact~="kind"] > #source-view-kind,
+#screen-sources .source-editor-status[data-compact~="selection"] > #source-selection { display: none; }
 #screen-sources #source-view-kind { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; color: var(--muted); }
 @media (max-width: 1100px) { #screen-sources .source-editor-status { gap: 12px; } #screen-sources .source-editor-status .source-hash { display: none; } }
 #screen-sources #source-view-kind::before { content: ""; width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: currentColor; }

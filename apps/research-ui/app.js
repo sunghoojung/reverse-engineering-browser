@@ -19,6 +19,37 @@ invocationSitesPanel.refresh();
 const sourceFormatClient = createSourceFormatClient({
   onChange: source => { if (state.sourceFormatted && sourceIdentity(selectedSource()) === sourceIdentity(source)) renderSources(); }
 });
+// The Sources status bar never cuts the cursor position, which has the full
+// text as its tooltip. When the items do not fit, it drops in turn the hash,
+// the pretty-print label (leaving "{ }"), the language, the size, the view
+// kind and the selection length; each keeps its tooltip. Only a position wider
+// than the whole bar is shortened. The observers refit after any text,
+// visibility or width change.
+const SOURCE_STATUS_DROPS = ['hash', 'pretty', 'language', 'size', 'kind', 'selection', 'position'];
+function fitSourceStatus() {
+  const position = elements.sourcePosition, bar = position?.parentElement;
+  if (!bar) return;
+  if (position.title !== position.textContent) position.title = position.textContent;
+  if (!bar.clientWidth) return;
+  const fits = () => bar.scrollWidth <= bar.clientWidth + 1;
+  const set = level => {
+    const value = SOURCE_STATUS_DROPS.slice(0, level).join(' ');
+    if ((bar.dataset.compact ?? '') !== value) bar.dataset.compact = value;
+  };
+  // From the current level: restore items while they fit, then drop until the rest fits.
+  let level = bar.dataset.compact ? bar.dataset.compact.split(' ').length : 0;
+  while (level > 0) {
+    set(level - 1);
+    if (!fits()) { set(level); break; }
+    level -= 1;
+  }
+  while (!fits() && level < SOURCE_STATUS_DROPS.length) set(++level);
+}
+if (typeof MutationObserver === 'function' && elements.sourcePosition?.parentElement) {
+  const bar = elements.sourcePosition.parentElement;
+  new MutationObserver(fitSourceStatus).observe(bar, {subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['hidden']});
+  if (typeof ResizeObserver === 'function') new ResizeObserver(fitSourceStatus).observe(bar);
+}
 const sourceTreeView = createSourceTree({
   tree: elements.sourceTree, filter: document.querySelector('#source-tree-filter'),
   expand: document.querySelector('#source-tree-expand'), collapse: document.querySelector('#source-tree-collapse'),
@@ -7430,8 +7461,15 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.sourcePretty.disabled = !source?.content || !sourcePrettySupported(source);
         elements.sourcePretty.setAttribute('aria-pressed', String(state.sourceFormatted));
         elements.sourcePretty.setAttribute('aria-label', state.sourceFormatted ? 'Show original source' : 'Pretty print source');
-        elements.sourcePretty.textContent = !state.sourceFormatted ? '{ }' : view?.formatPending ? '{ } Formatting…'
-          : view?.formatError ? '{ } Pretty print unavailable' : '{ } Pretty-printed · Show original';
+        // The label is its own span, so a narrow status bar can show only "{ }".
+        const prettyLabel = !state.sourceFormatted ? '' : view?.formatPending ? 'Formatting…'
+          : view?.formatError ? 'Pretty print unavailable' : 'Pretty-printed · Show original';
+        if (elements.sourcePretty.textContent !== `{ }${prettyLabel ? ` ${prettyLabel}` : ''}`) {
+          const label = document.createElement('span');
+          label.className = 'source-pretty-label';
+          label.textContent = ` ${prettyLabel}`;
+          elements.sourcePretty.replaceChildren('{ }', ...(prettyLabel ? [label] : []));
+        }
         elements.sourcePretty.title = !state.sourceFormatted ? `Pretty print ${sourceSyntaxLabel(sourceSyntaxLanguage(source))}`
           : view?.formatError ?? 'A display layout; the evidence is unchanged. Show the source as captured.';
         elements.sourceDeob.disabled = source?.kind !== 'javascript' || !source.content;

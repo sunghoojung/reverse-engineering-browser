@@ -59,7 +59,7 @@ get_source_format --endpoint-file /tmp/reb-api-endpoint --param session_id=1
 --param artifact_id=2`. Add `start_line` and `line_count` to read one window of
 a large layout; `anchors` map whole 1,000-line windows to original offsets. It
 runs the contained formatter worker, so it is listed only with
-`--allow-effects`. See
+`--allow-effects`, and MCP refuses a request or response body. See
 [Source format v1](source-format-v1.md).
 
 `spec` prints the complete embedded OpenAPI document for validators and client

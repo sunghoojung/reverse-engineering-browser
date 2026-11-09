@@ -14,7 +14,8 @@ bytes never change.
   `*+json`, JavaScript when it is a JavaScript MIME type, and refused
   otherwise. Optional `language` (`javascript` or `json`) names a body's
   language instead; a `javascript` artifact accepts only `javascript`. Body
-  layouts carry the body's sensitive text, as `get_artifact_content` does.
+  layouts carry the body's sensitive text, as `get_artifact_content` does, so
+  `reb-api mcp` refuses them and returns only `javascript` artifacts.
 - `start_line` and `line_count` are optional and only valid together. They
   return formatted lines `start_line` to `start_line + line_count - 1`
   (1-based, at most 10,000 lines). `line_count` in the response always counts

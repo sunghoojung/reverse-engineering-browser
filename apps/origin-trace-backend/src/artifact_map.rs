@@ -51,7 +51,9 @@ const VM_ANALYZED_BYTES: u64 = 4096;
 
 fn check(deadline: Instant, cancelled: &AtomicBool) -> Result<()> {
     if cancelled.load(Ordering::Relaxed) {
-        return Err(Error::new(499, "Artifact map request was cancelled").with_code(Code::Cancelled));
+        return Err(
+            Error::new(499, "Artifact map request was cancelled").with_code(Code::Cancelled)
+        );
     }
     if Instant::now() >= deadline {
         return Err(Error::new(408, "Artifact map exceeded its deadline").with_code(Code::Timeout));
@@ -263,7 +265,12 @@ impl KindCounts {
             let mut most = 0;
             let mut distinct = 0;
             for (index, count) in row.iter().enumerate() {
-                let effective = *count + if index == self.default as usize { remainder } else { 0 };
+                let effective = *count
+                    + if index == self.default as usize {
+                        remainder
+                    } else {
+                        0
+                    };
                 if effective > 0 {
                     distinct += 1;
                 }
@@ -779,14 +786,7 @@ pub fn build(root: &Path, artifact: &Value, cancelled: &AtomicBool) -> Result<Va
             deadline,
             cancelled,
         )?,
-        "javascript" => script_kinds(
-            root,
-            artifact,
-            byte_length,
-            cell_count,
-            deadline,
-            cancelled,
-        )?,
+        "javascript" => script_kinds(root, artifact, byte_length, cell_count, deadline, cancelled)?,
         "bytecode_buffer" => vm_kinds(root, artifact, byte_length, cell_count),
         _ => unclassified(
             byte_length,
@@ -834,7 +834,7 @@ pub fn build(root: &Path, artifact: &Value, cancelled: &AtomicBool) -> Result<Va
             "order": "hilbert",
             "side": side,
             "cell_count": cell_count,
-            "window_bytes": if cell_count == 0 { 0 } else { byte_length / cell_count },
+            "window_bytes": byte_length.checked_div(cell_count).unwrap_or(0),
             "min_window_bytes": MIN_WINDOW_BYTES,
             "below_min_window": byte_length > 0 && byte_length < MIN_WINDOW_BYTES,
         },
@@ -1018,7 +1018,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let record = artifact(root.path(), "1", "other", &noise(4096));
         let cancelled = AtomicBool::new(true);
-        assert_eq!(build(root.path(), &record, &cancelled).unwrap_err().status, 499);
+        assert_eq!(
+            build(root.path(), &record, &cancelled).unwrap_err().status,
+            499
+        );
     }
 
     fn wasm_module(data_payload: usize) -> Vec<u8> {
@@ -1073,7 +1076,10 @@ mod tests {
         assert_eq!(table_row("section_type")["bytes"], 6);
         assert_eq!(table_row("section_custom")["bytes"], 4);
         // The first window mixes the header, small sections and the segment.
-        assert_eq!(kinds[(cells[0] & !MIXED_FLAG) as usize]["id"], "data_segment");
+        assert_eq!(
+            kinds[(cells[0] & !MIXED_FLAG) as usize]["id"],
+            "data_segment"
+        );
         assert_eq!(cells[0] & MIXED_FLAG, MIXED_FLAG);
         assert_eq!(
             kinds[(*cells.last().unwrap() & !MIXED_FLAG) as usize]["id"],
@@ -1092,14 +1098,21 @@ mod tests {
             "undecoded_tail"
         );
         let notes = report["facts"]["notes"].as_array().unwrap();
-        assert!(notes.iter().any(|note| note.as_str().unwrap().contains("framing stopped")));
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.as_str().unwrap().contains("framing stopped"))
+        );
 
         let record = artifact(root.path(), "3", "wasm", &[0x7f; 4096]);
         let report = run(root.path(), &record).unwrap();
         let cells = decode(&report["kind_map"]["cells"]);
         let kinds = report["kind_map"]["kinds"].as_array().unwrap();
         assert_eq!(report["facts"]["sections"], 0);
-        assert_eq!(kinds[(cells[0] & !MIXED_FLAG) as usize]["id"], "undecoded_tail");
+        assert_eq!(
+            kinds[(cells[0] & !MIXED_FLAG) as usize]["id"],
+            "undecoded_tail"
+        );
     }
 
     #[test]
@@ -1110,10 +1123,12 @@ mod tests {
         let report = run(root.path(), &record).unwrap();
         assert_eq!(report["facts"]["complete"], true);
         assert_eq!(report["facts"]["data_segments"], 0);
-        assert!(report["facts"]["notes"][0]
-            .as_str()
-            .unwrap()
-            .contains("Data segments are listed for modules"));
+        assert!(
+            report["facts"]["notes"][0]
+                .as_str()
+                .unwrap()
+                .contains("Data segments are listed for modules")
+        );
     }
 
     #[test]
@@ -1125,15 +1140,21 @@ mod tests {
         assert_eq!(report["facts"]["string_literals"], 1);
         let cells = decode(&report["kind_map"]["cells"]);
         let kinds = report["kind_map"]["kinds"].as_array().unwrap();
-        assert!(cells.iter().any(|cell| kinds[(cell & !MIXED_FLAG) as usize]["id"] == "string"));
+        assert!(
+            cells
+                .iter()
+                .any(|cell| kinds[(cell & !MIXED_FLAG) as usize]["id"] == "string")
+        );
         let large = vec![b'x'; crate::source_facts::MAX_SOURCE_BYTES + 1];
         let record = artifact(root.path(), "2", "javascript", &large);
         let report = run(root.path(), &record).unwrap();
         assert_eq!(report["facts"]["source"], "none");
-        assert!(report["facts"]["notes"][0]
-            .as_str()
-            .unwrap()
-            .contains("at most 4 MiB"));
+        assert!(
+            report["facts"]["notes"][0]
+                .as_str()
+                .unwrap()
+                .contains("at most 4 MiB")
+        );
     }
 
     #[test]
@@ -1159,11 +1180,20 @@ mod tests {
         assert_eq!(report["facts"]["characterized_bytes"], 2048);
         let cells = decode(&report["kind_map"]["cells"]);
         let kinds = report["kind_map"]["kinds"].as_array().unwrap();
-        assert_eq!(kinds[(cells[0] & !MIXED_FLAG) as usize]["id"], "vm_instruction");
+        assert_eq!(
+            kinds[(cells[0] & !MIXED_FLAG) as usize]["id"],
+            "vm_instruction"
+        );
         // 8192 bytes make 16 windows of 512 bytes: 2048 characterized, 2048
         // analyzed but uncharacterized, and the rest past the retained preview.
-        assert_eq!(kinds[(cells[4] & !MIXED_FLAG) as usize]["id"], "vm_uncharacterized");
-        assert_eq!(kinds[(cells[8] & !MIXED_FLAG) as usize]["id"], "undecoded_tail");
+        assert_eq!(
+            kinds[(cells[4] & !MIXED_FLAG) as usize]["id"],
+            "vm_uncharacterized"
+        );
+        assert_eq!(
+            kinds[(cells[8] & !MIXED_FLAG) as usize]["id"],
+            "undecoded_tail"
+        );
     }
 
     /// Generates a 128 MiB module at test time, proving a fixed-size summary

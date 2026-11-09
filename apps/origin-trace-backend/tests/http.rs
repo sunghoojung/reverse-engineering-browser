@@ -3526,7 +3526,8 @@ async fn artifact_map_route_is_read_only_versioned_and_covers_the_whole_artifact
         ("?artifact_id=3", 500),
     ] {
         let route = format!("/api/artifact-map{query}");
-        assert_contract_response(server.get(&route).await, "get", "/api/artifact-map", status).await;
+        assert_contract_response(server.get(&route).await, "get", "/api/artifact-map", status)
+            .await;
     }
     let map: Value = server
         .get("/api/artifact-map?artifact_id=2")
@@ -3536,7 +3537,6 @@ async fn artifact_map_route_is_read_only_versioned_and_covers_the_whole_artifact
         .unwrap();
     assert_eq!(map["facts"]["source"], "javascript_lexer");
 }
-
 
 #[tokio::test]
 async fn wasm_section_requests_reach_late_tables_and_declare_what_they_left_out() {

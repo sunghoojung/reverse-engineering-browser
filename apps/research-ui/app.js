@@ -6837,7 +6837,7 @@ const entropyMap = createEntropyMap({
         elements.sourceHash.textContent = source?.sha256 ? `sha256 ${source.sha256}` : '';
         syncSourceDisplayControls(source, view);
         renderSourceContent(source, view);
-        entropyMap.sync();
+        if (typeof entropyMap !== 'undefined') entropyMap.sync();
         if (!investigationPassiveSource && state.sourceDeobfuscated && source?.kind === 'javascript' && !document.querySelector('#screen-sources').hidden) loadDeobfuscation(source);
         renderDeobfuscationReport(source);
         const reveal = state.sourceReveal;
@@ -7765,7 +7765,7 @@ const entropyMap = createEntropyMap({
 
         evidenceWorkspace.setVisible(screenName === 'evidence');
         if (screenName !== 'sources') sourceFactsPanel.cancel();
-        entropyMap.setVisible(screenName === 'sources');
+        if (typeof entropyMap !== 'undefined') entropyMap.setVisible(screenName === 'sources');
         if (screenName !== 'tools') float32Panel.cancel();
 
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });

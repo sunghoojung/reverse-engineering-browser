@@ -61,10 +61,12 @@ function mountTrafficColumns(table, {storage = globalThis.localStorage} = {}) {
       storage?.setItem(TRAFFIC_COLUMN_STORAGE, JSON.stringify({version: 1, hidden: [...layout.hidden], widths: layout.widths}));
     } catch { /* Private or file: storage keeps the layout for this window only. */ }
   }
+  // The rows' scrollbar gutter is the only width the header does not share.
+  function fittedColumns() {
+    return trafficFittedColumns(layout, (rows?.clientWidth || head.clientWidth || 0) - 2);
+  }
   function apply() {
-    // The rows' scrollbar gutter is the only width the header does not share.
-    const available = (rows?.clientWidth || head.clientWidth || 0) - 2;
-    const fitted = trafficFittedColumns(layout, available);
+    const fitted = fittedColumns();
     const hidden = TRAFFIC_COLUMNS.map(column => column.id).filter(id => !fitted.visible.includes(id)).join(' ');
     if (table.dataset.hiddenColumns !== hidden) table.dataset.hiddenColumns = hidden;
     table.style.setProperty('--request-columns', fitted.template);
@@ -95,18 +97,25 @@ function mountTrafficColumns(table, {storage = globalThis.localStorage} = {}) {
     menu.setAttribute('role', 'menu');
     menu.setAttribute('aria-label', 'Columns');
     menu.opener = opener;
+    // A column the width dropped is on but not shown, so it never reads as simply checked.
+    const sync = (item, column) => {
+      const dropped = fittedColumns().dropped.includes(column.id);
+      item.setAttribute('aria-checked', dropped ? 'mixed' : String(!layout.hidden.has(column.id)));
+      item.textContent = dropped ? `${column.label} (no room)` : column.label;
+      item.title = dropped ? `${column.label} is on, but this table is too narrow to show it.` : '';
+    };
     const items = TRAFFIC_COLUMNS.map(column => {
       const item = document.createElement('button');
       item.type = 'button';
       item.setAttribute('role', 'menuitemcheckbox');
-      item.setAttribute('aria-checked', String(!layout.hidden.has(column.id)));
-      item.textContent = column.label;
+      item.dataset.columnId = column.id;
+      sync(item, column);
       item.disabled = column.id === 'name';
       item.addEventListener('click', () => {
         if (layout.hidden.has(column.id)) layout.hidden.delete(column.id); else layout.hidden.add(column.id);
-        item.setAttribute('aria-checked', String(!layout.hidden.has(column.id)));
         save();
         apply();
+        for (const other of items) sync(other, TRAFFIC_COLUMNS.find(entry => entry.id === other.dataset.columnId));
       });
       return item;
     });

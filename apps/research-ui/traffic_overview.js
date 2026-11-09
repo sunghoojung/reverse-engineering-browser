@@ -92,6 +92,10 @@ function mountTrafficOverview(root, {onRange}) {
       : range ? `${ms(range.from - model.first)} – ${ms(range.to - model.first)} of ${total}` : `${total} · drag to filter by time`;
     clear.hidden = !range;
     root.dataset.range = String(Boolean(range));
+    track.setAttribute('aria-valuemin', '0');
+    track.setAttribute('aria-valuemax', String(Math.max(0, (model?.buckets.length ?? 1) - 1)));
+    track.setAttribute('aria-valuenow', String(range ? bucketOf(range.from) : 0));
+    track.setAttribute('aria-valuetext', label.textContent);
   }
 
   function paint() {

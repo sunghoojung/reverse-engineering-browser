@@ -687,6 +687,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
     _ = try await ui.value("document.querySelector('#screen-traffic .request-head [data-column=\"name\"]').focus()")
     try await ui.key(109, "\u{F70D}", modifiers: [.shift, .function])
     try await ui.waitUntil("document.activeElement?.closest('.column-menu') !== null", "\(context): Shift+F10 did not open the column menu")
+    // A column the width dropped is on but not shown, so the menu must not read as simply checked.
+    let droppedColumnsRead = try await ui.value("[...document.querySelectorAll('.column-menu [role=menuitemcheckbox]')].filter(item => (document.querySelector('.request-table')?.dataset.hiddenColumns ?? '').split(' ').includes(item.dataset.columnId) && item.getAttribute('aria-checked') === 'true').length") as? Int ?? -1
+    XCTAssertEqual(droppedColumnsRead, 0, "\(context): a column the width dropped must not read as shown")
     try await assertLayout(ui, ".column-menu", "\(context) column menu")
     try await ui.screenshot("traffic-column-menu-\(context)")
     try await ui.key(53, "\u{1B}")

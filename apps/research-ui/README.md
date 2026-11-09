@@ -1407,8 +1407,14 @@ itself an HTTP server.
 ## Basic-block graphs
 
 **Graph** on a captured WASM artifact draws one function at a time as basic
-blocks, above the linear disassembly and hex (the **Linear** toggle hides that
-pane). Selecting a block with the pointer or Enter scrolls the disassembly or hex
+blocks, above the linear disassembly and hex. The graph takes about two thirds
+of the height; drag the divider between them like the other pane splits, or
+use **Linear** to hide the linear pane. The text view's line window and search
+notice are hidden while Graph is active. A graph opens at actual size, centered
+on the entry block (or the whole graph when it fits), and **Fit** or `0` shows
+all of it. Below the zoom where rows are readable, cards keep a screen-size
+label and an overview cue says rows are hidden. The footer is one line: the
+limits, then the edge legend, which folds behind **Key** in a narrow pane. Selecting a block with the pointer or Enter scrolls the disassembly or hex
 to its offset. **Graph** in Static bytecode draws the same view for a decoded
 image. Declared flow and an imported **Observed path** are separate layers,
 never one graph: the observed layer's cards are retained steps, and a sequence

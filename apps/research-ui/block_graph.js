@@ -2,7 +2,10 @@
  * is a single canvas, so nothing here scales DOM with graph size. Layout runs in
  * block_graph_layout.js as a Web Worker. Captured text is painted as glyphs. */
 const BLOCK_GRAPH_KIND = {fallthrough: 0, branch: 1, taken: 2, not_taken: 3, table: 4, table_default: 5, exception: 6, unresolved: 7, call: 8, assumed: 9, sequence: 10};
-const BLOCK_GRAPH_LIMITS = 'Declared static flow. Reachable here is not observed execution, and a complete drawing is not a proof.';
+const BLOCK_GRAPH_LIMITS = 'Declared flow, not observed execution. A complete drawing is not a proof.';
+/* Rows are drawn only where 11 px text stays readable; below it, labels are
+ * painted at screen size and a cue says rows are hidden. */
+const BLOCK_GRAPH_ROW_ZOOM = 0.6;
 /* Layouts are retained in a small byte budget, never a whole-module set. */
 const BLOCK_GRAPH_CACHE_BYTES = 16 * 1024 * 1024;
 /* The backing store is the view's one allocation that scales with window size. */
@@ -97,9 +100,10 @@ function vmObservedBlockGraph(path) {
   return {count, offsets, ends: offsets.slice(), firstRow, rowCount, instructionCount: rowCount.slice(), flags,
     from: Int32Array.from(from), to: Int32Array.from(to), kind: Uint8Array.from(kind), labels, rows, roots, stackedRoots: true,
     title: path.identity.trace_id, status: path.coverage.complete ? 'decoded' : 'partial', instructions: path.nodes.length, omissions: [...path.warnings], evidence: 'observed',
-    notice: 'Observed retained sequence only. Gaps are shown without an edge; this is not a static control-flow graph.', gaps: path.gaps.length};
+    notice: 'Retained steps only. No edge crosses a gap. Not a static control-flow graph.', gaps: path.gaps.length};
 }
 
+let blockGraphViews = 0;
 function createBlockGraphView(root, options = {}) {
   const node = (tag, className = '', text = '') => { const element = document.createElement(tag); if (className) element.className = className; if (text) element.textContent = text; return element; };
   root.classList.add('block-graph');
@@ -117,12 +121,22 @@ function createBlockGraphView(root, options = {}) {
   const miniWrap = node('div', 'block-graph-minimap'); const minimap = node('canvas', 'block-graph-minimap-canvas'); minimap.width = 300; minimap.height = 220; minimap.setAttribute('aria-hidden', 'true'); miniWrap.append(minimap);
   const stateBox = node('div', 'block-graph-state'); stateBox.setAttribute('role', 'status'); stateBox.setAttribute('aria-live', 'polite'); stateBox.hidden = true;
   const stateText = node('p', '', ''); const retry = node('button', 'secondary-button', 'Retry'); retry.type = 'button'; retry.hidden = true; stateBox.append(stateText, retry);
-  stage.append(canvas, miniWrap, stateBox);
+  const hud = node('div', 'block-graph-hud');
+  const selection = node('span', 'block-graph-selection', ''); selection.setAttribute('role', 'status'); selection.setAttribute('aria-live', 'polite');
+  const lodCue = node('span', 'block-graph-lod', 'Overview: zoom in to read instructions'); lodCue.hidden = true;
+  hud.append(lodCue, selection);
+  stage.append(canvas, miniWrap, hud, stateBox);
   const foot = node('div', 'block-graph-foot');
   const limits = node('span', 'block-graph-limits', BLOCK_GRAPH_LIMITS);
-  const legend = node('div', 'block-graph-legend');
-  const selection = node('span', 'block-graph-selection', ''); selection.setAttribute('role', 'status'); selection.setAttribute('aria-live', 'polite');
-  foot.append(selection, limits, legend);
+  const legend = node('div', 'block-graph-legend'); legend.id = `block-graph-legend-${++blockGraphViews}`;
+  // Narrow views fold the legend behind Key so the footer stays one line.
+  const keyToggle = node('button', 'source-tool block-graph-tool block-graph-key-toggle', 'Key'); keyToggle.type = 'button';
+  keyToggle.setAttribute('aria-expanded', 'false'); keyToggle.setAttribute('aria-controls', legend.id); keyToggle.setAttribute('aria-label', 'Edge key');
+  const setKey = open => { foot.toggleAttribute('data-key-open', open); keyToggle.setAttribute('aria-expanded', String(open)); };
+  keyToggle.addEventListener('click', () => setKey(!foot.hasAttribute('data-key-open')));
+  foot.addEventListener('keydown', event => { if (event.key === 'Escape' && foot.hasAttribute('data-key-open')) { event.stopPropagation(); setKey(false); keyToggle.focus(); } });
+  foot.addEventListener('focusout', event => { if (!foot.contains(event.relatedTarget)) setKey(false); });
+  foot.append(limits, keyToggle, legend);
   const evidence = node('span', 'block-graph-evidence', '');
   head.append(title, stats, evidence, tools);
   root.append(head, stage, foot);
@@ -163,16 +177,35 @@ function createBlockGraphView(root, options = {}) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.fillStyle = tokens.bg; ctx.fillRect(0, 0, cssW, cssH);
     if (!layout) { drawMinimap(); return; }
     ctx.setTransform(dpr * view.z, 0, 0, dpr * view.z, -view.x * view.z * dpr, -view.y * view.z * dpr);
-    const lod = view.z < 0.18 ? 0 : view.z < 0.42 ? 1 : 2, rv = view.x + cssW / view.z, bv = view.y + cssH / view.z;
+    const lod = view.z < 0.18 ? 0 : view.z < BLOCK_GRAPH_ROW_ZOOM ? 1 : 2, rv = view.x + cssW / view.z, bv = view.y + cssH / view.z;
     drawEdges(rv, bv, lod);
+    const shown = [];
     for (let block = 0; block < graph.count; block += 1) {
       const x = layout.x[block], y = layout.y[block], w = layout.w[block], h = layout.h[block];
       if (x >= rv || x + w <= view.x || y >= bv || y + h <= view.y) continue;
       drawCard(block, x, y, w, h, lod);
+      if (lod < 2) shown.push(block);
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (lod < 2) drawScreenLabels(shown);
+    lodCue.hidden = lod === 2;
     zoomLabel.textContent = `${Math.round(view.z * 100)}%`;
     drawMinimap();
+  }
+  /** Below row zoom, each card that has room keeps a legible label and count. */
+  function drawScreenLabels(blocks) {
+    ctx.font = `11px ${tokens.mono}`; ctx.textBaseline = 'middle';
+    for (const block of blocks) {
+      const sx = (layout.x[block] - view.x) * view.z, sy = (layout.y[block] - view.y) * view.z, sw = layout.w[block] * view.z, sh = layout.h[block] * view.z;
+      if (sw < 48 || sh < 15) continue;
+      const room = Math.floor((sw - 12) / m.charW);
+      const label = blockLabel(block), count = `${graph.instructionCount[block]} ${graph.evidence === 'observed' ? 'step' : 'ins'}`;
+      ctx.save(); ctx.beginPath(); ctx.rect(sx, sy, sw, sh); ctx.clip();
+      ctx.fillStyle = block === selectedBlock ? tokens.text : tokens.muted;
+      ctx.fillText(label.length > room ? `${label.slice(0, Math.max(1, room - 1))}…` : label, sx + 6, sy + Math.min(sh / 2, 11));
+      if (sh >= 34 && count.length <= room) { ctx.fillStyle = tokens.faint; ctx.fillText(count, sx + 6, sy + 28); }
+      ctx.restore();
+    }
   }
   function edgePath(edge, lod) {
     const start = layout.pointStart[edge], end = layout.pointStart[edge + 1];
@@ -241,8 +274,9 @@ function createBlockGraphView(root, options = {}) {
     ctx.beginPath(); roundedRect(x, y, w, h, 4); ctx.fill(); ctx.stroke();
     if (lod === 0) return;
     ctx.save(); ctx.beginPath(); roundedRect(x, y, w, h, 4); ctx.clip();
-    if (!gapCard) { ctx.fillStyle = unreached ? tokens.dead : picked ? tokens.soft : tokens.head; ctx.fillRect(x, y, w, m.headerH); }
-    if (lod >= 1) {
+    if (!gapCard && lod === 2) { ctx.fillStyle = unreached ? tokens.dead : picked ? tokens.soft : tokens.head; ctx.fillRect(x, y, w, m.headerH); }
+    else if (unreached) { ctx.fillStyle = tokens.dead; ctx.fillRect(x, y, w, h); }
+    if (lod === 2) {
       ctx.textBaseline = 'middle'; ctx.font = `11px ${tokens.mono}`; ctx.fillStyle = tokens.muted;
       if (gapCard) ctx.fillText('gap', x + m.padX, y + m.headerH / 2);
       else {
@@ -293,7 +327,10 @@ function createBlockGraphView(root, options = {}) {
     if (miniImage) miniCtx.putImageData(miniImage, 0, 0);
     miniCtx.strokeStyle = tokens.accent; miniCtx.lineWidth = 2;
     const ox = (w - layout.width * scale) / 2, oy = (h - layout.height * scale) / 2;
-    miniCtx.strokeRect(ox + view.x * scale, oy + view.y * scale, Math.max(3, cssW / view.z * scale), Math.max(3, cssH / view.z * scale));
+    // The viewport can be larger than the whole graph; keep its outline on the minimap.
+    const left = Math.max(1, ox + view.x * scale), top = Math.max(1, oy + view.y * scale);
+    const right = Math.min(w - 1, ox + (view.x + cssW / view.z) * scale), bottom = Math.min(h - 1, oy + (view.y + cssH / view.z) * scale);
+    miniCtx.strokeRect(left, top, Math.max(3, right - left), Math.max(3, bottom - top));
   }
   let miniImage = null;
   function setState(kind, message = '', canRetry = false) {
@@ -312,20 +349,22 @@ function createBlockGraphView(root, options = {}) {
     stats.textContent = stats_ ?? [options.statsPrefix?.(graph), ...parts].filter(Boolean).join(' · ');
     evidence.textContent = graph.status === 'partial' ? `${graph.evidence} · partial` : graph.evidence;
     limits.textContent = graph.evidence === 'observed' ? graph.notice : BLOCK_GRAPH_LIMITS;
-    limits.title = [...(graph.omissions ?? [])].join(' ');
+    limits.title = graph.evidence === 'observed' ? graph.notice : 'Declared static flow. Reachable here is not observed execution, and a complete drawing is not a proof.';
+    if (graph.omissions?.length) limits.title += ` ${graph.omissions.join(' ')}`;
     selection.textContent = graph.omissions?.length ? graph.omissions[0] : '';
     setState('ready');
     needsFit = cssW <= 1;
     start();
   }
-  /** First view of a graph: everything if it fits legibly, else the entry. */
+  /** First view: actual size, centered on the selected block or the entry.
+   * A graph that fits at actual size is centered whole. Fit is one key away. */
   function start() {
     if (!layout || !cssW) return;
-    const whole = Math.min(cssW / layout.width, cssH / layout.height);
-    if (whole >= 0.4) { fit(); return; }
-    view.z = 0.4;
-    view.x = layout.x[0] + layout.w[0] / 2 - cssW / view.z / 2;
-    view.y = Math.max(0, layout.y[0] - 24);
+    view.z = 1;
+    if (layout.width <= cssW && layout.height <= cssH) { view.x = (layout.width - cssW) / 2; view.y = (layout.height - cssH) / 2; requestDraw(); return; }
+    const block = selectedBlock >= 0 ? selectedBlock : Math.max(0, graph.roots?.[0] ?? 0);
+    view.x = layout.x[block] + layout.w[block] / 2 - cssW / 2;
+    view.y = layout.y[block] - 24;
     requestDraw();
   }
   function fit() {
@@ -513,7 +552,7 @@ function createSourceGraphPanel({host, editor, button, linearToggle, revealOffse
     const linear = document.createElement('button'); linear.type = 'button'; linear.className = 'source-tool block-graph-tool'; linear.textContent = 'Linear';
     linear.setAttribute('aria-pressed', String(!editor.hasAttribute('data-graph-linear-hidden')));
     linear.title = 'Show or hide the linear disassembly and hex';
-    linear.addEventListener('click', () => { linearChoice = true; const hidden = !editor.hasAttribute('data-graph-linear-hidden'); editor.toggleAttribute('data-graph-linear-hidden', hidden); linear.setAttribute('aria-pressed', String(!hidden)); view.fit(); });
+    linear.addEventListener('click', () => { linearChoice = true; const hidden = !editor.hasAttribute('data-graph-linear-hidden'); editor.toggleAttribute('data-graph-linear-hidden', hidden); linear.setAttribute('aria-pressed', String(!hidden)); dispatchEvent(new Event('resize')); });
     view.tools.append(linear);
   }
   function stepFunction(direction) {

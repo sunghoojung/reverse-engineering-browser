@@ -1,7 +1,7 @@
 // Browser instrumentation is native-only. This viewer never attaches a debugger.
 const sourceGraphPanel = createSourceGraphPanel({
   host: document.querySelector('#source-graph-host'),
-  editor: document.querySelector('#source-graph-host').parentElement,
+  editor: document.querySelector('#source-graph-host').closest('.sources-editor'),
   button: document.querySelector('#source-graph'),
   revealOffset: offset => revealSourceByteOffset(offset)
 });

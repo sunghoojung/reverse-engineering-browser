@@ -149,5 +149,8 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
   assert(/\[\s*6,\s*3\s*\]/.test(view), 'the false arm has its own dash pattern, not only a color');
   assert(!/—/.test(view + css), 'no em dash characters');
   assert(html.includes('id="source-graph"') && html.includes('block_graph.js'), 'Sources offers Graph as a sibling view mode');
+  assert(/function start\(\)[\s\S]{0,200}view\.z = 1;/.test(view), 'a graph opens at actual size, not at Fit');
+  assert(/:is\(#source-window, #source-search-status\) \{ display: none/.test(css), 'text-window rows are hidden while Graph is active');
+  assert(/BLOCK_GRAPH_ROW_ZOOM/.test(view) && /drawScreenLabels/.test(view), 'below row zoom, cards keep screen-size labels');
 }
 console.log('PASS block graph model and layout (offline; rendered acceptance is the packaged-app gate)');

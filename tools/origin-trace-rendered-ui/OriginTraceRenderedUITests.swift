@@ -1829,6 +1829,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertTrue((limits["text"] as? String ?? "").contains("not a proof"), "\(size.name): the limit stays on screen: \(limits)")
       XCTAssertGreaterThan(limits["w"] as? Double ?? 0, 40, "\(size.name): limits are not clipped away: \(limits)")
       XCTAssertLessThanOrEqual(limits["right"] as? Double ?? 0, limits["windowWidth"] as? Double ?? 0, "\(size.name): limits stay on screen: \(limits)")
+      let view = try await ui.value("(() => { const q = s => document.querySelector(s), box = e => e.getBoundingClientRect(); const stage = box(q('#source-graph-host .block-graph-stage')), mini = box(q('#source-graph-host .block-graph-minimap')), foot = box(q('#source-graph-host .block-graph-foot')); return {zoom: parseInt(q('#source-graph-host .block-graph-zoom').textContent, 10), stageHeight: stage.height, miniInside: mini.width > 0 && mini.left >= stage.left && mini.right <= stage.right + 1 && mini.bottom <= stage.bottom + 1, footHeight: foot.height, textWindow: getComputedStyle(q('#source-window')).display}; })()") as? [String: Any] ?? [:]
+      XCTAssertGreaterThanOrEqual(view["zoom"] as? Int ?? 0, 90, "\(size.name): the graph opens at a readable zoom: \(view)")
+      XCTAssertEqual(view["miniInside"] as? Bool, true, "\(size.name): the minimap is visible inside the stage: \(view)")
+      XCTAssertLessThanOrEqual(view["footHeight"] as? Double ?? 99, 30, "\(size.name): the limits footer is one line: \(view)")
+      XCTAssertEqual(view["textWindow"] as? String, "none", "\(size.name): text-window rows are hidden in Graph mode: \(view)")
+      XCTAssertGreaterThanOrEqual(view["stageHeight"] as? Double ?? 0, 200, "\(size.name): the graph gets most of the height: \(view)")
       try await assertLayout(ui, "#screen-sources", "\(size.name) block graph")
       try await assertInert(ui, "\(size.name) block graph")
       try await ui.screenshot("block-graph-\(size.name)")

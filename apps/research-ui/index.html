@@ -89,7 +89,10 @@
                 <div id="network-notice" class="network-notice" data-kind="loading" role="status" aria-live="polite">Connecting to the local evidence broker…</div>
 
                 <div class="request-scope" aria-label="Captured request scope">
-                  <div id="request-tab-scopes" class="request-tab-scopes" role="tablist" aria-label="Browser tabs"></div>
+                  <div class="request-tab-row">
+                    <div id="request-tab-scopes" class="request-tab-scopes" role="tablist" aria-label="Browser tabs"></div>
+                    <select id="request-tab-more" class="request-tab-more" aria-label="More browser tabs" hidden></select>
+                  </div>
                   <label class="request-domain-filter">Domain
                     <select id="request-domain" aria-label="Filter requests by domain">
                       <option value="all">All domains</option>

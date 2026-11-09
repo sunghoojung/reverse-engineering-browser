@@ -297,18 +297,26 @@
         border-bottom: 1px solid var(--line);
         background: var(--chrome);
       }
-      .request-tab-scopes {
+      /* The strip holds whole chips only. app.js moves chips that do not fit
+         into the "+N tabs" menu after it and keeps the selected chip shown. */
+      .request-tab-row {
         min-width: 0;
         display: flex;
         align-items: center;
         gap: 4px;
-        overflow-x: auto;
-        scrollbar-width: none;
       }
-      .request-tab-scopes::-webkit-scrollbar { display: none; }
+      .request-tab-scopes {
+        flex: 0 1 auto;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        overflow: hidden;
+      }
       .request-tab-scope {
+        flex: 0 1 auto;
         height: 25px;
-        min-width: max-content;
+        min-width: 0;
         max-width: 220px;
         display: inline-flex;
         align-items: center;
@@ -334,6 +342,20 @@
         font-weight: 600;
       }
       .request-tab-scope span { color: var(--faint); font: 10px var(--mono); }
+      /* Natural chip widths, read while app.js fits the strip. */
+      .request-tab-scopes[data-measuring="true"] > .request-tab-scope { flex-shrink: 0; }
+      .request-tab-scope[hidden], .request-tab-more[hidden] { display: none; }
+      .request-tab-more {
+        flex: none;
+        max-width: 110px;
+        height: 24px;
+        padding-left: 8px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background-color: var(--panel);
+        color: var(--text);
+        font: 11px var(--sans);
+      }
       .request-domain-filter {
         display: flex;
         align-items: center;

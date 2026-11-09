@@ -2845,6 +2845,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           if (elements.requestTabScopes.children[index] !== button) elements.requestTabScopes.insertBefore(button, elements.requestTabScopes.children[index] ?? null);
         });
         while (elements.requestTabScopes.children.length > buttons.length) elements.requestTabScopes.lastElementChild.remove();
+        fitRequestTabScopes();
         if (focusedScope && document.activeElement !== focusedScope) (buttons.includes(focusedScope) ? focusedScope : buttons[0])?.focus({preventScroll: true});
 
         const domains = scopes.domains.map(([domain]) => domain);
@@ -2863,6 +2864,63 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.requestDomain.value = state.requestDomain;
         // A long domain truncates in the closed control; the tooltip holds the full value.
         elements.requestDomain.title = elements.requestDomain.selectedOptions?.[0]?.textContent ?? '';
+      }
+
+      // The strip shows whole chips only, never one cut at its edge. Chips past
+      // its width are hidden and listed in the "+N tabs" menu after it, which
+      // selects them; the selected chip always stays in the strip. Widths are
+      // read only when the chips or the selection change, or the row resizes.
+      function fitRequestTabScopes(force = false) {
+        const strip = elements.requestTabScopes, more = strip?.nextElementSibling;
+        if (!more?.classList?.contains('request-tab-more')) return;
+        const chips = [...strip.children];
+        const key = JSON.stringify(chips.map(chip => [chip.dataset.scopeId, chip.textContent, chip.getAttribute('aria-selected')]));
+        if (!more.fitObserver && typeof ResizeObserver === 'function') {
+          more.fitObserver = new ResizeObserver(() => fitRequestTabScopes(true));
+          more.fitObserver.observe(strip.parentElement);
+        }
+        if (!more.fitWired) {
+          more.fitWired = true;
+          more.addEventListener('change', () => {
+            const chip = [...strip.children].find(node => node.dataset.scopeId === more.value);
+            more.value = '';
+            chip?.click();
+          });
+        }
+        if (!force && more.fitKey === key) return;
+        const width = strip.parentElement.clientWidth;
+        // Off screen there is nothing to fit; the observer fits it once shown.
+        if (!(width > 0)) { more.fitKey = null; return; }
+        more.fitKey = key;
+        for (const chip of chips) chip.hidden = false;
+        more.hidden = true;
+        strip.dataset.measuring = 'true';
+        const widths = chips.map(chip => chip.getBoundingClientRect().width);
+        delete strip.dataset.measuring;
+        const gap = parseFloat(getComputedStyle(strip).columnGap) || 0;
+        if (widths.reduce((sum, value) => sum + value, 0) + gap * Math.max(0, chips.length - 1) <= width + 0.5) return;
+        // The menu is measured at its widest label before the chips are fitted,
+        // and keeps that width: a closed select otherwise widens to its longest option.
+        more.hidden = false;
+        more.style.width = '';
+        more.replaceChildren(new Option(`+${chips.length - 1} tabs`, ''));
+        const menuWidth = more.getBoundingClientRect().width;
+        more.style.width = `${menuWidth}px`;
+        const budget = width - menuWidth - gap;
+        const selected = chips.findIndex(chip => chip.getAttribute('aria-selected') === 'true');
+        let used = selected >= 0 ? widths[selected] : -gap, full = false;
+        const hidden = chips.filter((chip, index) => {
+          if (index === selected) return false;
+          if (!full && used + gap + widths[index] <= budget) { used += gap + widths[index]; return false; }
+          full = true;
+          return true;
+        });
+        for (const chip of hidden) chip.hidden = true;
+        const label = `+${hidden.length} ${hidden.length === 1 ? 'tab' : 'tabs'}`;
+        more.replaceChildren(new Option(label, ''), ...hidden.map(chip =>
+          new Option(`${chip.children[0].textContent}${chip.children[1].textContent ? ` (${chip.children[1].textContent})` : ''}`, chip.dataset.scopeId)));
+        more.value = '';
+        more.title = `${hidden.length} more browser ${hidden.length === 1 ? 'tab' : 'tabs'}: ${hidden.map(chip => chip.children[0].textContent).join(', ')}`;
       }
 
       // A row linked to several tabs is in each of them; no tab is a capture error.

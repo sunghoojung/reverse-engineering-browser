@@ -967,6 +967,8 @@ counts them and Sources shares the switch,
 top-level document, and **Failed** keeps failed requests. Sites are the last two
 host labels, or three after a short second level and a two-letter country code;
 there is no public suffix list. Tab and domain filters scope everything. The
+tab strip shows whole chips only: chips that do not fit are listed in the
+**+N tabs** menu after it, and the selected tab always stays in the strip. The
 request index applies the same rules to the whole session, and
 `make request-index-check` holds the two to one fixture. Filters never enable
 capture, fetch anything or change a row.

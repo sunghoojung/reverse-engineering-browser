@@ -2,14 +2,13 @@ import Cocoa
 import Security
 import WebKit
 
-// The web view asks; native decides. Keys stay in the Keychain and in the one
-// outgoing request that needs them. The page can reach this bridge only from the
-// exact main document the app loaded, as with client-project export.
+// The web view runs the LangGraph loop; native holds what it must not: keys,
+// the tool server and the transcript file. Keys stay in the Keychain and in the
+// one outgoing request that needs them. The page can reach this bridge only
+// from the exact main document the app loaded, as with client-project export.
 @MainActor
 final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
   static let handlerName = "rebAgent"
-  // Composer text plus pins, as the panel limits them, with room for encoding.
-  private static let turnByteLimit = 1024 * 1024
 
   private weak var webView: WKWebView?
   private weak var window: NSWindow?
@@ -26,10 +25,12 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
     configuration.timeoutIntervalForResource = 3600
     return URLSession(configuration: configuration)
   }()
-  private lazy var engine = AgentEngine(
-    session: urlSession,
-    keyProvider: { [weak self] kind in self?.standIn == nil ? AgentKeychain.read(kind) : nil },
-    emit: { [weak self] event in self?.deliver(event) })
+  private lazy var engine: AgentSession = {
+    let session = AgentSession(emit: { [weak self] event in self?.deliver(event) })
+    session.busy = { [weak self] in (self?.proxy.inFlight ?? 0) > 0 }
+    return session
+  }()
+  private lazy var proxy = AgentProviderProxy(session: urlSession)
 
   private var standIn: URL? { agentStandInBaseURL(environment) }
 
@@ -49,6 +50,7 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
   func navigationWillStart() {
     documentReady = false
     sessionKey = nil
+    proxy.cancelAll()
     engine.disable()
   }
 
@@ -97,7 +99,7 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
     case "status": return status()
     case "models":
       let kind = try provider(body)
-      let result = await engine.models(kind, baseURL: baseURL(for: kind))
+      let result = await models(kind)
       return ["models": result.models, "defaultModel": kind.defaultModel, "fromProvider": result.fromProvider]
     case "setKey":
       let kind = try provider(body)
@@ -108,19 +110,24 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
       return status()
     case "enable": return try await enable(body)
     case "disable":
+      proxy.cancelAll()
       engine.disable()
       return status()
-    case "send":
-      try send(body)
-      return ["accepted": true]
-    case "cancel":
-      engine.cancelTurn()
-      return ["cancelled": true]
-    case "decide":
-      guard let callID = body["callId"] as? String, let allow = body["allow"] as? Bool else {
-        throw AgentFailure(message: "Malformed approval.")
+    case "providerFetch": return try await providerFetch(body)
+    case "fetchCancel":
+      if let id = body["id"] as? String { proxy.cancel(id) }
+      return ["ok": true]
+    case "toolCall":
+      guard let name = body["name"] as? String, let arguments = body["arguments"] as? [String: Any] else {
+        throw AgentFailure(message: "Malformed tool call.")
       }
-      engine.decide(callID: callID, allow: allow)
+      return try await engine.callTool(name: name, arguments: arguments, approved: body["approved"] as? Bool == true)
+    case "turn":
+      engine.setTurnRunning(body["running"] as? Bool == true)
+      return ["ok": true]
+    case "transcriptAppend":
+      guard let row = body["row"] as? [String: Any] else { throw AgentFailure(message: "Malformed transcript row.") }
+      try engine.appendTranscript(row)
       return ["ok": true]
     case "panel":
       engine.setPanelVisible(body["visible"] as? Bool == true)
@@ -148,6 +155,7 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
         ]
       },
       "engine": engine.statusPayload(),
+      "tools": engine.toolDefinitions(),
     ]
   }
 
@@ -184,33 +192,53 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
     guard let rawKey = body["sessionKey"] as? String,
       rawKey.range(of: "^[0-9:]{1,64}$", options: .regularExpression) != nil
     else { throw AgentFailure(message: "The current capture session has no identity yet.") }
-    if engine.isOn { engine.disable() }
+    guard standIn != nil || AgentKeychain.contains(kind) else { throw AgentFailure(message: "Add a \(kind.label) key first.") }
+    if engine.isOn { proxy.cancelAll(); engine.disable() }
     let model = (body["model"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? kind.defaultModel
-    let configuration = AgentEngine.Configuration(
+    let configuration = AgentSession.Configuration(
       provider: kind, model: model, apiExecutable: apiExecutable, apiBaseURL: apiBaseURL,
-      allowEffects: body["effects"] as? Bool == true, baseURL: baseURL(for: kind),
-      needsKey: standIn == nil, transcriptDirectory: transcriptDirectory)
+      allowEffects: body["effects"] as? Bool == true, transcriptDirectory: transcriptDirectory)
     sessionKey = rawKey
     try await engine.enable(configuration, sessionKey: rawKey.replacingOccurrences(of: ":", with: "-"))
     return status()
   }
 
-  private func send(_ body: [String: Any]) throws {
-    guard let turnID = body["turnId"] as? String, turnID.count <= 64,
-      let text = body["text"] as? String, !text.isEmpty
-    else { throw AgentFailure(message: "Malformed message.") }
-    let context = body["context"] as? String
-    let pins = (body["pins"] as? [[String: Any]]) ?? []
-    var size = text.utf8.count + (context?.utf8.count ?? 0)
-    for pin in pins { size += (pin["text"] as? String)?.utf8.count ?? 0 }
-    guard size <= Self.turnByteLimit else {
-      throw AgentFailure(message: "This turn is larger than 1 MiB. Remove a pin or shorten the question.")
+  // Forwards one SDK request to the enabled provider's model endpoint only. The
+  // page's credentials are dropped; the Keychain key is added here.
+  private func providerFetch(_ body: [String: Any]) async throws -> [String: Any] {
+    guard let configuration = engine.configuration else { throw AgentFailure(message: "The agent is off.") }
+    guard let id = body["id"] as? String, id.count <= 64, let url = body["url"] as? String,
+      let method = body["method"] as? String, let text = body["body"] as? String
+    else { throw AgentFailure(message: "Malformed model request.") }
+    guard let route = AgentProviderRoute.resolve(url, method: method, standIn: standIn),
+      route.provider == configuration.provider
+    else { throw AgentFailure(message: "Model requests go only to the selected provider's model endpoint.") }
+    let key = standIn == nil ? AgentKeychain.read(route.provider) : nil
+    guard standIn != nil || key != nil else {
+      throw AgentFailure(message: "The \(route.provider.label) key is no longer available. Add it again.")
     }
-    try engine.send(turnID: turnID, text: text, context: context, pins: pins)
+    let headers = (body["headers"] as? [String: String]) ?? [:]
+    let request = try route.request(headers: headers, body: Data(text.utf8), key: key)
+    let sink = AgentEventSink(self)
+    return try await proxy.start(id: id, request: request) { event in await sink.send(event) }
+  }
+
+  private func models(_ kind: AgentProviderKind) async -> (models: [String], fromProvider: Bool) {
+    let key = standIn == nil ? AgentKeychain.read(kind) : nil
+    do {
+      let (data, response) = try await urlSession.data(for: kind.modelsRequest(baseURL: baseURL(for: kind), key: key))
+      guard (response as? HTTPURLResponse)?.statusCode == 200,
+        let document = (try JSONSerialization.jsonObject(with: data)) as? [String: Any]
+      else { return ([kind.defaultModel], false) }
+      let ids = kind.models(from: document)
+      return ids.isEmpty ? ([kind.defaultModel], false) : (ids, true)
+    } catch {
+      return ([kind.defaultModel], false)
+    }
   }
 
   // Captured values and model text move as JSON arguments, never as script text.
-  private func deliver(_ event: [String: Any]) {
+  func deliver(_ event: [String: Any]) {
     guard documentReady, let webView, JSONSerialization.isValidJSONObject(event),
       let data = try? JSONSerialization.data(withJSONObject: event)
     else { return }
@@ -256,6 +284,17 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
     let key = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !key.isEmpty else { return false }
     return AgentKeychain.write(key, for: kind)
+  }
+}
+
+// Carries streamed provider chunks from the proxy's task to the main actor.
+// Events are JSON-shaped values created for this delivery and never shared.
+final class AgentEventSink: @unchecked Sendable {
+  private weak var bridge: NativeAgentBridge?
+  @MainActor init(_ bridge: NativeAgentBridge) { self.bridge = bridge }
+  func send(_ event: [String: Any]) async {
+    nonisolated(unsafe) let payload = event
+    await MainActor.run { self.bridge?.deliver(payload) }
   }
 }
 

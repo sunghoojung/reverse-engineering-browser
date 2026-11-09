@@ -1,9 +1,10 @@
 import Darwin
 import Foundation
 
-// Compiled with the production core. Drives the real conversation loop against a
-// local stand-in provider and the real `reb-api mcp` on a real backend, so no
-// test needs a key or network. A real provider is not exercised here.
+// Compiled with the production native core. The agent loop is LangGraph in the
+// web view (tools/check-agent-runtime.mjs runs it); this checks what native
+// keeps: the restricted provider proxy, key handling, the real `reb-api mcp`
+// tool server and its gates, and the user-only transcript.
 
 final class StandIn: @unchecked Sendable {
   struct Received { let path: String; let headers: [String: String]; let body: [String: Any] }
@@ -98,34 +99,6 @@ final class StandIn: @unchecked Sendable {
 }
 
 func json(_ object: Any) -> String { String(decoding: try! JSONSerialization.data(withJSONObject: object), as: UTF8.self) }
-func claudeLines(_ events: [[String: Any]]) -> [String] { events.map { "event: \($0["type"] as! String)\ndata: \(json($0))\n" } }
-func openAILines(_ events: [[String: Any]]) -> [String] { events.map { "data: \(json($0))\n" } }
-
-func claudeToolUse(name: String, input: [String: Any]) -> [String] {
-  claudeLines([
-    ["type": "message_start", "message": ["usage": ["input_tokens": 10]]],
-    ["type": "content_block_start", "index": 0, "content_block": ["type": "thinking", "thinking": ""]],
-    ["type": "content_block_delta", "index": 0, "delta": ["type": "thinking_delta", "thinking": "reasoning"]],
-    ["type": "content_block_delta", "index": 0, "delta": ["type": "signature_delta", "signature": "sig-abc"]],
-    ["type": "content_block_stop", "index": 0],
-    ["type": "content_block_start", "index": 1, "content_block": ["type": "tool_use", "id": "toolu_1", "name": name, "input": [:] as [String: Any]]],
-    ["type": "content_block_delta", "index": 1, "delta": ["type": "input_json_delta", "partial_json": json(input)]],
-    ["type": "content_block_stop", "index": 1],
-    ["type": "message_delta", "delta": ["stop_reason": "tool_use"], "usage": ["output_tokens": 5]],
-    ["type": "message_stop"],
-  ])
-}
-
-func claudeText(_ text: String) -> [String] {
-  claudeLines([
-    ["type": "message_start", "message": ["usage": ["input_tokens": 20]]],
-    ["type": "content_block_start", "index": 0, "content_block": ["type": "text", "text": ""]],
-    ["type": "content_block_delta", "index": 0, "delta": ["type": "text_delta", "text": text]],
-    ["type": "content_block_stop", "index": 0],
-    ["type": "message_delta", "delta": ["stop_reason": "end_turn"], "usage": ["output_tokens": 7]],
-    ["type": "message_stop"],
-  ])
-}
 
 nonisolated(unsafe) var backendProcessForFailure: Process?
 
@@ -137,29 +110,15 @@ func check(_ condition: Bool, _ message: String, file: StaticString = #filePath,
   }
 }
 
-@MainActor
-final class Recorder {
-  var events: [[String: Any]] = []
-  var approvals: Bool?
-  weak var engine: AgentEngine?
-  func handle(_ event: [String: Any]) {
-    events.append(event)
-    if event["type"] as? String == "approval", let allow = approvals, let id = event["callId"] as? String {
-      engine?.decide(callID: id, allow: allow)
-    }
+final class Collected: @unchecked Sendable {
+  private let lock = NSLock()
+  private var events: [[String: Any]] = []
+  func add(_ event: [String: Any]) { lock.lock(); events.append(event); lock.unlock() }
+  var all: [[String: Any]] { lock.lock(); defer { lock.unlock() }; return events }
+  var body: Data {
+    all.filter { $0["type"] as? String == "fetchChunk" }.reduce(into: Data()) { $0.append(Data(base64Encoded: $1["data"] as! String)!) }
   }
-  func until(_ condition: () -> Bool, _ message: String) async {
-    let deadline = Date().addingTimeInterval(20)
-    while Date() < deadline {
-      if condition() { return }
-      try? await Task.sleep(nanoseconds: 20_000_000)
-    }
-    print("Events: \(events.suffix(8))")
-    check(false, "timed out: \(message)")
-  }
-  func text() -> String { events.filter { $0["type"] as? String == "text" }.compactMap { $0["delta"] as? String }.joined() }
-  func ended(_ turn: String) -> Bool { events.contains { $0["type"] as? String == "turnEnd" && $0["turnId"] as? String == turn } }
-  func erred(_ turn: String) -> Bool { events.contains { $0["type"] as? String == "error" && $0["turnId"] as? String == turn } }
+  var ended: Bool { all.contains { ["fetchEnd", "fetchError"].contains($0["type"] as? String ?? "") } }
 }
 
 @main
@@ -169,8 +128,53 @@ enum AgentCoreChecks {
     precondition(arguments.count == 2, "usage: check-agent-core <reb-api>")
     let api = URL(fileURLWithPath: arguments[1])
     let backend = api.deletingLastPathComponent().appendingPathComponent("origin-trace-backend")
-    checkPureRules()
+    checkRoutes()
 
+    // The proxy against a loopback stand-in: the key is added natively, the
+    // page's credentials are dropped, and the stream arrives on event boundaries.
+    let standIn = StandIn()
+    let session = URLSession(configuration: .ephemeral)
+    let proxy = AgentProviderProxy(session: session)
+    let route = AgentProviderRoute.resolve("https://api.anthropic.com/v1/messages?beta=true", method: "POST", standIn: standIn.url)!
+    check(route.target.absoluteString == "\(standIn.url.absoluteString)/v1/messages?beta=true", "a stand-in keeps the fixed path")
+    let stream = ["event: message_start\ndata: {\"type\":\"message_start\"}\n", "event: message_stop\ndata: {\"type\":\"message_stop\"}\n"]
+    standIn.enqueue(lines: stream)
+    let request = try! route.request(
+      headers: ["content-type": "application/json", "x-api-key": "page-supplied", "authorization": "Bearer page", "cookie": "a=b",
+        "anthropic-version": "2023-06-01", "x-unknown": "dropped"],
+      body: Data(#"{"model":"m","messages":[]}"#.utf8), key: "sk-native-0123456789")
+    let collected = Collected()
+    let head = try! await proxy.start(id: "f1", request: request) { collected.add($0) }
+    check(head["status"] as? Int == 200, "the response head reaches the page")
+    for _ in 0..<200 where !collected.ended { try? await Task.sleep(nanoseconds: 10_000_000) }
+    check(String(decoding: collected.body, as: UTF8.self).contains("message_stop"), "the streamed body reaches the page whole")
+    check(collected.all.filter { $0["type"] as? String == "fetchChunk" }.count >= 2, "chunks follow SSE event boundaries")
+    let sent = standIn.requests.last!
+    check(sent.headers["x-api-key"] == "sk-native-0123456789", "native adds the Keychain key")
+    check(sent.headers["authorization"] == nil && sent.headers["cookie"] == nil, "the page's credentials are dropped")
+    check(sent.headers["x-unknown"] == nil, "only listed headers are forwarded")
+    check(sent.headers["anthropic-version"] == "2023-06-01", "the SDK's API version is forwarded")
+    check(!json(collected.all).contains("sk-native"), "the key never comes back to the page")
+
+    // An error body is bounded and scrubbed of anything shaped like a key.
+    standIn.enqueue(status: 401, lines: [json(["error": ["message": "Invalid key sk-native-0123456789"]])])
+    let failed = Collected()
+    let errorHead = try! await proxy.start(id: "f2", request: request) { failed.add($0) }
+    for _ in 0..<200 where !failed.ended { try? await Task.sleep(nanoseconds: 10_000_000) }
+    check(errorHead["status"] as? Int == 401, "provider errors keep their status")
+    let errorText = String(decoding: failed.body, as: UTF8.self)
+    check(errorText.contains("[key]") && !errorText.contains("sk-native"), "error bodies are redacted")
+
+    // Cancel ends a held stream.
+    standIn.enqueue(lines: ["event: message_start\ndata: {\"type\":\"message_start\"}\n"], hold: true)
+    let held = Collected()
+    _ = try! await proxy.start(id: "f3", request: request) { held.add($0) }
+    check(proxy.inFlight == 1, "a held stream is in flight")
+    proxy.cancel("f3")
+    for _ in 0..<200 where proxy.inFlight > 0 { try? await Task.sleep(nanoseconds: 10_000_000) }
+    check(proxy.inFlight == 0, "cancel stops the stream")
+
+    // The real tool server on a real backend, with --omit-content.
     let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("reb-agent-core-\(UUID().uuidString)")
     try! FileManager.default.createDirectory(at: root.appendingPathComponent("blobs"), withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -183,7 +187,6 @@ enum AgentCoreChecks {
       "sha256": sha, "sensitive": false, "content_path": "blobs/\(sha).bin"]
     try! (json(manifest) + "\n").write(to: root.appendingPathComponent("manifest.jsonl"), atomically: true, encoding: .utf8)
     FileManager.default.createFile(atPath: root.appendingPathComponent("events.jsonl").path, contents: Data())
-
     let endpointFile = root.appendingPathComponent("endpoint")
     let backendProcess = Process()
     backendProcess.executableURL = backend
@@ -193,199 +196,88 @@ enum AgentCoreChecks {
     backendProcess.standardError = FileHandle.nullDevice
     try! backendProcess.run()
     backendProcessForFailure = backendProcess
-    // `exit` below skips deferred work, so the backend is stopped explicitly.
     var endpoint = ""
-    for _ in 0..<200 where endpoint.isEmpty {
+    for _ in 0..<400 where endpoint.isEmpty {
       endpoint = ((try? String(contentsOf: endpointFile, encoding: .utf8)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
       try? await Task.sleep(nanoseconds: 25_000_000)
     }
     check(!endpoint.isEmpty, "the backend published its endpoint")
-    let apiBase = URL(string: endpoint)!
-
-    let standIn = StandIn()
-    let transcriptDirectory = root.appendingPathComponent("transcripts", isDirectory: true)
-    let sessionConfiguration = URLSessionConfiguration.ephemeral
-    let session = URLSession(configuration: sessionConfiguration)
-    let testKey = "sk-test-secret-key-0123456789"
-
-    func make(_ provider: AgentProviderKind, effects: Bool = false, needsKey: Bool = false) -> (AgentEngine, Recorder, AgentEngine.Configuration) {
-      let recorder = Recorder()
-      let engine = AgentEngine(session: session, keyProvider: { _ in testKey }, emit: { recorder.handle($0) })
-      recorder.engine = engine
-      engine.setPanelVisible(true)
-      let configuration = AgentEngine.Configuration(
-        provider: provider, model: provider.defaultModel, apiExecutable: api, apiBaseURL: apiBase, allowEffects: effects,
-        baseURL: standIn.url, needsKey: needsKey, transcriptDirectory: transcriptDirectory)
-      return (engine, recorder, configuration)
+    let transcripts = root.appendingPathComponent("transcripts", isDirectory: true)
+    func configuration(effects: Bool) -> AgentSession.Configuration {
+      AgentSession.Configuration(provider: .claude, model: "claude-opus-5-5", apiExecutable: api, apiBaseURL: URL(string: endpoint)!,
+        allowEffects: effects, transcriptDirectory: transcripts)
     }
+    let events = Collected()
+    let agent = AgentSession(emit: { events.add($0) })
+    agent.setPanelVisible(true)
+    try! await agent.enable(configuration(effects: false), sessionKey: "test-1")
+    check(agent.childIsRunning, "the tool server runs while the agent is on")
+    check(agent.toolNames.contains("get_artifacts") && !agent.toolNames.contains("get_artifact_content"), "structural reads only")
+    check(!agent.toolNames.contains("capture_action"), "actions are hidden by default")
+    let artifacts = try! await agent.callTool(name: "get_artifacts", arguments: ["limit": 5], approved: false)
+    let artifactText = artifacts["text"] as? String ?? ""
+    check(artifactText.contains("artifact_id") && !artifactText.contains("SECRET_SOURCE_BODY"), "the real server answers without content")
+    let unlisted = try! await agent.callTool(name: "capture_action", arguments: ["action": "pause"], approved: true)
+    check(unlisted["isError"] as? Bool == true, "an unlisted tool is refused")
+    try! agent.appendTranscript(["role": "user", "text": "What was captured?"])
+    let file = transcripts.appendingPathComponent("session-test-1.jsonl")
+    check(((try? String(contentsOf: file, encoding: .utf8)) ?? "").contains("What was captured?"), "rows reach the transcript")
+    check((try! FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as! NSNumber).intValue == 0o600, "the transcript is user-only")
+    check((try! FileManager.default.attributesOfItem(atPath: transcripts.path)[.posixPermissions] as! NSNumber).intValue == 0o700, "its directory is user-only")
+    agent.setPanelVisible(false)
+    check(!agent.childIsRunning, "an idle tool server stops when the panel closes")
+    let restarted = try! await agent.callTool(name: "get_session_summary", arguments: [:], approved: false)
+    check(restarted["isError"] as? Bool == false, "the next call restarts it")
+    check(!agent.childIsRunning, "with the panel closed and no turn running, it stops again after the call")
+    agent.setTurnRunning(true)
+    _ = try! await agent.callTool(name: "get_session_summary", arguments: [:], approved: false)
+    check(agent.childIsRunning, "a running turn keeps it while the panel is closed")
+    agent.setTurnRunning(false)
+    check(!agent.childIsRunning, "the end of that turn stops it")
+    agent.disable()
+    check(!agent.isOn && !agent.childIsRunning, "turning off stops the tool server")
 
-    // Claude: a tool round through the real tool server, thinking replayed verbatim.
-    let (claude, claudeEvents, claudeConfig) = make(.claude, needsKey: true)
-    try! await claude.enable(claudeConfig, sessionKey: "test-1")
-    check(claude.toolNames.contains("get_artifacts"), "structural reads are advertised")
-    check(!claude.toolNames.contains("get_artifact_content"), "raw content reads stay hidden")
-    check(claude.childIsRunning, "the tool server runs while the agent is on")
-    standIn.enqueue(lines: claudeToolUse(name: "get_artifacts", input: ["limit": 5]))
-    standIn.enqueue(lines: claudeText("Found one [cite session=9 artifact=5]."))
-    try! claude.send(turnID: "t1", text: "What was captured?", context: "kind=script session=9 artifact=5", pins: [])
-    await claudeEvents.until({ claudeEvents.ended("t1") || claudeEvents.erred("t1") }, "claude turn")
-    check(claudeEvents.ended("t1"), "the Claude turn finishes")
-    check(claudeEvents.text().contains("Found one"), "text deltas reach the view")
-    let firstClaude = standIn.requests[0]
-    check(firstClaude.path == "/v1/messages", "Claude uses the Messages API")
-    check(firstClaude.headers["x-api-key"] == testKey, "the key is sent as a header")
-    check(firstClaude.headers["anthropic-version"] == "2026-10-21", "the API version is pinned")
-    check(firstClaude.body["fallbacks"] as? String == "default", "refusal fallback is requested for this model")
-    let firstMessages = firstClaude.body["messages"] as! [[String: Any]]
-    check(json(firstMessages).contains("kind=script session=9 artifact=5"), "selection identifiers are in the turn")
-    let secondClaude = standIn.requests[1]
-    let messages = secondClaude.body["messages"] as! [[String: Any]]
-    let resent = json(messages)
-    check(resent.contains("sig-abc"), "signed thinking is replayed unchanged")
-    check(resent.contains("tool_result"), "the tool result is sent back")
-    check(resent.contains("\\\"artifact_id\\\": \\\"5\\\"") || resent.contains("artifact_id"), "the real tool server answered")
-    check(!resent.contains("SECRET_SOURCE_BODY"), "captured source does not reach the provider")
-    let row = claudeEvents.events.first { $0["type"] as? String == "tool" && $0["state"] as? String == "done" }
-    check(row != nil && (row?["result"] as? String ?? "").contains("artifact_id"), "the tool result is visible to the researcher")
-    // Key and capture privacy of the local record.
-    let transcriptFile = transcriptDirectory.appendingPathComponent("session-test-1.jsonl")
-    let transcript = (try? String(contentsOf: transcriptFile, encoding: .utf8)) ?? ""
-    check(transcript.contains("What was captured?") && transcript.contains("artifact_id"), "the transcript keeps the conversation")
-    check(!transcript.contains(testKey), "the key never reaches the transcript")
-    let attributes = try! FileManager.default.attributesOfItem(atPath: transcriptFile.path)
-    check((attributes[.posixPermissions] as! NSNumber).intValue == 0o600, "the transcript is user-only")
-    let directoryAttributes = try! FileManager.default.attributesOfItem(atPath: transcriptDirectory.path)
-    check((directoryAttributes[.posixPermissions] as! NSNumber).intValue == 0o700, "the transcript directory is user-only")
-    // Fully stopping: the switch ends the conversation and the child.
-    claude.disable()
-    check(!claude.isOn && !claude.childIsRunning, "turning off stops the tool server")
+    // Actions: listed only when enabled, and never run without Allow once.
+    let actions = AgentSession(emit: { events.add($0) })
+    actions.setPanelVisible(true)
+    try! await actions.enable(configuration(effects: true), sessionKey: "test-2")
+    check(actions.toolNames.contains("capture_action"), "actions can be enabled")
+    let unapproved = try! await actions.callTool(name: "capture_action", arguments: ["action": "pause"], approved: false)
+    check((unapproved["text"] as? String ?? "").contains("needs Allow once"), "an action without approval does not run")
+    let approved = try! await actions.callTool(name: "capture_action", arguments: ["action": "not-a-real-action"], approved: true)
+    check(!(approved["text"] as? String ?? "").contains("needs Allow once"), "Allow once runs that one call")
+    actions.disable()
 
-    // Provider failure text, with a key-shaped value scrubbed.
-    let (failing, failingEvents, failingConfig) = make(.claude, needsKey: true)
-    try! await failing.enable(failingConfig, sessionKey: "test-1b")
-    standIn.enqueue(status: 401, lines: [json(["error": ["message": "Invalid x-api-key sk-abcd1234efgh"]])])
-    try! failing.send(turnID: "tf", text: "Hello", context: nil, pins: [])
-    await failingEvents.until({ failingEvents.erred("tf") }, "provider error")
-    let failure = failingEvents.events.first { $0["type"] as? String == "error" }?["message"] as? String ?? ""
-    check(failure.contains("rejected the key"), "a rejected key is explained")
-    check(!failure.contains("sk-abcd1234efgh"), "provider error text is redacted")
-    failing.disable()
-
-    // ChatGPT: stateless Responses history with reasoning replayed.
-    let (chatgpt, chatEvents, chatConfig) = make(.chatgpt)
-    try! await chatgpt.enable(chatConfig, sessionKey: "test-2")
-    standIn.enqueue(lines: openAILines([
-      ["type": "response.output_item.done", "item": ["type": "reasoning", "id": "rs_1", "encrypted_content": "ENC", "summary": [] as [Any]]],
-      ["type": "response.output_item.done", "item": ["type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "get_session_summary", "arguments": "{}"]],
-      ["type": "response.completed", "response": ["usage": ["input_tokens": 11, "output_tokens": 3]]],
-    ]))
-    standIn.enqueue(lines: openAILines([
-      ["type": "response.output_text.delta", "delta": "Done"],
-      ["type": "response.output_item.done", "item": ["type": "message", "role": "assistant", "content": [["type": "output_text", "text": "Done"]]]],
-      ["type": "response.completed", "response": ["usage": ["input_tokens": 12, "output_tokens": 1]]],
-    ]))
-    let beforeChat = standIn.requests.count
-    try! chatgpt.send(turnID: "t2", text: "Summarize", context: nil, pins: [])
-    await chatEvents.until({ chatEvents.ended("t2") || chatEvents.erred("t2") }, "chatgpt turn")
-    check(chatEvents.ended("t2"), "the ChatGPT turn finishes")
-    let firstChat = standIn.requests[beforeChat]
-    check(firstChat.path == "/v1/responses", "ChatGPT uses the Responses API")
-    check(firstChat.body["store"] as? Bool == false, "responses are not stored by the provider")
-    check(firstChat.headers["authorization"] == nil, "no key is sent to a stand-in")
-    let toolsField = firstChat.body["tools"] as! [[String: Any]]
-    check(toolsField.first?["type"] as? String == "function", "tools use the function shape")
-    let input = json(standIn.requests[beforeChat + 1].body["input"] as! [[String: Any]])
-    check(input.contains("ENC") && input.contains("function_call_output"), "reasoning and results are replayed")
-    chatgpt.disable()
-
-    // Effects are not advertised by default, and a call to one is refused.
-    let (readOnly, readEvents, readConfig) = make(.claude)
-    try! await readOnly.enable(readConfig, sessionKey: "test-3")
-    check(!readOnly.toolNames.contains("capture_action"), "effects are hidden by default")
-    standIn.enqueue(lines: claudeToolUse(name: "capture_action", input: ["action": "pause"]))
-    standIn.enqueue(lines: claudeText("Could not."))
-    try! readOnly.send(turnID: "t3", text: "Pause", context: nil, pins: [])
-    await readEvents.until({ readEvents.ended("t3") }, "refused effect")
-    check(readEvents.events.contains { $0["type"] as? String == "tool" && $0["state"] as? String == "refused" }, "an unlisted tool is refused without running")
-    check(!readEvents.events.contains { $0["type"] as? String == "approval" }, "no approval is offered for an unlisted tool")
-    readOnly.disable()
-
-    // With effects on, every call waits for its own decision.
-    let (effects, effectEvents, effectConfig) = make(.claude, effects: true)
-    try! await effects.enable(effectConfig, sessionKey: "test-4")
-    check(effects.toolNames.contains("capture_action"), "effects can be enabled")
-    effectEvents.approvals = false
-    standIn.enqueue(lines: claudeToolUse(name: "capture_action", input: ["action": "pause"]))
-    standIn.enqueue(lines: claudeText("Denied, noted."))
-    try! effects.send(turnID: "t4", text: "Pause", context: nil, pins: [])
-    await effectEvents.until({ effectEvents.ended("t4") }, "denied effect")
-    check(effectEvents.events.contains { $0["type"] as? String == "approval" && $0["name"] as? String == "capture_action" }, "the call asks first")
-    check(effectEvents.events.contains { $0["type"] as? String == "tool" && $0["state"] as? String == "denied" }, "a denial is recorded and does not run")
-    let denied = json(standIn.requests.last!.body["messages"] as! [[String: Any]])
-    check(denied.contains("denied this call"), "the model is told the call was denied")
-    effectEvents.approvals = true
-    standIn.enqueue(lines: claudeToolUse(name: "capture_action", input: ["action": "not-a-real-action"]))
-    standIn.enqueue(lines: claudeText("Ran."))
-    try! effects.send(turnID: "t5", text: "Again", context: nil, pins: [])
-    await effectEvents.until({ effectEvents.ended("t5") }, "allowed effect")
-    let ran = effectEvents.events.filter { $0["type"] as? String == "tool" && $0["state"] as? String != "running" }.last
-    check(ran?["state"] as? String != "denied", "Allow once runs that one call")
-    effects.disable()
-
-    // Stop ends the request; the next turn still works.
-    let (cancel, cancelEvents, cancelConfig) = make(.claude)
-    try! await cancel.enable(cancelConfig, sessionKey: "test-5")
-    standIn.enqueue(lines: claudeLines([["type": "message_start", "message": ["usage": ["input_tokens": 1]]]]), hold: true)
-    try! cancel.send(turnID: "t6", text: "Long", context: nil, pins: [])
-    try? await Task.sleep(nanoseconds: 150_000_000)
-    cancel.cancelTurn()
-    await cancelEvents.until({ cancelEvents.events.contains { $0["type"] as? String == "turnEnd" && $0["stopped"] as? Bool == true } }, "stop")
-    check(!cancel.isRunning, "stop ends the turn")
-
-    // Closing the panel stops an idle child; sending again restarts it.
-    cancel.setPanelVisible(true)
-    check(cancel.childIsRunning, "the child stays while the panel is open")
-    cancel.setPanelVisible(false)
-    check(!cancel.childIsRunning, "an idle child stops when the panel closes")
-    standIn.enqueue(lines: claudeText("Back."))
-    try! cancel.send(turnID: "t7", text: "Again", context: nil, pins: [])
-    await cancelEvents.until({ cancelEvents.ended("t7") }, "restart")
-    cancel.disable()
     backendProcess.terminate()
     backendProcess.waitUntilExit()
-    print("PASS agent core: Claude and ChatGPT loops, real reb-api tool results, no content or key leakage, effects, stop, idle")
+    print("PASS agent native: fixed-endpoint proxy, native key, dropped page credentials, redacted errors, cancel, real reb-api gates and user-only transcript")
     exit(0)
   }
 
-  static func checkPureRules() {
+  static func checkRoutes() {
     check(agentStandInBaseURL(["REB_AGENT_PROVIDER_BASE_URL": "http://127.0.0.1:9"]) != nil, "loopback stand-in accepted")
-    check(agentStandInBaseURL(["REB_AGENT_PROVIDER_BASE_URL": "https://evil.example:443"]) == nil, "remote hosts refused")
-    check(agentStandInBaseURL(["REB_AGENT_PROVIDER_BASE_URL": "http://169.254.169.254:80"]) == nil, "non-loopback refused")
+    check(agentStandInBaseURL(["REB_AGENT_PROVIDER_BASE_URL": "https://evil.example:443"]) == nil, "remote stand-in refused")
     check(agentRedactedError("key sk-abcd1234 failed") == "key [key] failed", "keys are scrubbed")
-
-    // Oldest whole turns leave first; thinking goes with them.
-    var history = AgentHistory()
-    let thinking: [String: Any] = ["role": "assistant", "content": [["type": "thinking", "thinking": "x", "signature": "s"], ["type": "text", "text": "ok"]]]
-    try! history.append(thinking, turn: 2)
-    try! history.append(["role": "user", "content": String(repeating: "x", count: AgentHistory.retainBytes)], turn: 1)
-    try! history.append(["role": "user", "content": "current"], turn: 3)
-    let trimmed = history.trim(keeping: 3, removeThinking: true)
-    check(trimmed != nil && history.items.allSatisfy { $0.turn != 1 }, "the oldest turn is removed")
-    check(!history.items.contains { String(decoding: $0.json, as: UTF8.self).contains("signature") }, "signed thinking leaves with the trim")
-
-    // A truncated eager tool input is not treated as complete JSON.
-    let parser = AgentStreamParser(kind: .claude)
-    for line in claudeLines([
-      ["type": "content_block_start", "index": 0, "content_block": ["type": "tool_use", "id": "t", "name": "get_events", "input": [:] as [String: Any]]],
-      ["type": "content_block_delta", "index": 0, "delta": ["type": "input_json_delta", "partial_json": "{\"limit\":"]],
-      ["type": "content_block_stop", "index": 0],
-      ["type": "message_delta", "delta": ["stop_reason": "max_tokens"]],
-      ["type": "message_stop"],
-    ]) { line.split(separator: "\n").forEach { parser.consume(line: String($0)) { _ in } } }
-    let step = try! parser.finish()
-    check(step.toolCalls.first?.arguments == "", "a truncated tool input is marked incomplete")
-    check(step.truncated, "max_tokens is reported")
-    print("PASS agent core: pure rules")
+    let anthropic = AgentProviderRoute.resolve("https://api.anthropic.com/v1/messages", method: "POST", standIn: nil)
+    check(anthropic?.provider == .claude && anthropic?.target.absoluteString == "https://api.anthropic.com/v1/messages", "Anthropic messages")
+    check(AgentProviderRoute.resolve("https://api.openai.com/v1/responses", method: "post", standIn: nil)?.provider == .chatgpt, "OpenAI responses")
+    for (url, method) in [
+      ("https://api.anthropic.com/v1/messages", "GET"), ("https://api.anthropic.com/v1/files", "POST"),
+      ("https://api.anthropic.com/v1/messages/batches", "POST"), ("https://api.anthropic.com/v1/messages?x=1", "POST"),
+      ("https://api.openai.com/v1/responses?beta=true", "POST"), ("https://api.openai.com/v1/chat/completions", "POST"),
+      ("https://evil.example/v1/messages", "POST"), ("http://api.anthropic.com/v1/messages", "POST"),
+      ("https://api.anthropic.com:8443/v1/messages", "POST"), ("https://user:pass@api.anthropic.com/v1/messages", "POST"),
+      ("https://api.anthropic.com.evil.example/v1/messages", "POST"), ("https://api.openai.com/v1/messages", "POST"),
+      ("https://127.0.0.1/v1/messages", "POST"), ("not a url", "POST"),
+    ] {
+      check(AgentProviderRoute.resolve(url, method: method, standIn: nil) == nil, "refused: \(method) \(url)")
+    }
+    let headers = AgentProviderRoute.forwarded(["X-Api-Key": "k", "Authorization": "a", "Cookie": "c", "Content-Type": "application/json", "Anthropic-Beta": "b"])
+    check(headers == ["content-type": "application/json", "anthropic-beta": "b"], "credentials are never forwarded from the page")
+    let oversized = Data(count: AgentProviderRoute.bodyLimit + 1)
+    check((try? AgentProviderRoute.resolve("https://api.openai.com/v1/responses", method: "POST", standIn: nil)!.request(headers: [:], body: oversized, key: nil)) == nil, "oversized bodies are refused")
+    check((try? AgentProviderRoute.resolve("https://api.openai.com/v1/responses", method: "POST", standIn: nil)!.request(headers: [:], body: Data("[]".utf8), key: nil)) == nil, "non-object bodies are refused")
+    print("PASS agent native: routes, headers and stand-in rules")
   }
 
   static func sha256Hex(_ data: Data) -> String {

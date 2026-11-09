@@ -15,7 +15,7 @@ use crate::{
     native_console::NativeConsole,
     origin_trace,
     owned_vm_debugger::OwnedVmDebugger,
-    session_context, session_summary, source_facts, validation, vm, wasm,
+    session_context, session_summary, source_facts, validation, vm, wasm, wasm_graph,
     workspace::{Kind, Store},
 };
 use axum::{
@@ -371,6 +371,36 @@ impl App {
             state: self.lifecycle.state(),
         }
     }
+    /// The graph documents are built as text so one large function never holds
+    /// a parsed JSON tree in this process.
+    async fn wasm_graph_route(&self, path: &str, raw_query: &str) -> Result<Response> {
+        let q = Query::new(raw_query);
+        if q.0
+            .keys()
+            .any(|key| !["artifact_id", "function"].contains(&key.as_str()))
+        {
+            return Err(Error::bad(
+                "WASM graph routes take artifact_id and, for the graph route, function",
+            ));
+        }
+        let id = q.required("artifact_id")?.to_owned();
+        let root = self.options.artifacts.clone();
+        let document = if path == "/api/wasm/functions" {
+            if q.one("function")?.is_some() {
+                return Err(Error::bad("The WASM function list takes only artifact_id"));
+            }
+            self.blocking(move || wasm_graph::function_index(&root, &id))
+                .await?
+        } else {
+            let function = q
+                .required("function")?
+                .parse::<u32>()
+                .map_err(|_| Error::bad("A WASM function index is an unsigned 32-bit integer"))?;
+            self.blocking(move || wasm_graph::function_graph(&root, &id, function))
+                .await?
+        };
+        Ok(([("content-type", "application/json")], document).into_response())
+    }
     async fn receiver_connected(&self) -> bool {
         socket_connected(self.options.artifact_socket.as_deref()).await
     }
@@ -381,6 +411,9 @@ impl App {
                 .trace(raw_query)
                 .await
                 .map(|value| axum::Json(value).into_response());
+        }
+        if path == "/api/wasm/functions" || path == "/api/wasm/graph" {
+            return self.wasm_graph_route(path, raw_query).await;
         }
         let q = Query::new(raw_query);
         let mut etag = None;

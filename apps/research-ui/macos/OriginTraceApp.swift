@@ -165,12 +165,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       switch requestURL.path {
       case "", "/", "/index.html":
         response = (try Data(contentsOf: indexURL), "text/html; charset=utf-8", 200, [:])
-      case "/app.css":
+      case "/app.css", "/xrefs_view.css":
         response = (
-          try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent("app.css")),
+          try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(String(requestURL.path.dropFirst()))),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/pane_layout.js", "/app.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/source_search.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/invocation_sites.js", "/traffic_view.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/native_console_completion.js", "/native_console.js":
+      case "/pane_layout.js", "/app.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/source_search.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/invocation_sites.js", "/traffic_view.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/native_console_completion.js", "/native_console.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]

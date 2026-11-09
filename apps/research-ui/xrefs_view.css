@@ -1,0 +1,79 @@
+/* Cross-references dock. Rows are fixed-height and absolutely positioned so
+   only the visible ones exist in the DOM; heights match ROW and GROUP in
+   xrefs_view.js. */
+#workspace > .main { grid-column: 1; grid-row: 1; }
+#workspace > .native-console-panel { grid-column: 1; grid-row: 2; }
+.workspace[data-xrefs-open="true"] { grid-template-columns: minmax(0, 1fr) clamp(260px, 26%, 400px); }
+.xrefs-dock {
+  grid-column: 2;
+  grid-row: 1 / -1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--panel-radius);
+  background: var(--panel);
+}
+.xrefs-head { flex: none; display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 0 6px 0 12px; }
+.xrefs-title { flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; gap: 5px; font-size: 12px; color: var(--muted); }
+.xrefs-title strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font: 600 12px var(--mono); }
+.xrefs-counts { flex: none; color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+.xrefs-close { flex: none; width: 24px; height: 24px; display: grid; place-items: center; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--muted); font-size: 14px; line-height: 1; }
+.xrefs-close:hover { background: var(--panel-3); color: var(--text); }
+.xrefs-controls { flex: none; padding: 0 12px 8px; display: grid; gap: 6px; }
+.xrefs-filter { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px; border: 1px solid var(--line-soft); border-radius: var(--control-radius); background: var(--bg); color: var(--faint); }
+.xrefs-filter:focus-within { border-color: var(--accent); }
+.xrefs-filter svg { flex: none; width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+.xrefs-filter input { flex: 1 1 auto; min-width: 0; height: 26px; padding: 0; border: 0; outline: none; background: transparent; color: var(--text); font: 12px var(--sans); }
+.xrefs-filter input::placeholder { color: var(--faint); }
+.xrefs-filter kbd { flex: none; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; color: var(--faint); font: 10px/14px var(--sans); }
+.xrefs-filter input:focus ~ kbd, .xrefs-filter input:not(:placeholder-shown) ~ kbd { display: none; }
+.xrefs-pills { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+.xrefs-pills::-webkit-scrollbar { display: none; }
+.xrefs-pill { flex: none; height: 22px; padding: 0 9px; border: 1px solid var(--line-soft); border-radius: 11px; background: transparent; color: var(--muted); font: 11px var(--sans); font-variant-numeric: tabular-nums; }
+.xrefs-pill:hover { color: var(--text); }
+.xrefs-pill[aria-pressed="true"] { border-color: var(--line); background: var(--panel-3); color: var(--text); }
+.xrefs-status { flex: none; padding: 0 12px 6px; color: var(--muted); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
+.xrefs-status[data-kind="error"] { color: var(--red); }
+.xrefs-status[data-kind="cut"] { color: var(--amber); }
+.xrefs-status button { margin-left: 6px; height: 20px; padding: 0 7px; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--panel-2); color: var(--text); font: 11px var(--sans); }
+.xrefs-rows { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; outline: none; border-top: 1px solid var(--line-soft); }
+.xrefs-rows:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.xrefs-space { position: relative; width: 100%; }
+.xrefs-group, .xrefs-row { position: absolute; left: 0; right: 0; }
+.xrefs-group { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; color: var(--muted); font-size: 11px; }
+.xrefs-group span:first-child { flex: none; color: var(--accent); }
+.xrefs-group em { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: normal; }
+.xrefs-group b { flex: none; min-width: 18px; padding: 0 5px; border-radius: 8px; background: var(--panel-3); color: var(--text); font: 600 10px/15px var(--sans); text-align: center; font-variant-numeric: tabular-nums; }
+.xrefs-row { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; grid-template-rows: 18px 16px; column-gap: 4px; align-items: center; height: 44px; padding: 5px 12px 5px 10px; cursor: default; }
+.xrefs-row::before { content: ""; grid-row: 1; width: 5px; height: 5px; justify-self: center; border-radius: 50%; background: var(--faint); }
+.xrefs-row[data-gap="true"]::before { background: var(--amber); }
+.xrefs-row:hover { background: var(--panel-2); }
+.xrefs-row[aria-selected="true"] { background: color-mix(in srgb, var(--accent) 16%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
+.xrefs-name { grid-column: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font: 12px var(--mono); }
+.xrefs-row[data-gap="true"] .xrefs-name { color: var(--muted); font-family: var(--sans); }
+.xrefs-kind { grid-column: 3; justify-self: end; max-width: 92px; padding: 0 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid var(--line-soft); border-radius: 4px; color: var(--muted); font: 10px/14px var(--sans); }
+.xrefs-row[data-gap="true"] .xrefs-kind { border-color: color-mix(in srgb, var(--amber) 50%, transparent); color: var(--amber); }
+.xrefs-detail { grid-row: 2; grid-column: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 11px var(--mono); }
+.xrefs-id { grid-row: 2; grid-column: 3; justify-self: end; color: var(--faint); font: 11px var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.xrefs-row[data-loading="true"] .xrefs-name, .xrefs-row[data-loading="true"] .xrefs-detail { color: var(--faint); }
+.xrefs-empty { padding: 16px 12px; color: var(--muted); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.xrefs-empty strong { display: block; margin-bottom: 2px; color: var(--text); font-weight: 600; }
+.xrefs-detail-pane { flex: none; max-height: 132px; overflow: auto; padding: 8px 12px; border-top: 1px solid var(--line-soft); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
+.xrefs-detail-pane strong { display: block; color: var(--text); font: 12px/16px var(--mono); }
+.xrefs-detail-pane p { margin: 2px 0 0; color: var(--muted); }
+.xrefs-detail-pane code { color: var(--faint); font: 11px/16px var(--mono); }
+.xrefs-detail-pane button { margin-top: 6px; height: 24px; padding: 0 9px; }
+@media (min-width: 1001px) and (max-width: 1520px) {
+  /* The Traffic split needs more than the width left beside the dock. */
+  .workspace[data-xrefs-open="true"] #screen-traffic .traffic-grid[data-detail-open="true"] { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 50%) minmax(0, 1fr); }
+  .workspace[data-xrefs-open="true"] #screen-traffic .traffic-grid[data-detail-open="true"] .request-pane { border-right: 0; border-bottom: 1px solid var(--line); }
+}
+@media (max-width: 1000px) {
+  /* Below this width the dock covers the workspace edge instead of squeezing it. */
+  .workspace { position: relative; }
+  .workspace[data-xrefs-open="true"] { grid-template-columns: minmax(0, 1fr); }
+  .xrefs-dock { position: absolute; top: 6px; right: 6px; bottom: 6px; z-index: 30; width: min(340px, calc(100% - 12px)); box-shadow: var(--overlay-shadow); }
+}

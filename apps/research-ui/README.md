@@ -198,6 +198,32 @@ signal profiles, or request-filtered VM candidates.
 See [Investigation navigation v1](../../docs/product/investigation-navigation-v1.md)
 for the identity boundary, retained limits and integration points.
 
+## Cross-references
+
+**Xrefs** at the foot of the sidebar, or X outside a text field, opens a dock on
+the right that follows the current selection: a request in Traffic, a source in
+Sources (or one Wasm inspection row, by click or by tabbing to its gutter), a
+handler in VM, or an API call in Fingerprinting. It lists the evidence pointing
+at that selection and the evidence it points at, using only recorded links:
+request initiator and lifecycle, parent events, host links from retained dispatch
+samples, artifact creators, and Wasm import, export and direct-call uses. A
+missing link is a gap row with its reason; no caller is inferred. The first line
+names the target and shows `0 in · 2 out`, the filter matches only names already
+on the rows, and the In and Out pills show or hide each direction. Each row
+carries its kind and sequence or artifact identifier; selecting one shows its full
+name, source and correlation identifiers below the list, so a truncated value
+stays readable.
+
+Arrow keys move through rows, Enter or double-click opens the existing row in
+Traffic, Sources, Fingerprinting or Evidence, `/` focuses the filter, and Escape
+returns focus to where it came from. Below 1000 px the dock covers the workspace
+edge instead of squeezing it. The dock queries [`/api/xrefs`](../../protocol/http-api.md#cross-references)
+once per selection, debounces selection changes, and aborts stale requests.
+Only visible rows are mounted, and at most a few nearby pages stay in memory; the
+rest are refetched as the list scrolls. Closing the dock drops the results and
+stops its timers. The stored-evidence window has no backend, so the dock says so
+instead of listing nothing.
+
 ## Local passive security report
 
 The passive security report is an offline command for one saved exact-request
@@ -846,6 +872,7 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status/name search, the General coverage view, and the saved-capture export document |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
+| `xrefs_view.js`, `xrefs_view.css` | The cross-references dock: selection following, the paged and virtualized list, and links to existing rows; the projection is [`/api/xrefs`](../../protocol/http-api.md#cross-references) in `../origin-trace-backend/src/xrefs.rs` |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
 | `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |

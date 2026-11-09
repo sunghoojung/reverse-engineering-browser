@@ -1880,8 +1880,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("!document.querySelector('.map-body').hidden && document.querySelector('.map-canvas').width > 0", timeout: 90, "the map did not load")
       let side = try await ui.value("document.querySelector('.map-canvas').width") as? Int ?? 0
       let openRSS = webContentResidentKilobytes(ui)
-      XCTAssertEqual(try await ui.value("document.querySelector('#source-map').getAttribute('aria-pressed')") as? String, "true")
-      XCTAssertEqual(try await ui.value("document.querySelector('#source-code-wrap').hidden") as? Bool, true, "\(size.name): the map replaces the code view")
+      let pressed = try await ui.value("document.querySelector('#source-map').getAttribute('aria-pressed')") as? String
+      XCTAssertEqual(pressed, "true")
+      let codeHidden = try await ui.value("document.querySelector('#source-code-wrap').hidden") as? Bool
+      XCTAssertEqual(codeHidden, true, "\(size.name): the map replaces the code view")
       let stats = try await ui.value("document.querySelector('.map-stats').innerText") as? String ?? ""
       XCTAssertTrue(stats.contains("Hilbert \(side)×\(side)"), "\(size.name): the header states the grid: \(stats)")
       XCTAssertTrue(stats.contains("per cell"), "\(size.name): the header states the cell size: \(stats)")
@@ -1924,7 +1926,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("document.querySelector('#source-map-view').hidden && !document.querySelector('#source-code-wrap').hidden", "Enter did not open the bytes")
       let position = try await ui.value("document.querySelector('#source-position').innerText") as? String ?? ""
       XCTAssertTrue(position.contains("hex row"), "\(size.name): Sources lands at the byte: \(position)")
-      XCTAssertEqual(try await ui.value("document.querySelector('.map-canvas').width") as? Int, 0, "\(size.name): the bitmap is released")
+      let releasedWidth = try await ui.value("document.querySelector('.map-canvas').width") as? Int
+      XCTAssertEqual(releasedWidth, 0, "\(size.name): the bitmap is released")
       print("RENDERED_UI_MAP_RSS \(size.name) idle_kb=\(idleRSS) open_kb=\(openRSS) released_kb=\(webContentResidentKilobytes(ui)) side=\(side)")
     }
   }

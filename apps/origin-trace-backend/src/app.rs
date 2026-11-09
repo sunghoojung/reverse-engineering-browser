@@ -35,7 +35,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 35] = [
+const UI_ASSETS: [&str; 37] = [
     "index.html",
     "app.css",
     "entropy_map.css",
@@ -74,8 +74,9 @@ const UI_ASSETS: [&str; 35] = [
     "xrefs_view.js",
     "xrefs_view.css",
 ];
-/// Flags a blocking read as abandoned when its request is dropped.
-struct CancelOnDrop(Arc<std::sync::atomic::AtomicBool>);
+/// Flags a blocking read (cross-references or an artifact map) as abandoned
+/// when its request future is dropped.
+struct CancelOnDrop(Arc<AtomicBool>);
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1812,13 +1813,6 @@ fn not_modified(etag: &str) -> Response {
         .headers_mut()
         .insert("etag", HeaderValue::from_str(etag).unwrap());
     response
-}
-/// Marks an artifact-map read as abandoned when its request future is dropped.
-struct CancelOnDrop(Arc<AtomicBool>);
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
 }
 fn bytes_response(bytes: Vec<u8>, mime: &'static str) -> Response {
     let mut response = Response::new(Body::from(bytes));

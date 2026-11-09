@@ -19,9 +19,14 @@ const {window, document} = parseHTML('<!doctype html><div id="panel"></div>');
 const reads = [], copied = [];
 const blobs = new Map();
 const state = {artifacts: [], events: [], content: true};
+let pendingDigests = 0;
+const countedCrypto = {subtle: {digest: (...args) => {
+  pendingDigests += 1;
+  return globalThis.crypto.subtle.digest(...args).finally(() => {pendingDigests -= 1;});
+}}};
 const context = createContext({
   window, document, location: {protocol: 'http:'}, console, TextDecoder, TextEncoder, Uint8Array, AbortController, Date,
-  setTimeout, clearTimeout, crypto: globalThis.crypto, btoa, Response, Promise,
+  setTimeout, clearTimeout, crypto: countedCrypto, btoa, Response, Promise,
   decodePayload: event => Buffer.from(event.payload, 'hex').toString(),
   navigator: {clipboard: {writeText: async text => {copied.push(text);}}},
   fetch: async url => {
@@ -35,7 +40,9 @@ runInContext(`${await ui('source_syntax.js')}\n${await ui('source_format.js')}\n
 globalThis.api = {trafficResponseCapture, trafficResponseArtifact, trafficImageType, trafficJsonTree, createTrafficResponse, createSourceLayoutWorker};`, context);
 const {api} = context;
 const panel = document.getElementById('panel');
-const settle = async () => {for (let i = 0; i < 30; i++) await nextTurn();};
+// SHA-256 runs off the event loop, so no fixed number of turns is sure to outlast
+// a digest. Settle once none is pending and the loop has stayed quiet.
+const settle = async () => {for (let quiet = 0; quiet < 30;) {await nextTurn(); quiet = pendingDigests ? 0 : quiet + 1;}};
 const notes = () => [...panel.querySelectorAll('.traffic-body-note')].map(node => node.textContent).join(' ');
 const until = async (condition, label) => {
   for (let i = 0; i < 400 && !condition(); i++) await new Promise(resolve => setTimeout(resolve, 5));

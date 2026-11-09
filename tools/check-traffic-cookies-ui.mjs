@@ -20,9 +20,14 @@ const {window, document} = parseHTML('<!doctype html><div id="panel"></div>');
 const reads = [], copied = [];
 let provenanceAnswer = null;
 const blobs = new Map();
+let pendingDigests = 0;
+const countedCrypto = {subtle: {digest: (...args) => {
+  pendingDigests += 1;
+  return globalThis.crypto.subtle.digest(...args).finally(() => {pendingDigests -= 1;});
+}}};
 const context = createContext({
   window, document, location: {protocol: 'http:'}, console, TextDecoder, TextEncoder, Uint8Array, DataView,
-  AbortController, Date, setTimeout, clearTimeout, crypto: globalThis.crypto, CustomEvent: window.CustomEvent,
+  AbortController, Date, setTimeout, clearTimeout, crypto: countedCrypto, CustomEvent: window.CustomEvent,
   state: {events: []}, decodePayload: () => 'sensitive_capture_disabled', decodeScriptCookieRecord,
   navigator: {clipboard: {writeText: async text => {copied.push(text);}}},
   AbortSignal, URLSearchParams,
@@ -39,7 +44,9 @@ runInContext(`${source};globalThis.api={trafficCookieList, trafficCookieHops, re
 const {api} = context;
 const panel = document.getElementById('panel');
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
-const settle = async () => {for (let i = 0; i < 30; i++) await nextTurn();};
+// SHA-256 runs off the event loop, so no fixed number of turns is sure to outlast
+// a digest. Settle once none is pending and the loop has stayed quiet.
+const settle = async () => {for (let quiet = 0; quiet < 30;) {await nextTurn(); quiet = pendingDigests ? 0 : quiet + 1;}};
 
 // RBCK layout, protocol/native-network-v3.md.
 const cookie = ({exclusions = 0n, warnings = 0n, flags = 1, sameSite = 3, priority = 2, effective = 2, scheme = 2,

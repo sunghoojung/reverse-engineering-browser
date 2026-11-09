@@ -16,9 +16,14 @@ const source = await readFile(new URL('../apps/research-ui/traffic_headers.js', 
 const {window, document} = parseHTML('<!doctype html><div id="panel"></div>');
 const reads = [], copied = [];
 const blobs = new Map();
+let pendingDigests = 0;
+const countedCrypto = {subtle: {digest: (...args) => {
+  pendingDigests += 1;
+  return globalThis.crypto.subtle.digest(...args).finally(() => {pendingDigests -= 1;});
+}}};
 const context = createContext({
   window, document, location: {protocol: 'http:'}, console, TextDecoder, Uint8Array, AbortController, Date,
-  setTimeout, clearTimeout, crypto: globalThis.crypto, state: {events: []}, decodePayload: () => 'sensitive_capture_disabled',
+  setTimeout, clearTimeout, crypto: countedCrypto, state: {events: []}, decodePayload: () => 'sensitive_capture_disabled',
   navigator: {clipboard: {writeText: async text => {copied.push(text);}}},
   fetch: async url => {
     reads.push(url);
@@ -41,7 +46,9 @@ const block = (kind, source, text, extra = {}) => {
 };
 let renders = 0;
 const rerender = () => {renders += 1; api.renderTrafficHeaders(panel, request, rerender);};
-const settle = async () => {for (let i = 0; i < 20; i++) await nextTurn();};
+// SHA-256 runs off the event loop, so no fixed number of turns is sure to outlast
+// a digest. Settle once none is pending and the loop has stayed quiet.
+const settle = async () => {for (let quiet = 0; quiet < 20;) {await nextTurn(); quiet = pendingDigests ? 0 : quiet + 1;}};
 
 assert.deepEqual(JSON.parse(JSON.stringify(api.trafficHeaderLines(':path: /a\r\nx: y: z\r\n', 2))),
   [{name: ':path', value: '/a'}, {name: 'x', value: 'y: z'}]);

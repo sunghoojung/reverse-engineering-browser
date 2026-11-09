@@ -2172,7 +2172,8 @@ var(--panel);
       .request-scope { padding: 4px 8px; gap: 4px; }
       .request-tab-scope { min-height: 25px; padding: 3px 6px; }
       .request-domain-filter { font-size: 10px; }
-      .request-domain-filter select { min-width: 0; max-width: 140px; height: 25px; font-size: 10px; }
+      /* Fits "All domains (1000000)"; a longer domain truncates and keeps its title. */
+      .request-domain-filter select { min-width: 0; max-width: 190px; height: 25px; font-size: 10px; }
       .request-pane > .request-table { grid-row: -2 / -1; }
       /* The footer wraps at narrow table widths; its row must grow with it. */
       .request-table { grid-template-rows: 28px minmax(28px, 1fr) max-content; }

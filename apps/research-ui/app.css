@@ -2271,8 +2271,8 @@ var(--panel);
       .detail-pane { display: grid; grid-template-rows: auto auto minmax(0, 1fr); overflow: hidden; }
       .detail-pane.showing-exchange { grid-template-rows: auto auto minmax(0, 1fr); }
       .detail-pane.showing-exchange > .inspector-tabs { display: flex; }
-      /* Ten tabs do not fit a narrow pane, and a clipped strip hides them with no sign; the strip's grid row is sized by content. */
-      .inspector-tabs { min-width: 0; min-height: 32px; flex-wrap: wrap; overflow: visible; padding: 0 8px; gap: 0 14px; }
+      /* Ten tabs do not fit a narrow pane, and a clipped strip hides them with no sign; the strip's grid row is sized by content, and fit-content keeps WebKit from reusing the height of the previous width's row after a resize. */
+      .inspector-tabs { min-width: 0; min-height: 32px; flex-wrap: wrap; align-self: start; height: fit-content; overflow: visible; padding: 0 8px; gap: 0 14px; }
       .inspector-tab { flex: 0 0 auto; height: 32px; padding: 0; font-size: 11px; }
       .request-inspector { overflow: auto; }
       .traffic-general { padding: 8px 12px; border-bottom: 1px solid var(--line); }
@@ -4127,7 +4127,7 @@ input[type="file"]:hover::file-selector-button { background: var(--panel-3); }
 #screen-traffic #request-detail-close { width: 24px; padding: 0; border-color: transparent; background: transparent; color: var(--muted); font-size: 14px; }
 #screen-traffic .secondary-button:hover:not(:disabled) { border-color: var(--line); background: var(--panel-3); }
 #screen-traffic #request-detail-close:hover { border-color: transparent; color: var(--text); }
-#screen-traffic .inspector-tabs { gap: 16px; padding: 0 12px; }
+#screen-traffic .inspector-tabs { gap: 0 16px; padding: 0 12px; }
 #screen-traffic .field-tabs { gap: 16px; }
 #screen-traffic .traffic-general { padding: 12px; border-bottom: 0; }
 #screen-traffic .request-inspector { padding: 12px; }

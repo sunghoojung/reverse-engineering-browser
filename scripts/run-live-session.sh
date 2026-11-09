@@ -694,10 +694,15 @@ if ((category_mask & (512 | 1024))); then
   fi
   artifact_store_bytes=$((artifact_store_mib * 1048576))
   artifact_item_limit=$((artifact_store_bytes / 4096))
+  # A manifest row can carry an 8 KiB URL, so small budgets keep a 256 MiB manifest.
+  artifact_manifest_bytes=$((artifact_item_limit * 1024))
+  if ((artifact_manifest_bytes < 268435456)); then
+    artifact_manifest_bytes=268435456
+  fi
   artifact_receiver_arguments+=(
     --max-store-bytes "${artifact_store_bytes}"
     --max-artifacts "${artifact_item_limit}"
-    --max-manifest-bytes "$((artifact_item_limit * 1024))"
+    --max-manifest-bytes "${artifact_manifest_bytes}"
   )
   "${artifact_receiver_binary}" "${artifact_receiver_arguments[@]}" \
     >"${artifact_receiver_log}" 2>&1 &

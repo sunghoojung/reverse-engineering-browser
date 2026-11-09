@@ -157,14 +157,22 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     }
     views.delete(key);
     views.set(key, view);
-    let retained = [...views.values()].reduce((sum, item) => sum + (item.bytes?.length ?? 0), 0);
+    evict(key);
+    onChange();
+  }
+
+  // Bytes and parsed previews share one budget. A preview goes with its view,
+  // and its source length stands in for an object graph that is larger still.
+  function evict(keep) {
+    const cost = (item, key) => (item.bytes?.length ?? 0) + (previews.get(key)?.sourceBytes ?? 0);
+    let retained = [...views.entries()].reduce((sum, [key, item]) => sum + cost(item, key), 0);
     for (const [oldest, item] of views) {
       if (views.size <= 8 && retained <= TRAFFIC_RESPONSE_CACHE_BYTES) break;
-      if (oldest === key) continue;
-      retained -= item.bytes?.length ?? 0;
+      if (oldest === keep) continue;
+      retained -= cost(item, oldest);
       views.delete(oldest);
+      previews.delete(oldest);
     }
-    onChange();
   }
 
   function viewOf(artifact) {
@@ -249,13 +257,14 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
   }
 
   // Preview shares the Payload tree, so its reach and keys are the same.
-  function jsonPreview(key, value) {
+  function jsonPreview(key, value, sourceBytes) {
     let shown = previews.get(key);
     if (!shown) {
       shown = {model: {json: {value}, keys: new WeakMap()}, expanded: new Set(['$']), selected: null,
-        find: {query: '', matches: [], current: -1, truncated: false}};
+        find: {query: '', matches: [], current: -1, truncated: false}, sourceBytes};
       previews.set(key, shown);
       while (previews.size > 8) previews.delete(previews.keys().next().value);
+      evict(key);
     }
     const holder = trafficNode('div', 'traffic-response-tree');
     const draw = (focus = false, keepScroll = false) => {
@@ -416,7 +425,7 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     const language = sourceSyntaxLanguage({kind: 'response_body', mime_type: artifact.mime_type, url: artifact.url});
     if (language === 'json' || /^\s*[[{]/.test(text)) {
       try {
-        return [...lossyNote, jsonPreview(`${artifact.session_id}:${artifact.artifact_id}:${artifact.sha256}`, JSON.parse(text))];
+        return [...lossyNote, jsonPreview(`${artifact.session_id}:${artifact.artifact_id}:${artifact.sha256}`, JSON.parse(text), text.length)];
       } catch {
         if (language === 'json') return [trafficNode('p', 'traffic-body-note', 'Not valid JSON; the Response tab shows its text.'), trafficNode('pre', 'traffic-body-text', text)];
       }

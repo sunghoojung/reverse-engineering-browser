@@ -363,6 +363,34 @@ const before = panel.firstChild;
 view.render(panel, ...current);
 assert(panel.firstChild === before, 'an unchanged render keeps its nodes');
 assert(renders > 0);
+// A parsed preview counts toward the byte budget and goes with its view, so a
+// tree cannot outlive the bytes it came from. A low budget makes eviction observable.
+{
+  const scriptText = `${await ui('source_syntax.js')}\n${await ui('source_format.js')}\n${await ui('code_view.js')}\n${await ui('source_facts.js')}\n${await ui('traffic_view.js')}\n${await ui('traffic_payload.js')}\n${(await ui('traffic_response.js')).replace('TRAFFIC_RESPONSE_CACHE_BYTES = 48 * 1024 * 1024', 'TRAFFIC_RESPONSE_CACHE_BYTES = 200')}\nglobalThis.api = {createTrafficResponse, createSourceLayoutWorker};`;
+  const small = createContext({window, document, location: {protocol: 'http:'}, console, TextDecoder, TextEncoder, Uint8Array, AbortController, Date,
+    setTimeout, clearTimeout, crypto: countedCrypto, btoa, Response, Promise, AbortSignal, URLSearchParams,
+    decodePayload: () => '', navigator: {clipboard: {writeText: async () => {}}},
+    fetch: async url => {
+      reads.push(url);
+      const [, id, offset, limit] = /artifacts\/(\d+)\/content\?offset=(\d+)&limit=(\d+)/.exec(url);
+      const bytes = blobs.get(id);
+      return new Response(bytes.subarray(Number(offset), Number(offset) + Number(limit)));
+    }});
+  runInContext(scriptText, small);
+  let drawn = null;
+  const reduced = small.api.createTrafficResponse({getArtifacts: () => state.artifacts, getEvents: () => state.events,
+    contentSession: () => state.content, readable: () => true, onChange: () => {if (drawn) reduced.render(panel, ...drawn);},
+    request: async () => {throw new Error('unused');},
+    worker: small.api.createSourceLayoutWorker({spawn: null, defer: callback => callback()})});
+  const render = async doc => {drawn = [request(record(doc)), 'preview']; reduced.render(panel, ...drawn); await settle();};
+  const first = retain(JSON.stringify({value: 'a'.repeat(70)}), 'application/json');
+  const second = retain(JSON.stringify({value: 'b'.repeat(70)}), 'application/json');
+  await render(first);
+  await render(second);
+  const before = reads.length;
+  await render(first);
+  assert(reads.length > before, 'The first preview was evicted, because bytes and parsed source together passed the budget');
+}
 console.log(`PASS traffic response UI: every capture state and reason, artifact join, pretty print by the Oxc layout with token raw ranges or the in-page layout with its reason, wrap/find/copy/hex, ` +
   `JSON tree bound, inert HTML and SVG, signature-checked image, ranged verified reads, integrity and refusal notes ` +
   `(${reads.length} reads; DOM model, not rendered QA)`);

@@ -6746,6 +6746,19 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         return null;
       }
 
+      // Rebuilding a page costs far more than scanning for a match, so a match
+      // already mounted moves only the caret. A column cut from its row still needs the render.
+      function moveSourceCaretInMountedPage(editor, line, column, length) {
+        const excerpt = editor.window.rows[line - editor.window.start];
+        if (excerpt?.line !== line || column < excerpt.columnStart || column + length > excerpt.columnEnd) return false;
+        editor.window = {...editor.window, line, column};
+        state.sourceWindow = {identity: editor.identity, representation: editor.representation, line, column};
+        elements.sourceCode.querySelector('.current-line')?.classList.remove('current-line');
+        elements.sourceCode.querySelector(`[data-local-line="${line}"]`)?.classList.add('current-line');
+        renderSourceWindowControls(editor);
+        return true;
+      }
+
       function applySourceSearch(reset = true, direction = 0, {reveal = true} = {}) {
         const query = elements.sourceSearch.value;
         let editor = state.sourceEditorView;
@@ -6794,7 +6807,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         state.sourceSearchIndex = reset ? 0 : (state.sourceSearchIndex + direction + matches.length) % matches.length;
         const match = matches[state.sourceSearchIndex];
-        if (reveal) {
+        if (reveal && !moveSourceCaretInMountedPage(editor, match.line, match.column, match.length)) {
           // Mount only the matched line/column window. Never enter the full
           // Sources route, which can start explicitly selected analysis.
           renderSourceContent(source, editor.view, {line: match.line, column: match.column, search: false});
@@ -6856,7 +6869,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           elements.sourcePosition.textContent = `${count} · original ${match.line + 1}:${match.column + 1} · reading its part of the layout…`;
           return;
         }
-        if (reveal) {
+        if (reveal && !moveSourceCaretInMountedPage(editor, at.line, at.column, at.length)) {
           renderSourceContent(source, editor.view, {line: at.line, column: at.column, search: false});
           editor = state.sourceEditorView;
         }

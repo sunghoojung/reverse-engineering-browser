@@ -1749,7 +1749,7 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
 // Corrective integration regressions from independent review. These use the
 // actual renderer, decoration updater, cursor receiver and Field trace pivot.
 class SourceReviewNode {
-  constructor(tag='div',doc){this.tagName=tag;this.doc=doc;this.children=[];this.attributes={};this.listeners={};this.dataset={};this.scrollLeft=0;this.scrollTop=0;this.hidden=false;this._text='';this.classes=new Set();this.classList={add:value=>this.classes.add(value),contains:value=>this.classes.has(value),toggle:(value,on)=>on?this.classes.add(value):this.classes.delete(value)};this.style={setProperty(){}};}
+  constructor(tag='div',doc){this.tagName=tag;this.doc=doc;this.children=[];this.attributes={};this.listeners={};this.dataset={};this.scrollLeft=0;this.scrollTop=0;this.hidden=false;this._text='';this.classes=new Set();this.classList={add:value=>this.classes.add(value),remove:value=>this.classes.delete(value),contains:value=>this.classes.has(value),toggle:(value,on)=>on?this.classes.add(value):this.classes.delete(value)};this.style={setProperty(){}};}
   set className(value){this.classes=new Set(value.split(' '));}get className(){return [...this.classes].join(' ');}
   get textContent(){return this._text+this.children.map(node=>node.textContent??'').join('');}set textContent(value){this._text=value;this.children=[];}
   setAttribute(key,value){this.attributes[key]=value;}getAttribute(key){return this.attributes[key];}
@@ -1772,7 +1772,7 @@ function sourceReviewDOM() {
   const {document,elements}=sourceReviewDOM();
   elements.sourceSearch=document.createElement('input');elements.sourceSearch.value='';elements.sourceSearchStatus=document.createElement('p');
   const ctx=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'20001'},document,elements,sourceOccurrenceRange:()=>null,
-    functions:['applySourceSearch'],renderSources(){}});
+    functions:['applySourceSearch','moveSourceCaretInMountedPage'],renderSources(){}});
   ctx.api.renderSourceContent(ctx.api.selectedSource());elements.sourceSearch.value='lateNeedle';ctx.api.applySourceSearch();
   assert.equal(ctx.state.sourceEditorView.window.line,20000);assert.match(elements.sourcePosition.textContent,/1 of 1 matches.*Line 20001, Column 7/);
   assert.equal(elements.sourceCode.querySelector('[data-local-line="20000"]').querySelector('.source-text').textContent,'const lateNeedle="😀";');
@@ -1786,8 +1786,32 @@ function sourceReviewDOM() {
   elements.sourceSearch.value='';ctx.api.applySourceSearch();assert(!elements.sourcePosition.textContent.includes('matches'));
   ctx.api.moveSourceWindow(999,3);assert.equal(document.activeElement.dataset.localLine,'999');
   ctx.api.moveSourceWindow(1000,3);assert.equal(document.activeElement.dataset.localLine,'1000');
+  // A match already mounted moves the caret and keeps the page; one on another page mounts that page.
+  ctx.api.moveSourceWindow(999,3);const mountedRow=elements.sourceCode.children[0];
+  elements.sourceSearch.value='row 12';ctx.api.applySourceSearch();
+  assert.equal(elements.sourceCode.children[0],mountedRow,'Find keeps a page holding the match');
+  assert.equal(ctx.state.sourceEditorView.window.line,12);assert.equal(ctx.state.sourceWindow.line,12);
+  assert.deepEqual(elements.sourceCode.querySelectorAll('.current-line').map(row=>row.dataset.localLine),['12']);
+  ctx.api.renderSourceContent(ctx.api.selectedSource());assert.equal(elements.sourceCode.children[0],mountedRow,'A later refresh keeps the moved caret and page');
+  elements.sourceSearch.value='row 1000';ctx.api.applySourceSearch();
+  assert.notEqual(elements.sourceCode.children[0],mountedRow,'A match on another page mounts it');assert.equal(ctx.state.sourceEditorView.window.start,1000);
+  elements.sourceSearch.value='';ctx.api.applySourceSearch();
   ctx.state.selectedArtifactId='missing';elements.sourceSearch.value='lateNeedle';ctx.api.applySourceSearch();assert.match(elements.sourcePosition.textContent,/nothing searched/);
   sourceOwnershipReceipt.push({test:'retained_find_20001_line_coverage_notice_exclusion_stale_owner_and_window_boundaries',status:'passed'});
+}
+{
+  // A match past a row's mounted columns still mounts the row around it.
+  const original=`short\n${'x'.repeat(600)}needle`;
+  const artifact=await ownedArtifact('20003',original);Object.assign(artifact,{content:original,sourceTextLength:original.length});
+  const {document,elements}=sourceReviewDOM();
+  elements.sourceSearch=document.createElement('input');elements.sourceSearch.value='';elements.sourceSearchStatus=document.createElement('p');
+  const ctx=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'20003'},document,elements,sourceOccurrenceRange:()=>null,
+    functions:['applySourceSearch','moveSourceCaretInMountedPage'],renderSources(){}});
+  ctx.api.renderSourceContent(ctx.api.selectedSource());const row=elements.sourceCode.children[0];
+  elements.sourceSearch.value='needle';ctx.api.applySourceSearch();
+  assert.notEqual(elements.sourceCode.children[0],row,'A cut column is not mounted, so the page renders');assert.equal(ctx.state.sourceEditorView.window.line,1);
+  assert.equal(ctx.state.sourceEditorView.window.column,600);
+  sourceOwnershipReceipt.push({test:'find_renders_only_when_the_match_is_not_mounted',status:'passed'});
 }
 {
   // A large Oxc layout is read one 1,000-line page at a time: absolute lines, the next page on request, Find in the evidence across pages.
@@ -1805,7 +1829,7 @@ function sourceReviewDOM() {
   const sourceFormatClient={page:(source,value,line)=>{const block=Math.min(anchors.length-1,Math.floor(line/1000));asked.push(block);
     if(!loaded.has(block))return {pending:true,previous:pages.get(shown)??null};shown=block;if(!pages.has(block))pages.set(block,pageOf(block));return pages.get(block);},forget(){}};
   ctx=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'paged',sourceFormatted:true,sourceOriginalHighlighter:null,sourcePagedFind:null},document,elements,
-    sourceOccurrenceRange:()=>null,sourceFormatClient,functions:['applySourceSearch','applyPagedSourceSearch','markSourceMatch'],productionExports:['sourceWhitespaceMap'],renderSources(){}});
+    sourceOccurrenceRange:()=>null,sourceFormatClient,functions:['applySourceSearch','applyPagedSourceSearch','markSourceMatch','moveSourceCaretInMountedPage'],productionExports:['sourceWhitespaceMap'],renderSources(){}});
   ctx.api.renderSourceContent(ctx.api.selectedSource());
   const editor=()=>ctx.state.sourceEditorView;
   assert.equal(editor().index.lineCount,laid.length);assert.equal(elements.sourceCode.children.length,1000,'one page is mounted');

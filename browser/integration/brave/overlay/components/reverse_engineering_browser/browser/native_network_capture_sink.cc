@@ -553,7 +553,7 @@ NativeHeaderState NativeNetworkCaptureSink::RetainBlock(const NativeArtifactKind
   header_bytes_ += size;
   // Shared only after the receiver accepts it: until then a sharer would name
   // an artifact that may never exist, and no later record could correct it.
-  in_flight_header_blocks_.emplace(event.header.artifact_id, key);
+  in_flight_header_blocks_.emplace(event.header.artifact_id, InFlightHeaderBlock{key, size});
   return NativeHeaderState::kCaptured;
 }
 
@@ -933,11 +933,17 @@ void NativeNetworkCaptureSink::HeaderBlockSettled(const std::uint64_t artifact_i
   if (found == in_flight_header_blocks_.end()) {
     return;
   }
-  if (accepted && shared_header_blocks_.size() < kNativeHeaderShareEntries) {
-    // An identical block accepted while this one was in flight keeps its entry.
-    shared_header_blocks_.emplace(found->second, artifact_id);
-  }
+  const InFlightHeaderBlock block = found->second;
   in_flight_header_blocks_.erase(found);
+  // The receiver stores one blob per digest, so a copy accepted while another
+  // was in flight costs no budget, and a refused attempt stored nothing.
+  if (!accepted || shared_header_blocks_.contains(block.key)) {
+    header_bytes_ -= std::min(block.size, header_bytes_);
+    return;
+  }
+  if (shared_header_blocks_.size() < kNativeHeaderShareEntries) {
+    shared_header_blocks_.emplace(block.key, artifact_id);
+  }
 }
 
 void NativeNetworkCaptureSink::FlushDeferredBodies() noexcept {

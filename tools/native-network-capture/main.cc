@@ -323,6 +323,49 @@ void HeaderBlocks() {
   assert(AllValid() && Headers(Last(reb::NativeProbeType::kRequestHeaders)).state ==
                            static_cast<std::uint8_t>(HeaderState::kNotCapturedSessionBudget));
 
+  // A refused block returns its bytes, so refused retries cannot end retention.
+  const auto next_block = [&](const std::size_t i) {
+    request.headers = {};
+    request.headers.SetHeader("X-Fill", std::string(block - 12, 'r') + std::to_string(i % 10) +
+                                            static_cast<char>('a' + (i / 10) % 26) +
+                                            static_cast<char>('a' + (i / 260) % 26));
+    events.clear();
+    start(1000 + i);
+    return Last(reb::NativeProbeType::kRequestHeaders);
+  };
+  const auto captured = [](const reb::NativeProbeEvent& event) {
+    return Headers(event).state == static_cast<std::uint8_t>(HeaderState::kCaptured);
+  };
+  sink.SetEmitter(Emit, 30, mask, 200, true);
+  std::size_t index = 0;
+  const std::size_t block_bytes = Headers(next_block(index)).block_length;
+  sink.HeaderBlockSettled(Last(reb::NativeProbeType::kRequestHeaders).header.artifact_id, false);
+  const std::size_t fit = reb::kNativeHeaderSessionBytes / block_bytes;
+  for (std::size_t attempt = 0; attempt < fit + 8; ++attempt) {
+    const auto refused = next_block(++index);
+    assert(captured(refused));
+    sink.HeaderBlockSettled(refused.header.artifact_id, false);
+  }
+  // Two copies in flight are one blob once accepted: only one stays charged.
+  for (std::size_t kept = 0; kept + 2 < fit; ++kept) {
+    const auto accepted = next_block(++index);
+    assert(captured(accepted));
+    sink.HeaderBlockSettled(accepted.header.artifact_id, true);
+  }
+  const auto copy = next_block(++index);
+  const auto first_copy = copy.header.artifact_id;
+  assert(captured(copy));
+  const auto second_copy = next_block(index);
+  assert(captured(second_copy) && second_copy.header.artifact_id != first_copy);
+  sink.HeaderBlockSettled(first_copy, true);
+  sink.HeaderBlockSettled(second_copy.header.artifact_id, true);
+  const auto last_fit = next_block(++index);
+  assert(captured(last_fit));
+  sink.HeaderBlockSettled(last_fit.header.artifact_id, true);
+  const auto over_budget = next_block(++index);
+  assert(Headers(over_budget).state ==
+         static_cast<std::uint8_t>(HeaderState::kNotCapturedSessionBudget));
+
   // Ending the session removes the hook observer.
   sink.SetEmitter(nullptr, 0, 0, 0, true);
   events.clear();

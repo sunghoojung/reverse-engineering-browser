@@ -2263,6 +2263,7 @@ int main() {
   Run<&NativeTaskChainsAndNavigations>();
   Run<&NativeAsyncSegmentNotAdmitted>();
   Run<&NativeAsyncSegmentArtifactRefused>();
+  Run<&NativeRefusedStackBudgets>();
   Run<&NativeDebuggerObservations>();
   Run<&DispatchSampleAdmission>();
   Run<&DispatchEmitFailureReleasesBudget>();

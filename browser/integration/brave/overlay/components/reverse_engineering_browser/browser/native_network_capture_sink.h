@@ -93,7 +93,8 @@ class NativeNetworkCaptureSink final {
   // DevTools ID gets `reb-<request_id>`, so the network service reports the
   // headers it sends (protocol/native-network-v3.md). No request byte changes.
   // The receiver's verdict on a queued header block or cookie list. Only an
-  // accepted one can be shared by later requests.
+  // accepted one can be shared by later requests. A refused block, or a copy of
+  // one already accepted, returns its bytes to the session budget.
   void HeaderBlockSettled(std::uint64_t artifact_id, bool accepted) noexcept;
   // Records every deferred body while the session can still record them.
   void FlushDeferredBodies() noexcept;
@@ -229,7 +230,11 @@ class NativeNetworkCaptureSink final {
   // Blocks the receiver accepted, by kind, length and digest.
   std::map<std::array<std::uint8_t, 37>, std::uint64_t> shared_header_blocks_;
   // Queued blocks awaiting an ACK; the artifact queue bounds their number.
-  std::map<std::uint64_t, std::array<std::uint8_t, 37>> in_flight_header_blocks_;
+  struct InFlightHeaderBlock final {
+    std::array<std::uint8_t, 37> key{};
+    std::size_t size = 0;
+  };
+  std::map<std::uint64_t, InFlightHeaderBlock> in_flight_header_blocks_;
   std::size_t header_bytes_ = 0;
   std::uint32_t unattributed_header_blocks_ = 0;
   std::uint32_t unattributed_cookie_lists_ = 0;

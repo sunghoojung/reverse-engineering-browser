@@ -65,6 +65,8 @@ struct NativeRequestStackTables final {
     std::uint64_t generation = 0;
     std::uint64_t sequence = 0;
     std::array<std::uint8_t, 32> digest{};
+    // Which budget admitted it: async_sent, or stacks_sent.
+    bool async_task = false;
   };
   std::array<NativeStackFrame, kNativeRequestStackFrameCapacity> frames{};
   std::array<std::uint8_t, kNativeStackArtifactMaxBytes> artifact{};
@@ -851,7 +853,7 @@ void NativeRequestStackWalk::QueueStackArtifact(
   slot.value = digest;
   // Remembered so a browser refusal can forget this digest (StackArtifactRefused).
   state.queued_stacks[state.queued_stack_next++ % state.queued_stacks.size()] = {
-      generation_, stack_sequence_, digest};
+      generation_, stack_sequence_, digest, async_task_walk()};
 }
 
 void NativeRequestStackWalk::StackArtifactRefused(const std::uint64_t creator_sequence) noexcept {
@@ -881,6 +883,11 @@ void NativeRequestStackWalk::StackArtifactRefused(const std::uint64_t creator_se
       segment.state =
           static_cast<std::uint8_t>(NativeTaskSegmentState::kNotRetainedArtifactUnavailable);
     }
+  }
+  // The refused attempt stored nothing, so its retry must not be charged again.
+  std::uint32_t& sent = queued->async_task ? state->async_sent : state->stacks_sent;
+  if (sent != 0) {
+    --sent;
   }
   *queued = {};
 }

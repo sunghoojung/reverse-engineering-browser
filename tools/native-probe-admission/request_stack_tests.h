@@ -483,6 +483,38 @@ std::uint8_t Kind(const reb::NativeAsyncTaskKind kind) {
                "capture, and a later resend owns its own state\n";
 }
 
+// A refused attempt stored nothing, so refused retries cannot spend a budget.
+[[gnu::noinline]] void NativeRefusedStackBudgets() {
+  using reb::NativeAsyncTaskKind;
+  NativeProbeQueue queue;
+  Configure(queue, 68);
+  scenario = {};
+  scenario.depth = 4;
+  scenario.scripts = 1;
+  scenario.seed = 320;
+  scenario.task_seed = 9200;
+  const auto attempts = reb::kNativeRequestStackArtifactBudget + 16;
+  for (std::uint32_t attempt = 0; attempt < attempts; ++attempt) {
+    const auto stack = Start(queue, 7000).second;
+    const auto value = StackPayload(stack);
+    assert(value.state == 1 && (value.flags & reb::kNativeRequestStackArtifactQueued) != 0);
+    Drain(queue);
+    transport.NativeStackArtifactRefused(stack.header.sequence_number);
+  }
+  const auto task_attempts = reb::kNativeAsyncTaskArtifactBudget + 16;
+  for (std::uint32_t attempt = 0; attempt < task_attempts; ++attempt) {
+    assert(NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout) != 0);
+    // A task over its budget would record nothing here.
+    const auto record = Pop(queue);
+    assert(record.header.type == reb::NativeProbeType::kAsyncTaskStack);
+    Drain(queue);
+    transport.NativeStackArtifactRefused(record.header.sequence_number);
+  }
+  scenario = {};
+  transport.Disable();
+  std::cout << "PASS refused stack and async task artifacts return their budget slots\n";
+}
+
 // Scheduling-time segments linked through async task runs and task
 // attribution, and script-initiated navigations.
 [[gnu::noinline]] void NativeTaskChainsAndNavigations() {

@@ -88,13 +88,13 @@ export async function checkAgentPanel() {
   // The panel drives the graph through this interface; the real one is bundled.
   const runtimeCalls = [];
   context.__runtimeCalls = runtimeCalls;
-  runInContext(`globalThis.RebAgentRuntime = {createAgentRuntime(options) {
+  runInContext(`globalThis.RebAgentRuntimes = {claude: {createAgentRuntime(options) {
       __runtimeCalls.push({op: 'create', provider: options.provider, model: options.model, tools: options.tools.map(tool => tool.name)});
       globalThis.__runtimeEmit = options.emit;
       return {running: false, send(turn) { __runtimeCalls.push({op: 'send', text: turn.text}); return Promise.resolve(); },
         decide(callId, allow) { __runtimeCalls.push({op: 'decide', callId, allow}); return true; },
         cancel() { __runtimeCalls.push({op: 'cancel'}); }, dispose() { __runtimeCalls.push({op: 'dispose'}); }};
-    }};
+    }}};
     globalThis.webkit = {messageHandlers: {rebAgent: {postMessage: message => __agentPost(message)}}};
     globalThis.fetch = async () => new Response(JSON.stringify({instance_id: '100:200'}), {status: 200});
     globalThis.requestAnimationFrame = callback => { callback(0); return 0; };`, context);

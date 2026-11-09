@@ -12,20 +12,27 @@ const here = dirname(fileURLToPath(import.meta.url));
 const output = process.argv[2];
 if (!output) throw new Error('usage: node build.mjs <output directory>');
 await mkdir(output, {recursive: true});
-const outfile = join(output, 'agent_runtime.js');
-const result = await build({
-  entryPoints: [join(here, 'src/entry.mjs')],
-  bundle: true, minify: true, format: 'iife', platform: 'browser', target: 'safari16',
-  outfile, legalComments: 'none', metafile: true, logLevel: 'warning',
-  // Deterministic output for the same lockfile.
-  sourcemap: false, charset: 'utf8',
-});
-const inputs = Object.keys(result.metafile.inputs);
-const forbidden = inputs.filter(path => /(^|\/)node:|async_hooks/.test(path));
-if (forbidden.length) throw new Error(`The agent bundle must not include Node built-ins: ${forbidden.join(', ')}`);
+// One bundle per provider, so a session parses only its own SDK.
+const inputs = new Set();
+const sizes = [];
+for (const provider of ['claude', 'chatgpt']) {
+  const outfile = join(output, `agent_runtime_${provider}.js`);
+  const result = await build({
+    entryPoints: [join(here, `src/entry-${provider}.mjs`)],
+    bundle: true, minify: true, format: 'iife', platform: 'browser', target: 'safari16',
+    outfile, legalComments: 'none', metafile: true, logLevel: 'warning',
+    // Deterministic output for the same lockfile.
+    sourcemap: false, charset: 'utf8',
+  });
+  const used = Object.keys(result.metafile.inputs);
+  const forbidden = used.filter(path => /(^|\/)node:|async_hooks/.test(path));
+  if (forbidden.length) throw new Error(`The agent bundle must not include Node built-ins: ${forbidden.join(', ')}`);
+  used.forEach(path => inputs.add(path));
+  sizes.push(`${provider} ${(await stat(outfile)).size} bytes`);
+}
 // One notice file per bundled package, from the package's own license file.
 const lock = JSON.parse(await readFile(join(here, 'package-lock.json'), 'utf8'));
-const used = [...new Set(inputs.map(path => /node_modules\/((?:@[^/]+\/)?[^/]+)/.exec(path)?.[1]).filter(Boolean))].sort();
+const used = [...new Set([...inputs].map(path => /node_modules\/((?:@[^/]+\/)?[^/]+)/.exec(path)?.[1]).filter(Boolean))].sort();
 const notices = [];
 for (const name of used) {
   const entry = lock.packages[`node_modules/${name}`];
@@ -37,6 +44,5 @@ for (const name of used) {
   notices.push(`${name}@${entry?.version ?? 'unknown'} (${entry?.license ?? 'see package'})\n\n${text.trim() || 'No license file in the package; see its package.json.'}\n`);
 }
 await writeFile(join(output, 'agent_runtime.LICENSES.txt'),
-  `Third-party packages bundled into agent_runtime.js, pinned by apps/research-ui/agent-runtime/package-lock.json.\n\n${notices.join('\n---\n\n')}`);
-const {size} = await stat(outfile);
-console.log(`Built ${outfile}: ${size} bytes, ${used.length} packages`);
+  `Third-party packages bundled into agent_runtime_claude.js and agent_runtime_chatgpt.js, pinned by apps/research-ui/agent-runtime/package-lock.json.\n\n${notices.join('\n---\n\n')}`);
+console.log(`Built the agent runtime in ${output}: ${sizes.join(', ')}; ${used.length} packages`);

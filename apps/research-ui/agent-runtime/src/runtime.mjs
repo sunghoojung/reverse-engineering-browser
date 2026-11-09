@@ -14,8 +14,6 @@
 import {StateGraph, MessagesAnnotation, MemorySaver, START, END} from '@langchain/langgraph/web';
 import {AIMessage, HumanMessage, SystemMessage, ToolMessage} from '@langchain/core/messages';
 import {tool} from '@langchain/core/tools';
-import {ChatAnthropic} from '@langchain/anthropic';
-import {ChatOpenAI} from '@langchain/openai';
 
 // What is retained to resend each turn. A tool result is at most the 128 KiB
 // MCP inline limit, so 2 MiB holds about sixteen full results or a long chat,
@@ -28,7 +26,8 @@ export const TOOL_ROUND_LIMIT = 128;
 // The models' own output caps are higher; this fits every listed model.
 const MAX_OUTPUT_TOKENS = 32000;
 // A placeholder so the SDKs construct. Native drops it and adds the real key.
-const PLACEHOLDER_KEY = 'origin-trace-native-key';
+export const PLACEHOLDER_KEY = 'origin-trace-native-key';
+export const MAX_OUTPUT_TOKEN_LIMIT = MAX_OUTPUT_TOKENS;
 
 export const SYSTEM_PROMPT = `You are the research assistant inside Origin Trace, a local-first reverse-engineering browser. The researcher asks about evidence from one authorized capture session.
 
@@ -42,8 +41,6 @@ Cite evidence inline with these exact tokens, one per claim, using only identifi
 Never invent an identifier. Say plainly what the evidence does not establish.
 
 Format with short paragraphs, lists and fenced code blocks. Do not use HTML.`;
-
-const DEFAULT_FALLBACK_MODELS = new Set(['claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5']);
 
 // A fetch for the provider SDKs that never leaves through the page. The body
 // streams back as native chunks, so token streaming still works.
@@ -90,25 +87,6 @@ export function createBridgeFetch(bridge) {
     }
     return new Response(body, {status: head.status, headers: head.headers ?? {}});
   };
-}
-
-export function createChatModel({provider, model, fetch}) {
-  if (provider === 'claude') {
-    const fallback = DEFAULT_FALLBACK_MODELS.has(model);
-    return new ChatAnthropic({
-      model, apiKey: PLACEHOLDER_KEY, maxTokens: MAX_OUTPUT_TOKENS, streaming: true,
-      clientOptions: {fetch, dangerouslyAllowBrowser: true},
-      // Re-run a declined request on Anthropic's recommended model, routed by
-      // refusal category, instead of ending the turn.
-      ...(fallback ? {betas: ['server-side-fallback-2026-07-01'], invocationKwargs: {fallbacks: 'default'}} : {}),
-    });
-  }
-  // zdrEnabled keeps nothing at OpenAI: `store: false`, with encrypted
-  // reasoning replayed from local history.
-  return new ChatOpenAI({
-    model, apiKey: PLACEHOLDER_KEY, streaming: true, useResponsesApi: true, zdrEnabled: true,
-    maxTokens: MAX_OUTPUT_TOKENS, configuration: {fetch, dangerouslyAllowBrowser: true},
-  });
 }
 
 // Bytes of a message as it is resent, counted from its JSON.
@@ -164,9 +142,11 @@ const formatBytes = value => value >= 1024 * 1024 ? `${(value / 1048576).toFixed
 
 // One runtime per enabled session. `emit` receives the rows the panel shows,
 // in the same shapes the transcript stores.
-export function createAgentRuntime({bridge, provider, model, tools: definitions, emit}) {
+// `createModel` is the one provider's chat model factory, so each bundle
+// carries one provider SDK.
+export function createAgentRuntime({bridge, provider, model, tools: definitions, emit, createModel}) {
   const fetch = createBridgeFetch(bridge);
-  const chatModel = createChatModel({provider, model, fetch});
+  const chatModel = createModel({model, fetch});
   const decisions = new Map();
   const readOnly = new Map(definitions.map(definition => [definition.name, definition.readOnly]));
   let rowCounter = 0;

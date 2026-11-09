@@ -4,14 +4,14 @@
 // against a local stand-in provider. A fake bridge plays the native side with
 // the same rules: one endpoint per provider, page credentials dropped, bodies
 // streamed back as base64 chunks, and actions refused without Allow once.
-// Usage: node tools/check-agent-runtime.mjs <agent_runtime.js>
+// Usage: node tools/check-agent-runtime.mjs <agent_runtime_claude.js> <agent_runtime_chatgpt.js>
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
 
-const bundlePath = process.argv[2];
-assert(bundlePath, 'usage: node tools/check-agent-runtime.mjs <agent_runtime.js>');
+const [claudeBundle, chatgptBundle] = process.argv.slice(2);
+assert(claudeBundle && chatgptBundle, 'usage: node tools/check-agent-runtime.mjs <agent_runtime_claude.js> <agent_runtime_chatgpt.js>');
 
 // Values cross the VM realm, so structural checks compare plain copies.
 const copy = value => JSON.parse(JSON.stringify(value));
@@ -122,20 +122,30 @@ const bridge = {
   },
 };
 
+// Each bundle runs in its own web-only context, as each loads alone in the app.
+async function loadBundle(path, provider) {
 const globals = {console, URL, URLSearchParams, TextEncoder, TextDecoder, AbortController, AbortSignal, Headers, Request, Response,
   ReadableStream, TransformStream, WritableStream, TextDecoderStream, Blob, FormData, crypto: globalThis.crypto, setTimeout, clearTimeout,
   setInterval, clearInterval, queueMicrotask, structuredClone, atob, btoa, Event, EventTarget, DOMException, performance};
 globals.globalThis = globals; globals.window = globals; globals.self = globals;
 const context = vm.createContext(globals);
-vm.runInContext(await readFile(bundlePath, 'utf8'), context, {filename: 'agent_runtime.js'});
-assert.equal(vm.runInContext('typeof require + typeof process + typeof Buffer', context), 'undefinedundefinedundefined', 'no Node globals');
-const runtimeApi = globals.RebAgentRuntime;
-assert(runtimeApi?.createAgentRuntime, 'the bundle exposes the runtime');
+const source = await readFile(path, 'utf8');
+vm.runInContext(source, context, {filename: path});
+assert.equal(vm.runInContext('typeof require + typeof process + typeof Buffer + typeof fetch', context), 'undefinedundefinedundefinedundefined',
+  'no Node globals, and no global fetch: every request goes through the bridge');
+const api = globals.RebAgentRuntimes?.[provider];
+assert(api?.createAgentRuntime, `the ${provider} bundle exposes its runtime`);
+const otherSdk = provider === 'claude' ? 'api.openai.com' : 'api.anthropic.com';
+assert(!source.includes(otherSdk), `the ${provider} bundle carries no other provider SDK`);
+return api;
+}
+const runtimes = {claude: await loadBundle(claudeBundle, 'claude'), chatgpt: await loadBundle(chatgptBundle, 'chatgpt')};
+const runtimeApi = runtimes.claude;
 
 function harness(kind) {
   provider = kind;
   const events = [];
-  const runtime = runtimeApi.createAgentRuntime({bridge, provider: kind, model: kind === 'claude' ? 'claude-opus-5-5' : 'gpt-6-astra', tools: toolDefinitions, emit: event => events.push(event)});
+  const runtime = runtimes[kind].createAgentRuntime({bridge, provider: kind, model: kind === 'claude' ? 'claude-opus-5-5' : 'gpt-6-astra', tools: toolDefinitions, emit: event => events.push(event)});
   const waitFor = async (predicate, label) => {
     const deadline = Date.now() + 15000;
     while (!predicate()) { assert(Date.now() < deadline, `timed out: ${label}: ${JSON.stringify(events.slice(-4))}`); await new Promise(done => setTimeout(done, 10)); }

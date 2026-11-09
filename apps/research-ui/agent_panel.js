@@ -856,17 +856,20 @@
 
   // The LangGraph bundle loads the first time the agent is turned on in this
   // document, so a closed or never-used dock parses none of it.
-  let runtimeModule = null, runtime = null, fetchListener = null;
-  function loadRuntime() {
-    if (globalThis.RebAgentRuntime) return Promise.resolve(globalThis.RebAgentRuntime);
-    runtimeModule ??= new Promise((resolve, reject) => {
+  // One bundle per provider, so a session parses only its own SDK.
+  const runtimeModules = {};
+  let runtime = null, fetchListener = null;
+  function loadRuntime(provider) {
+    const loaded = globalThis.RebAgentRuntimes?.[provider];
+    if (loaded) return Promise.resolve(loaded);
+    runtimeModules[provider] ??= new Promise((resolve, reject) => {
       const script = document.createElement('script');
-      script.src = 'agent_runtime.js';
-      script.onload = () => globalThis.RebAgentRuntime ? resolve(globalThis.RebAgentRuntime) : reject(new Error('The agent runtime did not load.'));
-      script.onerror = () => { runtimeModule = null; script.remove(); reject(new Error('This build does not include the agent runtime.')); };
+      script.src = `agent_runtime_${provider}.js`;
+      script.onload = () => globalThis.RebAgentRuntimes?.[provider] ? resolve(globalThis.RebAgentRuntimes[provider]) : reject(new Error('The agent runtime did not load.'));
+      script.onerror = () => { delete runtimeModules[provider]; script.remove(); reject(new Error('This build does not include the agent runtime.')); };
       document.head.append(script);
     });
-    return runtimeModule;
+    return runtimeModules[provider];
   }
 
   // What the graph shows is also what the local transcript keeps.
@@ -933,7 +936,7 @@
       view.sessionKey = key;
       const result = await call('enable', {provider: view.provider, model: view.model[view.provider] ?? '', effects: view.effects, sessionKey: key});
       let api;
-      try { api = await loadRuntime(); }
+      try { api = await loadRuntime(view.provider); }
       catch (error) { view.status = await call('disable'); syncEngine(view.status.engine); throw error; }
       runtime = api.createAgentRuntime({
         bridge: {call, onFetchEvent: listener => { fetchListener = listener; }},

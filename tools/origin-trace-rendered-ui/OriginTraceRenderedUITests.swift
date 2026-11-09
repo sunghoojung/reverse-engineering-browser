@@ -1851,9 +1851,6 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
-  // A web content process that stops leaves an empty window. The app reloads
-  // its workspace once; if it stops again soon after, it asks before reloading.
-  @MainActor
   // One resident-size sample from `ps`: the app, its web content process, the
   // backend and the agent's tool server. Values are KiB.
   @MainActor
@@ -1905,7 +1902,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.resize(width: size.width, height: size.height)
       try await ui.reload()
       _ = try memorySample(ui, "closed-\(size.name)")
-      XCTAssertEqual(try await ui.value("document.getElementById('agent-dock').hidden") as? Bool, true, "closed by default")
+      let closedByDefault = try await ui.value("document.getElementById('agent-dock').hidden") as? Bool
+      XCTAssertEqual(closedByDefault, true, "closed by default")
       try await ui.click("#agent-toggle")
       try await ui.waitUntil("__rebUiProbe.text('#agent-surface').includes('The agent is off')", "the off state did not show")
       _ = try memorySample(ui, "open-off-\(size.name)")
@@ -1946,7 +1944,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click(".agent-cite")
       try await ui.waitUntil("!document.getElementById('screen-sources').hidden", timeout: 10, "the citation did not open Sources")
       // An action waits on an explicit decision.
-      _ = try await ui.webView.callAsyncJavaScript("__rebAgentEvent({type:'approval',turnId:'t',callId:'rendered',name:'capture_action',arguments:'{\\"action\\":\\"pause\\"}'}); return true;", contentWorld: .page)
+      _ = try await ui.webView.callAsyncJavaScript(#"__rebAgentEvent({type:'approval',turnId:'t',callId:'rendered',name:'capture_action',arguments:'{"action":"pause"}'}); return true;"#, contentWorld: .page)
       try await ui.waitUntil("__rebUiProbe.count('[data-approve]') === 1", "the approval row did not show")
       let approval = try await ui.value("__rebUiProbe.text('.agent-approval')") as? String ?? ""
       XCTAssert(approval.contains("Allow once") && !approval.contains("Always"), "only Allow once and Deny are offered: \(approval)")
@@ -1999,6 +1997,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await ui.click("#theme-toggle")
   }
 
+  // A web content process that stops leaves an empty window. The app reloads
+  // its workspace once; if it stops again soon after, it asks before reloading.
+  @MainActor
   func test23WorkspaceReloadsAfterContentProcessStops() async throws {
     let ui = try Harness()
     try await ui.waitForInitialLoad()

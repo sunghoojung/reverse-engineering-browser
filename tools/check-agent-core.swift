@@ -127,8 +127,14 @@ func claudeText(_ text: String) -> [String] {
   ])
 }
 
+nonisolated(unsafe) var backendProcessForFailure: Process?
+
 func check(_ condition: Bool, _ message: String, file: StaticString = #filePath, line: UInt = #line) {
-  if !condition { print("FAIL \(message) (\(file):\(line))"); exit(1) }
+  if !condition {
+    print("FAIL \(message) (\(file):\(line))")
+    backendProcessForFailure?.terminate()
+    exit(1)
+  }
 }
 
 @MainActor
@@ -186,7 +192,8 @@ enum AgentCoreChecks {
     backendProcess.standardOutput = FileHandle.nullDevice
     backendProcess.standardError = FileHandle.nullDevice
     try! backendProcess.run()
-    defer { backendProcess.terminate() }
+    backendProcessForFailure = backendProcess
+    // `exit` below skips deferred work, so the backend is stopped explicitly.
     var endpoint = ""
     for _ in 0..<200 where endpoint.isEmpty {
       endpoint = ((try? String(contentsOf: endpointFile, encoding: .utf8)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -344,6 +351,8 @@ enum AgentCoreChecks {
     try! cancel.send(turnID: "t7", text: "Again", context: nil, pins: [])
     await cancelEvents.until({ cancelEvents.ended("t7") }, "restart")
     cancel.disable()
+    backendProcess.terminate()
+    backendProcess.waitUntilExit()
     print("PASS agent core: Claude and ChatGPT loops, real reb-api tool results, no content or key leakage, effects, stop, idle")
     exit(0)
   }

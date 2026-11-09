@@ -1956,7 +1956,7 @@ impl RequestIndex {
                     .as_ref()
                     .is_none_or(|root| root.request == request)
         };
-        let chosen: Vec<&Row> = if state.rows.iter().filter(browser_row).next().is_some() {
+        let chosen: Vec<&Row> = if state.rows.iter().any(|row| browser_row(&row)) {
             state.rows.iter().filter(browser_row).collect()
         } else {
             state.rows.iter().filter(|row| names(row)).collect()

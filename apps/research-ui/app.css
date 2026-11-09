@@ -2210,7 +2210,8 @@ var(--panel);
       .request-window button:hover { color: var(--text); background: var(--panel-3); }
       .request-window button:disabled { opacity: .45; cursor: default; }
       .request-window #request-latest { color: var(--accent); }
-      .request-row.request-placeholder { align-items: center; padding: 0 8px; color: var(--muted); }
+      /* A placeholder is one line across the whole row, not text in the Name track. */
+      .request-row.request-placeholder { display: block; padding: 0 8px; overflow: hidden; color: var(--muted); line-height: 28px; white-space: nowrap; text-overflow: ellipsis; }
       .request-spacer { pointer-events: none; }
       #request-rows { overflow-anchor: none; }
       .request-row[aria-busy="true"] { cursor: progress; opacity: .7; }

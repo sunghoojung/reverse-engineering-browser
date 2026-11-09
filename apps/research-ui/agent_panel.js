@@ -995,6 +995,24 @@
   }
   globalThis.__rebAgentEvent = handleEvent;
 
+  // WebKit keeps a nested grid's auto rows from the old width when only an
+  // ancestor track changes, so a Sources toolbar that wraps after the dock (or
+  // its divider) narrows it would overlap the code. Measured in the packaged app.
+  const sourcesEditor = document.querySelector('.sources-editor');
+  let sourcesEditorWidth = 0;
+  const recomputeEditorRows = () => {
+    if (!sourcesEditor) return;
+    sourcesEditor.style.gridTemplateRows = '35px auto minmax(0, 1fr) 28px';
+    void sourcesEditor.offsetHeight;
+    sourcesEditor.style.removeProperty('grid-template-rows');
+  };
+  const editorWidthWatch = new ResizeObserver(entries => {
+    const width = Math.round(entries.at(-1)?.contentRect.width ?? 0);
+    if (!width || width === sourcesEditorWidth) return;
+    sourcesEditorWidth = width;
+    recomputeEditorRows();
+  });
+
   // Listeners live only while the dock is open.
   const workspaceActivity = () => { if (!framePending) scheduleRender(); };
   function setOpen(open) {
@@ -1005,6 +1023,7 @@
     toggle.setAttribute('aria-expanded', String(open));
     toggle.setAttribute('aria-pressed', String(open));
     if (open) {
+      if (sourcesEditor) { sourcesEditorWidth = 0; editorWidthWatch.observe(sourcesEditor); }
       workspace.addEventListener('pointerup', workspaceActivity);
       workspace.addEventListener('keyup', workspaceActivity);
       document.addEventListener('selectionchange', workspaceActivity);
@@ -1014,6 +1033,8 @@
       render();
       (input.disabled ? switchInput : input).focus();
     } else {
+      editorWidthWatch.disconnect();
+      requestAnimationFrame(recomputeEditorRows);
       workspace.removeEventListener('pointerup', workspaceActivity);
       workspace.removeEventListener('keyup', workspaceActivity);
       document.removeEventListener('selectionchange', workspaceActivity);

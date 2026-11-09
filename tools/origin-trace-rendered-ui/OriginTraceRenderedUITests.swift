@@ -1849,4 +1849,63 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await ui.waitUntil(reloaded, timeout: 30, "Reload did not restore the workspace")
     XCTAssertEqual(ui.webView.url, harnessURL)
   }
+
+  // The Sources Map paints one canvas for a whole artifact: a segmented mode
+  // control, hover and keyboard cells, a thin summary, and the hex row it opens.
+  @MainActor
+  func test24SourcesMap() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem]", containing: "map-module")
+      try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('00000000')", "the fixture module did not open as hex")
+      try await ui.click("#source-map")
+      try await ui.waitUntil("!document.querySelector('.map-body').hidden && document.querySelector('.map-canvas').width === 64", "the map did not load")
+      XCTAssertEqual(try await ui.value("document.querySelector('#source-map').getAttribute('aria-pressed')") as? String, "true")
+      XCTAssertEqual(try await ui.value("document.querySelector('#source-code-wrap').hidden") as? Bool, true, "\(size.name): the map replaces the code view")
+      let stats = try await ui.value("document.querySelector('.map-stats').innerText") as? String ?? ""
+      XCTAssertTrue(stats.contains("Hilbert 64×64"), "\(size.name): the header states the grid: \(stats)")
+      XCTAssertTrue(stats.contains("per cell"), "\(size.name): the header states the cell size: \(stats)")
+      let summary = try await ui.value("document.querySelector('.map-summary').innerText") as? String ?? ""
+      XCTAssertTrue(summary.contains("≥ 7.0"), "\(size.name): the threshold is stated: \(summary)")
+      XCTAssertTrue(summary.contains("Segments"), "\(size.name): data segments are counted: \(summary)")
+      let body = try await ui.value("document.querySelector('#source-map-view').innerText") as? String ?? ""
+      for word in ["packed", "Packed", "encrypted", "Encrypted"] {
+        XCTAssertFalse(body.contains(word), "\(size.name): the map draws no conclusion about \(word)")
+      }
+      let square = try await ui.json("(() => { const box = document.querySelector('.map-canvas').getBoundingClientRect(); return {width: box.width, height: box.height}; })()")
+      XCTAssertEqual(square["width"] as? Double ?? 0, square["height"] as? Double ?? -1, accuracy: 1, "\(size.name): the map is square: \(square)")
+      XCTAssertGreaterThan(square["width"] as? Double ?? 0, 150, "\(size.name): the map stays readable: \(square)")
+      try await assertLayout(ui, "#source-map-view", "\(size.name) sources map")
+      try await assertInert(ui, "\(size.name) sources map")
+      try await ui.screenshot("sources-map-entropy-\(size.name)")
+
+      try await ui.click(".map-modes [data-map-mode='kind']")
+      try await ui.waitUntil("document.querySelector(\".map-modes [data-map-mode='kind']\").getAttribute('aria-pressed') === 'true' && !document.querySelector('.map-kind-legend').hidden", "kind mode did not apply")
+      let legend = try await ui.value("document.querySelector('.map-kind-legend').innerText") as? String ?? ""
+      XCTAssertTrue(legend.contains("data"), "\(size.name): the legend names present kinds: \(legend)")
+      try await assertLayout(ui, "#source-map-view", "\(size.name) sources map kind")
+      try await ui.screenshot("sources-map-kind-\(size.name)")
+      try await ui.click(".map-modes [data-map-mode='entropy']")
+
+      _ = try await ui.value("document.documentElement.dataset.theme = 'light'")
+      try await ui.waitUntil("document.documentElement.dataset.theme === 'light'", "light theme did not apply")
+      try await ui.screenshot("sources-map-light-\(size.name)")
+      try await assertLayout(ui, "#source-map-view", "\(size.name) sources map light")
+      _ = try await ui.value("document.documentElement.dataset.theme = 'dark'")
+
+      _ = try await ui.value("document.querySelector('.map-canvas').focus()")
+      let before = try await ui.value("document.querySelector('.map-cell-focus').hidden") as? Bool
+      try await ui.key(124, "\u{F703}") // Right arrow moves the visible focused cell.
+      try await ui.waitUntil("!document.querySelector('.map-cell-focus').hidden", "the keyboard cell did not appear (was hidden: \(String(describing: before)))")
+      let announced = try await ui.value("document.querySelector('#source-map-view .sr-only').textContent") as? String ?? ""
+      XCTAssertTrue(announced.contains("entropy"), "\(size.name): the focused cell is announced: \(announced)")
+      try await ui.screenshot("sources-map-focus-\(size.name)")
+      try await ui.key(36, "\r") // Enter opens the bytes.
+      try await ui.waitUntil("document.querySelector('#source-map-view').hidden && !document.querySelector('#source-code-wrap').hidden", "Enter did not open the bytes")
+      let position = try await ui.value("document.querySelector('#source-position').innerText") as? String ?? ""
+      XCTAssertTrue(position.contains("hex row"), "\(size.name): Sources lands at the byte: \(position)")
+      XCTAssertEqual(try await ui.value("document.querySelector('.map-canvas').width") as? Int, 0, "\(size.name): the bitmap is released")
+    }
+  }
 }

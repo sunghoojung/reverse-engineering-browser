@@ -16,6 +16,12 @@ const invocationSitesPanel = createInvocationSitesPanel({
   onShow: showInvocationSites
 });
 invocationSitesPanel.refresh();
+const entropyMap = createEntropyMap({
+  button: document.querySelector('#source-map'), root: document.querySelector('#source-map-view'),
+  codeWrap: elements.sourceCodeWrap, viewKind: elements.sourceViewKind,
+  toolbar: document.querySelector('.source-editor-toolbar'),
+  getSource: selectedSource, identityOf: sourceIdentity, reveal: revealSourceByteOffset
+});
       const evidencePackagePanel = createEvidencePackagePanel({getContext: () => ({
         requestId: evidenceRequestKey(state.requests.find(request => request.id === state.selectedRequestId)),
         requestEvents: state.requests.find(request => request.id === state.selectedRequestId)?.events ?? [],
@@ -1857,6 +1863,12 @@ invocationSitesPanel.refresh();
           );
           if (snapshot?.origin === 'captured-module') fields.append(vmField('module byte offset', snapshot.byte_offset));
           previewPanel.append(fields);
+          if (snapshot?.artifact_id && state.artifacts.some(artifact => artifact.artifact_id === snapshot.artifact_id && isSourceArtifact(artifact))) {
+            const mapButton = textElement('button', 'secondary-button', 'Open map');
+            mapButton.type = 'button';
+            mapButton.addEventListener('click', () => { showScreen('sources'); if (selectArtifact(snapshot.artifact_id)) entropyMap.open(); });
+            previewPanel.append(mapButton);
+          }
           const preview = formatVmHexPreview(snapshot?.preview_hex);
           if (preview) {
             const bytes = textElement('pre', 'vm-bytecode-preview', preview);
@@ -6825,6 +6837,7 @@ invocationSitesPanel.refresh();
         elements.sourceHash.textContent = source?.sha256 ? `sha256 ${source.sha256}` : '';
         syncSourceDisplayControls(source, view);
         renderSourceContent(source, view);
+        entropyMap.sync();
         if (!investigationPassiveSource && state.sourceDeobfuscated && source?.kind === 'javascript' && !document.querySelector('#screen-sources').hidden) loadDeobfuscation(source);
         renderDeobfuscationReport(source);
         const reveal = state.sourceReveal;
@@ -7752,6 +7765,7 @@ invocationSitesPanel.refresh();
 
         evidenceWorkspace.setVisible(screenName === 'evidence');
         if (screenName !== 'sources') sourceFactsPanel.cancel();
+        entropyMap.setVisible(screenName === 'sources');
         if (screenName !== 'tools') float32Panel.cancel();
 
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });

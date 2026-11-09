@@ -44,6 +44,25 @@ async function writeBlob(root, bytes) {
   return hash;
 }
 
+// A deterministic 1 MiB module for the Sources Map: structure, a repetitive
+// data segment and a noisy one, so entropy and kind both have regions to show.
+function mapFixtureModule() {
+  const leb = value => { const out = []; do { let byte = value & 0x7f; value >>>= 7; if (value) byte |= 0x80; out.push(byte); } while (value); return out; };
+  const section = (id, body) => Buffer.concat([Buffer.from([id, ...leb(body.length)]), body]);
+  let state = 0x2545f491;
+  const noise = Buffer.from(Array.from({length: 420 * 1024}, () => {
+    state ^= state << 13; state ^= state >>> 17; state ^= state << 5; state >>>= 0;
+    return state & 0xff;
+  }));
+  const pattern = Buffer.from(Array.from({length: 420 * 1024}, (_, index) => (index >> 12) & 0x0f));
+  const segment = bytes => Buffer.concat([Buffer.from([0, 0x41, 0, 0x0b, ...leb(bytes.length)]), bytes]);
+  const body = Buffer.concat([Buffer.from([0]), Buffer.alloc(180 * 1024, 0x01), Buffer.from([0x0b])]);
+  const code = Buffer.concat([Buffer.from([1, ...leb(body.length)]), body]);
+  return Buffer.concat([Buffer.from('\0asm\x01\0\0\0', 'latin1'),
+    section(1, Buffer.from([1, 0x60, 0, 0])), section(3, Buffer.from([1, 0])), section(10, code),
+    section(11, Buffer.concat([Buffer.from([2]), segment(pattern), segment(noise)]))]);
+}
+
 async function artifact(root, fields, bytes) {
   const hash = await writeBlob(root, bytes);
   return {protocol_version: 1, parent_artifact_id: '0', creator_event_id: '0', execution_context_id: '1',
@@ -234,6 +253,9 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const glue = await artifact(artifacts, {artifact_id: INVOCATION_ARTIFACT_ID, session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'network_response', kind: 'javascript', mime_type: 'text/javascript', url: 'https://hcaptcha.test/glue.js'},
   Buffer.from(INVOCATION_SOURCE, 'utf8'));
+  const mapped = await artifact(artifacts, {artifact_id: '312', session_id: '1', navigation_id: '100', frame_id: '200',
+    capture_origin: 'network_response', kind: 'wasm', execution_context_id: '0', mime_type: 'application/wasm', url: 'https://fixture.invalid/map-module.wasm'},
+  mapFixtureModule());
   const guest = await goldenEvidence(artifacts, guestStore);
   const physical = await goldenEvidence(artifacts, dispatchStore);
   assert(guest.events.some(event => event.type === 'wasm_guest_dispatch'), 'guest golden store holds a guest sample');
@@ -242,7 +264,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   // static arm label, and an inner interpreter linked to its outer handler.
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, withBodies.artifact, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, mapped, withBodies.artifact, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   const vm = demoEvents.find(event => event.category === 'vm');
   assert(vm, 'demo store must contain a native vm event');

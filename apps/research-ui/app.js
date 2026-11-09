@@ -1863,7 +1863,7 @@ const entropyMap = createEntropyMap({
           );
           if (snapshot?.origin === 'captured-module') fields.append(vmField('module byte offset', snapshot.byte_offset));
           previewPanel.append(fields);
-          if (snapshot?.artifact_id && state.artifacts.some(artifact => artifact.artifact_id === snapshot.artifact_id && isSourceArtifact(artifact))) {
+          if (snapshot?.artifact_id && state.artifacts?.some(artifact => artifact.artifact_id === snapshot.artifact_id && isSourceArtifact(artifact))) {
             const mapButton = textElement('button', 'secondary-button', 'Open map');
             mapButton.type = 'button';
             mapButton.addEventListener('click', () => { showScreen('sources'); if (selectArtifact(snapshot.artifact_id)) entropyMap.open(); });

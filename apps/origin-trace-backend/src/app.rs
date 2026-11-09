@@ -37,7 +37,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 47] = [
+const UI_ASSETS: [&str; 49] = [
     "index.html",
     "app.css",
     "command_palette.js",
@@ -85,7 +85,17 @@ const UI_ASSETS: [&str; 47] = [
     "pane_layout.js",
     "native_console.js",
     "native_console_completion.js",
+    "xrefs_view.js",
+    "xrefs_view.css",
 ];
+/// Flags a blocking read as abandoned when its request is dropped.
+struct CancelOnDrop(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 #[derive(Clone, Copy)]
 enum PackageOperation {
     Validate,
@@ -140,6 +150,8 @@ pub struct App {
     io: Arc<Semaphore>,
     package_io: Arc<Semaphore>,
     analysis: Mutex<Option<VmDocumentsCache>>,
+    /// Cursors of the current cross-reference selection; one entry only.
+    xrefs: Arc<crate::xrefs::Cursors>,
     events: Arc<Mutex<event_window::EventWindowCache>>,
     requests: Arc<Mutex<RequestIndex>>,
     initiator_frames: Arc<std::sync::Mutex<crate::request_stack::InitiatorFrames>>,
@@ -243,6 +255,7 @@ impl App {
             io: Arc::new(Semaphore::new(4)),
             package_io: Arc::new(Semaphore::new(2)),
             analysis: Mutex::new(None),
+            xrefs: Arc::default(),
             events: Arc::new(Mutex::new(event_window::EventWindowCache::default())),
             artifact_lookup: Arc::new(Mutex::new(ArtifactLookupCache::default())),
             event_waiters: Arc::new(Semaphore::new(event_query::MAX_WAITERS)),
@@ -1213,6 +1226,40 @@ impl App {
                     sequence.unwrap_or("all")
                 ));
                 value
+            }
+            "/api/xrefs" => {
+                let query = crate::xrefs::XrefQuery::parse(&q)?;
+                // Only the analysis already cached: this route never computes
+                // or publishes one.
+                let handler = match query.vm_target() {
+                    Some((artifact, sha256, byte_offset, byte_size)) => {
+                        let cache = self.analysis.lock().await;
+                        Some(match cache.as_ref().map(|c| c.opcode_workspace.as_ref()) {
+                            Some(Ok(document)) => crate::xrefs::vm_handler_input(
+                                document,
+                                &artifact,
+                                &sha256,
+                                byte_offset,
+                                byte_size,
+                            ),
+                            _ => crate::xrefs::VmHandlerInput::not_ready(),
+                        })
+                    }
+                    None => None,
+                };
+                let stores = crate::xrefs::Stores {
+                    events: self.options.store.clone(),
+                    artifacts: self.options.artifacts.clone(),
+                };
+                let cursors = self.xrefs.clone();
+                // A dropped request abandons its scan; a client that moved on
+                // leaves no read running.
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let _cancel_on_drop = CancelOnDrop(cancel.clone());
+                self.blocking(move || {
+                    crate::xrefs::run(&query, &stores, &cursors, handler, &cancel)
+                })
+                .await?
             }
             "/api/analysis/vm/host-links" => {
                 let _ = self.vm_documents().await?;

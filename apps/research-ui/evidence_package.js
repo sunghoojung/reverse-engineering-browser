@@ -791,6 +791,17 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
       return true;
     },
     snapshot: () => ({requestKey, selectedKey, page, pane, packages}),
+    // Opens one retained event by exact identity, for links from other panes.
+    openRecord(identity) {
+      const key = evidenceEventKey(identity);
+      if (!key) return false;
+      if (packages) showPackages(false, false);
+      sync();
+      if (!model.rows.some(row => row.key === key && !row.duplicate)) return false;
+      if (scope.value !== 'all' && !filtered.some(row => row.key === key)) {scope.value = 'all'; rebuild();}
+      select(key, true);
+      return true;
+    },
     canRestore(value, request = getContext().request) {const current = evidenceObservationModel({...getContext(), request}); return Boolean(value && value.requestKey === current.requestKey && (!value.selectedKey || current.rows.some(row => row.key === value.selectedKey && !row.duplicate)));},
     restore(value) {
       if (!this.canRestore(value)) return false;

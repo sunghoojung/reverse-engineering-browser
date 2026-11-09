@@ -697,9 +697,10 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 52, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 53, "Review route coverage when the API changes");
     assert!(ids.contains("get_request_headers"));
     assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
+    assert!(ids.contains("get_xrefs"));
     assert!(
         ids.contains("get_js_invocation_sites")
             && ids.contains("resolve_js_invocation_site")
@@ -787,7 +788,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 52);
+    assert_eq!(operation_count, 53);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -1165,6 +1166,19 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
             "/api/request-stack?process_id=4&navigation_sequence=0",
             "/api/request-stack",
             400,
+        ),
+        ("/api/xrefs?kind=request&session_id=oops", "/api/xrefs", 400),
+        ("/api/xrefs?kind=guess&session_id=1", "/api/xrefs", 400),
+        (
+            "/api/xrefs?kind=api&session_id=1&process_id=1&sequence_number=1&limit=1&offset=-1",
+            "/api/xrefs",
+            400,
+        ),
+        // A selection the store does not hold is a visible state, not an error.
+        (
+            "/api/xrefs?kind=api&session_id=1&process_id=1&sequence_number=999999",
+            "/api/xrefs",
+            200,
         ),
     ] {
         assert_contract_response(server.get(path).await, "get", route, status).await;

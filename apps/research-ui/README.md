@@ -592,8 +592,9 @@ captured path and query, and its Payload tab shows them parsed:
   the whole payload. Arrow keys move through, open and close tree rows.
 - **Capture details**, collapsed, holds the state, type, lengths, SHA-256,
   kind and artifact ID. A body cut at the capture limit or a cut target is
-  noted at the top. Bodies are read 256 KiB at a time; **Show the next 256 KiB**
-  reads on, and the body parses once every byte is read.
+  noted at the top. Bodies are read 2 MiB at a time, and a body that parses
+  (JSON, form or multipart) reads on by itself until every byte is read; other
+  text uses **Show the next 2 MiB**.
 
 Without content capture, Payload still shows the body's length, type and digest
 and says that content capture was off. File, blob and stream bodies are read
@@ -721,8 +722,11 @@ blocks ([native network v3](../../protocol/native-network-v3.md)). Response
 digest, then its bytes in the shared code view with pretty print (the Oxc
 layout for JavaScript and JSON, else the in-page one with the reason), raw
 ranges of laid-out tokens, wrap, find, copy and hex, read 2 MiB at a time and
-rechecked by SHA-256. Preview shows a
-bounded JSON tree, a raster image whose signature matches its bytes, or text;
+rechecked by SHA-256. Preview reads every remaining range itself. Text that is
+not valid UTF-8 shows with replacement characters and a notice, and a cut,
+partial, aborted or cancelled body may end inside a character without reading
+as binary. Preview shows the
+same JSON tree as Payload, opening 100 children or ranges at a time, a raster image whose signature matches its bytes, or text;
 HTML and SVG stay source and are never rendered. Script and Wasm responses show
 their Sources artifact in any session. A request with no body record says why:
 metadata-only session, redirect, or never seen by the browser proxy (service
@@ -741,7 +745,9 @@ opens its provenance: the responses that set it, the `document.cookie` and
 Cookie Store calls that used it with their script position (file, line and
 function from `get_cookie_provenance`, with **Show in Sources**, when the
 script's source was retained), and the requests that sent it, linked by value
-digest to the script write. Traffic has no
+digest to the script write. Loaded requests are read first, then the store's
+answer adds what the newest retained records hold beyond them. An empty group
+reads "Not in the scanned range" unless that answer covered the whole session. Traffic has no
 comparison or content-search views; General states the capture coverage.
 Missing initiators and timing phases stay explicitly unavailable.
 Request signal profiles are owned by the exact selected session, request and root
@@ -765,7 +771,10 @@ focus on the list until it returns. Counts, the
 whole session. Newest requests come first; rows that arrive above a scrolled
 viewport do not move it or the selection. Selecting a row whose records are not
 all in the newest event window reads them with `get_events` from the row's first
-byte offset before the inspector opens. While the index is still indexing a large
+byte offset before the inspector opens; choosing another row cancels that read.
+The selected row stays selected after it leaves the newest window, and its
+retained body, full target and receiver refusal are read by artifact ID, so
+they do not depend on the catalog's first 50,000 records. While the index is still indexing a large
 store, or counts unreadable or over-limit records, the footer says so. Until it
 first answers, Traffic uses the newest network window and labels its counts that
 way; a later failed read keeps the last rows. The Rust native-event API returns separate newest general and network lifecycle
@@ -1221,14 +1230,15 @@ fingerprinting vendor produced the activity.
 Sources navigation lists every retained Captured artifact (`source_tree.js`).
 The catalog is read forward from `get_artifacts` in 5,000-record pages; a
 one-record probe carries the ETag, a manifest that only grew is read from its
-last boundary, and loading stops at 50,000 records with a notice. The tree reads
+last boundary, and loading stops at 50,000 records with a notice. A stored
+session reads the same pages from the bundled backend. The tree reads
 **top**, then one row per frame, then the **Workers** (no frame),
 **Dynamic (eval / new Function)**, **WebAssembly** (modules compiled from bytes
 and their guest artifacts), **Extensions** (by extension ID) and **Browser
 internals** groups, then origins, folders and files. The frame seen first is
 listed first, other frames by name. A frame is named by its Console document URL
 when the Console listing has one, which also marks top-level documents, and
-otherwise by the origin of its first eval or Wasm artifact. Extension and
+otherwise by the origin of its first document artifact: a retained HTML response or an eval or Wasm artifact. Extension and
 `chrome://` hosts are read by hand because their URL origin is `null`; browser
 internals start collapsed. A folder chain with one folder child reads as one row
 (`a/b/c`). Files show their plain name, eval code `VM<id>` as in DevTools, with

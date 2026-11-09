@@ -1539,6 +1539,25 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   sourceOwnershipReceipt.push({test:'catalog_pages_whole_manifest',status:'passed',records:12003});
 }
 {
+  // The bare native route honors only limit, keeps the newest records and sends no query or ETag.
+  const template=await ownedArtifact('1');
+  const manifest=Array.from({length:7},(_,i)=>({...template,artifact_id:String(i+1),url:`https://fixture.invalid/native/${i+1}.js`}));
+  const lists=[];
+  const {state,api}=ownedContext({fetch:async url=>{
+    if(!url.startsWith('/api/artifacts?'))return new Response('const a = 1;');
+    lists.push(url);const limit=Number(new URL(url,'http://fixture.invalid').searchParams.get('limit'));
+    const page=manifest.slice(-Math.min(Math.max(limit,1),5000));
+    return Response.json({count:page.length,artifacts:page});
+  }});
+  await api.refreshArtifacts();
+  assert.deepEqual(lists,['/api/artifacts?after=0&limit=1','/api/artifacts?limit=5000'],'A one-record probe from a reader that does not page is never the catalog');
+  assert.equal(state.artifacts.length,7);assert.equal(state.artifactCatalogLimit,0);
+  manifest.length=0;for(let i=0;i<5000;i++)manifest.push({...template,artifact_id:String(i+1),url:`https://fixture.invalid/native/${i+1}.js`});
+  await api.refreshArtifacts();
+  assert.equal(state.artifacts.length,5000);assert.equal(state.artifactCatalogLimit,50000,'A full unpaged answer is reported as partial');
+  sourceOwnershipReceipt.push({test:'catalog_reads_unpaged_native_reply',status:'passed',records:5000});
+}
+{
   const artifact=await ownedArtifact('1'); let reads=0, bytes='const b = 1;';
   const {state,api}=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'1'},fetch:async()=>{reads++;return new Response(bytes);}});
   await api.loadArtifactContent(artifact); assert.match(artifact.loadError,/SHA-256/); assert.equal(artifact.content,undefined);

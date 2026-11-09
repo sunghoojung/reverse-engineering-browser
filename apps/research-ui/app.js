@@ -8061,6 +8061,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             if (base + records.length > catalogLimit) {records.length = catalogLimit - base; complete = false;}
             cursor = {first, after};
             if (grown) appended = records;
+          } else if (records.length) {
+            // A reader that does not page answers the one-record probe with one record, so read what it can give.
+            records = (await read('limit=5000'))?.body.artifacts ?? records;
+            complete = records.length < 5000;
           }
           const keepCursor = () => {state.artifactCursor = cursor && {...cursor, catalog: state.artifacts};};
           state.artifactCatalogLimit = complete ? 0 : catalogLimit;

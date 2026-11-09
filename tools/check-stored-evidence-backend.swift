@@ -21,7 +21,11 @@ enum StoredEvidenceBackendChecks {
     for route in StoredEvidenceBackend.getRoutes { precondition(StoredEvidenceBackend.serves(request(route)), route) }
     precondition(StoredEvidenceBackend.serves(request("/api/events?request_id=1&limit=5")))
     precondition(StoredEvidenceBackend.serves(request("/api/native-debugger/actions", method: "POST")))
-    for path in ["/api/events", "/api/events?limit=5000", "/api/health", "/api/native-debugger/actions", "/api/session/summary"] {
+    // The workspace pages the whole catalog; a read the scheme handler answered would hold only its newest record.
+    precondition(StoredEvidenceBackend.serves(request("/api/artifacts?after=0&limit=1")))
+    precondition(StoredEvidenceBackend.serves(request("/api/artifacts?artifact_id=1&limit=1")))
+    for path in ["/api/events", "/api/events?limit=5000", "/api/artifacts?limit=500", "/api/artifacts/1/content", "/api/health",
+      "/api/native-debugger/actions", "/api/session/summary"] {
       precondition(!StoredEvidenceBackend.serves(request(path)), "\(path) stays native")
     }
 
@@ -56,6 +60,11 @@ enum StoredEvidenceBackendChecks {
       precondition(done.wait(timeout: .now() + 60) == .success, "no reply for \(request.url!)")
       return result
     }
+
+    let catalog = call(request("/api/artifacts?after=0&limit=1"))
+    let catalogQuery = catalog.json["query"] as? [String: Any]
+    precondition(catalog.status == 200 && catalogQuery?["next_after"] != nil, "the probe answers with a paged query: \(catalog)")
+    precondition((catalog.json["artifacts"] as? [[String: Any]])?.first?["content_path"] == nil, "manifest paths stay private: \(catalog.json)")
 
     let index = call(request("/api/requests?limit=10"))
     precondition(index.status == 200 && index.json["format"] as? String == "reb-request-index-v1", "\(index)")

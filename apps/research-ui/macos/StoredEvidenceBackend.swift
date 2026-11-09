@@ -18,12 +18,14 @@ final class StoredEvidenceBackend {
     let message: String
   }
 
-  // The bare /api/events window stays with StoredEventWindow; filtered reads go to Rust.
+  // The bare /api/events window stays with StoredEventWindow and the bare artifact
+  // list with the scheme handler. Filtered and cursor-paged reads of both go to Rust,
+  // which pages the manifest by record boundary off the main thread.
   static func serves(_ request: URLRequest) -> Bool {
     guard let url = request.url else { return false }
     switch request.httpMethod ?? "GET" {
     case "GET":
-      if url.path == "/api/events" {
+      if url.path == "/api/events" || url.path == "/api/artifacts" {
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         return items.contains { $0.name != "limit" }
       }

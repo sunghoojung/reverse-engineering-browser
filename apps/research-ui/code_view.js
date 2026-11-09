@@ -219,7 +219,7 @@ function createCodeView({text, rows = codeViewRows(text), syntax, label, classNa
 function codeViewSelectToken(node) {
   const selection = globalThis.getSelection?.();
   if (!selection) return;
-  // A drag or double click inside this token keeps the researcher's own selection.
+  // A drag inside this token keeps the researcher's own selection.
   if (!selection.isCollapsed && selection.containsNode(node, true) && selection.toString() !== node.textContent) return;
   selection.selectAllChildren(node);
 }

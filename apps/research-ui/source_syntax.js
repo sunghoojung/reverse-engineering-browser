@@ -778,7 +778,10 @@
       const SOURCE_REGEXP_GROUP = /\(\?(?:[:=!]|<[=!])/y;
       const SOURCE_REGEXP_NAME = /\(\?<([\p{ID_Start}$_][\p{ID_Continue}$]*)>/uy;
       const SOURCE_REGEXP_BACKREFERENCE = /\\k<([\p{ID_Start}$_][\p{ID_Continue}$]*)>/uy;
-      const SOURCE_CSS_NESTED = /[^;{}]*\{/y;
+      // Bounded so a long run of colons in a selector cannot make the lexer quadratic.
+      const SOURCE_CSS_NESTED = /[^;{}]{0,4096}\{/y;
+      const SOURCE_CSS_KEYFRAME_OFFSET = /[^\s{},;/]+/y;
+      const SOURCE_CSS_URL_ARGUMENT = /[^)"']+/y;
       const SOURCE_CSS_ATTRIBUTE_OPERATOR = /[~|^$*]?=/y;
       const SOURCE_CSS_NTH_ARGUMENT = /\s*[+-]?\d*n?(?:\s*[+-]\s*\d+)?\s*(?=\))/y;
       const SOURCE_CSS_COLOR_PATTERN = /#[\da-fA-F]{3,8}\b/y;
@@ -1019,7 +1022,11 @@
 
       // A class member begins after these, or first on its own line when a field omits the semicolon.
       function sourceClassMemberStart(line, start, tokenizer) {
-        return ['{', ';', '}', 'static', 'async', 'get', 'set', '*'].includes(tokenizer.previous) || !line.slice(0, start).trim();
+        if (['{', ';', '}', 'static', 'async', 'get', 'set', '*'].includes(tokenizer.previous)) return true;
+        // Walks only the whitespace before this name, so a minified class body stays linear.
+        let at = start - 1;
+        while (at >= 0 && sourceFormatSpace(line.charCodeAt(at))) at -= 1;
+        return at < 0;
       }
 
       // Kinds follow what the grammar and the theme render, not what a name means: `JSON` is a
@@ -1327,7 +1334,7 @@
             push('punctuation', character); index += 1; continue;
           }
           if (tokenizer.cssBlocks.at(-1) === 'keyframes') {
-            const offset = line.slice(index).match(/^[^\s{},;/]+/)?.[0];
+            const offset = sourceMatchAt(SOURCE_CSS_KEYFRAME_OFFSET, line, index);
             if (offset) { push('text', offset); index += offset.length; continue; }
           }
           if (tokenizer.cssAttribute) {
@@ -1381,7 +1388,7 @@
             if (following === '(' && /^url$/i.test(identifier)) {
               // An unquoted url is one token up to its closing parenthesis.
               pushSourceBracket(tokens, tokenizer, '(', true); tokenizer.cssParens += 1; index += 1;
-              const argument = line.slice(index).match(/^[^)"']+/)?.[0];
+              const argument = sourceMatchAt(SOURCE_CSS_URL_ARGUMENT, line, index);
               if (argument) { push('parameter', argument); index += argument.length; }
             }
             continue;

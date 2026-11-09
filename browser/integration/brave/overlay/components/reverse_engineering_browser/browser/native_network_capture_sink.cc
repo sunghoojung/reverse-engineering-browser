@@ -437,16 +437,7 @@ void NativeNetworkCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
                                           const bool capture_content) noexcept {
   // Bodies still waiting or being read are recorded while the ending
   // configuration can still record them.
-  if (const NativeProbeEmitter ending = emitter_.load(std::memory_order_acquire)) {
-    if (unread_body_) {
-      EmitDeferredBody(ending, *unread_body_, NativeRequestBodyState::kNotCapturedBodyKind);
-    }
-    for (const auto& [read_id, body] : reading_bodies_) {
-      EmitDeferredBody(ending, body, NativeRequestBodyState::kNotCapturedReadIncomplete);
-    }
-  }
-  unread_body_.reset();
-  reading_bodies_.clear();
+  FlushDeferredBodies();
   emitter_.store(nullptr, std::memory_order_release);
   generation_.fetch_add(1, std::memory_order_acq_rel);
   session_id_.store(emitter ? session_id : 0, std::memory_order_relaxed);

@@ -1118,6 +1118,7 @@ void NativeArtifactCaptureSink::FlushBeforeExpiry(const std::uint64_t generation
   if (generation != generation_.load(std::memory_order_acquire))
     return;
   DrainGuestDependencies();
+  NativeNetworkCaptureSink::Get().FlushDeferredBodies();
   FlushPendingWork("native_guest_pending_at_expiry", "native_wasm_dispatch_pending_at_expiry");
 }
 

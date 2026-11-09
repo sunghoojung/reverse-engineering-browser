@@ -92,6 +92,10 @@ class NativeNetworkCaptureSink final {
   // Content sessions only, after RecordRequestStarted: a request without a
   // DevTools ID gets `reb-<request_id>`, so the network service reports the
   // headers it sends (protocol/native-network-v3.md). No request byte changes.
+  // A failed header or cookie artifact may no longer be shared by later requests.
+  void ForgetSharedBlock(std::uint64_t artifact_id) noexcept;
+  // Records every deferred body while the session can still record them.
+  void FlushDeferredBodies() noexcept;
   void AssignNetworkHeadersId(std::uint64_t request_id, network::ResourceRequest& request) noexcept;
   // Content sessions only, right after AssignNetworkHeadersId: reads a body
   // with file, blob or stream parts, whose request_body record then follows

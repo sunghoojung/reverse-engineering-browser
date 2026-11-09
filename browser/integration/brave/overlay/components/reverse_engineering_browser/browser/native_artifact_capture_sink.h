@@ -221,6 +221,8 @@ class NativeArtifactCaptureSink final {
     std::uint64_t parent_event_id = 0;
     NativeProbeCategory result_category = NativeProbeCategory::kArtifact;
     bool response_body = false;
+    // A header block or cookie list another request can share by artifact ID.
+    bool shared_block = false;
     // A request body still being read: no record exists yet to parent a loss
     // to, so a report sets read_lost and OnRequestBodyRead records it.
     bool read_open = false;

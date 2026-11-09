@@ -360,7 +360,8 @@ std::uint64_t NativeArtifactCaptureSink::CaptureHeaderBlock(const NativeArtifact
                                   .frame_id = frame_id,
                                   .session_id = session_id,
                                   .generation = generation_.load(std::memory_order_acquire),
-                                  .parent_event_id = creator_event_id});
+                                  .parent_event_id = creator_event_id,
+                                  .shared_block = true});
   return artifact_id;
 }
 
@@ -1642,6 +1643,10 @@ void NativeArtifactCaptureSink::OnTransferCompleted(
   }
   if (context.response_body) {
     NativeResponseBodyCapture::Get().OnTransferCompleted(
+  if (context.shared_block && status != NativeArtifactReceiveStatus::kAccepted) {
+    // An identical block must get its own attempt, not share one that failed.
+    NativeNetworkCaptureSink::Get().ForgetSharedBlock(artifact_id);
+  }
         artifact_id, status == NativeArtifactReceiveStatus::kAccepted);
   }
   if (auto receipt = guest_receipts_.find(artifact_id); receipt != guest_receipts_.end()) {

@@ -24,6 +24,9 @@ Every input declares `representation` (`float32-le` or `float32-be`), `channels`
   validator must finish its complete bounded scan, including duplicate checks,
   before selecting a record. A match found before scan exhaustion is insufficient.
   The complete blob must then pass the existing length and SHA-256 verification.
+  A record not marked `sensitive: false` is refused with 400 before its bytes are
+  read: the result returns input words, so request and response bodies, request
+  targets, header blocks, cookie lists and Canvas images never pass through it.
 
 The layout is interleaved: sample index `i` means frame `i / channels` (integer
 quotient), channel `i % channels`, and original byte offset `4*i`. Byte length must
@@ -31,8 +34,8 @@ be exactly `channels * frames * 4`; partial, unaligned, truncated-by-declaration
 extra or impossible dimensions are rejected, never silently cropped. The input
 identity records the SHA-256 of every supplied byte, complete size/count, declared
 layout and source type. It does not authenticate an artifact or infer how its
-bytes were obtained. An arbitrary selected retained artifact is interpreted only
-under the caller's declaration; its kind is not evidence of audio samples.
+bytes were obtained. A selected retained artifact is interpreted only under the
+caller's declaration; its kind is not evidence of audio samples.
 
 Coverage refers to complete supplied buffers. It does not establish capture
 completeness, graph parameters, sample rate, DSP implementation, environment,

@@ -249,6 +249,95 @@ fn tool_text(message: &Value) -> &str {
     message["result"]["content"][0]["text"].as_str().unwrap()
 }
 
+/// A retained artifact of `kind` in the backend's store, with `body` as its
+/// bytes. Every value is synthetic.
+fn retained_artifact(server: &Server, id: &str, kind: &str, body: &[u8]) -> Value {
+    use sha2::{Digest, Sha256};
+    let hash = hex::encode(Sha256::digest(body));
+    let (origin, context) = match kind {
+        "response_body" => ("network_response", "0"),
+        "canvas_data_url" => ("canvas_to_data_url", "0"),
+        "bytecode_buffer" => ("runtime_typed_array", "1"),
+        _ => ("network_request", "0"),
+    };
+    let sensitive = kind != "bytecode_buffer";
+    let artifact = json!({
+        "protocol_version": 1, "artifact_id": id, "session_id": "1", "navigation_id": "1",
+        "frame_id": "1", "parent_artifact_id": "0", "creator_event_id": "1",
+        "execution_context_id": context, "capture_origin": origin, "kind": kind,
+        "url": "https://owned.test/fixture", "mime_type": "application/octet-stream",
+        "byte_size": body.len(), "sha256": hash, "sensitive": sensitive,
+        "content_path": format!("blobs/{hash}.bin"),
+    });
+    let artifacts = server._root.path().join("artifacts");
+    std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
+    std::fs::write(artifacts.join(format!("blobs/{hash}.bin")), body).unwrap();
+    let mut manifest = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(artifacts.join("manifest.jsonl"))
+        .unwrap();
+    writeln!(manifest, "{artifact}").unwrap();
+    artifact
+}
+
+fn float32_artifact_request(artifact: &Value) -> Value {
+    let frames = artifact["byte_size"].as_u64().unwrap() / 4;
+    json!({"body": {"protocol_version": 1, "reference": null,
+        "input": {"representation": "float32-be", "channels": 1, "frames": frames,
+            "source": {"kind": "artifact", "session_id": "1", "artifact_id": artifact["artifact_id"],
+                "sha256": artifact["sha256"], "byte_length": artifact["byte_size"]}},
+        "tolerances": {"absolute": 0, "relative": 0, "ulps": 0},
+        "detail": {"start": 0, "limit": 256}}})
+}
+
+#[test]
+fn compare_float32_returns_no_bytes_of_a_sensitive_artifact_through_mcp() {
+    let server = Server::start();
+    let mut mcp = Mcp::start(&server.url, false);
+    let secret = b"SYNTHETIC-SECRET-BYTES-0123456!!";
+    assert_eq!(secret.len() % 4, 0);
+    let words: Vec<String> = secret.chunks(4).map(|word| hex::encode(word)).collect();
+    let readable = retained_artifact(&server, "1", "bytecode_buffer", secret);
+    let answer = mcp.request(
+        "tools/call",
+        json!({"name": "compare_float32", "arguments": float32_artifact_request(&readable)}),
+    );
+    assert_eq!(answer["result"]["isError"], false, "{answer}");
+    assert!(
+        tool_text(&answer).contains(&words[0]),
+        "the non-sensitive control must return its words: {answer}"
+    );
+    for (index, kind) in [
+        "response_body",
+        "request_body",
+        "request_target",
+        "request_headers",
+        "response_headers",
+        "cookie_list",
+        "canvas_data_url",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Each artifact has its own bytes, so every refusal is checked by content.
+        let mut body = secret.to_vec();
+        body[0] = b'A' + index as u8;
+        let artifact = retained_artifact(&server, &(index + 2).to_string(), kind, &body);
+        let answer = mcp.request(
+            "tools/call",
+            json!({"name": "compare_float32", "arguments": float32_artifact_request(&artifact)}),
+        );
+        assert_eq!(answer["result"]["isError"], true, "{kind}: {answer}");
+        let text = tool_text(&answer);
+        assert!(text.contains("sensitive artifacts"), "{kind}: {text}");
+        for word in body.chunks(4).map(hex::encode) {
+            assert!(!text.contains(&word), "{kind} returned {word}: {text}");
+        }
+        assert!(!text.contains("SYNTHETIC"), "{kind}: {text}");
+    }
+}
+
 #[tokio::test]
 async fn openapi_mcp_matches_the_live_loopback_api() {
     let spec = specification();

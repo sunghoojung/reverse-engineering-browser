@@ -160,6 +160,14 @@ fn load(root: &Path, input: &Input) -> Result<Loaded> {
                 )
                 .with_code(Code::TargetUnavailable));
             }
+            // The answer spells out the input words, so this route would return
+            // a body, header block or cookie list to whoever asks. Anything not
+            // recorded as non-sensitive stays closed, before a byte is read.
+            if record["sensitive"] != false {
+                return Err(Error::bad(
+                    "Float32 diagnostics do not read sensitive artifacts",
+                ));
+            }
             if record["sha256"] != *sha256 || record["byte_size"] != *byte_length {
                 return Err(Error::conflict("Float32 artifact identity changed"));
             }

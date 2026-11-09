@@ -5949,7 +5949,7 @@
             }
           },
           "400": {
-            "description": "Invalid framing, JSON, version, duplicate/unknown members, input encoding, complete layout, detail window or caller tolerance. No input values are echoed.",
+            "description": "Invalid framing, JSON, version, duplicate/unknown members, input encoding, complete layout, detail window, caller tolerance or an artifact not marked non-sensitive. No input values are echoed.",
             "content": {
               "application/json": {
                 "schema": {

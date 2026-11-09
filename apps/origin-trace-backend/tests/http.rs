@@ -6979,8 +6979,7 @@ async fn float32_verified_artifact_rejects_corruption_stale_identity_missing_and
     const ROUTE: &str = "/api/float32/compare";
     let server = Server::start().await;
     let bytes = [0, 0, 128, 63, 0, 0, 0, 128, 1, 0, 192, 127, 0, 0, 128, 127];
-    let mut artifact = put_source_facts_artifact(&server, &bytes, "response_body");
-    artifact["sensitive"] = json!(true);
+    let mut artifact = put_source_facts_artifact(&server, &bytes, "bytecode_buffer");
     artifact["mime_type"] = json!("application/octet-stream");
     server.file(
         "artifacts/manifest.jsonl",
@@ -7060,7 +7059,24 @@ async fn float32_verified_artifact_rejects_corruption_stale_identity_missing_and
         "artifacts/manifest.jsonl",
         format!("{artifact}\n{artifact}\n").as_bytes(),
     );
-    assert_contract_response(server.action(ROUTE, request).await, "post", ROUTE, 500).await;
+    assert_contract_response(
+        server.action(ROUTE, request.clone()).await,
+        "post",
+        ROUTE,
+        500,
+    )
+    .await;
+    // The answer spells out input words, so a sensitive artifact is refused unread.
+    let mut sensitive = artifact.clone();
+    sensitive["kind"] = json!("response_body");
+    sensitive["sensitive"] = json!(true);
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{sensitive}\n").as_bytes(),
+    );
+    let refused =
+        assert_contract_response(server.action(ROUTE, request).await, "post", ROUTE, 400).await;
+    assert!(!String::from_utf8_lossy(&refused).contains("0000803f"));
 }
 
 const EVIDENCE_COMPARISON_ROUTE: &str = "/api/evidence/packages/compare";

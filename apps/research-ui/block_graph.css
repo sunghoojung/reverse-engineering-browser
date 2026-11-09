@@ -17,19 +17,19 @@
   --graph-edge-assumed: var(--faint);
   --graph-edge-sequence: var(--text);
 }
-#screen-sources .sources-editor[data-graph="true"] { grid-template-rows: 36px auto minmax(0, 1.7fr) minmax(96px, 1fr) 28px; }
+#screen-sources .sources-editor[data-graph="true"] { grid-template-rows: 36px auto minmax(0, 2.4fr) minmax(88px, 1fr) 28px; }
 #screen-sources .sources-editor[data-graph="true"][data-graph-linear-hidden] { grid-template-rows: 36px auto minmax(0, 1fr) 28px; }
 #screen-sources .sources-editor[data-graph="true"][data-graph-linear-hidden] #source-code-wrap { display: none; }
 #screen-sources .sources-editor[data-graph="true"] #source-code-wrap { border-top: 1px solid var(--line); }
 .block-graph[hidden], .block-graph-state[hidden], .block-graph-minimap[hidden] { display: none; }
 .block-graph { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; background: var(--panel); }
-.block-graph-head { min-width: 0; display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px; border-bottom: 1px solid var(--line); }
+.block-graph-head { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; column-gap: 8px; row-gap: 2px; min-height: 30px; padding: 3px 10px; border-bottom: 1px solid var(--line); }
 .block-graph-title { flex: 0 0 auto; max-width: 40%; overflow: hidden; color: var(--text); font: 600 12px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .block-graph-stats { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--muted); font: 11px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .block-graph-evidence { flex: 0 0 auto; color: var(--accent); font: 11px var(--mono); }
-.block-graph-tools { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.block-graph-tools { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-left: auto; }
 .block-graph-tool[aria-pressed="true"] { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: var(--accent-soft); color: var(--text); }
-.block-graph-zoom-bar { position: absolute; z-index: 2; top: 8px; right: 10px; display: flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+.block-graph-zoom-bar { display: flex; align-items: center; gap: 2px; }
 .block-graph-zoom { min-width: 38px; color: var(--muted); font: 11px var(--mono); text-align: center; }
 .block-graph-layers { display: flex; gap: 2px; margin-right: 6px; }
 .block-graph-fn-wrap { position: relative; display: flex; align-items: center; gap: 2px; margin-right: 6px; }

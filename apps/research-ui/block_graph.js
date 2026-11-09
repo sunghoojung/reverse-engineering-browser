@@ -110,13 +110,14 @@ function createBlockGraphView(root, options = {}) {
   const tool = (label, action, aria) => { const element = node('button', 'source-tool block-graph-tool', label); element.type = 'button'; element.setAttribute('aria-label', aria ?? label); element.addEventListener('click', action); return element; };
   const zoomOut = tool('−', () => zoomAt(0.8), 'Zoom out'), zoomLabel = node('span', 'block-graph-zoom', '100%'), zoomIn = tool('+', () => zoomAt(1.25), 'Zoom in'), fitButton = tool('Fit', fit, 'Fit graph to view');
   const zoomBar = node('div', 'block-graph-zoom-bar'); zoomBar.append(zoomOut, zoomLabel, zoomIn, fitButton);
+  tools.append(zoomBar);
   const stage = node('div', 'block-graph-stage');
   const canvas = node('canvas', 'block-graph-canvas');
   canvas.tabIndex = 0; canvas.setAttribute('role', 'application'); canvas.setAttribute('aria-label', 'Basic-block graph. Arrow keys move between blocks, plus and minus zoom, 0 fits, Shift plus arrows pan, Enter shows the selected block in the disassembly and hex.');
   const miniWrap = node('div', 'block-graph-minimap'); const minimap = node('canvas', 'block-graph-minimap-canvas'); minimap.width = 300; minimap.height = 220; minimap.setAttribute('aria-hidden', 'true'); miniWrap.append(minimap);
   const stateBox = node('div', 'block-graph-state'); stateBox.setAttribute('role', 'status'); stateBox.setAttribute('aria-live', 'polite'); stateBox.hidden = true;
   const stateText = node('p', '', ''); const retry = node('button', 'secondary-button', 'Retry'); retry.type = 'button'; retry.hidden = true; stateBox.append(stateText, retry);
-  stage.append(canvas, zoomBar, miniWrap, stateBox);
+  stage.append(canvas, miniWrap, stateBox);
   const foot = node('div', 'block-graph-foot');
   const limits = node('span', 'block-graph-limits', BLOCK_GRAPH_LIMITS);
   const legend = node('div', 'block-graph-legend');
@@ -622,7 +623,7 @@ function createSourceGraphPanel({host, editor, button, linearToggle, revealOffse
     }
   }
   function applyResult(result) { view.setResult(result); renderTools(); }
-  function open() { isOpen = true; host.hidden = false; editor.setAttribute('data-graph', 'true'); button.setAttribute('aria-pressed', 'true'); if (!linearChoice && innerHeight < 640) { editor.setAttribute('data-graph-linear-hidden', ''); } view.activate(); if (functions) { if (functionIndex !== null) loadFunction(functionIndex); else view.setState('empty', 'Select a function.'); } else loadIndex(); }
+  function open() { isOpen = true; host.hidden = false; editor.setAttribute('data-graph', 'true'); button.setAttribute('aria-pressed', 'true'); if (!linearChoice && innerHeight < 600) { editor.setAttribute('data-graph-linear-hidden', ''); } view.activate(); if (functions) { if (functionIndex !== null) loadFunction(functionIndex); else view.setState('empty', 'Select a function.'); } else loadIndex(); }
   function close() { isOpen = false; host.hidden = true; editor.removeAttribute('data-graph'); button.setAttribute('aria-pressed', 'false'); closeMenu(); view.release(); release(); }
   return {
     toggle() { if (isOpen) close(); else if (isWasmSource(source)) open(); },

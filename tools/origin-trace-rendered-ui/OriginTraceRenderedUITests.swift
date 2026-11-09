@@ -1837,10 +1837,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-selection')?.textContent ?? '').includes('loc_')", "arrow keys select a block")
       try await ui.key(36, "\r")
       try await ui.waitUntil("document.querySelector('#source-code [data-graph-reveal]') !== null", "Enter reveals the block offset in the linear view")
-      try await ui.value("document.documentElement.dataset.theme = 'light'; 1")
+      _ = try await ui.value("(document.documentElement.dataset.theme = 'light', 1)")
       try await Task.sleep(nanoseconds: 600_000_000)
       try await ui.screenshot("block-graph-light-\(size.name)")
-      try await ui.value("document.documentElement.dataset.theme = 'dark'; 1")
+      _ = try await ui.value("(document.documentElement.dataset.theme = 'dark', 1)")
       try await ui.click("#source-graph")
     }
   }

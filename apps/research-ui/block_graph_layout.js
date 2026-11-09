@@ -303,7 +303,19 @@ const blockGraphLayout = (() => {
       }
       // Rails are colored like intervals: a rail only needs its own column
       // while its rows overlap another's, so a long guard chain stays narrow.
-      const railKey = r => r.dest.type === 'rail' ? r.destKey : r.destKey === 'T' || r.destKey === 'B' ? r.destKey : `to${r.destKey}`;
+      // A fan-out shares one feeder rail per source; a fan-in, such as every
+      // exit to a box's bottom port, shares one rail per destination.
+      const farSources = new Map(), farDests = new Map();
+      for (const r of routes) {
+        if (!r.far || r.dest.type === 'rail') continue;
+        const source = `${r.row}:${r.item}:${r.port}`;
+        farSources.set(source, (farSources.get(source) ?? 0) + 1); farDests.set(r.destKey, (farDests.get(r.destKey) ?? 0) + 1);
+      }
+      const railKey = r => {
+        if (r.dest.type === 'rail') return r.destKey;
+        const source = `${r.row}:${r.item}:${r.port}`;
+        return (farSources.get(source) ?? 0) > (farDests.get(r.destKey) ?? 0) ? `s${source}` : `d${r.destKey}`;
+      };
       const colorRails = (side, spanOf) => {
         const spans = new Map();
         for (const r of routes) {

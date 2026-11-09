@@ -63,6 +63,10 @@ const pointsOf = (layout, edge) => {
     assert(endY >= layout.y[to] - 1 && endY <= layout.y[to] + layout.h[to], `edge ${index} reaches its target`);
   });
   assert.equal(layout.direct, 0, 'a reducible dispatcher needs no direct edges');
+  // Feeding wrapped rows takes one rail, not one per arm.
+  const feeders = new Set();
+  edges.forEach(([from, , kind], index) => { if (kind === KIND.table) { const points = pointsOf(layout, index); if (points.length > 4) feeders.add(points[2][0]); } });
+  assert(feeders.size <= 1, `wrapped arms share one feeder rail: ${feeders.size}`);
 }
 {
   // A long chain of guards stays narrow: terminal arms stack and rails reuse columns.

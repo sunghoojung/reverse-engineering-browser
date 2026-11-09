@@ -355,6 +355,37 @@ std::uint8_t Kind(const reb::NativeAsyncTaskKind kind) {
   return static_cast<std::uint8_t>(kind);
 }
 
+// A queue that refused the async record means no artifact left this renderer
+// either, so a later chain must not call that segment captured.
+[[gnu::noinline]] void NativeAsyncSegmentNotAdmitted() {
+  using reb::NativeAsyncTaskKind;
+  NativeProbeQueue queue;
+  Configure(queue, 66);
+  scenario = {};
+  scenario.depth = 4;
+  scenario.scripts = 1;
+  scenario.seed = 300;
+  scenario.task_seed = 9000;
+  for (std::size_t index = 0; index < 2 * reb::kNativeProbeQueueCapacity; ++index) {
+    static_cast<void>(sink.RecordRequestInitiated(1, "GET", "https", "fill.example.test"));
+  }
+  const auto artifacts_before = reb::mojom::NativeProbeHost::artifacts.load();
+  const auto dropped = NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout);
+  assert(dropped != 0 && reb::mojom::NativeProbeHost::artifacts == artifacts_before);
+  Drain(queue);
+  const auto inside = NativeRequestStackWalk::EnterAsyncTask(dropped);
+  StackPayload(Start(queue, 6000).second);
+  const auto chain = GeneratedChain();
+  assert(chain[0].kind == Kind(NativeAsyncTaskKind::kSetTimeout) &&
+         chain[0].state == static_cast<std::uint8_t>(
+                               reb::NativeTaskSegmentState::kNotRetainedArtifactUnavailable));
+  Drain(queue);
+  NativeRequestStackWalk::ExitAsyncTask(inside);
+  scenario = {};
+  transport.Disable();
+  std::cout << "PASS an async segment whose record was refused is not called captured\n";
+}
+
 // Scheduling-time segments linked through async task runs and task
 // attribution, and script-initiated navigations.
 [[gnu::noinline]] void NativeTaskChainsAndNavigations() {

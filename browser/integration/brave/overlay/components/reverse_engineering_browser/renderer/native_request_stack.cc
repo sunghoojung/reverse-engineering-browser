@@ -795,6 +795,9 @@ void NativeRequestStackWalk::AsyncTaskFramesReady(std::uint32_t recorded,
       stack_sequence_ = event.header.sequence_number;
       QueueStackArtifact(sink, state, hash, payload.digest, content);
       ++state.async_sent;
+    } else {
+      // No record and no artifact left this renderer for this segment.
+      segment_state = NativeTaskSegmentState::kNotRetainedArtifactUnavailable;
     }
   }
   NativeRequestStackTables::Segment segment;

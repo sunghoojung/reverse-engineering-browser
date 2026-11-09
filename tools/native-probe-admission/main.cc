@@ -2259,6 +2259,7 @@ int main() {
   Run<&NativeJsInvocationBudgetCaps>();
   Run<&NativeRequestStacks>();
   Run<&NativeTaskChainsAndNavigations>();
+  Run<&NativeAsyncSegmentNotAdmitted>();
   Run<&NativeDebuggerObservations>();
   Run<&DispatchSampleAdmission>();
   Run<&DispatchEmitFailureReleasesBudget>();

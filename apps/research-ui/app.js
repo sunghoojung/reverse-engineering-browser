@@ -7233,7 +7233,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const requestedLine = target.line ?? savedWindow?.line ?? 0;
         const requestedColumn = target.column ?? savedWindow?.column ?? 0;
         const clampedLine = Math.max(0, Math.min(index.lineCount - 1, Number.isSafeInteger(requestedLine) ? requestedLine : 0));
-        const window = sameDocument && previous.window.line === clampedLine && previous.window.column === requestedColumn
+        // While another page of the layout is read, the page shown last stays
+        // exactly as it is: only the window controls say what is being read.
+        const window = sameDocument && (view.pageLoadingLine != null || previous.window.line === clampedLine && previous.window.column === requestedColumn)
           ? previous.window : sourceDocumentWindow(index, clampedLine, requestedColumn);
         state.sourceWindow = view.pageLoadingLine === null || view.pageLoadingLine === undefined
           ? {identity, representation, line: window.line, column: window.column}

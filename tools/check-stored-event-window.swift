@@ -157,11 +157,17 @@ enum StoredEventWindowChecks {
     precondition(sequences(window.networkEvents) == [2])
 
     try Data(#"{"protocol_version":"#.utf8).write(to: path)
-    do {
-      _ = try reopen.read(path: path.path, limit: 2)
-      preconditionFailure("malformed tail must fail the refresh")
-    } catch {}
+    window = try reopen.read(path: path.path, limit: 2)
+    precondition(window.events.isEmpty, "a torn tail is omitted")
+    precondition(window.coverage["malformed_lines"] as? Int == 0, "a torn tail is not damage")
     precondition(reopen.parsedRecords == 0)
+    var damagedStore = event(sequence: 7, category: "canvas", type: "api_call")
+    damagedStore += Data("not json\n{\"category\":\"network\"\n".utf8)
+    damagedStore += event(sequence: 8, category: "canvas", type: "api_call")
+    try damagedStore.write(to: path)
+    window = try reopen.read(path: path.path, limit: 10)
+    precondition(sequences(window.events) == [7, 8], "a damaged line is skipped")
+    precondition(window.coverage["malformed_lines"] as? Int == 2, "and counted")
     try write([event(sequence: 10, category: "network", type: "request_started")])
     window = try reopen.read(path: path.path, limit: 2)
     precondition(sequences(window.events) == [10])

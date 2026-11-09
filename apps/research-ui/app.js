@@ -263,6 +263,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           if (kind === 'empty') kind = 'gap';
           messages.push(`The queue reports ${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops} dropped ${reportedDrops === 1n ? 'event' : 'events'}${gapCount > 0n ? '; counts may overlap sequence gaps' : `; no sequence jump is visible in ${eventCountScopeLabel()}`}.`);
         }
+        if (state.eventMalformedLines > 0) {
+          if (kind === 'empty') kind = 'gap';
+          messages.push(`${state.eventMalformedLines} unreadable ${state.eventMalformedLines === 1 ? 'line was' : 'lines were'} skipped in ${eventCountScopeLabel()}.`);
+        }
         const networkLimits = namedGapNotice(namedGapsIn(shownNamedGaps(), networkGapCategories), eventCountScopeLabel());
         if (networkLimits) {
           if (kind === 'empty') kind = 'gap';

@@ -930,6 +930,9 @@ offsets (end exclusive), `scan_limit`, and separate `events_limited` and
 `network_events_limited` flags. A cut-through record prefix is omitted, not
 parsed as a new record. `scope: "store"` means the scan starts at byte zero;
 `"bounded_tail"` excludes an older prefix, even if fewer than 5,000 rows remain.
+A stored line that is not a valid event is skipped and counted in
+`malformed_lines`, so one damaged record cannot fail every poll. A tail still
+being written is omitted and not counted.
 
 `sequence_gaps` and `queue_drops` are canonical unsigned decimal strings over
 validated records in this declared scope. They are not session totals.

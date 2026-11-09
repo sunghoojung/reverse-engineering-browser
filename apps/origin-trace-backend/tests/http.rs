@@ -1259,8 +1259,9 @@ async fn openapi_action_envelopes_and_stored_failures_are_json_errors() {
         )
         .await;
     }
+    server.file("events.jsonl", b"not-json\n");
+    assert_contract_response(server.get("/api/events").await, "get", "/api/events", 200).await;
     for (file, route) in [
-        ("events.jsonl", "/api/events"),
         ("artifacts/manifest.jsonl", "/api/artifacts"),
         ("collection.json", "/api/api-collection"),
         ("analyst.json", "/api/local-analyst"),
@@ -1375,7 +1376,7 @@ fn event_response(events: &[Value], scan_end: usize, limited: bool) -> Value {
         "count": events.len(),
         "events": events,
         "network_events": events,
-        "event_window": {"scope":"store", "scan_start":"0", "scan_end":scan_end.to_string(), "scan_limit":67108864, "events_limited":limited, "network_events_limited":limited},
+        "event_window": {"scope":"store", "scan_start":"0", "scan_end":scan_end.to_string(), "scan_limit":67108864, "events_limited":limited, "network_events_limited":limited, "malformed_lines":0},
         "broker_connected": true,
         "capture_mode": "idle",
         "capture_state": "not_live",
@@ -1950,14 +1951,22 @@ async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
     .await;
     server.file("events.jsonl", b"");
     assert_poll_response(&server, "/api/events", event_response(&[], 0, false)).await;
-    for bad in [b"not-json\n".to_vec(), b"[]\n".to_vec(), vec![b'x'; 4097]] {
-        server.file("events.jsonl", &bad);
-        assert_eq!(server.get("/api/events").await.status(), 500);
-    }
+    // One damaged line is skipped and counted, so it cannot fail every poll.
     let mut invalid = metadata_event(1);
     invalid["payload"] = json!("not-hex");
-    server.file("events.jsonl", &jsonl(&[invalid]));
-    assert_eq!(server.get("/api/events").await.status(), 500);
+    for bad in [
+        b"not-json\n".to_vec(),
+        b"[]\n".to_vec(),
+        vec![b'x'; 4097],
+        jsonl(&[invalid]),
+    ] {
+        server.file("events.jsonl", &bad);
+        let response = server.get("/api/events").await;
+        assert_eq!(response.status(), 200);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["count"], 0);
+        assert_eq!(body["event_window"]["malformed_lines"], 1);
+    }
     server.file("events.jsonl", &jsonl(&[metadata_event(2)]));
     assert_poll_response(
         &server,

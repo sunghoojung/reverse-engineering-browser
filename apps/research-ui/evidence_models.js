@@ -362,6 +362,7 @@
         state.eventsLimited = body.event_window?.events_limited ?? body.count >= 5000;
         state.networkEventsAvailable = Array.isArray(body.network_events);
         state.networkEventsLimited = body.event_window?.network_events_limited === true;
+        state.eventMalformedLines = body.event_window?.malformed_lines ?? 0;
       }
 
       function eventGapLabel(gapCount, reportedDrops, namedGaps = []) {
@@ -395,7 +396,8 @@
           BigInt(value.scan_start) <= BigInt(value.scan_end) && value.scan_limit === 64 * 1024 * 1024 &&
           BigInt(value.scan_end) - BigInt(value.scan_start) <= BigInt(value.scan_limit) &&
           (value.scope === 'store') === (value.scan_start === '0') &&
-          typeof value.events_limited === 'boolean' && typeof value.network_events_limited === 'boolean';
+          typeof value.events_limited === 'boolean' && typeof value.network_events_limited === 'boolean' &&
+          (value.malformed_lines === undefined || (Number.isSafeInteger(value.malformed_lines) && value.malformed_lines >= 0));
       }
 
       // The JavaScript invocation context of a Wasm consumer record,

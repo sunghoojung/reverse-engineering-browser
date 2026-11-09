@@ -15998,6 +15998,11 @@
               },
               "network_events_limited": {
                 "type": "boolean"
+              },
+              "malformed_lines": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Whole lines in the scanned bytes skipped because they are not valid events. Present on the polling answer. A torn tail still being written is not counted."
               }
             },
             "required": [

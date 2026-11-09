@@ -570,7 +570,7 @@ void NativeNetworkCaptureSink::EmitCookieList(const NativeProbeEmitter emitter,
   for_each([&length, &count, &blocked](const NativeCookieEntry& entry) {
     length += NativeCookieEntrySize(entry);
     ++count;
-    blocked += entry.exclusion_reasons != 0 ? 1 : 0;
+    blocked += entry.exclusion_reasons != 0 ? 1U : 0U;
   });
   summary.cookie_count = count;
   summary.blocked_count = blocked;

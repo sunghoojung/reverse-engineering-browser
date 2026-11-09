@@ -254,7 +254,7 @@ bool NativeArtifactSocketClient::Enqueue(
     return false;
   }
   queued_bytes_ += transfer_size;
-  queued_stream_frames_ += stream_frame ? 1 : 0;
+  queued_stream_frames_ += stream_frame ? 1U : 0U;
   queue_.push_back(std::move(transfer));
   wakeup_.Signal();
   return true;
@@ -362,7 +362,7 @@ void NativeArtifactSocketClient::Run() {
       transfer = std::move(queue_.front());
       queue_.pop_front();
       queued_bytes_ -= TransferSize(*transfer);
-      queued_stream_frames_ -= IsStreamFrame(*transfer) ? 1 : 0;
+      queued_stream_frames_ -= IsStreamFrame(*transfer) ? 1U : 0U;
       descriptor = socket_descriptor_;
     }
 

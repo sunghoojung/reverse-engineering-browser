@@ -1325,8 +1325,12 @@ not reach them all; `coverage` says what was read:
   record, then by SHA-256 to a retained `javascript` artifact, to one-based line
   and column (UTF-16 columns, the identity record's start line and column
   added on the script's first line), and to the enclosing function name read
-  at the function start position. `eval` and `new Function` frames resolve to
-  their `dynamic_javascript` artifacts the same way.
+  at the function start position. `eval` and `new Function` frames resolve the
+  same way, to the `stack_script` artifact retained during the walk. A
+  `dynamic_javascript` artifact exists only when the page's CSP or Trusted Types
+  makes Blink check `eval` (#446), so resolution never depends on one. A Metadata
+  only session retains no script source, so those frames report
+  `source_not_retained`.
 - A Wasm frame resolves to its function index, and to its name when the
   retained module has a name section.
 - A frame that does not resolve keeps its raw identity and a reason. Nothing is
@@ -1379,7 +1383,9 @@ Still required before declaring this browser-ready:
 3. A 5,000-deep recursion records 1,024 frames, the omitted count and depth.
 4. Frames into an inline script, an `eval` script and a network script resolve
    to file, line and column. A `fetch` from a Wasm import shows Wasm frames.
-   An `await` chain shows its async frames.
+   An `await` chain shows its async frames. Run the `eval` case on a page with
+   no CSP, where no `dynamic_javascript` artifact exists, and in a Metadata only
+   session, where the frame reports `source_not_retained`.
 5. Repeated requests from one call site send their stack once.
 6. Measure added time per request at p50 and p99 on a request-heavy page before
    keeping the packaged default on.

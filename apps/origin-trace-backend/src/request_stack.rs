@@ -1477,7 +1477,7 @@ mod tests {
             (7, identity_bytes(1, 0x02, 7, 10, 4, inline.as_bytes())),
             (8, identity_bytes(1, 0x03, 8, 0, 0, evaled.as_bytes())),
             (30, identity_bytes(2, 0, 30, 0, 0, &wasm)),
-            (40, identity_bytes(1, 0x10, 40, 0, 0, b"not retained")),
+            (40, identity_bytes(1, 0x11, 40, 0, 0, b"not retained")),
         ] {
             let (id, identity) = decode_identity(&payload).expect("identity");
             assert_eq!(id, script);
@@ -1520,6 +1520,7 @@ mod tests {
         assert_eq!(f[2]["resolution"]["artifact_id"], "3");
         assert_eq!(f[2]["resolution"]["column"], 1);
         assert_eq!(f[3]["resolution"]["function_name"], "run");
+        assert_eq!(f[4]["eval"], true, "a Metadata only eval frame says why");
         assert_eq!(f[4]["resolution"]["reason"], "source_not_retained");
         assert_eq!(f[5]["kind"], "await");
         assert_eq!(f[5]["async"], true);

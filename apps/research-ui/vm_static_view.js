@@ -20,7 +20,9 @@ function vmStaticOwnedExample() {
     definition_id: definition.definition_id, entry_offsets: [0], bytes_hex: bytes.map(value => value.toString(16).padStart(2, '0')).join('')}};
 }
 
-function mountVmStatic(root, model = vmStatic) {
+function mountVmStatic(root, modelOrOptions = vmStatic, options = {}) {
+  const model = modelOrOptions?.getObservedPath || modelOrOptions === undefined ? vmStatic : modelOrOptions;
+  const hostOptions = modelOrOptions?.getObservedPath ? modelOrOptions : options;
   const pageSize = 64, graphPageSize = 32, maximumFileBytes = 1048576;
   const node = (tag, text = '', className = '') => {
     const element = document.createElement(tag); element.textContent = text; element.className = className; return element;
@@ -258,7 +260,7 @@ function mountVmStatic(root, model = vmStatic) {
       `${inputs.definition ? 'Definition ready' : 'Definition required'} · ${inputs.image ? 'Bytecode ready' : 'Bytecode required'} · Local static analysis only`;
     if (report && report.coverage.stop_reason !== 'end') sourceSummary.textContent += ` · stopped: ${report.coverage.stop_reason}`;
   };
-  function invalidate() { analysisSerial++; analyzing = false; report = null; selected = null; page = graphPage = auditPage = diagnosticPage = 0; auditText = ''; renderListing(); renderDetails(); }
+  function invalidate() { analysisSerial++; analyzing = false; report = null; selected = null; page = graphPage = auditPage = diagnosticPage = 0; auditText = ''; renderListing(); renderDetails(); blockGraph?.refresh(); }
   async function importFile(kind, file) {
     if (!file) return;
     const owner = ++serials[kind]; pending[kind] = true; analysisSerial++; analyzing = false; update();
@@ -286,7 +288,7 @@ function mountVmStatic(root, model = vmStatic) {
       const result = await model.analyze(definition.text, image.text);
       if (owner !== analysisSerial || definition !== inputs.definition || image !== inputs.image) return;
       report = result; selected = instructions()[0]?.offset ?? null; page = graphPage = auditPage = diagnosticPage = 0; auditText = ''; filter.value = '';
-      renderListing(); renderDetails(); notice.textContent = `${result.coverage.instruction_count} instructions decoded. ${result.coverage.undecoded_bytes ? `${result.coverage.undecoded_bytes} bytes unavailable; see Inputs and limits.` : 'Pseudocode and CFG reflect declarations only.'}`;
+      renderListing(); renderDetails(); blockGraph?.refresh(); notice.textContent = `${result.coverage.instruction_count} instructions decoded. ${result.coverage.undecoded_bytes ? `${result.coverage.undecoded_bytes} bytes unavailable; see Inputs and limits.` : 'Pseudocode and CFG reflect declarations only.'}`;
     } catch (error) { if (owner === analysisSerial) notice.textContent = `Analysis unavailable: ${error.message}. Inputs remain available; no code was executed.`; }
     finally { if (owner === analysisSerial) { analyzing = false; update(); } }
   }
@@ -301,6 +303,13 @@ function mountVmStatic(root, model = vmStatic) {
     invalidate(); notice.textContent = 'Owned authored example loaded. Choose Analyze to decode its declared loop and branch. This is not captured execution.'; update();
   });
   toolbar.append(analyze, demo, clear);
+  const graphToggle = button('Graph', () => blockGraph?.toggle()); graphToggle.setAttribute('aria-pressed', 'false'); graphToggle.setAttribute('aria-label', 'Show basic-block graph for this bytecode');
+  const graphHost = node('section', '', 'vm-static-graph'); graphHost.setAttribute('aria-label', 'Basic-block graph');
+  const blockGraph = typeof createVmBlockGraph === 'function' ? createVmBlockGraph({host: graphHost, button: graphToggle, getReport: () => report,
+    getObservedPath: () => hostOptions.getObservedPath?.() ?? null, onReveal: offset => {
+      const instruction = instructions().find(item => item.offset === offset); if (instruction) select(offset, {reveal: true});
+    }}) : null;
+  if (blockGraph) toolbar.append(graphToggle);
   const panelControls = node('nav', '', 'vm-static-panels'); panelControls.setAttribute('aria-label', 'Static analysis pane');
   for (const [key, label] of [['listing', 'Addresses'], ['details', 'Details']]) {
     const control = button(label, () => setPanel(key, true)); control.setAttribute('data-vm-static-panel', key); panelButtons[key] = control; panelControls.append(control);
@@ -310,7 +319,7 @@ function mountVmStatic(root, model = vmStatic) {
   filter.addEventListener('input', () => { page = 0; renderListing(); });
   listingHead.append(node('h2', 'Bytecode addresses'), filterBar, listingStatus, columns); listing.append(listingHead, listingRows, listingPager);
   const detailHead = node('div', '', 'vm-static-detail-head'); detailHead.append(selectedTitle, tabs); inspector.append(detailHead, detail, back);
-  body.append(listing, inspector); root.append(toolbar, summary, body);
+  body.append(listing, inspector); root.append(toolbar, summary, body, graphHost);
   root.addEventListener('keydown', event => { if (event.key === 'Escape' && layout === 'narrow' && panel === 'details' && !event.isComposing) { event.preventDefault(); selected !== null ? select(selected, {reveal: true, focus: true}) : setPanel('listing', true); } });
   function changeLayout(width) {
     const next = width >= 1100 ? 'wide' : width >= 760 ? 'medium' : 'narrow'; if (next === layout) return;
@@ -332,7 +341,7 @@ function mountVmStatic(root, model = vmStatic) {
     page = Math.floor(matches().indexOf(row) / pageSize); select(row.offset, {focus: true});
   });
   update(); renderListing(); renderDetails();
-  return {fileInputs, analyze, demo, clear, notice, sourceSummary, filter, reveal, listingRows, listingPager, detail, tabButtons, panelButtons,
+  return {blockGraph, fileInputs, analyze, demo, clear, notice, sourceSummary, filter, reveal, listingRows, listingPager, detail, tabButtons, panelButtons,
     select, setTab, setPanel, changeLayout, importFile, analyzeInputs, getReport: () => report, getSelected: () => selected};
 }
 if (typeof module === 'object' && module?.exports) module.exports = {mountVmStatic, vmStaticOwnedExample};

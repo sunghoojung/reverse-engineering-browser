@@ -271,6 +271,7 @@ javascript-check: capture-completeness-check
 	node tools/owned-opcode-experiment-ui-cases.mjs --validate-fixtures
 	node tools/check-vm-static.mjs
 	node tools/check-vm-static-ui.mjs
+	node tools/check-block-graph-ui.mjs
 	node tools/check-vm-contextual.mjs
 	node tools/check-vm-contextual-evidence.mjs
 	node tools/check-vm-contextual-ui.mjs

@@ -260,7 +260,9 @@ impl<'s, 't> Layout<'s, 't> {
         }
     }
     fn trailing_comments(&mut self) {
-        let before = self.peek().map_or(u32::MAX, |token| token.start());
+        let before = self
+            .peek()
+            .map_or(self.source.len() as u32, |token| token.start());
         // Only comments that end the line stay with the previous token.
         while let Some(comment) = self.comments.get(self.next_comment).copied()
             && comment.start < before
@@ -341,7 +343,7 @@ impl<'s, 't> Layout<'s, 't> {
         }
         self.body(&program.directives, &program.body);
         self.emit_until(u32::MAX);
-        self.leading_comments(u32::MAX);
+        self.leading_comments(self.source.len() as u32);
     }
 
     fn body(&mut self, directives: &[Directive], statements: &[Statement]) {
@@ -2024,6 +2026,34 @@ mod tests {
             "export default async function(){for await(const x of y){}}export*from'm';import q,{r as s}from'n';",
         ] {
             layout(source);
+        }
+    }
+
+    #[test]
+    fn comments_after_the_last_token_keep_their_text_and_end_the_output() {
+        let cases = [
+            (
+                "a;//# sourceMappingURL=app.js.map",
+                "a; //# sourceMappingURL=app.js.map\n",
+            ),
+            (
+                "a;\n//# sourceMappingURL=app.js.map\n",
+                "a;\n//# sourceMappingURL=app.js.map\n",
+            ),
+            ("a; // tail", "a; // tail\n"),
+            ("a; /* end */", "a; /* end */\n"),
+            ("a;\n\n/* end */\n", "a;\n\n/* end */\n"),
+            (
+                "a; /* one */ /* two */ // three",
+                "a; /* one */ /* two */ // three\n",
+            ),
+            ("// only", "// only\n"),
+            ("/* only */\n", "/* only */\n"),
+            ("/* one */\n\n// two\n", "/* one */\n\n// two\n"),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(layout(source), expected, "{source}");
+            assert_eq!(layout(expected), expected, "{source}");
         }
     }
 

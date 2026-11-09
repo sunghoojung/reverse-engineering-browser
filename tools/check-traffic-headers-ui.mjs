@@ -136,5 +136,11 @@ api.renderTrafficHeaders(panel, {id: 'm', origin: 'live', method: 'GET', path: '
 assert.match(panel.textContent, /recorded only in content capture sessions/);
 api.renderTrafficHeaders(panel, {id: 'l', origin: 'sample', method: 'GET', path: 'x', status: 200}, () => {});
 assert.match(panel.textContent, /no native header record/);
+// A partial store read must not state that nothing was retained.
+api.renderTrafficHeaders(panel, {id: 'p', origin: 'live', method: 'GET', path: 'https://echo.test/a', status: 200, hostOnly: false, headerBlocks: [], recordsPartial: true}, () => {});
+assert.match(panel.textContent, /unknown rather than missing/);
+assert.doesNotMatch(panel.textContent, /No header record was retained/);
+api.renderTrafficHeaders(panel, {id: 'c', origin: 'live', method: 'GET', path: 'https://echo.test/a', status: 200, hostOnly: false, headerBlocks: []}, () => {});
+assert.match(panel.textContent, /No header record was retained/, 'A complete read may still state absence');
 console.log('PASS Traffic Headers tab: hops newest first, provisional notice, size and SHA-256 checked reads, raw and copy, ' +
   'text-only values, refusal, integrity and not-retained states, metadata-only and legacy rows (DOM model; not rendered QA)');

@@ -476,6 +476,9 @@ function renderTrafficCookies(container, request, rerender, context = {}) {
   const malformed = (request.cookieLists ?? []).filter(list => list.malformed).length;
   let message = '';
   if (!Array.isArray(request.cookieLists)) message = 'This row has no native cookie record.';
+  else if (request.recordsPartial) message = hops.length
+    ? 'Some of this request\'s records could not be read, so more cookies may exist.'
+    : 'Some of this request\'s records could not be read, so its cookies are unknown rather than missing.';
   else if (!hops.length && !malformed) message = request.hostOnly
     ? 'Cookies are recorded only in content capture sessions.' : 'No cookie list was retained for this request.';
   if (malformed) message = `${message} ${malformed} cookie record${malformed === 1 ? ' is' : 's are'} malformed and not shown.`.trim();

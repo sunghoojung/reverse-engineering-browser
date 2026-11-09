@@ -3286,13 +3286,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const row = [...elements.requestRows.querySelectorAll('.request-row')].find(node => node.dataset.requestId === id);
         row?.setAttribute('aria-busy', 'true');
         try {
-          const events = await state.trafficIndex.events(indexed.indexRow, AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]));
+          const {events, partial} = await state.trafficIndex.events(indexed.indexRow, AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]));
           if (controller.signal.aborted) return;
           const request = requestsFromEvents(events, indexed.origin).find(candidate => candidate.id === id);
           if (!request) throw new Error('its stored records no longer form this request');
           // Tab sets and links have no request ID, so the store read lacks them; the index row has them.
           Object.assign(request, {tabIds: indexed.tabIds, tabLink: indexed.tabLink, tabLinkLabel: indexed.tabLinkLabel,
-            extensionId: indexed.extensionId});
+            extensionId: indexed.extensionId, recordsPartial: partial});
           retainTrafficRequest(request);
           rebuildTrafficRequests();
           if (select) {

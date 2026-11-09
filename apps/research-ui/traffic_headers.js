@@ -188,6 +188,9 @@ function renderTrafficHeaders(container, request, rerender, targetView = null) {
   const malformed = (request.headerBlocks ?? []).filter(block => block.malformed).length;
   let message = '';
   if (!Array.isArray(request.headerBlocks)) message = 'This row has no native header record.';
+  else if (request.recordsPartial) message = hops.length
+    ? 'Some of this request\'s records could not be read, so more headers may exist.'
+    : 'Some of this request\'s records could not be read, so its headers are unknown rather than missing.';
   else if (!hops.length && !malformed) message = request.hostOnly
     ? 'Headers are recorded only in content capture sessions.' : 'No header record was retained for this request.';
   if (malformed) message = `${message} ${malformed} header record${malformed === 1 ? ' is' : 's are'} malformed and not shown.`.trim();

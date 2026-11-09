@@ -97,8 +97,10 @@ function createTrafficIndex({fetcher = (input, init) => fetch(input, init), onCh
       return answer?.rows.find(request => request.id === id) ?? null;
     },
     // Each member is read forward from the row's first offset, up to its record count.
+    // `partial` means some records were not read, so a missing one is unknown, not absent.
     async events(row, signal) {
       const events = new Map();
+      let partial = row.members_limited === true;
       for (const member of row.members) {
         let after = row.first_offset, remaining = member.records;
         for (let page = 0; page < TRAFFIC_DETAIL_PAGES && remaining > 0; page += 1) {
@@ -110,17 +112,19 @@ function createTrafficIndex({fetcher = (input, init) => fetch(input, init), onCh
           if (!Array.isArray(body?.events) || !body.query) throw new Error('the event store answer is malformed');
           for (const event of body.events) events.set(`${event.session_id}:${event.process_id}:${event.sequence_number}`, event);
           remaining -= body.events.length;
+          if (body.query.malformed_lines > 0) partial = true;
           const next = body.query.next_after;
           if (!(body.query.limited || body.query.budget_exhausted) || BigInt(next) >= BigInt(row.end_offset)) break;
           after = next;
         }
+        if (remaining > 0) partial = true;
       }
       const order = event => [BigInt(event.monotonic_time_ns), BigInt(event.process_id), BigInt(event.sequence_number)];
-      return [...events.values()].sort((left, right) => {
+      return {partial, events: [...events.values()].sort((left, right) => {
         const [a, b] = [order(left), order(right)];
         for (let index = 0; index < a.length; index += 1) if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
         return 0;
-      });
+      })};
     }
   };
 }

@@ -295,6 +295,12 @@ assert.match(panel.textContent, /receiver refused this list: sensitive_capture_d
 assert.match(panel.textContent, /already retained 64 MiB of header blocks and cookie lists/);
 assert.match(panel.textContent, /2 MiB list limit/);
 
+// A partial store read must not state that nothing was retained.
+api.renderTrafficCookies(panel, {id: 'p', origin: 'live', method: 'GET', path: 'https://echo.test/a', status: 200, hostOnly: false, cookieLists: [], recordsPartial: true}, () => {});
+assert.match(panel.textContent, /unknown rather than missing/);
+assert.doesNotMatch(panel.textContent, /No cookie list was retained/);
+api.renderTrafficCookies(panel, {id: 'c', origin: 'live', method: 'GET', path: 'https://echo.test/a', status: 200, hostOnly: false, cookieLists: []}, () => {});
+assert.match(panel.textContent, /No cookie list was retained/, 'A complete read may still state absence');
 // Metadata-only and legacy rows say why there is nothing to show.
 api.renderTrafficCookies(panel, {id: 'm', origin: 'live', method: 'GET', path: 'echo.test', status: 200, hostOnly: true, cookieLists: []}, () => {});
 assert.match(panel.textContent, /recorded only in content capture sessions/);

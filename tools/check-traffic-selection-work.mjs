@@ -358,9 +358,24 @@ const eventsOf = (id, records) => Array.from({length: records}, (_, sequence) =>
     detailReads.push(url); return detailReads.length === 1 ? page(eventsOf('1', 200), '50', true) : page(eventsOf('1', 200).map((event, i) => ({...event, sequence_number: String(i + 201)})), '60', false);
   }});
   const row = {first_offset: '10', end_offset: '100', members: [{session_id: '1', process_id: 7, request_id: '1', records: 400}]};
-  const events = await details.events(row, new AbortController().signal);
+  const {events, partial} = await details.events(row, new AbortController().signal);
   assert.equal(events.length, 400, 'Every page of a member is read');
+  assert.equal(partial, false, 'A complete read is not partial');
   assert.match(detailReads[1], /after=50/);
+  // Absence after a partial read is unknown: a limited member list, the page cap, a damaged line, a short read.
+  const readWith = async (pages, rowOverride = {}) => {
+    let calls = 0;
+    const reader = t.api.createTrafficIndex({fetcher: async () => respond(200, pages[Math.min(calls++, pages.length - 1)])});
+    return reader.events({first_offset: '0', end_offset: '1000000', members: [{session_id: '1', process_id: 7, request_id: '1', records: 400}], ...rowOverride}, new AbortController().signal);
+  };
+  const part = (query, count = 200) => ({events: eventsOf('1', count).map((event, i) => ({...event, sequence_number: String(i + calls())})), query});
+  let serial = 1000; function calls() { serial += 1000; return serial; }
+  assert.equal((await readWith([part({next_after: '1', limited: false, budget_exhausted: false}, 400)], {members_limited: true})).partial, true, 'A row with unlisted members is partial');
+  const full = {next_after: '2', limited: true, budget_exhausted: false};
+  const capped = await readWith(Array.from({length: 17}, () => part(full, 20)));
+  assert.equal(capped.partial, true, 'Stopping at the page cap with records unread is partial');
+  assert.equal((await readWith([part({next_after: '1', limited: false, budget_exhausted: false, malformed_lines: 1}, 400)])).partial, true, 'A damaged line is partial');
+  assert.equal((await readWith([part({next_after: '1', limited: false, budget_exhausted: false}, 300)])).partial, true, 'Fewer records than indexed is partial');
   const broken = t.api.createTrafficIndex({fetcher: async () => respond(200, {events: 'no'})});
   await assert.rejects(broken.events(row, new AbortController().signal), /malformed/);
 }

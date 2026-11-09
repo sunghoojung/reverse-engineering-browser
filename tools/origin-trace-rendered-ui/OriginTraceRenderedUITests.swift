@@ -1182,6 +1182,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertTrue(general.contains("Response bodies are on the Response tab."), "\(size.name): native coverage is explicit: \(general)")
       let panes = try await ui.value("document.querySelectorAll('#exchange-inspector .exchange-pane').length") as? Int ?? -1
       XCTAssertEqual(panes, 0, "\(size.name): no permanently empty request/response header panes")
+      // A horizontal scrollbar takes height from the strip and covers the tabs.
+      let strip = try await ui.json("(() => { const strip = document.querySelector('#screen-traffic .inspector-tabs'); return {client: strip.clientHeight, content: strip.querySelector('.inspector-tab').offsetHeight}; })()")
+      XCTAssertGreaterThanOrEqual(strip["client"] as? Int ?? 0, strip["content"] as? Int ?? 1, "\(size.name): the inspector tabs are not clipped: \(strip)")
       try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) traffic general")
       try await ui.screenshot("traffic-general-\(size.name)")
 

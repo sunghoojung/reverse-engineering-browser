@@ -445,11 +445,15 @@
         min-height: 32px;
         display: flex;
         overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: none;
         align-items: stretch;
         gap: 16px;
         padding: 0 12px;
         border-bottom: 1px solid var(--line);
       }
+      /* A legacy scrollbar would cover the lower half of every 32px tab. */
+      .inspector-tabs::-webkit-scrollbar { display: none; }
       .inspector-tab, .field-tab {
         flex: 0 0 auto;
         position: relative;

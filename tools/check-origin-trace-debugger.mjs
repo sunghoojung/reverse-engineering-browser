@@ -1278,12 +1278,13 @@ console.log("PASS selected strip and inspector share current pending/response/fa
   let clock = 1000, renders = 0;
   const timers = [], fetches = [];
   const respond = [];
-  const context = {state: bodyState, location: {protocol: "http:"}, AbortController, TextDecoder, Uint8Array, crypto,
-    Date: {now: () => clock}, sourceFactsReadBytes: sourceFactsUI.sourceFactsReadBytes, decodePayload: () => "",
+  const context = {state: bodyState, location: {protocol: "http:"}, AbortController, TextDecoder, Uint8Array, crypto, URLSearchParams, AbortSignal,
+    Date: {now: () => clock}, sourceFactsReadBytes: sourceFactsUI.sourceFactsReadBytes, decodePayload: () => "", isArtifactResponse: body => Array.isArray(body?.artifacts),
     setTimeout: (fn) => {timers.push(fn); return timers.length;}, clearTimeout: () => {},
     fetch: (url, {signal}) => {fetches.push(url); return respond.shift()(signal);},
     renderInspector: () => {renders++; bodyState.requestBodyViewKey = body.requestContentViewKey(request);}};
-  const body = runInNewContext(appSection("      const REQUEST_BODY_PAGE_BYTES", "      function renderInspectorMessage(") +
+  const body = runInNewContext(trafficSource + "\n" +
+    appSection("      const REQUEST_BODY_PAGE_BYTES", "      function renderInspectorMessage(") +
     ";({requestBodyView,requestContentViewKey,refreshSelectedRequestBody,loadMoreRequestBody,requestFullUrl})", context);
   const settle = () => new Promise(resolve => setTimeout(resolve, 20));
   // The first read times out.
@@ -1330,16 +1331,29 @@ console.log("PASS selected strip and inspector share current pending/response/fa
   bodyState.artifacts.push({...artifact, artifact_id: "903", sha256: largeDigest, byte_size: large.length});
   const largeRequest = {id: "l", body: {...request.body, artifactId: "903"}};
   bodyState.requests.push(largeRequest); bodyState.selectedRequestId = "l";
-  respond.push(async () => new Response(large.slice(0, 256 * 1024)));
+  respond.push(async () => new Response(large.slice(0, 2 * 1024 * 1024)));
   body.requestBodyView(largeRequest); await settle();
   view = body.requestBodyView(largeRequest);
-  assert.equal(view.complete, false); assert.equal(view.loaded, 256 * 1024); assert.equal(view.verified, false);
-  assert.match(fetches.at(-1), /offset=0&limit=262144$/);
-  respond.push(async () => new Response(large.slice(256 * 1024)));
+  assert.equal(view.complete, false); assert.equal(view.loaded, 2 * 1024 * 1024); assert.equal(view.verified, false);
+  assert.match(fetches.at(-1), /offset=0&limit=2097152$/);
+  respond.push(async () => new Response(large.slice(2 * 1024 * 1024)));
   body.loadMoreRequestBody(view.key); await settle();
   view = body.requestBodyView(largeRequest);
-  assert.match(fetches.at(-1), /offset=262144&limit=45056$/, "The next range starts where the shown bytes end");
+  assert.match(fetches.at(-1), /offset=2097152&limit=1048576$/, "The next range starts where the shown bytes end");
   assert.equal(view.complete, true); assert.equal(view.verified, true); assert.equal(view.text.length, large.length);
+  // A body past the catalog's cap is read by ID: one manifest read, then its bytes.
+  const byIdRequest = {id: "byid", body: {...request.body, artifactId: "904"}};
+  bodyState.requests.push(byIdRequest); bodyState.selectedRequestId = "byid";
+  const manifestReply = {artifacts: [{...artifact, artifact_id: "904"}], query: {next_after: "5", budget_exhausted: false, limited: false}};
+  const before = fetches.length;
+  respond.push(async () => new Response(JSON.stringify(manifestReply)), async () => new Response(bytes));
+  assert.equal(body.requestBodyView(byIdRequest).status, "loading");
+  await settle();
+  assert.match(fetches[before], /^\/api\/artifacts\?artifact_id=904&session_id=7&after=0&limit=1$/);
+  await settle();
+  view = body.requestBodyView(byIdRequest);
+  assert.equal(view.status, "ready"); assert.equal(view.verified, true);
+  assert.equal(fetches.length, before + 2, "One manifest read, then the bytes");
   // A long target's retained artifact completes the request URL.
   const full = "/graphql?variables=" + "v".repeat(8000);
   const fullBytes = new TextEncoder().encode(full);

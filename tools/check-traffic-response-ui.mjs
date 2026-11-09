@@ -26,7 +26,7 @@ const countedCrypto = {subtle: {digest: (...args) => {
 }}};
 const context = createContext({
   window, document, location: {protocol: 'http:'}, console, TextDecoder, TextEncoder, Uint8Array, AbortController, Date,
-  setTimeout, clearTimeout, crypto: countedCrypto, btoa, Response, Promise,
+  setTimeout, clearTimeout, crypto: countedCrypto, btoa, Response, Promise, AbortSignal, URLSearchParams,
   decodePayload: event => Buffer.from(event.payload, 'hex').toString(),
   navigator: {clipboard: {writeText: async text => {copied.push(text);}}},
   fetch: async url => {
@@ -36,8 +36,8 @@ const context = createContext({
     return bytes ? new Response(bytes.subarray(Number(offset), Number(offset) + Number(limit))) : new Response('', {status: 404});
   }
 });
-runInContext(`${await ui('source_syntax.js')}\n${await ui('source_format.js')}\n${await ui('code_view.js')}\n${await ui('source_facts.js')}\n${await ui('traffic_response.js')}
-globalThis.api = {trafficResponseCapture, trafficResponseArtifact, trafficImageType, trafficJsonTree, createTrafficResponse, createSourceLayoutWorker};`, context);
+runInContext(`${await ui('source_syntax.js')}\n${await ui('source_format.js')}\n${await ui('code_view.js')}\n${await ui('source_facts.js')}\n${await ui('traffic_view.js')}\n${await ui('traffic_payload.js')}\n${await ui('traffic_response.js')}
+globalThis.api = {trafficResponseCapture, trafficResponseArtifact, trafficImageType, createTrafficResponse, createSourceLayoutWorker, createTrafficArtifactLookup};`, context);
 const {api} = context;
 const panel = document.getElementById('panel');
 // SHA-256 runs off the event loop, so no fixed number of turns is sure to outlast
@@ -233,7 +233,65 @@ state.events.push({type: 'artifact_capture_failed', artifact_id: '900', session_
 await show(request(refused));
 assert.match(panel.textContent, /not started for sensitive capture/);
 await show(request(record({artifact_id: '901', byte_size: 4, sha256: 'b'.repeat(64), mime_type: 'application/json'})));
-assert.match(panel.textContent, /not in the current catalog/);
+assert.match(panel.textContent, /not in the artifact manifest: its acknowledgment is pending/);
+
+// A body past the catalog is read by ID; a refusal is read by ID too.
+const lookupReads = [];
+const manifestRecord = retain('{"late":true}', 'application/json');
+state.artifacts.pop();
+let manifestAnswer = {artifacts: [manifestRecord], query: {next_after: '9', limited: false, budget_exhausted: false}};
+let eventAnswer = {events: [], query: {next_after: '9', limited: false, budget_exhausted: false}};
+const reply = body => new Response(JSON.stringify(body));
+const lookups = api.createTrafficArtifactLookup({onChange: () => {if (current) view.render(panel, ...current);},
+  valid: body => Array.isArray(body?.artifacts), refusalText: event => `refused:${event.artifact_id}`,
+  fetcher: async url => {lookupReads.push(url); return reply(url.startsWith('/api/artifacts?') ? manifestAnswer : eventAnswer);}});
+const byIdRecord = record(manifestRecord);
+let entry = lookups.lookup(byIdRecord, '1500');
+assert.equal(entry.status, 'loading');
+await settle();
+entry = lookups.lookup(byIdRecord, '1500');
+assert.equal(entry.status, 'found');
+assert.equal(entry.artifact.artifact_id, manifestRecord.artifact_id);
+assert.equal(lookupReads.length, 1, 'A found artifact is read once');
+assert.match(lookupReads[0], /artifact_id=\d+&session_id=7&after=0&limit=1/);
+// Neither manifest nor event scan reached it: unknown, not absent.
+const missing = record({artifact_id: '902', byte_size: 2, sha256: 'c'.repeat(64), mime_type: 'application/json'});
+manifestAnswer = {artifacts: [], query: {next_after: '64', limited: false, budget_exhausted: false}};
+eventAnswer = {events: [], query: {next_after: '64', limited: false, budget_exhausted: true}};
+lookups.lookup(missing, '1500');
+await settle();
+assert.equal(lookups.lookup(missing, '1500').status, 'unknown');
+assert.match(lookupReads.at(-1), /type=artifact_capture_failed&artifact_id=902&session_id=7&after=1500&limit=1/);
+// A whole-manifest miss with no refusal is pending; a refusal names its reason.
+const pending = record({artifact_id: '903', byte_size: 2, sha256: 'c'.repeat(64), mime_type: 'application/json'});
+eventAnswer = {events: [], query: {next_after: '64', limited: false, budget_exhausted: false}};
+lookups.lookup(pending);
+await settle();
+assert.equal(lookups.lookup(pending).status, 'absent');
+const reads0 = lookupReads.length;
+assert.equal(lookups.lookup(pending).status, 'absent');
+assert.equal(lookupReads.length, reads0, 'No extra reads inside the retry interval');
+const refusedById = record({artifact_id: '904', byte_size: 2, sha256: 'c'.repeat(64), mime_type: 'application/json'});
+eventAnswer = {events: [{artifact_id: '904'}], query: {next_after: '64', limited: false, budget_exhausted: false}};
+lookups.lookup(refusedById);
+await settle();
+assert.deepEqual({status: lookups.lookup(refusedById).status, reason: lookups.lookup(refusedById).reason}, {status: 'refused', reason: 'refused:904'});
+const byIdView = api.createTrafficResponse({getArtifacts: () => state.artifacts, getEvents: () => state.events, contentSession: () => true,
+  readable: () => true, onChange: () => {}, lookup: item => lookups.lookup(item)});
+const lookupPanel = document.createElement('div');
+byIdView.render(lookupPanel, request(byIdRecord), 'response');
+await settle();
+byIdView.render(lookupPanel, request(byIdRecord), 'response');
+assert(lookupPanel.querySelector('.traffic-response-code'), 'A body past the catalog renders after an ID read');
+byIdView.render(lookupPanel, request(refusedById), 'response');
+assert.match(lookupPanel.textContent, /did not retain it \(refused:904\)/);
+const unknownRecord = record({artifact_id: '905', byte_size: 2, sha256: 'c'.repeat(64), mime_type: 'application/json'});
+manifestAnswer = {artifacts: [], query: {next_after: '64', limited: false, budget_exhausted: false}};
+eventAnswer = {events: [], query: {next_after: '64', limited: false, budget_exhausted: true}};
+byIdView.render(lookupPanel, request(unknownRecord), 'response');
+await settle();
+byIdView.render(lookupPanel, request(unknownRecord), 'response');
+assert.match(lookupPanel.textContent, /not in the scanned range of the artifact manifest/);
 
 // Unchanged inputs do not rebuild the panel.
 await show(request(record(jsonArtifact)));

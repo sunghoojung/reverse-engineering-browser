@@ -110,7 +110,8 @@ function trafficBodyContent(body, view) {
       : `The artifact receiver did not retain it (${view.reason || 'unknown reason'}).`};
   }
   if (view.status === 'missing') {
-    return {note: 'The body artifact is not in the current catalog: its acknowledgment is pending, or it is past the first 50,000 artifacts of the catalog.'};
+    return {note: view.unknown ? 'The body artifact is not in the scanned range of the artifact manifest, so whether it was retained is unknown.'
+      : 'The body artifact is not in the artifact manifest: its acknowledgment is pending.'};
   }
   if (view.status === 'unavailable') return {note: 'Retained bodies are read from the local backend, which this view does not have.'};
   if (view.status === 'error') {
@@ -125,6 +126,57 @@ function trafficBodyContent(body, view) {
   if (!view.verified) notes.push(more ? 'The local backend checked the retained digest; this view rechecks it once every byte is shown.'
     : 'The retained digest could not be rechecked in this view.');
   return {text: view.text, note: notes.join(' '), url: view.url, more: more ? view.key : null, loadingMore: Boolean(view.loadingMore)};
+}
+
+// Request artifacts are read by ID (get_artifacts filters), not from the first 50,000
+// catalog records. A read that stopped at its scan budget is unknown, not absent.
+const TRAFFIC_ARTIFACT_LOOKUP_RETRY_MS = 5000;
+const TRAFFIC_ARTIFACT_LOOKUP_ENTRIES = 256;
+const TRAFFIC_ARTIFACT_LOOKUP_PAGES = 8;
+function createTrafficArtifactLookup({fetcher = (input, init) => fetch(input, init), onChange = () => {}, valid = () => true,
+  refusalText = () => ''} = {}) {
+  const entries = new Map();
+  const signal = () => AbortSignal.timeout(10000);
+  async function read(record, after) {
+    const {sessionId: session_id, artifactId: artifact_id} = record;
+    let cursor = '0', complete = false;
+    for (let page = 0; page < TRAFFIC_ARTIFACT_LOOKUP_PAGES && !complete; page += 1) {
+      const response = await fetcher(`/api/artifacts?${new URLSearchParams({artifact_id, session_id, after: cursor, limit: '1'})}`, {cache: 'no-store', signal: signal()});
+      if (!response.ok) throw new Error(`the artifact store returned ${response.status}`);
+      const body = await response.json();
+      if (!valid(body) || !body.query) throw new Error('the artifact store answer is malformed');
+      if (body.artifacts.length) return {status: 'found', artifact: body.artifacts[0]};
+      if (body.query.budget_exhausted) cursor = String(body.query.next_after);
+      else complete = true;
+    }
+    // A receiver refusal arrives soon after its creator record, so one page from the request's first record is enough.
+    const refusals = await fetcher(`/api/events?${new URLSearchParams({type: 'artifact_capture_failed', artifact_id, session_id, after, limit: '1'})}`, {cache: 'no-store', signal: signal()});
+    if (!refusals.ok) throw new Error(`the event store returned ${refusals.status}`);
+    const body = await refusals.json();
+    if (!Array.isArray(body?.events) || !body.query) throw new Error('the event store answer is malformed');
+    if (body.events.length) return {status: 'refused', reason: refusalText(body.events[0])};
+    return {status: complete && !body.query.budget_exhausted ? 'absent' : 'unknown'};
+  }
+  return {
+    // The manifest record for a record's artifact ID, read once per retry interval.
+    lookup(record, after = '0') {
+      const key = `${record.sessionId}:${record.artifactId}`;
+      const known = entries.get(key);
+      const retry = known && ['absent', 'unknown'].includes(known.status) && Date.now() >= known.retryAt;
+      if (known && !retry) return known.status === 'loading' && known.previous ? known.previous : known;
+      const entry = {status: 'loading', previous: known};
+      entries.delete(key);
+      entries.set(key, entry);
+      while (entries.size > TRAFFIC_ARTIFACT_LOOKUP_ENTRIES) entries.delete(entries.keys().next().value);
+      read(record, after).then(result => Object.assign(entry, result), error => Object.assign(entry, {status: 'unknown', error: String(error?.message ?? error)}))
+        .finally(() => {
+          entry.retryAt = Date.now() + TRAFFIC_ARTIFACT_LOOKUP_RETRY_MS;
+          onChange();
+        });
+      return known ?? entry;
+    },
+    clear: () => entries.clear()
+  };
 }
 
 // The Request URL row: the full target once retained bytes are loaded, else
@@ -144,7 +196,7 @@ function trafficRequestUrl(request, view) {
   if (retention === 'retained') {
     return `${prefix}; ${!view || view.status === 'loading' ? 'loading the retained full target'
       : view.status === 'refused' ? `the artifact receiver did not retain the full target (${view.reason || 'unknown reason'})`
-        : view.status === 'missing' ? 'the full target artifact is not in the current catalog'
+        : view.status === 'missing' ? `the full target artifact is ${view.unknown ? 'not in the scanned range of the artifact manifest' : 'not in the artifact manifest'}`
           : view.status === 'error' ? `the full target could not be read: ${view.error}` : 'the full target is not readable here'})`;
   }
   return TRAFFIC_TARGET_RETENTION[retention] ? `${prefix}; the full target was not retained: ${TRAFFIC_TARGET_RETENTION[retention]})` : `${prefix})`;

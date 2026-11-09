@@ -3558,15 +3558,34 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           artifact.creator_event_id === record.sequenceNumber);
         return matches.length === 1 ? matches[0] : null;
       }
-      function requestContentView(record, kind) {
+      const trafficArtifacts = createTrafficArtifactLookup({valid: isArtifactResponse, refusalText: decodePayload,
+        onChange: () => {
+          const selected = state.requests.find(request => request.id === state.selectedRequestId);
+          if (['response', 'preview'].includes(state.inspectorTab)) renderInspector();
+          else if (selected && requestContentViewKey(selected) !== state.requestBodyViewKey) renderInspector();
+        }});
+      // The index knows where a request's records start; a refusal is read forward from there.
+      function trafficStoreOffset(request) {
+        return state.trafficIndex?.row?.(request?.id)?.indexRow?.first_offset ?? '0';
+      }
+      function requestContentView(record, kind, after = '0') {
         if (location.protocol === 'file:') return {status: 'unavailable'};
         // The receiver's refusal joins the creator record exactly, as its parent.
         const refusal = state.events.find(event => event.type === 'artifact_capture_failed' &&
           event.artifact_id === record.artifactId && event.parent_event_id === record.sequenceNumber &&
           event.session_id === record.sessionId && event.process_id === record.processId);
         if (refusal) return {status: 'refused', reason: decodePayload(refusal)};
-        const artifact = requestContentArtifact(record, kind);
-        if (!artifact) return {status: 'missing'};
+        let artifact = requestContentArtifact(record, kind);
+        if (!artifact) {
+          // Past the catalog's cap, or not in it yet: read it by ID.
+          const found = trafficArtifacts.lookup(record, after);
+          if (found.status === 'refused') return {status: 'refused', reason: found.reason};
+          if (found.status === 'loading') return {status: 'loading'};
+          const named = found.status === 'found' && found.artifact.artifact_id === record.artifactId && found.artifact.kind === kind &&
+            found.artifact.session_id === record.sessionId && found.artifact.creator_event_id === record.sequenceNumber;
+          if (!named) return {status: 'missing', unknown: found.status === 'unknown'};
+          artifact = found.artifact;
+        }
         const key = `${artifact.session_id}:${artifact.artifact_id}:${artifact.sha256}`;
         const view = requestBodyViews.get(key);
         // A body cut at the capture limit may end inside a character.
@@ -3585,11 +3604,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       function requestBodyView(request) {
         const body = request?.body;
         if (!body || body.malformed || !['captured', 'captured_truncated'].includes(body.state)) return null;
-        return requestContentView(body, 'request_body');
+        return requestContentView(body, 'request_body', trafficStoreOffset(request));
       }
       function requestTargetView(request) {
         const target = request?.fullTarget;
-        return target?.retention === 'retained' ? requestContentView(target, 'request_target') : null;
+        return target?.retention === 'retained' ? requestContentView(target, 'request_target', trafficStoreOffset(request)) : null;
       }
       // The composed URL once its retained full target is loaded.
       function requestFullUrl(request) {
@@ -3702,7 +3721,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // Response and Preview tabs, protocol/native-network-v3.md.
       const trafficResponse = createTrafficResponse({getArtifacts: () => state.artifacts, getEvents: () => state.events,
         contentSession: () => state.requestContentCaptureEnabled, readable: () => location.protocol !== 'file:',
-        onChange: () => renderInspector()});
+        lookup: (record, request) => trafficArtifacts.lookup(record, trafficStoreOffset(request)), onChange: () => renderInspector()});
       function openResolvedFrame(resolution) {
         if (selectArtifact(resolution.artifact_id, resolution.artifact_line ?? null,
           {column: resolution.artifact_column ?? 0}) !== false) showScreen('sources');
@@ -8124,6 +8143,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
               retireCanvasPreviews('Canvas previews released because the artifact catalog is empty.');
               for (const artifact of state.artifacts) releaseSourcePreview(artifact, artifact);
               state.artifacts = [];
+              trafficArtifacts.clear();
               state.openArtifactIds = [];
               state.selectedArtifactId = null;
               renderSources();

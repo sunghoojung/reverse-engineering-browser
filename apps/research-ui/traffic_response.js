@@ -112,52 +112,12 @@ function trafficResponseText(bytes, open = false) {
   }
 }
 
-// A bounded tree of text nodes. Objects and arrays fold; strings stay inert.
-function trafficJsonTree(value) {
-  let budget = TRAFFIC_JSON_NODE_LIMIT;
-  const leaf = item => {
-    const type = item === null ? 'null' : typeof item;
-    const span = trafficNode('span', `traffic-json-value syntax-${type === 'string' ? 'string' : type === 'number' ? 'number' : 'keyword'}`,
-      type === 'string' ? JSON.stringify(item) : String(item));
-    return span;
-  };
-  const build = (key, item, depth) => {
-    budget -= 1;
-    const label = key === null ? null : trafficNode('span', 'traffic-json-key syntax-property', `${key}: `);
-    if (item === null || typeof item !== 'object') {
-      const row = trafficNode('div', 'traffic-json-leaf');
-      if (label) row.append(label);
-      row.append(leaf(item));
-      return row;
-    }
-    const entries = Array.isArray(item) ? item.map((entry, index) => [String(index), entry]) : Object.entries(item);
-    const details = document.createElement('details');
-    details.className = 'traffic-json-node';
-    details.open = depth < 2;
-    const summary = document.createElement('summary');
-    if (label) summary.append(label);
-    summary.append(trafficNode('span', 'traffic-json-shape', Array.isArray(item) ? `Array(${entries.length})` : `{${entries.length} ${entries.length === 1 ? 'key' : 'keys'}}`));
-    details.append(summary);
-    for (const [name, entry] of entries) {
-      if (budget <= 0 || depth >= 64) {
-        details.append(trafficNode('div', 'traffic-json-more', `${(entries.length - details.children.length + 1).toLocaleString('en-US')} more not shown`));
-        break;
-      }
-      details.append(build(name, entry, depth + 1));
-    }
-    return details;
-  };
-  const root = trafficNode('div', 'traffic-json-tree');
-  root.setAttribute('role', 'tree');
-  root.append(build(null, value, 0));
-  if (budget <= 0) root.append(trafficNode('p', 'traffic-body-note', `The tree shows the first ${TRAFFIC_JSON_NODE_LIMIT.toLocaleString('en-US')} values.`));
-  return root;
-}
-
 // `request` and `worker` replace the format client's backend read and layout worker.
-function createTrafficResponse({getArtifacts, getEvents, contentSession, readable, onChange, request, worker}) {
+function createTrafficResponse({getArtifacts, getEvents, contentSession, readable, onChange, request, worker, lookup = null}) {
   const views = new Map();
   const options = {pretty: false, wrap: true, hex: false, query: '', current: 0};
+  const previews = new Map();
+  let previewArea = null;
   let generation = 0;
   const layouts = createCodeLayouts({request, layouts: worker, onChange: () => {generation += 1; onChange();}});
 
@@ -237,16 +197,26 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     return event ? decodePayload(event) || 'unknown reason' : null;
   }
 
-  function contentNote(record, artifact, view, refusal) {
+  // Past the catalog's cap, or not in it yet: read the artifact by ID.
+  function artifactOf(selected, record) {
+    const catalog = trafficResponseArtifact(selected, getArtifacts() ?? []);
+    if (catalog || !lookup || !readable() || !record || record.malformed || record.artifactId === '0') return {artifact: catalog, found: null};
+    const found = lookup(record, selected);
+    return {artifact: found.status === 'found' ? trafficResponseArtifact(selected, [found.artifact]) : null, found};
+  }
+
+  function contentNote(record, artifact, view, refusal, found) {
     if (refusal) {
       return refusal === 'sensitive_capture_disabled'
         ? 'The artifact receiver refused it: the session receiver was not started for sensitive capture.'
         : `The artifact receiver did not retain it (${refusal}).`;
     }
     if (!artifact) {
-      return record && !record.malformed && record.artifactId !== '0'
-        ? 'The body artifact is not in the current catalog: its acknowledgment is pending, or it is past the first 50,000 artifacts of the catalog.'
-        : null;
+      if (!record || record.malformed || record.artifactId === '0') return null;
+      if (found?.status === 'loading') return 'Looking up the retained body…';
+      return found?.status === 'unknown'
+        ? 'The body artifact is not in the scanned range of the artifact manifest, so whether it was retained is unknown.'
+        : 'The body artifact is not in the artifact manifest: its acknowledgment is pending.';
     }
     if (view.status === 'unavailable') return 'Retained bodies are read from the local backend, which this view does not have.';
     if (view.status === 'loading') return 'Loading the retained body…';
@@ -418,13 +388,20 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
 
   function render(container, request, tab) {
     const record = request?.responseBody ?? null;
-    const artifact = request ? trafficResponseArtifact(request, getArtifacts() ?? []) : null;
-    const refusal = artifact ? null : refusalOf(request);
+    const {artifact, found} = request ? artifactOf(request, record) : {artifact: null, found: null};
+    const refusal = artifact ? null : refusalOf(request) ?? (found?.status === 'refused' ? found.reason || 'unknown reason' : null);
     const view = artifact ? viewOf(artifact) : null;
     const key = JSON.stringify([request?.id, request?.origin, tab, record, request?.responseStarted?.sequenceNumber, artifact?.artifact_id,
-      refusal, view && [view.status, view.loaded, view.error, view.moreError, view.loadingMore], options, generation]);
+      refusal, found?.status, view && [view.status, view.loaded, view.error, view.moreError, view.loadingMore], options, generation]);
     if (container.dataset.renderKey === key) return;
     container.dataset.renderKey = key;
+    // The same body keeps its place across a next range, wrap or pretty print.
+    const scrollKey = JSON.stringify([request?.id, request?.origin, tab, artifact?.artifact_id]);
+    const shownCode = container.dataset.scrollKey === scrollKey ? container.querySelector('.traffic-response-code') : null;
+    const scroll = shownCode ? {top: shownCode.scrollTop, left: shownCode.scrollLeft} : null;
+    container.dataset.scrollKey = scrollKey;
+    previewArea?.dispose();
+    previewArea = null;
     const active = container.contains(document.activeElement) ? document.activeElement.dataset?.control : null;
     const caret = active === 'find' ? document.activeElement.selectionStart : null;
     const nodes = [trafficNode('h2', '', tab === 'preview' ? 'Preview' : 'Response')];

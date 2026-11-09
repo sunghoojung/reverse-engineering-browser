@@ -598,35 +598,58 @@
         return writer.finish();
       }
 
+      // One statement is laid out at a time. A statement past this many tokens is written as it came.
+      const SOURCE_PRETTY_CSS_STATEMENT_TOKENS = 65536;
+      // The layout only adds line breaks and the space after a declaration's colon or before `{`.
+      // Between two other tokens it writes a space exactly where the input had whitespace, so
+      // `600px`, `a:hover`, `#main::before`, `!important` and `100% - var(--gap)` keep their spacing.
       function prettyPrintCssSource(value) {
-        const read = sourcePrettySignificant(createSourcePrettyLexer(value, 'css'));
+        const read = createSourcePrettyLexer(value, 'css');
         const writer = createSourcePrettyWriter();
-        let depth = 0;
-        for (let previous = null, token = read(), next = token && read(); token; previous = token, token = next, next = token && read()) {
-          if (token.kind === 'comment') {
-            writer.original(token); writer.newline(); continue;
+        let statement = [], open = false, spaced = false, parens = 0;
+        // A block's first line break waits so that `a {}` stays on one line.
+        const enter = () => { if (open) { writer.indent(); writer.newline(); open = false; } };
+        const write = entry => { if (entry.spaced) writer.space(); writer.original(entry.token); };
+        // Declarations and preludes differ only in where they may break or gain a space.
+        const flush = kind => {
+          if (statement.length) enter();
+          const atRule = statement[0]?.token.text === '@';
+          const colon = kind === 'declaration' && !atRule ? statement.findIndex(entry => entry.colon) : -1;
+          statement.forEach((entry, at) => {
+            if (at === colon) { writer.original(entry.token); writer.space(); return; }
+            if (at === colon + 1 && colon >= 0) { writer.original(entry.token); return; }
+            write(entry);
+            if (kind === 'prelude' && !atRule && entry.depth === 0 && entry.token.text === ',') writer.newline();
+          });
+          statement = [];
+        };
+        for (let token = read(); token; token = read()) {
+          if (token.kind === 'whitespace') { spaced = true; continue; }
+          if (token.kind === 'comment' && !statement.length) {
+            enter(); writer.original(token); writer.newline(); spaced = false; continue;
           }
-          if (token.kind !== 'operator') {
-            if (previous && ![':', '(', '[', '.', '#', '-', '@'].includes(previous.text)) writer.space();
-            writer.original(token); continue;
-          }
-          if (token.text === '{') {
-            writer.space(); writer.original(token); depth += 1;
-            if (next?.text !== '}') { writer.indent(); writer.newline(); }
-          } else if (token.text === '}') {
-            if (previous?.text !== '{') writer.outdent();
-            writer.newline(); writer.original(token); depth = Math.max(0, depth - 1);
-            if (next) writer.newline();
-          } else if (token.text === ';') {
+          if (token.text === '{' && parens === 0 && token.kind === 'operator') {
+            flush('prelude');
+            enter();
+            writer.space(); writer.original(token); open = true;
+          } else if (token.text === '}' && token.kind === 'operator') {
+            flush('declaration');
+            parens = 0;
+            if (open) open = false;
+            else { writer.newline(); writer.outdent(); }
             writer.original(token); writer.newline();
-          } else if (token.text === ':') {
-            writer.original(token); writer.space();
-          } else if (token.text === ',' && depth === 0) {
-            writer.original(token); writer.newline();
+          } else if (token.text === ';' && parens === 0 && token.kind === 'operator') {
+            flush('declaration');
+            enter(); writer.original(token); writer.newline();
           } else {
-            writer.original(token);
+            if (token.kind === 'operator' && '([{'.includes(token.text)) parens += 1;
+            statement.push({token, spaced, colon: token.kind === 'operator' && token.text === ':' && parens === 0, depth: parens});
+            if (token.kind === 'operator' && ')]}'.includes(token.text)) parens = Math.max(0, parens - 1);
+            if (statement.length === SOURCE_PRETTY_CSS_STATEMENT_TOKENS) flush('');
           }
+          spaced = false;
         }
+        flush('declaration');
         return writer.finish();
       }
 

@@ -143,6 +143,39 @@ var {key: value} = o, e = Foo.prototype, m = module.exports; o = {x: 1}; label: 
   assert.equal(model.sourceWhitespaceMap('a\u0085b', 'ab'), null, 'NEL is not JavaScript whitespace');
   assert(model.sourceWhitespaceMap('\ufeffa=1; b', 'a = 1;\n  b'), 'BOM and line separators are layout whitespace');
 
+  // The CSS layout moves whitespace only: units, selectors, !important and spaces CSS requires stay as written.
+  const cssLayout = input => model.prettyPrintSource({mime_type: 'text/css'}, input).text;
+  assert.equal(cssLayout((await fixture('sample.css')).trimEnd()), `/* theme fixture */
+@media (max-width: 600px) {
+  a:hover > .note,
+  #main::before {
+    color: #fff;
+    margin: 0 4px !important;
+    --gap: 1;
+    width: calc(100% - var(--gap));
+  }
+}`, 'CSS layout of the fixture');
+  assert.equal(cssLayout('a,b>c:not(d,e){color:red;background:url(data:x;base64,AA==) no-repeat}f{}'), `a,
+b>c:not(d,e) {
+  color: red;
+  background: url(data:x;base64,AA==) no-repeat
+}
+f {}`, 'Commas break only between selectors; a semicolon inside url() is content');
+  assert.equal(cssLayout('.e{&:hover{c:d}.f &{g:h}}'), `.e {
+  &:hover {
+    c: d
+  }
+  .f & {
+    g: h
+  }
+}`, 'A nested selector keeps its colon');
+  assert.equal(cssLayout('@import url(x.css);a b  c{d:1px  2px}'), `@import url(x.css);
+a b c {
+  d: 1px 2px
+}`, 'Required spaces stay, and a run of them becomes one');
+  const longValue = `a{b:${Array.from({length: 70000}, (_, at) => `v${at}`).join(' ')}}`;
+  assert.equal(cssLayout(longValue).replace(/\s+/g, ' '), longValue.replace('{b:', ' { b: ').replace('}', ' }'), 'A statement past the token bound keeps its spaces');
+
   // Layout runner: a worker reply, a worker that fails to load, and the shipped worker entry.
   const replies = [];
   const runner = model.createSourceLayoutWorker({defer: callback => callback(), spawn: () => ({

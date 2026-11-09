@@ -645,6 +645,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // timestamps. The strip and the column menu work from the keyboard.
   @MainActor
   private func assertTrafficColumns(_ ui: Harness, _ context: String) async throws {
+    // Only rows near the view are mounted, and item-3 is below the first screen.
+    try await ui.reveal("#screen-traffic .request-row", containing: "item-3.scroll.test")
     let table = try await ui.json("""
       (() => { const shown = cell => cell.getBoundingClientRect().width > 0;
         const row = [...document.querySelectorAll('#screen-traffic .request-row')].find(node => node.innerText.includes('item-3.scroll.test'));
@@ -656,6 +658,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
           waterfall: row?.querySelector('.waterfall-bar')?.getBoundingClientRect().width ?? -1}; })()
       """)
     print("RENDERED_UI_TRAFFIC_COLUMNS \(context) \(table)")
+    _ = try await ui.value("document.querySelector('#request-rows').scrollTop = 0")
+    try await ui.waitUntil("document.querySelector('#screen-traffic .request-row')?.getAttribute('aria-posinset') === '1'", "\(context): the list did not return to its first row")
     let visible = table["visible"] as? [String] ?? []
     XCTAssertEqual(visible.first, "name", "\(context): Name always shows")
     XCTAssertTrue(visible.contains("status") && visible.contains("time"), "\(context): narrow tables drop low-priority columns first: \(visible)")

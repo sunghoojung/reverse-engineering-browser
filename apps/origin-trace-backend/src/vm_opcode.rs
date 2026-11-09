@@ -3424,7 +3424,7 @@ mod tests {
             .map(|index| {
                 json!({
                     "artifact_id": (index + 2).to_string(), "parent_artifact_id":"1",
-                    "session_id":"1", "navigation_id":"1", "frame_id":"1",
+                    "session_id":"1", "navigation_id":"1", "frame_id":"1", "sensitive":false,
                     "sha256":hash, "byte_size":1, "content_path":format!("blobs/{hash}.bin")
                 })
             })

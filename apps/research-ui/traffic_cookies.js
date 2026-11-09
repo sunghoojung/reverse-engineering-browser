@@ -6,8 +6,8 @@
 const TRAFFIC_COOKIE_RETRY_MS = 2000;
 const TRAFFIC_COOKIE_PROVENANCE_LISTS = 64;
 const trafficCookieViews = new Map();
-const trafficCookieStacks = new Map();
-const trafficCookieOptions = {showFiltered: false, sort: new Map(), provenance: null};
+const trafficCookieProvenanceReads = new Map();
+const trafficCookieOptions = {showFiltered: false, sort: new Map(), provenance: null, opener: null, focusKey: null};
 
 const trafficCookieExclusions = ['unknown_error', 'http_only', 'secure_only', 'domain_mismatch', 'not_on_path',
   'samesite_strict', 'samesite_lax', 'samesite_unspecified_treated_as_lax', 'samesite_none_insecure', 'user_preferences',
@@ -230,6 +230,7 @@ function trafficCookieTable(id, title, cookies, {received, onProvenance}) {
     const button = trafficNode('button', 'traffic-cookie-sort', label);
     button.type = 'button';
     button.dataset.column = key;
+    button.dataset.focusKey = `sort:${id}:${key}`;
     button.addEventListener('click', () => {
       trafficCookieOptions.sort.set(id, {column: key, direction: sort.column === key ? -sort.direction : 1});
       table.dispatchEvent(new CustomEvent('traffic-cookie-change', {bubbles: true}));
@@ -252,7 +253,8 @@ function trafficCookieTable(id, title, cookies, {received, onProvenance}) {
         const open = trafficNode('button', 'traffic-cookie-name', text);
         open.type = 'button';
         open.title = `Show everything that touched ${text}`;
-        open.addEventListener('click', () => onProvenance(cookie.name));
+        open.dataset.focusKey = `name:${id}:${cookie.name}`;
+        open.addEventListener('click', () => onProvenance(cookie.name, open.dataset.focusKey));
         cell.append(open);
       } else {
         cell.textContent = text;
@@ -302,6 +304,7 @@ function trafficCookieSection(id, title, list, rerender, {received, onProvenance
     const box = trafficNode('input');
     box.type = 'checkbox';
     box.checked = trafficCookieOptions.showFiltered;
+    box.dataset.focusKey = `filter:${id}`;
     box.addEventListener('change', () => {
       trafficCookieOptions.showFiltered = box.checked;
       box.dispatchEvent(new CustomEvent('traffic-cookie-change', {bubbles: true}));
@@ -337,7 +340,9 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
   heading.append(trafficNode('h2', '', `Provenance of ${name}`));
   const close = trafficNode('button', 'secondary-button', 'Close');
   close.type = 'button';
+  close.dataset.focusKey = 'provenance-close';
   close.addEventListener('click', () => {
+    trafficCookieOptions.focusKey = trafficCookieOptions.opener;
     trafficCookieOptions.provenance = null;
     close.dispatchEvent(new CustomEvent('traffic-cookie-change', {bubbles: true}));
   });
@@ -440,8 +445,10 @@ function renderTrafficCookies(container, request, rerender, context = {}) {
     container.dataset.renderKey = '';
     return;
   }
-  const onProvenance = name => {
+  const onProvenance = (name, openerKey = null) => {
     trafficCookieOptions.provenance = name;
+    trafficCookieOptions.opener = openerKey;
+    trafficCookieOptions.focusKey = openerKey;
     container.dataset.renderKey = '';
     rerender?.();
   };
@@ -466,7 +473,11 @@ function renderTrafficCookies(container, request, rerender, context = {}) {
   container.dataset.renderKey = key;
   const nodes = parts.map(part => part.section);
   if (message) nodes.unshift(trafficNode('p', 'traffic-headers-note', message));
+  // Keyboard focus stays on the control that redrew the tab, or returns to the one that opened it.
+  const wanted = trafficCookieOptions.focusKey ?? (container.contains(document.activeElement) ? document.activeElement?.dataset?.focusKey : null);
+  trafficCookieOptions.focusKey = null;
   container.replaceChildren(...nodes);
+  if (wanted) [...container.querySelectorAll('[data-focus-key]')].find(node => node.dataset.focusKey === wanted)?.focus?.();
 }
 
 if (typeof module === 'object' && module?.exports) module.exports = {trafficCookieList, trafficCookieHops, renderTrafficCookies};

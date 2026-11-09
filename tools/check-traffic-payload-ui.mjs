@@ -361,6 +361,26 @@ assert.doesNotMatch(text('[data-section="payload"]'), /not valid JSON/, 'a partl
 render(ranged, ready(json, {complete: true, loaded: json.length, total: json.length}));
 assert.equal(panel.querySelector('.traffic-body-more'), null, 'a complete body has no next-range control');
 assert(tree(), 'the whole body parses once every byte is read');
+// Parsed and Source keep keyboard focus when the toggle redraws.
+{
+  let active = null;
+  const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(document), 'activeElement');
+  Object.defineProperty(document, 'activeElement', {configurable: true, get: () => active});
+  const focus = window.HTMLElement.prototype.focus;
+  window.HTMLElement.prototype.focus = function focusTracked() {active = this; focused = this;};
+  render(jsonRequest, ready(json));
+  button('Source').focus();
+  click(button('Source'));
+  await settle();
+  assert.equal(active?.textContent, 'Source', 'focus stays on Source after the toggle redraws');
+  button('Parsed').focus();
+  click(button('Parsed'));
+  await settle();
+  assert.equal(active?.textContent, 'Parsed', 'focus stays on Parsed after the toggle redraws');
+  delete document.activeElement;
+  if (descriptor) Object.defineProperty(Object.getPrototypeOf(document), 'activeElement', descriptor);
+  window.HTMLElement.prototype.focus = focus;
+}
 console.log('PASS Payload limits and failures: cut prefix noted at the top and shown as sent, ranged reads continue to the whole body, failed or pending re-reads keep the last view, digest mismatch shows none');
 
 // A 5 MiB JSON body: parsing and every interaction render a bounded number of rows.

@@ -649,6 +649,7 @@ function trafficPayloadBodySection(body, view, shown, panel) {
       const scroll = keepScroll ? area?.box.scrollTop ?? 0 : 0;
       area?.dispose();
       const source = sourceMode(), rows = source ? trafficPayloadSourceRows(model) : null;
+      const focusedOption = options.contains(globalThis.document?.activeElement) ? document.activeElement.textContent : null;
       options.replaceChildren();
       if (parsed) {
         options.append(trafficPayloadToggle(['Parsed', 'Source'], Number(source), index => {
@@ -677,6 +678,7 @@ function trafficPayloadBodySection(body, view, shown, panel) {
             : trafficPayloadPartsArea(model.parts.parts, shown);
       holder.replaceChildren(...notes, area.box, ...(rows?.layout?.status === 'ready' && rows.layout.map ? [raw] : []));
       area.box.scrollTop = scroll;
+      if (focusedOption) [...options.querySelectorAll('button')].find(button => button.textContent === focusedOption)?.focus();
       if (focus) area.box.querySelector('[tabindex="0"]')?.focus();
     },
     search(raw, needle) {

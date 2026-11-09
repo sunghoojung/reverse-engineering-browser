@@ -225,6 +225,58 @@ assert.match(panel.querySelector('.traffic-cookie-provenance').textContent,
 panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
 await settle();
 assert.equal(panel.querySelector('.traffic-cookie-provenance'), null, 'Close removes the provenance');
+// Evidence older than the loaded requests comes from the store, and absence names the range that was read.
+provenanceAnswer = {set_by: [{request_id: '900', hop: 2, sequence_number: '900', blocked: true, exclusion_reasons: ['secure_only']}],
+  sent_with: [{request_id: '901', hop: 0, sequence_number: '901', blocked: false, exclusion_reasons: []}], script: [],
+  lists_read: 3, lists_unread: 0, stacks_unresolved: 0, malformed_records: 0};
+const prefName = [...panel.querySelectorAll('.traffic-cookie-name')].find(node => node.textContent === 'pref');
+prefName.dispatchEvent(new window.Event('click'));
+await settle();
+let older = panel.querySelector('.traffic-cookie-provenance');
+assert.match(older.textContent, /Set by responses \(1\)request 900 · hop 2 — This Set-Cookie was blocked because it is Secure/);
+assert.match(older.textContent, /Sent with requests \(2\).*request 901/);
+assert.match(older.textContent, /Not in the scanned range: the backend reads the newest retained network records/);
+assert.doesNotMatch(older.textContent, /No recorded document\.cookie/, 'A partial store read does not claim absence');
+panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
+await settle();
+// A complete store read may state absence.
+provenanceAnswer = {set_by: [], sent_with: [], script: [], lists_read: 3, lists_unread: 0, stacks_unresolved: 0, malformed_records: 0, coverage: {complete: true}};
+const another = [...panel.querySelectorAll('.traffic-cookie-name')].find(node => node.textContent === 'track');
+another.dispatchEvent(new window.Event('click'));
+await settle();
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.match(panel.querySelector('.traffic-cookie-provenance').textContent, /Provenance of track/);
+panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
+await settle();
+// Keyboard focus survives sort, the filter switch and Close.
+{
+  let active = null;
+  Object.defineProperty(document, 'activeElement', {configurable: true, get: () => active});
+  const focus = window.HTMLElement.prototype.focus;
+  window.HTMLElement.prototype.focus = function focusTracked() {active = this;};
+  byName().focus();
+  byName().dispatchEvent(new window.Event('click'));
+  await settle();
+  assert.equal(active?.dataset.focusKey, 'sort:sent-0-0:name', 'focus stays on the sort button');
+  const filterBox = [...panel.querySelectorAll('details')][2].querySelector('input[type="checkbox"]');
+  filterBox.focus();
+  filterBox.checked = false;
+  filterBox.dispatchEvent(new window.Event('change'));
+  await settle();
+  assert.equal(active?.dataset.focusKey, 'filter:sent-0-0', 'focus stays on the filter switch');
+  const nameButton = [...panel.querySelectorAll('.traffic-cookie-name')].find(node => node.textContent === 'sid');
+  const openerKey = nameButton.dataset.focusKey;
+  nameButton.focus();
+  nameButton.dispatchEvent(new window.Event('click'));
+  await settle();
+  const closeButton = panel.querySelector('.traffic-cookie-provenance button');
+  closeButton.focus();
+  closeButton.dispatchEvent(new window.Event('click'));
+  await settle();
+  assert.equal(active?.dataset.focusKey, openerKey, 'focus returns to the name that opened provenance');
+  delete document.activeElement;
+  window.HTMLElement.prototype.focus = focus;
+}
 assert.equal(panel.querySelectorAll('img').length, 0, 'captured markup is still text');
 
 // Integrity failure, refusal and not-retained states read as sentences.
@@ -250,7 +302,7 @@ api.renderTrafficCookies(panel, {id: 'l', origin: 'sample', method: 'GET', path:
 assert.match(panel.textContent, /no native cookie record/);
 assert.equal(reads.filter(url => url.startsWith('/api/artifacts/')).length, 4,
   'one read per distinct retained list; refused and not-retained lists are not read');
-assert.equal(reads.filter(url => url.startsWith('/api/cookie-provenance?')).length, 2, 'a failed position read retries once');
+assert.equal(reads.filter(url => url.startsWith('/api/cookie-provenance?session_id=7&name=sid')).length, 2, 'a failed position read retries once');
 console.log('PASS Traffic Cookies tab: hops newest first, filtered-out request cookies and reasons, every response attribute ' +
   'and block reason, unparsed line, sort, tooltip and copy, provenance to response, script write at its resolved position and later request, ' +
   'size and SHA-256 checked reads, refusal and not-retained states, metadata-only and legacy rows (DOM model; not rendered QA)');

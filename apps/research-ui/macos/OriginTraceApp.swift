@@ -178,12 +178,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       switch requestURL.path {
       case "", "/", "/index.html":
         response = (try Data(contentsOf: indexURL), "text/html; charset=utf-8", 200, [:])
-      case "/app.css", "/xrefs_view.css":
+      case "/app.css", "/xrefs_view.css", "/entropy_map.css":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(String(requestURL.path.dropFirst()))),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/pane_layout.js", "/app.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/invocation_sites.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/native_console_completion.js", "/native_console.js":
+      case "/pane_layout.js", "/app.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/invocation_sites.js", "/entropy_map.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/native_console_completion.js", "/native_console.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -223,6 +223,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           throw LocalHTTPError(status: 405, message: "WASM inspection requires GET")
         }
         handleWasm(requestURL, to: urlSchemeTask)
+        return
+      case "/api/artifact-map":
+        guard urlSchemeTask.request.httpMethod == "GET" else {
+          throw LocalHTTPError(status: 405, message: "The artifact map requires GET")
+        }
+        handleArtifactMap(requestURL, to: urlSchemeTask)
         return
       case "/api/decoder":
         response = (try decoderService.state(), "application/json; charset=utf-8", 200, [:])
@@ -1886,6 +1892,27 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
 
   private func completeDeobfuscation(_ body: Data, status: Int, to task: WKURLSchemeTask) {
     send(body, contentType: "application/json; charset=utf-8", status: status, headers: [:], to: task)
+  }
+
+  private func handleArtifactMap(_ url: URL, to task: WKURLSchemeTask) {
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let ids = items.filter { $0.name == "artifact_id" }
+        guard items.count == 1, ids.count == 1, let id = ids.first?.value, UInt64(id) != nil,
+          id.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil else {
+          throw NativeDecoderError(status: 400, message: "One canonical nonzero artifact ID is required")
+        }
+        let body = try self.wasmService.artifactMap(root: self.artifactStoreURL, artifactID: id)
+        self.completeDeobfuscation(body, status: 200, to: task)
+      } catch let error as NativeDecoderError {
+        let body = (try? JSONSerialization.data(withJSONObject: ["error": error.message])) ?? Data()
+        self.completeDeobfuscation(body, status: error.status, to: task)
+      } catch {
+        let body = (try? JSONSerialization.data(withJSONObject: ["error": "The artifact map is unavailable"])) ?? Data()
+        self.completeDeobfuscation(body, status: 500, to: task)
+      }
+    }
   }
 
   private func handleWasm(_ url: URL, to task: WKURLSchemeTask) {

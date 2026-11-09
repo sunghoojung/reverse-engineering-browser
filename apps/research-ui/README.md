@@ -1006,6 +1006,7 @@ capture, fetch anything or change a row.
 | --- | --- |
 | `index.html`, `app.css` | Document structure and visual layout |
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
+| `entropy_map.js`, `entropy_map.css` | Sources Map: the fixed-size canvas view, its segmented modes, summary and states; the only color tokens the map uses |
 | `invocation_sites.js` | Track calls: the saved invocation site pane, byte offsets of Sources positions and the titlebar tracking chip |
 | `request_stack.js` | Initiator tab: the native request or navigation call stack and task chain from `get_request_stack`, opening Sources at a frame, and the initiator chain |
 | `command_palette.js` | The ⌘ / Ctrl + K palette: provider registry, matching, ranking and caps, and its dialog controller; `app.js` supplies the built-in providers |
@@ -1665,6 +1666,30 @@ headings and omission messages are excluded; partial coverage stays visible. Fai
 provide **Retry inspection**. Partial coverage and display limits are explicit.
 The native shell ships `WasmService.swift` and `OriginTraceWasmInspector`, using
 the same Rust provider as HTTP. See [WASM Inspection v1](../../protocol/wasm-inspection-v1.md).
+
+**Map** in the Sources toolbar shows one picture of the whole selected artifact:
+a captured script, a Wasm module or a VM bytecode image. **Open map** on a VM
+Bytes view opens the same picture for its retained image. Windows follow a
+Hilbert curve, so nearby bytes stay nearby on the square. The title line states
+the grid and the bytes per cell. **Entropy** colors each window by Shannon
+entropy on a 0 to 8 bits per byte scale. **Kind** colors it by the dominant
+recorded fact: Wasm section or data segment, string, VM instruction coverage, or
+undecoded tail. Hover, or move the focused cell with the arrow keys, to read the
+byte range, kind and entropy. A click or Enter opens that byte in Hex or the
+Inspect disassembly, and a text script opens at its line. Bytes past what the
+existing view holds stay in the map and say so.
+
+A window is marked high-entropy only by the 7.0 bits per byte test stated beside
+the map. That mark says nothing about compression or encryption. Windows are
+never shorter than 256 bytes, because Shannon entropy over W bytes cannot exceed
+log2(W), so small windows make the 0 to 8 scale meaningless. A short artifact
+gets a smaller grid instead. See [Artifact map v1](../../protocol/artifact-map-v1.md).
+
+The map costs fixed memory. The backend reads the stored artifact in chunks and
+returns one summary of at most 16 KB per mode, whatever the artifact size. The
+page keeps two cell arrays and one image for the current artifact only and
+releases them when the map closes, the selection changes, Sources is left or the
+session changes. A stale request is cancelled. The page keeps no artifact bytes.
 
 ## Evidence investigation and metadata packages
 

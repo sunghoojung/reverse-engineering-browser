@@ -8,6 +8,7 @@
     <title>Origin Trace - Reverse Engineering Browser</title>
     <link rel="stylesheet" href="app.css">
     <link rel="stylesheet" href="xrefs_view.css">
+    <link rel="stylesheet" href="entropy_map.css">
   </head>
   <body>
     <div class="app">
@@ -274,6 +275,7 @@
                 <button id="source-quick-open" class="source-tool" type="button">Open file</button>
                 <input id="source-search" class="source-search" type="search" maxlength="512" placeholder="Find" aria-label="Find in source" aria-keyshortcuts="Meta+F Control+F" aria-describedby="source-search-status" title="Find retained text; Enter for next, Shift+Enter for previous (single-line literal, first 1000 matches)" />
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
+                <button id="source-map" class="source-tool" type="button" aria-label="Show artifact map" aria-pressed="false" hidden>Map</button>
                 <details id="source-more" class="source-more">
                   <summary class="source-tool" title="More source actions">More</summary>
                   <div class="source-more-menu" role="group" aria-label="Source actions">
@@ -302,6 +304,7 @@
                 <code id="source-code" class="source-code" aria-label="Source content" hidden></code>
                 <button id="source-window-next" class="source-window-edge" type="button" aria-label="Next source lines" hidden></button>
               </div>
+              <section id="source-map-view" class="source-map-view" aria-label="Artifact map" hidden></section>
               <div class="source-editor-status">
                 <span id="source-position">Line 1, Column 1</span>
                 <span id="source-selection" hidden></span>
@@ -867,6 +870,7 @@
     <script src="evidence_names.js"></script>
     <script src="invocation_sites.js"></script>
     <script src="request_stack.js"></script>
+    <script src="entropy_map.js"></script>
 
     <script src="app.js"></script>
     <script src="vm_program_workspace.js"></script>

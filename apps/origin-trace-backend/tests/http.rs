@@ -697,7 +697,7 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 53, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 54, "Review route coverage when the API changes");
     assert!(ids.contains("get_request_headers"));
     assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
     assert!(ids.contains("get_xrefs"));
@@ -788,7 +788,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 53);
+    assert_eq!(operation_count, 54);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -3668,6 +3668,63 @@ async fn wasm_inspection_preserves_offsets_identity_limits_and_original_bytes() 
     corrupt[0] = 1;
     server.file(&format!("artifacts/blobs/{hash}.bin"), &corrupt);
     assert_eq!(server.get("/api/wasm?artifact_id=1").await.status(), 500);
+}
+
+#[tokio::test]
+async fn artifact_map_route_is_read_only_versioned_and_covers_the_whole_artifact() {
+    let server = Server::start().await;
+    let spec = specification();
+    let mut rows = String::new();
+    let mut put = |id: &str, bytes: &[u8], kind: &str, hash_override: Option<String>| {
+        let hash = hash_override.unwrap_or_else(|| hex::encode(Sha256::digest(bytes)));
+        let artifact = format!(
+            r#"{{"protocol_version":1,"artifact_id":"{id}","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"{kind}","url":"https://example.test/{id}","mime_type":"application/octet-stream","byte_size":{},"sha256":"{hash}","sensitive":false,"content_path":"blobs/{hash}.bin"}}"#,
+            bytes.len()
+        );
+        rows.push_str(&artifact);
+        rows.push('\n');
+        server.file("artifacts/manifest.jsonl", rows.as_bytes());
+        server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+    };
+    let mut module = b"\0asm\x01\0\0\0".to_vec();
+    module.extend([1, 4, 1, 0x60, 0, 0]);
+    module.extend(vec![0u8; 8192 - module.len()]);
+    put("1", &module, "wasm", None);
+    put("2", &[0x41; 1024], "javascript", None);
+    put("3", b"tampered bytes", "javascript", Some("0".repeat(64)));
+    let response = server.get("/api/artifact-map?artifact_id=1").await;
+    assert_eq!(response.status(), 200);
+    let report: Value = response.json().await.unwrap();
+    assert_schema(
+        &spec,
+        &spec["components"]["schemas"]["ArtifactMap"],
+        &report,
+        "artifact map",
+    );
+    assert_eq!(report["version"], 1);
+    assert_eq!(report["integrity"], "verified");
+    assert_eq!(report["byte_length"], 8192);
+    assert_eq!(report["grid"]["order"], "hilbert");
+    assert_eq!(report["grid"]["side"], 4);
+    assert_eq!(report["facts"]["source"], "wasm_section_frames");
+    for (query, status) in [
+        ("?artifact_id=1&extra=1", 400),
+        ("", 400),
+        ("?artifact_id=0", 404),
+        ("?artifact_id=99", 404),
+        ("?artifact_id=3", 500),
+    ] {
+        let route = format!("/api/artifact-map{query}");
+        assert_contract_response(server.get(&route).await, "get", "/api/artifact-map", status)
+            .await;
+    }
+    let map: Value = server
+        .get("/api/artifact-map?artifact_id=2")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(map["facts"]["source"], "javascript_lexer");
 }
 
 #[tokio::test]

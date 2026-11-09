@@ -7,6 +7,9 @@ research UI. Authorization, capture, and privacy rules are defined in
 [WASM Inspection v1](wasm-inspection-v1.md) defines bounded static module
 inspection and its original-byte coordinates.
 
+[Artifact map v1](artifact-map-v1.md) defines the fixed-size whole-artifact
+entropy and kind summary behind the Sources Map view.
+
 [Live Wasm inspection v1](live-wasm-inspection-v1.md) (retired with CDP) defined
 confirmed Object Lab and attached-page memory inspection.
 [Live Wasm instance commands v1](live-wasm-instance-v1.md) is the separate

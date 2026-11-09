@@ -41,7 +41,7 @@ fn bad(error: wasmparser::BinaryReaderError) -> Error {
     Error::protocol(format!("WASM decoding failed: {error}"))
 }
 
-fn section_name(id: u8) -> &'static str {
+pub(crate) fn section_name(id: u8) -> &'static str {
     SECTION_NAMES.get(id as usize).copied().unwrap_or("unknown")
 }
 

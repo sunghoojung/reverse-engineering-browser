@@ -3,6 +3,7 @@ mod analysis_catalog;
 mod analyst;
 mod app;
 mod artifact_lookup;
+pub mod artifact_map;
 mod artifact_query;
 mod capture;
 mod config;

@@ -453,6 +453,11 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     if (view?.status === 'ready') nodes.push(...(tab === 'preview' ? preview(artifact, view, record) : responseBody(container, request, artifact, view)));
     container.replaceChildren(...nodes);
     container.dataset.state = record?.malformed ? 'malformed' : record?.state ?? (artifact ? 'source_artifact' : 'none');
+    const code = scroll && container.querySelector('.traffic-response-code');
+    if (code) {
+      code.scrollTop = scroll.top;
+      code.scrollLeft = scroll.left;
+    }
     if (active) {
       const control = container.querySelector(`[data-control="${active}"]`) ??
         (active === 'more' ? container.querySelector('.traffic-response-code') : null);

@@ -793,10 +793,11 @@ function trafficPayloadTools(panel, shown) {
   return tools;
 }
 
-function renderTrafficPayload(container, request, view) {
+function renderTrafficPayload(container, request, view, targetView = null) {
   const body = request && (request.origin === 'live' || request.origin === 'demo') ? request.body ?? null : undefined;
   const identity = JSON.stringify([request?.origin ?? null, request?.id ?? null, body?.sessionId, body?.artifactId, body?.sequenceNumber]);
-  if (trafficPayloadShown?.identity !== identity) {
+  const sameRequest = trafficPayloadShown?.identity === identity;
+  if (!sameRequest) {
     trafficPayloadShown?.dispose();
     trafficPayloadShown = {identity, source: null, model: null, expanded: new Set(['$']), selected: null,
       find: {query: '', matches: [], current: -1, truncated: false}, dispose() {}};
@@ -857,11 +858,18 @@ function renderTrafficPayload(container, request, view) {
     nodes.push(box);
   }
   if (query?.pairs?.length || shown.model) nodes.push(trafficPayloadTools(panel, shown));
-  nodes.push(...panel.sections.map(section => section.element), trafficPayloadDetails(body));
+  nodes.push(...panel.sections.map(section => section.element), trafficPayloadDetails(body, view));
   // Keyboard focus stays on the body when its next range replaces the button.
   const refocus = container.querySelector('.traffic-body-more') === globalThis.document?.activeElement;
+  // The same request keeps its place when a new range arrives or the view redraws.
+  const scrolls = sameRequest && !shown.find.query ? new Map([...container.querySelectorAll('.traffic-payload-section')].map(section =>
+    [section.dataset.section, section.querySelector('.traffic-payload-view')?.scrollTop ?? 0])) : null;
   container.replaceChildren(...nodes);
   panel.refresh();
+  for (const section of container.querySelectorAll('.traffic-payload-section')) {
+    const view = section.querySelector('.traffic-payload-view'), top = scrolls?.get(section.dataset.section);
+    if (view && top) view.scrollTop = top;
+  }
   if (refocus) (container.querySelector('.traffic-body-more') ?? container.querySelector('.traffic-payload-view'))?.focus?.();
   shown.dispose = () => panel.sections.forEach(section => section.dispose());
   shown.relayout = () => {

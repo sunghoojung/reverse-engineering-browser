@@ -71,8 +71,8 @@ any byte is outside the named facts.
 ## Highest ranges
 
 `highest_ranges` holds at most 8 rows ordered by peak entropy: adjacent windows
-at or above the threshold are merged, and the highest remaining single windows
-fill the list. `start` is inclusive and `end` exclusive, in original bytes.
+at or above the threshold are merged. An artifact with no window at or above it
+lists its highest single windows instead, marked `high: false`. `start` is inclusive and `end` exclusive, in original bytes.
 
 ## Errors
 

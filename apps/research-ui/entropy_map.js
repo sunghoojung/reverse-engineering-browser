@@ -228,19 +228,15 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
     summary.append(facts, noticeLine, rangesHead, ranges, notes);
 
     body.append(main, summary);
-    const announce = element('p', 'sr-only');
+    const announce = element('p', 'map-announce');
     announce.setAttribute('aria-live', 'polite');
     root.replaceChildren(head, statePanel, body, announce);
 
     canvas.addEventListener('pointermove', event => setHover(cellAt(event)));
     canvas.addEventListener('pointerleave', () => setHover(-1));
     canvas.addEventListener('click', event => { const cell = cellAt(event); if (cell >= 0) { setCursor(cell); activate(cell); } });
-    // Only keyboard focus draws the cursor; a pointer already shows where it is.
-    canvas.addEventListener('focus', () => {
-      if (!map || !canvas.matches(':focus-visible')) return;
-      setCursor(cursor < 0 ? 0 : cursor);
-      showPopover(cursor);
-    });
+    // The focused cell appears on the first key press, so opening the map with
+    // a pointer does not leave a stray cursor and popover over the first window.
     canvas.addEventListener('blur', () => { focusCell.hidden = true; showPopover(hover); });
     canvas.addEventListener('keydown', keydown);
 
@@ -292,6 +288,7 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
       popover.hidden = true;
       marker.hidden = true;
       statusWord.textContent = legendStatus();
+      built.statusDot.hidden = mode !== 'entropy' || (map?.doc.high_entropy.windows ?? 0) === 0;
       return;
     }
     const [start, end] = cellRange(index);
@@ -309,7 +306,10 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
     popover.style.top = `${Math.max(4, Math.min(area.clientHeight - height - 4, top))}px`;
     marker.style.left = `${bits / 8 * 100}%`;
     marker.hidden = mode !== 'entropy';
-    statusWord.textContent = mode === 'entropy' ? (cellHigh(index) ? 'high' : 'below') : statusWord.textContent;
+    if (mode === 'entropy') {
+      statusWord.textContent = cellHigh(index) ? 'high' : 'below';
+      built.statusDot.hidden = !cellHigh(index);
+    }
   }
 
   function setHover(index) {
@@ -331,6 +331,12 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
     if (!map) return;
     if (event.key === 'Escape') { event.preventDefault(); close(true); return; }
     if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); if (cursor >= 0) activate(cursor); return; }
+    if (cursor < 0 && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+      event.preventDefault();
+      setCursor(0);
+      showPopover(0);
+      return;
+    }
     let next = cursor < 0 ? 0 : cursor;
     if (event.key === 'Home') next = 0;
     else if (event.key === 'End') next = map.cellCount - 1;
@@ -432,7 +438,7 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
     threshold.textContent = `≥ ${doc.high_entropy.threshold_bits.toFixed(1)}`;
     threshold.title = `A window at or above ${doc.high_entropy.threshold_bits.toFixed(1)} bits per byte is marked high-entropy. The mark states this test only.`;
     tick.style.left = `${doc.high_entropy.threshold_bits / 8 * 100}%`;
-    statusDot.hidden = !entropy;
+    statusDot.hidden = !entropy || doc.high_entropy.windows === 0;
     statusWord.textContent = legendStatus();
     const present = new Map();
     for (const row of doc.kind_map.kinds) {
@@ -454,7 +460,6 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
     const {facts, ranges, notes, rangesHead} = built;
     const rows = [
       ['Length', `${doc.byte_length.toLocaleString()} bytes`],
-      ['Window', `${entropyMapBytes(doc.grid.window_bytes)} per cell`],
       ['Integrity', 'SHA-256 verified'],
       ['Mean', `${doc.entropy.mean_bits.toFixed(2)} bits/byte`],
       ['Max', `${doc.entropy.max_bits.toFixed(2)} bits/byte`],

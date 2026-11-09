@@ -1919,7 +1919,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let before = try await ui.value("document.querySelector('.map-cell-focus').hidden") as? Bool
       try await ui.key(124, "\u{F703}") // Right arrow moves the visible focused cell.
       try await ui.waitUntil("!document.querySelector('.map-cell-focus').hidden", "the keyboard cell did not appear (was hidden: \(String(describing: before)))")
-      let announced = try await ui.value("document.querySelector('#source-map-view .sr-only').textContent") as? String ?? ""
+      let announced = try await ui.value("document.querySelector('#source-map-view .map-announce').textContent") as? String ?? ""
       XCTAssertTrue(announced.contains("entropy"), "\(size.name): the focused cell is announced: \(announced)")
       try await ui.screenshot("sources-map-focus-\(size.name)")
       try await ui.key(36, "\r") // Enter opens the bytes.

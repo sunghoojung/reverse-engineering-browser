@@ -45,6 +45,9 @@
   background: var(--panel);
 }
 #screen-sources .source-map-view[hidden] { display: none; }
+/* Line windows and Find status describe the code view the map replaces. */
+#screen-sources .sources-editor:has(#source-map-view:not([hidden])) #source-window,
+#screen-sources .sources-editor:has(#source-map-view:not([hidden])) #source-search-status { display: none; }
 .map-head {
   min-width: 0;
   display: flex;
@@ -262,10 +265,24 @@
 .map-notes[hidden] { display: none; }
 .map-notes li + li { margin-top: 6px; }
 
+/* Stays side by side while the square remains useful, then stacks. */
 @container (max-width: 620px) {
+  .map-body { --map-summary-width: 196px; --map-gap: 16px; }
+}
+@container (max-width: 460px) {
   .map-body {
-    --map-side: min(calc(100cqw - 32px), 420px);
+    --map-side: max(160px, min(calc(100cqw - 32px), calc(100cqh - 88px)));
     grid-template-columns: minmax(0, 1fr);
   }
-  .map-frame { max-width: 100%; }
+}
+.map-announce {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }

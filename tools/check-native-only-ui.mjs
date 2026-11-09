@@ -243,9 +243,6 @@ context.mapReady = mapDocument('901', Buffer.from([225, 0, 0, 0]).toString('base
 context.mapMalformed = {...mapDocument('901', Buffer.from([225, 0, 0, 0]).toString('base64'), 2), grid: {order: 'hilbert', side: 3, cell_count: 9, window_bytes: 1024, min_window_bytes: 256, below_min_window: false}};
 context.mapEmpty = {...mapDocument('901', '', 0), byte_length: 4096, grid: {order: 'hilbert', side: 0, cell_count: 0, window_bytes: 0, min_window_bytes: 256, below_min_window: false}};
 context.mapSourceValue = mapSource();
-// LinkeDOM has no :focus-visible; a programmatic focus is not keyboard focus.
-runInContext(`{ const nativeMatches = HTMLElement.prototype.matches;
-  HTMLElement.prototype.matches = function (selector) { return selector === ':focus-visible' ? false : nativeMatches.call(this, selector); }; }`, context);
 runInContext(`var mapFixture = (() => {
   const make = tag => { const node = document.createElement(tag); document.body.append(node); return node; };
   const button = make('button'), root = make('section'), codeWrap = make('div'), viewKind = make('span'), toolbar = make('div');

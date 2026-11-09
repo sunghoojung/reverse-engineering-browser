@@ -451,7 +451,10 @@ fn wasm_kinds(
                     .filter(|row| row["kind"] == "data")
                     .filter_map(|row| row["byte_offset"].as_u64().zip(row["byte_end"].as_u64()))
                     .collect();
-                if report["status"] != "decoded" {
+                // A filtered document is always partial, so read the data section's
+                // own coverage instead of the overall status.
+                let analyzed = report["coverage"]["analyzed_sections"].as_array();
+                if !analyzed.is_some_and(|names| names.iter().any(|name| name == "data")) {
                     notes.push(
                         "Inspect stopped before every data segment was listed; the remaining bytes keep the data section kind.".to_owned(),
                     );
@@ -683,8 +686,8 @@ struct Range {
     high: bool,
 }
 
-/// Highest-entropy ranges: adjacent high windows merged, then the highest
-/// remaining single windows so a low-entropy artifact still lists something.
+/// Highest-entropy ranges: adjacent high windows merged. An artifact with none
+/// lists its highest single windows instead.
 fn highest_ranges(cells: &[u8]) -> Vec<Range> {
     let mut ranges: Vec<Range> = Vec::new();
     let mut index = 0usize;
@@ -709,16 +712,13 @@ fn highest_ranges(cells: &[u8]) -> Vec<Range> {
             },
         );
     }
-    if ranges.len() < MAX_HIGHEST_RANGES {
-        let mut order: Vec<usize> = (0..cells.len())
-            .filter(|index| cells[*index] < HIGH_UNITS)
-            .collect();
+    if ranges.is_empty() {
+        // Nothing crossed the threshold; list the highest windows instead so
+        // the summary still points somewhere. Filling alongside high ranges
+        // would only add low-entropy noise.
+        let mut order: Vec<usize> = (0..cells.len()).collect();
         order.sort_unstable_by_key(|index| std::cmp::Reverse(cells[*index]));
-        for index in order
-            .into_iter()
-            .take(MAX_HIGHEST_RANGES - ranges.len())
-            .collect::<Vec<_>>()
-        {
+        for index in order.into_iter().take(MAX_HIGHEST_RANGES) {
             ranges.push(Range {
                 start_cell: index as u64,
                 end_cell: index as u64 + 1,
@@ -965,9 +965,20 @@ mod tests {
         assert_eq!(ranges[0]["start"], 8192);
         assert_eq!(ranges[0]["end"], 16384);
         assert_eq!(ranges[0]["high"], true);
-        assert!(ranges[1..].iter().all(|range| range["high"] == false));
-        assert!(ranges.len() <= MAX_HIGHEST_RANGES);
+        assert_eq!(ranges.len(), 1, "no low-entropy filler beside a high range");
         assert_eq!(report["facts"]["source"], "none");
+    }
+
+    #[test]
+    fn an_artifact_with_nothing_high_still_lists_its_highest_windows() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes: Vec<u8> = (0..8192usize).map(|index| (index % 16) as u8).collect();
+        let record = artifact(root.path(), "1", "other", &bytes);
+        let report = run(root.path(), &record).unwrap();
+        assert_eq!(report["high_entropy"]["windows"], 0);
+        let ranges = report["highest_ranges"].as_array().unwrap();
+        assert_eq!(ranges.len(), MAX_HIGHEST_RANGES);
+        assert!(ranges.iter().all(|range| range["high"] == false));
     }
 
     #[test]

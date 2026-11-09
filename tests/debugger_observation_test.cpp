@@ -2,6 +2,7 @@
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -134,6 +135,29 @@ void MalformedRecords() {
   auto event = Record(reb::EventType::kRequestWatchMatch, unparented);
   event.header.parent_event_id = 0;
   Expect("request match without parent", event, false);
+
+  // Every envelope field the broker requires, so the offline validator matches it.
+  const auto envelope_case = [&](const std::string& name,
+                                 const std::function<void(reb::EventRecord&)>& change) {
+    auto copy = Record(reb::EventType::kRequestWatchMatch, unparented);
+    change(copy);
+    Expect(name, copy, false);
+  };
+  envelope_case("observation flags", [](auto& e) { e.header.flags = 1; });
+  envelope_case("observation parent at its own sequence",
+                [](auto& e) { e.header.parent_event_id = e.header.sequence_number; });
+  envelope_case("observation parent past its sequence",
+                [](auto& e) { e.header.parent_event_id = e.header.sequence_number + 1; });
+  envelope_case("observation navigation", [](auto& e) { e.header.navigation_id = 1; });
+  envelope_case("observation status", [](auto& e) { e.header.status_code = 200; });
+  envelope_case("observation error", [](auto& e) { e.header.error_code = 1; });
+  envelope_case("observation encoded length", [](auto& e) { e.header.encoded_data_length = 1; });
+  envelope_case("observation decoded length", [](auto& e) { e.header.decoded_body_length = 1; });
+  envelope_case("observation resource type", [](auto& e) { e.header.resource_type = 1; });
+  envelope_case("observation initiator request",
+                [](auto& e) { e.header.initiator_request_id = 1; });
+  envelope_case("observation initiator process",
+                [](auto& e) { e.header.initiator_process_id = 1; });
 
   auto runtime = NoScript();
   runtime.stack.reserved1[0] = 1;

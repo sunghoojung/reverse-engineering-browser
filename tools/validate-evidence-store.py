@@ -310,14 +310,28 @@ OBSERVATION_TYPES = frozenset((
     "csp_violation", "exception_observation", "dom_mutation"))
 
 
+def observation_envelope(event: dict, payload: bytes, request: bool) -> bool:
+    """observation_detail::Envelope in include/reb/debugger_observation.hpp."""
+    zero = ("artifact_id", "navigation_id", "encoded_data_length", "decoded_body_length")
+    parent = int(event["parent_event_id"])
+    return (event["protocol_version"] == 3 and len(payload) == 128
+            and event["category"] == ("network" if request else "runtime")
+            and event["flags"] == 0 and not event["payload_truncated"]
+            and all(event[key] != "0" for key in ("session_id", "sequence_number"))
+            and all(event[key] == "0" for key in zero) and 1 <= event["process_id"] <= 0xFFFFFFFF
+            and event["status_code"] == 0 and event["error_code"] == 0
+            and event["resource_type"] == 0 and event["initiator_request_id"] == 0
+            and event["initiator_process_id"] == 0 and (not request or parent != 0)
+            and (parent == 0 or parent < int(event["sequence_number"])))
+
+
 def valid_observation(event: dict, payload: bytes) -> bool:
     """Types 40-45, protocol/native-debugger-observation-v1.md."""
     kind = event["type"]
     request = kind == "request_watch_match"
-    if (event["category"] != ("network" if request else "runtime") or len(payload) != 128
+    if (not observation_envelope(event, payload, request)
             or payload[:4] != b"\x01\x00\x80\x00" or payload[6:8] != b"\0\0"
-            or event["artifact_id"] != "0" or (event["request_id"] == "0") == request
-            or (request and event["parent_event_id"] == "0")
+            or (event["request_id"] == "0") == request
             or not valid_stack_summary(payload)):
         return False
     t = payload[80:]

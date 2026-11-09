@@ -1356,7 +1356,10 @@ and Details. Find's coverage sentence is its tooltip. The status bar shows the
 caret line and column, with the original location in a pretty-printed or derived
 view (`Line 1204, Column 5 (original 1:48213)`), the selection length, the
 evidence state (Original or Derived), the language and layout, the **{ }**
-toggle and the size.
+toggle and the size. The position is never cut and its tooltip is the full text.
+When the bar is too narrow it drops whole items instead of squeezing them: the
+hash, then the toggle's label (leaving **{ }**), the language, the size, the
+evidence state and the selection length.
 
 The Sources sidebar starts closed. Details opens source metadata, JavaScript
 facts and static cleanup; it remains available at narrow window sizes.

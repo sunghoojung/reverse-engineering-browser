@@ -2905,6 +2905,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         empty.setAttribute('role', 'status');
         empty.textContent = text;
         const hadFocus = elements.requestRows.contains(document.activeElement);
+        // A later resize must not remount rows this empty state replaced.
+        elements.requestRows.trafficBlock = null;
         elements.requestRows.replaceChildren(empty);
         elements.requestRows.tabIndex = 0;
         if (hadFocus) elements.requestRows.focus({preventScroll: true});

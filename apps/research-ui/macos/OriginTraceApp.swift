@@ -2883,7 +2883,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     else {
       presentLiveSessionError(
         .init(
-          message: "Origin Trace could not find Brave Browser Development. "
+          message: configuredBraveBinary.map {
+            "REB_BRAVE_BINARY names \($0), which is not the executable inside a Brave Browser Development app. "
+              + "Correct it, or unset it to use the Brave beside Origin Trace."
+          } ?? "Origin Trace could not find Brave Browser Development. "
             + "Place it beside Origin Trace or set REB_BRAVE_BINARY.",
           afterStartup: false),
         captureMode: captureMode,
@@ -3023,19 +3026,23 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     (NSApp.modalWindow ?? window).makeKeyAndOrderFront(nil)
   }
 
+  private var configuredBraveBinary: String? {
+    ProcessInfo.processInfo.environment["REB_BRAVE_BINARY"].flatMap { $0.isEmpty ? nil : $0 }
+  }
+
+  // An explicit REB_BRAVE_BINARY names the one browser to use, as it does for
+  // the launcher: one that is not Brave Browser Development fails the start
+  // instead of quietly starting another build found elsewhere.
   private func customBraveApplicationURL() -> URL? {
-    var candidates: [URL] = []
-    if let configuredBinary = ProcessInfo.processInfo.environment["REB_BRAVE_BINARY"],
-      !configuredBinary.isEmpty
-    {
-      let executableURL = URL(fileURLWithPath: configuredBinary).standardizedFileURL
-      candidates.append(
-        executableURL.deletingLastPathComponent()
-          .deletingLastPathComponent()
-          .deletingLastPathComponent()
-      )
+    if let configuredBinary = configuredBraveBinary {
+      let application = URL(fileURLWithPath: configuredBinary).standardizedFileURL
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+      return isCustomBraveApplication(application) ? application : nil
     }
 
+    var candidates: [URL] = []
     let applicationDirectory = Bundle.main.bundleURL.deletingLastPathComponent()
     let siblingApplication = applicationDirectory.appendingPathComponent(
       customBraveApplicationName,

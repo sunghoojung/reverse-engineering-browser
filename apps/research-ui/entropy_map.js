@@ -142,10 +142,12 @@ function revealSourceByteOffset(source, offset, leaveMap) {
   return '';
 }
 
+const ENTROPY_MAP_VIEW_KIND = 'Whole-artifact map · original bytes';
+
 function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource, identityOf, reveal}) {
   let open = false, built = null, generation = 0, controller = null, timer = 0, mode = 'entropy';
   let openIdentity = null, map = null, status = 'idle', message = '', themeObserver = null;
-  let hover = -1, cursor = -1, lut = null, focusWhenReady = false;
+  let hover = -1, cursor = -1, lut = null, focusWhenReady = false, codeViewKind = null;
 
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
@@ -597,6 +599,14 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
     }
   }
 
+  // The status bar names the map as the evidence state while it shows. Closing
+  // it restores the state the last Sources render wrote, unless a render for
+  // another selection has already replaced the map's label.
+  function showViewKind() {
+    if (viewKind.textContent !== ENTROPY_MAP_VIEW_KIND) codeViewKind = viewKind.textContent;
+    viewKind.textContent = ENTROPY_MAP_VIEW_KIND;
+  }
+
   function showView() {
     build();
     root.hidden = false;
@@ -604,7 +614,7 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
     setMode(mode);
     button.setAttribute('aria-pressed', 'true');
     button.setAttribute('aria-label', 'Hide artifact map');
-    viewKind.textContent = 'Whole-artifact map · original bytes';
+    showViewKind();
   }
 
   function close(returnFocus) {
@@ -616,6 +626,8 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
     openIdentity = null;
     root.hidden = true;
     codeWrap.hidden = false;
+    if (viewKind.textContent === ENTROPY_MAP_VIEW_KIND && codeViewKind !== null) viewKind.textContent = codeViewKind;
+    codeViewKind = null;
     button.setAttribute('aria-pressed', 'false');
     button.setAttribute('aria-label', 'Show artifact map');
     if (returnFocus) button.focus?.();
@@ -642,7 +654,7 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
     button.title = eligible ? 'Map the whole artifact by entropy and kind' : 'Open one captured artifact to map it.';
     button.setAttribute('aria-pressed', String(open));
     if (open && (!eligible || identityOf(source) !== openIdentity)) close(false);
-    if (open) viewKind.textContent = 'Whole-artifact map · original bytes';
+    if (open) showViewKind();
   }
 
   button.addEventListener('click', () => { if (open) close(true); else show(); });

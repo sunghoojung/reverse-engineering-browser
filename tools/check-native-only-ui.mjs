@@ -304,7 +304,7 @@ context.mapSourceValue = mapSource();
 runInContext(`var mapFixture = (() => {
   const make = tag => { const node = document.createElement(tag); document.body.append(node); return node; };
   const button = make('button'), root = make('section'), codeWrap = make('div'), viewKind = make('span'), toolbar = make('div');
-  button.classList.add('source-tool');
+  button.classList.add('source-tool'); viewKind.textContent = 'Original · truncated';
   root.hidden = true; let source = mapSourceValue; let revealed = [];
   const controller = createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource: () => source, identityOf: value => value ? value.artifact_id + ':' + value.sha256 : null,
     reveal: (value, offset, leave) => { revealed.push(offset); return offset > 2048 ? 'Past the hex view.' : (leave(), ''); }});
@@ -342,13 +342,18 @@ assert.match(mapText('.map-facts'), /≥ 7\.0 bits\/byte/, 'the threshold is sta
 assert.equal(mapRoot.querySelectorAll('img, b').length, 0, 'captured-derived text stays inert');
 assert.match(mapText('.map-notes'), /onerror/, 'notes are shown as text');
 assert.doesNotMatch(mapRoot.textContent, /packed|encrypted/i, 'the map draws no such conclusion');
+const mapViewKind = () => runInContext('mapFixture.viewKind.textContent', context);
+assert.equal(mapViewKind(), 'Whole-artifact map · original bytes', 'the status bar names the map while it shows');
 mapRoot.querySelector('.map-range').click();
 assert.equal(runInContext('mapFixture.controller.isOpen()', context), false, 'opening a reachable byte leaves the map');
+assert.equal(mapViewKind(), 'Original · truncated', 'closing the map restores the evidence state');
 assert.deepEqual([...runInContext('mapFixture.revealed', context)], [0], 'a range row opens its first byte');
 assert.equal(mapWrap.hidden, false, 'the code view returns');
 await openMap(() => new context.Response(JSON.stringify(context.mapReady), {status: 200, headers: {'content-type': 'application/json'}}));
-runInContext(`mapFixture.setSource({...mapSourceValue, artifact_id: '902'}); mapFixture.controller.sync();`, context);
+// A render for the new selection writes its own evidence state before the map retires.
+runInContext(`mapFixture.setSource({...mapSourceValue, artifact_id: '902'}); mapFixture.viewKind.textContent = 'Derived'; mapFixture.controller.sync();`, context);
 assert.equal(runInContext('mapFixture.controller.isOpen()', context), false, 'a new selection retires the map');
+assert.equal(mapViewKind(), 'Derived', 'the new selection keeps the evidence state its render wrote');
 assert.equal(mapRoot.hidden, true, 'the retired map is hidden');
 assert.equal(mapRoot.querySelector('.map-facts').children.length, 0, 'the retired summary is released');
 

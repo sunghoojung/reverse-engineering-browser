@@ -169,6 +169,9 @@ fn writer_holds(guard: &Path) -> bool {
             return false;
         };
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+            // A helper spawned while this file is open can hold its lock briefly
+            // after close, which would refuse a clear that follows, so unlock first.
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
             return false;
         }
         std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock

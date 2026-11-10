@@ -394,7 +394,9 @@ before it becomes a link that opens the existing Traffic, Sources,
 Fingerprinting or VM row. An identifier that cannot be found stays plain text
 labeled *not verified*. Model output is rendered as text plus a small markdown
 subset (paragraphs, lists, code fences); HTML is never interpreted, and the
-model is told captured content is data, not instructions.
+model is told captured content is data, not instructions. JavaScript, JSON,
+CSS and HTML fences and tool JSON are colored by the shared code view's lexer,
+still as text.
 
 The transcript is written to
 `~/Library/Application Support/Origin Trace/agent-transcripts/`, user-only, one
@@ -1155,7 +1157,7 @@ capture, fetch anything or change a row.
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
 | `source_format.js` | The backend layout client (whole bodies and 1,000-line Sources pages) and its whitespace-only mapping to the displayed evidence |
-| `code_view.js` | The code view Payload, Response, Native Console and Analyst share: Sources colors, rows mounted near the view in blocks of at most 200 rows and 64 KiB, find marks, layouts with raw ranges and the colored textarea editor |
+| `code_view.js` | The code view Payload, Response, Native Console, Analyst and the agent panel share: Sources colors, rows mounted near the view in blocks of at most 200 rows and 64 KiB, find marks, layouts with raw ranges and the colored textarea editor |
 | `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
 | `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `workspace_lease.rs` | Workspace contracts, explicit analyst execution, private durable replacement |
@@ -1272,9 +1274,10 @@ color at low strength, while folders, origins and frames stay neutral. Code is t
 Native Console color code like the Rosé Pine Moon VS Code theme (Rosé Pine
 Dawn in light mode), with the colors and styles VS Code renders for each token
 (there, `JSON` is an italic variable and `stringify(` a plain function call), its
-six bracket pair colors, editor colors and Menlo 12/18 px; the Analyst editor and the Traffic Payload and Response
-code views take the same editor colors and font. Payload, Response, Native
-Console and Analyst use one code view (`code_view.js`) with the Sources lexer
+six bracket pair colors, editor colors and Menlo 12/18 px; the Analyst editor, the Traffic Payload and Response
+code views, and the agent panel's fenced code and tool arguments and results
+take the same editor colors and font. Payload, Response, Native Console,
+Analyst and the agent panel use one code view (`code_view.js`) with the Sources lexer
 and theme; Analyst colors its text behind the textarea, which keeps editing. With macOS Increase Contrast, comments and
 keywords are brightened. `node tools/check-source-format-ui.mjs` (part of
 `make lint`) pins the token kinds and colors.

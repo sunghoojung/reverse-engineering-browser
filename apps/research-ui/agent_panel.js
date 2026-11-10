@@ -619,6 +619,25 @@
     } else parent.append(codeBlock(block));
   }
 
+  // Fenced code and tool JSON take the shared code view's lexer and colors
+  // (code_view.js). Every token is a text node, so model output stays inert.
+  function fenceSyntax(lang) {
+    const name = String(lang ?? '').toLowerCase();
+    if (/^(?:js|javascript|jsx|mjs|cjs)$/.test(name)) return codeViewSyntax('javascript');
+    if (name === 'json') return codeViewSyntax('json');
+    if (name === 'css') return {kind: 'plain', mime_type: 'text/css'};
+    if (/^(?:html|xml|svg)$/.test(name)) return {kind: 'plain', mime_type: 'text/html'};
+    return codeViewSyntax('text');
+  }
+
+  function codeText(className, text, syntax) {
+    return codeViewColor(element('pre', className), text, syntax);
+  }
+
+  function toolText(text) {
+    return codeText('agent-tool-pre', text, codeViewSyntax(/^\s*[[{]/.test(text) ? 'json' : 'text'));
+  }
+
   function codeBlock(block) {
     const wrap = element('div', 'agent-code');
     const header = element('div', 'agent-code-head');
@@ -629,7 +648,7 @@
       copy.classList.add('copied');
     }, 'Copy code');
     header.append(copy);
-    const pre = element('pre', 'agent-code-body', block.text);
+    const pre = codeText('agent-code-body', block.text, fenceSyntax(block.lang));
     wrap.append(header, pre);
     return wrap;
   }
@@ -686,9 +705,9 @@
 
   function toolDetail(row) {
     const area = element('div', 'agent-tool-detail');
-    area.append(element('div', 'agent-tool-label', 'Arguments'), element('pre', 'agent-tool-pre', row.arguments || '{}'));
+    area.append(element('div', 'agent-tool-label', 'Arguments'), toolText(row.arguments || '{}'));
     area.append(element('div', 'agent-tool-label', `Result sent to the provider${row.resultBytes ? ` · ${formatBytes(row.resultBytes)}` : ''}`));
-    area.append(element('pre', 'agent-tool-pre', row.result ?? (row.state === 'running' ? 'Running' : 'No result')));
+    area.append(toolText(row.result ?? (row.state === 'running' ? 'Running' : 'No result')));
     return area;
   }
 
@@ -703,7 +722,7 @@
   function approvalRow(row) {
     const card = element('div', 'agent-approval');
     card.append(element('div', 'agent-approval-title', `Allow ${row.name}?`));
-    card.append(element('pre', 'agent-tool-pre', row.arguments || '{}'));
+    card.append(toolText(row.arguments || '{}'));
     if (row.state === 'pending') {
       const actions = element('div', 'agent-approval-actions');
       const deny = button('agent-text-button', 'Deny', () => decide(row, false));

@@ -1,4 +1,4 @@
-// The code view Payload, Response, Native Console and Analyst share with Sources; captured text only ever becomes text nodes.
+// The code view Payload, Response, Native Console, Analyst and the agent panel share with Sources; captured text only ever becomes text nodes.
 const CODE_VIEW_ROW_UNITS = 4096;
 const CODE_VIEW_BLOCK_ROWS = 200;
 // A block, and what one frame mounts, is also bounded by characters: 200 rows of

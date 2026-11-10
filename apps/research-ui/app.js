@@ -2996,7 +2996,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // `totals`: the index's matching sizes, hidden browser-internal rows and rows without a tab.
       function renderTrafficWindowStatus(visibleCount, totalCount, outside, note = '', totals = null) {
         const bytes = value => trafficBytesLabel(value).replace(' ', '\u00a0');
-        const sizes = totals ? ` · ${bytes(totals.sizes.transferred)} transferred · ${bytes(totals.sizes.resources)} resources` : '';
+        const sizes = totals?.sizes ? ` · ${bytes(totals.sizes.transferred)} transferred · ${bytes(totals.sizes.resources)} resources` : '';
         const hidden = totals?.hiddenInternal ? ` · ${totals.hiddenInternal.toLocaleString('en-US')} browser-internal hidden` : '';
         const excluded = globalThis.RebNetworkScope?.captureExclusionNotice(state.captureExclusions) ?? '';
         // A null total is a session nothing has been read from yet: no counts, the note leads.
@@ -3255,8 +3255,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             if (block.options.pending !== pending) renderTrafficRows(container, block.requests, {...block.options, pending, newIds: new Set()});
             renderTrafficRowSelection(container, state.selectedRequestId);
           }
+          // The last answer's tab facets cover the whole session, so its count of
+          // rows without a tab holds while another query is unanswered.
+          const unresolved = answer?.document.facets?.tabs?.find(tab => tab.tab_id === '0')?.count;
           renderTrafficWindowStatus(null, answer ? answer.document.total : null, false,
-            failure ? `${trafficIndexNote(null, failure)}, filter not applied` : 'reading the request index');
+            failure ? `${trafficIndexNote(null, failure)}, filter not applied` : 'reading the request index',
+            unresolved === undefined ? null : {unresolved});
           return;
         }
         const page = current.document, matching = page.matching;

@@ -168,6 +168,12 @@ enum SessionCommand {
         /// MiB of unique request bodies and targets to retain, 1..4096 (default 256).
         #[arg(long, requires = "request_content")]
         request_content_budget_mib: Option<u32>,
+        /// MiB of unique response bodies to retain, 1..16384 (default 512).
+        #[arg(long, requires = "request_content")]
+        response_body_budget_mib: Option<u32>,
+        /// Also retain images, audio, video and fonts that page elements load.
+        #[arg(long, requires = "request_content")]
+        response_media: bool,
         /// Record the JavaScript and Wasm stack that started each renderer request.
         #[arg(long)]
         request_stacks: bool,
@@ -1260,6 +1266,8 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         canvas_images,
         request_content,
         request_content_budget_mib,
+        response_body_budget_mib,
+        response_media,
         request_stacks,
         document_start,
         js_invocation_sites,
@@ -1290,6 +1298,8 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         canvas_images,
         request_content,
         request_content_budget_mib,
+        response_body_budget_mib,
+        response_media,
         request_stacks,
         document_start,
         js_invocation_sites,

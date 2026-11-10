@@ -5,6 +5,7 @@ mod app;
 mod artifact_lookup;
 pub mod artifact_map;
 mod artifact_query;
+mod artifact_text;
 mod capture;
 mod config;
 mod debugger_observation;

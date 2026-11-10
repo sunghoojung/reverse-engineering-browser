@@ -77,7 +77,7 @@ impl ArtifactFilter {
         }
         Ok(filter)
     }
-    fn matches(&self, artifact: &Value) -> bool {
+    pub(crate) fn matches(&self, artifact: &Value) -> bool {
         let host = || {
             artifact["url"]
                 .as_str()

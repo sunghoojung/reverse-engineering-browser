@@ -2,7 +2,7 @@ use crate::{
     analysis_catalog,
     analyst::Analyst,
     artifact_lookup::ArtifactLookupCache,
-    artifact_map, artifact_query,
+    artifact_map, artifact_query, artifact_text,
     capture::{self, Capture, StopRefusal},
     config::{CaptureMode, Options},
     decoder::Decoder,
@@ -551,12 +551,11 @@ impl App {
             "/api/wasm" => {
                 // A misspelled filter must fail rather than return a
                 // whole-module document the caller will read as scoped.
-                if q.0
-                    .keys()
-                    .any(|key| !["artifact_id", "sections"].contains(&key.as_str()))
-                {
+                if q.0.keys().any(|key| {
+                    !["artifact_id", "sections", "row_offset", "row_limit"].contains(&key.as_str())
+                }) {
                     return Err(Error::bad(
-                        "WASM inspection takes artifact_id with an optional sections filter",
+                        "WASM inspection takes artifact_id with optional sections, row_offset and row_limit",
                     ));
                 }
                 let id = q.required("artifact_id")?.to_owned();
@@ -564,9 +563,26 @@ impl App {
                     .one("sections")?
                     .map(wasm::requested_sections)
                     .transpose()?;
+                let window = if q.any(&["row_offset", "row_limit"]) {
+                    let offset = q.number("row_offset", Some("0"), 32, false)? as usize;
+                    let default = wasm::WINDOW_MAX_ROWS.to_string();
+                    let limit = q.number("row_limit", Some(&default), 32, true)? as usize;
+                    if limit > wasm::WINDOW_MAX_ROWS {
+                        return Err(Error::bad("row_limit is at most 2048"));
+                    }
+                    Some((offset, limit))
+                } else {
+                    None
+                };
                 let root = self.options.artifacts.clone();
-                self.blocking(move || wasm::load(&root, &id, sections.as_ref()))
-                    .await?
+                self.blocking(move || {
+                    let mut document = wasm::load(&root, &id, sections.as_ref())?;
+                    if let Some((offset, limit)) = window {
+                        wasm::window(&mut document, offset, limit)?;
+                    }
+                    Ok(document)
+                })
+                .await?
             }
             "/api/artifact-map" => {
                 if q.0.keys().any(|key| key != "artifact_id") {
@@ -1350,6 +1366,42 @@ impl App {
                         .ok_or_else(|| Error::new(500, "VM opcode workspace is malformed"))?
                 ));
                 value
+            }
+            "/api/artifacts/search" => {
+                q.only(
+                    &artifact_query::ARTIFACT_QUERY_KEYS[..8],
+                    &["q", "match_case", "offset", "limit"],
+                )?;
+                let query = artifact_text::SearchRequest::query(q.required("q")?)?;
+                let match_case = match q.one("match_case")? {
+                    None | Some("false") => false,
+                    Some("true") => true,
+                    Some(_) => return Err(Error::bad("match_case must be true or false")),
+                };
+                let request = artifact_text::SearchRequest {
+                    query,
+                    match_case,
+                    filter: artifact_query::ArtifactFilter::parse(&q)?,
+                    offset: q.number("offset", Some("0"), 32, false)? as usize,
+                    limit: q.limit(50, artifact_text::SEARCH_MAX_LIMIT)?,
+                };
+                let root = self.options.artifacts.clone();
+                self.blocking(move || artifact_text::search(&root, &request))
+                    .await?
+            }
+            _ if path.starts_with("/api/artifacts/") && path.ends_with("/text") => {
+                q.only(&["offset", "length", "encoding"], &[])?;
+                let id = &path["/api/artifacts/".len()..path.len() - "/text".len()];
+                let artifact = self.find_artifact(id).await?;
+                let encoding = artifact_text::Encoding::parse(q.one("encoding")?)?;
+                let offset = q.number("offset", Some("0"), 64, false)? as usize;
+                let default = encoding.page_bytes().to_string();
+                let length = q.number("length", Some(&default), 32, true)? as usize;
+                let root = self.options.artifacts.clone();
+                self.blocking(move || {
+                    artifact_text::page(&root, &artifact, offset, length, encoding)
+                })
+                .await?
             }
             _ if path.starts_with("/api/artifacts/") && path.ends_with("/content") => {
                 let id = &path["/api/artifacts/".len()..path.len() - "/content".len()];

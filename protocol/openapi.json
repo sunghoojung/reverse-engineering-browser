@@ -47,7 +47,7 @@
         "start"
       ],
       "title": "Start a live capture session",
-      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. Every option is off unless named and none is inherited from the environment. document_start permits document-start Console scripts (arming is a separate Console action). request_stacks records the call stack that started each renderer request (get_request_stack). request_content_budget_mib (1 to 4096, default 256) sets how much unique request content is kept. Sensitive capture needs confirm_sensitive_capture: canvas_images, request_content (request paths, queries and bodies, request and response headers including Cookie, Set-Cookie and Authorization, each request's cookies, and response bodies) and js_invocation_digests. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm sample budgets and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session.",
+      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. Every option is off unless named and none is inherited from the environment. document_start permits document-start Console scripts (arming is a separate Console action). request_stacks records the call stack that started each renderer request (get_request_stack). request_content_budget_mib (1 to 4096, default 256) sets how much unique request content is kept. response_body_budget_mib (1 to 16384, default 512) sets how much unique response content is kept, and response_media also keeps element images, audio, video and fonts; both need request_content. Sensitive capture needs confirm_sensitive_capture: canvas_images, request_content (request paths, queries and bodies, request and response headers including Cookie, Set-Cookie and Authorization, each request's cookies, and response bodies) and js_invocation_digests. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm sample budgets and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session.",
       "input": {
         "$ref": "#/components/schemas/LiveSessionStart"
       },
@@ -3328,6 +3328,366 @@
         }
       }
     },
+    "/api/artifacts/search": {
+      "get": {
+        "operationId": "search_artifact_text",
+        "summary": "Search retained artifacts for literal text",
+        "description": "Captured content: finds a literal of 1 to 256 bytes on one line in retained artifacts, oldest artifact first, as Sources Search does. There is no pattern language, because captured text is adversarial. match_case false folds ASCII letters only. kind, artifact_id, session_id, navigation_id, frame_id, execution_context_id, sha256 and host select artifacts as get_artifacts filters do. Each match has its artifact, byte_offset, 1-based line and column (characters), and up to 48 bytes of the same line before and after it. At most 100 matches are taken from one file, files over 16 MiB are skipped, one call reads at most 64 MiB and stops after 10 seconds; coverage names each file not fully searched and complete says whether the scope was searched whole. offset skips matches and next_offset continues. The MCP projection lists this operation only with --allow-content (--permission full).",
+        "tags": [
+          "artifacts"
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "The literal text, 1 to 256 bytes, no line breaks.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          {
+            "name": "match_case",
+            "in": "query",
+            "required": false,
+            "description": "Default false.",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "description": "Comma separated artifact kinds, such as javascript or response_body.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "navigation_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "frame_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "execution_context_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "sha256",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 253
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Matches to skip. Default 0.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Clamped to 1..200, default 50.",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matches and coverage.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactSearchResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid q, or an unknown, duplicate or malformed parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Artifact manifest read exceeded its deadline.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Artifact manifest scan exceeds its resource limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read or validation failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads retained artifacts within fixed byte, match and time budgets. Returns captured content; nothing is changed.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/artifact_text.rs",
+              "symbol": "search"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/artifacts/{artifact_id}/text": {
+      "get": {
+        "operationId": "get_artifact_text",
+        "summary": "Read one bounded page of an artifact's bytes as text",
+        "description": "Captured content: returns one page of a retained artifact (JavaScript source, request and response bodies, Wasm module bytes, stacks and any other kind) as UTF-8 text, hex or base64, verified against the manifest digest. A page covers at most 65,536 source bytes for utf-8, 32,768 for hex and 49,152 for base64, and stops earlier so its text costs at most 98,304 JSON bytes with escapes, so the whole document always fits the 128 KiB MCP inline limit. next_offset continues the read and is null at the end; complete is true when one page held the whole artifact. A utf-8 page that starts inside a character begins at the next one, and invalid bytes become U+FFFD and are counted in replacements. The MCP projection lists this operation only with --allow-content (--permission full), because its result is captured content that goes to the model provider.",
+        "tags": [
+          "artifacts"
+        ],
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Byte offset to start from, at most the artifact byte size. Default 0.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "length",
+            "in": "query",
+            "required": false,
+            "description": "Source bytes to read, clamped to the page limit of the encoding. Default: that limit.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536
+            }
+          },
+          {
+            "name": "encoding",
+            "in": "query",
+            "required": false,
+            "description": "utf-8 for text, hex or base64 for binary bytes. Default utf-8.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "utf-8",
+                "hex",
+                "base64"
+              ],
+              "default": "utf-8"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One verified page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactTextPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown, duplicate or malformed parameter, an unknown encoding, or an offset beyond the byte size.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Requested record not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Artifact manifest lookup or verification exceeded its deadline.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or integrity failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads one retained artifact and verifies its digest. Returns captured content; nothing is changed.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/artifact_text.rs",
+              "symbol": "page"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/artifacts/{artifact_id}/content": {
       "get": {
         "operationId": "get_artifact_content",
@@ -4306,6 +4666,28 @@
               "type": "string",
               "maxLength": 128,
               "pattern": "^(custom|type|import|function|table|memory|global|export|start|element|code|data|data_count|tag)(,(custom|type|import|function|table|memory|global|export|start|element|code|data|data_count|tag))*$"
+            }
+          },
+          {
+            "name": "row_offset",
+            "in": "query",
+            "required": false,
+            "description": "First row of a row window. With row_offset or row_limit the document keeps only that window of rows and adds row_window, so a module whose rows exceed an inline limit can be read page by page. Default 0.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "row_limit",
+            "in": "query",
+            "required": false,
+            "description": "Rows in the window, 1 to 2048. The window also stops at 98,304 bytes of serialized rows, so one page always fits a 128 KiB MCP result; row_window.next_offset continues. Default 2048.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2048
             }
           }
         ],
@@ -19665,6 +20047,284 @@
           }
         }
       },
+      "ArtifactTextPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "One verified page of artifact bytes. The text is captured content.",
+        "required": [
+          "format",
+          "artifact",
+          "encoding",
+          "offset",
+          "length",
+          "next_offset",
+          "complete",
+          "replacements",
+          "page_limit_bytes",
+          "text"
+        ],
+        "properties": {
+          "format": {
+            "const": "reb-artifact-text-v1"
+          },
+          "artifact": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "artifact_id",
+              "session_id",
+              "kind",
+              "mime_type",
+              "byte_size",
+              "sha256"
+            ],
+            "properties": {
+              "artifact_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "session_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "mime_type": {
+                "type": "string"
+              },
+              "byte_size": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          },
+          "encoding": {
+            "enum": [
+              "utf-8",
+              "hex",
+              "base64"
+            ]
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Where this page starts, after any move to a character boundary."
+          },
+          "length": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Source bytes this page covers."
+          },
+          "next_offset": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Where the next page starts, or null at the end."
+          },
+          "complete": {
+            "type": "boolean",
+            "description": "This page holds the whole artifact."
+          },
+          "replacements": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Invalid UTF-8 sequences shown as U+FFFD."
+          },
+          "page_limit_bytes": {
+            "type": "integer",
+            "enum": [
+              65536,
+              32768,
+              49152
+            ]
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 98304
+          }
+        }
+      },
+      "ArtifactSearchResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Literal matches with bounded same-line context. Snippets are captured content.",
+        "required": [
+          "format",
+          "query",
+          "matches",
+          "next_offset",
+          "coverage"
+        ],
+        "properties": {
+          "format": {
+            "const": "reb-artifact-search-v1"
+          },
+          "query": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "q_bytes",
+              "match_case",
+              "filters",
+              "offset",
+              "limit"
+            ],
+            "properties": {
+              "q_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 256
+              },
+              "match_case": {
+                "type": "boolean"
+              },
+              "filters": {
+                "type": "object"
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200
+              }
+            }
+          },
+          "matches": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "artifact_id",
+                "session_id",
+                "kind",
+                "byte_offset",
+                "line",
+                "column",
+                "before",
+                "match",
+                "after"
+              ],
+              "properties": {
+                "artifact_id": {
+                  "$ref": "#/components/schemas/Uint64String"
+                },
+                "session_id": {
+                  "$ref": "#/components/schemas/Uint64String"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "byte_offset": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "line": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "column": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "before": {
+                  "type": "string",
+                  "maxLength": 48
+                },
+                "match": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "after": {
+                  "type": "string",
+                  "maxLength": 48
+                }
+              }
+            }
+          },
+          "next_offset": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "coverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "artifacts_selected",
+              "artifacts_searched",
+              "bytes_searched",
+              "stopped",
+              "not_fully_searched",
+              "not_fully_searched_count",
+              "complete"
+            ],
+            "properties": {
+              "artifacts_selected": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "artifacts_searched": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "bytes_searched": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "stopped": {
+                "enum": [
+                  "deadline",
+                  "total_bytes",
+                  null
+                ]
+              },
+              "not_fully_searched": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "artifact_id",
+                    "reason"
+                  ],
+                  "properties": {
+                    "artifact_id": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "reason": {
+                      "enum": [
+                        "larger_than_16_mib",
+                        "unreadable_or_integrity",
+                        "file_match_limit"
+                      ]
+                    }
+                  }
+                }
+              },
+              "not_fully_searched_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "complete": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      },
       "WasmInspection": {
         "type": "object",
         "additionalProperties": false,
@@ -19847,6 +20507,40 @@
           "notice": {
             "type": "string",
             "maxLength": 512
+          },
+          "row_window": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Present only when row_offset or row_limit was given. rows holds this window, which stops at row_limit rows or 98,304 serialized bytes.",
+            "required": [
+              "offset",
+              "rows",
+              "total_rows",
+              "next_offset"
+            ],
+            "properties": {
+              "offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "rows": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2048
+              },
+              "total_rows": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 8192
+              },
+              "next_offset": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              }
+            }
           },
           "limits": {
             "type": "object",
@@ -32966,6 +33660,17 @@
             "minimum": 1,
             "maximum": 4096,
             "description": "MiB of unique request bodies and full targets this content session retains, default 256. Identical bytes are stored once; a request past the budget keeps its length, type and digest and names the refusal. Requires request_content."
+          },
+          "response_body_budget_mib": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16384,
+            "description": "MiB of unique response bodies this content session retains, default 512. A response past the budget keeps its length, type and digest. Requires request_content."
+          },
+          "response_media": {
+            "type": "boolean",
+            "default": false,
+            "description": "Also retain the images, audio, video and fonts that page elements load, which content sessions otherwise skip. They count against response_body_budget_mib and can hold sensitive page content. Requires request_content, so it is sensitive capture behind confirm_sensitive_capture."
           },
           "request_stacks": {
             "type": "boolean",

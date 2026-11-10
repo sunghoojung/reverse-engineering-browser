@@ -97,6 +97,40 @@ pub fn load(root: &Path, id: &str, sections: Option<&BTreeSet<u8>>) -> Result<Va
     Ok(document)
 }
 
+/// Row windows let a client page through a whole module's rows when the
+/// document is larger than its inline limit. The window stops at `limit` rows
+/// or `WINDOW_BYTES` of serialized rows, whichever comes first, so one page
+/// always fits a 128 KiB MCP result; `next_offset` continues.
+pub const WINDOW_MAX_ROWS: usize = 2048;
+pub const WINDOW_BYTES: usize = 98_304;
+
+pub fn window(document: &mut Value, offset: usize, limit: usize) -> Result<()> {
+    let rows = document["rows"].as_array().cloned().unwrap_or_default();
+    let total = rows.len();
+    if offset > total {
+        return Err(Error::bad("row_offset exceeds the row count"));
+    }
+    let mut kept = Vec::new();
+    let mut bytes = 0usize;
+    for row in rows.into_iter().skip(offset).take(limit) {
+        let size = serde_json::to_vec(&row).map_or(usize::MAX, |encoded| encoded.len() + 1);
+        if !kept.is_empty() && bytes + size > WINDOW_BYTES {
+            break;
+        }
+        bytes += size;
+        kept.push(row);
+    }
+    let next = offset + kept.len();
+    document["rows"] = Value::Array(kept);
+    document["row_window"] = json!({
+        "offset": offset,
+        "rows": next - offset,
+        "total_rows": total,
+        "next_offset": if next < total { json!(next) } else { Value::Null },
+    });
+    Ok(())
+}
+
 struct Rows {
     values: Vec<Value>,
     started: Instant,

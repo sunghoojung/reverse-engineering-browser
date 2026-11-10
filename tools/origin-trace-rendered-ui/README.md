@@ -96,6 +96,18 @@ Live Session…** again. The unsaved-work sheet must name the new session, keep
 page, the edit and the start dialog untouched. Once the edit is discarded, the
 start dialog opens at once and the test continues offline.
 
+`test0AgentPanel` opens the Agent dock at both window sizes. It stays off
+until the disclosure names tool results and their URLs and hosts, then a turn
+runs through the bundled LangGraph runtime, the native fixed-endpoint proxy, a
+local stand-in provider (`REB_AGENT_PROVIDER_BASE_URL`, loopback only, no key)
+and the real tool server: the tool call and its result are visible,
+hostile model markup stays text, an invented citation is labeled *not verified*,
+and a real one opens Sources. An action waits on Allow once or Deny, a 400-row
+conversation mounts only nearby rows, the switch stops the tool server, and
+`ps` RSS is printed for each state (`RENDERED_UI_AGENT_MEMORY`). The driver
+asserts the provider received no key and no captured source, and that the
+transcript is user-only.
+
 `test23WorkspaceReloadsAfterContentProcessStops` ends the web content process
 with SIGKILL, as a crash would; WebKit's testing selector names its process ID.
 The workspace must reload once by itself; a second stop within 30 seconds must

@@ -8,7 +8,8 @@ function initializePaneLayout() {
     { id: 'traffic-columns', parent: '.traffic-grid', panes: ['.request-pane', '.detail-pane'], axis: 'x', minimum: [380, 360], label: 'Traffic list and inspector' },
     { id: 'sources', parent: '#screen-sources', panes: ['.sources-navigator', '.sources-editor'], axis: 'x', minimum: [140, 320], label: 'Source navigator and editor' },
     { id: 'source-graph', parent: '#source-view-split', panes: ['#source-graph-host', '#source-code-wrap'], axis: 'y', minimum: [180, 72], label: 'block graph and linear view' },
-    { id: 'decoder', parent: '.decoder-grid', panes: ['.decoder-column:first-child', '.decoder-column:last-child'], axis: 'x', minimum: [340, 300], label: 'Decoder pipeline and output' }
+    { id: 'decoder', parent: '.decoder-grid', panes: ['.decoder-column:first-child', '.decoder-column:last-child'], axis: 'x', minimum: [340, 300], label: 'Decoder pipeline and output' },
+    { id: 'agent', parent: '#workspace', panes: ['.main', '#agent-dock'], axis: 'x', minimum: [420, 300], label: 'workspace and agent' }
   ];
   let saved = {};
   try {
@@ -221,6 +222,7 @@ function initializePaneLayout() {
   observer.observe(document.querySelector('#exchange-inspector'), { childList: true });
   observer.observe(document.querySelector('#native-console-panel'), { attributes: true, attributeFilter: ['hidden'] });
   observer.observe(document.querySelector('#xrefs-dock'), { attributes: true, attributeFilter: ['hidden'] });
+  observer.observe(document.querySelector('#agent-dock'), { attributes: true, attributeFilter: ['hidden'] });
   window.addEventListener('resize', schedule);
   document.addEventListener('scroll', event => { rememberScroll(event.target); schedule(true); }, true);
   window.addEventListener('blur', () => dragging?.layout.finish(false));

@@ -409,7 +409,8 @@ assert.match(nativeAppSource,/return nativeUIURL\(arguments\[urlFlag \+ 1\]\)/);
 // normalized live URL, the requested --ui-url or the bundled workspace. A
 // stopped page reloads only through the same normalization.
 assert.match(nativeAppSource,/return nativeUIURL\(published\.absoluteString\)/);
-assert.match(nativeAppSource,/private func load\(_ url: URL\) \{\s+closeGuard\?\.prepareForLoad\(url\)\s+clientProjectExport\?\.prepareForLoad\(url\)\s+webView\?\.load\(URLRequest\(url: url\)\)/);
+// The agent bridge trusts the same explicitly loaded document as export.
+assert.match(nativeAppSource,/private func load\(_ url: URL\) \{\s+closeGuard\?\.prepareForLoad\(url\)\s+clientProjectExport\?\.prepareForLoad\(url\)\s+agentBridge\?\.prepareForLoad\(url\)\s+webView\?\.load\(URLRequest\(url: url\)\)/);
 assert.match(nativeAppSource,/guard let self, self\.readyLiveWorkspaceURL == url else \{ return \}\s+self\.liveWorkspaceURL = url\s+self\.load\(url\)/);
 assert.match(nativeAppSource,/load\(requestedUIURL \?\? localApplicationURL\)/);
 assert.match(nativeAppSource,/self\.load\(localApplicationURL\)/);

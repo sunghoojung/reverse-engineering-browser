@@ -165,12 +165,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       switch requestURL.path {
       case "", "/", "/index.html":
         response = (try Data(contentsOf: indexURL), "text/html; charset=utf-8", 200, [:])
-      case "/app.css", "/xrefs_view.css", "/entropy_map.css", "/block_graph.css":
+      case "/app.css", "/xrefs_view.css", "/entropy_map.css", "/block_graph.css", "/agent_panel.css":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(String(requestURL.path.dropFirst()))),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/block_graph.js", "/block_graph_layout.js", "/pane_layout.js", "/app.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/source_search.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/invocation_sites.js", "/entropy_map.js", "/traffic_view.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/native_console_completion.js", "/native_console.js":
+      case "/pane_layout.js", "/app.js", "/agent_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/source_search.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/invocation_sites.js", "/entropy_map.js", "/traffic_view.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/native_console_completion.js", "/native_console.js", "/block_graph.js", "/block_graph_layout.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -2676,6 +2676,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private var contentHandler: LocalContentHandler?
   private var closeGuard: NativeCloseGuard?
   private var clientProjectExport: NativeClientProjectExport?
+  private var agentBridge: NativeAgentBridge?
   private var clientProjectSmoke: ClientProjectExportSmoke?
   private var closeSmoke: NativeCloseGuardSmoke?
   private let liveSessionCoordinator = LiveSessionCoordinator()
@@ -2768,6 +2769,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       clientProjectExport, contentWorld: .page, name: NativeClientProjectExport.handlerName
     )
     self.clientProjectExport = clientProjectExport
+    let agentBridge = NativeAgentBridge(webView: webView, window: window)
+    configuration.userContentController.addScriptMessageHandler(
+      agentBridge, contentWorld: .page, name: NativeAgentBridge.handlerName
+    )
+    self.agentBridge = agentBridge
 
     NSApp.setActivationPolicy(.regular)
     if !smokeTest {
@@ -2810,6 +2816,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
     closeGuard?.navigationWillStart()
     clientProjectExport?.navigationWillStart()
+    agentBridge?.navigationWillStart()
   }
 
   func webView(
@@ -2819,6 +2826,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     if navigationAction.targetFrame?.isMainFrame == true {
       closeGuard?.navigationWillStart()
       clientProjectExport?.navigationWillStart()
+      agentBridge?.navigationWillStart()
+    agentBridge?.navigationWillStart()
     }
     decisionHandler(.allow)
   }
@@ -2829,6 +2838,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
     closeGuard?.navigationWillStart()
     clientProjectExport?.navigationWillStart()
+    agentBridge?.navigationWillStart()
     // WebKit can forget the page's URL once this callback returns.
     let url = webView.url
     if let last = lastContentProcessReload, Date().timeIntervalSince(last) < 30 {
@@ -2888,6 +2898,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 
   func applicationWillTerminate(_ notification: Notification) {
     clientProjectExport?.navigationWillStart()
+    agentBridge?.navigationWillStart()
     closeSmoke?.willTerminate()
     liveSessionCoordinator.stop()
   }
@@ -3035,6 +3046,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private func load(_ url: URL) {
     closeGuard?.prepareForLoad(url)
     clientProjectExport?.prepareForLoad(url)
+    agentBridge?.prepareForLoad(url)
     webView?.load(URLRequest(url: url))
   }
 
@@ -3461,6 +3473,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     clientProjectExport?.navigationDidFinish(webView)
+    agentBridge?.navigationDidFinish(webView)
     if openLiveWorkspaceWhenLoaded {
       openLiveWorkspaceWhenLoaded = false
       openLiveWorkspace(nil)

@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="xrefs_view.css">
     <link rel="stylesheet" href="entropy_map.css">
     <link rel="stylesheet" href="block_graph.css">
+    <link rel="stylesheet" href="agent_panel.css">
   </head>
   <body>
     <div class="app">
@@ -19,6 +20,7 @@
         <span id="session-mode" class="session-mode">Connecting</span>
         <span id="session-content" class="session-mode" data-kind="content" hidden>Content capture</span>
         <button id="invocation-tracking" class="session-tracking" type="button" aria-controls="invocation-sites-details" hidden></button>
+        <button id="agent-toggle" class="titlebar-dock-toggle" type="button" aria-controls="agent-dock" aria-expanded="false" aria-pressed="false" aria-label="Agent" aria-keyshortcuts="Meta+Shift+A Control+Shift+A" title="Agent (⌘ / Ctrl + Shift + A)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4h12v9H9l-4 3v-3H4zM7 8h6"/></svg></button>
         <button id="xrefs-toggle" class="xrefs-toggle" type="button" aria-controls="xrefs-dock" aria-expanded="false" aria-pressed="false" aria-label="Cross-references" aria-keyshortcuts="X" title="Cross-references for the selection (X)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5h6m-2-2 2 2-2 2M16 15h-6m2-2-2 2 2 2M4 10h12"/></svg></button>
       </header>
 
@@ -695,6 +697,7 @@
           </section>
         </main>
         <aside id="xrefs-dock" class="xrefs-dock" aria-label="Cross-references" hidden></aside>
+        <aside id="agent-dock" class="agent-dock" aria-label="Agent" hidden></aside>
         <section id="native-console-panel" class="native-console-panel" aria-label="Native JavaScript console" hidden>
           <header class="native-console-head">
             <strong class="native-console-title">Console</strong>
@@ -832,6 +835,7 @@
     <script src="entropy_map.js"></script>
 
     <script src="app.js"></script>
+    <script src="agent_panel.js"></script>
     <script src="vm_program_workspace.js"></script>
     <script src="xrefs_view.js"></script>
   </body>

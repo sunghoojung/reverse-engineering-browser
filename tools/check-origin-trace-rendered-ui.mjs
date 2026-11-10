@@ -7,7 +7,8 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {execFileSync, spawn} from 'node:child_process';
-import {chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile} from 'node:fs/promises';
+import {chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile} from 'node:fs/promises';
+import {createServer} from 'node:http';
 import {existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -94,6 +95,8 @@ async function waitForFile(path, child, timeout = 30000) {
 const temporary = await mkdtemp(join(tmpdir(), 'reb-rendered-ui-'));
 let backend;
 let failingBackend;
+let agentStandIn;
+const agentRequests = [];
 let log = '';
 try {
   await rm(report, {recursive: true, force: true});
@@ -120,6 +123,47 @@ try {
   // The packaged app's default content mode retains request content, so the
   // titlebar carries its session label in every screenshot.
   const uiURL = `${endpoint}/?native=1&canvas_images=0&request_content=1`;
+
+  // A local stand-in for the provider, so the agent's whole loop runs through
+  // the packaged app with no key and no network. The real tool server answers.
+  const citedArtifact = (await (await fetch(`${endpoint}/api/artifacts?kind=javascript&limit=1`)).json()).artifacts[0];
+  const sse = lines => lines.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('');
+  const toolTurn = () => sse([{type: 'message_start', message: {id: `msg_${Math.random().toString(36).slice(2)}`, type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, usage: {input_tokens: 40, output_tokens: 0}}},
+    {type: 'content_block_start', index: 0, content_block: {type: 'tool_use', id: `toolu_${Math.random().toString(36).slice(2)}`, name: 'get_artifacts', input: {}}},
+    {type: 'content_block_delta', index: 0, delta: {type: 'input_json_delta', partial_json: '{"limit":3}'}},
+    {type: 'content_block_stop', index: 0}, {type: 'message_delta', delta: {stop_reason: 'tool_use'}, usage: {output_tokens: 8}}, {type: 'message_stop'}]);
+  const answer = `The session loaded **one** script. <img src=x onerror="window.__rebInjected=1"> See [cite session=${citedArtifact.session_id} artifact=${citedArtifact.artifact_id}] and an invented [cite session=${citedArtifact.session_id} artifact=999999].
+
+\`\`\`js
+fetch("/getcaptcha");
+\`\`\`
+
+- first observation
+- second observation`;
+  const textTurn = () => sse([{type: 'message_start', message: {id: `msg_${Math.random().toString(36).slice(2)}`, type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, usage: {input_tokens: 64, output_tokens: 0}}},
+    {type: 'content_block_start', index: 0, content_block: {type: 'text', text: ''}},
+    {type: 'content_block_delta', index: 0, delta: {type: 'text_delta', text: answer}},
+    {type: 'content_block_stop', index: 0}, {type: 'message_delta', delta: {stop_reason: 'end_turn'}, usage: {output_tokens: 32}}, {type: 'message_stop'}]);
+  agentStandIn = createServer((request, response) => {
+    let body = '';
+    request.setEncoding('utf8');
+    request.on('data', chunk => { body += chunk; });
+    request.on('end', () => {
+      agentRequests.push({path: request.url, headers: request.headers, body});
+      if (request.url.endsWith('/v1/models')) {
+        response.setHeader('Content-Type', 'application/json');
+        response.end(JSON.stringify({data: [{id: 'claude-opus-5-5'}, {id: 'claude-sonnet-5-5'}]}));
+        return;
+      }
+      response.setHeader('Content-Type', 'text/event-stream');
+      // A turn's first request asks for a tool; the request carrying its result
+      // gets the answer. Earlier turns' results are history, not this signal.
+      const last = JSON.stringify(JSON.parse(body || '{}').messages?.at(-1) ?? '');
+      response.end(last.includes('tool_result') ? textTurn() : toolTurn());
+    });
+  });
+  await new Promise(done => agentStandIn.listen(0, '127.0.0.1', done));
+  const agentProviderURL = `http://127.0.0.1:${agentStandIn.address().port}`;
 
   // A separate, real backend has no cached analysis. Removing execution
   // permission from its copied binary makes self-reexecution fail at spawn.
@@ -172,6 +216,9 @@ try {
       ...(maximumHeight === undefined ? {} : {REB_RENDERED_UI_MAX_HEIGHT: maximumHeight}),
       REB_DISABLE_AUTOMATIC_LIVE_SESSION: '1',
       REB_JS_INVOCATION_SITE_STORE: stores.invocationSites,
+      REB_AGENT_PROVIDER_BASE_URL: agentProviderURL,
+      REB_AGENT_TRANSCRIPT_DIR: join(temporary, 'agent-transcripts'),
+      REB_RENDERED_UI_BACKEND_PID: String(backend.pid),
       REB_RENDERED_UI_FAILURE_URL: failureURL,
       REB_RENDERED_UI_FAILURE_BINARY: failureBinary,
       REB_RENDERED_UI_OUTPUT: join(report, 'screenshots'),
@@ -202,6 +249,18 @@ try {
   } finally {
     await writeFile(join(report, 'backend.log'), backendLog);
   }
+  if (!only || only === 'test0AgentPanel') {
+    // The Claude model asks with the refusal-fallback beta, as `/v1/messages?beta=true`.
+    const asked = agentRequests.filter(entry => new URL(entry.path, 'http://stand-in').pathname === '/v1/messages');
+    assert(asked.length >= 4, `The agent must reach the local stand-in provider for each turn: ${asked.length}`);
+    assert(asked.every(entry => !entry.headers['x-api-key'] && !entry.headers.authorization), 'A stand-in provider receives no key');
+    assert(!asked.some(entry => entry.body.includes(HOSTILE_SOURCE_MARKER)), 'Captured source must not reach the provider');
+    const transcripts = await readdir(join(temporary, 'agent-transcripts'));
+    assert(transcripts.length > 0, 'The agent writes a local transcript');
+    for (const name of transcripts) assert.equal((await stat(join(temporary, 'agent-transcripts', name))).mode & 0o777, 0o600, 'The transcript is user-only');
+    assert.equal((await stat(join(temporary, 'agent-transcripts'))).mode & 0o777, 0o700, 'The transcript directory is user-only');
+    log += '\nRENDERED_UI_AGENT_CHECK transcript and provider assertions passed\n';
+  }
   const executed = [...log.matchAll(/Test Case '-\[OriginTraceRenderedUITests\.OriginTraceRenderedUITests (\w+)\]' passed/g)].map(match => match[1]);
   assert(executed.length > 0, 'No rendered UI test executed');
   const screenshots = (await readdir(join(report, 'screenshots'))).filter(name => name.endsWith('.png')).sort();
@@ -215,6 +274,7 @@ try {
 } finally {
   await writeFile(join(report, 'xcodebuild.log'), log).catch(() => {});
   if (failingBackend && failingBackend.exitCode === null) failingBackend.kill('SIGTERM');
+  agentStandIn?.close();
   if (backend && backend.exitCode === null) backend.kill('SIGTERM');
   // Stop any app instance still running from this relocated copy.
   try { execFileSync('pkill', ['-f', join(temporary, 'Origin Trace.app/Contents/MacOS/')]); } catch {}

@@ -298,6 +298,129 @@ through the normal selection paths. See the
 [names contract](../../docs/product/evidence-names-v1.md) for identities, bounds and
 concurrency.
 
+## In-app agent
+
+The **Agent** dock (the button at the titlebar's right edge, or ⌘⇧A) puts Claude or ChatGPT beside the
+evidence. It is closed by default, and the switch in its header is off by
+default. Turning it on is an explicit action for the current session, behind
+a disclosure, and stops completely when it is switched off.
+
+### Where the loop runs
+
+The agent loop is LangGraph, in this page's WKWebView. It is a `StateGraph` from
+`@langchain/langgraph/web` with three nodes (`model`, `review`, `tools`), the
+official `ChatAnthropic` and `ChatOpenAI` chat models, and one LangChain `tool()`
+per tool the native tool server lists. The source is
+[`agent-runtime/src/`](agent-runtime/src/). LangChain's `createAgent` with its
+human-in-the-loop middleware is not used, because that middleware pauses with
+`interrupt()`. `interrupt()` reads the graph config from `AsyncLocalStorage`,
+which WKWebView does not have, so it fails with "Called interrupt() outside the
+context of a graph". The graph instead stops at a static breakpoint before
+`review` whenever the model asks for an action. Each action then waits for its
+own **Allow once** or **Deny**; there is no standing grant. Deny records a
+refused tool result. Allow once resumes the graph, which runs that one call.
+
+Each turn runs on its own checkpoint thread, deleted when the turn ends, so no
+checkpoint outlives a turn. The conversation is kept in the page with a 2 MiB
+budget (a tool result is at most the 128 KiB inline limit). Older whole turns
+leave with a labeled notice; for Claude, their signed thinking leaves with them.
+A turn stops visibly after 128 rounds of tool calls.
+
+### Packages and bundle
+
+[`agent-runtime/package.json`](agent-runtime/package.json) pins
+`@langchain/langgraph` 1.5.2, `@langchain/core` 1.3.0,
+`@langchain/anthropic` 1.6.0 and `@langchain/openai` 1.7.0, with esbuild
+0.28.2. Every package in the lockfile was published at least two weeks before
+it was pinned (`npm install --before`). `make app-build` runs
+[`scripts/build-agent-runtime.sh`](../../scripts/build-agent-runtime.sh):
+`npm ci --ignore-scripts` from the lockfile, then one minified browser bundle
+per provider, `agent_runtime_claude.js` (about 1.5 MB) and
+`agent_runtime_chatgpt.js` (about 1.8 MB). The build refuses any Node built-in,
+and the third-party license notices ship as
+`Contents/Resources/AgentRuntimeLicenses.txt`. The page loads the bundle for
+the selected provider from the packaged resources the first time the agent is
+turned on, so a dock that is closed, or never turned on, parses none of it.
+Nothing in the bundle fetches on its own: the only network request is the
+provider call below. The browser-only `make ui` path has no bundle and says the
+agent is unavailable.
+
+### What stays native
+
+The native app keeps what the page must not hold:
+
+- **Keys.** The Keychain holds one item per provider. **Add key** opens a
+  native secure field, so a key never enters the web view. The chat models are
+  given a placeholder key and a `fetch` that goes through the native bridge.
+  Native forwards a request only to `https://api.anthropic.com/v1/messages`
+  (optionally `?beta=true`) or `https://api.openai.com/v1/responses`, by POST and
+  for the provider that was enabled. It drops every credential and cookie header
+  the page sent and adds the real key itself. The response streams back as
+  chunks on SSE event boundaries, so token streaming works. An error body is
+  bounded and scrubbed of anything shaped like a key. This is a transport for
+  the two chat models, not a general proxy.
+- **The tool server.** One `reb-api mcp` child (the packaged `OriginTraceAPI`)
+  with `--base-url` set to this workspace's loopback API. It runs only while the
+  agent is on. It stops when the switch turns off, when the session or document
+  changes, when the dock closes with no turn running, or after five idle minutes
+  with the dock open; the next tool call starts it again. Native refuses any
+  action call that did not come with Allow once.
+- **The transcript file**, below.
+
+A workspace without a loopback API (the bundled offline workspace) says the
+agent is unavailable.
+
+### What leaves the machine
+
+As the disclosure says: the question, excerpts the researcher pins, and every
+tool result, including its URLs, hosts, identifiers and counts. Tool calls and
+full results are visible in the transcript. The tool surface is `reb-api mcp`
+started without `--allow-effects`, so only read-only tools are listed, narrowed
+further to structural reads (`AgentCore.swift`). `--omit-content` makes every
+response structural: rows and identifiers stay, while source, bytecode,
+disassembly, bodies, and long strings do not. Those leave only when pinned. The
+ChatGPT path stores nothing at OpenAI (`store: false`, with encrypted reasoning
+replayed from local history). Pins are bounded to 128 KiB each and 512 KiB per
+turn, and a cut pin says so.
+
+**Actions** are off unless the researcher opts in during the disclosure step,
+which adds `--allow-effects` for that session.
+
+### Citations, rendering and the transcript
+
+Citations use the token form `[cite session=S process=P sequence=N]` or
+`[cite session=S artifact=A offset=B]`. Each is checked against retained evidence
+before it becomes a link that opens the existing Traffic, Sources,
+Fingerprinting or VM row. An identifier that cannot be found stays plain text
+labeled *not verified*. Model output is rendered as text plus a small markdown
+subset (paragraphs, lists, code fences); HTML is never interpreted, and the
+model is told captured content is data, not instructions.
+
+The transcript is written to
+`~/Library/Application Support/Origin Trace/agent-transcripts/`, user-only, one
+file per session, and is separate from the evidence store. Earlier rows are
+shown when the agent is turned back on and are not resent to the model.
+
+The web view keeps 6 MiB of transcript rows and mounts only rows near the
+viewport once there are many; older rows leave with a visible label and **Load
+earlier** reads them back. `REB_AGENT_PROVIDER_BASE_URL` accepts only a loopback
+stand-in, for tests; it never redirects a real key.
+
+### Checks
+
+- `node tools/check-agent-runtime.mjs <claude bundle> <chatgpt bundle>` runs the
+  shipped bundles in a VM context with only web globals, and no global `fetch`,
+  against a local stand-in provider. It covers a read tool call, Deny and Allow
+  once at the breakpoint, stop while paused and while streaming, the history
+  budget, and both providers' request shapes. `make app-build` runs it on the
+  packaged bundles.
+- `tools/check-agent-core.swift`, also in `make app-build`, checks the proxy's
+  routes, header filtering, native key, error redaction and cancel, and the real
+  `reb-api mcp` tool gates and the transcript's permissions.
+- `node tools/check-agent-panel.mjs` (`make native-only-check`) checks the dock's
+  states, safe rendering, citations and budgets in a DOM model.
+- `test0AgentPanel` drives the packaged app.
+
 ## Native console
 
 The **Console** bottom dock runs explicit mutable main-world JavaScript commands.

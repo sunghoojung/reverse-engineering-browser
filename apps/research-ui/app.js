@@ -19,6 +19,12 @@ invocationSitesPanel.refresh();
 const sourceFormatClient = createSourceFormatClient({
   onChange: source => { if (state.sourceFormatted && sourceIdentity(selectedSource()) === sourceIdentity(source)) renderSources(); }
 });
+const entropyMap = createEntropyMap({
+  button: document.querySelector('#source-map'), root: document.querySelector('#source-map-view'),
+  codeWrap: elements.sourceCodeWrap, viewKind: elements.sourceViewKind,
+  toolbar: document.querySelector('.source-editor-toolbar'),
+  getSource: selectedSource, identityOf: sourceIdentity, reveal: revealSourceByteOffset
+});
 // The Sources status bar never cuts the cursor position, which has the full
 // text as its tooltip. When the items do not fit, it drops in turn the hash,
 // the pretty-print label (leaving "{ }"), the language, the size, the view
@@ -71,12 +77,6 @@ const sourceTreeView = createSourceTree({
 });
 // The Console's document listing names frames and marks the top-level ones.
 document.addEventListener('reb:console-documents', event => { state.consoleDocuments = event.detail; renderSourceTree(); });
-const entropyMap = createEntropyMap({
-  button: document.querySelector('#source-map'), root: document.querySelector('#source-map-view'),
-  codeWrap: elements.sourceCodeWrap, viewKind: elements.sourceViewKind,
-  toolbar: document.querySelector('.source-editor-toolbar'),
-  getSource: selectedSource, identityOf: sourceIdentity, reveal: revealSourceByteOffset
-});
       const evidencePackagePanel = createEvidencePackagePanel({getContext: () => ({
         requestId: evidenceRequestKey(state.requests.find(request => request.id === state.selectedRequestId)),
         requestEvents: state.requests.find(request => request.id === state.selectedRequestId)?.events ?? [],

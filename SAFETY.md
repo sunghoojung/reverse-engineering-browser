@@ -304,9 +304,12 @@ it.
   the researcher's Collection and Analyst drafts, local store paths and every
   other content field of a tool result go to the provider. Choose it only when
   the target's authorization and the provider's terms allow that data to leave
-  the machine. Cookie values and credential header values (withheld by header
-  name) are withheld at every level; other header values, such as `Location`
-  or `Referer`, are returned as captured and can still hold a secret. The
+  the machine. The request header and cookie reads withhold cookie values and
+  credential header values (by header name) at every level, and the text reads
+  and search never return header blocks or cookie lists. Other header values,
+  such as `Location` or `Referer`, are returned as captured and can still hold
+  a secret, and script the agent evaluates in a connected document at Full
+  access returns whatever that page can read, such as `document.cookie`. The
   agent's own sessions can name request content, response media, canvas images
   or invocation value digests only when the researcher also ticks a separate
   sensitive-capture box, off by default and never remembered. The native app
@@ -354,6 +357,7 @@ of the data-handling policy:
 | App-started digest default and agent-session exclusion | `LiveSessionCoordinator.captureDefaults` (Content mode with saved sites only, explicit value wins) and `session_launch.rs` (agent sessions remove an inherited site file and digest switch, and arm only named sites from a private copy) |
 | In-app agent permission level and per-call decision for the LangGraph and CLI loops | `AgentToolGate` in [`AgentCore.swift`](apps/research-ui/macos/AgentCore.swift), the native confirmation in [`AgentBridge.swift`](apps/research-ui/macos/AgentBridge.swift) |
 | Tool server content, effect and sensitive-capture gates (`--permission`, `--allow-content`, `--allow-sensitive-capture`) | [`mcp.rs`](apps/origin-trace-backend/src/bin/reb_api/mcp.rs) |
+| Header blocks and cookie lists never returned by the text reads or search, at any level | `WITHHELD_KINDS` in [`artifact_text.rs`](apps/origin-trace-backend/src/artifact_text.rs) |
 | Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |
 
 ## Related documents

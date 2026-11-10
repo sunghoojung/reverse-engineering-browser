@@ -6052,6 +6052,11 @@ async fn capture_clear_requires_stopped_guards_for_every_output_before_any_trunc
                 b"retained bytes\n"
             );
         }
+        // Dropping the file alone can leave the lock held: a child that
+        // another test spawns while it is open keeps a copy of the
+        // descriptor until its exec, and the lock belongs to the shared open
+        // file description. Unlock it here, as frozen::Store does on drop.
+        assert_eq!(unsafe { libc::flock(guard.as_raw_fd(), libc::LOCK_UN) }, 0);
         drop(guard);
     }
     assert_eq!(clear().await.status(), 200);
@@ -7707,6 +7712,9 @@ async fn workspace_http_held_lease_rejects_without_wait_or_changes() {
             200,
             "Atomic reads stay available"
         );
+        // Another test's child can hold a copy of this descriptor until its
+        // exec, so dropping alone may leave the lease held for the next change.
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
         drop(lock);
         assert_eq!(
             server
@@ -8764,11 +8772,20 @@ impl FakeBroker {
     fn exit(&mut self) {
         self.listener = None;
         let _ = std::fs::remove_file(&self.socket);
-        self.guard = None;
+        self.release();
     }
     /// A killed broker releases its lock and leaves its socket behind.
     fn kill(&mut self) {
-        self.guard = None;
+        self.release();
+    }
+    /// A broker's exit frees its lock at once. In this shared test process,
+    /// another test's child can hold a copy of the descriptor until its exec,
+    /// so dropping the file alone can keep the capture reading as running.
+    fn release(&mut self) {
+        use std::os::fd::AsRawFd;
+        if let Some(guard) = self.guard.take() {
+            assert_eq!(unsafe { libc::flock(guard.as_raw_fd(), libc::LOCK_UN) }, 0);
+        }
     }
 }
 

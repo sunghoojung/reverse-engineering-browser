@@ -1467,7 +1467,7 @@ const ownershipFunctionNames = ['sourceIdentity', 'isSourceArtifact', 'sourceIsC
   'capturedSources', 'selectedSource', 'deobfuscationKey', 'validateSourceAnalysis', 'loadDeobfuscation',
   'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
   'closeSource',
-  'sourceDisplayName', 'sourceKindLabel', 'sourceIcon', 'renderSourceWindowControls', 'revealSourceColumn', 'moveSourceWindow', 'syncSourceDisplayControls', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent',
+  'sourceDisplayName', 'sourceKindLabel', 'sourceIcon', 'renderSourceWindowControls', 'revealSourceColumn', 'moveSourceWindow', 'syncSourceDisplayControls', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent', 'renderSourceLanguage', 'recolorSourceWindow',
   'sourceArtifactIdentityMatches', 'selectArtifact', 'sourceRepresentation', 'sourceWantedLine', 'sourceOriginalHighlighter', 'sourceFormattedView', 'sourceFormatWanted', 'sourcePositionText', 'syncFloat32Panel', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
   'discardStaticCleanup', 'toggleStaticCleanupComparison', 'updateDeobfuscationView', 'setDeobfuscationDisclosure', 'revealDeobfuscationChange', 'deobfuscationButton', 'deobfuscationDisclosure', 'renderDeobfuscationReport'];
 const canvasProductionRules=runInNewContext(

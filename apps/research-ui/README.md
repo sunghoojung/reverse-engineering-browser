@@ -1503,7 +1503,8 @@ increasing these limits. Colors resume from lexer checkpoints saved every 4 Ki
 UTF-16 units of the document, so later windows and clipped columns color exactly
 as a pass from the start would. Checkpoints extend in steps of 64 Ki units
 between tasks; a window they have not reached shows **coloring…** in plain text
-until they do. Captured bytes, line endings, BOMs and absolute runtime locations
+until they do, and its mounted rows are then colored in place rather than
+rebuilt. Captured bytes, line endings, BOMs and absolute runtime locations
 stay unchanged. The current document has one sparse line anchor per 128 lines,
 within a defensive 64 Mi UTF-16-unit inspection limit.
 Derived/Pretty mappings are projected only for mounted lines.

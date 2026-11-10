@@ -7372,7 +7372,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const highlighter = sameDocument && previous.highlighter ? previous.highlighter
           : createSourceHighlighter(view.wasmRows ? {kind: 'plain', mime_type: 'text/plain'} : source, index,
             page ? {highlighter: sourceOriginalHighlighter(source, view.active), offset: page.base} : null);
-        if (!highlighter.ready(window.rows)) highlighter.advance(SOURCE_COLOR_SYNC_UNITS);
+        // The synchronous budget is spent in slices: a page of a large layout is
+        // seeded only once the original's lexer reaches its first character, so a
+        // page within the budget is colored before its first paint.
+        for (let spent = 0; spent < SOURCE_COLOR_SYNC_UNITS && !highlighter.ready(window.rows); spent += SOURCE_COLOR_SLICE_UNITS) highlighter.advance(SOURCE_COLOR_SLICE_UNITS);
         const colored = highlighter.ready(window.rows);
         const sameWindow = sameDocument && previous.window.line === window.line && previous.window.column === window.column && previous.colored === colored;
         if (sameWindow) {
@@ -7394,7 +7397,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           search: sameDocument ? previous.search : null};
         const lineMap = view.lineMap;
         const colors = colored ? highlighter.rows(window.rows) : null;
-        // Checkpoints extend in small steps between tasks; the window recolors once they reach it.
+        // Checkpoints extend in small steps between tasks; the mounted rows recolor
+        // in place once they reach the window, so the rows are built once.
         if (!highlighter.done() && !highlighter.pumping) {
           highlighter.pumping = true;
           const pump = () => {
@@ -7402,7 +7406,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             if (editor?.highlighter !== highlighter || editor.identity !== sourceIdentity(selectedSource())) {highlighter.pumping = false; return;}
             highlighter.advance(SOURCE_COLOR_SLICE_UNITS);
             if (!editor.colored && highlighter.ready(editor.window.rows)) {
-              renderSourceContent(selectedSource(), editor.view, {line: editor.window.line, column: editor.window.column, search: false});
+              if (!recolorSourceWindow(editor)) renderSourceContent(selectedSource(), editor.view, {line: editor.window.line, column: editor.window.column, search: false});
               if (elements.sourceSearch.value) applySourceSearch(false, 0, {reveal: false});
             }
             if (highlighter.done()) highlighter.pumping = false; else setTimeout(pump, 0);
@@ -7458,12 +7462,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         });
         elements.sourceCode.replaceChildren(...nodes);
         elements.sourceCodeWrap.dataset.gutterDigits = String(Math.max(5, String(index.lineCount).length));
-        // Why the whitespace layout is used is stated in #source-limit-notice; the label stays short.
-        const layout = view.formatPending ? ' · formatting…' : view.formatError ? ` · ${view.formatError}`
-          : view.formatted ? ` · ${view.formatted.engine === 'oxc' ? 'Oxc layout' : 'whitespace layout'}` : '';
-        elements.sourceLanguage.textContent = view.wasmRows ? 'WASM disassembly · byte offsets'
-          : `${sourceSyntaxLabel(highlighter.language)}${!colors ? ' · coloring…' : colors.truncated ? ' · color limit reached' : ''}${layout}`;
-        elements.sourceLanguage.title = `${elements.sourceLanguage.textContent}${view.formatted?.engine !== 'oxc' && view.formatNotice ? `: ${view.formatNotice}` : ''}`;
+        renderSourceLanguage(view, highlighter, colors);
         elements.sourceCode.hidden = false;
         elements.sourceCodeEmpty.hidden = true;
         renderSourceWindowControls();
@@ -7485,6 +7484,32 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             if (elements.sourceSearch.value === find.query) { state.sourceSearchIndex = find.index ?? 0; applySourceSearch(false, 0); }
           } else if (target.search !== false) applySourceSearch(false, 0, {reveal: false});
         }
+      }
+
+      // Why the whitespace layout is used is stated in #source-limit-notice; the label stays short.
+      function renderSourceLanguage(view, highlighter, colors) {
+        const layout = view.formatPending ? ' · formatting…' : view.formatError ? ` · ${view.formatError}`
+          : view.formatted ? ` · ${view.formatted.engine === 'oxc' ? 'Oxc layout' : 'whitespace layout'}` : '';
+        elements.sourceLanguage.textContent = view.wasmRows ? 'WASM disassembly · byte offsets'
+          : `${sourceSyntaxLabel(highlighter.language)}${!colors ? ' · coloring…' : colors.truncated ? ' · color limit reached' : ''}${layout}`;
+        elements.sourceLanguage.title = `${elements.sourceLanguage.textContent}${view.formatted?.engine !== 'oxc' && view.formatNotice ? `: ${view.formatNotice}` : ''}`;
+      }
+
+      // Colors the mounted rows once the lexer reaches them. Only each row's text
+      // is replaced, so focus, the caret line, match bands and scroll stay. False
+      // when the mounted rows are not this window's, which then needs a render.
+      function recolorSourceWindow(editor) {
+        const rows = editor.window.rows, texts = elements.sourceCode.querySelectorAll(':scope > .source-line > .source-excerpt > .source-text');
+        if (texts.length !== rows.length || texts[0]?.closest('.source-line').dataset.localLine !== String(rows[0]?.line)) return false;
+        const colors = editor.highlighter.rows(rows);
+        if (!colors) return false;
+        rows.forEach((excerpt, index) => {
+          texts[index].replaceChildren();
+          appendSourceSyntax(texts[index], colors.rows[index]);
+        });
+        editor.colored = true;
+        renderSourceLanguage(editor.view, editor.highlighter, colors);
+        return true;
       }
 
       function renderSources() {

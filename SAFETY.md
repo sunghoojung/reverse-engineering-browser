@@ -64,6 +64,15 @@ it.
   or `js_invocation_saved_sites`), never inherited, and keep their own saved
   set, so an agent cannot read or change what the researcher's next capture
   arms.
+- With Artifact capture on, every script V8 compiles records its V8 script ID,
+  realm, kind, UTF-8 length, SHA-256 and, for `eval` and `Function`, the script
+  and position that created it. A digest of a short or predictable source can be
+  confirmed by guessing. Source text that no response body carried (`eval` and
+  `Function` strings, inline, inserted and `blob:` scripts) is page content and
+  is sensitive capture: it is retained only with `REB_CAPTURE_REQUEST_CONTENT=1`,
+  which the packaged app's default content mode sets, at most 16 MiB per script
+  and 64 MiB of distinct text per renderer and configuration. See
+  [Native compiled scripts](protocol/native-compiled-scripts-v1.md).
 - Standalone probes remain inactive without an enabled session. Enabled artifact
   capture retains raw source URLs locally; metadata is not necessarily secret-free.
 - With Network capture on, every native request records its body's length,
@@ -253,6 +262,7 @@ of the data-handling policy:
 | Loopback-only research API trust check | [`config.rs`](apps/origin-trace-backend/src/config.rs) and [`app.rs`](apps/origin-trace-backend/src/app.rs) |
 | Artifact receiver `--allow-sensitive` gate | `services/artifact-receiver/main.cpp` |
 | Request path and body gate (`--reb-capture-request-content`) | Brave overlay `native_probe_socket_client.cc` and `native_network_capture_sink.cc`; receiver `--allow-sensitive` |
+| Compiled script source opt-in (`--reb-capture-request-content`) | Brave overlay renderer `native_probe_sink.cc` and browser `native_artifact_capture_sink.cc`, which refuses the text outside content capture |
 | Canvas image opt-in | Brave overlay renderer `native_probe_sink.cc` and browser `native_artifact_capture_sink.cc`, which refuses an image the session did not opt in to |
 | Capture category mask and session expiration | `protocol/README.md`, native probes |
 | Agent-started sessions get request content, document-start permission, invocation sites and digests only when the start request names them, never inherited | [`session_launch.rs`](apps/origin-trace-backend/src/session_launch.rs) |

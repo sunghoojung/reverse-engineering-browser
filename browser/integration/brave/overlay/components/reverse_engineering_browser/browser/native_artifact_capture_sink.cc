@@ -1171,6 +1171,17 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
                "canvas_image_capture_disabled", result_category);
     return 0;
   }
+  const bool is_page_script_source =
+      kind == NativeArtifactKind::kJavaScript &&
+      (capture_origin == NativeArtifactCaptureOrigin::kDynamicJavaScript ||
+       capture_origin == NativeArtifactCaptureOrigin::kCompiledScript);
+  // This text is page content no response body carried. The session's opt-in
+  // decides, not the renderer's view of its configuration.
+  if (is_page_script_source && !NativeProbeSession::Get().capture_request_content()) {
+    EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
+               "script_source_capture_disabled", result_category);
+    return 0;
+  }
   const bool valid_kind_and_origin =
       (native_wasm_runtime &&
        ((kind == NativeArtifactKind::kWasm &&
@@ -1178,8 +1189,7 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
         ((kind == NativeArtifactKind::kWasmGuestAdapter ||
           kind == NativeArtifactKind::kBytecodeBuffer) &&
          capture_origin == NativeArtifactCaptureOrigin::kNativeWasmGuest))) ||
-      (kind == NativeArtifactKind::kJavaScript &&
-       capture_origin == NativeArtifactCaptureOrigin::kDynamicJavaScript) ||
+      is_page_script_source ||
       (kind == NativeArtifactKind::kWasm &&
        (capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyCompile ||
         capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyModule ||

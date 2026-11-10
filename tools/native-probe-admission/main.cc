@@ -2221,6 +2221,7 @@ void NativeWasmExecutionOutcomes() {
                "still-executing while inside, interrupt then a later call, quiet return\n";
 }
 
+#include "compiled_script_tests.h"
 #include "guest_sampler_tests.h"
 #include "js_dispatch_tests.h"
 #include "js_invocation_tests.h"
@@ -2270,5 +2271,14 @@ int main() {
   Run<&RuntimeBufferFrameSelection>();
   Run<&RuntimeSourceFeed>();
   Run<&RuntimeCheckpointQueue>();
+  Run<&CompiledScriptEvalIsRetainedWithLineage>();
+  Run<&CompiledScriptRecordsEachScriptOnce>();
+  Run<&CompiledScriptDeduplicatesSource>();
+  Run<&CompiledScriptRetainsOnlyWhatSkippedTheNetwork>();
+  Run<&CompiledScriptNeedsContentCapture>();
+  Run<&CompiledScriptReportsMissingSource>();
+  Run<&CompiledScriptBudgetIsVisible>();
+  Run<&CompiledScriptRefusedRecordKeepsNothing>();
+  Run<&CompiledScriptDisabledRecordsNothing>();
   std::cout << "Renderer ring admission only; no full Chromium/Mojo/runtime validation.\n";
 }

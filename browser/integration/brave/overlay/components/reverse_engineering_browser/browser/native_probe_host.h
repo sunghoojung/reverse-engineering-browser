@@ -131,7 +131,8 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   void Configure(std::uint64_t session_id,
                  std::uint64_t category_mask,
                  std::uint64_t expires_at_monotonic_ns,
-                 bool capture_canvas_images);
+                 bool capture_canvas_images,
+                 bool capture_request_content);
   void Disable();
   // Zeros this renderer's stream counters and asks the renderer to restart
   // sample indexes. The queue and capture epoch stay.

@@ -576,7 +576,8 @@
             "js_invocation_request",
             "wasm_execution_outcome",
             "wasm_dispatch_overflow",
-            "wasm_indirect_overflow"
+            "wasm_indirect_overflow",
+            "script_compiled"
           ]
         },
         "status_code": {
@@ -776,7 +777,8 @@
             "webassembly_instantiate",
             "canvas_to_data_url",
             "native_wasm_guest",
-            "network_request"
+            "network_request",
+            "compiled_script"
           ]
         },
         "kind": {

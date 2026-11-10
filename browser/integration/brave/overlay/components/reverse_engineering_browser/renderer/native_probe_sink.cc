@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <span>
 #include <string_view>
 
@@ -88,6 +89,44 @@ struct RuntimeObservationCache final {
   bool snapshot_limit_reported = false;
 };
 thread_local RuntimeObservationCache runtime_observations;
+
+inline constexpr std::size_t kCompiledScriptTableSlots = 4096;
+
+struct CompiledScriptKey final {
+  std::uint64_t execution_context_id = 0;
+  std::uint64_t script_id = 0;
+  bool operator==(const CompiledScriptKey&) const = default;
+};
+
+// One thread's memory of one configuration. Both tables are direct-mapped: a
+// collision forgets the older entry, which costs a repeated record and never
+// a lost one. Heap-allocated so idle threads pay nothing.
+struct CompiledScriptThreadState final {
+  std::uint64_t generation = 0;
+  std::array<CompiledScriptKey, kCompiledScriptTableSlots> recorded{};
+  std::array<std::array<std::uint8_t, 32>, kCompiledScriptTableSlots> queued_digests{};
+  bool budget_reported = false;
+  bool too_large_reported = false;
+};
+
+thread_local std::unique_ptr<CompiledScriptThreadState> compiled_script_state;
+
+CompiledScriptThreadState& CompiledScriptStateFor(const std::uint64_t generation) {
+  if (!compiled_script_state || compiled_script_state->generation != generation) {
+    compiled_script_state = std::make_unique<CompiledScriptThreadState>();
+    compiled_script_state->generation = generation;
+  }
+  return *compiled_script_state;
+}
+
+std::size_t CompiledScriptSlot(const CompiledScriptKey& key) noexcept {
+  return static_cast<std::size_t>((key.execution_context_id ^ (key.script_id * 0x9E3779B1U)) %
+                                  kCompiledScriptTableSlots);
+}
+
+std::size_t CompiledScriptDigestSlot(const std::array<std::uint8_t, 32>& digest) noexcept {
+  return ((static_cast<std::size_t>(digest[0]) << 8U) | digest[1]) % kCompiledScriptTableSlots;
+}
 
 // Negative results may rotate so ordinary allocations cannot occupy every
 // observation slot forever. Pin positive evidence, and bound all conversions
@@ -1177,7 +1216,8 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
                                   const std::uint64_t category_mask,
                                   const std::uint64_t expires_at_monotonic_ns,
                                   const bool capture_canvas_images,
-                                  const NativeProbeFrameIdProvider frame_id_provider) noexcept {
+                                  const NativeProbeFrameIdProvider frame_id_provider,
+                                  const bool capture_script_sources) noexcept {
   // Flush dispatch losses and held invocation gaps into the configuration
   // that observed them before the emitter and generation change. A
   // replacement session must opt in again.
@@ -1223,6 +1263,8 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   category_mask_.store(active ? category_mask : 0, std::memory_order_relaxed);
   expires_at_monotonic_ns_.store(active ? expires_at_monotonic_ns : 0, std::memory_order_relaxed);
   capture_canvas_images_.store(active && capture_canvas_images, std::memory_order_relaxed);
+  capture_script_sources_.store(active && capture_script_sources, std::memory_order_relaxed);
+  compiled_script_source_bytes_.store(0, std::memory_order_relaxed);
   frame_id_provider_.store(active ? frame_id_provider : nullptr, std::memory_order_relaxed);
   emitter_.store(emitter, std::memory_order_relaxed);
   artifact_emitter_.store(artifact_emitter, std::memory_order_relaxed);
@@ -1626,12 +1668,129 @@ void NativeProbeSink::FillSequenceGap(const NativeProbeHeader& source,
   static_cast<void>(EmitStatus(gap, generation));
 }
 
-std::uint64_t NativeProbeSink::RecordRuntimeBufferEvent(const NativeProbeType type,
-                                                        const std::uint64_t frame_id,
-                                                        const std::string_view reason,
-                                                        const std::uint64_t generation) noexcept {
+bool NativeProbeSink::CompiledScriptNeedsRecord(const std::uint64_t execution_context_id,
+                                                const std::uint32_t script_id) const noexcept {
+  const CompiledScriptThreadState* state = compiled_script_state.get();
+  if (!state || state->generation != config_generation_.load(std::memory_order_acquire)) {
+    return true;
+  }
+  const CompiledScriptKey key{execution_context_id, script_id};
+  return state->recorded[CompiledScriptSlot(key)] != key;
+}
+
+bool NativeProbeSink::ReserveCompiledScriptSource(const std::uint64_t bytes) noexcept {
+  const std::uint64_t previous =
+      compiled_script_source_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+  if (previous + bytes <= kNativeCompiledScriptSourceBudget) {
+    return true;
+  }
+  compiled_script_source_bytes_.fetch_sub(bytes, std::memory_order_relaxed);
+  return false;
+}
+
+void NativeProbeSink::RecordCompiledScript(const NativeCompiledScript& script) noexcept {
+  const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
+  if ((generation & 1U) != 0 || !IsArtifactCaptureEnabled() || script.script_id == 0 ||
+      script.execution_context_id == 0) {
+    return;
+  }
+  // Workers record on their own threads, so capture can end during this call.
+  // Hold the emitter that belongs to this generation.
+  const NativeGeneratedArtifactEmitter artifact_emitter =
+      artifact_emitter_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (config_generation_.load(std::memory_order_acquire) != generation || !artifact_emitter) {
+    return;
+  }
+  CompiledScriptThreadState& state = CompiledScriptStateFor(generation);
+  const CompiledScriptKey key{script.execution_context_id, script.script_id};
+  CompiledScriptKey& recorded = state.recorded[CompiledScriptSlot(key)];
+  if (recorded == key) {
+    return;
+  }
+  recorded = key;
+
+  NativeCompiledScriptPayload payload;
+  payload.kind = script.kind;
+  payload.script_id = script.script_id;
+  payload.start_line = script.start_line;
+  payload.start_column = script.start_column;
+  payload.creator_script_id = script.creator_script_id;
+  payload.creator_position = script.creator_script_id != 0 ? script.creator_position : 0;
+  payload.execution_context_id = script.execution_context_id;
+  payload.source_length = script.source_length;
+  if (!script.source.empty()) {
+    payload.source_sha256 = NativeGuestDigest(script.source);
+  }
+  auto& queued_digest = state.queued_digests[CompiledScriptDigestSlot(payload.source_sha256)];
+  using Retention = NativeCompiledScriptRetention;
+  if (script.source.empty()) {
+    payload.retention = script.source_length > kNativeArtifactMaxContentBytes
+                            ? Retention::kTooLarge
+                            : Retention::kUnavailable;
+  } else if (!NativeCompiledScriptSkipsNetwork(script)) {
+    payload.retention = Retention::kNetworkFetched;
+  } else if (!capture_script_sources_.load(std::memory_order_relaxed)) {
+    payload.retention = Retention::kNotPermitted;
+  } else if (queued_digest == payload.source_sha256) {
+    payload.retention = Retention::kDuplicate;
+  } else if (!ReserveCompiledScriptSource(script.source.size())) {
+    payload.retention = Retention::kBudgetSpent;
+  } else {
+    payload.retention = Retention::kQueued;
+  }
+
   NativeProbeEvent event;
-  event.header.category = NativeProbeCategory::kVm;
+  event.header.category = NativeProbeCategory::kArtifact;
+  event.header.type = NativeProbeType::kScriptCompiled;
+  event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  event.header.monotonic_time_ns = MonotonicTimeNs();
+  event.header.session_id = session_id_.load(std::memory_order_relaxed);
+  event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  event.header.frame_id = script.frame_id;
+  event.header.payload_size = 128;
+  event.inline_payload = EncodeNativeCompiledScriptPayload(payload);
+  if (EmitStatus(event, generation) != NativeProbeEmitStatus::kAdmitted) {
+    if (payload.retention == Retention::kQueued) {
+      compiled_script_source_bytes_.fetch_sub(script.source.size(), std::memory_order_relaxed);
+    }
+    return;
+  }
+
+  if (payload.retention == Retention::kBudgetSpent && !state.budget_reported) {
+    state.budget_reported =
+        RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, script.frame_id,
+                                 "compiled_script_source_budget", generation,
+                                 NativeProbeCategory::kArtifact) != 0;
+  } else if (payload.retention == Retention::kTooLarge && !state.too_large_reported) {
+    state.too_large_reported =
+        RecordRuntimeBufferEvent(NativeProbeType::kArtifactCaptureFailed, script.frame_id,
+                                 "compiled_script_source_too_large", generation,
+                                 NativeProbeCategory::kArtifact) != 0;
+  }
+  if (payload.retention != Retention::kQueued) {
+    return;
+  }
+  queued_digest = payload.source_sha256;
+  const bool generated = script.kind == NativeCompiledScriptKind::kEval ||
+                         script.kind == NativeCompiledScriptKind::kFunctionConstructor;
+  artifact_emitter(NativeArtifactKind::kJavaScript,
+                   generated ? NativeArtifactCaptureOrigin::kDynamicJavaScript
+                             : NativeArtifactCaptureOrigin::kCompiledScript,
+                   event.header.sequence_number, script.execution_context_id, script.frame_id,
+                   script.script_url.empty() ? script.context_url : script.script_url,
+                   script.source, {});
+}
+
+std::uint64_t NativeProbeSink::RecordRuntimeBufferEvent(
+    const NativeProbeType type,
+    const std::uint64_t frame_id,
+    const std::string_view reason,
+    const std::uint64_t generation,
+    const NativeProbeCategory category) noexcept {
+  NativeProbeEvent event;
+  event.header.category = category;
   event.header.type = type;
   event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
   event.header.monotonic_time_ns = MonotonicTimeNs();
@@ -1659,8 +1818,6 @@ void NativeProbeSink::CaptureGeneratedArtifact(
     return;
   }
   const bool valid_kind_and_origin =
-      (kind == NativeArtifactKind::kJavaScript &&
-       capture_origin == NativeArtifactCaptureOrigin::kDynamicJavaScript) ||
       (kind == NativeArtifactKind::kWasm &&
        (capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyCompile ||
         capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyModule ||

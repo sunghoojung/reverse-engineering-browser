@@ -279,6 +279,7 @@ class NativeProbeSession {
   std::uint64_t category_mask() const { return mask; }
   std::uint64_t expires_at_monotonic_ns() const { return expires; }
   bool capture_canvas_images() const { return canvas_images; }
+  bool capture_request_content() const { return request_content; }
   const std::string& guest_adapter_json() const { return adapter_json; }
   const std::vector<std::uint8_t>& js_dispatch_sites() const { return js_sites; }
   const std::vector<std::uint8_t>& js_invocation_sites() const { return invocation_sites; }
@@ -290,7 +291,7 @@ class NativeProbeSession {
   }
   void AddHost(NativeProbeHost&) {}
   void RemoveHost(NativeProbeHost&) {}
-  bool active = false, canvas_images = false;
+  bool active = false, canvas_images = false, request_content = true;
   std::uint64_t id = 0, mask = 0, expires = 0;
   std::string adapter_json;
   std::vector<std::uint8_t> js_sites;
@@ -407,6 +408,7 @@ class NativeProbeClient {
                          const std::string&,
                          const std::vector<std::uint8_t>&,
                          const std::vector<std::uint8_t>&,
+                         bool,
                          bool) = 0;
   virtual void SetWasmSampleBudget(const std::vector<std::uint8_t>&) = 0;
   virtual void ResetWasmSampleBudgets() = 0;

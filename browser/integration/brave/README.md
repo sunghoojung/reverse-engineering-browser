@@ -298,8 +298,10 @@ connection, and a failed connection is replaced within a bounded retry budget.
 If the receiver stays unreachable, Brave emits one `artifact_channel_lost`
 gap; later artifacts are not attempted.
 
-The same category enables runtime-generated source capture. Blink submits only
-accepted dynamic JavaScript, and V8 exposes copied byte buffers used by
+The same category enables runtime-generated source capture. V8 reports every
+script it compiles, including `eval` and `Function` text on pages with no CSP and
+in workers, as described in [native compiled scripts](../../../protocol/native-compiled-scripts-v1.md).
+V8 also exposes copied byte buffers used by
 `WebAssembly.compile`, `WebAssembly.Module`, and `WebAssembly.instantiate`.
 Renderer hooks perform one inactive atomic check, cap each submission at 16
 MiB, and send bytes one way to the browser process. The browser copies shared

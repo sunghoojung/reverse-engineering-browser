@@ -73,6 +73,8 @@ enum class EventType : std::uint16_t {
   // See protocol/native-wasm-dispatch-v1.md.
   kWasmDispatchOverflow = 28,
   kWasmIndirectOverflow = 29,
+  // One successful V8 compile. See protocol/native-compiled-scripts-v1.md.
+  kScriptCompiled = 51,
 };
 
 enum class EventFlag : std::uint16_t {

@@ -1,0 +1,476 @@
+diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
+index 5f718019..13c40f2c 100644
+--- a/include/v8-callbacks.h
++++ b/include/v8-callbacks.h
+@@ -460,6 +460,38 @@ struct RuntimeBufferScript {
+   Local<String> name;
+ };
+ 
++// How a script reached the compiler.
++enum class CompiledScriptKind : uint8_t {
++  kScript = 1,
++  kModule = 2,
++  // ScriptCompiler::CompileFunction, such as an inline event handler.
++  kFunction = 3,
++  kEval = 4,
++  // Function and its generator and async variants.
++  kFunctionConstructor = 5,
++};
++
++// One compile that succeeded. Handles are borrowed and valid only during the
++// callback, which must not run JavaScript. This never enables Inspector.
++struct CompiledScript {
++  CompiledScriptKind kind = CompiledScriptKind::kScript;
++  int script_id = 0;
++  int line_offset = 0;
++  int column_offset = 0;
++  // The realm the script compiled for.
++  Local<Context> context;
++  Local<String> source;
++  // Empty when the embedder gave the script no name.
++  Local<String> name;
++  // kEval and kFunctionConstructor only. The script running the call, or zero
++  // when no JavaScript was running, and the UTF-16 offset of the call in it.
++  int creator_script_id = 0;
++  int creator_position = 0;
++};
++
++using CompiledScriptEnabledCallback = bool (*)();
++using CompiledScriptCallback = void (*)(const CompiledScript& script);
++
+ enum class RuntimeBufferKind {
+   kArrayBuffer,
+   kUint8Array,
+diff --git a/include/v8-isolate.h b/include/v8-isolate.h
+index 366dd2a1..0ac6546b 100644
+--- a/include/v8-isolate.h
++++ b/include/v8-isolate.h
+@@ -1837,6 +1837,13 @@ class V8_EXPORT Isolate {
+   // embedder's capture gate. Does not execute JavaScript or enable debugging.
+   bool GetRuntimeBufferAllocatingScript(RuntimeBufferScript* result);
+ 
++  // Observes every compile that succeeds, whatever the context's code
++  // generation policy. An eval compilation cache hit is reported again with
++  // the cached script's ID. Nothing runs unless enabled_callback returns true.
++  void SetCompiledScriptCallback(
++      CompiledScriptCallback callback,
++      CompiledScriptEnabledCallback enabled_callback);
++
+   void SetWasmAsyncResolvePromiseCallback(
+       WasmAsyncResolvePromiseCallback callback);
+ 
+diff --git a/src/api/api.cc b/src/api/api.cc
+index ac1c8d0c..c107928f 100644
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -2669,6 +2669,10 @@ MaybeLocal<UnboundScript> ScriptCompiler::CompileUnboundInternal(
+ 
+   if (!maybe_function_info.ToHandle(&result)) return {};
+   DCHECK(!i::HeapLayout::InReadOnlySpace(*result));
++  i::Compiler::ObserveCompiledScript(i_isolate, result, i_isolate->context(),
++                                     source->GetResourceOptions().IsModule()
++                                         ? CompiledScriptKind::kModule
++                                         : CompiledScriptKind::kScript);
+   return api_scope.Escape(ToApiHandle<UnboundScript>(result));
+ }
+ 
+@@ -2781,6 +2785,9 @@ V8_WARN_UNUSED_RESULT MaybeLocal<Function> ScriptCompiler::CompileFunction(
+     source->cached_data->rejected = cached_data->rejected();
+   }
+   if (has_exception) return {};
++  i::Compiler::ObserveCompiledScript(
++      i_isolate, i::direct_handle(result->shared(), i_isolate),
++      *context, CompiledScriptKind::kFunction);
+   return api_scope.Escape(Utils::CallableToLocal(result));
+ }
+ 
+@@ -2873,9 +2880,18 @@ i::MaybeDirectHandle<i::SharedFunctionInfo> CompileStreamedSource(
+                        origin.GetHostDefinedOptions(), origin.Options());
+   i::ScriptStreamingData* data = v8_source->impl();
+   i::IsCompiledScope is_compiled_scope;
+-  return i::Compiler::GetSharedFunctionInfoForStreamedScript(
+-      i_isolate, str, script_details, data, &is_compiled_scope,
+-      &v8_source->compilation_details());
++  i::MaybeDirectHandle<i::SharedFunctionInfo> maybe_result =
++      i::Compiler::GetSharedFunctionInfoForStreamedScript(
++          i_isolate, str, script_details, data, &is_compiled_scope,
++          &v8_source->compilation_details());
++  i::DirectHandle<i::SharedFunctionInfo> result;
++  if (maybe_result.ToHandle(&result)) {
++    i::Compiler::ObserveCompiledScript(i_isolate, result, i_isolate->context(),
++                                       origin.Options().IsModule()
++                                           ? CompiledScriptKind::kModule
++                                           : CompiledScriptKind::kScript);
++  }
++  return maybe_result;
+ }
+ 
+ }  // namespace
+@@ -11188,6 +11204,14 @@ bool Isolate::GetRuntimeBufferAllocatingScript(RuntimeBufferScript* result) {
+   return false;
+ }
+ 
++void Isolate::SetCompiledScriptCallback(
++    CompiledScriptCallback callback,
++    CompiledScriptEnabledCallback enabled_callback) {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
++  i_isolate->set_compiled_script_callback(callback);
++  i_isolate->set_compiled_script_enabled_callback(enabled_callback);
++}
++
+ CALLBACK_SETTER(WasmAsyncResolvePromiseCallback,
+                 WasmAsyncResolvePromiseCallback,
+                 wasm_async_resolve_promise_callback)
+diff --git a/src/codegen/compiler.cc b/src/codegen/compiler.cc
+index d4529bb2..a24351be 100644
+--- a/src/codegen/compiler.cc
++++ b/src/codegen/compiler.cc
+@@ -3353,6 +3353,52 @@ MaybeDirectHandle<SharedFunctionInfo> Compiler::CompileForLiveEdit(
+ }
+ 
+ // static
++// static
++void Compiler::ObserveCompiledScript(Isolate* isolate,
++                                     DirectHandle<SharedFunctionInfo> shared,
++                                     Tagged<Context> realm,
++                                     v8::CompiledScriptKind kind) {
++  const v8::CompiledScriptCallback callback =
++      isolate->compiled_script_callback();
++  const v8::CompiledScriptEnabledCallback enabled =
++      isolate->compiled_script_enabled_callback();
++  if (callback == nullptr || enabled == nullptr || !enabled() ||
++      realm.is_null() || !IsScript(shared->script())) {
++    return;
++  }
++  HandleScope scope(isolate);
++  DirectHandle<Script> script(Cast<Script>(shared->script()), isolate);
++  if (script->type() != Script::Type::kNormal || !IsString(script->source())) {
++    return;
++  }
++  v8::CompiledScript compiled;
++  compiled.kind = kind;
++  compiled.script_id = script->id();
++  compiled.line_offset = script->line_offset();
++  compiled.column_offset = script->column_offset();
++  compiled.context =
++      Utils::ToLocal(direct_handle(realm->native_context(), isolate));
++  compiled.source =
++      Utils::ToLocal(direct_handle(Cast<String>(script->source()), isolate));
++  if (IsString(script->name())) {
++    compiled.name =
++        Utils::ToLocal(direct_handle(Cast<String>(script->name()), isolate));
++  }
++  if ((kind == v8::CompiledScriptKind::kEval ||
++       kind == v8::CompiledScriptKind::kFunctionConstructor) &&
++      script->has_eval_from_shared()) {
++    // With no JavaScript on the stack, eval_from_shared is the empty function
++    // of the native context, whose script is not a normal one.
++    Tagged<Object> creator = script->eval_from_shared()->script();
++    if (IsScript(creator) &&
++        Cast<Script>(creator)->type() == Script::Type::kNormal) {
++      compiled.creator_script_id = Cast<Script>(creator)->id();
++      compiled.creator_position = Script::GetEvalPosition(isolate, script);
++    }
++  }
++  callback(compiled);
++}
++
+ MaybeDirectHandle<JSFunction> Compiler::GetFunctionFromEval(
+     Isolate* isolate, DirectHandle<String> source,
+     DirectHandle<SharedFunctionInfo> outer_info, DirectHandle<Context> context,
+@@ -3375,6 +3421,14 @@ MaybeDirectHandle<JSFunction> Compiler::GetFunctionFromEval(
+     DCHECK_EQ(eval_position, kNoSourcePosition);
+     eval_cache_position = -parameters_end_pos;
+   }
++  const auto observe = [&](DirectHandle<SharedFunctionInfo> compiled) {
++    // Debug-evaluate is the researcher's own expression, not page code.
++    if (parsing_while_debugging == ParsingWhileDebugging::kYes) return;
++    ObserveCompiledScript(isolate, compiled, *context,
++                          restriction == ONLY_SINGLE_FUNCTION_LITERAL
++                              ? v8::CompiledScriptKind::kFunctionConstructor
++                              : v8::CompiledScriptKind::kEval);
++  };
+   CompilationCache* compilation_cache = isolate->compilation_cache();
+   InfoCellPair eval_result = compilation_cache->LookupEval(
+       source, outer_info, context, language_mode, eval_cache_position);
+@@ -3390,6 +3444,7 @@ MaybeDirectHandle<JSFunction> Compiler::GetFunctionFromEval(
+       result->UpdateCode(isolate, *BUILTIN_CODE(isolate, CompileLazy));
+     }
+     result->set_context(*context, kReleaseStore);
++    observe(direct_handle(result->shared(), isolate));
+     return result;
+   }
+ 
+@@ -3460,6 +3515,7 @@ MaybeDirectHandle<JSFunction> Compiler::GetFunctionFromEval(
+     }
+     allow_eval_cache = parse_info.allow_eval_cache();
+   }
++  observe(shared_info);
+ 
+   // If caller is strict mode, the result must be in strict mode as well.
+   DCHECK(is_sloppy(language_mode) || is_strict(shared_info->language_mode()));
+diff --git a/src/codegen/compiler.h b/src/codegen/compiler.h
+index f7fe372e..51d73dda 100644
+--- a/src/codegen/compiler.h
++++ b/src/codegen/compiler.h
+@@ -162,6 +162,13 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
+   // need to call Factory::NewFunctionFromSharedFunctionInfo before you have a
+   // real function with a context.
+ 
++  // Reports one successful compile to the embedder. realm may be null, which
++  // reports nothing. Runs no JavaScript.
++  static void ObserveCompiledScript(Isolate* isolate,
++                                    DirectHandle<SharedFunctionInfo> shared,
++                                    Tagged<Context> realm,
++                                    v8::CompiledScriptKind kind);
++
+   // Create a (bound) function for a String source within a context for eval.
+   V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSFunction>
+   GetFunctionFromEval(Isolate* isolate, DirectHandle<String> source,
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index cc6f4b31..63239148 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -532,6 +532,8 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
+   V(SharedArrayBufferConstructorEnabledCallback,                            \
+     sharedarraybuffer_constructor_enabled_callback, nullptr)                \
+   V(WasmStreamingCallback, wasm_streaming_callback, nullptr)                \
++  V(CompiledScriptCallback, compiled_script_callback, nullptr)              \
++  V(CompiledScriptEnabledCallback, compiled_script_enabled_callback, nullptr) \
+   V(RuntimeBufferCallback, runtime_buffer_callback, nullptr)                \
+   V(WasmAsyncResolvePromiseCallback, wasm_async_resolve_promise_callback,   \
+     DefaultWasmAsyncResolvePromiseCallback)                                 \
+diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
+index dcc68535..207e899e 100644
+--- a/test/cctest/test-api.cc
++++ b/test/cctest/test-api.cc
+@@ -33155,3 +33155,229 @@ TEST(RebNativeJsInvocationAdmissionAndUnsupportedKinds) {
+   CHECK_EQ(0u, capture.embedder().starts[0].slot);
+ }
+ #endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
++
++namespace {
++
++struct RebCompiledScriptRecord {
++  v8::CompiledScriptKind kind;
++  int script_id;
++  int line_offset;
++  int column_offset;
++  std::string source;
++  std::string name;
++  int creator_script_id;
++  int creator_position;
++};
++
++std::vector<RebCompiledScriptRecord> reb_compiled_scripts;
++bool reb_compiled_scripts_enabled = false;
++
++std::string RebUtf8(v8::Isolate* isolate, v8::Local<v8::String> value) {
++  if (value.IsEmpty()) return {};
++  v8::String::Utf8Value utf8(isolate, value);
++  return std::string(*utf8, utf8.length());
++}
++
++void RebRecordCompiledScript(const v8::CompiledScript& script) {
++  v8::Isolate* isolate = v8::Isolate::GetCurrent();
++  reb_compiled_scripts.push_back(
++      {script.kind, script.script_id, script.line_offset, script.column_offset,
++       RebUtf8(isolate, script.source), RebUtf8(isolate, script.name),
++       script.creator_script_id, script.creator_position});
++}
++
++class RebCompiledScriptScope {
++ public:
++  explicit RebCompiledScriptScope(v8::Isolate* isolate, bool enabled = true)
++      : isolate_(isolate) {
++    reb_compiled_scripts.clear();
++    reb_compiled_scripts_enabled = enabled;
++    isolate_->SetCompiledScriptCallback(
++        RebRecordCompiledScript, [] { return reb_compiled_scripts_enabled; });
++  }
++  ~RebCompiledScriptScope() {
++    isolate_->SetCompiledScriptCallback(nullptr, nullptr);
++  }
++
++ private:
++  v8::Isolate* isolate_;
++};
++
++const RebCompiledScriptRecord& RebCompiledScriptWithSource(
++    const std::string& source) {
++  for (const RebCompiledScriptRecord& record : reb_compiled_scripts) {
++    if (record.source == source) return record;
++  }
++  FATAL("No compiled script record has source: %s", source.c_str());
++}
++
++}  // namespace
++
++TEST(RebNativeCompiledScriptEvalNeedsNoCodeGenerationPolicy) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebCompiledScriptScope capture(isolate);
++  CHECK(env.local()->IsCodeGenerationFromStringsAllowed());
++  const std::string outer = "eval('1 + 1'); (0, eval)('2 + 2');";
++  CHECK_EQ(4, CompileRun(outer.c_str())->Int32Value(env.local()).FromJust());
++  const RebCompiledScriptRecord& top = RebCompiledScriptWithSource(outer);
++  CHECK_EQ(v8::CompiledScriptKind::kScript, top.kind);
++  CHECK_EQ(0, top.creator_script_id);
++
++  const RebCompiledScriptRecord& direct = RebCompiledScriptWithSource("1 + 1");
++  CHECK_EQ(v8::CompiledScriptKind::kEval, direct.kind);
++  CHECK_EQ(top.script_id, direct.creator_script_id);
++  CHECK_EQ(static_cast<int>(outer.find("eval")), direct.creator_position);
++
++  // V8 stores the indirect caller as a bytecode offset; it must be translated.
++  const RebCompiledScriptRecord& indirect =
++      RebCompiledScriptWithSource("2 + 2");
++  CHECK_EQ(v8::CompiledScriptKind::kEval, indirect.kind);
++  CHECK_EQ(top.script_id, indirect.creator_script_id);
++  CHECK_GE(indirect.creator_position,
++           static_cast<int>(outer.find("(0, eval)")));
++  CHECK_LT(indirect.creator_position, static_cast<int>(outer.size()));
++}
++
++TEST(RebNativeCompiledScriptFunctionConstructor) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebCompiledScriptScope capture(isolate);
++  const std::string outer = "new Function('a', 'return a + 1')(2);";
++  CHECK_EQ(3, CompileRun(outer.c_str())->Int32Value(env.local()).FromJust());
++  const RebCompiledScriptRecord& top = RebCompiledScriptWithSource(outer);
++  // The record's source is what V8 compiled, the synthesized wrapper.
++  const RebCompiledScriptRecord& constructed = RebCompiledScriptWithSource(
++      "(function anonymous(a\n) {\nreturn a + 1\n})");
++  CHECK_EQ(v8::CompiledScriptKind::kFunctionConstructor, constructed.kind);
++  CHECK_EQ(top.script_id, constructed.creator_script_id);
++  CHECK_GE(constructed.creator_position, 0);
++  CHECK_LT(constructed.creator_position, static_cast<int>(outer.size()));
++}
++
++TEST(RebNativeCompiledScriptNestedEvalChains) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebCompiledScriptScope capture(isolate);
++  const std::string middle = "eval('3 + 3');";
++  const std::string outer = "eval(\"" + middle + "\");";
++  CHECK_EQ(6, CompileRun(outer.c_str())->Int32Value(env.local()).FromJust());
++  const RebCompiledScriptRecord& top = RebCompiledScriptWithSource(outer);
++  const RebCompiledScriptRecord& first = RebCompiledScriptWithSource(middle);
++  const RebCompiledScriptRecord& inner = RebCompiledScriptWithSource("3 + 3");
++  CHECK_EQ(top.script_id, first.creator_script_id);
++  CHECK_EQ(first.script_id, inner.creator_script_id);
++  CHECK_EQ(static_cast<int>(middle.find("eval")), inner.creator_position);
++}
++
++TEST(RebNativeCompiledScriptEvalCacheHitKeepsScriptId) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebCompiledScriptScope capture(isolate);
++  CompileRun("for (var i = 0; i < 5; i++) eval('4 + 4');");
++  std::vector<int> script_ids;
++  for (const RebCompiledScriptRecord& record : reb_compiled_scripts) {
++    if (record.source == "4 + 4") script_ids.push_back(record.script_id);
++  }
++  CHECK_EQ(5u, script_ids.size());
++  CHECK_EQ(script_ids[3], script_ids[4]);
++}
++
++TEST(RebNativeCompiledScriptKeepsOriginOffsets) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebCompiledScriptScope capture(isolate);
++  v8::ScriptOrigin origin(v8_str("https://example.test/page"), 7, 3);
++  v8::ScriptCompiler::Source source(v8_str("1"), origin);
++  CHECK(!v8::ScriptCompiler::Compile(env.local(), &source).IsEmpty());
++  CHECK_EQ(1u, reb_compiled_scripts.size());
++  CHECK_EQ(7, reb_compiled_scripts[0].line_offset);
++  CHECK_EQ(3, reb_compiled_scripts[0].column_offset);
++  CHECK_EQ(std::string("https://example.test/page"),
++           reb_compiled_scripts[0].name);
++}
++
++TEST(RebNativeCompiledScriptModule) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebCompiledScriptScope capture(isolate);
++  v8::ScriptOrigin origin(v8_str("module.js"), 0, 0, false, -1,
++                          Local<v8::Value>(), false, false, true);
++  v8::ScriptCompiler::Source source(v8_str("export const a = 1;"), origin);
++  CHECK(!v8::ScriptCompiler::CompileModule(isolate, &source).IsEmpty());
++  CHECK_EQ(1u, reb_compiled_scripts.size());
++  CHECK_EQ(v8::CompiledScriptKind::kModule, reb_compiled_scripts[0].kind);
++}
++
++TEST(RebNativeCompiledScriptWrappedFunction) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebCompiledScriptScope capture(isolate);
++  v8::ScriptCompiler::Source source(v8_str("return 5;"));
++  CHECK(!v8::ScriptCompiler::CompileFunction(env.local(), &source).IsEmpty());
++  CHECK_EQ(1u, reb_compiled_scripts.size());
++  CHECK_EQ(v8::CompiledScriptKind::kFunction, reb_compiled_scripts[0].kind);
++  CHECK_EQ(std::string("return 5;"), reb_compiled_scripts[0].source);
++  CHECK_EQ(0, reb_compiled_scripts[0].creator_script_id);
++}
++
++TEST(RebNativeCompiledScriptCodeCacheConsumer) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  const char* text = "function rebCached() { return 6; } rebCached();";
++  v8::ScriptOrigin origin(v8_str("cached.js"));
++  v8::ScriptCompiler::CachedData* cache;
++  {
++    v8::ScriptCompiler::Source source(v8_str(text), origin);
++    Local<v8::Script> script =
++        v8::ScriptCompiler::Compile(env.local(), &source).ToLocalChecked();
++    cache = v8::ScriptCompiler::CreateCodeCache(script->GetUnboundScript());
++  }
++  RebCompiledScriptScope capture(isolate);
++  v8::ScriptCompiler::Source source(v8_str(text), origin, cache);
++  CHECK(!v8::ScriptCompiler::Compile(env.local(), &source,
++                                     v8::ScriptCompiler::kConsumeCodeCache)
++             .IsEmpty());
++  CHECK_EQ(1u, reb_compiled_scripts.size());
++  CHECK_EQ(std::string(text), reb_compiled_scripts[0].source);
++}
++
++TEST(RebNativeCompiledScriptStreaming) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebCompiledScriptScope capture(isolate);
++  // The helper expects 13 as the script's value and, for a module, in Result.
++  const char* chunks[] = {"globalThis.Result = 13; ", "13;", nullptr};
++  RunStreamingTest(chunks, v8::ScriptType::kClassic);
++  const RebCompiledScriptRecord& classic =
++      RebCompiledScriptWithSource("globalThis.Result = 13; 13;");
++  CHECK_EQ(v8::CompiledScriptKind::kScript, classic.kind);
++  reb_compiled_scripts.clear();
++  RunStreamingTest(chunks, v8::ScriptType::kModule);
++  const RebCompiledScriptRecord& module =
++      RebCompiledScriptWithSource("globalThis.Result = 13; 13;");
++  CHECK_EQ(v8::CompiledScriptKind::kModule, module.kind);
++}
++
++TEST(RebNativeCompiledScriptDisabledRunsNothing) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  {
++    RebCompiledScriptScope capture(isolate, false);
++    CompileRun("eval('7 + 7'); new Function('return 1')();");
++    CHECK(reb_compiled_scripts.empty());
++  }
++  reb_compiled_scripts.clear();
++  CompileRun("eval('8 + 8');");
++  CHECK(reb_compiled_scripts.empty());
++}

@@ -130,7 +130,8 @@ void NativeProbeHost::BindClient(mojo::PendingRemote<mojom::NativeProbeClient> c
   client_.Bind(std::move(client));
   if (session_->IsActive()) {
     Configure(session_->session_id(), session_->category_mask(),
-              session_->expires_at_monotonic_ns(), session_->capture_canvas_images());
+              session_->expires_at_monotonic_ns(), session_->capture_canvas_images(),
+              session_->capture_request_content());
   }
 }
 
@@ -702,7 +703,8 @@ void NativeProbeHost::CaptureGeneratedArtifact(const std::uint16_t kind,
 void NativeProbeHost::Configure(const std::uint64_t session_id,
                                 const std::uint64_t category_mask,
                                 const std::uint64_t expires_at_monotonic_ns,
-                                const bool capture_canvas_images) {
+                                const bool capture_canvas_images,
+                                const bool capture_request_content) {
   Disable();
   if (!client_.is_bound() || session_id == 0 ||
       wasm_capture_epoch_ == std::numeric_limits<std::uint64_t>::max()) {
@@ -732,7 +734,8 @@ void NativeProbeHost::Configure(const std::uint64_t session_id,
   client_->Configure(session_id, category_mask, expires_at_monotonic_ns, capture_canvas_images,
                      std::move(renderer_region), wasm_capture_epoch_,
                      session_->guest_adapter_json(), session_->js_dispatch_sites(),
-                     session_->js_invocation_sites(), session_->js_invocation_digests());
+                     session_->js_invocation_sites(), session_->js_invocation_digests(),
+                     capture_request_content);
 }
 
 void NativeProbeHost::Disable() {

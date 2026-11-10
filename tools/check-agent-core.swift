@@ -132,6 +132,7 @@ enum AgentCoreChecks {
     let api = URL(fileURLWithPath: arguments[1])
     let backend = api.deletingLastPathComponent().appendingPathComponent("origin-trace-backend")
     checkRoutes()
+    checkPermissions()
 
     // The proxy against a loopback stand-in: the key is added natively, the
     // page's credentials are dropped, and the stream arrives on event boundaries.
@@ -206,17 +207,22 @@ enum AgentCoreChecks {
     }
     check(!endpoint.isEmpty, "the backend published its endpoint")
     let transcripts = root.appendingPathComponent("transcripts", isDirectory: true)
-    func configuration(effects: Bool) -> AgentSession.Configuration {
+    func configuration(_ level: AgentPermission, sensitive: Bool = false) -> AgentSession.Configuration {
       AgentSession.Configuration(provider: .claude, model: "claude-opus-5-5", apiExecutable: api, apiBaseURL: URL(string: endpoint)!,
-        allowEffects: effects, transcriptDirectory: transcripts)
+        permission: level, sensitiveCapture: sensitive, transcriptDirectory: transcripts,
+        appEnvironment: ["HOME": "/Users/test", "REB_BRAVE_BINARY": "/tmp/brave", "SECRET_TOKEN": "must-not-pass"])
     }
     let events = Collected()
     let agent = AgentSession(emit: { events.add($0) })
     agent.setPanelVisible(true)
-    try! await agent.enable(configuration(effects: false), sessionKey: "test-1")
+    try! await agent.enable(configuration(.readOnly), sessionKey: "test-1")
     check(agent.childIsRunning, "the tool server runs while the agent is on")
     check(agent.toolNames.contains("get_artifacts") && !agent.toolNames.contains("get_artifact_content"), "structural reads only")
+    check(agent.toolNames.contains("get_requests") && agent.toolNames.contains("get_xrefs") && agent.toolNames.contains("inspect_wasm"),
+      "every structural read is offered, not a short list")
+    check(!agent.toolNames.contains("get_health") && !agent.toolNames.contains("get_api_collection"), "store paths and drafts wait for Full access")
     check(!agent.toolNames.contains("capture_action"), "actions are hidden by default")
+    check(!agent.toolNames.contains("get_artifact_text") && !agent.toolNames.contains("start_live_session"), "content and sessions wait for Full access")
     let artifacts = try! await agent.callTool(name: "get_artifacts", arguments: ["limit": 5], approved: false)
     let artifactText = artifacts["text"] as? String ?? ""
     check(artifactText.contains("artifact_id") && !artifactText.contains("SECRET_SOURCE_BODY"), "the real server answers without content")
@@ -240,16 +246,59 @@ enum AgentCoreChecks {
     agent.disable()
     check(!agent.isOn && !agent.childIsRunning, "turning off stops the tool server")
 
-    // Actions: listed only when enabled, and never run without Allow once.
+    // Ask for actions: listed, and never run without Allow once.
     let actions = AgentSession(emit: { events.add($0) })
     actions.setPanelVisible(true)
-    try! await actions.enable(configuration(effects: true), sessionKey: "test-2")
+    try! await actions.enable(configuration(.ask), sessionKey: "test-2")
     check(actions.toolNames.contains("capture_action"), "actions can be enabled")
+    check(actions.toolDefinitions().first { $0["name"] as? String == "capture_action" }?["needsApproval"] as? Bool == true,
+      "the page is told which calls pause")
     let unapproved = try! await actions.callTool(name: "capture_action", arguments: ["action": "pause"], approved: false)
     check((unapproved["text"] as? String ?? "").contains("needs Allow once"), "an action without approval does not run")
     let approved = try! await actions.callTool(name: "capture_action", arguments: ["action": "not-a-real-action"], approved: true)
     check(!(approved["text"] as? String ?? "").contains("needs Allow once"), "Allow once runs that one call")
+    check(!actions.toolNames.contains("get_artifact_text"), "Ask for actions reads no content")
     actions.disable()
+
+    // Auto-approve: the same tools, and native runs an action without Allow once.
+    let auto = AgentSession(emit: { events.add($0) })
+    auto.setPanelVisible(true)
+    try! await auto.enable(configuration(.auto), sessionKey: "test-3")
+    check(auto.toolDefinitions().allSatisfy { $0["needsApproval"] as? Bool == false }, "nothing pauses at Auto-approve")
+    let ran = try! await auto.callTool(name: "capture_action", arguments: ["action": "not-a-real-action"], approved: false)
+    check(!(ran["text"] as? String ?? "").contains("needs Allow once"), "Auto-approve runs the action")
+    let autoArtifacts = try! await auto.callTool(name: "get_artifacts", arguments: ["limit": 5], approved: false)
+    check(!(autoArtifacts["text"] as? String ?? "").contains("SECRET_SOURCE_BODY"), "Auto-approve still omits content")
+    auto.disable()
+
+    // Full access: content reads, store paths and sessions are offered; a
+    // sensitive start is refused natively without the separate consent.
+    let full = AgentSession(emit: { events.add($0) })
+    full.setPanelVisible(true)
+    try! await full.enable(configuration(.full), sessionKey: "test-4")
+    for name in ["get_artifact_text", "search_artifact_text", "start_live_session", "session_action", "get_health"] {
+      check(full.toolNames.contains(name), "Full access offers \(name)")
+    }
+    let page = try! await full.callTool(name: "get_artifact_text", arguments: ["artifact_id": "5"], approved: false)
+    check((page["text"] as? String ?? "").contains("SECRET_SOURCE_BODY"), "Full access reads captured content: \(page)")
+    let found = try! await full.callTool(name: "search_artifact_text", arguments: ["q": "secret_source"], approved: false)
+    check((found["text"] as? String ?? "").contains("\"byte_offset\""), "Full access searches captured content")
+    let sensitive = try! await full.callTool(name: "start_live_session",
+      arguments: ["request_content": true, "confirm_sensitive_capture": true], approved: false)
+    check((sensitive["text"] as? String ?? "").contains("were not allowed") && sensitive["isError"] as? Bool == true,
+      "a sensitive start is refused without its own consent")
+    // Lowering applies at once: content leaves the list and the server
+    // restarts at the lower level on its next call.
+    try! full.lower(to: .ask)
+    check(!full.childIsRunning, "lowering stops the Full access tool server")
+    check(!full.toolNames.contains("get_artifact_text") && !full.toolNames.contains("get_health"), "the lowered level offers no content")
+    let gone = try! await full.callTool(name: "get_artifact_text", arguments: ["artifact_id": "5"], approved: false)
+    check((gone["text"] as? String ?? "").contains("not available at Ask for actions"), "a lowered tool is refused: \(gone)")
+    let lowered = try! await full.callTool(name: "get_artifacts", arguments: ["limit": 5], approved: false)
+    check(lowered["isError"] as? Bool == false && full.childIsRunning, "the next call restarts the server at the lower level")
+    check(full.statusPayload()["permission"] as? String == "ask", "status reports the lowered level")
+    check((try? full.lower(to: .full)) == nil, "the level cannot be raised without consent")
+    full.disable()
 
     await AgentSubscriptionChecks.run(api: api, endpoint: URL(string: endpoint)!, root: root)
 
@@ -257,6 +306,65 @@ enum AgentCoreChecks {
     backendProcess.waitUntilExit()
     print("PASS agent native: fixed-endpoint proxy, native key, dropped page credentials, redacted errors, cancel, real reb-api gates and user-only transcript")
     exit(0)
+  }
+
+  // The level rules, the server flags each level stands for, and the prompt.
+  static func checkPermissions() {
+    let api = URL(fileURLWithPath: "/reb-api"), base = URL(string: "http://127.0.0.1:9")!, folder = URL(fileURLWithPath: "/tmp")
+    func arguments(_ level: AgentPermission, sensitive: Bool = false) -> [String] {
+      AgentSession.Configuration(provider: .claude, model: "m", apiExecutable: api, apiBaseURL: base, permission: level,
+        sensitiveCapture: sensitive, transcriptDirectory: folder).mcpArguments
+    }
+    for level in AgentPermission.allCases {
+      check(arguments(level) == ["mcp", "--base-url", "http://127.0.0.1:9", "--permission", level.rawValue], "\(level.rawValue): --permission")
+    }
+    check(arguments(.full, sensitive: true).last == "--allow-sensitive-capture", "Full access with the sensitive option")
+    check(!arguments(.auto, sensitive: true).contains("--allow-sensitive-capture"), "the sensitive option means nothing below Full access")
+    let environment = AgentSession.Configuration(provider: .claude, model: "m", apiExecutable: api, apiBaseURL: base, permission: .full,
+      transcriptDirectory: folder, appEnvironment: ["HOME": "/Users/x", "SECRET": "no", "REB_LIVE_SESSION_ROOT": "/tmp/s"]).mcpEnvironment
+    check(environment["HOME"] == "/Users/x" && environment["REB_LIVE_SESSION_ROOT"] == "/tmp/s" && environment["SECRET"] == nil,
+      "a Full access tool server gets only what starting a session needs")
+    check(AgentSession.Configuration(provider: .claude, model: "m", apiExecutable: api, apiBaseURL: base, permission: .ask,
+      transcriptDirectory: folder, appEnvironment: ["HOME": "/Users/x"]).mcpEnvironment == ["LANG": "C", "LC_ALL": "C"],
+      "below Full access the tool server gets nothing from the app")
+    check(AgentPermission.allCases.sorted() == [.readOnly, .ask, .auto, .full] && AgentPermission.rememberedCeiling == .ask, "ordered levels")
+    typealias Case = (String, Bool, AgentPermission, [String: Any], Bool, AgentToolDecision)
+    let refuse = AgentToolDecision.refuse("")
+    let cases: [Case] = [
+      ("get_events", true, .readOnly, [:], false, .run),
+      ("capture_action", false, .readOnly, [:], false, refuse),
+      ("capture_action", false, .ask, [:], false, .ask),
+      ("capture_action", false, .auto, [:], false, .run),
+      ("capture_action", false, .full, [:], false, .run),
+      ("get_artifact_text", true, .auto, [:], false, refuse),
+      ("get_artifact_text", true, .full, [:], false, .run),
+      ("get_health", true, .ask, [:], false, refuse),
+      ("get_health", true, .full, [:], false, .run),
+      ("get_artifact_content", true, .full, [:], false, refuse),
+      ("start_live_session", false, .auto, [:], false, refuse),
+      ("start_live_session", false, .full, ["url": "http://127.0.0.1:8/"], false, .run),
+      ("start_live_session", false, .full, ["request_content": true, "confirm_sensitive_capture": true], false, refuse),
+      ("start_live_session", false, .full, ["response_media": true], false, refuse),
+      ("start_live_session", false, .full, ["request_content": true, "confirm_sensitive_capture": true], true, .run),
+      ("session_action", false, .auto, [:], false, refuse),
+    ]
+    for (name, readOnly, level, arguments, sensitive, expected) in cases {
+      let decision = AgentToolGate.decide(name, readOnly: readOnly, arguments: arguments, level: level, sensitive: sensitive)
+      let same: Bool
+      switch (decision, expected) {
+      case (.refuse, .refuse): same = true
+      default: same = decision == expected
+      }
+      check(same, "gate: \(name) at \(level.rawValue) with \(arguments.keys.sorted()) is \(decision)")
+    }
+    for level in AgentPermission.allCases {
+      let prompt = agentSystemPrompt(level)
+      check(prompt.contains("Permission: \(level.label).") && !prompt.contains("{permission}"), "the \(level.rawValue) prompt names its level")
+      check(prompt.contains("stay on this Mac") == (level != .full), "only Full access says content goes to the provider")
+    }
+    check(agentSystemPrompt(.full, sensitive: true).contains("also allowed sensitive capture options"), "the sensitive prompt says so")
+    check(agentPermissionChangeNote(.readOnly).contains("Permission: Read only."), "a lowered level is described to a running CLI")
+    print("PASS agent native: four permission levels, --permission mapping, Full access environment, per-call gate and prompts")
   }
 
   static func checkRoutes() {

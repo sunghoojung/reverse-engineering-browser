@@ -36,6 +36,8 @@ deobfuscation_service_source="${repo_root}/apps/research-ui/macos/DeobfuscationS
 wasm_service_source="${repo_root}/apps/research-ui/macos/WasmService.swift"
 agent_core_source="${repo_root}/apps/research-ui/macos/AgentCore.swift"
 agent_bridge_source="${repo_root}/apps/research-ui/macos/AgentBridge.swift"
+agent_cli_source="${repo_root}/apps/research-ui/macos/AgentCLI.swift"
+agent_chatgpt_source="${repo_root}/apps/research-ui/macos/AgentChatGPTAuth.swift"
 cargo build --locked --release --manifest-path "${repo_root}/apps/deobfuscator-worker/Cargo.toml"
 deobfuscation_binary="${repo_root}/apps/deobfuscator-worker/target/release/reb-deobfuscator-worker"
 icon_source="${repo_root}/apps/research-ui/macos/assets/origin-trace-icon.png"
@@ -156,7 +158,7 @@ xcrun swiftc -parse-as-library \
 "${repo_root}/build/check-live-session-failure"
 
 xcrun swiftc -parse-as-library \
-  "${agent_core_source}" "${repo_root}/tools/check-agent-core.swift" \
+  "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${repo_root}/tools/check-agent-core.swift" \
   -o "${repo_root}/build/check-agent-core"
 "${repo_root}/build/check-agent-core" "${repo_root}/apps/origin-trace-backend/target/release/reb-api"
 
@@ -182,7 +184,7 @@ xcrun swiftc \
   -framework Cocoa \
   -framework WebKit \
   -framework Security \
-  "${swift_source}" "${stored_event_window_source}" "${stored_evidence_backend_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${agent_core_source}" "${agent_bridge_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
+  "${swift_source}" "${stored_event_window_source}" "${stored_evidence_backend_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${agent_bridge_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
   -o "${macos_path}/OriginTrace"
 
 "${macos_path}/OriginTrace" --check-native-ui-url

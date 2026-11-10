@@ -4304,7 +4304,10 @@ input[type="file"]:hover::file-selector-button { background: var(--panel-3); }
 #screen-sources .sources-navigator { grid-template-rows: 36px auto auto minmax(0, 1fr); }
 /* The editor owns the quick-open overlay, so it opens over the editor rather
    than over the investigation bar above the screen. */
-#screen-sources .sources-editor { position: relative; grid-template-rows: 36px auto minmax(0, 1fr) 28px; }
+/* The toolbar's row is max-content, not auto: WebKit keeps an auto row at its
+   old height after a width change reflows the limit notice, and the code view
+   then covers the notice's last line. With a 1fr row beside it the two size alike. */
+#screen-sources .sources-editor { position: relative; grid-template-rows: 36px max-content minmax(0, 1fr) 28px; }
 
 /* Chrome stays neutral (code takes the editor theme). The accent marks the open
    file and the selection; file icons alone carry a low-strength type tint. */

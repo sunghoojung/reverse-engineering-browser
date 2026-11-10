@@ -16,9 +16,10 @@ import Foundation
 //   `--permission` level the researcher chose (read only unless they chose
 //   more). Below Full access that level omits captured source, bytecode and
 //   bodies from every result, so they cannot reach a provider through a tool.
-// - The permission level itself. The page asks for one; native holds it, asks
-//   the researcher natively before Auto-approve or Full access, and decides
-//   every tool call by it (AgentToolGate), for the graph and the CLIs alike.
+// - The permission level itself. Consent in the dock chooses one; native
+//   checks it (AgentPermission.requested), holds it, lets only lowering change
+//   it, and decides every tool call by it (AgentToolGate), for the graph and
+//   the CLIs alike.
 // - The local transcript file. Captured content and model output are data here.
 
 enum AgentProviderKind: String, CaseIterable, Sendable {
@@ -150,6 +151,23 @@ enum AgentPermission: String, CaseIterable, Comparable, Sendable {
   // The level a browser may remember between launches. Higher levels are
   // chosen again each time, through consent.
   static let rememberedCeiling = AgentPermission.ask
+
+  // What enable accepts from the page: exactly one known level, and the
+  // sensitive capture option only as a boolean beside Full access. Anything
+  // else is refused before the running agent is touched.
+  static func requested(by body: [String: Any]) throws -> (AgentPermission, Bool) {
+    guard let raw = body["permission"] as? String, let level = AgentPermission(rawValue: raw) else {
+      throw AgentFailure(message: "Choose a permission level to turn the agent on. Nothing was turned on.")
+    }
+    guard let value = body["sensitive"] else { return (level, false) }
+    guard let sensitive = value as? Bool, CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID() else {
+      throw AgentFailure(message: "The sensitive capture option is malformed. Nothing was turned on.")
+    }
+    guard !sensitive || level == .full else {
+      throw AgentFailure(message: "Sensitive capture options belong to Full access. Nothing was turned on.")
+    }
+    return (level, sensitive)
+  }
 }
 
 // The system prompt every loop uses: one shared frame and one paragraph per

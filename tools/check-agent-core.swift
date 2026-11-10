@@ -330,6 +330,23 @@ enum AgentCoreChecks {
       transcriptDirectory: folder, appEnvironment: ["HOME": "/Users/x"]).mcpEnvironment == ["LANG": "C", "LC_ALL": "C"],
       "below Full access the tool server gets nothing from the app")
     check(AgentPermission.allCases.sorted() == [.readOnly, .ask, .auto, .full] && AgentPermission.rememberedCeiling == .ask, "ordered levels")
+    // enable takes exactly one known level, and the sensitive option only as a
+    // boolean beside Full access; anything else turns nothing on.
+    for (body, expected) in [
+      (["permission": "read-only"] as [String: Any], "read-only false"), (["permission": "ask", "sensitive": false], "ask false"),
+      (["permission": "auto"], "auto false"), (["permission": "full", "sensitive": true], "full true"),
+      (["permission": "full", "sensitive": false], "full false"),
+    ] {
+      let requested = try? AgentPermission.requested(by: body)
+      check(requested.map { "\($0.0.rawValue) \($0.1)" } == expected, "enable accepts \(body)")
+    }
+    for body in [
+      [:] as [String: Any], ["permission": "everything"], ["permission": 3], ["permission": "Full access"],
+      ["permission": "auto", "sensitive": true], ["permission": "read-only", "sensitive": true],
+      ["permission": "full", "sensitive": "yes"], ["permission": "full", "sensitive": 1],
+    ] {
+      check((try? AgentPermission.requested(by: body)) == nil, "enable refuses \(body)")
+    }
     typealias Case = (String, Bool, AgentPermission, [String: Any], Bool, AgentToolDecision)
     let refuse = AgentToolDecision.refuse("")
     let cases: [Case] = [
@@ -366,7 +383,7 @@ enum AgentCoreChecks {
     }
     check(agentSystemPrompt(.full, sensitive: true).contains("also allowed sensitive capture options"), "the sensitive prompt says so")
     check(agentPermissionChangeNote(.readOnly).contains("Permission: Read only."), "a lowered level is described to a running CLI")
-    print("PASS agent native: four permission levels, --permission mapping, Full access environment, per-call gate and prompts")
+    print("PASS agent native: four permission levels, enable request validation, --permission mapping, Full access environment, per-call gate and prompts")
   }
 
   static func checkRoutes() {

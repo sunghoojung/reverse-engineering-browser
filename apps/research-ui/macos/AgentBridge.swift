@@ -314,26 +314,13 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
         throw AgentFailure(message: "The \(AgentCLILocator.name(kind)) command was not found on this Mac.")
       }
     }
-    // New conversation restarts the running choice. Native already asked for
-    // that level, so it asks again only for anything higher or different.
-    let running = engine.isOn ? engine.configuration : nil
+    // Consent in the dock chose this level. Native checks it before anything
+    // changes, then holds it: only lowerPermission changes it afterwards.
+    let (permission, sensitive) = try AgentPermission.requested(by: body)
     if engine.isOn { proxy.cancelAll(); stopCLI(); engine.disable() }
     let requested = (body["model"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? kind.defaultModel(mode)
     guard requested.range(of: "^[A-Za-z0-9._:\\[\\]-]{1,80}$", options: .regularExpression) != nil else {
       throw AgentFailure(message: "That model name is not valid.")
-    }
-    // The page names a level; an unknown or missing one is Read only. Auto-
-    // approve and Full access are asked again here, natively, so a page bug
-    // cannot raise the level on its own.
-    let permission = (body["permission"] as? String).flatMap(AgentPermission.init(rawValue:)) ?? .readOnly
-    let sensitive = permission == .full && body["sensitive"] as? Bool == true
-    let kept = body["restart"] as? Bool == true && sessionKey == rawKey && running.map {
-      $0.provider == kind && $0.auth == mode && $0.permission >= permission && ($0.sensitive || !sensitive)
-    } == true
-    if permission >= .auto && !kept {
-      guard try await confirmPermission(permission, sensitive: sensitive, provider: kind, mode: mode) else {
-        return status().merging(["cancelled": true]) { _, new in new }
-      }
     }
     let configuration = AgentSession.Configuration(
       provider: kind, auth: mode, model: requested, apiExecutable: apiExecutable, apiBaseURL: apiBaseURL,
@@ -433,39 +420,6 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
     webView.callAsyncJavaScript(
       "window.__rebAgentEvent && window.__rebAgentEvent(JSON.parse(payload));",
       arguments: ["payload": payload], in: nil, in: .page, completionHandler: nil)
-  }
-
-  // The native half of consent for the two levels that act without asking.
-  // The page shows the same warning; this sheet is what turns it on.
-  private func confirmPermission(
-    _ level: AgentPermission, sensitive: Bool, provider: AgentProviderKind, mode: AgentAuthMode
-  ) async throws -> Bool {
-    guard let window, window.isVisible, window.attachedSheet == nil else {
-      throw AgentFailure(message: "Finish the current dialog first.")
-    }
-    let alert = NSAlert()
-    alert.alertStyle = .warning
-    alert.messageText = level == .full ? "Turn on the agent with Full access?" : "Let the agent act without asking?"
-    alert.informativeText = Self.permissionWarning(level, sensitive: sensitive, vendor: provider.vendor, cli: mode == .subscription && provider != .chatgpt)
-    alert.addButton(withTitle: level == .full ? "Turn On Full Access" : "Turn On")
-    alert.addButton(withTitle: "Cancel")
-    alert.window.setAccessibilityIdentifier("agent-permission-confirm")
-    let response = await withCheckedContinuation { continuation in
-      alert.beginSheetModal(for: window) { continuation.resume(returning: $0) }
-    }
-    return response == .alertFirstButtonReturn
-  }
-
-  // Plain words for what the level does and, for Full access, exactly what
-  // more leaves this Mac. agent_panel.js shows the same lists in consent.
-  static func permissionWarning(_ level: AgentPermission, sensitive: Bool, vendor: String, cli: Bool) -> String {
-    let actions = "The agent runs actions without asking you first: capture controls such as Stop and Clear, the Console in a connected document, saved local state such as the Collection, notebook, Analyst scripts and saved invocation sites, and the owned VM fixture. Every call and its full result still appear in the transcript, the header shows the level, and Stop or Turn off ends it at once."
-    guard level == .full else { return actions }
-    var text = "\(actions)\n\nFull access also sends captured content to \(vendor)\(cli ? " through your CLI" : ""): JavaScript and other source text, Wasm bytes and disassembly, VM bytecode, request and response bodies, and every content field of tool results. The agent can also start, drive and end its own live capture sessions, which open a capture browser, load pages and send real clicks and keys to them."
-    text += sensitive
-      ? "\n\nYou also allowed sensitive capture options for its sessions: request content (paths, queries, bodies, headers including Cookie and Authorization), response media, Canvas images and invocation value digests."
-      : "\n\nSensitive capture options (request content, response media, Canvas images and invocation value digests) stay off for its sessions."
-    return text
   }
 
   private func confirmSignOut() async throws -> Bool {

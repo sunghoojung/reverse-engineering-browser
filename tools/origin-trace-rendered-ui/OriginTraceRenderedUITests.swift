@@ -2439,6 +2439,40 @@ final class OriginTraceRenderedUITests: XCTestCase {
       throw error
     }
     try await restoreDarkTheme(ui)
+    // A Claude subscription turn through the real bridge, the stand-in claude
+    // CLI and the packaged tool server, then a full stop of the CLI.
+    try await ui.reload()
+    try await ui.click("#agent-toggle")
+    try await ui.click("[data-provider=\"claude\"]")
+    try await ui.click("[data-auth=\"subscription\"]")
+    try await ui.waitUntil("__rebUiProbe.text('#agent-account-text').includes('through your Claude CLI')", timeout: 20,
+      "the Claude CLI did not report its sign-in")
+    try await agentLayoutIsClean(ui, "claude subscription")
+    try await ui.screenshot("agent-claude-subscription")
+    try await ui.click(".agent-switch")
+    try await ui.waitUntil("__rebUiProbe.count('#agent-consent-accept') === 1", "the subscription consent did not show")
+    let disclosure = try await ui.value("__rebUiProbe.text('#agent-surface')") as? String ?? ""
+    XCTAssert(disclosure.contains("Claude CLI installed and signed in on this Mac") && disclosure.contains("own local use"),
+      "the disclosure names the researcher's own CLI: \(disclosure)")
+    try await ui.click("#agent-consent-accept")
+    try await ui.waitUntil(on, timeout: 20, "the subscription agent did not turn on")
+    try await ui.click("#agent-input")
+    try await ui.type("What did the CLI read? SCENARIO:read")
+    try await ui.key(36, "\r")
+    // "Looking at the session." and get_session_summary come only from the stand-in CLI.
+    try await ui.waitUntil("__rebUiProbe.text('#agent-log').includes('Looking at the session.') " +
+      "&& [...document.querySelectorAll('.agent-tool-summary')].some(row => row.textContent.includes('get_session_summary') && row.querySelector('.agent-tool-state-done')) " +
+      "&& document.getElementById('agent-send').textContent === 'Send'", timeout: 30, "the CLI turn did not finish")
+    let cliLog = try await ui.value("__rebUiProbe.text('#agent-log')") as? String ?? ""
+    XCTAssert(cliLog.contains("get_session_summary"), "the CLI's tool call is visible: \(cliLog)")
+    try await agentLayoutIsClean(ui, "claude subscription turn")
+    try await ui.screenshot("agent-claude-cli-turn")
+    try await ui.click(".agent-switch")
+    try await ui.waitUntil("!\(on)", timeout: 15, "the subscription agent did not turn off")
+    let cliStopped = try await ui.value("webkit.messageHandlers.rebAgent.postMessage({op: 'status'}).then(status => status.engine.cliRunning)") as? Bool
+    XCTAssertEqual(cliStopped, false, "turning off ends the CLI")
+    try await ui.click("[data-auth=\"key\"]")
+    try await ui.click("#agent-close")
   }
 
   // Earlier rows of this session come back after a reload, citations included,

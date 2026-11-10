@@ -64,10 +64,10 @@ try {
     } catch(error) {exportError=error;await writeFile(join(report,'attachment-export-error.log'),String(error));}
   }
   if(exportError)throw new Error('Native warning screenshots could not be exported',{cause:exportError});
-  const screenshots=['automatic-startup-failure','automatic-after-offline',
-    'retry-initial-failure','retry-fresh-failure','retry-after-offline','retry-new-session-setup',
+  const screenshots=['automatic-start-panel','automatic-startup-failure','automatic-after-offline',
+    'retry-start-panel','retry-initial-failure','retry-fresh-failure','retry-after-offline','retry-new-session-setup',
     'retry-new-session-failure','retry-new-session-offline',
-    'modal-reopen-initial-failure','modal-reopen-single-failure','modal-reopen-still-offline'];
+    'modal-reopen-start-panel','modal-reopen-initial-failure','modal-reopen-single-failure','modal-reopen-still-offline'];
   const manifest=JSON.parse(await readFile(join(report,'attachments/manifest.json'),'utf8'));
   assert(Array.isArray(manifest),'Expected XCTest attachment manifest');
   const attachments=manifest.flatMap(test=>Array.isArray(test.attachments)?test.attachments:[]);
@@ -93,7 +93,7 @@ try {
     receipts[scenario]=expected;
   }
   await writeFile(join(report,'result.json'),JSON.stringify({pairingPrompt:false,realXCTest:true,fakeBrowserOnly:true,screenshots,receipts},null,2)+'\n');
-  console.log('PASS prompt-free live-session startup, failure Retry, Continue Offline and reopen with launch receipts; owned unsigned fake browser only, no native capture claim');
+  console.log('PASS in-window start panel, prompt-free live-session startup, failure Retry, Continue Offline and reopen with launch receipts; owned unsigned fake browser only, no native capture claim');
 } finally {
   await writeFile(join(report,'xcodebuild.log'),log);
   // Match only this unique relocated bundle, including orphaned packaged helpers

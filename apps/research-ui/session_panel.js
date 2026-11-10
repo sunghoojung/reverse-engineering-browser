@@ -233,7 +233,7 @@
 
   function startingContent(state) {
     const body = element('div', 'session-panel-body');
-    const status = element('p', 'session-panel-text', `${modeTitle(state.mode)} capture. Origin Trace opens the live workspace when the broker, receiver and Brave Browser Development are ready, within a minute.`);
+    const status = element('p', 'session-panel-text', `Capture mode: ${modeTitle(state.mode)}. Origin Trace opens the live workspace when the broker, receiver and Brave Browser Development are ready, within a minute.`);
     status.setAttribute('role', 'status');
     body.append(status);
     return [header('busy', 'Starting a live session'), body];

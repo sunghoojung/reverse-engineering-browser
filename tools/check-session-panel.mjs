@@ -132,7 +132,7 @@ assert.equal(panel.querySelector('[role="alert"]'), null, 'a new decision clears
 push({panel: 'starting', mode: 'metadata', modes});
 assert.equal(panel.dataset.state, 'starting');
 assert(text().includes('Starting a live session'));
-assert(text().includes('Metadata only capture.'));
+assert(text().includes('Capture mode: Metadata only.'));
 assert.equal(panel.querySelectorAll('button').length, 0);
 assert.equal(panel.querySelector('[role="status"]')?.textContent.includes('within a minute'), true);
 assert.equal(panel.getAttribute('aria-busy'), 'true');

@@ -84,6 +84,8 @@ const fetchCancels = [];
 const pageHeaders = [];
 let fetchListener = null;
 let provider = 'claude';
+// The level native holds; at Ask for actions it refuses an action sent without Allow once.
+let nativeLevel = 'ask';
 const bridge = {
   onFetchEvent: listener => { fetchListener = listener; },
   async call(op, fields) {
@@ -114,7 +116,7 @@ const bridge = {
     if (op === 'fetchCancel') { fetchCancels.push(fields.id); return {ok: true}; }
     if (op === 'toolCall') {
       const definition = toolDefinitions.find(item => item.name === fields.name);
-      if (!definition.readOnly && !fields.approved) return {text: 'This action needs Allow once. It did not run.', isError: true};
+      if (!definition.readOnly && !fields.approved && nativeLevel === 'ask') return {text: 'This action needs Allow once. It did not run.', isError: true};
       toolCalls.push({name: fields.name, arguments: fields.arguments, approved: fields.approved});
       return {text: JSON.stringify({events: [{session_id: '9', process_id: '1', sequence_number: '4'}]}), isError: false};
     }
@@ -171,6 +173,8 @@ assert.equal(requests.at(-1).headers['anthropic-beta'], 'server-side-fallback-20
 assert(JSON.stringify(second.messages).includes('signed-reasoning'), 'signed thinking is replayed unchanged');
 assert(JSON.stringify(second.messages).includes('tool_result'), 'the tool result is sent back');
 assert(JSON.stringify(second.system).includes('untrusted data'), 'the model is told tool results are data');
+assert(JSON.stringify(second.system).includes('Permission: Read only'), 'the default prompt describes Read only');
+assert(!JSON.stringify(second.system).includes('{permission}'), 'the level paragraph replaces its placeholder');
 assert(JSON.stringify(second.messages).includes('<current_selection>kind=request session=9</current_selection>'), 'selection identifiers are in the turn');
 for (const headers of pageHeaders) {
   const credential = Object.entries(headers).find(([name]) => ['x-api-key', 'authorization'].includes(name.toLowerCase()));
@@ -258,6 +262,37 @@ assert.equal(firstOpenAI.tools?.[0]?.type, 'function');
 const replay = requests[openAIStart + 1].body;
 assert(replay.includes('ENCRYPTED_REASONING') && replay.includes('function_call_output'), 'reasoning and results are replayed');
 
+// Auto-approve: native lists the action without Allow once, so the graph does
+// not pause and native runs it. Lowered to Ask, the next action pauses again.
+nativeLevel = 'auto';
+provider = 'claude';
+const autoEvents = [];
+const auto = runtimes.claude.createAgentRuntime({bridge, provider: 'claude', model: 'claude-opus-5-5', permission: 'auto',
+  tools: toolDefinitions.map(definition => ({...definition, needsApproval: false})), emit: event => autoEvents.push(event)});
+script.push(claudeTool('capture_action', {action: 'stop'}), claudeText('Stopped.'));
+await auto.send({turnId: 'a1', text: 'Stop capture', pins: []});
+assert(!autoEvents.some(event => event.type === 'approval'), 'Auto-approve does not pause for the action');
+assert.deepEqual(copy(toolCalls.at(-1)), {name: 'capture_action', arguments: {action: 'stop'}, approved: false}, 'native decides it, not an approval');
+assert(autoEvents.some(event => event.type === 'tool' && event.turnId === 'a1' && event.state === 'done'), 'the call and its result are still shown');
+assert(JSON.stringify(JSON.parse(requests.at(-1).body).system).includes('Permission: Auto-approve actions'));
+nativeLevel = 'ask';
+auto.setPermission({permission: 'ask', tools: toolDefinitions.map(definition => ({...definition, needsApproval: !definition.readOnly}))});
+assert.equal(auto.permission, 'ask');
+script.push(claudeTool('capture_action', {action: 'clear'}), claudeText('Asked.'));
+const lowered = auto.send({turnId: 'a2', text: 'Clear it', pins: []});
+const deadline = Date.now() + 15000;
+while (!autoEvents.some(event => event.type === 'approval' && event.turnId === 'a2')) {
+  assert(Date.now() < deadline, 'the lowered level pauses for Allow once');
+  await new Promise(done => setTimeout(done, 10));
+}
+assert(JSON.stringify(JSON.parse(requests.at(-1).body).system).includes('Permission: Ask for actions'), 'the next model call has the lowered prompt');
+auto.cancel();
+await lowered;
+assert.equal(toolCalls.at(-1).arguments.action, 'stop', 'the paused action never ran');
+const full = runtimes.chatgpt.createAgentRuntime({bridge, provider: 'chatgpt', model: 'gpt-6-astra', permission: 'full',
+  tools: [], emit: () => {}});
+assert.equal(full.permission, 'full');
+
 server.close();
 server.closeAllConnections?.();
-console.log(`PASS agent runtime (bundled LangGraph StateGraph in a web-only context): tool call, Deny and Allow once breakpoints, stop while paused and while streaming, Claude and ChatGPT requests, placeholder-only key`);
+console.log(`PASS agent runtime (bundled LangGraph StateGraph in a web-only context): tool call, Deny and Allow once breakpoints, Auto-approve without a pause and a lowered level pausing again, the prompt per level, stop while paused and while streaming, Claude and ChatGPT requests, placeholder-only key`);

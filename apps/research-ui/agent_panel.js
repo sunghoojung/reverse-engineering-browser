@@ -200,8 +200,34 @@
     return {status: 'verified', kind: 'event', event: match[0]};
   }
 
+  // The four permission levels, lowest first, named as native and
+  // `reb-api mcp --permission` name them. Native holds the level and decides
+  // each call; this page only asks for one and shows it.
+  const PERMISSIONS = Object.freeze([
+    {id: 'read-only', label: 'Read only', short: 'Read only',
+      text: 'Reads structural results. It cannot change anything.'},
+    {id: 'ask', label: 'Ask for actions', short: 'Ask',
+      text: 'Can request actions. Each one needs Allow once.'},
+    {id: 'auto', label: 'Auto-approve actions', short: 'Auto-approve',
+      text: 'Actions run without asking. Every call and result is shown.'},
+    {id: 'full', label: 'Full access', short: 'Full access',
+      text: 'Also reads captured content and runs its own capture sessions.'},
+  ]);
+  const REMEMBERED_CEILING = 'ask';
+  const permissionRank = id => PERMISSIONS.findIndex(level => level.id === id);
+  const permissionInfo = id => PERMISSIONS[Math.max(0, permissionRank(id))];
+  // Never remembered above Ask for actions: higher levels are chosen again.
+  const rememberable = id => (permissionRank(id) < 0 ? 'read-only'
+    : permissionRank(id) > permissionRank(REMEMBERED_CEILING) ? REMEMBERED_CEILING : id);
+  const AUTO_WARNING = 'The agent runs actions without asking you first: capture controls such as Stop and Clear, the Console in a connected document, saved local state such as the Collection, notebook, Analyst scripts and saved invocation sites, and the owned VM fixture. Every call and its full result still appear in the transcript, the header shows the level, and Stop or Turn off ends it at once.';
+  // Exactly what Full access adds to what leaves this Mac.
+  const FULL_LEAVES = Object.freeze(['JavaScript and other source text', 'Wasm bytes and disassembly', 'VM bytecode',
+    'Request and response bodies', 'Every content field of tool results']);
+  const FULL_SESSIONS = 'The agent can also start, drive and end its own live capture sessions, which open a capture browser, load pages and send real clicks and keys to them.';
+  const SENSITIVE_TEXT = 'Request content (paths, queries, bodies, headers including Cookie and Authorization), response media, Canvas images and invocation value digests, in sessions the agent starts. Tick it only when your authorization covers that content.';
+
   globalThis.RebAgentModel = {parseMarkdown, parseInline, parseCitation, clipPin, createTranscriptModel, verifyCitation, formatBytes,
-    WEB_BUDGET_BYTES, PIN_BYTES, PIN_TOTAL_BYTES};
+    WEB_BUDGET_BYTES, PIN_BYTES, PIN_TOTAL_BYTES, PERMISSIONS, rememberable, AUTO_WARNING, FULL_LEAVES};
 
   /* ---- View ---- */
 
@@ -233,7 +259,7 @@
   const view = {
     open: false, native: false, status: null, surfaceError: '', provider: 'claude', models: {}, model: {},
     auth: {claude: 'key', chatgpt: 'key', grok: 'subscription'}, subs: {}, checking: {}, signingIn: false,
-    phase: 'off', running: false, sessionKey: null, consenting: false, effects: false, turning: false, follow: true,
+    phase: 'off', running: false, sessionKey: null, consenting: false, permission: 'read-only', sensitive: false, turning: false, follow: true,
     usage: null, olderBefore: null, olderAvailable: false, pins: [], selectionKey: '', copied: null, setupNotice: '',
   };
   const transcript = createTranscriptModel();
@@ -247,7 +273,9 @@
     if (PROVIDERS.some(([id]) => id === remembered)) view.provider = remembered;
     const auth = JSON.parse(localStorage.getItem('origin-trace.agent.auth') ?? '{}');
     for (const [id] of PROVIDERS) if (auth?.[id] === 'key' || auth?.[id] === 'subscription') view.auth[id] = auth[id];
+    view.permission = rememberable(localStorage.getItem('origin-trace.agent.permission'));
   } catch { /* Preferences are optional. */ }
+  const rememberPermission = id => { try { localStorage.setItem('origin-trace.agent.permission', rememberable(id)); } catch { /* Optional. */ } };
 
   // Icons are fixed markup from this file. Captured and model text never
   // reaches innerHTML; it is always a text node.
@@ -288,6 +316,10 @@
   chip.setAttribute('role', 'status');
   const chipText = element('span', 'agent-status-text');
   chip.append(element('span', 'agent-status-dot'), chipText);
+  // The running level, always in view while the agent is on.
+  const badge = element('span', 'agent-permission');
+  badge.id = 'agent-permission';
+  badge.hidden = true;
   const newButton = iconButton('agent-new', 'compose', 'New conversation', () => restartConversation());
   const moreButton = iconButton('agent-more', 'more', 'More', () => toggleMenu());
   moreButton.setAttribute('aria-haspopup', 'menu');
@@ -295,7 +327,7 @@
   moreButton.setAttribute('aria-controls', 'agent-menu');
   const close = iconButton('agent-close', 'close', 'Close agent panel', () => setOpen(false));
   close.title = 'Close (⌘ / Ctrl + Shift + A)';
-  head.append(headTitle, chip, element('span', 'agent-spacer'), newButton, moreButton, close);
+  head.append(headTitle, chip, badge, element('span', 'agent-spacer'), newButton, moreButton, close);
 
   const menu = element('div', 'agent-menu');
   menu.id = 'agent-menu';
@@ -314,11 +346,21 @@
   const menuInfo = menuItem('agent-menu-info', 'What leaves this Mac', () => openSheet('info'));
   const menuModel = menuItem('agent-menu-model', 'Change provider or model', () => { closeMenu(false); openPicker(modelButton); });
   const menuClear = menuItem('agent-menu-clear', 'Clear transcript…', () => openSheet('clear'));
+  // Lowering takes effect at once and keeps the conversation; raising goes
+  // back through consent, as turning on does.
+  const permissionSeparator = element('div', 'agent-menu-separator');
+  permissionSeparator.setAttribute('role', 'separator');
+  const menuLower = PERMISSIONS.slice(0, -1).map(level => {
+    const node = menuItem(`agent-lower-${level.id}`, `Lower to ${level.label}`, () => { closeMenu(false); lowerPermission(level.id).then(() => focusDefault()); });
+    node.dataset.level = level.id;
+    return node;
+  });
+  const menuRaise = menuItem('agent-raise', 'Raise permission…', () => { closeMenu(false); raisePermission(); });
   const menuSeparator = element('div', 'agent-menu-separator');
   menuSeparator.setAttribute('role', 'separator');
   const menuOff = menuItem('agent-turn-off', 'Turn off', () => { closeMenu(false); turnOff().then(() => focusDefault()); });
   menuOff.classList.add('agent-menu-danger');
-  menu.append(menuMeta, menuInfo, menuModel, menuClear, menuSeparator, menuOff);
+  menu.append(menuMeta, menuInfo, menuModel, menuClear, permissionSeparator, ...menuLower, menuRaise, menuSeparator, menuOff);
 
   // Info and the clear confirmation open here, over the top of the body.
   const sheet = element('div', 'agent-sheet');
@@ -478,22 +520,28 @@
   function statusDetail() {
     const choice = activeChoice(), engine = view.status?.engine;
     const parts = [providerInfo(choice.provider)?.label, choice.model || 'default model', modeLabel(choice.provider, choice.auth)];
-    if (view.phase !== 'off') parts.push(count(engine?.tools?.length ?? 0, 'tool'), engine?.effects ? 'actions ask each time' : 'read only');
+    if (view.phase !== 'off') parts.push(count(engine?.tools?.length ?? 0, 'tool'), permissionInfo(runningPermission()).label);
     if (view.usage) parts.push(`last turn ${count(view.usage.input, 'token')} in, ${count(view.usage.output, 'token')} out`);
     return parts.filter(Boolean).join(' · ');
   }
 
-  function disclosureText() {
+  // The level the agent runs with, from native; off, the one consent shows.
+  const runningPermission = () => (view.phase !== 'off' && view.status?.engine?.permission) || view.permission;
+
+  function disclosureText(level = view.permission) {
     const provider = providerInfo();
     const vendor = provider?.vendor ?? 'the provider';
-    const structural = 'Tool results are structural: they can include URLs, hosts, identifiers and counts. Source, bytecode, disassembly and request bodies stay on this Mac unless you pin them.';
+    const structural = level === 'full'
+      ? `With Full access, tool results include captured content: source, bytecode, disassembly and request and response bodies go to ${standInApplies() ? 'the stand-in' : vendor} when the agent reads them.`
+      : 'Tool results are structural: they can include URLs, hosts, identifiers and counts. Source, bytecode, disassembly and request bodies stay on this Mac unless you pin them.';
+    const decisions = {'read-only': 'it can only read', ask: 'every action still needs Allow once', auto: 'actions run without asking', full: 'actions run without asking'}[level] ?? 'it can only read';
     if (standInApplies()) return `Your question, excerpts you pin and every tool result go to a local stand-in provider on this machine. ${structural}`;
     if (authFor() === 'key') return `Your question, excerpts you pin and every tool result go to ${vendor}. ${structural}`;
     if (view.provider === 'chatgpt') {
       return `Your question, excerpts you pin and every tool result go to ${vendor} under your ChatGPT plan, through token sharing. ${structural}`;
     }
     const kept = view.provider === 'grok' ? ' Grok keeps its own record of the session in ~/.grok/sessions on this Mac.' : '';
-    return `Your question, excerpts you pin and every tool result go to ${vendor} under your plan, through the ${CLI_NAMES[view.provider]} installed and signed in on this Mac. This is your own local use of your own CLI login, which stays with the CLI. The CLI runs its own agent loop with only the reb-api tools; every action still needs Allow once.${kept} ${structural}`;
+    return `Your question, excerpts you pin and every tool result go to ${vendor} under your plan, through the ${CLI_NAMES[view.provider]} installed and signed in on this Mac. This is your own local use of your own CLI login, which stays with the CLI. The CLI runs its own agent loop with only the reb-api tools; ${decisions}.${kept} ${structural}`;
   }
 
   // One line for the setup state. The full disclosure is the consent step and Info.
@@ -535,6 +583,13 @@
     chipText.textContent = state === 'starting' ? 'Starting…' : state === 'stopped' ? 'Disconnected' : tone === 'off' ? 'Off' : choiceLabel();
     // The pulsing dot shows a running turn; the tooltip says it in words.
     chip.title = usable ? `${state === 'running' ? 'Working. ' : ''}${statusDetail()}` : '';
+    const on = usable && view.phase !== 'off' && state !== 'starting';
+    const level = permissionInfo(runningPermission());
+    badge.hidden = !on;
+    badge.dataset.level = level.id;
+    badge.textContent = level.short;
+    badge.title = `Permission: ${level.label}. ${level.text}${level.id === 'read-only' ? '' : ' Lower it from More.'}`;
+    badge.setAttribute('aria-label', `Permission: ${level.label}`);
     newButton.hidden = moreButton.hidden = !usable;
     newButton.disabled = view.phase === 'off' || view.running || view.turning || !transcript.rows().length;
   }
@@ -601,6 +656,11 @@
     menuMeta.textContent = statusDetail();
     menuModel.hidden = menuClear.hidden = menuOff.hidden = menuSeparator.hidden = !on;
     menuModel.disabled = menuClear.disabled = view.running || view.turning;
+    const current = permissionRank(runningPermission());
+    for (const node of menuLower) node.hidden = !on || permissionRank(node.dataset.level) >= current;
+    menuRaise.hidden = !on || current === PERMISSIONS.length - 1;
+    menuRaise.disabled = view.running || view.turning;
+    permissionSeparator.hidden = !on;
     menuOff.disabled = view.turning;
   }
 
@@ -634,7 +694,7 @@
 
   function renderSheet() {
     if (!sheetKind) return;
-    const key = JSON.stringify([sheetKind, view.provider, view.auth, view.phase, view.status?.providers, view.status?.engine, view.subs, view.usage, view.running, view.turning]);
+    const key = JSON.stringify([sheetKind, view.provider, view.auth, view.phase, view.permission, view.status?.providers, view.status?.engine, view.subs, view.usage, view.running, view.turning]);
     if (key === sheetKey) return;
     sheetKey = key;
     const focusKey = focusKeyIn(sheet);
@@ -667,11 +727,12 @@
     else if (view.provider === 'chatgpt') rows.append(row('Account', subscriptionOf('chatgpt').signedIn ? 'ChatGPT token in Keychain' : 'Not signed in'));
     else rows.append(row('Account', `Your ${CLI_NAMES[view.provider]} login, kept by the CLI`));
     rows.append(row('Loop', loopFor() === 'cli' ? `The ${CLI_NAMES[view.provider]}'s own loop` : 'LangGraph in this window'));
-    rows.append(row('Tools', view.status?.engine?.effects ? 'Read and actions (ask each time)' : 'Read only'));
+    const level = permissionInfo(runningPermission());
+    rows.append(row('Permission', `${level.label}. ${level.text}`));
     if (view.phase !== 'off') rows.append(row('Listed', count(view.status?.engine?.tools?.length ?? 0, 'tool')));
     if (view.usage) rows.append(row('Last turn', `${count(view.usage.input, 'token')} in, ${count(view.usage.output, 'token')} out`));
     rows.append(row('Transcript', 'Local, user-only, not part of the evidence'));
-    const nodes = [sheetHead('What leaves this Mac'), element('p', 'agent-sheet-text', disclosureText()), rows];
+    const nodes = [sheetHead('What leaves this Mac'), element('p', 'agent-sheet-text', disclosureText(level.id)), rows];
     const actions = element('div', 'agent-sheet-actions');
     if (auth === 'key' && provider?.hasKey && !standInApplies()) {
       const remove = button('agent-button', `Remove ${provider.label} key`, removeKey);
@@ -853,14 +914,34 @@
     const node = welcome('agent-consent', 'shield', 'Before you turn this on');
     node.append(element('p', 'agent-consent-target', choiceLabel()));
     node.append(element('p', 'agent-consent-text', disclosureText()));
-    const effectsLabel = element('label', 'agent-check');
-    const effects = element('input');
-    effects.type = 'checkbox';
-    effects.id = 'agent-effects';
-    effects.dataset.focusKey = 'effects';
-    effects.checked = view.effects;
-    effects.addEventListener('change', () => { view.effects = effects.checked; });
-    effectsLabel.append(effects, element('span', '', 'Let the agent request actions. Each one needs Allow once.'));
+    // One ordered setting. Read only is the default; Auto-approve and Full
+    // access show what they change here, and native asks once more.
+    const group = element('fieldset', 'agent-levels');
+    group.id = 'agent-permission-choice';
+    group.append(element('legend', 'agent-levels-legend', 'Permission'));
+    for (const level of PERMISSIONS) {
+      const label = element('label', 'agent-level');
+      label.dataset.level = level.id;
+      const radio = element('input');
+      radio.type = 'radio';
+      radio.name = 'agent-permission';
+      radio.value = level.id;
+      radio.id = `agent-level-${level.id}`;
+      radio.dataset.focusKey = `level:${level.id}`;
+      radio.checked = view.permission === level.id;
+      radio.addEventListener('change', () => {
+        if (!radio.checked) return;
+        view.permission = level.id;
+        if (level.id !== 'full') view.sensitive = false;
+        renderConsentDetails();
+      });
+      const words = element('span', 'agent-level-words');
+      words.append(element('span', 'agent-level-name', level.label), element('span', 'agent-level-text', level.text));
+      label.append(radio, words);
+      group.append(label);
+    }
+    const details = element('div', 'agent-consent-details');
+    details.id = 'agent-consent-details';
     const actions = element('div', 'agent-consent-actions');
     const cancel = button('agent-button', 'Cancel', () => { view.consenting = false; render(); focusDefault(); });
     cancel.dataset.focusKey = 'cancel';
@@ -868,7 +949,45 @@
     accept.id = 'agent-consent-accept';
     accept.dataset.focusKey = 'accept';
     actions.append(cancel, accept);
-    node.append(effectsLabel, actions);
+    node.append(group, details, actions);
+    // The warning and the sensitive checkbox follow the chosen level without
+    // rebuilding the radios under the pointer.
+    function renderConsentDetails() {
+      const text = node.querySelector('.agent-consent-text');
+      if (text) text.textContent = disclosureText();
+      accept.textContent = view.permission === 'full' ? 'Turn on with Full access' : 'Turn on for this session';
+      details.replaceChildren();
+      if (view.permission === 'auto' || view.permission === 'full') {
+        const warning = element('div', `agent-warning${view.permission === 'full' ? ' agent-warning-full' : ''}`);
+        warning.id = 'agent-permission-warning';
+        warning.setAttribute('role', 'note');
+        warning.append(element('p', 'agent-warning-text', AUTO_WARNING));
+        if (view.permission === 'full') {
+          const vendor = standInApplies() ? 'the local stand-in' : providerInfo()?.vendor ?? 'the provider';
+          warning.append(element('p', 'agent-warning-text agent-warning-strong', `Full access also sends this to ${vendor}:`));
+          const list = element('ul', 'agent-warning-list');
+          for (const item of FULL_LEAVES) list.append(element('li', '', item));
+          warning.append(list, element('p', 'agent-warning-text', FULL_SESSIONS));
+          const sensitiveLabel = element('label', 'agent-check agent-check-sensitive');
+          const sensitive = element('input');
+          sensitive.type = 'checkbox';
+          sensitive.id = 'agent-sensitive';
+          sensitive.dataset.focusKey = 'sensitive';
+          sensitive.checked = view.sensitive;
+          sensitive.setAttribute('aria-describedby', 'agent-sensitive-text');
+          sensitive.addEventListener('change', () => { view.sensitive = sensitive.checked; });
+          const words = element('span', 'agent-level-words');
+          const detail = element('span', 'agent-level-text', SENSITIVE_TEXT);
+          detail.id = 'agent-sensitive-text';
+          words.append(element('span', 'agent-level-name', 'Also allow sensitive capture options'), detail);
+          sensitiveLabel.append(sensitive, words);
+          warning.append(sensitiveLabel);
+        }
+        warning.append(element('p', 'agent-warning-text agent-warning-native', 'Origin Trace asks you once more before turning this on.'));
+        details.append(warning);
+      }
+    }
+    renderConsentDetails();
     return node;
   }
 
@@ -1787,8 +1906,9 @@
   }
 
   // Turning on always passes the disclosure for the selected provider and payment.
-  function requestConsent() {
+  function requestConsent(level) {
     if (view.phase !== 'off' || view.turning || !view.status?.available) return;
+    if (typeof level === 'string' && permissionRank(level) >= 0) view.permission = level;
     const state = credential();
     if (!state.ready) { view.setupNotice = {text: state.text || 'This provider is not ready yet.', kind: 'error'}; render(); return; }
     view.setupNotice = '';
@@ -1798,9 +1918,16 @@
   }
 
   // Enables native for one session and builds the loop that drives it.
-  async function startAgent({provider, auth, model, effects, key}) {
+  async function startAgent({provider, auth, model, permission, sensitive, key, restart = false}) {
     view.sessionKey = key;
-    const result = await call('enable', {provider, auth, model, effects, sessionKey: key});
+    const result = await call('enable', {provider, auth, model, permission, sensitive: permission === 'full' && Boolean(sensitive), sessionKey: key, restart});
+    // Native asked once more for Auto-approve or Full access, and the
+    // researcher cancelled there: nothing was turned on.
+    if (result?.cancelled) {
+      view.status = result;
+      syncEngine(result.engine);
+      return false;
+    }
     if ((result.engine?.loop ?? loopFor(provider, auth)) === 'cli') {
       runtime = createCliRuntime();
     } else {
@@ -1810,10 +1937,12 @@
       runtime = api.createAgentRuntime({
         bridge: {call, onFetchEvent: listener => { fetchListener = listener; }},
         provider, model: result.engine?.model ?? model, tools: result.tools ?? [], emit: handleRuntimeEvent,
+        permission: result.engine?.permission ?? 'read-only', sensitive: Boolean(result.engine?.sensitive),
       });
     }
     view.status = result;
     syncEngine(result.engine);
+    return true;
   }
 
   async function confirmConsent() {
@@ -1823,7 +1952,16 @@
     render();
     try {
       const key = await sessionKey();
-      await startAgent({provider: view.provider, auth: authFor(), model: view.model[modelKey()] ?? '', effects: view.effects, key});
+      const level = view.permission;
+      const started = await startAgent({provider: view.provider, auth: authFor(), model: view.model[modelKey()] ?? '', permission: level, sensitive: view.sensitive, key});
+      if (!started) {
+        view.setupNotice = {text: `${permissionInfo(level).label} was not turned on. Nothing was started.`, kind: 'info'};
+        return;
+      }
+      // The next consent starts from what may be remembered, never higher.
+      rememberPermission(level);
+      view.permission = rememberable(level);
+      view.sensitive = false;
       const page = await call('transcript', {});
       view.olderBefore = page.before ?? null;
       view.olderAvailable = view.olderBefore !== null;
@@ -1850,7 +1988,8 @@
   async function restartConversation({clear = false} = {}) {
     if (view.phase === 'off' || view.running || view.turning) return;
     const engine = view.status?.engine ?? {};
-    const choice = {provider: engine.provider ?? view.provider, auth: engine.auth ?? authFor(), model: engine.model ?? '', effects: Boolean(engine.effects)};
+    const choice = {provider: engine.provider ?? view.provider, auth: engine.auth ?? authFor(), model: engine.model ?? '',
+      permission: engine.permission ?? 'read-only', sensitive: Boolean(engine.sensitive)};
     const had = transcript.rows().length > 0 || view.olderAvailable;
     view.turning = true;
     render();
@@ -1867,7 +2006,8 @@
       runtime?.dispose();
       runtime = null;
       fetchListener = null;
-      await startAgent({...choice, key});
+      // The same consented choice again; native keeps it without asking twice.
+      await startAgent({...choice, key, restart: true});
       transcript.clear();
       heights.clear();
       citeChecks.clear();
@@ -1895,6 +2035,36 @@
     setChoice(id, mode);
     if (model) view.model[modelKey(id)] = model;
     if (credential().ready) requestConsent();
+    focusDefault();
+  }
+
+  // Lowering applies at once, in native first: the next tool call and the
+  // next model call use the new level, and the conversation continues.
+  async function lowerPermission(level) {
+    if (view.phase === 'off' || permissionRank(level) < 0 || permissionRank(level) >= permissionRank(runningPermission())) return;
+    try {
+      const result = await call('lowerPermission', {permission: level});
+      view.status = result;
+      syncEngine(result.engine);
+      runtime?.setPermission?.({permission: level, sensitive: false, tools: result.tools ?? []});
+      rememberPermission(level);
+      view.permission = rememberable(level);
+      const info = permissionInfo(level);
+      appendNotice(`Permission lowered to ${info.label}. ${info.text}`);
+      persist({role: 'notice', text: `Permission lowered to ${info.label}.`});
+    } catch (error) { appendNotice(bridgeFailure(error), 'error'); }
+    render();
+  }
+
+  // Raising is turning on again: off, then consent with the next level chosen.
+  async function raisePermission() {
+    if (view.phase === 'off' || view.running || view.turning) return;
+    const next = PERMISSIONS[Math.min(PERMISSIONS.length - 1, permissionRank(runningPermission()) + 1)].id;
+    const choice = activeChoice();
+    await turnOff();
+    setChoice(choice.provider, choice.auth);
+    if (choice.model) view.model[modelKey(choice.provider)] = choice.model;
+    if (credential().ready) requestConsent(next);
     focusDefault();
   }
 

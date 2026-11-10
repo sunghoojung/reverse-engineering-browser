@@ -31,17 +31,19 @@
 // clang-format on
 
 std::atomic<std::uint64_t> allocations{0};
-void* operator new(std::size_t size) {
+// Kept out of line: GCC 15 otherwise inlines free() into std::vector's destructor,
+// sees it paired with operator new and fails -Werror=mismatched-new-delete.
+[[gnu::noinline]] void* operator new(std::size_t size) {
   ++allocations;
   if (void* value = std::malloc(size)) {
     return value;
   }
   std::abort();
 }
-void operator delete(void* value) noexcept {
+[[gnu::noinline]] void operator delete(void* value) noexcept {
   std::free(value);
 }
-void operator delete(void* value, std::size_t) noexcept {
+[[gnu::noinline]] void operator delete(void* value, std::size_t) noexcept {
   std::free(value);
 }
 

@@ -6,6 +6,7 @@
 // the packaged app path is test24 in the rendered harness.
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
+import {readFileSync} from 'node:fs';
 import {runInContext} from 'node:vm';
 import {setImmediate as nextTurn} from 'node:timers/promises';
 
@@ -70,15 +71,29 @@ export async function checkAgentPanel() {
   // Panel states through the shipped controller and a fake native bridge.
   const posted = [];
   let engine = {type: 'status', phase: 'off', running: false, childRunning: false, tools: [], provider: null, model: null, effects: false};
-  const status = () => ({available: true, reason: '', standIn: true,
+  // Later the native side reports subscriptions too, as AgentBridge.status does.
+  let subscriptions = false, standIn = true, grokSignedIn = false, chatgptSignedIn = false;
+  const status = () => ({available: true, reason: '', standIn,
     providers: [{id: 'claude', label: 'Claude', vendor: 'Anthropic', defaultModel: 'claude-opus-5-5', hasKey: true},
-      {id: 'chatgpt', label: 'ChatGPT', vendor: 'OpenAI', defaultModel: 'gpt-6-astra', hasKey: true}], engine});
+      {id: 'chatgpt', label: 'ChatGPT', vendor: 'OpenAI', defaultModel: 'gpt-6-astra', hasKey: true,
+        ...(subscriptions ? {supportsKey: true, subscriptionModel: 'gpt-6-astra', subscription: {kind: 'oauth', available: true, signedIn: chatgptSignedIn}} : {})},
+      ...(subscriptions ? [{id: 'grok', label: 'Grok', vendor: 'xAI', defaultModel: 'default', subscriptionModel: 'default', supportsKey: false,
+        hasKey: false, subscription: {kind: 'cli', available: true, cli: 'grok'}}] : [])], engine});
   context.__agentPost = message => {
     posted.push(message);
     if (message.op === 'enable') {
-      engine = {...engine, phase: 'ready', childRunning: true, provider: message.provider, model: 'claude-opus-5-5', tools: [{name: 'get_events', readOnly: true}]};
+      const cli = message.auth === 'subscription' && message.provider !== 'chatgpt';
+      engine = {...engine, phase: 'ready', childRunning: !cli, provider: message.provider, model: message.model || 'claude-opus-5-5',
+        auth: message.auth, loop: cli ? 'cli' : 'langgraph', cliRunning: false, tools: [{name: 'get_events', readOnly: true}]};
       return Promise.resolve({...status(), tools: [{name: 'get_events', description: 'Read', schema: {type: 'object'}, readOnly: true}]});
     }
+    if (message.op === 'subscriptionStatus') {
+      return Promise.resolve(grokSignedIn ? {kind: 'cli', available: true, signedIn: true, cli: 'grok'}
+        : {kind: 'cli', available: true, signedIn: false, cli: 'grok', reason: 'The Grok CLI is not signed in.'});
+    }
+    if (message.op === 'subscriptionSignIn') { chatgptSignedIn = true; return Promise.resolve({signedIn: true, sharing: true}); }
+    if (message.op === 'cliSend' || message.op === 'cliCancel') return Promise.resolve({ok: true});
+    if (message.op === 'cliDecide') return Promise.resolve({waiting: true});
     if (message.op === 'disable') { engine = {...engine, phase: 'off', childRunning: false}; return Promise.resolve(status()); }
     if (message.op === 'turn' || message.op === 'transcriptAppend') return Promise.resolve({ok: true});
     if (message.op === 'transcript') return Promise.resolve({rows: [], before: null});
@@ -88,13 +103,14 @@ export async function checkAgentPanel() {
   // The panel drives the graph through this interface; the real one is bundled.
   const runtimeCalls = [];
   context.__runtimeCalls = runtimeCalls;
-  runInContext(`globalThis.RebAgentRuntimes = {claude: {createAgentRuntime(options) {
+  runInContext(`const fakeRuntime = {createAgentRuntime(options) {
       __runtimeCalls.push({op: 'create', provider: options.provider, model: options.model, tools: options.tools.map(tool => tool.name)});
       globalThis.__runtimeEmit = options.emit;
       return {running: false, send(turn) { __runtimeCalls.push({op: 'send', text: turn.text}); return Promise.resolve(); },
         decide(callId, allow) { __runtimeCalls.push({op: 'decide', callId, allow}); return true; },
         cancel() { __runtimeCalls.push({op: 'cancel'}); }, dispose() { __runtimeCalls.push({op: 'dispose'}); }};
-    }}};
+    }};
+    globalThis.RebAgentRuntimes = {claude: fakeRuntime, chatgpt: fakeRuntime};
     globalThis.webkit = {messageHandlers: {rebAgent: {postMessage: message => __agentPost(message)}}};
     globalThis.fetch = async () => new Response(JSON.stringify({instance_id: '100:200'}), {status: 200});
     globalThis.requestAnimationFrame = callback => { callback(0); return 0; };`, context);
@@ -217,9 +233,121 @@ export async function checkAgentPanel() {
   assert.equal(doc.getElementById('workspace').dataset.xrefsOpen, undefined, 'Cross-references gives up the dock column');
   doc.getElementById('agent-toggle').click();
   await settle();
+
+  // The Swift CLI drivers and the graph send the same system prompt.
+  const runtimeSource = readFileSync(new URL('../apps/research-ui/agent-runtime/src/runtime.mjs', import.meta.url), 'utf8');
+  const swiftSource = readFileSync(new URL('../apps/research-ui/macos/AgentCore.swift', import.meta.url), 'utf8');
+  const jsPrompt = /export const SYSTEM_PROMPT = `([^`]*)`;/.exec(runtimeSource)?.[1];
+  const swiftPrompt = /let agentSystemPrompt = """\n([\s\S]*?)\n  """/.exec(swiftSource)?.[1]?.split('\n').map(line => line.replace(/^  /, '')).join('\n');
+  assert.ok(jsPrompt && jsPrompt === swiftPrompt, 'the CLI loops get the same system prompt as the graph');
+
+  // Subscriptions: Grok is subscription only and asks its CLI whether it is signed in.
+  subscriptions = true;
+  standIn = false;
+  doc.getElementById('agent-toggle').click();
+  await settle();
+  const grok = doc.querySelector('[data-provider="grok"]');
+  assert.ok(grok, 'Grok is in the provider picker');
+  grok.click();
+  await settle();
+  assert.ok(posted.some(message => message.op === 'subscriptionStatus' && message.provider === 'grok'), 'the Grok CLI is asked about its sign-in');
+  assert.equal(doc.querySelector('[data-auth="key"]').hidden, true, 'Grok has no API key path');
+  assert.equal(doc.querySelector('[data-auth="subscription"]').getAttribute('aria-pressed'), 'true');
+  assert.match(doc.getElementById('agent-account-text').textContent, /Run grok login in Terminal/, 'a signed-out CLI says how to sign in');
+  const check = doc.getElementById('agent-account-action');
+  assert.equal(check.hidden, false);
+  assert.equal(check.textContent, 'Check again');
+  switchInput.checked = true;
+  switchInput.dispatchEvent(new window.Event('change'));
+  await settle();
+  assert.equal(posted.some(message => message.op === 'enable' && message.provider === 'grok'), false, 'a signed-out CLI cannot be turned on');
+  grokSignedIn = true;
+  check.click();
+  await settle();
+  assert.match(doc.getElementById('agent-account-text').textContent, /through your Grok CLI/);
+  assert.ok(posted.some(message => message.op === 'models' && message.provider === 'grok' && message.auth === 'subscription'), 'its models come from the CLI');
+  switchInput.checked = true;
+  switchInput.dispatchEvent(new window.Event('change'));
+  await settle();
+  const grokConsent = doc.getElementById('agent-surface').textContent;
+  assert.match(grokConsent, /through the Grok CLI installed and signed in on this Mac/, 'the disclosure names the CLI');
+  assert.match(grokConsent, /own local use/, 'and that this is the researcher\'s own login');
+  assert.match(grokConsent, /~\/\.grok\/sessions/, 'and that Grok keeps its own record');
+  assert.match(grokConsent, /tool result/);
+  assert.match(grokConsent, /URLs, hosts/);
+  const creates = runtimeCalls.filter(entry => entry.op === 'create').length;
+  doc.getElementById('agent-consent-accept').click();
+  await settle();
+  const grokEnable = posted.findLast(message => message.op === 'enable');
+  assert.equal(grokEnable.provider, 'grok');
+  assert.equal(grokEnable.auth, 'subscription');
+  assert.equal(runtimeCalls.filter(entry => entry.op === 'create').length, creates, 'the CLI loop loads no LangGraph bundle');
+
+  // The CLI's rows render like the graph's, and decisions go to native.
+  input.value = 'What did the CLI see?';
+  input.dispatchEvent(new window.Event('input'));
+  doc.getElementById('agent-send').click();
+  await settle();
+  const sent = posted.findLast(message => message.op === 'cliSend');
+  assert.equal(sent?.text, 'What did the CLI see?', 'the question goes to the native CLI driver');
+  const cli = event => runInContext(`__rebAgentEvent(${JSON.stringify({...event, cli: true})})`, context);
+  cli({type: 'text', rowId: 'g1', turnId: sent.turnId, delta: 'From Grok <b>bold</b>'});
+  cli({type: 'tool', id: 'tool-g', turnId: sent.turnId, name: 'get_session_summary', arguments: '{}', state: 'running', readOnly: true});
+  cli({type: 'tool', id: 'tool-g', turnId: sent.turnId, name: 'get_session_summary', arguments: '{}', state: 'done', result: '{"events":3}', resultBytes: 12, isError: false});
+  cli({type: 'approval', turnId: sent.turnId, callId: 'gc1', name: 'capture_action', arguments: '{"action":"pause"}'});
+  await settle();
+  assert.match(logNode.textContent, /From Grok <b>bold<\/b>/);
+  assert.equal(logNode.querySelector('b'), null, 'CLI text stays inert');
+  logNode.querySelector('[data-approve="gc1"]').click();
+  await settle();
+  assert.deepEqual(copy(posted.findLast(message => message.op === 'cliDecide')), {op: 'cliDecide', callId: 'gc1', allow: true}, 'Allow once reaches the driver');
+  assert.ok(posted.some(message => message.op === 'transcriptAppend' && message.row.role === 'tool' && message.row.id === 'tool-g'), 'CLI tool rows are kept locally');
+  cli({type: 'assistantDone', turnId: sent.turnId, rowId: 'g1', text: 'From Grok <b>bold</b>'});
+  cli({type: 'turnEnd', turnId: sent.turnId, stopped: false, inputTokens: 3, outputTokens: 2});
+  await settle();
+  assert.ok(posted.some(message => message.op === 'transcriptAppend' && message.row.role === 'assistant' && message.row.rowId === 'g1'));
+  assert.equal(doc.getElementById('agent-send').textContent, 'Send', 'the turn ended');
+  input.value = 'Stop this one';
+  input.dispatchEvent(new window.Event('input'));
+  doc.getElementById('agent-send').click();
+  await settle();
+  doc.getElementById('agent-send').click();
+  await settle();
+  assert.ok(posted.some(message => message.op === 'cliCancel'), 'Stop ends the CLI turn natively');
+  cli({type: 'turnEnd', turnId: posted.findLast(message => message.op === 'cliSend').turnId, stopped: true});
+  switchInput.checked = false;
+  switchInput.dispatchEvent(new window.Event('change'));
+  await settle();
+
+  // ChatGPT: the subscription signs in through the browser and keeps the graph.
+  doc.querySelector('[data-provider="chatgpt"]').click();
+  await settle();
+  doc.querySelector('[data-auth="subscription"]').click();
+  await settle();
+  const signIn = doc.getElementById('agent-account-action');
+  assert.equal(signIn.textContent, 'Sign in');
+  signIn.click();
+  await settle();
+  assert.ok(posted.some(message => message.op === 'subscriptionSignIn' && message.provider === 'chatgpt'), 'Sign in starts the native flow');
+  assert.match(doc.getElementById('agent-account-text').textContent, /token sharing allowed/);
+  switchInput.checked = true;
+  switchInput.dispatchEvent(new window.Event('change'));
+  await settle();
+  assert.match(doc.getElementById('agent-surface').textContent, /under your ChatGPT plan, through token sharing/);
+  doc.getElementById('agent-consent-accept').click();
+  await settle();
+  assert.equal(posted.findLast(message => message.op === 'enable').auth, 'subscription');
+  assert.equal(runtimeCalls.findLast(entry => entry.op === 'create').provider, 'chatgpt', 'the ChatGPT subscription runs the LangGraph graph');
+  assert.match(doc.querySelector('.agent-popover').textContent, /Sign out of ChatGPT/);
+  assert.match(doc.querySelector('.agent-popover').textContent, /LangGraph in this window/);
+  switchInput.checked = false;
+  switchInput.dispatchEvent(new window.Event('change'));
+  await settle();
+  doc.getElementById('agent-toggle').click();
+  await settle();
   assert.deepEqual(asyncErrors, [], 'no asynchronous errors');
   release();
-  console.log('PASS agent panel: safe markdown, verified citations, byte budget, consent, approvals and closed-panel behavior (not rendered QA)');
+  console.log('PASS agent panel: safe markdown, verified citations, byte budget, consent, approvals, closed-panel behavior, and subscription states with the CLI and ChatGPT paths (not rendered QA)');
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) await checkAgentPanel();

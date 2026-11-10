@@ -23,6 +23,8 @@ import Security
 // tools/check-agent-core.swift.
 
 protocol AgentSecretStore: AnyObject {
+  // Presence only. It reads no secret, so it never raises a Keychain prompt.
+  func contains(_ account: String) -> Bool
   func read(_ account: String) -> Data?
   @discardableResult func write(_ data: Data, account: String) -> Bool
   func delete(_ account: String)
@@ -34,6 +36,12 @@ final class AgentKeychainSecretStore: AgentSecretStore {
 
   private func query(_ account: String) -> [String: Any] {
     [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
+  }
+
+  func contains(_ account: String) -> Bool {
+    var attributes = query(account)
+    attributes[kSecReturnAttributes as String] = true
+    return SecItemCopyMatching(attributes as CFDictionary, nil) == errSecSuccess
   }
 
   func read(_ account: String) -> Data? {
@@ -61,6 +69,7 @@ final class AgentKeychainSecretStore: AgentSecretStore {
 // Tokens from a stand-in issuer never reach the Keychain.
 final class AgentMemorySecretStore: AgentSecretStore {
   private var values: [String: Data] = [:]
+  func contains(_ account: String) -> Bool { values[account] != nil }
   func read(_ account: String) -> Data? { values[account] }
   @discardableResult func write(_ data: Data, account: String) -> Bool { values[account] = data; return true }
   func delete(_ account: String) { values.removeValue(forKey: account) }
@@ -147,14 +156,13 @@ final class AgentChatGPTAuth {
   }
   var signInWaiting: Bool { listener != nil }
 
+  // Only a sign-in that allowed token sharing keeps tokens, so presence is
+  // the whole answer.
   func status() -> [String: Any] {
-    guard let tokens else {
+    guard store.contains(Self.tokensAccount) else {
       return ["signedIn": false, "waiting": signInWaiting, "reason": "Sign in with ChatGPT to use your subscription."]
     }
-    let sharing = tokens.scopes.contains(Self.requiredScope)
-    var status: [String: Any] = ["signedIn": sharing, "waiting": signInWaiting, "sharing": sharing]
-    if !sharing { status["reason"] = "Token sharing is off for this ChatGPT sign-in. Sign in again and allow it." }
-    return status
+    return ["signedIn": true, "waiting": signInWaiting]
   }
 
   // MARK: Discovery and keys
@@ -271,7 +279,7 @@ final class AgentChatGPTAuth {
     let sharing = issued.scopes.contains(Self.requiredScope)
     save(AgentChatGPTRegistration(clientId: clientId, subject: identity.subject, email: identity.email, redirectURI: redirect,
       sharingEnabled: sharing))
-    if sharing || previous == nil {
+    if sharing {
       save(AgentChatGPTTokens(
         clientId: clientId, accessToken: issued.accessToken, refreshToken: issued.refreshToken, idToken: idToken,
         expiresAt: Date().timeIntervalSince1970 + Double(issued.expiresIn), earliestRefreshAt: issued.earliestRefreshAt,
@@ -406,10 +414,11 @@ final class AgentChatGPTAuth {
     renewed.expiresAt = Date().timeIntervalSince1970 + Double(issued.expiresIn)
     renewed.earliestRefreshAt = issued.earliestRefreshAt
     renewed.scopes = issued.scopes
-    save(renewed)
     guard renewed.scopes.contains(Self.requiredScope) else {
+      store.delete(Self.tokensAccount)
       throw AgentFailure(message: "ChatGPT token sharing is no longer allowed. Sign in again.")
     }
+    save(renewed)
     return renewed
   }
 

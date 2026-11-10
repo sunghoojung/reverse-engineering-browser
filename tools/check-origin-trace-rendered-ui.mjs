@@ -250,7 +250,8 @@ fetch("/getcaptcha");
     await writeFile(join(report, 'backend.log'), backendLog);
   }
   if (!only || only === 'test0AgentPanel') {
-    const asked = agentRequests.filter(entry => entry.path.endsWith('/v1/messages'));
+    // The Claude model asks with the refusal-fallback beta, as `/v1/messages?beta=true`.
+    const asked = agentRequests.filter(entry => new URL(entry.path, 'http://stand-in').pathname === '/v1/messages');
     assert(asked.length >= 4, `The agent must reach the local stand-in provider for each turn: ${asked.length}`);
     assert(asked.every(entry => !entry.headers['x-api-key'] && !entry.headers.authorization), 'A stand-in provider receives no key');
     assert(!asked.some(entry => entry.body.includes(HOSTILE_SOURCE_MARKER)), 'Captured source must not reach the provider');

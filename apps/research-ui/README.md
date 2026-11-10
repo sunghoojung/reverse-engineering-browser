@@ -300,10 +300,89 @@ concurrency.
 
 ## In-app agent
 
-The **Agent** dock (the button at the titlebar's right edge, or ⌘⇧A) puts Claude or ChatGPT beside the
-evidence. It is closed by default, and the switch in its header is off by
-default. Turning it on is an explicit action for the current session, behind
-a disclosure, and stops completely when it is switched off.
+The **Agent** dock (the button at the titlebar's right edge, or ⌘⇧A) puts Claude, ChatGPT or Grok
+beside the evidence. It is closed by default, and the switch in its header is
+off by default. Turning it on is an explicit action for the current session,
+behind a disclosure, and stops completely when it is switched off.
+
+### Keys and subscriptions
+
+The line under the provider picker chooses how each provider is paid for:
+**API key** (the researcher's own key in the Keychain) or **Subscription**
+(the researcher's own plan). Grok has only the subscription.
+
+| Provider | Subscription path | Loop | Where the login lives |
+| --- | --- | --- | --- |
+| ChatGPT | OpenAI token sharing: **Sign in** opens ChatGPT in the default browser | LangGraph, unchanged | Access and refresh tokens in the Keychain |
+| Claude | The installed `claude` CLI, already signed in with `claude auth login` | The CLI's own loop (`claude -p`, stream-json) | With the CLI; Origin Trace never reads it |
+| Grok | The installed `grok` CLI, already signed in with `grok login` | The CLI's own loop (`grok agent stdio`, ACP) | With the CLI; Origin Trace never reads it |
+
+The Claude and Grok paths are for the researcher's own local use of their own
+installed and signed-in CLI. Origin Trace does not offer a claude.ai or Grok
+sign-in of its own; the dock asks the CLI (`claude auth status`,
+`grok models`) whether it is signed in and, if not, says which command to run
+in Terminal.
+
+**ChatGPT token sharing** is the sign-in T3 Code's managed Codex mode uses.
+Native (`macos/AgentChatGPTAuth.swift`) reads the OIDC discovery document and
+refuses it unless the issuer is `https://auth.openai.com` and every endpoint is
+on that origin. It opens an authorization-code request with PKCE S256, `state`
+and `nonce`, scope `openid profile email offline_access resource.invoke
+chatgpt.tokens.use.direct` and resource `https://api.openai.com/v1`. The first
+sign-in registers with `client_id=dynamic_agent_client` and
+`agent_name_hint=Origin Trace`; later ones reuse the returned `oaiapp_...`
+client with `login_hint` and `id_token_hint`. `ext_agent_host_id` is a random
+install id kept in the Keychain. The callback is a one-shot listener on
+`http://127.0.0.1:<port>/auth/callback` that accepts only this sign-in's state
+and expires after five minutes. The ID token must verify against the issuer's
+JWKS (RS256 or ES256) with this client as audience and this nonce, and the
+granted scope must include `chatgpt.tokens.use.direct`; otherwise the dock
+says token sharing was not allowed. Before each model request native renews
+the access token when it is within a minute of expiry, honoring
+`earliest_refresh_at`; a refused renewal forgets the tokens and asks for a new
+sign-in. The token goes only on the existing `/v1/responses` route and the
+model list (`/v1/models`); the web view never sees it. **Sign out of ChatGPT**
+in Info revokes the refresh token and forgets the tokens. A real sign-in needs
+the researcher's consent in the browser, so it is a manual check.
+
+**The Claude CLI** (`macos/AgentCLI.swift`) runs as `claude -p --input-format
+stream-json --output-format stream-json --verbose --include-partial-messages
+--permission-prompt-tool stdio --permission-mode default --strict-mcp-config
+--mcp-config <reb only> --tools "" --setting-sources "" --disable-slash-commands
+--no-session-persistence --system-prompt <the dock's prompt>`, plus
+`--disallowed-tools` for every reb-api tool the graph would not list. So it has
+no built-in tool, no other MCP server, no user or project settings, hooks or
+CLAUDE.md, and writes no session file. `--bare` is not used because it ignores
+the claude.ai login. The CLI's `init` report must list only `mcp__reb__*` tools
+and the `reb` server, and `apiKeySource: none`, or the CLI is stopped.
+
+**The Grok CLI** runs as `grok --permission-mode default --disable-web-search
+--no-subagents agent --agent-profile <profile> --no-leader stdio`. The agent
+profile allows only `search_tool` and `use_tool`, through which Grok reaches
+MCP tools. Grok merges MCP servers from the researcher's own Grok configuration
+into every ACP session, whatever the client sends, so the private working
+folder's `.grok/config.toml` replaces each of them with a disabled stub, and
+the environment turns off folder trust (so that file applies), memory,
+subagents, web fetch, the update check, and Claude, Cursor and Codex skills,
+rules, agents, MCP servers, hooks and sessions. `grok inspect --json` must then
+show no enabled MCP server, hook or plugin, or Grok is not started. A
+`servers_updated` notice naming any server, a tool call that is not
+`search_tool` or `use_tool`, or a permission request that is not a `reb__` tool
+stops the CLI. Grok keeps its own record of the session under
+`~/.grok/sessions`, as it does for any session.
+
+Both CLIs run from a private, user-only folder under
+`~/Library/Application Support/Origin Trace/agent-cli/`, in their own process
+group, with an environment allowlist: no `ANTHROPIC_API_KEY`,
+`ANTHROPIC_BASE_URL`, `XAI_API_KEY` or `GROK_OAUTH2_REFERRER` reaches them, so
+they use the subscription. A CLI starts with the first question, not when the
+switch turns on, and keeps its conversation between turns. **Stop**, the switch,
+a navigation, app exit and 15 idle minutes kill its whole process group,
+including helpers it moved to another group; the next question starts a new
+conversation and says so. Every tool call it wants comes to native first: a
+structural read runs, an action waits for **Allow once** or **Deny**, anything
+else is refused. Lines longer than 16 MiB, more than 128 tool rounds or
+repeated unreadable output stop it with a visible row.
 
 ### Where the loop runs
 
@@ -349,8 +428,9 @@ agent is unavailable.
 
 The native app keeps what the page must not hold:
 
-- **Keys.** The Keychain holds one item per provider. **Add key** opens a
-  native secure field, so a key never enters the web view. The chat models are
+- **Keys and tokens.** The Keychain holds one item per provider, and the
+  ChatGPT subscription's tokens and registration under their own accounts.
+  **Add key** opens a native secure field, so a key never enters the web view. The chat models are
   given a placeholder key and a `fetch` that goes through the native bridge.
   Native forwards a request only to `https://api.anthropic.com/v1/messages`
   (optionally `?beta=true`) or `https://api.openai.com/v1/responses`, by POST and
@@ -419,9 +499,18 @@ accepts only a loopback stand-in, for tests; it never redirects a real key.
   packaged bundles.
 - `tools/check-agent-core.swift`, also in `make app-build`, checks the proxy's
   routes, header filtering, native key, error redaction and cancel, and the real
-  `reb-api mcp` tool gates and the transcript's permissions.
+  `reb-api mcp` tool gates and the transcript's permissions. With
+  `tools/check-agent-subscriptions.swift` it also runs both CLI drivers against
+  stand-in `claude` and `grok` executables (the same binary, in
+  `tools/agent-cli-stand-in.swift`) that call the real `reb-api mcp`: flags,
+  environment, own process group, reads, Allow once and Deny, refusals, Stop
+  with helpers killed, unreadable output and Grok's MCP stubs. It runs the
+  ChatGPT sign-in against a loopback issuer that checks PKCE, state and nonce,
+  and covers renewal, refusal, a forged issuer and sign out.
 - `node tools/check-agent-panel.mjs` (`make native-only-check`) checks the dock's
-  states, safe rendering, citations and budgets in a DOM model.
+  states, safe rendering, citations and budgets in a DOM model, the
+  subscription states, the CLI rows and decisions, and that the CLIs get the
+  graph's system prompt.
 - `test0AgentPanel` drives the packaged app.
 
 ## Native console

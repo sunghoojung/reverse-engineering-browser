@@ -10,7 +10,7 @@
 //
 // The key never reaches this file. Model requests go through `bridge.fetch`,
 // which the native app forwards only to the fixed provider endpoints with the
-// Keychain key it adds itself.
+// Keychain key, or the ChatGPT subscription's access token, it adds itself.
 import {StateGraph, MessagesAnnotation, MemorySaver, START, END} from '@langchain/langgraph/web';
 import {AIMessage, HumanMessage, SystemMessage, ToolMessage} from '@langchain/core/messages';
 import {tool} from '@langchain/core/tools';
@@ -273,7 +273,9 @@ export function createAgentRuntime({bridge, provider, model, tools: definitions,
     } catch (error) {
       if (turn.abort.signal.aborted) { await finish(turn, config, {stopped: true}, 'Stopped.'); return; }
       if (error instanceof TurnStop) { await finish(turn, config, {}, error.message); return; }
-      const message = String(error?.message ?? error).replace(/sk-[A-Za-z0-9_*.-]{4,}/g, '[key]').slice(0, 2048);
+      // Keys and, for a ChatGPT subscription, JWT-shaped tokens never reach a row.
+      const message = String(error?.message ?? error).replace(/sk-[A-Za-z0-9_*.-]{4,}/g, '[key]')
+        .replace(/eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]*/g, '[token]').slice(0, 2048);
       await finish(turn, config, {error: message});
     }
   }

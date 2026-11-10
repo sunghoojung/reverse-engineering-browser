@@ -286,6 +286,27 @@ it.
   automatically.
 - Keep captured evidence and credentials out of commits, logs, and shared
   artifacts.
+- The in-app agent is off by default and is turned on per session by an
+  explicit researcher action, after a disclosure of what leaves the machine.
+  While it is on, the question, researcher-pinned excerpts and the structural
+  results of the read-only tools the model calls (identifiers, counts, URLs
+  and hosts; no source, bytecode, disassembly or request bodies) go to the
+  selected model provider. Every tool call and its full result is shown in the
+  transcript. Provider keys stay in the macOS Keychain and are added by the
+  native app; the web view never holds one.
+- The agent can instead use the researcher's own subscription. A ChatGPT
+  subscription signs in through OpenAI token sharing in the researcher's
+  browser; its tokens and client registration stay in the macOS Keychain and
+  are added by the native app only to the fixed Responses and model-list
+  endpoints. Claude and Grok subscriptions run the researcher's own installed
+  and signed-in CLI, for their own local use. Origin Trace never reads the
+  CLI's credentials. It starts the CLI with only the reb-api tool server and no
+  built-in tools, user settings, hooks, memory or other MCP servers, refuses
+  any other tool the CLI asks to run, and ends the CLI when the agent is
+  switched off. On these paths the same question, pins and structural tool
+  results go to that vendor under the terms of the researcher's plan, and the
+  vendor's CLI may keep its own local record of the session (Grok under
+  `~/.grok/sessions`).
 
 ## Enforcement status
 

@@ -114,7 +114,13 @@ Live Session…** again. The unsaved-work sheet must name the new session, keep
 page, the edit and the start dialog untouched. Once the edit is discarded, the
 start dialog opens at once and the test continues offline.
 
-`test0AgentPanel` opens the Agent dock at both window sizes. It stays off
+`test0AgentPanel` opens the Agent dock at both window sizes. None of the
+researcher's CLIs runs: `REB_AGENT_GROK_CLI` names a missing file, so Grok's
+subscription-only account line says to install it, unclipped, and
+`REB_AGENT_CLAUDE_CLI` names the stand-in CLI that `make app-build` builds
+(`build/check-agent-core`). After the key-mode turns, a Claude subscription
+turn runs through the real bridge, that stand-in and the packaged tool server,
+and the switch ends the CLI. The dock stays off
 until the disclosure names tool results and their URLs and hosts, then a turn
 runs through the bundled LangGraph runtime, the native fixed-endpoint proxy, a
 local stand-in provider (`REB_AGENT_PROVIDER_BASE_URL`, loopback only, no key)

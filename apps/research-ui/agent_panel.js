@@ -1,5 +1,8 @@
-/* In-app agent dock. The native side owns provider calls, the Keychain and the
- * single `reb-api mcp` child; this file owns only the visible conversation.
+/* In-app agent dock. The native side owns provider calls, the Keychain, the
+ * `reb-api mcp` child and the Claude and Grok CLIs; this file owns only the
+ * visible conversation. With a key or a ChatGPT subscription the LangGraph
+ * graph runs here; with a Claude or Grok subscription the CLI's own loop runs
+ * natively and sends the same rows.
  * Captured values and model output are inserted as text, never as markup. Nothing
  * here runs while the dock is closed: no timers, no polling, no listeners on
  * the workspace. */
@@ -222,8 +225,10 @@
     return node;
   };
 
+  const PROVIDERS = [['claude', 'Claude'], ['chatgpt', 'ChatGPT'], ['grok', 'Grok']];
   const view = {
     open: false, native: false, status: null, surfaceError: '', provider: 'claude', models: {}, model: {},
+    auth: {claude: 'key', chatgpt: 'key', grok: 'subscription'}, subs: {}, checking: {}, signingIn: false,
     phase: 'off', running: false, sessionKey: null, consenting: false, effects: false, turning: false, follow: true,
     usage: null, olderBefore: null, olderAvailable: false, pins: [], selectionKey: '', copied: null,
   };
@@ -235,7 +240,9 @@
   const mountedRows = new Map();
   try {
     const remembered = localStorage.getItem('origin-trace.agent.provider');
-    if (remembered === 'chatgpt' || remembered === 'claude') view.provider = remembered;
+    if (PROVIDERS.some(([id]) => id === remembered)) view.provider = remembered;
+    const auth = JSON.parse(localStorage.getItem('origin-trace.agent.auth') ?? '{}');
+    for (const [id] of PROVIDERS) if (auth?.[id] === 'key' || auth?.[id] === 'subscription') view.auth[id] = auth[id];
   } catch { /* Preferences are optional. */ }
 
   dock.replaceChildren();
@@ -287,7 +294,7 @@
   providerGroup.setAttribute('role', 'group');
   providerGroup.setAttribute('aria-label', 'Provider');
   const providerButtons = {};
-  for (const kind of [['claude', 'Claude'], ['chatgpt', 'ChatGPT']]) {
+  for (const kind of PROVIDERS) {
     providerButtons[kind[0]] = button('agent-segment-button', kind[1], () => chooseProvider(kind[0]));
     providerButtons[kind[0]].dataset.provider = kind[0];
     providerGroup.append(providerButtons[kind[0]]);
@@ -295,25 +302,85 @@
   const modelSelect = element('select', 'agent-model');
   modelSelect.id = 'agent-model';
   modelSelect.setAttribute('aria-label', 'Model');
-  modelSelect.addEventListener('change', () => { view.model[view.provider] = modelSelect.value; });
-  const keyButton = button('agent-key', 'Add key', addKey);
-  keyButton.id = 'agent-key';
+  modelSelect.addEventListener('change', () => { view.model[modelKey()] = modelSelect.value; });
   const send = button('agent-send', 'Send', onSend);
   send.id = 'agent-send';
-  controls.append(providerGroup, modelSelect, element('span', 'agent-spacer'), keyButton, send);
+  controls.append(providerGroup, modelSelect, element('span', 'agent-spacer'), send);
+  // How this provider is paid for: the researcher's own key, or their own
+  // subscription, with what that needs next.
+  const account = element('div', 'agent-account');
+  account.id = 'agent-account';
+  const authGroup = element('div', 'agent-segment');
+  authGroup.setAttribute('role', 'group');
+  authGroup.setAttribute('aria-label', 'Pay with');
+  const authButtons = {
+    key: button('agent-segment-button', 'API key', () => chooseAuth('key')),
+    subscription: button('agent-segment-button', 'Subscription', () => chooseAuth('subscription')),
+  };
+  for (const [mode, node] of Object.entries(authButtons)) { node.dataset.auth = mode; authGroup.append(node); }
+  const accountText = element('span', 'agent-account-text');
+  accountText.id = 'agent-account-text';
+  const keyButton = button('agent-key', 'Add key', addKey);
+  keyButton.id = 'agent-key';
+  const accountAction = button('agent-key', '', () => accountActions[accountAction.dataset.action]?.());
+  accountAction.id = 'agent-account-action';
+  account.append(authGroup, accountText, keyButton, accountAction);
   const hint = element('p', 'agent-hint');
   hint.id = 'agent-hint';
-  composer.append(chips, input, controls, hint);
+  composer.append(chips, input, controls, account, hint);
   dock.append(head, body, composer);
 
   function bridgeFailure(error) {
     return String(error?.message ?? error ?? 'The agent could not complete that.').replace(/^Error:\s*/, '');
   }
 
+  const providerInfo = (id = view.provider) => view.status?.providers?.find(item => item.id === id);
+  // A provider without a key path (Grok) is always on its subscription.
+  const authFor = (id = view.provider) => providerInfo(id)?.supportsKey === false ? 'subscription' : view.auth[id] ?? 'key';
+  const loopFor = (id = view.provider, auth = authFor(id)) => auth === 'subscription' && id !== 'chatgpt' ? 'cli' : 'langgraph';
+  const modelKey = (id = view.provider) => `${id}:${authFor(id)}`;
+  const CLI_NAMES = {claude: 'Claude CLI', grok: 'Grok CLI'};
+  const CLI_LOGIN = {claude: 'Run claude auth login in Terminal, then check again.', grok: 'Run grok login in Terminal, then check again.'};
+  const subscriptionOf = id => view.subs[id] ?? providerInfo(id)?.subscription ?? {};
+  // A loopback stand-in replaces only the graph's provider endpoint. A CLI
+  // still talks to its own vendor, so its disclosure never says "stand-in".
+  const standInApplies = (id = view.provider) => Boolean(view.status?.standIn) && loopFor(id) === 'langgraph';
+
+  // What the selected provider and payment need before the agent can turn on.
+  function credential(id = view.provider) {
+    const provider = providerInfo(id);
+    if (!provider) return {ready: false, text: ''};
+    if (authFor(id) === 'key') {
+      return provider.hasKey ? {ready: true, text: standInApplies(id) ? 'Local stand-in provider' : 'Key in your Keychain'}
+        : {ready: false, text: `No ${provider.label} key yet`, action: 'addKey'};
+    }
+    const sub = subscriptionOf(id);
+    if (id === 'chatgpt') {
+      if (view.signingIn || sub.waiting) return {ready: false, text: 'Finish signing in to ChatGPT in your browser.', action: 'cancelSignIn'};
+      if (sub.signedIn) return {ready: true, text: sub.standIn ? 'Stand-in ChatGPT sign-in' : 'ChatGPT, token sharing allowed'};
+      return {ready: false, text: sub.reason ?? 'Sign in with ChatGPT to use your plan.', action: 'signIn'};
+    }
+    if (view.checking[id]) return {ready: false, text: `Checking the ${CLI_NAMES[id]}…`};
+    if (sub.available === false) return {ready: false, text: sub.reason ?? `The ${CLI_NAMES[id]} is not installed.`, action: 'check'};
+    if (sub.signedIn === true) {
+      const plan = sub.plan ? `${String(sub.plan).replace(/^./, letter => letter.toUpperCase())} plan` : 'Signed in';
+      return {ready: true, text: `${plan}, through your ${CLI_NAMES[id]}`};
+    }
+    if (sub.signedIn === false) return {ready: false, text: sub.reason ? `${sub.reason} ${CLI_LOGIN[id]}` : CLI_LOGIN[id], action: 'check'};
+    return {ready: false, text: `Checks the ${CLI_NAMES[id]} on this Mac.`, action: 'check'};
+  }
+
   function disclosureText() {
-    const provider = view.status?.providers?.find(item => item.id === view.provider);
-    const destination = view.status?.standIn ? 'a local stand-in provider on this machine' : provider?.vendor ?? 'the provider';
-    return `Your question, excerpts you pin and every tool result go to ${destination}. Tool results are structural: they can include URLs, hosts, identifiers and counts. Source, bytecode, disassembly and request bodies stay on this Mac unless you pin them.`;
+    const provider = providerInfo();
+    const vendor = provider?.vendor ?? 'the provider';
+    const structural = 'Tool results are structural: they can include URLs, hosts, identifiers and counts. Source, bytecode, disassembly and request bodies stay on this Mac unless you pin them.';
+    if (standInApplies()) return `Your question, excerpts you pin and every tool result go to a local stand-in provider on this machine. ${structural}`;
+    if (authFor() === 'key') return `Your question, excerpts you pin and every tool result go to ${vendor}. ${structural}`;
+    if (view.provider === 'chatgpt') {
+      return `Your question, excerpts you pin and every tool result go to ${vendor} under your ChatGPT plan, through token sharing. ${structural}`;
+    }
+    const kept = view.provider === 'grok' ? ' Grok keeps its own record of the session in ~/.grok/sessions on this Mac.' : '';
+    return `Your question, excerpts you pin and every tool result go to ${vendor} under your plan, through the ${CLI_NAMES[view.provider]} installed and signed in on this Mac. This is your own local use of your own CLI login, which stays with the CLI. The CLI runs its own agent loop with only the reb-api tools; every action still needs Allow once.${kept} ${structural}`;
   }
 
   function renderHead() {
@@ -322,11 +389,13 @@
     switchInput.setAttribute('aria-checked', String(on));
     switchLabel.querySelector('.agent-switch-text').textContent = view.turning ? 'Starting' : on ? 'On' : 'Off';
     const tools = view.status?.engine?.tools?.length ?? 0;
-    const provider = view.status?.providers?.find(item => item.id === view.provider);
+    const provider = providerInfo();
+    const engine = view.status?.engine;
     const parts = [];
     if (on && view.phase !== 'stopped') parts.push(`${provider?.label ?? ''} · ${tools} tools`);
+    const working = engine?.loop === 'cli' ? engine?.cliRunning : engine?.childRunning;
     if (view.phase === 'stopped') parts.push('Disconnected');
-    else if (on && !view.status?.engine?.childRunning && !view.running && view.phase === 'ready') parts.push('Idle');
+    else if (on && !working && !view.running && view.phase === 'ready') parts.push('Idle');
     if (view.running) parts.push('Working');
     headStats.textContent = parts.join(' · ');
   }
@@ -338,14 +407,21 @@
       line.append(element('span', 'agent-popover-key', key), element('span', 'agent-popover-value', value));
       return line;
     };
-    const provider = view.status?.providers?.find(item => item.id === view.provider);
+    const provider = providerInfo();
+    const auth = authFor();
     infoBody.append(element('p', 'agent-popover-note', disclosureText()));
-    infoBody.append(row('Provider', view.status?.standIn ? `${provider?.label ?? ''}, local stand-in` : provider?.vendor ?? 'Unknown'));
-    infoBody.append(row('Key', provider?.hasKey ? 'Stored in Keychain' : 'Not set'));
+    infoBody.append(row('Provider', standInApplies() ? `${provider?.label ?? ''}, local stand-in` : provider?.vendor ?? 'Unknown'));
+    if (auth === 'key') infoBody.append(row('Key', provider?.hasKey ? 'Stored in Keychain' : 'Not set'));
+    else if (view.provider === 'chatgpt') infoBody.append(row('Account', subscriptionOf('chatgpt').signedIn ? 'ChatGPT token in Keychain' : 'Not signed in'));
+    else infoBody.append(row('Account', `Your ${CLI_NAMES[view.provider]} login, kept by the CLI`));
+    infoBody.append(row('Loop', loopFor() === 'cli' ? `The ${CLI_NAMES[view.provider]}'s own loop` : 'LangGraph in this window'));
     infoBody.append(row('Tools', view.status?.engine?.effects ? 'Read and actions (ask each time)' : 'Read only'));
     infoBody.append(row('Transcript', 'Local, user-only, not part of the evidence'));
-    if (provider?.hasKey && !view.status?.standIn) {
+    if (auth === 'key' && provider?.hasKey && !standInApplies()) {
       infoBody.append(button('agent-text-button', `Remove ${provider.label} key`, removeKey));
+    }
+    if (auth === 'subscription' && view.provider === 'chatgpt' && subscriptionOf('chatgpt').signedIn && !subscriptionOf('chatgpt').standIn) {
+      infoBody.append(button('agent-text-button', 'Sign out of ChatGPT', signOut));
     }
   }
 
@@ -399,26 +475,46 @@
     return {title: 'Before you turn this on', node};
   }
 
+  function renderAccount(on) {
+    const provider = providerInfo();
+    const auth = authFor();
+    account.hidden = !provider;
+    if (!provider) return;
+    authButtons.key.hidden = provider.supportsKey === false;
+    for (const [mode, node] of Object.entries(authButtons)) {
+      node.setAttribute('aria-pressed', String(mode === auth));
+      node.disabled = on;
+    }
+    const state = credential();
+    accountText.textContent = state.text;
+    accountText.title = state.text;
+    accountText.classList.toggle('agent-account-ready', Boolean(state.ready));
+    keyButton.hidden = on || state.action !== 'addKey';
+    keyButton.textContent = `Add ${provider.label} key`;
+    const labels = {signIn: 'Sign in', cancelSignIn: 'Cancel', check: 'Check again'};
+    accountAction.hidden = on || !labels[state.action];
+    accountAction.dataset.action = state.action ?? '';
+    accountAction.textContent = labels[state.action] ?? '';
+  }
+
   function renderComposer() {
     const on = view.phase !== 'off';
-    const provider = view.status?.providers?.find(item => item.id === view.provider);
-    const needsKey = view.native && view.status?.available && provider && !provider.hasKey;
+    const provider = providerInfo();
     composer.hidden = !view.native || view.status?.available === false || view.consenting;
     for (const [id, node] of Object.entries(providerButtons)) {
       node.setAttribute('aria-pressed', String(id === view.provider));
       node.disabled = on;
     }
-    const list = view.models[view.provider] ?? [provider?.defaultModel ?? ''];
-    const selected = view.model[view.provider] ?? provider?.defaultModel ?? list[0] ?? '';
+    renderAccount(on);
+    const fallback = authFor() === 'subscription' ? provider?.subscriptionModel ?? provider?.defaultModel : provider?.defaultModel;
+    const list = view.models[modelKey()] ?? [fallback ?? ''];
+    const selected = view.model[modelKey()] ?? fallback ?? list[0] ?? '';
     if (modelSelect.dataset.options !== list.join('|')) {
       modelSelect.replaceChildren(...list.filter(Boolean).map(id => { const option = element('option', '', id); option.value = id; return option; }));
       modelSelect.dataset.options = list.join('|');
     }
     modelSelect.value = selected;
     modelSelect.disabled = on;
-    keyButton.hidden = !needsKey;
-    keyButton.textContent = `Add ${provider?.label ?? ''} key`;
-    send.hidden = Boolean(needsKey);
     send.textContent = view.running ? 'Stop' : 'Send';
     send.classList.toggle('agent-send-stop', view.running);
     send.disabled = !on || (!view.running && !input.value.trim());
@@ -426,9 +522,10 @@
     input.disabled = !on;
     input.placeholder = on ? 'Ask about this session' : 'Turn the agent on to ask';
     const pinNote = view.pins.length ? `${view.pins.length} pin${view.pins.length === 1 ? '' : 's'} attached. ` : '';
-    hint.textContent = view.status?.standIn
+    const via = loopFor() === 'cli' ? ` through the ${CLI_NAMES[view.provider]}` : '';
+    hint.textContent = standInApplies()
       ? `${pinNote}Local stand-in provider. Nothing leaves this Mac.`
-      : `↵ send · ⇧↵ new line · ${pinNote}question, pins and tool results go to ${provider?.vendor ?? 'the provider'}`;
+      : `↵ send · ⇧↵ new line · ${pinNote}question, pins and tool results go to ${provider?.vendor ?? 'the provider'}${via}`;
     renderChips();
   }
 
@@ -906,7 +1003,10 @@
       view.status = await call('status');
       syncEngine(view.status.engine);
       view.surfaceError = '';
-      if (view.status.available && view.status.providers?.find(item => item.id === view.provider)?.hasKey) refreshModels();
+      if (view.status.available) {
+        if (authFor() === 'subscription' && loopFor() === 'cli' && subscriptionOf(view.provider).signedIn === undefined) checkSubscription();
+        if (credential().ready) refreshModels();
+      }
     } catch (error) {
       view.status = {available: false, reason: 'offline-workspace'};
       view.surfaceError = bridgeFailure(error);
@@ -915,14 +1015,30 @@
   }
 
   async function refreshModels() {
-    const provider = view.provider;
-    if (view.models[provider]) return;
+    const provider = view.provider, auth = authFor(provider), key = modelKey(provider);
+    if (view.models[key]) return;
     try {
-      const result = await call('models', {provider});
-      view.models[provider] = result.models;
-      if (!view.model[provider]) view.model[provider] = result.models.includes(result.defaultModel) ? result.defaultModel : result.models[0];
+      const result = await call('models', {provider, auth});
+      view.models[key] = result.models;
+      if (!view.model[key]) view.model[key] = result.models.includes(result.defaultModel) ? result.defaultModel : result.models[0];
       scheduleRender();
     } catch { /* The default model remains selectable. */ }
+  }
+
+  // A CLI is asked whether it is signed in only when its subscription is chosen.
+  async function checkSubscription(id = view.provider) {
+    if (view.checking[id]) return;
+    view.checking[id] = true;
+    scheduleRender();
+    try {
+      view.subs[id] = await call('subscriptionStatus', {provider: id});
+    } catch (error) {
+      view.subs[id] = {signedIn: false, reason: bridgeFailure(error)};
+    } finally {
+      view.checking[id] = false;
+    }
+    if (id === view.provider && credential(id).ready) refreshModels();
+    scheduleRender();
   }
 
   // The running state belongs to the graph in this page, not to native status.
@@ -930,6 +1046,7 @@
     if (!engine) return;
     view.phase = engine.phase;
     if (engine.phase !== 'off' && engine.provider) view.provider = engine.provider;
+    if (engine.phase !== 'off' && engine.provider && engine.auth) view.auth[engine.provider] = engine.auth;
   }
 
   // The LangGraph bundle loads the first time the agent is turned on in this
@@ -967,12 +1084,84 @@
     handleEvent(event);
   }
 
+  // The CLI loops run natively; this keeps the panel's runtime interface.
+  // Rows arrive through __rebAgentEvent marked `cli`.
+  function createCliRuntime() {
+    const waiting = new Set();
+    let running = false;
+    return {
+      get running() { return running; },
+      send({turnId, text, context, pins}) {
+        running = true;
+        return call('cliSend', {turnId, text, context, pins}).catch(error => {
+          receiveCli({type: 'error', turnId, message: bridgeFailure(error), cli: true});
+          receiveCli({type: 'turnEnd', turnId, stopped: false, cli: true});
+        });
+      },
+      observe(event) {
+        if (event.type === 'approval') waiting.add(event.callId);
+        if (event.type === 'turnEnd') { waiting.clear(); running = false; }
+      },
+      decide(callId, allow) {
+        if (!waiting.delete(callId)) return false;
+        call('cliDecide', {callId, allow}).catch(() => {});
+        return true;
+      },
+      cancel() { call('cliCancel').catch(() => {}); },
+      dispose() { waiting.clear(); running = false; },
+    };
+  }
+
+  function receiveCli(event) {
+    runtime?.observe?.(event);
+    handleRuntimeEvent(event);
+  }
+
   function chooseProvider(id) {
     if (view.phase !== 'off') return;
     view.provider = id;
     try { localStorage.setItem('origin-trace.agent.provider', id); } catch { /* Optional. */ }
-    refreshModels();
+    if (authFor(id) === 'subscription' && loopFor(id) === 'cli' && subscriptionOf(id).signedIn === undefined) checkSubscription(id);
+    if (credential(id).ready) refreshModels();
     render();
+  }
+
+  function chooseAuth(mode) {
+    if (view.phase !== 'off' || providerInfo()?.supportsKey === false) return;
+    view.auth[view.provider] = mode;
+    try { localStorage.setItem('origin-trace.agent.auth', JSON.stringify(view.auth)); } catch { /* Optional. */ }
+    if (mode === 'subscription' && loopFor() === 'cli' && subscriptionOf(view.provider).signedIn === undefined) checkSubscription();
+    if (credential().ready) refreshModels();
+    render();
+  }
+
+  const accountActions = {
+    signIn: async () => {
+      view.signingIn = true;
+      render();
+      try {
+        view.subs.chatgpt = await call('subscriptionSignIn', {provider: 'chatgpt'});
+        await refreshStatus();
+        delete view.subs.chatgpt;
+        refreshModels();
+      } catch (error) {
+        appendNotice(bridgeFailure(error), 'error');
+      } finally {
+        view.signingIn = false;
+        render();
+      }
+    },
+    cancelSignIn: () => { call('subscriptionCancel', {provider: 'chatgpt'}).catch(() => {}); },
+    check: () => checkSubscription(),
+  };
+
+  async function signOut() {
+    try {
+      const result = await call('subscriptionSignOut', {provider: 'chatgpt'});
+      if (result?.notice) appendNotice(result.notice);
+      delete view.subs.chatgpt;
+      await refreshStatus();
+    } catch (error) { appendNotice(bridgeFailure(error), 'error'); }
   }
 
   async function addKey() {
@@ -994,9 +1183,9 @@
     if (switchInput.checked) {
       switchInput.checked = false;
       if (view.phase !== 'off' || view.turning) return;
-      const provider = view.status?.providers?.find(item => item.id === view.provider);
       if (!view.status?.available) return;
-      if (!provider?.hasKey) { appendNotice(`Add a ${provider?.label ?? ''} key first.`, 'error'); return; }
+      const state = credential();
+      if (!state.ready) { appendNotice(state.text || 'This provider is not ready yet.', 'error'); return; }
       view.consenting = true;
       render();
       document.getElementById('agent-consent-accept')?.focus();
@@ -1012,14 +1201,19 @@
     try {
       const key = await sessionKey();
       view.sessionKey = key;
-      const result = await call('enable', {provider: view.provider, model: view.model[view.provider] ?? '', effects: view.effects, sessionKey: key});
-      let api;
-      try { api = await loadRuntime(view.provider); }
-      catch (error) { view.status = await call('disable'); syncEngine(view.status.engine); throw error; }
-      runtime = api.createAgentRuntime({
-        bridge: {call, onFetchEvent: listener => { fetchListener = listener; }},
-        provider: view.provider, model: result.engine?.model ?? view.model[view.provider], tools: result.tools ?? [], emit: handleRuntimeEvent,
-      });
+      const auth = authFor();
+      const result = await call('enable', {provider: view.provider, auth, model: view.model[modelKey()] ?? '', effects: view.effects, sessionKey: key});
+      if ((result.engine?.loop ?? loopFor()) === 'cli') {
+        runtime = createCliRuntime();
+      } else {
+        let api;
+        try { api = await loadRuntime(view.provider); }
+        catch (error) { view.status = await call('disable'); syncEngine(view.status.engine); throw error; }
+        runtime = api.createAgentRuntime({
+          bridge: {call, onFetchEvent: listener => { fetchListener = listener; }},
+          provider: view.provider, model: result.engine?.model ?? view.model[modelKey()], tools: result.tools ?? [], emit: handleRuntimeEvent,
+        });
+      }
       view.status = result;
       syncEngine(result.engine);
       const page = await call('transcript', {});
@@ -1128,7 +1322,7 @@
       scheduleTranscript();
     }
   }
-  globalThis.__rebAgentEvent = handleEvent;
+  globalThis.__rebAgentEvent = event => (event?.cli ? receiveCli(event) : handleEvent(event));
 
   // WebKit keeps a nested grid's auto rows from the old width when only an
   // ancestor track changes, so a Sources toolbar that wraps after the dock (or

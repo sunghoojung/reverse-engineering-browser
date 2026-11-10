@@ -218,6 +218,12 @@ fetch("/getcaptcha");
       REB_JS_INVOCATION_SITE_STORE: stores.invocationSites,
       REB_AGENT_PROVIDER_BASE_URL: agentProviderURL,
       REB_AGENT_TRANSCRIPT_DIR: join(temporary, 'agent-transcripts'),
+      // None of the researcher's CLIs runs. Claude is the stand-in CLI that
+      // make app-build builds (tools/agent-cli-stand-in.swift); no Grok CLI is
+      // found, so its account line reads the same on every machine.
+      REB_AGENT_CLAUDE_CLI: join(root, 'build/check-agent-core'),
+      REB_AGENT_GROK_CLI: join(temporary, 'no-grok-cli'),
+      REB_AGENT_CLI_DIR: join(temporary, 'agent-cli'),
       REB_RENDERED_UI_BACKEND_PID: String(backend.pid),
       REB_RENDERED_UI_FAILURE_URL: failureURL,
       REB_RENDERED_UI_FAILURE_BINARY: failureBinary,

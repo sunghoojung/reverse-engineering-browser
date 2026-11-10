@@ -2806,9 +2806,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // afresh on Retry, and leave the offline workspace on Continue Offline.
   @MainActor
   func test27StartPanelStartRetryAndKeyboard() async throws {
-    let ui = try Harness()
-    try await ui.waitForInitialLoad()
+    let ui = try await prepare(windowSizes[0])
     let harnessURL = try XCTUnwrap(ui.webView.url)
+    // No saved sites, so the panel's controls are the same whatever ran before.
+    try await clearSavedSites(ui)
     let focus = { try await ui.json("__rebUiProbe.focusState()") }
     // Normal turns Metadata and the Keychain on; narrow, opened with that
     // choice remembered for the run, turns both back.

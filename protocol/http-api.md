@@ -136,11 +136,44 @@ It execs this command and does not add a server. Cursor, Codex, Claude Code,
 Grok Bot, and T3 Code settings are in the
 [local coding-agent guide](../docs/development/local-coding-agents.md).
 
-The default tool list is the read-only projection used by `list --json`.
+The default tool list is the read-only projection used by `list --json`,
+without the content reads below.
 `--omit-content` applies the structural summary's omissions to every response,
 whatever its size: rows and identifiers stay, while source, bytecode, disassembly,
-bodies and long strings do not. Origin Trace's in-app agent always starts the
-server this way, because its tool results go to a model provider.
+bodies and long strings do not. Origin Trace's in-app agent starts the server
+this way below Full access, because its tool results go to a model provider.
+
+### Permission levels and content reads
+
+`--permission read-only|ask|auto|full` is one ordered level in place of the
+individual flags. `x-reb-mcp.permission.levels` names the flags each level
+stands for, and the server applies exactly those:
+
+| Level | Stands for | Lists |
+| --- | --- | --- |
+| `read-only` | `--omit-content` | The read-only projection, content omitted |
+| `ask` | `--allow-effects --omit-content` | Also every effectful operation |
+| `auto` | `--allow-effects --omit-content` | The same as `ask`; whether a person approves each call is the client's setting |
+| `full` | `--allow-effects --allow-session-start --allow-content` | Also `start_live_session`, `session_action` and the content reads, with content in results |
+
+`--permission` cannot be combined with the individual flags, and those flags
+keep their meaning without it. `get_session_context` reports the connection's
+`mcp_admission` (`permission`, `effects`, `session_start`, `content_reads`,
+`content_omitted`, `sensitive_capture`), and the initialize instructions end
+with one sentence for the level. Under `--permission full`,
+`start_live_session` refuses `canvas_images`, `request_content`,
+`response_media`, `js_invocation_digests` and `confirm_sensitive_capture`
+before anything launches, unless `--allow-sensitive-capture` is also set. The
+legacy `--allow-session-start` keeps accepting them with
+`confirm_sensitive_capture`. None of these flags is authorization.
+
+`x-reb-mcp.content_reads` names the operations whose purpose is captured
+content, `get_artifact_text` and `search_artifact_text`. They are listed only
+with `--allow-content` (which `full` sets, and which conflicts with
+`--omit-content`), and a call without it is refused before any request. With
+it, `get_source_format` also lays out request and response bodies. Content is
+still read in pages, because a document above the inline limit still returns a
+structural summary: see [artifact text pages](#artifact-text-pages-and-search).
 
 `--allow-effects` also lists the other operations. The flag does not authorize
 a target, redact a response, or permit sending captured data to a model
@@ -427,7 +460,8 @@ returns 409 `dependency_unavailable` for these actions.
 `LiveSessionStart` options: `url`, `wasm_dispatch`, `wasm_call_indirect`,
 `guest_adapter`, `js_dispatch_sites`, `quiet`, `category_mask`,
 `duration_seconds`, `localhost_only`, `canvas_images`, `request_content`,
-`request_content_budget_mib`, `request_stacks`, `document_start`,
+`request_content_budget_mib`, `response_body_budget_mib`, `response_media`,
+`request_stacks`, `document_start`,
 `js_invocation_sites`, `js_invocation_saved_sites`,
 `js_invocation_digests`, `confirm_sensitive_capture`,
 `publish_canonical_endpoint`, `brave_binary`, `timeout_seconds`,
@@ -439,13 +473,16 @@ capture switch is off unless named; an inherited capture switch, site file,
 browser profile or embedded-session variable is ignored, so an inherited
 `REB_CAPTURE_REQUEST_CONTENT`, `REB_CONSOLE_DOCUMENT_START`,
 `REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS` or
-`REB_NATIVE_REQUEST_STACKS` never reaches an agent session, and neither does
-`REB_REQUEST_CONTENT_BUDGET_MIB`.
+`REB_NATIVE_REQUEST_STACKS` never reaches an agent session, and neither do
+`REB_REQUEST_CONTENT_BUDGET_MIB`, `REB_RESPONSE_BODY_BUDGET_MIB` or
+`REB_CAPTURE_RESPONSE_MEDIA`.
 
 | Option | Launcher switch | Rule |
 | --- | --- | --- |
 | `request_content` | `REB_CAPTURE_REQUEST_CONTENT=1` | Sensitive: needs `confirm_sensitive_capture` and category bits 256 and 1024. Without it, request body length, type and digest are still recorded, but no path, query or body bytes. |
 | `request_content_budget_mib` | `REB_REQUEST_CONTENT_BUDGET_MIB` | 1..4096 MiB of unique request bodies and full targets, default 256. Needs `request_content`, so it is behind the same confirmation. |
+| `response_body_budget_mib` | `REB_RESPONSE_BODY_BUDGET_MIB` | 1..16384 MiB of unique response bodies, default 512. Needs `request_content`. |
+| `response_media` | `REB_CAPTURE_RESPONSE_MEDIA=1` | Also keeps the images, audio, video and fonts that page elements load. Needs `request_content`, so it is behind the same confirmation; under `--permission full` it also needs `--allow-sensitive-capture`. |
 | `request_stacks` | `REB_NATIVE_REQUEST_STACKS=1` | The stack that started each renderer request, read with `get_request_stack`. Needs category bits 256 and 1024. Strict: `REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED` is removed, so a Brave without `--reb-request-stacks` refuses the start. |
 | `document_start` | `REB_CONSOLE_DOCUMENT_START=1` | Permits document-start Console scripts in this capture browser. Arms nothing: a rule still needs a live Console connection and a confirmed `arm_document_start`. |
 | `js_invocation_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Absolute path of a `native-js-invocation-sites-v1` file. Checked, then armed from a private copy under the agent session directory. Needs category bit 512. |
@@ -1089,6 +1126,43 @@ response's `snapshot` to page within one list. A store scan that exceeds its
 counts cover only what was read; a malformed record is counted and skipped. The
 `filter` is a case-insensitive substring over the names on the rows and never
 reads captured source bodies.
+
+## Artifact text pages and search
+
+`GET /api/artifacts/{artifact_id}/text` (`get_artifact_text`) returns one
+verified page of any retained artifact as `reb-artifact-text-v1`: `text` in
+`encoding` `utf-8` (default), `hex` or `base64`, from `offset` (default 0) for
+up to `length` source bytes. A page covers at most 65,536 bytes for UTF-8,
+32,768 for hex and 49,152 for base64, and stops earlier so `text` costs at
+most 98,304 JSON bytes once escapes are counted, so the whole document always
+fits the 128 KiB MCP inline limit. `next_offset` continues and is null at the
+end; `complete` says one page held the artifact. A UTF-8 page that starts
+inside a character begins at the next one (`offset` is where it began), a
+character cut by `length` is finished from the next bytes, and invalid bytes
+become U+FFFD, counted in `replacements`. Each page re-verifies the artifact's
+SHA-256, as `get_artifact_content` does.
+
+`GET /api/artifacts/search` (`search_artifact_text`) finds a literal `q` of 1
+to 256 bytes on one line, as Sources Search does. There is no pattern
+language. `match_case` (default false) folds ASCII letters only. `kind`,
+`artifact_id`, `session_id`, `navigation_id`, `frame_id`,
+`execution_context_id`, `sha256` and `host` select artifacts as
+[`get_artifacts` filters](#filtered-and-paged-reads) do, oldest first. Each
+match names its artifact, `byte_offset`, 1-based `line` and `column` (in
+characters), and up to 48 bytes of the same line in `before` and `after`. At
+most 100 matches come from one file, a file over 16 MiB is skipped, one call
+reads at most 64 MiB and stops after 10 seconds. `coverage` names every file
+not fully searched, with its reason, and `complete` says whether the whole
+scope was searched; `offset` skips matches and `next_offset` continues.
+
+`inspect_wasm` takes `row_offset` and `row_limit` (1 to 2048). With either,
+`rows` holds only that window, which also stops at 98,304 bytes of serialized
+rows, and `row_window` gives `offset`, `rows`, `total_rows` and
+`next_offset`. Without them the document is unchanged.
+
+Both text operations return captured content and change nothing. MCP lists
+them only with `--allow-content`, as described in
+[permission levels and content reads](#permission-levels-and-content-reads).
 
 ## Artifact map
 

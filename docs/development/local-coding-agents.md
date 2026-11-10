@@ -9,7 +9,9 @@ or configure permissions.
 `reb-api mcp` is the only MCP surface. It is a stdio projection of the embedded
 OpenAPI document, described by `x-reb-mcp`. Tool names are operation IDs. The
 default list is the read-only projection. `--allow-effects` lists the other
-operations; it is not authorization or capture redaction. The server calls only
+operations; it is not authorization or capture redaction. `--permission
+read-only|ask|auto|full` sets the same four levels the in-app agent uses
+([permission levels](#permission-levels)). The server calls only
 the selected loopback root. It does not inline binary artifact bodies. An
 unknown tool, or one hidden without `--allow-effects`, is rejected before any
 HTTP call. JSON larger than the inline limit returns a structural summary and
@@ -176,6 +178,42 @@ authorization: start sessions and open URLs only for the authorized target.
 See [SAFETY.md](../../SAFETY.md) and
 [live session control](../../protocol/http-api.md#live-session-control).
 
+### Permission levels
+
+`--permission` is one ordered setting in place of the flags above, with the
+same names and meaning as the in-app agent's consent screen. The wrapper
+passes it through and puts it in printed configurations:
+
+```sh
+scripts/reb-api-mcp.sh --permission read-only
+scripts/reb-api-mcp.sh --permission ask
+scripts/reb-api-mcp.sh --permission full
+scripts/reb-api-mcp.sh --permission full --allow-sensitive-capture
+scripts/reb-api-mcp.sh --print-config claude --permission auto
+```
+
+| Level | Server lists | Client setting that makes it this level |
+| --- | --- | --- |
+| `read-only` | Structural reads; every result has captured content omitted | Any |
+| `ask` | Also every effectful operation, content still omitted | Keep the client asking before each `origin-trace` tool call, as Claude Code does by default for MCP tools |
+| `auto` | The same tools as `ask` | Let the client run `origin-trace` tools without asking: in Claude Code an allow rule for `mcp__origin-trace`; in other clients their own approval setting for this server |
+| `full` | Also `start_live_session`, `session_action`, `get_artifact_text` and `search_artifact_text`, with content in results | As for `auto`, if the agent should act without asking |
+
+The server cannot see whether the client asks, so `ask` and `auto` list the
+same tools; `get_session_context` reports the level in `mcp_admission` so the
+model can say which applies. `full` sends captured source, bytecode,
+disassembly and request and response bodies to the model provider whenever
+the agent reads them. Its own live sessions cannot name `request_content`,
+`response_media`, `canvas_images` or `js_invocation_digests` unless
+`--allow-sensitive-capture` is also passed, which is the same choice as the
+dock's **Also allow sensitive capture options**. `full` starts without a live
+endpoint, like `--allow-session-start`. A connection that ends a session it
+started returns to the endpoint it was opened on. `--permission` refuses the
+individual flags beside it; without it, those flags keep their old meaning,
+including sensitive capture through `--allow-session-start`. None of this is
+authorization: agree on the target, the provider and the data categories
+first.
+
 Agents with a shell can do the same without MCP. This prints the session
 directory to pass to `--session-dir` or `reb-api call`:
 
@@ -241,6 +279,9 @@ claude mcp add --transport stdio origin-trace -- \
   --require-live \
   --allow-effects
 ```
+
+For one of the four levels, pass `--permission ask` (or another level) in
+place of `--allow-effects`.
 
 ### Grok Bot
 

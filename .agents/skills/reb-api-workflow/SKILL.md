@@ -31,11 +31,13 @@ Tool names are OpenAPI operation IDs. The same names work with
 | Which events match a type, frame, request or time range? | `get_events` with filters and a small `limit` |
 | Which requests did the session make? | `get_requests` with `q` (Traffic tokens such as `domain:`, `status-code:`, `larger-than:`), `type`, `tab_id`, `domain`, `failed`, `third_party` or `from_ns`/`to_ns`; rows carry sizes, MIME type and initiator class; a row's `members` and `first_offset` read its records with `get_events` |
 | Which scripts and Wasm modules were stored, with digests? | `get_artifacts` with `kind`, `frame_id`, `host`, `sha256` |
-| What does a stored Wasm module contain? | `inspect_wasm` with `artifact_id` and `sections` |
+| What does a stored Wasm module contain? | `inspect_wasm` with `artifact_id` and `sections`; page rows with `row_offset` and `row_limit` |
+| Read a script, body or module as text, in pages | `get_artifact_text` with `offset` and `encoding` (needs `--permission full` or `--allow-content`: it returns captured content) |
+| Find a literal in every retained file | `search_artifact_text` with `q` (needs `--permission full` or `--allow-content`) |
 | Wait until the browser produces something | `wait_for_events` |
 | How did a native request come about? | `get_origin_trace`, `get_request_signal_profile`, `get_request_stack` (the JavaScript and Wasm stack and async tasks that started it; `navigation_sequence` for a script navigation) |
 | VM analysis of retained samples | `get_vm_analysis`, `get_vm_opcode_workspace`, `get_vm_host_links` (need `--allow-effects`: they write a derived cache) |
-| Start a session with named capture options | `start_live_session` (needs `--allow-effects --allow-session-start`) or `reb-api session start` |
+| Start a session with named capture options | `start_live_session` (needs `--permission full`, or `--allow-effects --allow-session-start`) or `reb-api session start` |
 | Open a page in a session you started, or end it | `session_action` with `open_url` or `end` (listed with `--allow-session-start`; check `capture_observed`) |
 | Click, type, press keys or scroll in that page | `session_action` with `list_inputs`, then `click`, `type`, `press` or `scroll` (needs macOS Accessibility for the app that started the session) |
 | Which documents and frames are open? | `get_native_console` (needs `--allow-effects`) |
@@ -48,7 +50,11 @@ or `query.next_after` (newer). JSON over 128 KiB comes back as a structural
 summary, so filter and keep `limit` small instead of reading the whole tail.
 The default tool list is read-only. `--allow-effects` lists the other
 operations and is not authorization, redaction, or permission to send captured
-data to a provider. Binary bodies are not inlined.
+data to a provider. `--permission read-only|ask|auto|full` sets the in-app
+agent's four levels instead; `get_session_context` reports the level in
+`mcp_admission`. Binary bodies are not inlined. The
+[feature coverage table](../../../docs/development/agent-feature-coverage.md)
+maps every Origin Trace feature to its tools.
 
 ## Establish scope before evidence access
 

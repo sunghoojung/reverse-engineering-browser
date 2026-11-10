@@ -342,13 +342,16 @@
   const CLI_NAMES = {claude: 'Claude CLI', grok: 'Grok CLI'};
   const CLI_LOGIN = {claude: 'Run claude auth login in Terminal, then check again.', grok: 'Run grok login in Terminal, then check again.'};
   const subscriptionOf = id => view.subs[id] ?? providerInfo(id)?.subscription ?? {};
+  // A loopback stand-in replaces only the graph's provider endpoint. A CLI
+  // still talks to its own vendor, so its disclosure never says "stand-in".
+  const standInApplies = (id = view.provider) => Boolean(view.status?.standIn) && loopFor(id) === 'langgraph';
 
   // What the selected provider and payment need before the agent can turn on.
   function credential(id = view.provider) {
     const provider = providerInfo(id);
     if (!provider) return {ready: false, text: ''};
     if (authFor(id) === 'key') {
-      return provider.hasKey ? {ready: true, text: view.status?.standIn ? 'Local stand-in provider' : 'Key in your Keychain'}
+      return provider.hasKey ? {ready: true, text: standInApplies(id) ? 'Local stand-in provider' : 'Key in your Keychain'}
         : {ready: false, text: `No ${provider.label} key yet`, action: 'addKey'};
     }
     const sub = subscriptionOf(id);
@@ -371,7 +374,7 @@
     const provider = providerInfo();
     const vendor = provider?.vendor ?? 'the provider';
     const structural = 'Tool results are structural: they can include URLs, hosts, identifiers and counts. Source, bytecode, disassembly and request bodies stay on this Mac unless you pin them.';
-    if (view.status?.standIn) return `Your question, excerpts you pin and every tool result go to a local stand-in provider on this machine. ${structural}`;
+    if (standInApplies()) return `Your question, excerpts you pin and every tool result go to a local stand-in provider on this machine. ${structural}`;
     if (authFor() === 'key') return `Your question, excerpts you pin and every tool result go to ${vendor}. ${structural}`;
     if (view.provider === 'chatgpt') {
       return `Your question, excerpts you pin and every tool result go to ${vendor} under your ChatGPT plan, through token sharing. ${structural}`;
@@ -407,14 +410,14 @@
     const provider = providerInfo();
     const auth = authFor();
     infoBody.append(element('p', 'agent-popover-note', disclosureText()));
-    infoBody.append(row('Provider', view.status?.standIn ? `${provider?.label ?? ''}, local stand-in` : provider?.vendor ?? 'Unknown'));
+    infoBody.append(row('Provider', standInApplies() ? `${provider?.label ?? ''}, local stand-in` : provider?.vendor ?? 'Unknown'));
     if (auth === 'key') infoBody.append(row('Key', provider?.hasKey ? 'Stored in Keychain' : 'Not set'));
     else if (view.provider === 'chatgpt') infoBody.append(row('Account', subscriptionOf('chatgpt').signedIn ? 'ChatGPT token in Keychain' : 'Not signed in'));
     else infoBody.append(row('Account', `Your ${CLI_NAMES[view.provider]} login, kept by the CLI`));
     infoBody.append(row('Loop', loopFor() === 'cli' ? `The ${CLI_NAMES[view.provider]}'s own loop` : 'LangGraph in this window'));
     infoBody.append(row('Tools', view.status?.engine?.effects ? 'Read and actions (ask each time)' : 'Read only'));
     infoBody.append(row('Transcript', 'Local, user-only, not part of the evidence'));
-    if (auth === 'key' && provider?.hasKey && !view.status?.standIn) {
+    if (auth === 'key' && provider?.hasKey && !standInApplies()) {
       infoBody.append(button('agent-text-button', `Remove ${provider.label} key`, removeKey));
     }
     if (auth === 'subscription' && view.provider === 'chatgpt' && subscriptionOf('chatgpt').signedIn && !subscriptionOf('chatgpt').standIn) {
@@ -520,7 +523,7 @@
     input.placeholder = on ? 'Ask about this session' : 'Turn the agent on to ask';
     const pinNote = view.pins.length ? `${view.pins.length} pin${view.pins.length === 1 ? '' : 's'} attached. ` : '';
     const via = loopFor() === 'cli' ? ` through the ${CLI_NAMES[view.provider]}` : '';
-    hint.textContent = view.status?.standIn
+    hint.textContent = standInApplies()
       ? `${pinNote}Local stand-in provider. Nothing leaves this Mac.`
       : `↵ send · ⇧↵ new line · ${pinNote}question, pins and tool results go to ${provider?.vendor ?? 'the provider'}${via}`;
     renderChips();

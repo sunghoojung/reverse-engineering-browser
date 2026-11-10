@@ -242,8 +242,8 @@ export async function checkAgentPanel() {
   assert.ok(jsPrompt && jsPrompt === swiftPrompt, 'the CLI loops get the same system prompt as the graph');
 
   // Subscriptions: Grok is subscription only and asks its CLI whether it is signed in.
+  // A provider stand-in stays configured: it never applies to a CLI loop.
   subscriptions = true;
-  standIn = false;
   doc.getElementById('agent-toggle').click();
   await settle();
   const grok = doc.querySelector('[data-provider="grok"]');
@@ -275,6 +275,8 @@ export async function checkAgentPanel() {
   assert.match(grokConsent, /~\/\.grok\/sessions/, 'and that Grok keeps its own record');
   assert.match(grokConsent, /tool result/);
   assert.match(grokConsent, /URLs, hosts/);
+  assert.doesNotMatch(grokConsent, /stand-in/, 'a provider stand-in does not redirect a CLI, so the disclosure never says so');
+  assert.doesNotMatch(doc.getElementById('agent-hint').textContent, /stand-in/);
   const creates = runtimeCalls.filter(entry => entry.op === 'create').length;
   doc.getElementById('agent-consent-accept').click();
   await settle();
@@ -320,6 +322,11 @@ export async function checkAgentPanel() {
   await settle();
 
   // ChatGPT: the subscription signs in through the browser and keeps the graph.
+  standIn = false;
+  doc.getElementById('agent-toggle').click();
+  await settle();
+  doc.getElementById('agent-toggle').click();
+  await settle();
   doc.querySelector('[data-provider="chatgpt"]').click();
   await settle();
   doc.querySelector('[data-auth="subscription"]').click();

@@ -205,13 +205,13 @@
   // each call; this page only asks for one and shows it.
   const PERMISSIONS = Object.freeze([
     {id: 'read-only', label: 'Read only', short: 'Read only',
-      text: 'Reads structural results. It cannot change anything.'},
+      text: 'Reads structural results and changes nothing.'},
     {id: 'ask', label: 'Ask for actions', short: 'Ask',
-      text: 'Can request actions. Each one needs Allow once.'},
+      text: 'Each action needs Allow once.'},
     {id: 'auto', label: 'Auto-approve actions', short: 'Auto-approve',
-      text: 'Actions run without asking. Every call and result is shown.'},
+      text: 'Actions run without asking.'},
     {id: 'full', label: 'Full access', short: 'Full access',
-      text: 'Also reads captured content and runs its own capture sessions.'},
+      text: 'Also reads content and runs its own sessions.'},
   ]);
   const REMEMBERED_CEILING = 'ask';
   const permissionRank = id => PERMISSIONS.findIndex(level => level.id === id);
@@ -219,15 +219,17 @@
   // Never remembered above Ask for actions: higher levels are chosen again.
   const rememberable = id => (permissionRank(id) < 0 ? 'read-only'
     : permissionRank(id) > permissionRank(REMEMBERED_CEILING) ? REMEMBERED_CEILING : id);
-  const AUTO_WARNING = 'The agent runs actions without asking you first: capture controls such as Stop and Clear, the Console in a connected document, saved local state such as the Collection, notebook, Analyst scripts and saved invocation sites, and the owned VM fixture. Every call and its full result still appear in the transcript, the header shows the level, and Stop or Turn off ends it at once.';
+  // Consent is the only confirmation, so these say plainly what changes.
+  const AUTO_WARNING = 'Actions run without asking you first: capture controls such as Stop and Clear, the Console in a connected document, saved local state (Collection, notebook, Analyst scripts, invocation sites) and the owned VM fixture.';
+  const STAYS_VISIBLE = 'Every call and its result stays in the transcript, and Stop or Turn off ends it at once.';
   // Exactly what Full access adds to what leaves this Mac.
   const FULL_LEAVES = Object.freeze(['JavaScript and other source text', 'Wasm bytes and disassembly', 'VM bytecode',
     'Request and response bodies', 'Every content field of tool results']);
-  const FULL_SESSIONS = 'The agent can also start, drive and end its own live capture sessions, which open a capture browser, load pages and send real clicks and keys to them.';
-  const SENSITIVE_TEXT = 'Request content (paths, queries, bodies, headers including Cookie and Authorization), response media, Canvas images and invocation value digests, in sessions the agent starts. Tick it only when your authorization covers that content.';
+  const FULL_SESSIONS = 'Actions run without asking, and it runs its own live capture sessions, with real clicks and keys.';
+  const SENSITIVE_TEXT = 'Request content, response media, Canvas images and invocation digests in its sessions, only if your authorization covers them.';
 
   globalThis.RebAgentModel = {parseMarkdown, parseInline, parseCitation, clipPin, createTranscriptModel, verifyCitation, formatBytes,
-    WEB_BUDGET_BYTES, PIN_BYTES, PIN_TOTAL_BYTES, PERMISSIONS, rememberable, AUTO_WARNING, FULL_LEAVES};
+    WEB_BUDGET_BYTES, PIN_BYTES, PIN_TOTAL_BYTES, PERMISSIONS, rememberable, AUTO_WARNING, FULL_LEAVES, SENSITIVE_TEXT};
 
   /* ---- View ---- */
 
@@ -910,12 +912,24 @@
     return card;
   }
 
+  // Where the provider traffic goes, in a few words, for the consent box.
+  function destination() {
+    const vendor = providerInfo()?.vendor ?? 'the provider';
+    if (standInApplies()) return 'the local stand-in provider';
+    if (authFor() === 'key') return vendor;
+    if (view.provider === 'chatgpt') return `${vendor} under your ChatGPT plan`;
+    return `${vendor} through the ${CLI_NAMES[view.provider]} signed in on this Mac`;
+  }
+
+  // The confirm step. Consent is the only confirmation, so the chosen level,
+  // what leaves this Mac and, for Auto-approve and Full access, what changes
+  // fit in the panel at the normal window size, above a button that names the
+  // level. Native then checks the request and holds the level.
   function consentSurface() {
-    const node = welcome('agent-consent', 'shield', 'Before you turn this on');
-    node.append(element('p', 'agent-consent-target', choiceLabel()));
-    node.append(element('p', 'agent-consent-text', disclosureText()));
-    // One ordered setting. Read only is the default; Auto-approve and Full
-    // access show what they change here, and native asks once more.
+    const node = element('div', 'agent-center agent-consent');
+    const top = element('div', 'agent-consent-head');
+    top.append(icon('shield', 'agent-consent-icon'), element('h3', 'agent-center-title', 'Before you turn this on'));
+    node.append(top, element('p', 'agent-consent-target', choiceLabel()));
     const group = element('fieldset', 'agent-levels');
     group.id = 'agent-permission-choice';
     group.append(element('legend', 'agent-levels-legend', 'Permission'));
@@ -929,11 +943,14 @@
       radio.id = `agent-level-${level.id}`;
       radio.dataset.focusKey = `level:${level.id}`;
       radio.checked = view.permission === level.id;
+      radio.setAttribute('aria-describedby', 'agent-consent-details');
       radio.addEventListener('change', () => {
         if (!radio.checked) return;
         view.permission = level.id;
         if (level.id !== 'full') view.sensitive = false;
         renderConsentDetails();
+        // At a short window the box and the button come into view.
+        accept.scrollIntoView?.({block: 'nearest'});
       });
       const words = element('span', 'agent-level-words');
       words.append(element('span', 'agent-level-name', level.label), element('span', 'agent-level-text', level.text));
@@ -945,47 +962,54 @@
     const actions = element('div', 'agent-consent-actions');
     const cancel = button('agent-button', 'Cancel', () => { view.consenting = false; render(); focusDefault(); });
     cancel.dataset.focusKey = 'cancel';
-    const accept = button('agent-button agent-button-primary', 'Turn on for this session', confirmConsent);
+    const accept = button('agent-button agent-button-primary', '', confirmConsent);
     accept.id = 'agent-consent-accept';
     accept.dataset.focusKey = 'accept';
     actions.append(cancel, accept);
     node.append(group, details, actions);
-    // The warning and the sensitive checkbox follow the chosen level without
-    // rebuilding the radios under the pointer.
+    // The box and the button follow the chosen level without rebuilding the
+    // radios under the pointer.
     function renderConsentDetails() {
-      const text = node.querySelector('.agent-consent-text');
-      if (text) text.textContent = disclosureText();
-      accept.textContent = view.permission === 'full' ? 'Turn on with Full access' : 'Turn on for this session';
+      const level = permissionInfo(view.permission);
+      accept.textContent = `Turn on ${level.label}`;
       details.replaceChildren();
-      if (view.permission === 'auto' || view.permission === 'full') {
-        const warning = element('div', `agent-warning${view.permission === 'full' ? ' agent-warning-full' : ''}`);
-        warning.id = 'agent-permission-warning';
-        warning.setAttribute('role', 'note');
-        warning.append(element('p', 'agent-warning-text', AUTO_WARNING));
-        if (view.permission === 'full') {
-          const vendor = standInApplies() ? 'the local stand-in' : providerInfo()?.vendor ?? 'the provider';
-          warning.append(element('p', 'agent-warning-text agent-warning-strong', `Full access also sends this to ${vendor}:`));
-          const list = element('ul', 'agent-warning-list');
-          for (const item of FULL_LEAVES) list.append(element('li', '', item));
-          warning.append(list, element('p', 'agent-warning-text', FULL_SESSIONS));
-          const sensitiveLabel = element('label', 'agent-check agent-check-sensitive');
-          const sensitive = element('input');
-          sensitive.type = 'checkbox';
-          sensitive.id = 'agent-sensitive';
-          sensitive.dataset.focusKey = 'sensitive';
-          sensitive.checked = view.sensitive;
-          sensitive.setAttribute('aria-describedby', 'agent-sensitive-text');
-          sensitive.addEventListener('change', () => { view.sensitive = sensitive.checked; });
-          const words = element('span', 'agent-level-words');
-          const detail = element('span', 'agent-level-text', SENSITIVE_TEXT);
-          detail.id = 'agent-sensitive-text';
-          words.append(element('span', 'agent-level-name', 'Also allow sensitive capture options'), detail);
-          sensitiveLabel.append(sensitive, words);
-          warning.append(sensitiveLabel);
-        }
-        warning.append(element('p', 'agent-warning-text agent-warning-native', 'Origin Trace asks you once more before turning this on.'));
-        details.append(warning);
+      details.dataset.level = level.id;
+      if (level.id !== 'auto' && level.id !== 'full') {
+        details.append(element('p', 'agent-consent-text', disclosureText(level.id)));
+        return;
       }
+      const warning = element('div', 'agent-warning');
+      warning.id = 'agent-permission-warning';
+      warning.setAttribute('role', 'note');
+      if (level.id === 'auto') {
+        warning.append(element('p', 'agent-warning-text', disclosureText('auto')),
+          element('p', 'agent-warning-text agent-warning-strong', AUTO_WARNING));
+      } else {
+        warning.append(element('p', 'agent-warning-text',
+          `Your question, pins and tool results go to ${destination()}, with captured content:`));
+        const list = element('ul', 'agent-warning-list');
+        for (const item of FULL_LEAVES) list.append(element('li', '', item));
+        warning.append(list, element('p', 'agent-warning-text', FULL_SESSIONS));
+      }
+      const kept = view.provider === 'grok' && authFor() === 'subscription' ? ' Grok also keeps its own record in ~/.grok/sessions.' : '';
+      warning.append(element('p', 'agent-warning-text agent-warning-quiet', `${STAYS_VISIBLE}${kept}`));
+      if (level.id === 'full') {
+        const sensitiveLabel = element('label', 'agent-check agent-check-sensitive');
+        const sensitive = element('input');
+        sensitive.type = 'checkbox';
+        sensitive.id = 'agent-sensitive';
+        sensitive.dataset.focusKey = 'sensitive';
+        sensitive.checked = view.sensitive;
+        sensitive.setAttribute('aria-describedby', 'agent-sensitive-text');
+        sensitive.addEventListener('change', () => { view.sensitive = sensitive.checked; });
+        const words = element('span', 'agent-level-words');
+        const detail = element('span', 'agent-level-text', SENSITIVE_TEXT);
+        detail.id = 'agent-sensitive-text';
+        words.append(element('span', 'agent-level-name', 'Also allow sensitive capture options'), detail);
+        sensitiveLabel.append(sensitive, words);
+        warning.append(sensitiveLabel);
+      }
+      details.append(warning);
     }
     renderConsentDetails();
     return node;
@@ -1918,16 +1942,9 @@
   }
 
   // Enables native for one session and builds the loop that drives it.
-  async function startAgent({provider, auth, model, permission, sensitive, key, restart = false}) {
+  async function startAgent({provider, auth, model, permission, sensitive, key}) {
     view.sessionKey = key;
-    const result = await call('enable', {provider, auth, model, permission, sensitive: permission === 'full' && Boolean(sensitive), sessionKey: key, restart});
-    // Native asked once more for Auto-approve or Full access, and the
-    // researcher cancelled there: nothing was turned on.
-    if (result?.cancelled) {
-      view.status = result;
-      syncEngine(result.engine);
-      return false;
-    }
+    const result = await call('enable', {provider, auth, model, permission, sensitive: permission === 'full' && Boolean(sensitive), sessionKey: key});
     if ((result.engine?.loop ?? loopFor(provider, auth)) === 'cli') {
       runtime = createCliRuntime();
     } else {
@@ -1942,7 +1959,6 @@
     }
     view.status = result;
     syncEngine(result.engine);
-    return true;
   }
 
   async function confirmConsent() {
@@ -1953,11 +1969,7 @@
     try {
       const key = await sessionKey();
       const level = view.permission;
-      const started = await startAgent({provider: view.provider, auth: authFor(), model: view.model[modelKey()] ?? '', permission: level, sensitive: view.sensitive, key});
-      if (!started) {
-        view.setupNotice = {text: `${permissionInfo(level).label} was not turned on. Nothing was started.`, kind: 'info'};
-        return;
-      }
+      await startAgent({provider: view.provider, auth: authFor(), model: view.model[modelKey()] ?? '', permission: level, sensitive: view.sensitive, key});
       // The next consent starts from what may be remembered, never higher.
       rememberPermission(level);
       view.permission = rememberable(level);
@@ -2006,8 +2018,7 @@
       runtime?.dispose();
       runtime = null;
       fetchListener = null;
-      // The same consented choice again; native keeps it without asking twice.
-      await startAgent({...choice, key, restart: true});
+      await startAgent({...choice, key});
       transcript.clear();
       heights.clear();
       citeChecks.clear();

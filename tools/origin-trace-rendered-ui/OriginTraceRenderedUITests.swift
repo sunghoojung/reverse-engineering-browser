@@ -1929,7 +1929,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#agent-input")
       try await ui.type("What loaded?")
       try await ui.key(36, "\r")
-      try await ui.waitUntil(answered("What loaded?"), timeout: 20, "the answer and its citation did not arrive")
+      // Each citation is checked on its own, so wait until both have settled:
+      // the real one as a link and the invented one labeled, before reading or clicking.
+      try await ui.waitUntil(settled("What loaded?"), timeout: 20, "the answer and its citations did not settle")
       let log = try await ui.value("__rebUiProbe.text('#agent-log')") as? String ?? ""
       XCTAssert(log.contains("get_artifacts"), "the tool call is visible: \(log)")
       XCTAssert(log.contains("not verified"), "the invented citation stays labeled: \(log)")
@@ -1996,7 +1998,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#agent-input")
       try await ui.type("Again")
       try await ui.key(36, "\r")
-      try await ui.waitUntil(answered("Again"), timeout: 20, "the light theme answer did not arrive")
+      try await ui.waitUntil(settled("Again"), timeout: 20, "the light theme answer did not settle")
       try await agentLayoutIsClean(ui, "light")
       try await ui.screenshot("agent-conversation-light")
       try await ui.click(".agent-switch")
@@ -2014,6 +2016,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
     "(() => { const rows = [...document.querySelectorAll('#agent-log .agent-row')]; " +
       "const asked = rows.findLastIndex(row => row.classList.contains('agent-row-user') && row.textContent.includes(\(String(reflecting: question)))); " +
       "return asked >= 0 && rows.slice(asked + 1).some(row => row.querySelector('.agent-cite')); })()"
+  }
+
+  private func settled(_ question: String) -> String {
+    "(\(answered(question)) && (() => { const rows = [...document.querySelectorAll('#agent-log .agent-row')]; " +
+      "const asked = rows.findLastIndex(row => row.classList.contains('agent-row-user') && row.textContent.includes(\(String(reflecting: question)))); " +
+      "return rows.slice(asked + 1).some(row => row.querySelector('.agent-cite-note')); })())"
   }
 
   @MainActor

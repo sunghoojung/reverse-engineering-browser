@@ -230,7 +230,7 @@
   const transcript = createTranscriptModel();
   const citeChecks = new Map();
   const heights = new Map();
-  let framePending = false, frameTranscript = false, lastWindow = '', citeRevision = 0;
+  let framePending = false, frameTranscript = false, lastWindow = '';
   try {
     const remembered = localStorage.getItem('origin-trace.agent.provider');
     if (remembered === 'chatgpt' || remembered === 'claude') view.provider = remembered;
@@ -531,6 +531,16 @@
       link.title = 'Verified against this session\'s evidence';
       return link;
     }
+    // A pending or unverified citation updates in place when its check ends, so
+    // a check finishing never rebuilds the rows under the pointer.
+    const placeholder = citationPlaceholder(token, key, known);
+    placeholder.dataset.citeKey = key;
+    placeholder.dataset.citeFields = JSON.stringify(token.fields);
+    placeholder.dataset.citeRaw = token.raw;
+    return placeholder;
+  }
+
+  function citationPlaceholder(token, key, known) {
     if (!known) { citeChecks.set(key, {status: 'checking'}); verify(token.fields, key); }
     const plain = element('span', 'agent-cite-plain');
     plain.textContent = token.raw;
@@ -557,8 +567,10 @@
       },
     }).catch(() => ({status: 'unverified', reason: 'could not be checked'}));
     citeChecks.set(key, result);
-    citeRevision += 1;
-    scheduleTranscript();
+    for (const node of rowsHost.querySelectorAll('[data-cite-key]')) {
+      if (node.dataset.citeKey !== key) continue;
+      node.replaceWith(citationNode({type: 'cite', fields: JSON.parse(node.dataset.citeFields), raw: node.dataset.citeRaw}));
+    }
   }
 
   function openCitation(fields, known) {
@@ -741,7 +753,7 @@
         if (index >= 0) { first = Math.min(first, index); last = Math.max(last, index); }
       }
     }
-    const key = `${first}:${last}:${rows.length}:${rows.slice(first, last + 1).map(row => row.text?.length ?? 0).join(',')}:${citeRevision}:${stats.droppedRows}:${view.olderAvailable}`;
+    const key = `${first}:${last}:${rows.length}:${rows.slice(first, last + 1).map(row => row.text?.length ?? 0).join(',')}:${stats.droppedRows}:${view.olderAvailable}`;
     if (key !== lastWindow) {
       lastWindow = key;
       const nodes = headNote ? [headNote] : [];

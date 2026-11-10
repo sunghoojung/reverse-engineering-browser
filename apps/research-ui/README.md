@@ -732,8 +732,9 @@ captured path and query, and its Payload tab shows them parsed:
 - **Request Payload**, Parsed or Source. JSON is a tree whose containers open
   100 children or ranges at a time, so any size stays responsive, and its
   source is laid out by the backend Oxc formatter, or by the in-page one with
-  the reason when Oxc refuses it, in the shared code view; clicking a token
-  shows its exact raw range. Form bodies are a name/value table and
+  the reason when Oxc refuses it, in the shared code view. Until the layout
+  is ready, Source shows a Formatting… note rather than the body as sent.
+  Clicking a token shows its exact raw range. Form bodies are a name/value table and
   multipart bodies list each part's name, filename, type and size, with the
   boundary read from the first line. Other text is colored by its type. Binary
   bytes are only shown as hex. Long sources render as they scroll, in blocks

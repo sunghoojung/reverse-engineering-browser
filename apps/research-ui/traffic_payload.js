@@ -176,6 +176,11 @@ function trafficPayloadSourceRows(model) {
   }
   const layout = model.json ? trafficPayloadLayout().layout(model.artifact, model.text, model.syntax, 'json') : null;
   if (model.sourceRows && model.sourceRows.layout === layout && model.sourceRows.status === layout?.status) return model.sourceRows;
+  // A pending layout shows only its note: drawing the body as sent until the
+  // layout arrived froze the page for over half a second on a 5 MiB body.
+  if (layout?.status === 'pending') {
+    return model.sourceRows = {text: null, rows: [], syntax: model.syntax, hex: false, layout, status: 'pending', note: codeLayoutNote(layout)};
+  }
   const text = layout?.status === 'ready' ? layout.text : model.text;
   return model.sourceRows = {text, rows: codeViewRows(text), syntax: model.syntax, hex: false, layout, status: layout?.status,
     note: codeLayoutNote(layout) ?? ''};
@@ -472,6 +477,12 @@ function trafficPayloadLinesArea(rows, shown, status) {
     onRaw: raw => {status.textContent = codeViewRawText(raw);}});
 }
 
+function trafficPayloadProgress(text) {
+  const progress = trafficNode('p', 'traffic-payload-note traffic-payload-progress', text);
+  progress.setAttribute('role', 'status');
+  return {box: progress, dispose() {}, reveal: () => null};
+}
+
 function trafficPayloadPartsArea(parts, shown) {
   const marks = trafficPayloadMatchesBy(shown, 'payload');
   return trafficPayloadArea({className: 'traffic-payload-parts', label: 'Multipart parts', role: 'list', count: parts.length,
@@ -654,14 +665,12 @@ function trafficPayloadBodySection(body, view, shown, panel) {
       area?.dispose();
       if (reading) {
         options.replaceChildren();
-        const progress = trafficNode('p', 'traffic-payload-note traffic-payload-progress',
-          `Reading the rest of the body to show it parsed: ${trafficByteCount(view.loaded)} of ${trafficByteCount(view.total)} read.`);
-        progress.setAttribute('role', 'status');
-        area = {box: progress, dispose() {}, reveal: () => null};
-        holder.replaceChildren(progress);
+        area = trafficPayloadProgress(`Reading the rest of the body to show it parsed: ${trafficByteCount(view.loaded)} of ${trafficByteCount(view.total)} read.`);
+        holder.replaceChildren(area.box);
         return;
       }
       const source = sourceMode(), rows = source ? trafficPayloadSourceRows(model) : null;
+      const pending = rows?.status === 'pending';
       const focusedOption = options.contains(globalThis.document?.activeElement) ? document.activeElement.textContent : null;
       options.replaceChildren();
       if (parsed) {
@@ -680,12 +689,12 @@ function trafficPayloadBodySection(body, view, shown, panel) {
         });
         options.append(wrap);
       }
-      const notes = [model.parsedNote, rows?.note, rows?.hex ? 'Binary bytes are shown as hex and never interpreted.' : '',
+      const notes = [model.parsedNote, pending ? '' : rows?.note, rows?.hex ? 'Binary bytes are shown as hex and never interpreted.' : '',
         !source && model.parts && !model.parts.parts.length ? 'No part precedes the closing boundary.' : '']
         .filter(Boolean).map(text => trafficNode('p', 'traffic-payload-note', text));
       const raw = trafficNode('p', 'traffic-payload-note code-view-raw');
       raw.setAttribute('role', 'status');
-      area = source ? trafficPayloadLinesArea(rows, shown, raw)
+      area = pending ? trafficPayloadProgress(rows.note) : source ? trafficPayloadLinesArea(rows, shown, raw)
         : model.json ? trafficPayloadTreeArea(model, shown, () => controller.render({focus: true, keepScroll: true}))
           : model.pairs ? trafficPayloadPairsArea(model.pairs, 'Form fields', 'payload', shown)
             : trafficPayloadPartsArea(model.parts.parts, shown);
@@ -697,7 +706,10 @@ function trafficPayloadBodySection(body, view, shown, panel) {
     search(raw, needle) {
       if (reading) return [];
       if (sourceMode()) {
-        return findSourceOccurrences(trafficPayloadSourceRows(model).rows.map(row => row.text), raw, TRAFFIC_PAYLOAD_FIND_LIMIT).matches
+        // A pending layout is searched once it arrives (shown.relayout).
+        const rows = trafficPayloadSourceRows(model);
+        if (rows.status === 'pending') return [];
+        return findSourceOccurrences(rows.rows.map(row => row.text), raw, TRAFFIC_PAYLOAD_FIND_LIMIT).matches
           .map(({line, column, length}) => ({section: 'payload', row: line, column, length}));
       }
       if (model.json) return trafficPayloadTreeSearch(model, needle);

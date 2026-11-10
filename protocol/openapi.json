@@ -37,6 +37,65 @@
     ],
     "batching": false,
     "message_limit_bytes": 33554432,
+    "permission": {
+      "flag": "--permission",
+      "description": "One ordered setting for clients that let a model act. Each level names the individual flags it stands for, and the server applies exactly those. read-only, ask and auto also omit captured content from every result (--omit-content). ask and auto list the same tools: whether a person approves each effectful call is the client's own setting, and get_session_context reports the level so the model can say which applies. full adds starting, driving and ending its own live capture sessions and the content reads; its sensitive capture options also need --allow-sensitive-capture. The levels are not authorization, and the individual flags keep working on their own.",
+      "levels": [
+        {
+          "name": "read-only",
+          "label": "Read only",
+          "flags": [
+            "--omit-content"
+          ]
+        },
+        {
+          "name": "ask",
+          "label": "Ask for actions",
+          "flags": [
+            "--allow-effects",
+            "--omit-content"
+          ]
+        },
+        {
+          "name": "auto",
+          "label": "Auto-approve actions",
+          "flags": [
+            "--allow-effects",
+            "--omit-content"
+          ]
+        },
+        {
+          "name": "full",
+          "label": "Full access",
+          "flags": [
+            "--allow-effects",
+            "--allow-session-start",
+            "--allow-content"
+          ]
+        }
+      ],
+      "sensitive_capture": {
+        "flag": "--allow-sensitive-capture",
+        "requires": "--permission full",
+        "options": [
+          "canvas_images",
+          "request_content",
+          "response_media",
+          "js_invocation_digests",
+          "confirm_sensitive_capture"
+        ],
+        "description": "Under --permission full, start_live_session refuses these options before launching anything unless this flag is also set. The legacy --allow-session-start flag keeps accepting them with confirm_sensitive_capture, as before."
+      }
+    },
+    "content_reads": {
+      "flag": "--allow-content",
+      "conflicts": "--omit-content",
+      "operations": [
+        "get_artifact_text",
+        "search_artifact_text"
+      ],
+      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, and inspect_wasm with row_offset and row_limit. Binary responses are still refused."
+    },
     "session_start": {
       "tool": "start_live_session",
       "flag": "--allow-session-start",
@@ -24420,6 +24479,46 @@
               "read_only_projection",
               "effects_exposed_not_authorized"
             ]
+          },
+          "mcp_admission": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Added by reb-api mcp only: what this connection lists and returns. permission is the --permission level, or null when the connection was started with the individual flags. None of it is authorization.",
+            "required": [
+              "permission",
+              "effects",
+              "session_start",
+              "content_reads",
+              "content_omitted",
+              "sensitive_capture"
+            ],
+            "properties": {
+              "permission": {
+                "enum": [
+                  "read-only",
+                  "ask",
+                  "auto",
+                  "full",
+                  null
+                ]
+              },
+              "effects": {
+                "type": "boolean"
+              },
+              "session_start": {
+                "type": "boolean"
+              },
+              "content_reads": {
+                "type": "boolean"
+              },
+              "content_omitted": {
+                "type": "boolean"
+              },
+              "sensitive_capture": {
+                "type": "boolean",
+                "description": "start_live_session may name canvas_images, request_content, response_media or js_invocation_digests. False under --permission full without --allow-sensitive-capture."
+              }
+            }
           },
           "limits": {
             "type": "object",

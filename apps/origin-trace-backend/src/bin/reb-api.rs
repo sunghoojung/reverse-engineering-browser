@@ -67,7 +67,7 @@ enum Action {
     Mcp {
         #[arg(
             long,
-            required_unless_present_any = ["endpoint_file", "session_dir", "allow_session_start"],
+            required_unless_present_any = ["endpoint_file", "session_dir", "allow_session_start", "permission"],
             conflicts_with_all = ["endpoint_file", "session_dir"]
         )]
         base_url: Option<String>,
@@ -95,6 +95,27 @@ enum Action {
         /// long strings do not. For clients that forward results to a provider.
         #[arg(long)]
         omit_content: bool,
+        /// Also list the content reads (get_artifact_text, search_artifact_text)
+        /// and lay out request and response bodies with get_source_format. Their
+        /// results are captured content that goes to the model provider. Not
+        /// authorization.
+        #[arg(long, conflicts_with = "omit_content")]
+        allow_content: bool,
+        /// One ordered level in place of the individual flags: read-only, ask,
+        /// auto or full. read-only, ask and auto omit captured content; ask and
+        /// auto list effects (the client decides whether it asks); full adds
+        /// session start and the content reads. See x-reb-mcp.permission.
+        #[arg(
+            long,
+            value_parser = ["read-only", "ask", "auto", "full"],
+            conflicts_with_all = ["allow_effects", "allow_session_start", "omit_content", "allow_content"]
+        )]
+        permission: Option<String>,
+        /// With --permission full, let start_live_session name sensitive
+        /// capture options (canvas_images, request_content, response_media,
+        /// js_invocation_digests). Not authorization.
+        #[arg(long, requires = "permission")]
+        allow_sensitive_capture: bool,
         /// Require live capture and a running or paused debugger at startup
         /// and before every tool call. Does not authorize capture or effects.
         #[arg(long)]
@@ -1043,10 +1064,30 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
             allow_effects,
             allow_session_start,
             omit_content,
+            allow_content,
+            permission,
+            allow_sensitive_capture,
             require_live,
             timeout,
         } => {
             check_timeout(timeout)?;
+            let admission = match permission.as_deref() {
+                Some(level) => mcp::Admission::for_level(&spec, level, allow_sensitive_capture)?,
+                None => mcp::Admission::flags(
+                    allow_effects,
+                    allow_session_start,
+                    omit_content,
+                    allow_content,
+                ),
+            };
+            let allow_session_start = admission.allow_session_start;
+            if base_url.is_none()
+                && endpoint_file.is_none()
+                && session_dir.is_none()
+                && !allow_session_start
+            {
+                return Err("Pass --base-url, --endpoint-file or --session-dir; only --permission full can start without one. No server was started.".into());
+            }
             let mut guard = McpEndpointGuard {
                 endpoint_file: endpoint_file.clone().or_else(|| {
                     session_dir
@@ -1084,19 +1125,7 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 }
                 Err(error) => return Err(error),
             };
-            mcp::serve(
-                &spec,
-                &ops,
-                base,
-                mcp::Admission {
-                    allow_effects,
-                    allow_session_start,
-                    omit_content,
-                },
-                timeout,
-                guard,
-            )
-            .await
+            mcp::serve(&spec, &ops, base, admission, timeout, guard).await
         }
         Action::Session { command } => run_session(command).await,
         Action::Describe {

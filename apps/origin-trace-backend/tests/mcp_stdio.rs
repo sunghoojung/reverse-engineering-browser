@@ -367,7 +367,18 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
         .iter()
         .filter(|operation| operation["read_only_eligible"] == true)
         .map(|operation| operation["operation_id"].as_str().unwrap().to_owned())
+        // Content reads are read-only but list only with --allow-content.
+        .filter(|id| {
+            !spec["x-reb-mcp"]["content_reads"]["operations"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(id))
+        })
         .collect::<Vec<_>>();
+    assert_eq!(
+        spec["x-reb-mcp"]["content_reads"]["operations"],
+        json!(["get_artifact_text", "search_artifact_text"])
+    );
     let mut mcp = Mcp::start(&server.url, false);
     let listed = mcp.request("tools/list", json!({}));
     let names = listed["result"]["tools"]
@@ -459,6 +470,14 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
             assert!(direct["allow_effects"].is_null());
             direct["allow_effects"] = json!(false);
             direct["effects_admission"] = json!("read_only_projection");
+            assert!(
+                direct.get("mcp_admission").is_none(),
+                "only MCP adds its admission"
+            );
+            direct["mcp_admission"] = json!({
+                "permission": null, "effects": false, "session_start": false,
+                "content_reads": false, "content_omitted": false, "sensitive_capture": false
+            });
         }
         if name == "wait_for_events" {
             assert_eq!(body["wait"]["timed_out"], true);
@@ -1562,16 +1581,15 @@ wait "$backend"
     /// environment carries every capture switch the packaged app sets. None
     /// of them may reach an agent session.
     fn mcp(&self) -> Mcp {
+        self.mcp_with(&["--allow-effects", "--allow-session-start"])
+    }
+
+    fn mcp_with(&self, admission: &[&str]) -> Mcp {
         let mut command = Command::new(env!("CARGO_BIN_EXE_reb-api"));
         command
-            .args([
-                "mcp",
-                "--allow-effects",
-                "--allow-session-start",
-                "--require-live",
-                "--timeout",
-                "15",
-            ])
+            .arg("mcp")
+            .args(admission)
+            .args(["--require-live", "--timeout", "15"])
             .env("HOME", &self.home)
             .env(
                 "REB_LIVE_SESSION_SCRIPT",
@@ -2082,4 +2100,244 @@ fn session_tools_need_their_flag_and_a_session_started_here() {
     let refused = starter.request("tools/call", end);
     assert_eq!(refused["result"]["isError"], true);
     assert!(tool_text(&refused).contains("acts only on a session this connection started"));
+}
+
+/// `--permission` is one ordered setting over the individual flags. Each level
+/// lists exactly what x-reb-mcp.permission names, reports itself in the
+/// session context, and only full returns captured content.
+#[test]
+fn permission_levels_list_their_tools_and_gate_content() {
+    let server = Server::start();
+    retained_artifact(&server, "5", "request_body", b"token=SECRET_BODY_VALUE");
+    for (level, effects, content, session) in [
+        ("read-only", false, false, false),
+        ("ask", true, false, false),
+        ("auto", true, false, false),
+        ("full", true, true, true),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_reb-api"));
+        command
+            .args([
+                "mcp",
+                "--base-url",
+                &server.url,
+                "--permission",
+                level,
+                "--timeout",
+                "15",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut mcp = Mcp::from_command(&mut command);
+        let names = tool_names(&mcp.request("tools/list", json!({})));
+        let has = |name: &str| names.iter().any(|listed| listed == name);
+        assert_eq!(has("capture_action"), effects, "{level}");
+        assert_eq!(has("get_artifact_text"), content, "{level}");
+        assert_eq!(has("search_artifact_text"), content, "{level}");
+        assert_eq!(has("start_live_session"), session, "{level}");
+        assert_eq!(has("session_action"), session, "{level}");
+        assert!(has("get_artifacts") && has("inspect_wasm"), "{level}");
+        let context = mcp.request("tools/call", json!({"name":"get_session_context"}));
+        let admission = &context["result"]["structuredContent"]["mcp_admission"];
+        assert_eq!(admission["permission"], level);
+        assert_eq!(admission["effects"], effects);
+        assert_eq!(admission["content_reads"], content);
+        assert_eq!(admission["content_omitted"], !content);
+        assert_eq!(admission["sensitive_capture"], false, "{level}");
+        let read = mcp.request(
+            "tools/call",
+            json!({"name":"get_artifact_text","arguments":{"artifact_id":"5"}}),
+        );
+        let search = mcp.request(
+            "tools/call",
+            json!({"name":"search_artifact_text","arguments":{"q":"secret_body"}}),
+        );
+        if content {
+            assert!(tool_text(&read).contains("SECRET_BODY_VALUE"), "{read}");
+            assert_eq!(
+                search["result"]["structuredContent"]["matches"][0]["artifact_id"],
+                "5"
+            );
+        } else {
+            for refused in [&read, &search] {
+                assert_eq!(refused["error"]["code"], -32602, "{level}: {refused}");
+                assert!(!refused.to_string().contains("SECRET_BODY_VALUE"));
+            }
+        }
+    }
+    // The individual flags keep working, and content reads have their own flag.
+    let mut legacy = Mcp::start(&server.url, true);
+    let names = tool_names(&legacy.request("tools/list", json!({})));
+    assert!(names.iter().any(|name| name == "capture_action"));
+    assert!(!names.iter().any(|name| name == "get_artifact_text"));
+    let context = legacy.request("tools/call", json!({"name":"get_session_context"}));
+    assert!(context["result"]["structuredContent"]["mcp_admission"]["permission"].is_null());
+    let mut content = Mcp::start_with(vec![
+        "mcp".into(),
+        "--base-url".into(),
+        server.url.clone(),
+        "--allow-content".into(),
+    ]);
+    let names = tool_names(&content.request("tools/list", json!({})));
+    assert!(names.iter().any(|name| name == "get_artifact_text"));
+    assert!(!names.iter().any(|name| name == "capture_action"));
+    for (args, needle) in [
+        (
+            vec!["--permission", "ask", "--allow-effects"],
+            "cannot be used with",
+        ),
+        (
+            vec!["--permission", "full", "--omit-content"],
+            "cannot be used with",
+        ),
+        (
+            vec!["--allow-content", "--omit-content"],
+            "cannot be used with",
+        ),
+        (vec!["--allow-sensitive-capture"], "--permission"),
+        (
+            vec!["--permission", "auto", "--allow-sensitive-capture"],
+            "needs --permission full",
+        ),
+        (vec!["--permission", "everything"], "possible values"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args(["mcp", "--base-url", &server.url])
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(needle), "{args:?}: {stderr}");
+    }
+    let unbound = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["mcp", "--permission", "ask"])
+        .output()
+        .unwrap();
+    assert!(!unbound.status.success());
+    assert!(String::from_utf8_lossy(&unbound.stderr).contains("only --permission full"));
+}
+
+/// Under `--permission full`, sensitive capture needs its own flag, and the
+/// refusal comes before anything launches.
+#[cfg(unix)]
+#[test]
+fn full_permission_starts_sensitive_capture_only_with_its_flag() {
+    let fixture = AgentFixture::new();
+    let sensitive = json!({"name": "start_live_session", "arguments": {
+        "request_content": true, "confirm_sensitive_capture": true
+    }});
+    let mut mcp = fixture.mcp_with(&["--permission", "full"]);
+    let refused = mcp.request("tools/call", sensitive.clone());
+    assert_eq!(refused["result"]["isError"], true);
+    let text = tool_text(&refused);
+    assert!(
+        text.contains("does not allow sensitive capture options"),
+        "{text}"
+    );
+    assert!(
+        text.contains("request_content, confirm_sensitive_capture"),
+        "{text}"
+    );
+    assert!(
+        !fixture.sessions.exists()
+            || std::fs::read_dir(&fixture.sessions)
+                .unwrap()
+                .next()
+                .is_none()
+    );
+    let instructions = {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_reb-api"));
+        command
+            .args(["mcp", "--permission", "full"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{}}}}"#
+        )
+        .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        serde_json::from_str::<Value>(&line).unwrap()["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(instructions.contains("Permission for this connection: full."));
+    assert!(instructions.contains("are refused for this connection"));
+    assert!(instructions.contains("get_artifact_text"));
+    // An ordinary start still works at full, and the flag admits the rest.
+    let started = mcp.request(
+        "tools/call",
+        json!({"name": "start_live_session", "arguments": {}}),
+    );
+    assert_eq!(started["result"]["isError"], false, "{started}");
+    let end = json!({"name": "session_action", "arguments": {"body": {"action": "end", "confirm": true}}});
+    assert_eq!(
+        mcp.request("tools/call", end.clone())["result"]["isError"],
+        false
+    );
+    let mut allowed = fixture.mcp_with(&["--permission", "full", "--allow-sensitive-capture"]);
+    let started = allowed.request("tools/call", sensitive);
+    assert_eq!(started["result"]["isError"], false, "{started}");
+    assert_eq!(
+        started["result"]["structuredContent"]["options"]["request_content"],
+        true
+    );
+    assert_eq!(
+        allowed.request("tools/call", end)["result"]["isError"],
+        false
+    );
+}
+
+/// A connection opened on a session that starts and ends its own session goes
+/// back to the one it was opened on, and still cannot end that one.
+#[cfg(unix)]
+#[test]
+fn ending_its_own_session_returns_a_connection_to_where_it_started() {
+    let fixture = AgentFixture::new();
+    let mut researcher = fixture.mcp();
+    let first = researcher.request(
+        "tools/call",
+        json!({"name": "start_live_session", "arguments": {}}),
+    );
+    let home = first["result"]["structuredContent"]["endpoint"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut agent = fixture.mcp_with(&["--base-url", &home, "--permission", "full"]);
+    let started = agent.request(
+        "tools/call",
+        json!({"name": "start_live_session", "arguments": {}}),
+    );
+    let own = started["result"]["structuredContent"]["endpoint"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(own, home);
+    let end = json!({"name": "session_action", "arguments": {"body": {"action": "end", "confirm": true}}});
+    assert_eq!(
+        agent.request("tools/call", end.clone())["result"]["isError"],
+        false
+    );
+    let context = agent.request("tools/call", json!({"name": "get_session_context"}));
+    assert_eq!(
+        context["result"]["structuredContent"]["endpoint"],
+        home.trim_end_matches('/')
+    );
+    let refused = agent.request("tools/call", end.clone());
+    assert!(tool_text(&refused).contains("acts only on a session this connection started"));
+    assert_eq!(
+        researcher.request("tools/call", end)["result"]["isError"],
+        false
+    );
 }

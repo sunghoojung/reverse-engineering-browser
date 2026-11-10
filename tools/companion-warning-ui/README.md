@@ -9,9 +9,10 @@ node tools/check-companion-warning.mjs
 ```
 
 The target keeps its original companion-release name. It now proves that
-Origin Trace starts a live session with whatever Brave Browser Development it
+Origin Trace opens on its workspace with the in-window start panel, that Start
+Session there starts a live session with whatever Brave Browser Development it
 finds, without a browser pairing prompt, and that the startup failure, Retry,
-Continue Offline and reopen paths behave.
+Continue Offline and reopen paths behave in that panel.
 
 The driver requires macOS and `CI=true`, builds no browser, and owns an inert,
 unsigned `com.brave.Browser.development` application whose executable records
@@ -40,15 +41,16 @@ this suite is limited to disposable cloud CI with synthetic data.
 
 The three serial scenarios verify:
 
-- `automatic`: launch reaches the inert browser with no pairing prompt, its real
-  startup failure offers Retry and Continue Offline, and Continue Offline stays
-  offline
-- `retry`: Return on the failure alert is Retry and relaunches, reported by a
+- `automatic`: launch opens the start panel, Start Session reaches the inert
+  browser with no pairing prompt, its real startup failure offers Retry and
+  Continue Offline, and Continue Offline stays offline
+- `retry`: the failure focuses Retry, so Return relaunches, reported by a
   failure naming a new session log; after Continue Offline, **New Live Session…**
-  shows its setup panel and Start Session launches again
-- `modal-reopen`: Launch Services reopens the same app while the failure alert is
-  modal without starting another session behind it; Return still reaches Retry,
-  and after Continue Offline a later reopen stays offline
+  opens the start panel and Start Session launches again
+- `modal-reopen`: Launch Services reopens the same app while the start panel is
+  open and again while the failure is shown without starting a session behind
+  either; Return still reaches Retry, and after Continue Offline a later reopen
+  stays offline
 
 Every final Continue Offline observes a 65-second quiet window, exceeding the
 coordinator's 60-second startup deadline. This avoids passing a receipt check
@@ -59,5 +61,5 @@ The runner emits named, retained XCTest screenshot attachments at each phase.
 The outer driver exports them from the result bundle and checks receipts after
 the sandboxed runner exits: `automatic`, `retry` and `modal-reopen` must record
 exactly one, three and two launches. This catches a prompt that blocks startup,
-and accidental starts on Continue Offline or modal reentry, without needing
+and accidental starts on Continue Offline or a reopen, without needing
 filesystem writes or receipt access from inside the UI-test runner sandbox.

@@ -28,7 +28,8 @@ The driver, [`check-origin-trace-rendered-ui.mjs`](../check-origin-trace-rendere
    generated `.xctestrun` so the bundle is hosted by the copied app
    (`TestHostPath`, `libXCTestBundleInject.dylib`) and the app receives
    `--ui-url` for that backend;
-5. runs `xcodebuild test-without-building` and checks the PNG screenshots.
+5. runs `xcodebuild test-without-building`, then a second launch pass for
+   `testLaunchOpensStartPanel`, and checks the PNG screenshots.
 
 `xcodebuild` cannot build a hosted bundle for an app that no scheme builds, so
 the bundle is built unhosted and the host is supplied only in the `.xctestrun`
@@ -84,14 +85,34 @@ next capture` in full, inside the titlebar and over no other label.
 numbers and the original location in their tooltips, keep its colors after
 line 1,000, open Find with Cmd+F and Go to line with Ctrl+G (Escape closes it),
 and show the one captured line after **Show original**, without clipping.
-`test19StartDialogListsSavedFunctions` opens **New Live Session…** from the
-app menu with two saved sites. The native dialog must say `Tracking 2
-functions`, name each function and its script, say Content mode records
-digests and Metadata mode does not, and its Remove must rewrite the saved file
-at once; the test then continues offline and returns to the harness page. The
-harness backend and the app share one temporary saved set through
-`--js-invocation-site-store` and `REB_JS_INVOCATION_SITE_STORE`. Dialog
-screenshots are drawn from the native window, which WebKit cannot snapshot.
+`test19StartPanelListsSavedFunctions` opens **New Live Session…** from the
+app menu with two saved sites. The start panel in the bundled workspace must
+say `Tracking 2 functions`, name each function and its script, say Content
+mode records digests and Metadata mode does not, keep captured labels inert,
+and its Remove must rewrite the saved file at once and keep the chosen mode;
+the test then continues offline and returns to the harness page. The harness
+backend and the app share one temporary saved set through
+`--js-invocation-site-store` and `REB_JS_INVOCATION_SITE_STORE`.
+
+`test27StartPanelStartRetryAndKeyboard` takes the start panel through a whole
+decision at both window sizes. The driver names a `REB_BRAVE_BINARY` that does
+not exist, so Start fails at once and no browser launches on any machine. The
+panel must sit inside the workspace with nothing clipped, open with Start
+Session focused and this run's last choice, reach every control with Shift+Tab
+and visible focus, change the mode with an arrow key and the Keychain with
+Space, and start on Return. The failure must name the cause, say Retry uses
+the mode and Keychain choice made by keyboard (so native received them), and
+focus Retry; Return on Retry must fail afresh, and Continue Offline must close
+the panel and return focus to the workspace.
+
+`testLaunchOpensStartPanel` runs alone in a second launch pass. That pass
+starts the copied app without `--ui-url` or an evidence-store argument, with
+automatic live sessions on, the synthetic stores in `REB_EVENT_STORE` and its
+siblings, an empty saved site set and the same missing `REB_BRAVE_BINARY`. The
+window must open on the bundled workspace with the start panel at both sizes,
+a Launch Services reopen while it is open must start nothing, Start must reach
+the native start, and after Continue Offline a reopen must offer nothing. The
+main pass skips this test and it skips itself outside the launch pass.
 The app also receives the harness's `--api-collection` and `--local-analyst`
 stores, so the bundled `reb://` workspace those tests open never reads or
 writes Application Support.
@@ -104,15 +125,15 @@ request raises an exception that ended the app. The next run must get its own
 `timed_out` answer, not 409.
 
 `test22NewLiveSessionAsksAboutUnsavedWork` first opens the bundled workspace
-through **New Live Session…** and **Continue Offline**, because the close guard
+through **New Live Session…** and the start panel's **Continue Offline**, because the close guard
 trusts only a document the app loaded itself. When an earlier test left the
 harness page in place, that page cannot answer, and the test makes the
 deliberate **Start New Session** choice. In the bundled workspace it makes an
 API Collection folder edit through its editor's input event and chooses **New
 Live Session…** again. The unsaved-work sheet must name the new session, keep
 **Stay** as the Return default and photograph complete; Stay must leave the
-page, the edit and the start dialog untouched. Once the edit is discarded, the
-start dialog opens at once and the test continues offline.
+page and the edit untouched and the start panel closed. Once the edit is
+discarded, the start panel opens at once and the test continues offline.
 
 `test0AgentPanel` opens the Agent dock at both window sizes. None of the
 researcher's CLIs runs: `REB_AGENT_GROK_CLI` names a missing file, so Grok's
@@ -202,7 +223,9 @@ Environment passed to the hosted bundle through the `.xctestrun`:
 - `REB_RENDERED_UI_OUTPUT`: screenshot directory
 - `REB_RENDERED_UI_PROBES`: absolute path of `probes.js`
 - `REB_RENDERED_UI_EXPECT`: JSON with the fixture's hostile markers and counts
-- `REB_DISABLE_AUTOMATIC_LIVE_SESSION=1`
+- `REB_DISABLE_AUTOMATIC_LIVE_SESSION=1` (`0` in the launch pass, which also
+  sets `REB_RENDERED_UI_LAUNCH=1` and the `REB_*_STORE` overrides)
+- `REB_BRAVE_BINARY`: a path that does not exist, so a start fails at once
 - `REB_RENDERED_UI_FAILURE_URL` and `REB_RENDERED_UI_FAILURE_BINARY`: a separate
   copied backend with synthetic interpreter evidence. Its executable permission
   is removed to reproduce a real worker spawn failure, then restored to verify

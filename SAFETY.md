@@ -28,9 +28,11 @@ it.
 
 ## Default capture
 
-- Opening the packaged Origin Trace app starts a visibly labeled local research
-  session with implemented native capture categories. CDP collection and injected
-  JavaScript hooks have been removed. Launch only for authorized targets/data.
+- Opening the packaged Origin Trace app shows its offline workspace with the
+  start panel. **Start Session** there starts a visibly labeled local research
+  session with implemented native capture categories; **Continue Offline**
+  starts none. CDP collection and injected JavaScript hooks have been removed.
+  Start only for authorized targets/data.
   The session expires after one hour. The packaged app also enables native Wasm
   `br_table` and `call_indirect` dispatch instrumentation and ignores page
   `debugger;` statements by default; set `REB_NATIVE_WASM_DISPATCH`,
@@ -54,7 +56,7 @@ it.
   records and loader requests ran inside the call. It never records argument,
   receiver, return or exception contents. Captures the packaged app starts arm
   its saved site set (at most 8 functions, saved from Sources with **Track
-  calls**), which the start dialog lists and the titlebar names while the
+  calls**), which the start panel lists and the titlebar names while the
   session runs. Saving a site changes nothing in the open page or the running
   capture; tracking starts with the next capture. Each saved site keeps its
   script's raw source URL beside it, locally and user-only, like the artifact
@@ -134,10 +136,11 @@ it.
   `Authorization`, of the cookies each request sent and received and the
   cookie names and value digests page script used, and of Canvas images, and
   the titlebar labels that session "Content capture". **Metadata
-  only** is the opt-out, chosen in **New Live Session…** or with
+  only** is the opt-out, chosen in the start panel, which opens at launch and
+  from **New Live Session…**, or preselected there with
   `REB_AUTOMATIC_CAPTURE_MODE=metadata`; any other value but `content` also
   selects it. The app saves no choice between launches, and a choice made in the
-  dialog holds for the rest of that app run. The standalone `make live` launcher
+  start panel holds for the rest of that app run. The standalone `make live` launcher
   leaves request content and Canvas images off unless set to `1`. Agent-started
   sessions (`reb-api session start`, MCP `start_live_session`) retain request
   content only when the start request names it (`request_content` with
@@ -152,7 +155,7 @@ it.
   package exports never include them. A digest is not redaction: a short or
   guessable value can be confirmed from it. Content-mode captures the packaged
   app starts with saved invocation sites record these digests by default; the
-  start dialog says so, and the launch log and titlebar label the session.
+  start panel says so, and the launch log and titlebar label the session.
   Metadata mode never records them. Agent-started sessions record them only
   when the start request names them (`js_invocation_digests` with named sites
   and `confirm_sensitive_capture`), never inherited. An explicit

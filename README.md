@@ -47,11 +47,13 @@ session data.
    record names the Brave build those probes belong to.
 3. Unzip them side by side, or put Brave in `/Applications`, and open Origin Trace.
 
-Origin Trace starts capture and an isolated Brave window. A session runs for
-one hour with the implemented capture categories, bounded request content,
-Canvas images, quiet mode, and Wasm dispatch. A page `debugger;` statement
-is ignored. **New Live Session…** records metadata only. What that pair
-includes is on the release page.
+Origin Trace opens on its workspace with a start panel. **Start Session**
+there starts capture and an isolated Brave window; **Continue Offline** keeps
+the stored evidence only. A session runs for one hour with the implemented
+capture categories, bounded request content, Canvas images, quiet mode, and
+Wasm dispatch. A page `debugger;` statement is ignored. Choose **Metadata
+only** in the panel to keep no request content. What that pair includes is on
+the release page.
 
 Both apps are ad-hoc signed and not notarized. Brave Browser Development is
 a workstation build from pinned sources, not a Brave Software release.

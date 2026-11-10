@@ -218,6 +218,11 @@ fetch("/getcaptcha");
       REB_JS_INVOCATION_SITE_STORE: stores.invocationSites,
       REB_AGENT_PROVIDER_BASE_URL: agentProviderURL,
       REB_AGENT_TRANSCRIPT_DIR: join(temporary, 'agent-transcripts'),
+      // No subscription CLI is found, so the Grok account line is the same on
+      // every machine, and none of the researcher's CLIs runs.
+      REB_AGENT_CLAUDE_CLI: join(temporary, 'no-claude-cli'),
+      REB_AGENT_GROK_CLI: join(temporary, 'no-grok-cli'),
+      REB_AGENT_CLI_DIR: join(temporary, 'agent-cli'),
       REB_RENDERED_UI_BACKEND_PID: String(backend.pid),
       REB_RENDERED_UI_FAILURE_URL: failureURL,
       REB_RENDERED_UI_FAILURE_BINARY: failureBinary,

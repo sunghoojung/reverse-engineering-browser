@@ -2328,6 +2328,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
       _ = try memorySample(ui, "open-off-\(size.name)")
       try await agentLayoutIsClean(ui, "off")
       try await ui.screenshot("agent-off-\(size.name)")
+      // Grok is subscription only; without its CLI the account line says so.
+      try await ui.click("[data-provider=\"grok\"]")
+      try await ui.waitUntil("__rebUiProbe.text('#agent-account-text').includes('Install the Grok CLI')", "the Grok account line did not show")
+      let grokLine = try await ui.value("document.querySelector('[data-auth=\"key\"]').hidden") as? Bool
+      XCTAssertEqual(grokLine, true, "Grok offers no API key path")
+      try await agentLayoutIsClean(ui, "grok subscription")
+      try await ui.screenshot("agent-grok-\(size.name)")
+      try await ui.click("[data-provider=\"claude\"]")
+      try await ui.waitUntil("__rebUiProbe.text('#agent-account-text').length > 0 && document.querySelector('[data-provider=\"claude\"]').getAttribute('aria-pressed') === 'true'", "Claude was not selected again")
       // Consent before anything starts.
       try await ui.click(".agent-switch")
       try await ui.waitUntil("__rebUiProbe.count('#agent-consent-accept') === 1", "the consent step did not show")

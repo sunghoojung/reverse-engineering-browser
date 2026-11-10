@@ -144,6 +144,17 @@ export async function checkAgentPanel() {
   assert.match(logNode.textContent, /get_events/);
   assert.equal(logNode.querySelector('img'), null, 'model markup is never instantiated');
   assert.match(logNode.textContent, /<img src=x onerror=alert\(1\)>/);
+  // A streamed reply keeps the blocks it drew; in pieces it must draw what the whole reply does.
+  const reply = 'Intro <b>x</b>\nmore\n\n# Head\n- one\n- two\n\n```json\n{"a": [1, "<i>"]}\n```\n1. after\n\n```js\nlet open = 1;';
+  for (let at = 0; at < reply.length; at += 7) {
+    emit({type: 'text', rowId: 'p1', turnId: 't', delta: reply.slice(at, at + 7)});
+    await settle();
+  }
+  emit({type: 'text', rowId: 'p2', turnId: 't', delta: reply});
+  await settle();
+  const rowMarkup = id => logNode.querySelector(`[data-row-id="${id}"]`).innerHTML;
+  assert.equal(rowMarkup('p1'), rowMarkup('p2'), 'a reply streamed in pieces draws as the whole reply does');
+  assert.equal(logNode.querySelector('b, i'), null);
   await settle();
   assert.match(logNode.textContent, /not verified/, 'an invented citation stays labeled plain text');
   assert.equal(logNode.querySelector('.agent-cite'), null);

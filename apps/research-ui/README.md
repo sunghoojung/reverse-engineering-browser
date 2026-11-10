@@ -403,8 +403,9 @@ shown when the agent is turned back on and are not resent to the model.
 
 The web view keeps 6 MiB of transcript rows and mounts only rows near the
 viewport once there are many; older rows leave with a visible label and **Load
-earlier** reads them back. `REB_AGENT_PROVIDER_BASE_URL` accepts only a loopback
-stand-in, for tests; it never redirects a real key.
+earlier** reads them back. An unchanged row keeps its node, and a streamed
+reply redraws only from its first changed block. `REB_AGENT_PROVIDER_BASE_URL`
+accepts only a loopback stand-in, for tests; it never redirects a real key.
 
 ### Checks
 

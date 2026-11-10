@@ -1389,6 +1389,8 @@ mod tests {
             "get_events",
             "get_artifacts",
             "inspect_wasm",
+            "get_wasm_functions",
+            "get_wasm_function_graph",
             "validate_evidence_package",
             "export_evidence_package",
             "compare_evidence_packages",

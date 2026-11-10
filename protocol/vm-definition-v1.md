@@ -196,6 +196,11 @@ not proof that runtime execution cannot reach that byte. Unresolved targets
 never become nodes. `cfg.complete` and `equivalence_proven` are always false.
 Static edges never merge with or masquerade as observed trace edges.
 
+The research UI groups these declared edges into basic blocks for drawing. That
+grouping is a display over this report: it adds no edge, resolves no target and
+leaves `cfg.complete` false. An imported observed path is a separately toggled
+layer with its own nodes, so gaps stay gaps and the two never share a graph.
+
 Every pseudocode line has `instruction_id`, `offset`, `text`, and `status`
 (`declared` or `unknown`). Lines appear both with their instruction and in the
 top-level ordered `pseudocode` list. They are a finite rendering of the table

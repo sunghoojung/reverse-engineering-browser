@@ -1812,6 +1812,45 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
   private var reloadStarted = false
 
+  // A captured dispatcher draws as a block graph with its limits on screen, and
+  // the keyboard moves through blocks and reveals the linear view.
+  @MainActor
+  func test25BlockGraphInSources() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem]", containing: "artifact 340")
+      try await ui.waitUntil("!document.querySelector('#source-graph').hidden", "Graph is offered for a captured WASM artifact")
+      try await ui.click("#source-graph")
+      try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '').includes('blocks')", timeout: 30, "the block graph did not finish laying out")
+      let evidence = try await ui.value("document.querySelector('#source-graph-host .block-graph-evidence').textContent") as? String ?? ""
+      XCTAssertEqual(evidence, "declared", "\(size.name): the header says declared")
+      let limits = try await ui.value("(() => { const box = document.querySelector('#source-graph-host .block-graph-limits'); const rect = box.getBoundingClientRect(); return {text: box.textContent, w: rect.width, right: rect.right, windowWidth: innerWidth}; })()") as? [String: Any] ?? [:]
+      XCTAssertTrue((limits["text"] as? String ?? "").contains("not a proof"), "\(size.name): the limit stays on screen: \(limits)")
+      XCTAssertGreaterThan(limits["w"] as? Double ?? 0, 40, "\(size.name): limits are not clipped away: \(limits)")
+      XCTAssertLessThanOrEqual(limits["right"] as? Double ?? 0, limits["windowWidth"] as? Double ?? 0, "\(size.name): limits stay on screen: \(limits)")
+      let view = try await ui.value("(() => { const q = s => document.querySelector(s), box = e => e.getBoundingClientRect(); const stage = box(q('#source-graph-host .block-graph-stage')), mini = box(q('#source-graph-host .block-graph-minimap')), foot = box(q('#source-graph-host .block-graph-foot')); return {zoom: parseInt(q('#source-graph-host .block-graph-zoom').textContent, 10), stageHeight: stage.height, miniInside: mini.width > 0 && mini.left >= stage.left && mini.right <= stage.right + 1 && mini.bottom <= stage.bottom + 1, footHeight: foot.height, textWindow: getComputedStyle(q('#source-window')).display}; })()") as? [String: Any] ?? [:]
+      XCTAssertGreaterThanOrEqual(view["zoom"] as? Int ?? 0, 90, "\(size.name): the graph opens at a readable zoom: \(view)")
+      XCTAssertEqual(view["miniInside"] as? Bool, true, "\(size.name): the minimap is visible inside the stage: \(view)")
+      XCTAssertLessThanOrEqual(view["footHeight"] as? Double ?? 99, 30, "\(size.name): the limits footer is one line: \(view)")
+      XCTAssertEqual(view["textWindow"] as? String, "none", "\(size.name): text-window rows are hidden in Graph mode: \(view)")
+      XCTAssertGreaterThanOrEqual(view["stageHeight"] as? Double ?? 0, 200, "\(size.name): the graph gets most of the height: \(view)")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) block graph")
+      try await assertInert(ui, "\(size.name) block graph")
+      try await ui.screenshot("block-graph-\(size.name)")
+      try await ui.click("#source-graph-host .block-graph-canvas")
+      try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
+      try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-selection')?.textContent ?? '').includes('loc_')", "arrow keys select a block")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("document.querySelector('#source-code [data-graph-reveal]') !== null", "Enter reveals the block offset in the linear view")
+      _ = try await ui.value("(document.documentElement.dataset.theme = 'light', 1)")
+      try await Task.sleep(nanoseconds: 600_000_000)
+      try await ui.screenshot("block-graph-light-\(size.name)")
+      _ = try await ui.value("(document.documentElement.dataset.theme = 'dark', 1)")
+      try await ui.click("#source-graph")
+    }
+  }
+
   // A web content process that stops leaves an empty window. The app reloads
   // its workspace once; if it stops again soon after, it asks before reloading.
   @MainActor

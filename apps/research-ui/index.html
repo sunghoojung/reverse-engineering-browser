@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="app.css">
     <link rel="stylesheet" href="xrefs_view.css">
     <link rel="stylesheet" href="entropy_map.css">
+    <link rel="stylesheet" href="block_graph.css">
   </head>
   <body>
     <div class="app">
@@ -248,6 +249,7 @@
                 <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" maxlength="512" placeholder="Find" aria-label="Find in source" title="Find retained text; Enter for next, Shift+Enter for previous (single-line literal, first 1000 matches)" /></label>
                 <button id="source-pretty" class="source-tool" type="button" aria-label="Pretty print source" title="Pretty print source" disabled>{ }</button>
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
+                <button id="source-graph" class="source-tool" type="button" aria-label="Show basic-block graph" aria-pressed="false" hidden>Graph</button>
                 <button id="source-map" class="source-tool" type="button" aria-label="Show artifact map" aria-pressed="false" hidden>Map</button>
                 <button id="investigation-decode-range" class="source-tool" type="button" title="First select an Original bytes link in Facts; this copies at most 64 KiB without running a transformation" disabled>Decode range</button>
                 <button id="source-facts-toggle" class="source-tool" type="button" aria-controls="source-facts-details" aria-expanded="false" disabled>Facts</button>
@@ -267,9 +269,12 @@
                 <p id="source-search-status" class="source-search-status" role="status"></p>
                 <div id="source-name-host" class="evidence-name-host"></div>
               </div>
+              <div id="source-view-split" class="source-view-split">
+              <div id="source-graph-host" class="block-graph" hidden></div>
               <div id="source-code-wrap" class="source-code-wrap" tabindex="0">
                 <div id="source-code-empty" class="source-empty">Select a JavaScript file, WASM module, source map, or approved response body.</div>
                 <code id="source-code" class="source-code" aria-label="Source content" hidden></code>
+              </div>
               </div>
               <section id="source-map-view" class="source-map-view" aria-label="Artifact map" hidden></section>
               <div class="source-editor-status">
@@ -806,6 +811,9 @@
     <script src="captured_export_formats.js"></script>
     <script src="vm_debugger.js"></script>
     <script src="vm_static.js"></script>
+    <!-- Loaded here as well so the page and the Worker share one script; it does work only inside the Worker. -->
+    <script src="block_graph_layout.js"></script>
+    <script src="block_graph.js"></script>
     <script src="vm_static_view.js"></script>
     <script src="vm_contextual.js"></script>
     <script src="vm_contextual_evidence.js"></script>

@@ -660,6 +660,10 @@
     const detail = element('details', 'agent-tool');
     if (row.openTool) detail.open = true;
     detail.addEventListener('toggle', () => {
+      // Restoring an open row above queues a toggle too. Acting on it would
+      // append a second result and rebuild every frame, so a click in the log
+      // would land on a replaced node. Only a change from the saved state counts.
+      if (detail.open === Boolean(row.openTool)) return;
       row.openTool = detail.open;
       if (detail.open) detail.append(toolDetail(row));
       else detail.querySelector('.agent-tool-detail')?.remove();

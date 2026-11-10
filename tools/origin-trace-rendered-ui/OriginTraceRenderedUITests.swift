@@ -2361,6 +2361,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
       // Every result the provider received is open for inspection.
       try await ui.click(".agent-tool summary")
       try await ui.waitUntil("__rebUiProbe.count('.agent-tool-detail') === 1", "the tool result did not open")
+      // An open result is drawn once and stays mounted. A log rebuilt every
+      // frame drops the next click in it, as the citation click below did.
+      try await ui.settle()
+      let steady = try await ui.value("(async () => { const row = document.querySelector('.agent-tool'); await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); }); return document.querySelector('.agent-tool') === row && __rebUiProbe.count('.agent-tool-detail') === 1; })()") as? Bool
+      XCTAssertEqual(steady, true, "an open tool result must not be rebuilt each frame")
       try await ui.screenshot("agent-tool-result-\(size.name)")
       try await ui.click(".agent-tool summary")
       // A verified citation opens the existing row.

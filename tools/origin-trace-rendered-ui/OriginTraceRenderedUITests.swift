@@ -2333,6 +2333,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("__rebUiProbe.text('#agent-account-text').includes('Install the Grok CLI')", "the Grok account line did not show")
       let grokLine = try await ui.value("document.querySelector('[data-auth=\"key\"]').hidden") as? Bool
       XCTAssertEqual(grokLine, true, "Grok offers no API key path")
+      // The whole instruction is readable: the line wraps instead of cutting.
+      let grokTextFits = try await ui.value("(() => { const node = document.querySelector('#agent-account-text'); const box = node.getBoundingClientRect(); return node.scrollWidth <= node.clientWidth && box.right <= document.querySelector('#agent-account').getBoundingClientRect().right + 0.5 && getComputedStyle(node).textOverflow !== 'ellipsis'; })()") as? Bool
+      XCTAssertEqual(grokTextFits, true, "the Grok account line is cut off at \(size.name)")
       try await agentLayoutIsClean(ui, "grok subscription")
       try await ui.screenshot("agent-grok-\(size.name)")
       try await ui.click("[data-provider=\"claude\"]")

@@ -138,11 +138,15 @@
 .agent-text-button:hover { color: var(--text); background: var(--panel-3); }
 .agent-hint { margin: 0; color: var(--faint); font: 10px/1.4 var(--sans); overflow-wrap: anywhere; }
 /* The payment line: the researcher's own key or their own subscription, and
- * what that needs next. Its status text cuts with an ellipsis; the title holds
- * all of it. */
-.agent-account { display: flex; align-items: center; gap: 6px; min-width: 0; }
+ * what that needs next. The status text gets its own full-width row and wraps,
+ * because a signed-out state ends in the command to run. Every cell is placed
+ * explicitly so a hidden button never moves the text. */
+.agent-account { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; grid-template-rows: auto auto; column-gap: 6px; row-gap: 4px; align-items: center; min-width: 0; }
 .agent-account[hidden] { display: none; }
-.agent-account-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 11px var(--sans); }
+.agent-account > .agent-segment { grid-row: 1; grid-column: 1; }
+.agent-account > #agent-key { grid-row: 1; grid-column: 3; }
+.agent-account > #agent-account-action { grid-row: 1; grid-column: 4; }
+.agent-account-text { grid-row: 2; grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; color: var(--faint); font: 11px/1.4 var(--sans); }
 .agent-account-text.agent-account-ready { color: var(--muted); }
 .agent-account .agent-key { height: 20px; padding: 0 8px; font-weight: 500; }
 .agent-segment-button[hidden] { display: none; }

@@ -287,13 +287,39 @@ it.
 - Keep captured evidence and credentials out of commits, logs, and shared
   artifacts.
 - The in-app agent is off by default and is turned on per session by an
-  explicit researcher action, after a disclosure of what leaves the machine.
-  While it is on, the question, researcher-pinned excerpts and the structural
-  results of the read-only tools the model calls (identifiers, counts, URLs
-  and hosts; no source, bytecode, disassembly or request bodies) go to the
-  selected model provider. Every tool call and its full result is shown in the
-  transcript. Provider keys stay in the macOS Keychain and are added by the
+  explicit researcher action, after a disclosure of what leaves the machine
+  and a choice of one of four permission levels: Read only (the default), Ask
+  for actions, Auto-approve actions and Full access. Below Full access, the
+  question, researcher-pinned excerpts and the structural results of the tools
+  the model calls (identifiers, counts, URLs and hosts; no source, bytecode,
+  disassembly or request bodies) go to the selected model provider. Read only
+  offers only read-only tools. Ask for actions runs each effectful tool only
+  after the researcher's **Allow once**; Auto-approve actions runs them without
+  asking. Every tool call and its full result is shown in the transcript at
+  every level. Provider keys stay in the macOS Keychain and are added by the
   native app; the web view never holds one.
+- Full access also lets the model read captured content through its tools and
+  start, drive and end its own visibly labeled live sessions. At this level
+  source, Wasm bytes and disassembly, VM bytecode, request and response bodies,
+  the researcher's Collection and Analyst drafts, local store paths and every
+  other content field of a tool result go to the provider. Choose it only when
+  the target's authorization and the provider's terms allow that data to leave
+  the machine. Cookie values and credential header values (withheld by header
+  name) are withheld at every level; other header values, such as `Location`
+  or `Referer`, are returned as captured and can still hold a secret. The
+  agent's own sessions can name request content, response media, canvas images
+  or invocation value digests only when the researcher also ticks a separate
+  sensitive-capture box, off by default and never remembered. The native app
+  confirms Auto-approve actions and Full access in its own sheet, decides every
+  tool call by the running level for every provider and CLI, remembers no level
+  above Ask for actions across launches, and lowers the level at once from the
+  dock menu; raising it goes back through consent. No level authorizes a
+  target, widens session scope or exempts the agent from this policy.
+- `reb-api mcp --permission read-only|ask|auto|full` applies the same levels to
+  a local coding agent connected through `scripts/reb-api-mcp.sh`. `full` (or
+  `--allow-content`) sends captured content to that client's model provider in
+  the same way, and `--allow-sensitive-capture` is the same separate consent
+  for sensitive options in the sessions it starts.
 - The agent can instead use the researcher's own subscription. A ChatGPT
   subscription signs in through OpenAI token sharing in the researcher's
   browser; its tokens and client registration stay in the macOS Keychain and
@@ -303,8 +329,8 @@ it.
   CLI's credentials. It starts the CLI with only the reb-api tool server and no
   built-in tools, user settings, hooks, memory or other MCP servers, refuses
   any other tool the CLI asks to run, and ends the CLI when the agent is
-  switched off. On these paths the same question, pins and structural tool
-  results go to that vendor under the terms of the researcher's plan, and the
+  switched off. On these paths the data the chosen level allows goes to that
+  vendor under the terms of the researcher's plan, and the
   vendor's CLI may keep its own local record of the session (Grok under
   `~/.grok/sessions`).
 
@@ -326,6 +352,8 @@ of the data-handling policy:
 | Agent-started sessions get request content, document-start permission, invocation sites and digests only when the start request names them, never inherited | [`session_launch.rs`](apps/origin-trace-backend/src/session_launch.rs) |
 | JavaScript invocation value digests opt-in | `scripts/run-live-session.sh`, the overlay's `native_probe_session.cc`, and the renderer sink, which refuses a digest without it |
 | App-started digest default and agent-session exclusion | `LiveSessionCoordinator.captureDefaults` (Content mode with saved sites only, explicit value wins) and `session_launch.rs` (agent sessions remove an inherited site file and digest switch, and arm only named sites from a private copy) |
+| In-app agent permission level and per-call decision for the LangGraph and CLI loops | `AgentToolGate` in [`AgentCore.swift`](apps/research-ui/macos/AgentCore.swift), the native confirmation in [`AgentBridge.swift`](apps/research-ui/macos/AgentBridge.swift) |
+| Tool server content, effect and sensitive-capture gates (`--permission`, `--allow-content`, `--allow-sensitive-capture`) | [`mcp.rs`](apps/origin-trace-backend/src/bin/reb_api/mcp.rs) |
 | Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |
 
 ## Related documents

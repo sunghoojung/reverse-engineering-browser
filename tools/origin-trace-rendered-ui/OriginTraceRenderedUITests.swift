@@ -330,7 +330,12 @@ struct Expectations: Decodable {
   let requestBodyTarget: String
   let requestBodyMarker: String
   let metadataBodyHost: String
+  let responseBodyHost: String
+  let responseBodyMarker: String
+  let headerValueMarker: String
+  let cookieValueMarker: String
   let invocationArtifactId: String
+  let minifiedArtifactId: String
   let invocationSiteStore: String
 
   static func load() throws -> Expectations {
@@ -635,14 +640,87 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // Columns fit the table, every cell with text has a tooltip, and Size, the
+  // waterfall and the timing strip follow the fixture's recorded lengths and
+  // timestamps. The strip and the column menu work from the keyboard.
+  @MainActor
+  private func assertTrafficColumns(_ ui: Harness, _ context: String) async throws {
+    // Only rows near the view are mounted, and item-3 is below the first screen.
+    try await ui.reveal("#screen-traffic .request-row", containing: "item-3.scroll.test")
+    let table = try await ui.json("""
+      (() => { const shown = cell => cell.getBoundingClientRect().width > 0;
+        const row = [...document.querySelectorAll('#screen-traffic .request-row')].find(node => node.innerText.includes('item-3.scroll.test'));
+        return {visible: [...document.querySelectorAll('#screen-traffic .request-head [data-column]')].filter(shown).map(cell => cell.dataset.column),
+          untitled: [...document.querySelectorAll('#screen-traffic .request-row [data-column]')].filter(cell => shown(cell) && cell.textContent.trim() && !cell.title).length,
+          footer: document.querySelector('#request-window-status').textContent,
+          bars: document.querySelectorAll('#request-overview .overview-bar').length,
+          size: row?.querySelector('.size-transfer')?.textContent ?? '', sizeTitle: row?.querySelector('.request-size')?.title ?? '',
+          waterfall: row?.querySelector('.waterfall-bar')?.getBoundingClientRect().width ?? -1}; })()
+      """)
+    print("RENDERED_UI_TRAFFIC_COLUMNS \(context) \(table)")
+    _ = try await ui.value("document.querySelector('#request-rows').scrollTop = 0")
+    try await ui.waitUntil("document.querySelector('#screen-traffic .request-row')?.getAttribute('aria-posinset') === '1'", "\(context): the list did not return to its first row")
+    let visible = table["visible"] as? [String] ?? []
+    XCTAssertEqual(visible.first, "name", "\(context): Name always shows")
+    XCTAssertTrue(visible.contains("status") && visible.contains("time"), "\(context): narrow tables drop low-priority columns first: \(visible)")
+    XCTAssertFalse(visible.contains("protocol"), "\(context): Protocol is hidden by default")
+    if context == "normal" {
+      XCTAssertEqual(visible, ["name", "status", "type", "method", "initiator", "size", "time", "waterfall"], "\(context): default columns")
+      XCTAssertGreaterThan(table["waterfall"] as? Double ?? 0, 0, "\(context): a completed request has a waterfall bar")
+    }
+    XCTAssertEqual(table["untitled"] as? Int, 0, "\(context): truncated cells have tooltips")
+    let footer = table["footer"] as? String ?? ""
+    XCTAssertTrue(footer.contains(" transferred · ") && footer.contains(" resources"), "\(context): footer totals: \(footer)")
+    XCTAssertEqual(table["bars"] as? Int, 120, "\(context): the timing strip has one bar per bucket")
+    // syntheticTransferSize(3) in evidence-fixture.mjs.
+    if visible.contains("size") {
+      XCTAssertEqual(table["size"] as? String, "1.0 kB", "\(context): Size shows the recorded transfer size")
+    }
+    XCTAssertTrue((table["sizeTitle"] as? String ?? "").contains("Transferred: 1,030 bytes."), "\(context): Size tooltip is exact: \(table)")
+    _ = try await ui.value("document.querySelector('#request-overview .overview-track').focus()")
+    try await ui.key(124, "\u{F703}", modifiers: [.function, .numericPad])
+    try await ui.waitUntil("state.trafficRange !== null", "\(context): Right Arrow on the timing strip did not select a time range")
+    try await assertLayout(ui, "#screen-traffic", "\(context) traffic time range")
+    try await ui.screenshot("traffic-time-range-\(context)")
+    try await ui.key(53, "\u{1B}")
+    try await ui.waitUntil("state.trafficRange === null", "\(context): Escape did not clear the time range")
+    _ = try await ui.value("document.querySelector('#screen-traffic .request-head [data-column=\"name\"]').focus()")
+    try await ui.key(109, "\u{F70D}", modifiers: [.shift, .function])
+    try await ui.waitUntil("document.activeElement?.closest('.column-menu') !== null", "\(context): Shift+F10 did not open the column menu")
+    // A column the width dropped is on but not shown, so the menu must not read as simply checked.
+    let droppedColumnsRead = try await ui.value("[...document.querySelectorAll('.column-menu [role=menuitemcheckbox]')].filter(item => (document.querySelector('.request-table')?.dataset.hiddenColumns ?? '').split(' ').includes(item.dataset.columnId) && item.getAttribute('aria-checked') === 'true').length") as? Int ?? -1
+    XCTAssertEqual(droppedColumnsRead, 0, "\(context): a column the width dropped must not read as shown")
+    try await assertLayout(ui, ".column-menu", "\(context) column menu")
+    try await ui.screenshot("traffic-column-menu-\(context)")
+    try await ui.key(53, "\u{1B}")
+    try await ui.waitUntil("document.querySelector('.column-menu') === null && document.activeElement?.dataset.column === 'name'",
+      "\(context): Escape did not close the column menu and return focus")
+  }
+
   @MainActor
   func test1TrafficRequests() async throws {
     let expected = try Expectations.load()
     for size in windowSizes {
       let ui = try await prepare(size)
       try await show(ui, "traffic")
-      let rows = try await ui.value("__rebUiProbe.count('#screen-traffic .request-row') > 0 && document.querySelectorAll('#screen-traffic .request-row').length") as? Int ?? 0
-      XCTAssertGreaterThanOrEqual(rows, expected.requestCount, "\(size.name): retained native requests are listed")
+      try await ui.waitUntil("__rebUiProbe.count('#screen-traffic .request-row') > 0", "no request rows rendered")
+      // Only rows in view and 8 on each side are mounted; every row names its place in the whole list.
+      let list = try await ui.json("""
+        (() => { const rows = [...document.querySelectorAll('#screen-traffic .request-row')];
+          return {mounted: rows.length, size: Number(rows[0].getAttribute('aria-setsize')),
+            view: Math.ceil(document.querySelector('#request-rows').clientHeight / rows[0].offsetHeight)}; })()
+        """)
+      XCTAssertGreaterThanOrEqual(list["size"] as? Int ?? 0, expected.requestCount, "\(size.name): retained native requests are listed: \(list)")
+      XCTAssertLessThanOrEqual(list["mounted"] as? Int ?? .max, (list["view"] as? Int ?? 0) + 17, "\(size.name): only rows near the view are mounted: \(list)")
+      // Rows and the footer come from the session request index, not the newest window.
+      let indexed = try await ui.value("state.trafficIndex?.answer()?.document.total ?? -1") as? Int ?? -1
+      XCTAssertGreaterThanOrEqual(indexed, expected.requestCount, "\(size.name): the request index lists the session")
+      let footer = try await ui.json("""
+        ({text: document.querySelector('#request-window-status').textContent, total: (\(indexed)).toLocaleString('en-US')})
+        """)
+      let total = footer["total"] as? String ?? "?"
+      XCTAssertTrue((footer["text"] as? String ?? "").hasPrefix("\(total) / \(total) requests"), "\(size.name): footer counts the session: \(footer)")
+      try await assertTrafficColumns(ui, size.name)
       // A stored session is a fixed set; none of its requests is new.
       let latestHidden = try await ui.value("document.querySelector('#request-latest').hidden") as? Bool
       XCTAssertEqual(latestHidden, true, "\(size.name): a stored session must not claim new requests")
@@ -653,7 +731,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let scroll = try await ui.json("__rebUiProbe.scrollToEnd('#screen-traffic .request-row', '.request-row')")
       XCTAssertEqual(scroll["scrollable"] as? Bool, true, "\(size.name): request list must scroll: \(scroll)")
       XCTAssertEqual(scroll["moved"] as? Bool, true, "\(size.name): request list scroll position must change")
-      XCTAssertEqual(scroll["lastVisible"] as? Bool, true, "\(size.name): last request must be reachable: \(scroll)")
+      try await ui.waitUntil("""
+        (() => { const last = [...document.querySelectorAll('#screen-traffic .request-row')].at(-1);
+          const list = document.querySelector('#request-rows').getBoundingClientRect(), rect = last?.getBoundingClientRect();
+          return Boolean(last) && last.getAttribute('aria-posinset') === last.getAttribute('aria-setsize') &&
+            rect.height > 0 && rect.top >= list.top - 1 && rect.bottom <= list.bottom + 1; })()
+        """, "\(size.name): the last request did not mount at the end of the list")
       try await ui.screenshot("traffic-list-scrolled-\(size.name)")
 
       try await ui.click("#screen-traffic .request-row", containing: "inert.test")
@@ -663,6 +746,17 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertInert(ui, "\(size.name) traffic detail")
       try await assertLayout(ui, "#screen-traffic", "\(size.name) traffic detail")
       try await ui.screenshot("traffic-detail-\(size.name)")
+
+      // End and Home reach the ends of the whole list through unmounted rows; focus follows the selection.
+      let ends: [(UInt16, String, String, String)] = [
+        (119, "\u{F72B}", "document.activeElement.getAttribute('aria-setsize')", "End"), (115, "\u{F729}", "'1'", "Home")]
+      for (code, character, position, name) in ends {
+        try await ui.key(code, character, modifiers: [.function])
+        try await ui.waitUntil("""
+          document.activeElement?.classList.contains('request-row') && document.activeElement.getAttribute('aria-selected') === 'true' &&
+            document.activeElement.getAttribute('aria-posinset') === \(position)
+          """, "\(size.name): \(name) did not select and focus that end of the list")
+      }
     }
   }
 
@@ -673,19 +767,64 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let ui = try await prepare(size)
       try await show(ui, "sources")
       // Native guest artifacts are an adapter JSON recipe and a bytecode buffer, not JavaScript.
-      for (artifact, icon, kind) in [("artifact 108", "AD", "guest adapter JSON"), ("artifact 109", "BC", "guest bytecode")] {
-        let find = "[...document.querySelectorAll('#source-tree [role=treeitem]')].find(row => row.innerText.includes('\(artifact)'))"
+      for (artifact, icon, kind) in [("108", "AD", "guest adapter JSON"), ("109", "BC", "guest bytecode")] {
+        let find = "document.querySelector('#source-tree [role=treeitem][data-artifact-id=\"\(artifact)\"]')"
         let shown = try await ui.value("\(find)?.querySelector('.source-file-icon')?.innerText ?? ''") as? String ?? ""
-        XCTAssertEqual(shown, icon, "\(size.name): \(artifact) is labeled \(icon), not JS")
-        // The kind detail is collapsed in the navigator; it is still the row's text.
-        let detail = try await ui.value("\(find)?.textContent ?? ''") as? String ?? ""
-        XCTAssertTrue(detail.contains(kind), "\(size.name): \(artifact) names its kind: \(detail)")
+        XCTAssertEqual(shown, icon, "\(size.name): artifact \(artifact) is labeled \(icon), not JS")
+        let label = try await ui.value("\(find)?.getAttribute('aria-label') ?? ''") as? String ?? ""
+        XCTAssertTrue(label.contains(kind), "\(size.name): artifact \(artifact) names its kind: \(label)")
       }
-      // The retained request body (artifact 320) is Traffic evidence, never a source file.
+      // The retained request body, header blocks and cookie lists (artifacts 320 to 324) are Traffic evidence, never source files.
       let tree = try await ui.value("document.querySelector('#source-tree')?.textContent ?? ''") as? String ?? ""
       XCTAssertFalse(tree.contains(expected.requestBodyHost), "\(size.name): Sources lists no request body origin: \(tree)")
-      XCTAssertFalse(tree.contains("artifact 320"), "\(size.name): Sources lists no request body file")
-      try await ui.click("#source-tree [role=treeitem]", containing: "artifact 303")
+      let rows = try await ui.json("""
+        (() => { const row = document.querySelector('#source-tree [data-artifact-id="303"]');
+          return {name: row?.querySelector('.source-tree-raw')?.textContent ?? 'missing', meta: row?.querySelector('.source-tree-meta')?.textContent ?? '',
+            groups: [...document.querySelectorAll('#source-tree [data-source-tree-kind="group"] .source-tree-raw')].map(node => node.textContent),
+            body: Boolean(document.querySelector('#source-tree [data-artifact-id="320"]'))}; })()
+        """)
+      XCTAssertEqual(rows["body"] as? Bool, false, "\(size.name): Sources lists no request body file")
+      XCTAssertFalse((rows["name"] as? String ?? "artifact").contains("artifact"), "\(size.name): file rows show plain names: \(rows)")
+      XCTAssertEqual(rows["meta"] as? String, "303", "\(size.name): the artifact ID is the muted meta column: \(rows)")
+      let groups = rows["groups"] as? [String] ?? []
+      XCTAssertTrue(groups.contains("Dynamic (eval / new Function)") && groups.contains("WebAssembly"), "\(size.name): eval and Wasm sources have their own groups: \(groups)")
+      // The keyboard reaches the whole tree: End, Home and type-ahead, with visible focus.
+      let rowIndex = "Number(document.activeElement?.style.getPropertyValue('--source-row') ?? -1)"
+      _ = try await ui.value("document.querySelector('#source-tree [role=treeitem][tabindex=\"0\"]').focus({focusVisible:true})")
+      try await ui.key(119, "\u{F72B}", modifiers: [.function])
+      let last = try await ui.value("\(rowIndex) === document.querySelector('#source-tree .source-tree-canvas').offsetHeight / 24 - 1") as? Bool
+      XCTAssertEqual(last, true, "\(size.name): End reaches the last tree row")
+      let endFocus = try await ui.json("__rebUiProbe.focusState()")
+      XCTAssertEqual(endFocus["focusVisible"] as? Bool, true, "\(size.name): the focused tree row shows keyboard focus: \(endFocus)")
+      XCTAssertEqual(endFocus["inViewport"] as? Bool, true, "\(size.name): End scrolls the last row into view: \(endFocus)")
+      try await ui.key(115, "\u{F729}", modifiers: [.function])
+      let home = try await ui.value("\(rowIndex)") as? Int
+      XCTAssertEqual(home, 0, "\(size.name): Home reaches the first tree row")
+      // PageDown moves focus, so the focused row never stays behind out of view.
+      try await ui.key(121, "\u{F72D}", modifiers: [.function])
+      let paged = try await ui.value("\(rowIndex)") as? Int ?? 0
+      XCTAssertGreaterThan(paged, 0, "\(size.name): PageDown moves focus down the tree")
+      let pageFocus = try await ui.json("__rebUiProbe.focusState()")
+      XCTAssertEqual(pageFocus["inViewport"] as? Bool, true, "\(size.name): PageDown keeps the focused row in view: \(pageFocus)")
+      try await ui.key(115, "\u{F729}", modifiers: [.function])
+      try await ui.type("w")
+      let typed = try await ui.value("document.activeElement?.querySelector('.source-tree-raw')?.textContent ?? ''") as? String ?? ""
+      XCTAssertTrue(typed.lowercased().hasPrefix("w"), "\(size.name): type-ahead moves to a row starting with w: \(typed)")
+      // The filter keeps matching files and their folders; Escape restores the tree.
+      try await ui.click("#source-tree-filter")
+      try await ui.type("glue")
+      let filtered = try await ui.json("""
+        ({files: [...document.querySelectorAll('#source-tree [data-artifact-id]')].map(row => row.dataset.artifactId),
+          origin: [...document.querySelectorAll('#source-tree [data-source-tree-kind="origin"] .source-tree-raw')].map(node => node.textContent)})
+        """)
+      XCTAssertEqual(filtered["files"] as? [String], [expected.invocationArtifactId], "\(size.name): the filter keeps only matching files: \(filtered)")
+      XCTAssertEqual(filtered["origin"] as? [String], ["hcaptcha.test"], "\(size.name): a match keeps its origin: \(filtered)")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) sources filter")
+      try await ui.screenshot("sources-tree-filter-\(size.name)")
+      try await ui.key(53, "\u{1B}")
+      let cleared = try await ui.value("document.querySelector('#source-tree-filter').value === '' && document.querySelectorAll('#source-tree [data-artifact-id]').length > 1") as? Bool
+      XCTAssertEqual(cleared, true, "\(size.name): Escape clears the filter and restores the tree")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"303\"]")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('retainedLine')", "retained source did not render")
       let source = try await ui.value("document.querySelector('#source-code').innerText") as? String ?? ""
       XCTAssertTrue(source.contains(expected.hostileSourceMarker), "\(size.name): captured markup shows as source text")
@@ -1087,15 +1226,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
     for id in ["websocket-inspector", "runtime-hook-traffic", "request-memory-pivot", "screen-memory", "screen-experiments",
       "open-api-catalog", "api-catalog", "passive-security", "traffic-capture-export", "request-search-scope",
-      "inspector-tab-payload", "inspector-tab-preview", "inspector-tab-response", "inspector-tab-compare", "traffic-comparison",
+      "inspector-tab-compare", "traffic-comparison",
       "screen-field-provenance", "decoder-field-origin"] {
       let count = try await ui.value("document.querySelectorAll('#\(id)').length") as? Int ?? -1
       XCTAssertEqual(count, 0, "#\(id) must be removed, not hidden")
     }
   }
 
-  // Native rows carry no headers or bodies; guest bytecode is binary. Traffic,
-  // Export and Sources must offer only what that evidence supports.
+  // Native rows carry header, cookie and response body records; guest bytecode
+  // is binary. Traffic, Export and Sources offer only what that evidence supports.
   @MainActor
   func test7NativeOnlyTrafficExportAndBytecode() async throws {
     let expected = try Expectations.load()
@@ -1105,13 +1244,18 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#screen-traffic .request-row", containing: "item-3.scroll.test")
       try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
       let tabs = try await ui.value("[...document.querySelectorAll('#screen-traffic .inspector-tab')].map(tab => tab.innerText.trim()).join('|')") as? String ?? ""
-      XCTAssertEqual(tabs, "General|Initiator|Timing|Signals|Evidence", "\(size.name): Traffic offers no body, Compare or header-pane tabs")
+      XCTAssertEqual(tabs, "General|Headers|Payload|Preview|Response|Cookies|Initiator|Timing|Signals|Evidence", "\(size.name): Traffic offers native header, payload, response and cookie tabs, no Compare tab")
       let search = try await ui.value("document.querySelectorAll('#request-search-scope, #request-search-status, #traffic-comparison').length") as? Int ?? -1
       XCTAssertEqual(search, 0, "\(size.name): content search and comparison are removed, not hidden")
       let general = try await ui.value("document.querySelector('#exchange-inspector').innerText") as? String ?? ""
-      XCTAssertTrue(general.contains("Request and response headers and response bodies are not captured"), "\(size.name): native coverage is explicit: \(general)")
+      XCTAssertTrue(general.contains("Response bodies are on the Response tab."), "\(size.name): native coverage is explicit: \(general)")
       let panes = try await ui.value("document.querySelectorAll('#exchange-inspector .exchange-pane').length") as? Int ?? -1
       XCTAssertEqual(panes, 0, "\(size.name): no permanently empty request/response header panes")
+      // A horizontal scrollbar takes height from the strip and covers the tabs.
+      let strip = try await ui.json("(() => { const strip = document.querySelector('#screen-traffic .inspector-tabs'); return {client: strip.clientHeight, content: strip.querySelector('.inspector-tab').offsetHeight}; })()")
+      XCTAssertGreaterThanOrEqual(strip["client"] as? Int ?? 0, strip["content"] as? Int ?? 1, "\(size.name): the inspector tabs are not clipped: \(strip)")
+      let hiddenTabs = try await ui.value("(() => { const box = document.querySelector('#screen-traffic .inspector-tabs').getBoundingClientRect(); return [...document.querySelectorAll('#screen-traffic .inspector-tab')].filter(tab => { const rect = tab.getBoundingClientRect(); return rect.left < box.left || rect.right > box.right + 1 || rect.bottom > box.bottom + 1; }).map(tab => tab.innerText.trim()).join('|'); })()") as? String ?? "unknown"
+      XCTAssertEqual(hiddenTabs, "", "\(size.name): every inspector tab is inside the strip")
       try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) traffic general")
       try await ui.screenshot("traffic-general-\(size.name)")
 
@@ -1135,7 +1279,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("!document.querySelector('#captured-export-dialog').open", "Escape did not close export")
 
       try await show(ui, "sources")
-      try await ui.click("#source-tree [role=treeitem]", containing: "artifact 109")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"109\"]")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('00000000')", "golden guest bytecode did not render as hex")
       let golden = try await ui.value("document.querySelector('#source-code').innerText") as? String ?? ""
       XCTAssertTrue(golden.contains("00000000  00 42 00 00"), "\(size.name): real guest bytecode shows its bytes: \(golden)")
@@ -1144,7 +1288,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let language = try await ui.value("document.querySelector('#source-language').innerText") as? String
       XCTAssertEqual(language, "Guest bytecode hex", "\(size.name): bytecode is labeled as a hex view")
 
-      try await ui.click("#source-tree [role=treeitem]", containing: "artifact 310")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"310\"]")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('3c 69 6d 67')", "hostile bytecode did not render as hex")
       let hostile = try await ui.value("document.querySelector('#source-code').innerText") as? String ?? ""
       let prefix = String(expected.hostileBytecodeMarkup.prefix(16))
@@ -1166,8 +1310,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // A renderer record that no initiator edge reached reads as its own, weaker
   // class: after the gap it did not close, named as having no recorded link,
   // and reported beside coverage rather than inside it.
-  // A content-session POST shows its exact target and retained body as text;
-  // a metadata-only POST says why no bytes exist. Markup in either never runs.
+  // A content-session POST shows its query and retained JSON body on Payload as
+  // a keyboard tree and as source; a metadata-only POST says why no bytes
+  // exist. Markup in either never runs.
   @MainActor
   func test16RequestTargetAndBody() async throws {
     let expected = try Expectations.load()
@@ -1177,34 +1322,238 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#screen-traffic .request-row", containing: expected.requestBodyHost)
       try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
       let rowText = try await ui.value("document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"]')?.innerText ?? ''") as? String ?? ""
-      XCTAssertTrue(rowText.contains(expected.requestBodyTarget), "\(size.name): the row shows the captured path and query: \(rowText)")
-      try await ui.waitUntil("document.querySelector('#exchange-inspector .traffic-body-text') !== null", "retained body did not load")
-      let body = try await ui.json("""
-        ({text: document.querySelector('#exchange-inspector .traffic-body-text').innerText,
-          section: document.querySelector('#exchange-inspector .traffic-body').innerText,
-          state: document.querySelector('#exchange-inspector .traffic-body').dataset.state})
+      // The row names the last path segment and the query; the tooltip has the full URL.
+      let path = expected.requestBodyTarget.split(separator: "?", maxSplits: 1).first.map(String.init) ?? ""
+      let shortName = (path.split(separator: "/").last.map(String.init) ?? "") + expected.requestBodyTarget.dropFirst(path.count)
+      XCTAssertTrue(rowText.contains(shortName), "\(size.name): the row shows the captured last segment and query: \(rowText)")
+      let nameTitle = try await ui.value("document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"] .request-name')?.title ?? ''") as? String ?? ""
+      XCTAssertTrue(nameTitle.contains(expected.requestBodyTarget), "\(size.name): the name tooltip has the full URL: \(nameTitle)")
+      try await ui.click("#inspector-tab-payload")
+      try await ui.waitUntil("document.querySelector('#payload-inspector .traffic-payload-tree [role=\"treeitem\"]') !== null", "retained body did not load")
+      let payload = try await ui.json("""
+        ({tree: document.querySelector('#payload-inspector .traffic-payload-tree').innerText,
+          query: document.querySelector('#payload-inspector [data-section="query"]').innerText,
+          state: document.querySelector('#payload-inspector [data-section="payload"]').dataset.state,
+          detailsOpen: document.querySelector('#payload-inspector .traffic-payload-details').open})
         """)
-      XCTAssertEqual(body["state"] as? String, "captured", "\(size.name): body record state")
-      XCTAssertTrue((body["text"] as? String ?? "").contains(expected.requestBodyMarker), "\(size.name): captured markup is literal text")
-      let section = body["section"] as? String ?? ""
-      for phrase in ["Retained in full", "application/json", "SHA-256", "In-memory bytes"] {
-        XCTAssertTrue(section.contains(phrase), "\(size.name): body section names \(phrase): \(section)")
+      XCTAssertEqual(payload["state"] as? String, "captured", "\(size.name): body record state")
+      let tree = payload["tree"] as? String ?? ""
+      let markup = expected.requestBodyMarker.components(separatedBy: "\"").first ?? expected.requestBodyMarker
+      XCTAssertTrue(tree.contains("sitekey") && tree.contains(markup), "\(size.name): captured markup is literal text: \(tree)")
+      let query = payload["query"] as? String ?? ""
+      let marker = expected.requestBodyTarget.split(separator: "=", maxSplits: 1).last.map(String.init) ?? ""
+      XCTAssertTrue(query.contains(marker), "\(size.name): the decoded query parameter is literal text: \(query)")
+      XCTAssertEqual(payload["detailsOpen"] as? Bool, false, "\(size.name): Capture details starts collapsed")
+      try await assertInert(ui, "\(size.name) request payload")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) request payload")
+      try await ui.screenshot("traffic-payload-parsed-\(size.name)")
+
+      // The tree is one Tab stop; arrow keys collapse, expand and move with a visible ring.
+      _ = try await ui.value("document.querySelector('#payload-inspector .traffic-payload-tree [tabindex=\"0\"]').focus({focusVisible:true})")
+      let expanded = "document.activeElement?.getAttribute('aria-expanded') ?? ''"
+      try await ui.key(123, "\u{F702}", modifiers: [.function, .numericPad])
+      let collapsed = try await ui.value(expanded) as? String
+      XCTAssertEqual(collapsed, "false", "\(size.name): Left collapses the root")
+      try await ui.key(124, "\u{F703}", modifiers: [.function, .numericPad])
+      let reopened = try await ui.value(expanded) as? String
+      XCTAssertEqual(reopened, "true", "\(size.name): Right expands the root")
+      try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
+      let focus = try await ui.json("__rebUiProbe.focusState()")
+      let selected = try await ui.value("document.activeElement?.getAttribute('aria-selected') ?? ''") as? String
+      XCTAssertEqual(selected, "true", "\(size.name): Down selects the next row: \(focus)")
+      XCTAssertTrue((focus["element"] as? String ?? "").contains("sitekey"), "\(size.name): Down moves to the first key: \(focus)")
+      XCTAssertEqual(focus["focusVisible"] as? Bool, true, "\(size.name): the tree row shows keyboard focus: \(focus)")
+      XCTAssertNotEqual(focus["indicator"] as? String, "none", "\(size.name): \(focus)")
+      try await ui.screenshot("traffic-payload-keyboard-\(size.name)")
+
+      try await ui.click("#payload-inspector .traffic-payload-details > summary")
+      let details = try await ui.value("document.querySelector('#payload-inspector .traffic-payload-details').innerText") as? String ?? ""
+      for phrase in ["Retained in full", "application/json", "SHA-256", "In-memory bytes", "Artifact ID"] {
+        XCTAssertTrue(details.contains(phrase), "\(size.name): Capture details names \(phrase): \(details)")
       }
-      try await assertInert(ui, "\(size.name) request body")
-      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) request body")
-      try await ui.screenshot("traffic-request-body-\(size.name)")
+      XCTAssertFalse(details.contains("artifact URL"), "\(size.name): the duplicate URL row is gone: \(details)")
+      try await ui.click("#payload-inspector button", containing: "Source")
+      try await ui.waitUntil("document.querySelector('#payload-inspector .traffic-payload-lines .traffic-payload-line') !== null", "payload source did not render")
+      // Raw text shows until the backend's layout arrives.
+      try await ui.waitUntil("document.querySelector('#payload-inspector .traffic-payload-lines').innerText.includes('\"sitekey\": \"site-key\"')", "\(size.name): payload source was not laid out")
+      let source = try await ui.value("document.querySelector('#payload-inspector .traffic-payload-lines').innerText") as? String ?? ""
+      XCTAssertTrue(source.contains("\"sitekey\": \"site-key\""), "\(size.name): Source is pretty-printed: \(source.prefix(200))")
+      try await assertInert(ui, "\(size.name) request payload source")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) request payload source")
+      try await ui.screenshot("traffic-payload-source-\(size.name)")
+      try await ui.click("#payload-inspector button", containing: "Parsed")
 
       try await ui.click("#screen-traffic .request-row", containing: expected.metadataBodyHost)
       try await ui.waitUntil(
-        "(document.querySelector('#exchange-inspector .traffic-body')?.innerText ?? '').includes('content capture was off')",
+        "(document.querySelector('#payload-inspector [data-section=\"payload\"]')?.innerText ?? '').includes('content capture was off')",
         "metadata-only body state did not render")
-      let metadata = try await ui.value("document.querySelector('#exchange-inspector').innerText") as? String ?? ""
+      let metadata = try await ui.value("document.querySelector('#payload-inspector').innerText") as? String ?? ""
       XCTAssertTrue(metadata.contains("application/x-www-form-urlencoded"), "\(size.name): metadata session keeps the type: \(metadata)")
-      XCTAssertTrue(metadata.contains("host only"), "\(size.name): metadata session stays host-only: \(metadata)")
-      let pre = try await ui.value("document.querySelectorAll('#exchange-inspector .traffic-body-text').length") as? Int ?? -1
-      XCTAssertEqual(pre, 0, "\(size.name): no body text exists for a metadata-only request")
-      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) metadata-only body")
-      try await ui.screenshot("traffic-request-body-metadata-\(size.name)")
+      XCTAssertTrue(metadata.contains("recorded only in content capture sessions"), "\(size.name): metadata session stays host-only: \(metadata)")
+      let views = try await ui.value("document.querySelectorAll('#payload-inspector .traffic-payload-view').length") as? Int ?? -1
+      XCTAssertEqual(views, 0, "\(size.name): no payload view exists for a metadata-only request")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) metadata-only payload")
+      try await ui.screenshot("traffic-payload-metadata-\(size.name)")
+    }
+  }
+
+  // A retained response body reads as inert, colored text on Response and as a
+  // JSON tree on Preview, with the keyboard reaching both tabs.
+  @MainActor
+  func test24ResponseAndPreviewTabs() async throws {
+    let expected = try Expectations.load()
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      try await ui.click("#screen-traffic .request-row", containing: expected.responseBodyHost)
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      try await ui.click("#inspector-tab-response")
+      try await ui.waitUntil("document.querySelector('#response-inspector .traffic-response-code') !== null", "retained response did not load")
+      let response = try await ui.json("""
+        ({text: document.querySelector('#response-inspector .traffic-response-code').innerText,
+          panel: document.querySelector('#response-inspector').innerText,
+          state: document.querySelector('#response-inspector').dataset.state,
+          colored: document.querySelectorAll('#response-inspector .traffic-response-code .syntax-string').length,
+          labelled: document.querySelector('#response-inspector').getAttribute('aria-labelledby')})
+        """)
+      XCTAssertEqual(response["state"] as? String, "captured", "\(size.name): response body record state")
+      XCTAssertEqual(response["labelled"] as? String, "inspector-tab-response")
+      // Response shows the JSON source and Preview quotes strings, so the marker's quotes stay escaped.
+      let escapedMarker = expected.responseBodyMarker.replacingOccurrences(of: "\"", with: "\\\"")
+      XCTAssertTrue((response["text"] as? String ?? "").contains(escapedMarker), "\(size.name): captured markup is literal text")
+      XCTAssertGreaterThan(response["colored"] as? Int ?? 0, 0, "\(size.name): JSON strings are colored")
+      for phrase in ["Retained in full", "application/json", "SHA-256", "Pretty print", "Wrap", "Hex", "Copy"] {
+        XCTAssertTrue((response["panel"] as? String ?? "").contains(phrase), "\(size.name): Response names \(phrase)")
+      }
+      try await assertInert(ui, "\(size.name) response body")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) response body")
+      try await ui.screenshot("traffic-response-\(size.name)")
+
+      try await ui.click("#response-inspector [data-control='pretty']")
+      try await ui.waitUntil("document.querySelectorAll('#response-inspector .traffic-response-line').length > 3", "pretty print did not split the body")
+      // The shared code view: the backend Oxc layout, and a clicked token names its exact raw range.
+      let notes = try await ui.value("document.querySelector('#response-inspector').innerText") as? String ?? ""
+      XCTAssertFalse(notes.contains("Whitespace layout"), "\(size.name): JSON responses use the Oxc layout: \(notes)")
+      try await ui.click("#response-inspector .traffic-response-code .syntax-key")
+      try await ui.waitUntil("/ · raw \\d+:\\d+–\\d+:\\d+ \\(offsets \\d+–\\d+\\)$/.test(document.querySelector('#response-inspector .code-view-raw')?.textContent ?? '')",
+        "\(size.name): a laid-out token did not report its raw range")
+      try await assertInert(ui, "\(size.name) pretty response")
+
+      // Left arrow from Response moves to Preview, as on every inspector tab.
+      _ = try await ui.value("(document.querySelector('#inspector-tab-response').focus(), true)")
+      try await ui.key(123, "\u{F702}", modifiers: [.function, .numericPad])
+      try await ui.waitUntil("document.activeElement?.id === 'inspector-tab-preview'", "arrow key did not reach Preview")
+      try await ui.waitUntil("document.querySelector('#response-inspector .traffic-payload-tree') !== null", "JSON preview did not render")
+      // The tree opens at the root; the captured string is two levels down.
+      for key in ["tasks:", "0:"] {
+        try await ui.click("#response-inspector .traffic-payload-tree [role=\"treeitem\"]", containing: key)
+      }
+      try await ui.waitUntil("document.querySelector('#response-inspector .traffic-payload-tree').textContent.includes('note')", "\(size.name): the nested preview row did not open")
+      let preview = try await ui.value("document.querySelector('#response-inspector .traffic-payload-tree').textContent") as? String ?? ""
+      XCTAssertTrue(preview.contains("challenge"), "\(size.name): the tree names its keys: \(preview)")
+      XCTAssertTrue(preview.contains(escapedMarker), "\(size.name): tree strings are literal text")
+      try await assertInert(ui, "\(size.name) response preview")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) response preview")
+      try await ui.screenshot("traffic-preview-\(size.name)")
+      try await ui.click("#inspector-tab-general")
+    }
+  }
+
+  // protocol/native-network-v3.md: the Headers tab of a content-session request
+  // shows General, response and request headers read from retained blocks;
+  // markup in a value is literal text. A metadata-only request says why none exist.
+  @MainActor
+  func test25RequestHeaders() async throws {
+    let expected = try Expectations.load()
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      try await ui.click("#screen-traffic .request-row", containing: expected.requestBodyHost)
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      try await ui.click("#inspector-tab-headers")
+      try await ui.waitUntil("document.querySelectorAll('#headers-inspector .traffic-header-row').length === 6", "retained header blocks did not load")
+      let headers = try await ui.json("""
+        ({titles: [...document.querySelectorAll('#headers-inspector summary')].map(node => node.firstChild.textContent),
+          text: document.querySelector('#headers-inspector').innerText,
+          selected: document.querySelector('#inspector-tab-headers').getAttribute('aria-selected'),
+          clipped: [...document.querySelectorAll('#headers-inspector .traffic-header-row')].some(row => row.scrollWidth > row.clientWidth + 1)})
+        """)
+      XCTAssertEqual(headers["titles"] as? [String] ?? [], ["General", "Response headers (200)", "Request headers"], "\(size.name): \(headers)")
+      XCTAssertEqual(headers["selected"] as? String, "true", "\(size.name): the Headers tab is selected")
+      XCTAssertEqual(headers["clipped"] as? Bool, false, "\(size.name): header rows are not clipped")
+      let text = headers["text"] as? String ?? ""
+      for phrase in ["127.0.0.1:8443", "set-cookie", ":method", expected.headerValueMarker] {
+        XCTAssertTrue(text.contains(phrase), "\(size.name): Headers shows \(phrase): \(text)")
+      }
+      XCTAssertFalse(text.contains("Provisional headers are shown"), "\(size.name): the network block replaces provisional headers")
+      try await assertInert(ui, "\(size.name) request headers")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) request headers")
+      try await ui.screenshot("traffic-request-headers-\(size.name)")
+
+      try await ui.click("#headers-inspector .traffic-headers-tools button", containing: "Raw")
+      try await ui.waitUntil("document.querySelector('#headers-inspector .traffic-headers-raw') !== null", "Raw view did not open")
+      let raw = try await ui.value("document.querySelector('#headers-inspector .traffic-headers-raw').innerText") as? String ?? ""
+      XCTAssertTrue(raw.contains("set-cookie: hc=1; Secure; HttpOnly"), "\(size.name): Raw shows the exact block: \(raw)")
+      try await ui.screenshot("traffic-request-headers-raw-\(size.name)")
+
+      try await ui.click("#screen-traffic .request-row", containing: expected.metadataBodyHost)
+      try await ui.waitUntil(
+        "(document.querySelector('#headers-inspector')?.innerText ?? '').includes('recorded only in content capture sessions')",
+        "metadata-only headers state did not render")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) metadata-only headers")
+      try await ui.click("#inspector-tab-general")
+    }
+  }
+
+  // "Cookies" in protocol/native-network-v3.md: the Cookies tab shows the
+  // response and request cookies of retained lists, filtered-out request
+  // cookies on request, a blocked Set-Cookie's reason, and a name's
+  // provenance to the script that wrote it. Markup in a value is literal text.
+  @MainActor
+  func test26RequestCookies() async throws {
+    let expected = try Expectations.load()
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      try await ui.click("#screen-traffic .request-row", containing: expected.requestBodyHost)
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      try await ui.click("#inspector-tab-cookies")
+      try await ui.waitUntil("document.querySelectorAll('#cookies-inspector .traffic-cookie-table tbody tr').length === 3", "retained cookie lists did not load")
+      let cookies = try await ui.json("""
+        ({titles: [...document.querySelectorAll('#cookies-inspector summary')].map(node => node.firstChild.textContent),
+          text: document.querySelector('#cookies-inspector').innerText,
+          selected: document.querySelector('#inspector-tab-cookies').getAttribute('aria-selected'),
+          blocked: document.querySelector('#cookies-inspector .traffic-cookie-blocked .traffic-cookie-col-blocked')?.title ?? '',
+          tooltip: document.querySelector('#cookies-inspector .traffic-cookie-blocked .traffic-cookie-col-value')?.title ?? ''})
+        """)
+      XCTAssertEqual(cookies["titles"] as? [String] ?? [], ["Response cookies", "Request cookies"], "\(size.name): \(cookies)")
+      XCTAssertEqual(cookies["selected"] as? String, "true", "\(size.name): the Cookies tab is selected")
+      let text = cookies["text"] as? String ?? ""
+      for phrase in ["hc", "sid", "track", "Show filtered out request cookies (1)", "Partition Key Site"] {
+        XCTAssertTrue(text.contains(phrase), "\(size.name): Cookies shows \(phrase): \(text)")
+      }
+      XCTAssertFalse(text.contains("pref"), "\(size.name): filtered-out cookies stay hidden until asked for")
+      XCTAssertTrue((cookies["blocked"] as? String ?? "").contains("SameSite=None without Secure"), "\(size.name): \(cookies)")
+      XCTAssertEqual(cookies["tooltip"] as? String, expected.cookieValueMarker, "\(size.name): the full value is the tooltip")
+      try await assertInert(ui, "\(size.name) request cookies")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) request cookies")
+      try await ui.screenshot("traffic-request-cookies-\(size.name)")
+
+      try await ui.click("#cookies-inspector .traffic-cookie-filter input")
+      try await ui.waitUntil("(document.querySelector('#cookies-inspector')?.innerText ?? '').includes('samesite_strict')", "filtered-out cookies did not show")
+      try await ui.click("#cookies-inspector .traffic-cookie-name", containing: "sid")
+      try await ui.waitUntil("(document.querySelector('#cookies-inspector .traffic-cookie-provenance')?.innerText ?? '').includes('the value document.cookie set wrote')", "provenance did not link the script write")
+      let provenance = try await ui.value("document.querySelector('#cookies-inspector .traffic-cookie-provenance').innerText") as? String ?? ""
+      XCTAssertTrue(provenance.contains("script 77 at character 1234"), "\(size.name): \(provenance)")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) cookie provenance")
+      try await ui.screenshot("traffic-cookie-provenance-\(size.name)")
+      try await ui.click("#cookies-inspector .traffic-cookie-provenance button", containing: "Close")
+
+      try await ui.click("#screen-traffic .request-row", containing: expected.metadataBodyHost)
+      try await ui.waitUntil(
+        "(document.querySelector('#cookies-inspector')?.innerText ?? '').includes('recorded only in content capture sessions')",
+        "metadata-only cookies state did not render")
+      try await ui.click("#inspector-tab-general")
     }
   }
 
@@ -1369,11 +1718,14 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let ui = try await prepare(size)
       try await clearSavedSites(ui)
       try await show(ui, "sources")
-      try await ui.click("#source-tree [role=treeitem]", containing: "artifact \(expected.invocationArtifactId)")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"\(expected.invocationArtifactId)\"]")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('Mk().then')", "\(size.name): glue.js did not render")
       try await ui.waitUntil("!document.querySelector('#source-track-calls').disabled", "\(size.name): Track calls stayed disabled on an original JavaScript artifact")
       // The default position is top-level code, which is refused with its reason.
+      // Track calls and Go to line are in the toolbar's More menu.
+      try await ui.click("#source-more > summary")
       try await ui.click("#source-track-calls")
+      try await ui.waitUntil("!document.querySelector('#source-more').open", "\(size.name): the More menu stayed open after an action")
       try await ui.waitUntil("(document.querySelector('#invocation-site-status')?.innerText ?? '').includes('top-level script code')",
         "\(size.name): top-level code was not refused")
       // A name typed and submitted with the keyboard; two definitions are refused.
@@ -1400,6 +1752,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let savedStatus = try await ui.value("document.querySelector('#invocation-site-status').innerText") as? String ?? ""
       XCTAssertTrue(savedStatus.contains("not the open page"), "\(size.name): saving says tracking starts with the next capture")
       // Line 2 at the awb( call names the then-callback around it.
+      try await ui.click("#source-more > summary")
+      try await ui.click("#source-goto")
+      try await ui.waitUntil("document.activeElement?.id === 'source-window-line'", "\(size.name): Go to line did not focus its line field")
       _ = try await ui.webView.callAsyncJavaScript(
         """
         const line = document.querySelector('#source-window-line'), column = document.querySelector('#source-window-column');
@@ -1407,6 +1762,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
         return true;
         """, contentWorld: .page)
       try await ui.click("#source-window button[type=submit]")
+      try await ui.waitUntil("document.querySelector('#source-window').hidden", "\(size.name): Go to line stayed open after Go")
+      try await ui.click("#source-more > summary")
       try await ui.click("#source-track-calls")
       try await ui.waitUntil("(document.querySelector('#invocation-site-status')?.innerText ?? '').includes('Saved the function at line 2')",
         "\(size.name): the function at the position was not saved")
@@ -1432,6 +1789,66 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertLayout(ui, "#source-sidebar", "\(size.name) track calls saved")
       try await revealAndAssertFullyVisible(ui, ".invocation-sites-list", "\(size.name) saved list")
       try await ui.screenshot("sources-track-calls-saved-\(size.name)")
+    }
+  }
+
+  // A one-line source map opens pretty-printed: the gutter numbers formatted
+  // lines, a later window keeps its colors, Cmd+F and Ctrl+G reach Find and
+  // Go to line, and the status-bar toggle shows the captured line (#433).
+  @MainActor
+  func test18bMinifiedSourceOpensPrettyPrinted() async throws {
+    let expected = try Expectations.load()
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"\(expected.minifiedArtifactId)\"]")
+      let settled = "!/Formatting|coloring/.test(document.querySelector('#source-pretty').innerText + document.querySelector('#source-language').innerText)"
+      // A narrow status bar shows only "{ }", so read the toggle's pressed state.
+      try await ui.waitUntil("document.querySelector('#source-pretty').getAttribute('aria-pressed') === 'true' && \(settled)", timeout: 30,
+        "\(size.name): the one-line source map did not open pretty-printed")
+      let first = try await ui.json(
+        """
+        ({gutters: [...document.querySelectorAll('.source-gutter')].slice(0, 3).map(node => node.textContent),
+          title: document.querySelectorAll('.source-gutter')[1].title, keys: document.querySelectorAll('#source-code .syntax-key').length,
+          pressed: document.querySelector('#source-pretty').getAttribute('aria-pressed')})
+        """)
+      XCTAssertEqual(first["gutters"] as? [String], ["1", "2", "3"], "\(size.name): the gutter numbers formatted lines: \(first)")
+      XCTAssertTrue((first["title"] as? String ?? "").hasPrefix("Original 1:"), "\(size.name): the gutter tooltip names the original location: \(first)")
+      XCTAssertGreaterThan(first["keys"] as? Int ?? 0, 0, "\(size.name): JSON keys are colored: \(first)")
+      XCTAssertEqual(first["pressed"] as? String, "true")
+      try await assertInert(ui, "\(size.name) pretty-printed source map")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) pretty-printed source map")
+      try await ui.screenshot("sources-pretty-printed-\(size.name)")
+      // A file past the preview limit states it above the code. The record is marked rather than
+      // retained at 16 MiB, which would dominate this suite; the loader has its own check.
+      _ = try await ui.value("(() => { state.artifacts.find(item => item.artifact_id === state.selectedArtifactId).contentTruncated = true; renderSources(); return true; })()")
+      try await ui.waitUntil("!document.querySelector('#source-limit-notice').hidden", "\(size.name): the limit notice did not appear")
+      let limit = try await ui.value("document.querySelector('#source-limit-notice').innerText") as? String ?? ""
+      XCTAssertTrue(limit.contains("first 16 MiB"), "\(size.name): the notice states the limit: \(limit)")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) source past the preview limit")
+      try await ui.screenshot("sources-limit-notice-\(size.name)")
+      _ = try await ui.value("(() => { state.artifacts.find(item => item.artifact_id === state.selectedArtifactId).contentTruncated = false; renderSources(); return true; })()")
+      try await ui.waitUntil("document.querySelector('#source-limit-notice').hidden", "\(size.name): the limit notice stayed after the record changed")
+      try await ui.click("#source-window-next")
+      try await ui.waitUntil("document.querySelector('.source-line[data-line=\"1001\"]') && \(settled) && document.querySelectorAll('#source-code .syntax-string').length > 0",
+        "\(size.name): the window after line 1,000 lost its colors")
+      let rowHeight = (try await ui.value("document.querySelector('#source-code .source-line').getBoundingClientRect().height") as? NSNumber)?.doubleValue ?? 0
+      XCTAssertEqual(rowHeight, 18, "\(size.name): Sources rows use the editor's 18 px line height")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) pretty-printed later window")
+      try await ui.screenshot("sources-pretty-printed-later-\(size.name)")
+      try await ui.key(3, "f", modifiers: [.command])
+      try await ui.waitUntil("document.activeElement?.id === 'source-search'", "\(size.name): Cmd+F did not focus Find")
+      try await ui.key(5, "g", modifiers: [.control])
+      try await ui.waitUntil("!document.querySelector('#source-window').hidden && document.activeElement?.id === 'source-window-line'",
+        "\(size.name): Ctrl+G did not open Go to line")
+      try await ui.screenshot("sources-go-to-line-\(size.name)")
+      try await ui.key(53, "\u{1b}")
+      try await ui.waitUntil("document.querySelector('#source-window').hidden", "\(size.name): Escape did not close Go to line")
+      try await ui.click("#source-pretty")
+      try await ui.waitUntil("document.querySelector('#source-pretty').getAttribute('aria-pressed') === 'false' && document.querySelectorAll('.source-line').length === 1 && \(settled)",
+        "\(size.name): Show original did not show the captured line")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) original one-line source map")
+      try await ui.screenshot("sources-original-line-\(size.name)")
     }
   }
 
@@ -1819,7 +2236,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     for size in windowSizes {
       let ui = try await prepare(size)
       try await show(ui, "sources")
-      try await ui.click("#source-tree [role=treeitem]", containing: "artifact 340")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"340\"]")
       try await ui.waitUntil("!document.querySelector('#source-graph').hidden", "Graph is offered for a captured WASM artifact")
       try await ui.click("#source-graph")
       try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '').includes('blocks')", timeout: 30, "the block graph did not finish laying out")
@@ -1944,6 +2361,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
       // Every result the provider received is open for inspection.
       try await ui.click(".agent-tool summary")
       try await ui.waitUntil("__rebUiProbe.count('.agent-tool-detail') === 1", "the tool result did not open")
+      // An open result is drawn once and stays mounted. A log rebuilt every
+      // frame drops the next click in it, as the citation click below did.
+      try await ui.settle()
+      let steady = try await ui.value("(async () => { const row = document.querySelector('.agent-tool'); await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); }); return document.querySelector('.agent-tool') === row && __rebUiProbe.count('.agent-tool-detail') === 1; })()") as? Bool
+      XCTAssertEqual(steady, true, "an open tool result must not be rebuilt each frame")
       try await ui.screenshot("agent-tool-result-\(size.name)")
       try await ui.click(".agent-tool summary")
       // A verified citation opens the existing row.
@@ -2151,6 +2573,38 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let releasedWidth = try await ui.value("document.querySelector('.map-canvas').width") as? Int
       XCTAssertEqual(releasedWidth, 0, "\(size.name): the bitmap is released")
       print("RENDERED_UI_MAP_RSS \(size.name) idle_kb=\(idleRSS) open_kb=\(openRSS) released_kb=\(webContentResidentKilobytes(ui)) side=\(side)")
+    }
+  }
+
+  // Narrowing the window with a Wasm module open keeps Inspect, Graph, Map and
+  // More on one toolbar row that the code view never covers; widening it back
+  // leaves no blank band. The toolbar's grid row once kept its old height after
+  // a width change, so a wrapped second row slid under the code.
+  @MainActor
+  func test24bSourcesToolbarAfterResize() async throws {
+    let ui = try await prepare(windowSizes[0])
+    try await show(ui, "sources")
+    try await ui.click("#source-tree [role=treeitem]", containing: "map-module")
+    try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('00000000')", "the fixture module did not open as hex")
+    let measure = """
+      (() => {
+        const bar = document.querySelector('.source-editor-toolbar'), menu = document.querySelector('.source-more-menu');
+        const top = bar.getBoundingClientRect().top;
+        const rows = [...bar.querySelectorAll(':scope > *')].filter(c => c.getClientRects().length && getComputedStyle(c).position !== 'absolute');
+        const tools = ['#source-wasm', '#source-graph', '#source-map', '#source-more'].map(s => document.querySelector(s)).filter(t => !menu.contains(t));
+        return {height: bar.getBoundingClientRect().height, content: Math.max(...rows.map(c => c.getBoundingClientRect().bottom)) - top,
+          rowTops: new Set(tools.map(t => Math.round(t.getBoundingClientRect().top))).size};
+      })()
+      """
+    for (step, size) in [("narrowed", windowSizes[1]), ("widened", windowSizes[0])] {
+      try await ui.resize(width: size.width, height: size.height)
+      let toolbar = try await ui.json(measure)
+      XCTAssertEqual(toolbar["rowTops"] as? Int, 1, "\(step): the toolbar commands share one row: \(toolbar)")
+      // The row holds its content and 4 px of padding plus the 1 px border, nothing more.
+      let spare = (toolbar["height"] as? Double ?? 0) - (toolbar["content"] as? Double ?? 0)
+      XCTAssertEqual(spare, 5, accuracy: 2, "\(step): the toolbar row matches its content: \(toolbar)")
+      try await assertLayout(ui, "#screen-sources", "\(step) sources toolbar with a Wasm module")
+      try await ui.screenshot("sources-toolbar-wasm-\(step)")
     }
   }
 }

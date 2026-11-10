@@ -24,12 +24,107 @@ const invocationSitesPanel = createInvocationSitesPanel({
   onShow: showInvocationSites
 });
 invocationSitesPanel.refresh();
+const sourceFormatClient = createSourceFormatClient({
+  onChange: source => { if (state.sourceFormatted && sourceIdentity(selectedSource()) === sourceIdentity(source)) renderSources(); }
+});
 const entropyMap = createEntropyMap({
   button: document.querySelector('#source-map'), root: document.querySelector('#source-map-view'),
   codeWrap: elements.sourceCodeWrap, viewKind: elements.sourceViewKind,
   toolbar: document.querySelector('.source-editor-toolbar'),
   getSource: selectedSource, identityOf: sourceIdentity, reveal: revealSourceByteOffset
 });
+// The Sources status bar never cuts the cursor position, which has the full
+// text as its tooltip. When the items do not fit, it drops in turn the hash,
+// the pretty-print label (leaving "{ }"), the language, the size, a
+// selection's raw offsets, the view kind, the selection length and a
+// selection's raw range; each keeps its tooltip, and the position's tooltip
+// keeps its dropped parts. Only a position wider than the whole bar is
+// shortened. The observers refit after any text, visibility or width change.
+const SOURCE_STATUS_DROPS = ['hash', 'pretty', 'language', 'size', 'offsets', 'kind', 'selection', 'raw', 'position'];
+function fitSourceStatus() {
+  const position = elements.sourcePosition, bar = position?.parentElement;
+  if (!bar) return;
+  if (position.title !== position.textContent) position.title = position.textContent;
+  if (!bar.clientWidth) return;
+  const fits = () => bar.scrollWidth <= bar.clientWidth + 1;
+  const set = level => {
+    const value = SOURCE_STATUS_DROPS.slice(0, level).join(' ');
+    if ((bar.dataset.compact ?? '') !== value) bar.dataset.compact = value;
+  };
+  // From the current level: restore items while they fit, then drop until the rest fits.
+  let level = bar.dataset.compact ? bar.dataset.compact.split(' ').length : 0;
+  while (level > 0) {
+    set(level - 1);
+    if (!fits()) { set(level); break; }
+    level -= 1;
+  }
+  while (!fits() && level < SOURCE_STATUS_DROPS.length) set(++level);
+}
+if (typeof MutationObserver === 'function' && elements.sourcePosition?.parentElement) {
+  const bar = elements.sourcePosition.parentElement;
+  new MutationObserver(fitSourceStatus).observe(bar, {subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['hidden']});
+  if (typeof ResizeObserver === 'function') new ResizeObserver(fitSourceStatus).observe(bar);
+}
+// The Sources commands stay on one row at every width. The URL and then Find
+// shrink (app.css); when the row still overflows, Map, then Graph, then
+// Inspect move to the top of More, and return in reverse order once they fit.
+// A wrapped second row is not an option: WebKit does not re-measure the
+// toolbar's auto grid row when a width change alters its line count, so the
+// code view would cover that row. The menu is left alone while it is open.
+const SOURCE_TOOLBAR_OVERFLOW = ['source-wasm', 'source-graph', 'source-map'];
+let sourceToolbarObserver = null;
+function fitSourceToolbar() {
+  const row = document.querySelector('#source-editor-controls'), more = elements.sourceMore, first = elements.sourceGoto;
+  if (!row || !more || !first || more.open || !row.clientWidth) return;
+  const tools = SOURCE_TOOLBAR_OVERFLOW.map(id => document.getElementById(id));
+  const fits = () => row.scrollWidth <= row.clientWidth + 1;
+  // Level n keeps the first tools.length - n tools in the row, in their order.
+  const set = level => tools.forEach((tool, index) => {
+    const inRow = index < tools.length - level;
+    if ((tool.parentElement === row) === inRow) return;
+    const focused = tool === document.activeElement;
+    if (inRow) more.before(tool);
+    else (tools.slice(index + 1).find(next => next.parentElement !== row) ?? first).before(tool);
+    if (focused) more.querySelector('summary').focus({preventScroll: true});
+  });
+  let level = tools.filter(tool => tool.parentElement !== row).length;
+  while (level > 0) {
+    set(level - 1);
+    if (!fits()) { set(level); break; }
+    level -= 1;
+  }
+  while (!fits() && level < tools.length) set(++level);
+  // The trial moves above are this function's own; they must not call it again.
+  sourceToolbarObserver?.takeRecords();
+}
+if (typeof MutationObserver === 'function' && document.querySelector('#source-editor-controls')) {
+  const row = document.querySelector('#source-editor-controls');
+  sourceToolbarObserver = new MutationObserver(fitSourceToolbar);
+  sourceToolbarObserver.observe(row, {subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['hidden']});
+  if (typeof ResizeObserver === 'function') new ResizeObserver(fitSourceToolbar).observe(row);
+  elements.sourceMore?.addEventListener('toggle', fitSourceToolbar);
+}
+const sourceTreeView = createSourceTree({
+  tree: elements.sourceTree, filter: document.querySelector('#source-tree-filter'),
+  expand: document.querySelector('#source-tree-expand'), collapse: document.querySelector('#source-tree-collapse'),
+  helpers: {isSource: isSourceArtifact, identity: sourceIdentity, reference: sourceReference, name: sourceDisplayName, isCurrent: sourceIsCurrent},
+  catalog: () => state.artifacts, collection: () => state.sourceCollection, selectedId: () => state.selectedArtifactId,
+  catalogLimit: () => state.artifactCatalogLimit, consoleDocuments: () => state.consoleDocuments,
+  hideInternal: () => state.hideBrowserInternal, internalToggle: internal => sourceInternalToggle(internal),
+  kindLabel: source => sourceKindLabel(source.kind),
+  researcherName(source) {
+    const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
+    return names?.has('captured-artifact') ? names.nameFor('artifact', source) : null;
+  },
+  open: artifactId => selectArtifact(artifactId),
+  stale() {
+    state.sourceNoticeKind = 'warning';
+    state.sourceNotice = 'This exact source changed or is no longer available. Refresh the catalog before opening it.';
+    renderSourceHealth();
+  }
+});
+// The Console's document listing names frames and marks the top-level ones.
+document.addEventListener('reb:console-documents', event => { state.consoleDocuments = event.detail; renderSourceTree(); });
       const evidencePackagePanel = createEvidencePackagePanel({getContext: () => ({
         requestId: evidenceRequestKey(state.requests.find(request => request.id === state.selectedRequestId)),
         requestEvents: state.requests.find(request => request.id === state.selectedRequestId)?.events ?? [],
@@ -233,14 +328,17 @@ const entropyMap = createEntropyMap({
             ? 'The local evidence broker did not answer within 10 seconds.'
             : 'The local evidence broker is disconnected.');
         }
-        if (state.eventsLimited) {
+        // The request index lists the whole session, so window caps do not limit Traffic rows.
+        const indexed = state.trafficIndex?.answer?.() ?? null;
+        if (state.eventsLimited && !indexed) {
           if (kind === 'empty') kind = 'gap';
           messages.push('Showing the last 5,000 evidence events; older events remain recorded on disk.');
         }
-        if (state.networkEventsLimited) messages.push('The network event window is capped; older request lifecycle evidence may be incomplete.');
+        if (state.networkEventsLimited && !indexed) messages.push('The network event window is capped; older request lifecycle evidence may be incomplete.');
         if (state.eventCountScope === 'bounded_tail') {
           if (kind === 'empty') kind = 'gap';
-          messages.push('Only the newest 64 MiB of stored evidence is scanned; counts and both windows exclude the older prefix.');
+          messages.push(indexed ? 'Gap and drop counts cover only the newest 64 MiB of stored evidence; the request list covers the whole session.'
+            : 'Only the newest 64 MiB of stored evidence is scanned; counts and both windows exclude the older prefix.');
         }
         if (gapCount > 0n) {
           if (kind === 'empty') kind = 'gap';
@@ -250,13 +348,18 @@ const entropyMap = createEntropyMap({
           if (kind === 'empty') kind = 'gap';
           messages.push(`The queue reports ${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops} dropped ${reportedDrops === 1n ? 'event' : 'events'}${gapCount > 0n ? '; counts may overlap sequence gaps' : `; no sequence jump is visible in ${eventCountScopeLabel()}`}.`);
         }
+        if (state.eventMalformedLines > 0) {
+          if (kind === 'empty') kind = 'gap';
+          messages.push(`${state.eventMalformedLines} unreadable ${state.eventMalformedLines === 1 ? 'line was' : 'lines were'} skipped in ${eventCountScopeLabel()}.`);
+        }
         const networkLimits = namedGapNotice(namedGapsIn(shownNamedGaps(), networkGapCategories), eventCountScopeLabel());
         if (networkLimits) {
           if (kind === 'empty') kind = 'gap';
           messages.push(networkLimits);
         }
 
-        const failedNotice = trafficFailedRequestNotice(state.requests);
+        const failedNotice = indexed ? indexed.document.failed > 0 ? `Failed requests: ${indexed.document.failed}.` : ''
+          : trafficFailedRequestNotice(state.requests);
         if (failedNotice) messages.push(failedNotice);
         if (messages.length) setNetworkNotice(kind, messages.join(' '));
         else {
@@ -1036,9 +1139,7 @@ const entropyMap = createEntropyMap({
         }
         const ids = [...counts.keys()].sort((left, right) =>
           left === 'unattributed' ? 1 : right === 'unattributed' ? -1 : Number(left) - Number(right));
-        const requestTabLabels = new Map(requestTabGroups()
-          .filter(group => group.id !== 'unattributed')
-          .map((group, index) => [group.id, `Tab ${index + 1}`]));
+        const requestTabLabels = new Map(requestTabGroups().map((group, index) => [group.id, `Tab ${index + 1}`]));
         const scopes = [['all', 'All tabs', allEvents.length], ...ids.map(id =>
           [id, id === 'unattributed' ? 'Unattributed' : requestTabLabels.get(id) ?? `Tab ${id}`, counts.get(id)])];
         const buttons = scopes.map(([id, label, count]) => {
@@ -1270,7 +1371,24 @@ const entropyMap = createEntropyMap({
       function rebuildTrafficRequests() {
         // Hidden Traffic must not keep the previous request snapshot alive.
         state.trafficRenderedView = null;
-        state.requests = state.nativeRequests;
+        const loaded = state.trafficLoaded;
+        // The selection keeps its last window copy, so it survives leaving the window (#437).
+        const selected = state.selectedRequestId === null ? null : state.nativeRequests.find(request => request.id === state.selectedRequestId);
+        if (loaded && selected && trafficRecordCount(selected) >= trafficRecordCount(loaded.get(selected.id))) loaded.set(selected.id, selected);
+        // Without an index answer this list is state.requests itself, so only the selection may stay.
+        if (loaded && !trafficIndexActive()) for (const id of loaded.keys()) if (id !== state.selectedRequestId) loaded.delete(id);
+        if (!loaded?.size) {
+          state.requests = state.nativeRequests;
+          return;
+        }
+        // Rows read on selection stay selectable and replace a window copy with fewer records.
+        const merged = state.nativeRequests.map(request => {
+          const read = loaded.get(request.id);
+          return read && trafficRecordCount(read) > trafficRecordCount(request) ? read : request;
+        });
+        const windowIds = new Set(state.nativeRequests.map(request => request.id));
+        for (const [id, request] of loaded) if (!windowIds.has(id)) merged.push(request);
+        state.requests = merged;
       }
 
       function renderShellStatus() {
@@ -1298,7 +1416,7 @@ const entropyMap = createEntropyMap({
               : 'Deterministic developer evidence is loaded.';
         // Sensitive capture is labeled for the whole session, not only in the
         // rows it fills, because the packaged app turns it on without a dialog.
-        const retained = [state.requestContentCaptureEnabled && 'request paths, queries and bodies up to 256 KiB each',
+        const retained = [state.requestContentCaptureEnabled && 'request paths, queries and bodies, and response bodies, up to 16 MiB each, request and response headers, cookies',
           state.canvasImageCaptureEnabled && 'Canvas images'].filter(Boolean);
         elements.sessionContent.hidden = !live || !retained.length;
         // The launch turned these on; a browser built before them ignores the
@@ -1355,8 +1473,18 @@ const entropyMap = createEntropyMap({
         evidencePackagePanel.sync();
       }
 
-      function renderRequestCount(visibleCount, loadedCount) {
-        elements.requestCount.textContent = String(visibleCount);
+      function renderRequestCount(visibleCount, loadedCount, scope = 'loaded') {
+        if (visibleCount === null) {
+          elements.requestCount.textContent = 'No';
+          elements.requestCountLabel.textContent = 'requests read yet';
+          return;
+        }
+        elements.requestCount.textContent = visibleCount.toLocaleString('en-US');
+        if (scope === 'session') {
+          elements.requestCountLabel.textContent = visibleCount === loadedCount ? loadedCount === 1 ? 'request' : 'requests'
+            : `of ${loadedCount.toLocaleString('en-US')} ${loadedCount === 1 ? 'request' : 'requests'}`;
+          return;
+        }
         const loadedLabel = loadedCount === 1 ? 'request loaded' : 'requests loaded';
         const suffix = state.eventsLimited ? ' · event window capped' : '';
         elements.requestCountLabel.textContent = visibleCount === loadedCount
@@ -2711,53 +2839,62 @@ const entropyMap = createEntropyMap({
         renderedVmWorkspace = workspaceKey;
       }
 
-      function requestDomain(request) {
-        if (!request) return 'unknown';
-        if (request.origin === 'sample') return 'checkout.acme.test';
-        const target = String(request.path ?? '').trim();
-        if (!target || target === 'Unidentified network event') return 'unknown';
-        try {
-          return new URL(target).host || 'unknown';
-        } catch {
-          return target.replace(/^\/\//, '').split('/')[0] || 'unknown';
-        }
-      }
+      function requestDomain(request) { return trafficRequestDomain(request); }
 
       function requestTabGroups() {
         const groups = new Map();
-        state.requests.forEach(request => {
-          const id = request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed';
+        state.requests.forEach(request => requestTabsOf(request).forEach(id => {
           const group = groups.get(id) ?? {id, requests: [], firstTimestamp: request.firstTimestamp};
           group.requests.push(request);
           if (request.firstTimestamp < group.firstTimestamp) group.firstTimestamp = request.firstTimestamp;
           groups.set(id, group);
-        });
-        return [...groups.values()].sort((left, right) => {
-          if (left.id === 'unattributed') return 1;
-          if (right.id === 'unattributed') return -1;
-          return left.firstTimestamp < right.firstTimestamp ? -1 : left.firstTimestamp > right.firstTimestamp ? 1 : 0;
-        });
+        }));
+        return [...groups.values()].sort((left, right) =>
+          left.firstTimestamp < right.firstTimestamp ? -1 : left.firstTimestamp > right.firstTimestamp ? 1 : 0);
       }
 
-      function renderRequestScopes() {
-        const groups = requestTabGroups();
+      function trafficLocalScopes() {
+        const groups = requestTabGroups().map(group => ({id: group.id, count: group.requests.length,
+          domains: [...new Set(group.requests.map(requestDomain))],
+          title: group.requests.map(request => String(request.tabTitle ?? '').trim()).find(Boolean),
+          page: globalThis.RebRequestTabs?.tabPageLabel(group.requests, requestDomain) ?? null}));
+        const scoped = state.requests.filter(requestInScope);
+        const domainCounts = new Map();
+        for (const request of scoped) { const domain = requestDomain(request); domainCounts.set(domain, (domainCounts.get(domain) ?? 0) + 1); }
+        return {total: state.requests.length, groups, scopedCount: scoped.length,
+          domains: [...domainCounts.keys()].sort((left, right) => left.localeCompare(right)).map(domain => [domain, domainCounts.get(domain)])};
+      }
+
+      function trafficIndexScopes(answer) {
+        // Rows with no tab are a capture error listed from the footer, not a tab.
+        const groups = answer.facets.tabs.filter(tab => tab.tab_id !== '0').map(tab => ({id: tab.tab_id,
+          count: tab.count, domains: tab.domains, title: null, page: null}));
+        const unresolved = answer.facets.tabs.find(tab => tab.tab_id === '0')?.count ?? 0;
+        return {total: answer.through, groups, unresolved, domains: answer.facets.domains.map(entry => [entry.domain, entry.count]),
+          scopedCount: state.requestTabId === 'all' ? answer.through
+            : state.requestTabId === 'unresolved' ? unresolved : groups.find(group => group.id === state.requestTabId)?.count ?? 0};
+      }
+
+      // `countsKnown` is false until anything has been read; zero would misstate the session.
+      function renderRequestScopes(scopes = trafficLocalScopes(), countsKnown = true) {
+        const groups = scopes.groups;
         const availableTabs = new Set(groups.map(group => group.id));
-        if (state.requestTabId !== 'all' && !availableTabs.has(state.requestTabId)) state.requestTabId = 'all';
+        if (state.requestTabId !== 'all' && !availableTabs.has(state.requestTabId) &&
+            !(state.requestTabId === 'unresolved' && (scopes.unresolved === undefined
+              ? state.requests.some(request => !requestTabsOf(request).length) : scopes.unresolved > 0))) state.requestTabId = 'all';
         const oldScopes = new Map([...elements.requestTabScopes.children].map(button => [button.dataset.scopeId, button]));
         const focusedScope = elements.requestTabScopes.contains(document.activeElement) ? document.activeElement : null;
-        const buttons = [{id: 'all', label: 'All tabs', count: state.requests.length}, ...groups.map((group, index) => {
-          const domains = [...new Set(group.requests.map(requestDomain))];
-          const title = group.requests.map(request => String(request.tabTitle ?? '').trim()).find(Boolean);
-          const domain = domains.find(value => value && value !== 'unknown');
+        const buttons = [{id: 'all', label: 'All tabs', count: scopes.total}, ...groups.map((group, index) => {
+          const title = group.title;
+          const page = group.page ?? group.domains.find(value => value && value !== 'unknown');
           const fallback = `Tab ${index + 1}`;
-          const label = group.id === 'unattributed' ? 'Unattributed'
-            : title ? (title.length > 42 ? `${title.slice(0, 41)}…` : title)
-            : domain || fallback;
+          const label = globalThis.RebRequestTabs?.scopeLabel(group.id) ??
+            (title ? (title.length > 42 ? `${title.slice(0, 41)}…` : title) : page || fallback);
           return {
             id: group.id,
             label,
-            count: group.requests.length,
-            domains
+            count: group.count,
+            domains: group.domains
           };
         })].map(scope => {
           let button = oldScopes.get(scope.id);
@@ -2773,9 +2910,10 @@ const entropyMap = createEntropyMap({
           button.setAttribute('aria-selected', String(state.requestTabId === scope.id));
           button.tabIndex = state.requestTabId === scope.id ? 0 : -1;
           if (button.children[0].textContent !== scope.label) button.children[0].textContent = scope.label;
-          if (button.children[1].textContent !== String(scope.count)) button.children[1].textContent = String(scope.count);
-          button.title = scope.id === 'all' ? 'Show requests from every captured browser tab'
-            : scope.id === 'unattributed' ? 'Events without a browser tab identifier'
+          const count = countsKnown ? String(scope.count) : '';
+          if (button.children[1].textContent !== count) button.children[1].textContent = count;
+          button.title = scope.id === 'all' ? 'Show requests from every captured browser tab, each once'
+            : scope.id.startsWith('extension:') ? `Extension ${scope.id.slice(10)} · ${scope.domains.join(', ')}`
               : `${scope.label} · ${scope.domains.join(', ')} · tab id ${scope.id}`;
           if (created) button.addEventListener('click', () => {
             state.requestTabId = scope.id;
@@ -2798,16 +2936,13 @@ const entropyMap = createEntropyMap({
           if (elements.requestTabScopes.children[index] !== button) elements.requestTabScopes.insertBefore(button, elements.requestTabScopes.children[index] ?? null);
         });
         while (elements.requestTabScopes.children.length > buttons.length) elements.requestTabScopes.lastElementChild.remove();
+        fitRequestTabScopes();
         if (focusedScope && document.activeElement !== focusedScope) (buttons.includes(focusedScope) ? focusedScope : buttons[0])?.focus({preventScroll: true});
 
-        const scoped = state.requestTabId === 'all' ? state.requests
-          : state.requests.filter(request => (request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed') === state.requestTabId);
-        const domainCounts = new Map();
-        for (const request of scoped) { const domain = requestDomain(request); domainCounts.set(domain, (domainCounts.get(domain) ?? 0) + 1); }
-        const domains = [...domainCounts.keys()].sort((left, right) => left.localeCompare(right));
+        const domains = scopes.domains.map(([domain]) => domain);
         if (state.requestDomain !== 'all' && !domains.includes(state.requestDomain)) state.requestDomain = 'all';
         const oldOptions = new Map([...elements.requestDomain.children].map(option => [option.value, option]));
-        const options = [['all', `All domains (${scoped.length})`], ...domains.map(domain => [domain, `${domain} (${domainCounts.get(domain)})`])]
+        const options = [['all', countsKnown ? `All domains (${scopes.scopedCount})` : 'All domains'], ...scopes.domains.map(([domain, count]) => [domain, `${domain} (${count})`])]
           .map(([value, label]) => {
             const option = oldOptions.get(value) ?? document.createElement('option'); option.value = value;
             if (option.textContent !== label) option.textContent = label;
@@ -2818,51 +2953,201 @@ const entropyMap = createEntropyMap({
         });
         while (elements.requestDomain.children.length > options.length) elements.requestDomain.lastElementChild.remove();
         elements.requestDomain.value = state.requestDomain;
+        // A long domain truncates in the closed control; the tooltip holds the full value.
+        elements.requestDomain.title = elements.requestDomain.selectedOptions?.[0]?.textContent ?? '';
+      }
+
+      // The strip shows whole chips only, never one cut at its edge. Chips past
+      // its width are hidden and listed in the "+N tabs" menu after it, which
+      // selects them; the selected chip always stays in the strip. Widths are
+      // read only when the chips or the selection change, or the row resizes.
+      function fitRequestTabScopes(force = false) {
+        const strip = elements.requestTabScopes, more = strip?.nextElementSibling;
+        if (!more?.classList?.contains('request-tab-more')) return;
+        const chips = [...strip.children];
+        const key = JSON.stringify(chips.map(chip => [chip.dataset.scopeId, chip.textContent, chip.getAttribute('aria-selected')]));
+        if (!more.fitObserver && typeof ResizeObserver === 'function') {
+          more.fitObserver = new ResizeObserver(() => fitRequestTabScopes(true));
+          more.fitObserver.observe(strip.parentElement);
+        }
+        if (!more.fitWired) {
+          more.fitWired = true;
+          more.addEventListener('change', () => {
+            const chip = [...strip.children].find(node => node.dataset.scopeId === more.value);
+            more.value = '';
+            chip?.click();
+          });
+        }
+        if (!force && more.fitKey === key) return;
+        const width = strip.parentElement.clientWidth;
+        // Off screen there is nothing to fit; the observer fits it once shown.
+        if (!(width > 0)) { more.fitKey = null; return; }
+        more.fitKey = key;
+        for (const chip of chips) chip.hidden = false;
+        more.hidden = true;
+        strip.dataset.measuring = 'true';
+        const widths = chips.map(chip => chip.getBoundingClientRect().width);
+        delete strip.dataset.measuring;
+        const gap = parseFloat(getComputedStyle(strip).columnGap) || 0;
+        if (widths.reduce((sum, value) => sum + value, 0) + gap * Math.max(0, chips.length - 1) <= width + 0.5) return;
+        // The menu is measured at its widest label before the chips are fitted,
+        // and keeps that width: a closed select otherwise widens to its longest option.
+        more.hidden = false;
+        more.style.width = '';
+        more.replaceChildren(new Option(`+${chips.length - 1} tabs`, ''));
+        const menuWidth = more.getBoundingClientRect().width;
+        more.style.width = `${menuWidth}px`;
+        const budget = width - menuWidth - gap;
+        const selected = chips.findIndex(chip => chip.getAttribute('aria-selected') === 'true');
+        let used = selected >= 0 ? widths[selected] : -gap, full = false;
+        const hidden = chips.filter((chip, index) => {
+          if (index === selected) return false;
+          if (!full && used + gap + widths[index] <= budget) { used += gap + widths[index]; return false; }
+          full = true;
+          return true;
+        });
+        for (const chip of hidden) chip.hidden = true;
+        const label = `+${hidden.length} ${hidden.length === 1 ? 'tab' : 'tabs'}`;
+        more.replaceChildren(new Option(label, ''), ...hidden.map(chip =>
+          new Option(`${chip.children[0].textContent}${chip.children[1].textContent ? ` (${chip.children[1].textContent})` : ''}`, chip.dataset.scopeId)));
+        more.value = '';
+        more.title = `${hidden.length} more browser ${hidden.length === 1 ? 'tab' : 'tabs'}: ${hidden.map(chip => chip.children[0].textContent).join(', ')}`;
+      }
+
+      // A row linked to several tabs is in each of them; no tab is a capture error.
+      function requestTabsOf(request) {
+        return globalThis.RebRequestTabs?.rowTabs(request) ?? (request.tabId && request.tabId !== '0' ? [request.tabId] : []);
+      }
+
+      function requestInScope(request) {
+        if (state.requestTabId === 'all') return true;
+        const tabs = requestTabsOf(request);
+        return state.requestTabId === 'unresolved' ? tabs.length === 0 : tabs.includes(state.requestTabId);
       }
 
       function trafficRequestFilterKey() {
+        const range = state.trafficRange;
         return JSON.stringify([state.requestTabId, state.requestDomain, state.requestType,
           elements.requestFilter.value.trim().toLowerCase(),
-          state.trafficSort, state.trafficSortDirection]);
+          state.trafficSort, state.trafficSortDirection, state.trafficFlags, range && `${range.from}:${range.to}`]);
       }
 
-      function renderTrafficWindowStatus(start, rowCount, visibleCount) {
-        const selectedFiltered = state.selectedRequestId !== null && !state.trafficSearchMatches.has(state.selectedRequestId);
-        const message = `${visibleCount ? start + 1 : 0}–${start + rowCount} of ${visibleCount} matching · ${state.requests.length} retained${selectedFiltered ? ' · Selection outside filter' : ''}`;
+      // A null visible count is a query the request index has not answered yet.
+      // `totals`: the index's matching sizes, hidden browser-internal rows and rows without a tab.
+      function renderTrafficWindowStatus(visibleCount, totalCount, outside, note = '', totals = null) {
+        const bytes = value => trafficBytesLabel(value).replace(' ', '\u00a0');
+        const sizes = totals?.sizes ? ` · ${bytes(totals.sizes.transferred)} transferred · ${bytes(totals.sizes.resources)} resources` : '';
+        const hidden = totals?.hiddenInternal ? ` · ${totals.hiddenInternal.toLocaleString('en-US')} browser-internal hidden` : '';
+        const excluded = globalThis.RebNetworkScope?.captureExclusionNotice(state.captureExclusions) ?? '';
+        // A null total is a session nothing has been read from yet: no counts, the note leads.
+        const counts = totalCount === null ? '' : `${visibleCount === null ? '' : `${visibleCount.toLocaleString('en-US')} / `}${totalCount.toLocaleString('en-US')} requests${sizes}${hidden}`;
+        const rest = `${excluded ? ` · ${excluded}` : ''}${outside ? ' · Selection outside filter' : ''}${note ? ` · ${note}` : ''}`;
+        const message = counts ? counts + rest : rest.slice(3).replace(/^./, letter => letter.toUpperCase());
         const status = document.querySelector('#request-window-status');
         if (status.textContent !== message) status.textContent = message;
+        const unresolved = totals?.unresolved ?? state.requests.filter(request => globalThis.RebRequestTabs?.isUnresolved(request)).length;
+        const errors = document.querySelector('#request-unresolved');
+        errors.hidden = unresolved === 0;
+        errors.textContent = globalThis.RebRequestTabs?.unresolvedNotice(unresolved) ?? '';
+        errors.setAttribute('aria-pressed', String(state.requestTabId === 'unresolved'));
+      }
+
+      // The waterfall spans the selected time range, else the timeline of every matching start.
+      function trafficScale(timeline) {
+        if (!timeline || timeline.first === null) return null;
+        const range = state.trafficRange;
+        const [start, end] = range ? [range.from, range.to] : [timeline.first, timeline.last];
+        return {start, end: end > start ? end : start + 1n, origin: timeline.first};
+      }
+
+      function renderTrafficSortButtons() {
+        document.querySelectorAll('[data-request-sort]').forEach(button => {
+          const active = button.dataset.requestSort === state.trafficSort;
+          button.setAttribute('aria-pressed', String(active));
+          button.setAttribute('aria-label', `${button.dataset.column ?? button.dataset.requestSort}: ${active ? state.trafficSortDirection === 1 ? 'ascending' : 'descending' : 'not sorted'}. Activate to sort.`);
+          button.querySelector('span').textContent = active ? state.trafficSortDirection === 1 ? ' ↑' : ' ↓' : '';
+        });
+      }
+
+      function renderTrafficEmpty(text) {
+        const empty = document.createElement('div');
+        empty.className = 'request-empty';
+        empty.setAttribute('role', 'status');
+        empty.textContent = text;
+        const hadFocus = elements.requestRows.contains(document.activeElement);
+        // A later resize must not remount rows this empty state replaced.
+        elements.requestRows.trafficBlock = null;
+        elements.requestRows.replaceChildren(empty);
+        elements.requestRows.tabIndex = 0;
+        if (hadFocus) elements.requestRows.focus({preventScroll: true});
+      }
+
+      function trafficEmptyText(total) {
+        return total === 0
+          ? state.sessionMode === 'live' ? 'No live requests yet. Start a capture in the attached browser.'
+            : state.sessionMode === 'demo' ? 'No developer evidence is available.' : 'No capture session is running.'
+          : 'No requests match the current filters. Clear the filter or choose another type.';
+      }
+
+      // Until a poll or an index read answers, the session's requests are
+      // unknown, not zero: say so with the connection reason and show no counts.
+      function trafficUnreadReason() {
+        if (state.eventPollAnswered || state.trafficIndex?.answer()) return null;
+        return {connecting: 'the local evidence broker has not answered yet',
+          unresponsive: 'the local evidence broker did not answer within 10 seconds',
+          unreachable: 'the local evidence broker is disconnected', malformed: 'the broker returned malformed event data'}[state.connection] ?? null;
+      }
+
+      // Until the index first answers, or without a backend, the newest window serves Traffic.
+      function trafficIndexActive() {
+        const index = state.trafficIndex;
+        return Boolean(index) && state.sessionMode !== 'preview' && !(index.error() && !index.answer());
       }
 
       function renderRequests(selectionOnly = false) {
         const previous = state.trafficRenderedView;
+        const index = trafficIndexActive() ? state.trafficIndex : null;
         // Producers replace the retained request array on refresh. Reuse only
         // this exact rendered snapshot and filter/window; all other entry
-        // points (polls, search, sort, paging and history) take the full path.
+        // points (polls, search, sort, scrolling and history) take the full path.
         if (selectionOnly === true && previous?.requests === state.requests && previous.retainedCount === state.requests.length &&
-            previous.filterKey === trafficRequestFilterKey() &&
-            previous.start === state.trafficWindowStart && previous.anchor === state.trafficWindowAnchor) {
+            previous.filterKey === trafficRequestFilterKey() && (previous.answer ?? null) === (index?.answer() ?? null) &&
+            previous.start === state.trafficWindowStart && previous.anchor === state.trafficWindowAnchor &&
+            (!previous.mounted || previous.mounted.has(state.selectedRequestId))) {
           renderTrafficRowSelection(elements.requestRows, state.selectedRequestId);
-          renderTrafficWindowStatus(previous.start, previous.rowCount, previous.visibleCount);
+          renderTrafficWindowStatus(previous.visibleCount, previous.totalCount, previous.outside(state.selectedRequestId), previous.note, previous.totals);
           return;
         }
         state.trafficRenderedView = null;
-        renderRequestScopes();
-        const needle = elements.requestFilter.value.trim().toLowerCase();
+        if (index && (index.answer() || !state.requests.length)) {
+          renderIndexedRequests(index);
+          return;
+        }
+        // Until the index first answers, the newest window's rows serve and the first read starts.
+        if (index) wantTrafficIndex(index, {start: 0});
+        const unread = state.requests.length === 0 ? trafficUnreadReason() : null;
+        renderRequestScopes(undefined, !unread);
+        const filter = trafficParseFilter(elements.requestFilter.value);
         const scoped = state.requests.filter(request =>
-          (state.requestTabId === 'all' ||
-            (request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed') === state.requestTabId) &&
+          requestInScope(request) &&
           (state.requestDomain === 'all' || requestDomain(request) === state.requestDomain) &&
           (state.requestType === 'all' || request.type === state.requestType)
         );
         // Researcher names are searchable too; captured fields stay as recorded.
         const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
         const nameOf = names?.has('captured-request') ? request => names.nameFor('request', request) : () => null;
-        const search = trafficSearchRequests(scoped, needle, nameOf);
-        state.trafficSearchMatches = search.matches;
-        const visible = trafficSortedRequests(scoped.filter(request => search.matches.has(request.id)), state.trafficSort, state.trafficSortDirection);
+        const search = trafficSearchRequests(scoped, filter.text, nameOf);
+        const filtered = trafficApplyFilter(scoped, search.matches, filter, {flags: state.trafficFlags, range: state.trafficRange, all: state.requests});
+        state.trafficSearchMatches = filtered.matches;
+        const visible = trafficSortedRequests(scoped.filter(request => filtered.matches.has(request.id)), state.trafficSort, state.trafficSortDirection);
+        const totals = {sizes: filtered.sizes, hiddenInternal: filtered.hiddenInternal};
+        state.trafficOverview?.render(filtered.timeline, state.trafficRange);
         const filterKey = trafficRequestFilterKey();
         const filterChanged = filterKey !== state.trafficFilterKey;
-        if (filterChanged) { state.trafficNewIds.clear(); state.trafficWindowStart = 0; state.trafficWindowAnchor = null; }
+        if (filterChanged) {
+          state.trafficNewIds.clear(); state.trafficWindowStart = 0; state.trafficWindowAnchor = null;
+          if (state.trafficFilterKey !== null) elements.requestRows.scrollTop = 0;
+        }
         state.trafficFilterKey = filterKey;
         const selectedIsVisible = visible.some(request => request.id === state.selectedRequestId);
         const selectionCleared = state.selectedRequestId !== null && !state.requests.some(request => request.id === state.selectedRequestId);
@@ -2872,39 +3157,30 @@ const entropyMap = createEntropyMap({
         const knownIds = state.trafficKnownIds, live = state.sessionMode === 'live';
         const newIds = new Set(live && knownIds ? visible.filter(request => !knownIds.has(request.id)).map(request => request.id) : []);
         state.trafficKnownIds = new Set(state.requests.map(request => request.id));
-        if (!live) state.trafficNewIds.clear();
-        if (!filterChanged) newIds.forEach(id => state.trafficNewIds.add(id));
+        if (!live || trafficAtNewest()) state.trafficNewIds.clear();
+        else if (!filterChanged) newIds.forEach(id => state.trafficNewIds.add(id));
         for (const id of state.trafficNewIds) if (!state.trafficKnownIds.has(id)) state.trafficNewIds.delete(id);
-        const window = trafficWindow(visible, state.trafficWindowStart, state.trafficWindowAnchor);
+        // The block follows its first row when rows arrive above it, unless scrolled to the top.
+        const start = trafficBlockStart(elements.requestRows, visible.length, state.trafficWindowStart);
+        const anchor = start === state.trafficWindowStart && elements.requestRows.scrollTop > 0 ? state.trafficWindowAnchor : null;
+        const window = trafficWindow(visible, start, anchor);
         state.trafficWindowStart = window.start;
         state.trafficWindowAnchor = window.rows[0]?.id ?? null;
-        renderTrafficWindowStatus(window.start, window.rows.length, visible.length);
+        const outside = id => id !== null && !state.trafficSearchMatches.has(id);
+        const indexError = state.trafficIndex?.error();
+        const note = unread ? `nothing read yet${indexError ? ` · request index unavailable (${indexError})` : ''}`
+          : indexError ? 'request index unavailable; newest window shown' : 'newest window';
+        const counted = unread ? {visible: null, total: null, totals: null} : {visible: visible.length, total: state.requests.length, totals};
+        renderTrafficWindowStatus(counted.visible, counted.total, outside(state.selectedRequestId), note, counted.totals);
         const renderedView = {requests: state.requests, retainedCount: state.requests.length, filterKey, start: window.start, anchor: state.trafficWindowAnchor,
-          rowCount: window.rows.length, visibleCount: visible.length};
-        document.querySelector('#request-window-prev').disabled = window.start === 0;
-        document.querySelector('#request-window-next').disabled = window.start + TRAFFIC_ROW_LIMIT >= visible.length;
-        document.querySelectorAll('[data-request-sort]').forEach(button => {
-          const active = button.dataset.requestSort === state.trafficSort;
-          button.setAttribute('aria-pressed', String(active));
-          button.setAttribute('aria-label', `${button.dataset.requestSort}: ${active ? state.trafficSortDirection === 1 ? 'ascending' : 'descending' : 'not sorted'}. Activate to sort.`);
-          button.querySelector('span').textContent = active ? state.trafficSortDirection === 1 ? ' ↑' : ' ↓' : '';
-        });
+          answer: undefined, visibleCount: counted.visible, totalCount: counted.total, outside, note, totals: counted.totals, mounted: null};
+        renderTrafficSortButtons();
         elements.requestRows.setAttribute('role', 'listbox');
         if (visible.length === 0) {
-          const empty = document.createElement('div');
-          empty.className = 'request-empty';
-          empty.setAttribute('role', 'status');
-          empty.textContent = state.requests.length === 0
-            ? state.sessionMode === 'live' ? 'No live requests yet. Start a capture in the attached browser.'
-              : state.sessionMode === 'demo' ? 'No developer evidence is available.' : 'No capture session is running.'
-            : 'No requests match the current filters. Clear the filter or choose another type.';
-          const hadFocus = elements.requestRows.contains(document.activeElement);
-          elements.requestRows.replaceChildren(empty);
-          elements.requestRows.tabIndex = 0;
-          if (hadFocus) elements.requestRows.focus({preventScroll: true});
+          renderTrafficEmpty(unread ? `Nothing has been read yet: ${unread}.` : trafficEmptyText(state.requests.length));
           state.trafficPendingCount = 0;
           elements.requestLatest.hidden = true;
-          renderRequestCount(0, state.requests.length);
+          renderRequestCount(counted.visible, counted.total);
           state.trafficRenderedView = renderedView;
           if (selectionCleared) {
             updateSelectionSummary(null);
@@ -2914,19 +3190,161 @@ const entropyMap = createEntropyMap({
           return;
         }
         renderTrafficRows(elements.requestRows, window.rows, {
-          selectedId: state.selectedRequestId, newIds,
-          onSelect: id => { selectRequest(id); focusRequestRow(id); }, onKey: moveRequestSelection, nameOf
+          start: window.start, total: visible.length, selectedId: state.selectedRequestId, newIds,
+          onSelect: id => { selectRequest(id); focusRequestRow(id); }, onKey: moveRequestSelection, nameOf,
+          scale: trafficScale(filtered.timeline)
         });
         state.trafficPendingCount = state.trafficNewIds.size;
-        elements.requestLatest.hidden = state.trafficPendingCount === 0;
-        elements.requestLatest.textContent = `${state.trafficPendingCount} new ${state.trafficPendingCount === 1 ? 'request' : 'requests'}`;
+        renderTrafficLatest();
         renderRequestCount(visible.length, state.requests.length);
         state.trafficRenderedView = renderedView;
+        finishTrafficFocus();
         if (selectionCleared) {
           updateSelectionSummary(null);
           renderInspector();
           renderEvidence();
         } else if (filterChanged && selectedIsVisible) renderInspector();
+      }
+
+      function trafficAtNewest() {
+        return elements.requestRows.scrollTop === 0 && state.trafficSort === 'capture' && state.trafficSortDirection < 0;
+      }
+
+      function renderTrafficLatest() {
+        elements.requestLatest.hidden = state.trafficPendingCount === 0;
+        elements.requestLatest.textContent = `${state.trafficPendingCount.toLocaleString('en-US')} new ${state.trafficPendingCount === 1 ? 'request' : 'requests'}`;
+      }
+
+      // Researcher names live in the UI, so the index gets the named root events to match.
+      function trafficNamedRoots(names, needle, origin) {
+        if (!needle || !names) return [];
+        return (names.model?.document?.requests ?? []).filter(entry => entry.origin === origin && entry.name.toLowerCase().includes(needle))
+          .slice(0, 64).map(entry => `${entry.session}:${entry.process}:${entry.sequence}`);
+      }
+
+      function trafficNameOf(names) {
+        if (!names?.has('captured-request')) return () => null;
+        return request => {
+          if (!request.indexRow) return names.nameFor('request', request);
+          const identity = request.indexRow.root && RebEvidenceNames.requestIdentity(request, request.indexRow.root);
+          return identity ? names.nameOf(identity) : null;
+        };
+      }
+
+      function trafficIndexNote(answer, error) {
+        if (error) return `request index unavailable (${error}); last rows kept`;
+        const coverage = answer.index;
+        const notes = [];
+        if (!coverage.complete) {
+          const end = Number(coverage.store_end);
+          notes.push(`indexing ${end ? Math.floor(Number(coverage.indexed_end) * 100 / end) : 0}%`);
+        }
+        if (coverage.unindexed_records !== '0') notes.push(`${coverage.unindexed_records} records past the ${coverage.request_limit.toLocaleString('en-US')}-request limit`);
+        if (coverage.malformed_records !== '0') notes.push(`${coverage.malformed_records} unreadable records`);
+        return notes.join(' · ');
+      }
+
+      function trafficIndexQuery(origin, names = globalThis.RebEvidenceNames?.controller?.() ?? null) {
+        const filter = trafficParseFilter(elements.requestFilter.value);
+        return trafficIndexParameters({sort: state.trafficSort, direction: state.trafficSortDirection, needle: filter.needle,
+          tabId: state.requestTabId, domain: state.requestDomain, type: state.requestType, named: trafficNamedRoots(names, filter.text, origin),
+          flags: state.trafficFlags, range: state.trafficRange});
+      }
+
+      function wantTrafficIndex(index, {start, origin = state.sessionMode === 'demo' ? 'demo' : 'live', query = trafficIndexQuery(origin)}) {
+        return index.want({query, start, origin, locate: [state.selectedRequestId]});
+      }
+
+      function renderIndexedRequests(index) {
+        const container = elements.requestRows;
+        const origin = state.sessionMode === 'demo' ? 'demo' : 'live', live = state.sessionMode === 'live';
+        let answer = index.answer();
+        if (answer && answer.document.index.epoch !== state.trafficIndexEpoch) {
+          // A cleared or replaced store: rows read before it are not this session's.
+          if (state.trafficIndexEpoch !== null) { state.trafficLoaded.clear(); rebuildTrafficRequests(); }
+          state.trafficIndexEpoch = answer.document.index.epoch;
+        }
+        // Scopes first: a tab or domain the session no longer has resets its filter.
+        if (answer) renderRequestScopes(trafficIndexScopes(answer.document));
+        const filterKey = trafficRequestFilterKey();
+        const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
+        const query = trafficIndexQuery(origin, names);
+        const covering = candidate => candidate?.query === query && candidate.origin === origin ? candidate : null;
+        // The list moves to the new query only when it answers. Until then the
+        // last rows and their scroll position stay, even if the read fails.
+        if (covering(answer) && filterKey !== state.trafficFilterKey) {
+          state.trafficNewIds.clear(); state.trafficPendingCount = 0; state.trafficSeenThrough = null;
+          state.trafficWindowStart = 0; state.trafficWindowAnchor = null;
+          if (state.trafficFilterKey !== null) container.scrollTop = 0;
+          state.trafficFilterKey = filterKey;
+        }
+        const known = covering(answer)?.document.matching ?? 0;
+        const start = trafficBlockStart(container, known, state.trafficWindowStart);
+        state.trafficWindowStart = start;
+        answer = wantTrafficIndex(index, {start, origin, query});
+        const current = covering(answer);
+        renderTrafficSortButtons();
+        container.setAttribute('role', 'listbox');
+        if (!current) {
+          // Another query's rows stay until this one answers; they are never relabeled.
+          if (!answer) renderTrafficEmpty('Reading the request index…');
+          const failure = index.error();
+          const block = container.trafficBlock;
+          if (block) {
+            const pending = failure ? 'Not loaded: the request index is unavailable' : 'Loading…';
+            if (block.options.pending !== pending) renderTrafficRows(container, block.requests, {...block.options, pending, newIds: new Set()});
+            renderTrafficRowSelection(container, state.selectedRequestId);
+          }
+          // The last answer's tab facets cover the whole session, so its count of
+          // rows without a tab holds while another query is unanswered.
+          const unresolved = answer?.document.facets?.tabs?.find(tab => tab.tab_id === '0')?.count;
+          renderTrafficWindowStatus(null, answer ? answer.document.total : null, false,
+            failure ? `${trafficIndexNote(null, failure)}, filter not applied` : 'reading the request index',
+            unresolved === undefined ? null : {unresolved});
+          return;
+        }
+        const page = current.document, matching = page.matching;
+        if (current !== state.trafficAppliedAnswer) {
+          if (live && state.trafficAppliedAnswer?.query === query && current.added > 0 && !trafficAtNewest()) state.trafficPendingCount += current.added;
+          state.trafficAppliedAnswer = current;
+        }
+        if (!live || trafficAtNewest()) state.trafficPendingCount = 0;
+        const length = Math.max(0, Math.min(TRAFFIC_ROW_LIMIT, matching - start));
+        const rows = Array.from({length}, (_, offset) => {
+          const at = start + offset - current.start;
+          return at >= 0 && at < current.rows.length ? current.rows[at] : null;
+        });
+        const seen = state.trafficSeenThrough;
+        const newIds = new Set(live && seen !== null ? rows.filter(row => row && row.indexRow.ordinal >= seen).map(row => row.id) : []);
+        state.trafficSeenThrough = page.through;
+        const mounted = new Set(rows.filter(Boolean).map(row => row.id));
+        const located = page.located ?? {};
+        const outside = id => id !== null && !mounted.has(id) && Object.hasOwn(located, id) && located[id] === null;
+        const note = trafficIndexNote(page, index.error());
+        const totals = {sizes: page.sizes, hiddenInternal: page.hidden_internal,
+          unresolved: page.facets.tabs.find(tab => tab.tab_id === '0')?.count ?? 0};
+        const timeline = {first: page.timeline.first_time_ns === null ? null : BigInt(page.timeline.first_time_ns),
+          last: page.timeline.last_time_ns === null ? null : BigInt(page.timeline.last_time_ns), buckets: page.timeline.buckets};
+        state.trafficOverview?.render(timeline, state.trafficRange);
+        renderTrafficWindowStatus(matching, page.total, outside(state.selectedRequestId), note, totals);
+        renderTrafficLatest();
+        renderRequestCount(matching, page.total, 'session');
+        if (matching === 0) renderTrafficEmpty(trafficEmptyText(page.total));
+        else renderTrafficRows(container, rows, {start, total: matching, selectedId: state.selectedRequestId, newIds,
+          onSelect: selectTrafficRow, onKey: moveRequestSelection, nameOf: trafficNameOf(names),
+          pending: index.error() ? 'Not loaded: the request index is unavailable' : 'Loading…', scale: trafficScale(timeline)});
+        state.trafficWindowAnchor = rows.find(Boolean)?.id ?? null;
+        state.trafficRenderedView = {requests: state.requests, retainedCount: state.requests.length, filterKey, start,
+          anchor: state.trafficWindowAnchor, answer: current, visibleCount: matching, totalCount: page.total, outside, note, totals, mounted};
+        finishTrafficFocus();
+        // A loaded selection that gained records is read again, once per count.
+        const selected = state.selectedRequestId !== null ? current.rows.find(row => row.id === state.selectedRequestId) : null;
+        const loaded = selected && state.trafficLoaded.get(selected.id);
+        const attempt = selected && `${selected.id}:${selected.indexRow.records}`;
+        if (loaded && trafficRecordCount(loaded) < selected.indexRow.records && state.trafficLoadingId === null && state.trafficReloaded !== attempt) {
+          state.trafficReloaded = attempt;
+          loadTrafficRequest(selected, false);
+        }
       }
 
       function updateSelectionSummary(request) {
@@ -2960,13 +3378,14 @@ const entropyMap = createEntropyMap({
         const failed = Boolean(request.failed) || Number.isFinite(numericStatus) && numericStatus >= 400;
         elements.selectedStatus.classList.toggle('status-error', failed);
         elements.selectedStatus.classList.toggle('status-neutral', !failed && (!Number.isFinite(numericStatus) || request.status === 'pending'));
+        const fullUrl = request.urlTruncated ? requestFullUrl(request) : null;
         elements.selectedUrl.textContent = request.origin === 'sample'
           ? `https://checkout.acme.test${request.path}`
           : request.hostOnly ? `${request.path} (host only metadata)`
-            : request.urlTruncated ? `${request.path}… (truncated)` : request.path;
+            : fullUrl ?? (request.urlTruncated ? `${request.path}… (truncated)` : request.path);
         elements.selectedUrl.title = elements.selectedUrl.textContent;
-        // A truncated or scheme-less target is not a URL to copy.
-        elements.requestCopyUrl.disabled = request.hostOnly || Boolean(request.urlTruncated) || request.targetKind === 'path';
+        // A truncated or scheme-less target is not a URL to copy until its full target is loaded.
+        elements.requestCopyUrl.disabled = request.hostOnly || (Boolean(request.urlTruncated) && !fullUrl) || request.targetKind === 'path';
       }
 
       function selectRequest(id, expectedIdentity = null) {
@@ -2981,9 +3400,13 @@ const entropyMap = createEntropyMap({
         if (!request) return;
         investigationBeforeSelection();
         state.originTraceController?.abort();
+        // A store read still running for another row must not select it afterwards.
+        if (state.trafficLoadingId !== id) cancelTrafficLoad();
         state.selectedRequestId = id;
+        retainTrafficRequest(request);
         state.trafficDetailOpen = true;
         state.trafficSelectionNotice = null;
+        clearTrafficUnreadSelection();
         state.originTrace = null;
         state.selectedTraceRow = null;
         state.originTraceStatus = 'idle';
@@ -3016,21 +3439,161 @@ const entropyMap = createEntropyMap({
         refreshRequestSignalProfile();
       }
 
+      function trafficRecordCount(request) {
+        return (request?.events?.length ?? 0) + (request?.details?.length ?? 0);
+      }
+
+      function cancelTrafficLoad() {
+        state.trafficLoadController?.abort();
+        state.trafficLoadController = null;
+        state.trafficLoadingId = null;
+      }
+
+      // Keeps a selected or store-read row selectable after the newest window moves on.
+      function retainTrafficRequest(request) {
+        const loaded = state.trafficLoaded;
+        if (!loaded) return;
+        loaded.delete(request.id);
+        loaded.set(request.id, request);
+        for (const key of loaded.keys()) {
+          if (loaded.size <= 32) break;
+          if (key !== state.selectedRequestId && key !== request.id) loaded.delete(key);
+        }
+      }
+
+      // A row whose records could not be read keeps a notice that names it. The
+      // notice goes once that row, or any other, is selected.
+      function clearTrafficUnreadSelection() {
+        const failed = state.trafficUnreadSelection;
+        if (!failed) return;
+        state.trafficUnreadSelection = null;
+        const notice = document.querySelector('#investigation-notice');
+        if (!notice || notice.textContent !== failed.message) return;
+        notice.textContent = '';
+        const bar = document.querySelector('#investigation-navigation');
+        bar.dataset.status = 'ready';
+        const details = bar.querySelector('details');
+        if (details) details.open = false;
+        if (failed.barWasHidden && document.querySelector('#investigation-back')?.disabled && document.querySelector('#investigation-forward')?.disabled) bar.hidden = true;
+      }
+
+      function trafficUnreadSelectionText(indexed, reason, previous) {
+        const url = String(indexed.path ?? '');
+        const name = `${indexed.method} ${url.length > 120 ? `${url.slice(0, 119)}…` : url} (request ${indexed.id})`;
+        return `${name} was not opened: its records could not be read (${reason}).${previous ? ' The inspector still shows the request selected before it.' : ''} It opens when its records can be read.`;
+      }
+
+      // A row the newest window does not hold whole is read from the store first.
+      function selectTrafficRow(id) {
+        const indexed = state.trafficIndex?.row(id) ?? null;
+        const retained = state.requests.find(request => request.id === id);
+        if (retained && (!indexed || trafficRecordCount(retained) >= indexed.indexRow.records)) {
+          selectRequest(id);
+          focusRequestRow(id);
+        } else if (indexed) loadTrafficRequest(indexed, true);
+      }
+
+      async function loadTrafficRequest(indexed, select) {
+        const id = indexed.id;
+        state.trafficLoadController?.abort();
+        const controller = new AbortController();
+        state.trafficLoadController = controller;
+        state.trafficLoadingId = id;
+        const row = [...elements.requestRows.querySelectorAll('.request-row')].find(node => node.dataset.requestId === id);
+        row?.setAttribute('aria-busy', 'true');
+        // WebKit rejects a timed-out fetch with AbortError; the deadline says whether it was reached.
+        const deadline = AbortSignal.timeout(10000);
+        try {
+          const {events, partial} = await state.trafficIndex.events(indexed.indexRow, AbortSignal.any([controller.signal, deadline]));
+          if (controller.signal.aborted) return;
+          const request = requestsFromEvents(events, indexed.origin).find(candidate => candidate.id === id);
+          if (!request) throw new Error('its stored records no longer form this request');
+          // Tab sets and links have no request ID, so the store read lacks them; the index row has them.
+          Object.assign(request, {tabIds: indexed.tabIds, tabLink: indexed.tabLink, tabLinkLabel: indexed.tabLinkLabel,
+            extensionId: indexed.extensionId, recordsPartial: partial});
+          retainTrafficRequest(request);
+          rebuildTrafficRequests();
+          if (select) {
+            selectRequest(id);
+            // The read can finish after the researcher moved on; never take focus from another control.
+            if (trafficListHoldsFocus()) focusRequestRow(id);
+            // Selecting opens the inspector, which can cover the row.
+            [...elements.requestRows.querySelectorAll('.request-row')].find(node => node.dataset.requestId === id)?.scrollIntoView({block: 'nearest'});
+          } else if (state.selectedRequestId === id) {
+            renderInspector();
+          }
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          if (select) {
+            const reason = deadline.aborted ? 'the backend did not answer within 10 seconds' : error.message;
+            const message = trafficUnreadSelectionText(indexed, reason, state.selectedRequestId !== null);
+            const bar = document.querySelector('#investigation-navigation');
+            // A later valid poll reads it again (retryTrafficUnreadSelection).
+            state.trafficUnreadSelection = {id, indexed, message,
+              barWasHidden: state.trafficUnreadSelection?.barWasHidden ?? Boolean(bar?.hidden)};
+            state.trafficSelectionNotice = message;
+            if (state.selectedRequestId === null) updateSelectionSummary(null);
+            else investigationNotice(message, 'unavailable');
+          }
+        } finally {
+          row?.removeAttribute('aria-busy');
+          if (state.trafficLoadController === controller) {
+            state.trafficLoadController = null;
+            state.trafficLoadingId = null;
+          }
+          renderRequests();
+        }
+      }
+
+      function trafficRowAt(position) {
+        return [...elements.requestRows.querySelectorAll('.request-row')].find(row => row.dataset.position === String(position)) ?? null;
+      }
+
+      // Positions span the whole filtered list; only rows near the view are mounted.
       function moveRequestSelection(event) {
         if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
-        const rows = [...elements.requestRows.querySelectorAll('.request-row')];
-        const current = rows.indexOf(event.currentTarget);
-        if (current < 0) return;
+        const container = elements.requestRows, view = state.trafficRenderedView;
+        const row = event.currentTarget !== container && container.contains(event.currentTarget) ? event.currentTarget : null;
+        if (!view || (!row?.dataset.position && event.currentTarget !== container)) return;
         event.preventDefault();
-        const next = event.key === 'Home'
-          ? 0
-          : event.key === 'End'
-            ? rows.length - 1
-            : Math.max(0, Math.min(rows.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)));
-        const id = rows[next].dataset.requestId;
-        selectRequest(id);
-        focusRequestRow(id);
-        rows[next].scrollIntoView({block: 'nearest'});
+        const selected = container.dataset.selectedPosition;
+        const from = row ? Number(row.dataset.position)
+          : state.trafficFocusPosition ?? (selected === undefined ? Math.floor(container.scrollTop / trafficRowHeight(container)) : Number(selected));
+        const position = event.key === 'Home' ? 0 : event.key === 'End' ? view.visibleCount - 1
+          : from + (event.key === 'ArrowDown' ? 1 : -1);
+        focusTrafficPosition(Math.max(0, Math.min(view.visibleCount - 1, position)));
+      }
+
+      function focusTrafficPosition(position) {
+        const container = elements.requestRows;
+        const slot = state.trafficRenderedView && trafficRowAt(position);
+        delete container.dataset.focusId;
+        if (slot?.dataset.requestId) {
+          state.trafficFocusPosition = null;
+          selectTrafficRow(slot.dataset.requestId);
+          if (document.activeElement !== slot) slot.focus({preventScroll: true});
+          slot.scrollIntoView({block: 'nearest'});
+          return;
+        }
+        // The list keeps focus while the row's block mounts or loads.
+        state.trafficFocusPosition = position;
+        container.focus({preventScroll: true});
+        if (slot) return;
+        const height = trafficRowHeight(container);
+        container.scrollTop = Math.max(0, (position + 1) * height - (container.clientHeight || 0) / 2);
+        renderRequests();
+      }
+
+      function finishTrafficFocus() {
+        const position = state.trafficFocusPosition, view = state.trafficRenderedView;
+        if (position === null) return;
+        if (!view || document.activeElement !== elements.requestRows || position >= view.visibleCount) state.trafficFocusPosition = null;
+        else if (trafficRowAt(position)?.dataset.requestId) focusTrafficPosition(position);
+      }
+
+      function trafficListHoldsFocus() {
+        const active = document.activeElement;
+        return !active || active === document.body || elements.requestRows.contains(active);
       }
 
       function focusRequestRow(id) {
@@ -3203,92 +3766,176 @@ const entropyMap = createEntropyMap({
         elements.requestDecoderPivot.disabled = !selected;
       }
 
-      // Retained request bodies (protocol/native-network-v2.md) load only for the
-      // selected request: at most 256 KiB, checked against the catalog's size and
-      // SHA-256, and decoded to text that is only ever assigned to textContent.
-      const REQUEST_BODY_READ_LIMIT = 256 * 1024;
+      // Retained request content (protocol/native-network-v2.md) loads only for the
+      // selected request and by range: a body 2 MiB at a time, a full target in
+      // one read. The backend checks the catalog's size and SHA-256 on every read;
+      // this view rechecks the digest once every byte is loaded. Text is only ever
+      // assigned to textContent.
+      const REQUEST_BODY_PAGE_BYTES = 2 * 1024 * 1024;
+      // The backend's largest range read, which is also Chromium's URL limit.
+      const REQUEST_TARGET_READ_BYTES = 2 * 1024 * 1024;
+      // Loaded bytes kept for recently selected requests, never the session's content.
+      const REQUEST_CONTENT_CACHE_BYTES = 32 * 1024 * 1024;
       // A transient read failure (timeout, HTTP status, transport) stays shown
       // and is retried by the next refresh or selection at least this long
       // after it, so a failing backend sees one read per poll, not a loop. A size
       // or SHA-256 mismatch stays cached with its reason.
       const REQUEST_BODY_RETRY_MS = 2000;
       const requestBodyViews = new Map();
-      function requestBodyArtifact(body) {
-        const matches = (state.artifacts ?? []).filter(artifact => artifact.artifact_id === body.artifactId &&
-          artifact.kind === 'request_body' && artifact.session_id === body.sessionId &&
-          artifact.creator_event_id === body.sequenceNumber);
+      function requestContentArtifact(record, kind) {
+        const matches = (state.artifacts ?? []).filter(artifact => artifact.artifact_id === record.artifactId &&
+          artifact.kind === kind && artifact.session_id === record.sessionId &&
+          artifact.creator_event_id === record.sequenceNumber);
         return matches.length === 1 ? matches[0] : null;
+      }
+      const trafficArtifacts = createTrafficArtifactLookup({valid: isArtifactResponse, refusalText: decodePayload,
+        onChange: () => {
+          const selected = state.requests.find(request => request.id === state.selectedRequestId);
+          if (['response', 'preview'].includes(state.inspectorTab)) renderInspector();
+          else if (selected && requestContentViewKey(selected) !== state.requestBodyViewKey) renderInspector();
+        }});
+      // The index knows where a request's records start; a refusal is read forward from there.
+      function trafficStoreOffset(request) {
+        return state.trafficIndex?.row?.(request?.id)?.indexRow?.first_offset ?? '0';
+      }
+      function requestContentView(record, kind, after = '0') {
+        if (location.protocol === 'file:') return {status: 'unavailable'};
+        // The receiver's refusal joins the creator record exactly, as its parent.
+        const refusal = state.events.find(event => event.type === 'artifact_capture_failed' &&
+          event.artifact_id === record.artifactId && event.parent_event_id === record.sequenceNumber &&
+          event.session_id === record.sessionId && event.process_id === record.processId);
+        if (refusal) return {status: 'refused', reason: decodePayload(refusal)};
+        let artifact = requestContentArtifact(record, kind);
+        if (!artifact) {
+          // Past the catalog's cap, or not in it yet: read it by ID.
+          const found = trafficArtifacts.lookup(record, after);
+          if (found.status === 'refused') return {status: 'refused', reason: found.reason};
+          if (found.status === 'loading') return {status: 'loading'};
+          const named = found.status === 'found' && found.artifact.artifact_id === record.artifactId && found.artifact.kind === kind &&
+            found.artifact.session_id === record.sessionId && found.artifact.creator_event_id === record.sequenceNumber;
+          if (!named) return {status: 'missing', unknown: found.status === 'unknown'};
+          artifact = found.artifact;
+        }
+        const key = `${artifact.session_id}:${artifact.artifact_id}:${artifact.sha256}`;
+        // A body kept whole is the bytes its record digested. A cut body's record digests more than was kept.
+        if (record.state === 'captured' && record.sha256 && record.sha256 !== artifact.sha256) {
+          return {status: 'error', error: "the request record's SHA-256 does not match the retained artifact", retryable: false, url: artifact.url, key};
+        }
+        const view = requestBodyViews.get(key);
+        // A body cut at the capture limit may end inside a character.
+        const cut = record.state === 'captured_truncated';
+        if (view?.retryable && Date.now() - view.failedAt >= REQUEST_BODY_RETRY_MS) {
+          // The failed view stays visible until the retry settles.
+          requestBodyViews.set(key, {status: 'loading', previous: view});
+          void loadRequestContent(artifact, key, null, cut);
+          return {...view, url: artifact.url, key};
+        }
+        if (view) return {...(view.previous ?? view), loadingMore: view.status === 'loading' && Boolean(view.previous?.bytes), url: artifact.url, key};
+        requestBodyViews.set(key, {status: 'loading'});
+        void loadRequestContent(artifact, key, null, cut);
+        return {status: 'loading', url: artifact.url, key};
       }
       function requestBodyView(request) {
         const body = request?.body;
         if (!body || body.malformed || !['captured', 'captured_truncated'].includes(body.state)) return null;
-        if (location.protocol === 'file:') return {status: 'unavailable'};
-        // The receiver's refusal joins the body record exactly, as its parent.
-        const refusal = state.events.find(event => event.type === 'artifact_capture_failed' &&
-          event.artifact_id === body.artifactId && event.parent_event_id === body.sequenceNumber &&
-          event.session_id === body.sessionId && event.process_id === body.processId);
-        if (refusal) return {status: 'refused', reason: decodePayload(refusal)};
-        const artifact = requestBodyArtifact(body);
-        if (!artifact) return {status: 'missing'};
-        const key = `${artifact.session_id}:${artifact.artifact_id}:${artifact.sha256}`;
-        const view = requestBodyViews.get(key);
-        if (view?.retryable && Date.now() - view.failedAt >= REQUEST_BODY_RETRY_MS) {
-          // The failed view stays visible until the retry settles.
-          requestBodyViews.set(key, {status: 'loading', previous: view});
-          void loadRequestBody(artifact, key);
-          return {...view, url: artifact.url};
-        }
-        if (view) return {...(view.previous ?? view), url: artifact.url};
-        requestBodyViews.set(key, {status: 'loading'});
-        void loadRequestBody(artifact, key);
-        return {status: 'loading', url: artifact.url};
+        return requestContentView(body, 'request_body', trafficStoreOffset(request));
       }
-      async function loadRequestBody(artifact, key) {
+      function requestTargetView(request) {
+        const target = request?.fullTarget;
+        return target?.retention === 'retained' ? requestContentView(target, 'request_target', trafficStoreOffset(request)) : null;
+      }
+      // The composed URL once its retained full target is loaded.
+      function requestFullUrl(request) {
+        const view = requestTargetView(request);
+        return view?.status === 'ready' && view.complete ? `${view.url}${view.text}` : null;
+      }
+      async function loadRequestContent(artifact, key, previous, cut = false) {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 10000);
         const mismatch = message => Object.assign(new Error(message), {integrity: true});
+        const loaded = previous?.bytes ?? new Uint8Array(0);
         let view;
         try {
-          const limit = Math.min(artifact.byte_size, REQUEST_BODY_READ_LIMIT);
-          const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?limit=${limit}`,
+          const page = artifact.kind === 'request_target' ? REQUEST_TARGET_READ_BYTES : REQUEST_BODY_PAGE_BYTES;
+          const limit = Math.min(artifact.byte_size - loaded.length, page);
+          const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?offset=${loaded.length}&limit=${limit}`,
             {cache: 'no-store', signal: controller.signal});
-          if (!response.ok) {response.body?.cancel().catch(() => {}); throw new Error(`the artifact store returned ${response.status}`);}
-          const bytes = await sourceFactsReadBytes(response, limit, controller.signal);
-          if (bytes.length !== artifact.byte_size) throw mismatch('its retained byte size changed');
+          if (!response.ok) {
+            if (response.status === 500 && (await Promise.resolve(response.json?.()).catch(() => null))?.code === 'artifact_integrity') throw mismatch('its bytes do not match the retained SHA-256');
+            response.body?.cancel().catch(() => {});
+            throw new Error(`the artifact store returned ${response.status}`);
+          }
+          const chunk = await sourceFactsReadBytes(response, limit, controller.signal);
+          if (chunk.length !== limit) throw mismatch('its retained byte size changed');
+          const bytes = new Uint8Array(loaded.length + chunk.length);
+          bytes.set(loaded);
+          bytes.set(chunk, loaded.length);
+          const complete = bytes.length === artifact.byte_size;
           let verified = false;
-          if (globalThis.crypto?.subtle) {
+          if (complete && globalThis.crypto?.subtle) {
             const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
               byte => byte.toString(16).padStart(2, '0')).join('');
             if (digest !== artifact.sha256) throw mismatch('its bytes do not match the retained SHA-256');
             verified = true;
           }
+          // A prefix may end inside a character; streaming leaves that tail out instead of failing it.
+          const open = {stream: !complete || cut};
           let lossy = false;
-          try {new TextDecoder('utf-8', {fatal: true}).decode(bytes);} catch {lossy = true;}
-          view = {status: 'ready', text: new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(bytes), lossy, verified};
+          try {new TextDecoder('utf-8', {fatal: true}).decode(bytes, open);} catch {lossy = true;}
+          view = {status: 'ready', artifact, bytes, text: new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(bytes, open),
+            lossy, verified, complete, cut, loaded: bytes.length, total: artifact.byte_size};
         } catch (error) {
-          view = {status: 'error', error: controller.signal.aborted ? 'timed out after 10 seconds'
-            : String(error?.message ?? error).replace(/\.$/, ''), retryable: error?.integrity !== true, failedAt: Date.now()};
+          const message = controller.signal.aborted ? 'timed out after 10 seconds' : String(error?.message ?? error).replace(/\.$/, '');
+          // A failed next range keeps the bytes already shown; bytes that fail integrity are not shown.
+          view = previous && error?.integrity !== true ? {...previous, moreError: message}
+            : {status: 'error', error: message, retryable: error?.integrity !== true, failedAt: Date.now()};
         } finally {
           clearTimeout(timeout);
         }
-        // Bounded: a few recently selected bodies, never the session's bodies.
+        // Bounded: a few recently selected requests, never the session's content.
         requestBodyViews.delete(key);
         requestBodyViews.set(key, view);
-        while (requestBodyViews.size > 8) requestBodyViews.delete(requestBodyViews.keys().next().value);
+        let retained = [...requestBodyViews.values()].reduce((sum, item) => sum + (item.bytes?.length ?? 0), 0);
+        for (const [oldest, item] of requestBodyViews) {
+          if (requestBodyViews.size <= 8 && retained <= REQUEST_CONTENT_CACHE_BYTES) break;
+          if (oldest === key) continue;
+          retained -= item.bytes?.length ?? 0;
+          requestBodyViews.delete(oldest);
+        }
         const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        if (selected?.body?.artifactId === artifact.artifact_id &&
-            requestBodyViewKey(requestBodyView(selected)) !== state.requestBodyViewKey) renderInspector();
+        if (selected && requestContentViewKey(selected) !== state.requestBodyViewKey) renderInspector();
+      }
+      function startMoreRequestBody(key) {
+        const view = requestBodyViews.get(key);
+        if (view?.status !== 'ready' || view.complete) return false;
+        requestBodyViews.set(key, {status: 'loading', previous: {...view, moreError: null}});
+        void loadRequestContent(view.artifact, key, view, view.cut);
+        return true;
+      }
+      function loadMoreRequestBody(key) {
+        if (startMoreRequestBody(key)) renderInspector();
       }
       function requestBodyViewKey(view) {
-        return view ? `${view.status}|${view.reason ?? view.error ?? ''}|${view.url ?? ''}` : '';
+        return view ? `${view.status}|${view.unknown ?? ''}|${view.reason ?? view.error ?? ''}|${view.url ?? ''}|${view.loaded ?? ''}|${view.moreError ?? ''}|${view.loadingMore ?? ''}` : '';
       }
-      // A body whose acknowledgment arrives after selection becomes readable on
+      // General and Headers read the full target; Payload reads the body and its query from the full target.
+      function requestContentViewKey(request) {
+        return state.inspectorTab === 'payload' ? `${requestBodyViewKey(requestBodyView(request))}#${requestBodyViewKey(requestTargetView(request))}`
+          : requestBodyViewKey(requestTargetView(request));
+      }
+      // Content whose acknowledgment arrives after selection becomes readable on
       // the next catalog refresh without reselecting the request. Unchanged
       // views do not re-render the inspector on every poll.
       function refreshSelectedRequestBody() {
         const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        if (state.inspectorTab !== 'general' || !['captured', 'captured_truncated'].includes(selected?.body?.state)) return;
-        if (requestBodyViewKey(requestBodyView(selected)) !== state.requestBodyViewKey) renderInspector();
+        if (selected && ['response', 'preview'].includes(state.inspectorTab)) {
+          trafficResponse.render(document.querySelector('#response-inspector'), selected, state.inspectorTab);
+          return;
+        }
+        const target = selected?.fullTarget?.retention === 'retained';
+        if (!selected || (state.inspectorTab === 'payload' ? !target && !['captured', 'captured_truncated'].includes(selected.body?.state)
+          : !['general', 'headers'].includes(state.inspectorTab) || !target)) return;
+        if (requestContentViewKey(selected) !== state.requestBodyViewKey) renderInspector();
       }
 
       function renderInspectorMessage(message) {
@@ -3299,7 +3946,11 @@ const entropyMap = createEntropyMap({
       }
 
       function renderInspectorDetails(rows) {
-        elements.fieldTree.replaceChildren(...rows.map(detail => {
+        elements.fieldTree.replaceChildren(...inspectorDetailRows(rows));
+      }
+
+      function inspectorDetailRows(rows) {
+        return rows.map(detail => {
           const row = document.createElement('div');
           row.className = 'field-row'; row.dataset.type = detail.type;
           const key = document.createElement('span'); key.className = 'field-key'; key.textContent = detail.key;
@@ -3307,8 +3958,21 @@ const entropyMap = createEntropyMap({
           const type = document.createElement('span'); type.className = 'field-type'; type.textContent = detail.type;
           row.append(key, value, type);
           return row;
-        }));
+        });
       }
+
+      // Response and Preview tabs, protocol/native-network-v3.md.
+      const trafficResponse = createTrafficResponse({getArtifacts: () => state.artifacts, getEvents: () => state.events,
+        contentSession: () => state.requestContentCaptureEnabled, readable: () => location.protocol !== 'file:',
+        lookup: (record, request) => trafficArtifacts.lookup(record, trafficStoreOffset(request)), onChange: () => renderInspector()});
+      function openResolvedFrame(resolution) {
+        if (selectArtifact(resolution.artifact_id, resolution.artifact_line ?? null,
+          {column: resolution.artifact_column ?? 0}) !== false) showScreen('sources');
+      }
+      const requestStackPanel = createRequestStackPanel({
+        refresh: () => { if (state.inspectorTab === 'initiator') renderInspector(); },
+        open: frame => openResolvedFrame(frame.resolution)
+      });
 
       function renderInspector() {
         evidencePackagePanel.sync();
@@ -3336,10 +4000,46 @@ const entropyMap = createEntropyMap({
         elements.requestCollectionPivot.disabled = !request;
         elements.requestInspector.hidden = showingGeneral;
         document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingGeneral);
-        if (showingGeneral) {
+        const responseInspector = document.querySelector('#response-inspector');
+        responseInspector.hidden = showingGeneral || !['response', 'preview'].includes(state.inspectorTab);
+        const headersInspector = document.querySelector('#headers-inspector');
+        headersInspector.hidden = showingGeneral || state.inspectorTab !== 'headers';
+        const cookiesInspector = document.querySelector('#cookies-inspector');
+        cookiesInspector.hidden = showingGeneral || state.inspectorTab !== 'cookies';
+        const payloadInspector = document.querySelector('#payload-inspector');
+        payloadInspector.hidden = showingGeneral || state.inspectorTab !== 'payload';
+        if (!responseInspector.hidden) {
+          responseInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
+          elements.requestInspector.hidden = true;
+          document.querySelector('.detail-pane').classList.add('showing-exchange');
+          trafficResponse.render(responseInspector, request, state.inspectorTab);
+          return;
+        }
+        if (!headersInspector.hidden || !cookiesInspector.hidden) {
+          elements.requestInspector.hidden = true;
+          document.querySelector('.detail-pane').classList.add('showing-exchange');
+          if (!headersInspector.hidden) {
+            state.requestBodyViewKey = requestContentViewKey(request);
+            renderTrafficHeaders(headersInspector, request, renderInspector, requestTargetView(request));
+          }
+          else renderTrafficCookies(cookiesInspector, request, renderInspector, {requests: state.requests, events: state.events, selectRequest,
+            openFrame: openResolvedFrame, storeRevision: state.eventEtag});
+          return;
+        }
+        if (!payloadInspector.hidden) {
+          elements.requestInspector.hidden = true;
+          document.querySelector('.detail-pane').classList.add('showing-exchange');
+          // A parsed view needs every retained byte, so ranges are read on without a click.
           const bodyView = requestBodyView(request);
-          state.requestBodyViewKey = requestBodyViewKey(bodyView);
-          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice, bodyView);
+          if (bodyView?.status === 'ready' && bodyView.complete === false && !bodyView.loadingMore && !bodyView.moreError &&
+              trafficPayloadParses(request.body, bodyView)) startMoreRequestBody(bodyView.key);
+          state.requestBodyViewKey = requestContentViewKey(request);
+          renderTrafficPayload(payloadInspector, request, requestBodyView(request), requestTargetView(request));
+          return;
+        }
+        if (showingGeneral) {
+          state.requestBodyViewKey = requestContentViewKey(request);
+          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice, requestTargetView(request));
           return;
         }
         elements.requestInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
@@ -3422,13 +4122,16 @@ const entropyMap = createEntropyMap({
               );
             }
             details.push({ key: 'Frame', value: integerText(source, 'frame_id'), type: 'id' });
-            renderInspectorDetails(details);
+            requestStackPanel.render(elements.fieldTree, request, inspectorDetailRows(details));
           } else {
-            renderInspectorMessage(request?.origin === 'sample'
+            const empty = document.createElement('div');
+            empty.className = 'field-empty';
+            empty.textContent = request?.origin === 'sample'
               ? 'Sample initiator evidence is available in the request field backtrace.'
               : request?.origin === 'demo'
                 ? 'Demo initiator evidence is available in the retained event payload.'
-                : 'No renderer initiator was captured for this browser request.');
+                : 'No renderer initiator was captured for this browser request.';
+            requestStackPanel.render(elements.fieldTree, request, [empty]);
           }
           return;
         }
@@ -4959,6 +5662,13 @@ const entropyMap = createEntropyMap({
         analystElements.deleteFolder.dataset.confirm = String(state.analystDeleteFolderId === folder.id);
       }
 
+      let analystCodeEditor = null;
+      function colorAnalystEditor() {
+        analystCodeEditor ??= mountCodeEditor(analystElements.content, analystElements.contentColors,
+          () => codeViewSyntax(analystElements.kind.value === 'analyst-script' ? 'javascript' : analystElements.language.value));
+        analystCodeEditor.refresh();
+      }
+
       function renderAnalystEditor() {
         const file = analystFile();
         analystElements.editorEmpty.hidden = Boolean(file);
@@ -4992,6 +5702,7 @@ const entropyMap = createEntropyMap({
         analystElements.draftStatus.textContent = state.analystDraftDirty
           ? 'Unsaved changes cannot run. Save or discard them before choosing another item or closing the app.'
           : `${formatByteSize(file.content_bytes)} saved · file ${file.id} · ${new Date(file.updated_at_ms).toLocaleString()}`;
+        colorAnalystEditor();
       }
 
       function selectedAnalystArtifact() {
@@ -5945,11 +6656,12 @@ const entropyMap = createEntropyMap({
       }
 
       // The one Sources exclusion rule. Canvas images belong to Fingerprinting;
-      // request bodies are sensitive network evidence shown with their Traffic
-      // row (protocol/native-network-v2.md). Neither is listed, opened or loaded
+      // request bodies, full targets, header blocks and cookie lists are
+      // sensitive network evidence shown with their Traffic row
+      // (protocol/native-network-v2.md and v3). None is listed, opened or loaded
       // as a source file.
       function isSourceArtifact(artifact) {
-        return Boolean(artifact) && artifact.kind !== 'canvas_data_url' && artifact.kind !== 'request_body';
+        return Boolean(artifact) && !['canvas_data_url', 'request_body', 'request_target', 'request_headers', 'response_headers', 'cookie_list', 'stack'].includes(artifact.kind);
       }
 
       function sourceIsCurrent(source) {
@@ -5976,12 +6688,13 @@ const entropyMap = createEntropyMap({
         }
       }
 
-      function releaseSourcePreview(source) {
+      // Passing the catalog record keeps a whole-catalog release linear.
+      function releaseSourcePreview(source, owner = null) {
         const identity = sourceIdentity(source);
-        const preview = state.artifacts.find(value => sourceIdentity(value) === identity);
+        const preview = owner ?? state.artifacts.find(value => sourceIdentity(value) === identity);
         if (preview) {
           preview.controller?.abort();
-          for (const field of ['content', 'sourceTextLength', 'contentTruncated', 'loading', 'loadError', 'controller', 'previewUsed', 'contentVerified', 'contentLossy']) delete preview[field];
+          for (const field of ['content', 'sourceTextLength', 'contentTruncated', 'contentLongLine', 'loading', 'loadError', 'controller', 'previewUsed', 'contentVerified', 'contentLossy']) delete preview[field];
         }
         for (const cache of [state.deobfuscationRequests, state.deobfuscationCache, state.sourceFormatCache]) {
           for (const [key, value] of cache ?? []) {
@@ -5991,6 +6704,7 @@ const entropyMap = createEntropyMap({
           }
         }
         if (state.sourceEditorView?.identity === identity) state.sourceEditorView = null;
+        if (state.sourceOriginalHighlighter?.identity === identity) state.sourceOriginalHighlighter = null;
       }
 
       function boundSourcePreviews(protectedSource = null) {
@@ -6001,16 +6715,16 @@ const entropyMap = createEntropyMap({
         let characters = entries.reduce((sum, {preview}) => sum + (preview.content?.length ?? 0), 0);
         let documents = entries.length;
         // Metadata/open tabs remain. Reopening an evicted preview reloads it.
-        // Text is at most 16 MiB of UTF-16 units across eight preview owners.
+        // Other previews hold at most 32 Mi UTF-16 units across eight owners.
         for (const {source, preview} of entries) {
-          if (documents <= 8 && characters <= 8 * 1024 * 1024) break;
+          if (documents <= 8 && characters <= 32 * 1024 * 1024) break;
           if (sourceIdentity(source) === protectedIdentity) continue;
           characters -= preview.content?.length ?? 0; documents -= 1;
           releaseSourcePreview(source);
         }
       }
 
-      function boundSourceAnalysis(cache, maximum, characterLimit, segmentLimit) {
+      function boundSourceAnalysis(cache, maximum, characterLimit, segmentLimit, keep = null) {
         let characters = 0, segments = 0, wireBytes = 0;
         for (const value of cache.values()) {
           wireBytes += value.sourceDocumentBytes ?? 0;
@@ -6019,6 +6733,7 @@ const entropyMap = createEntropyMap({
         }
         for (const [key, value] of cache) {
           if (cache.size <= maximum && characters <= characterLimit && segments <= segmentLimit && wireBytes <= 32 * 1024 * 1024) break;
+          if (key === keep) continue;
           wireBytes -= value.sourceDocumentBytes ?? 0;
           characters -= (value.original_source?.length ?? value.sourceInput?.length ?? 0) + (value.representation?.text?.length ?? value.text?.length ?? 0);
           segments -= value.representation?.segments?.length ?? value.segments?.length ?? 0;
@@ -6027,21 +6742,18 @@ const entropyMap = createEntropyMap({
         }
       }
 
-      function capturedSources() {
+      function capturedSources(artifactId = null) {
         return state.artifacts
-          .filter(isSourceArtifact)
+          .filter(artifact => isSourceArtifact(artifact) && (artifactId === null || artifact.artifact_id === artifactId))
           .map(artifact => {
             const key = `artifact:${artifact.artifact_id}`;
             return { ...artifact, source_type: 'artifact', key, deobfuscation: state.deobfuscationCache?.get(deobfuscationKey({...artifact, key})) ?? null };
           });
       }
 
-      function sourceOrigin(source) {
-        try { return source.url ? new URL(source.url).origin : '(anonymous)'; } catch { return '(generated)'; }
-      }
-
+      // Dynamic code has no file of its own; DevTools names it VM<id> too.
       function sourceDisplayName(source) {
-        return `${sourceName(source)} · artifact ${source.artifact_id}`;
+        return source?.capture_origin === 'dynamic_javascript' ? `VM${source.artifact_id}` : sourceName(source);
       }
 
       // Every artifact kind the evidence contract admits, labeled by what its
@@ -6052,298 +6764,40 @@ const entropyMap = createEntropyMap({
           bytecode_buffer: ['BC', 'guest bytecode']}[kind] ?? null;
       }
 
-      function sourceDisplayMeta(source) {
-        return `${source.origin === 'sample' ? 'sample' : source.origin === 'demo' ? 'demo' : 'evidence'} · ${sourceKindLabel(source.kind)?.[1] ?? source.kind}`;
-      }
-
-      function sourcePathParts(source) {
-        try { return source.url ? new URL(source.url).pathname.split('/').filter(Boolean) : [sourceName(source)]; } catch { return [sourceName(source)]; }
-      }
-
       function sourceIcon(source) {
         return sourceKindLabel(source.kind)?.[0] ?? '?';
       }
 
       function selectedSource() {
-        const matches = capturedSources().filter(source => source.artifact_id === state.selectedArtifactId);
+        if (state.selectedArtifactId == null) return null;
+        const matches = capturedSources(state.selectedArtifactId);
         return matches.length === 1 ? matches[0] : null;
       }
 
-      // The navigator owns metadata and focus only. It never owns source bytes,
-      // editor state, analysis, or fetches. These caps also bound hostile paths.
-      const SOURCE_TREE_LIMITS = Object.freeze({catalog: 5000, nodes: 10000, visible: 1000, depth: 16, url: 4096, identity: 8192});
-
-      function sourceTreeModel(collection) {
-        const catalog = state.artifacts;
-        const nodes = new Map();
-        const rootKey = JSON.stringify([collection, 'root']);
-        const root = {key: rootKey, kind: 'root', label: 'top', depth: 0, parent: null, children: [], count: 0};
-        nodes.set(rootKey, root);
-        const limits = {catalog: Math.max(0, catalog.length - SOURCE_TREE_LIMITS.catalog), omitted: 0, deep: 0, ambiguous: 0};
-        const files = new Map();
-        const branch = (key, label, kind, parent) => {
-          if (!nodes.has(key)) {
-            const node = {key, label, kind, depth: parent.depth + 1, parent: parent.key, children: [], count: 0};
-            nodes.set(key, node); parent.children.push(key);
-          }
-          return nodes.get(key);
-        };
-        for (let index = 0; index < Math.min(catalog.length, SOURCE_TREE_LIMITS.catalog); index++) {
-          const raw = catalog[index];
-          if (!isSourceArtifact(raw)) continue;
-          // Refuse an overlong path before URL parsing or identity serialization.
-          if (typeof raw.url !== 'string' || raw.url.length > SOURCE_TREE_LIMITS.url) {limits.omitted++; continue;}
-          const source = {...sourceReference(raw), source_type: 'artifact'};
-          const identity = sourceIdentity(source);
-          if (!identity || identity.length > SOURCE_TREE_LIMITS.identity) {limits.omitted++; continue;}
-          const key = JSON.stringify([collection, 'source', identity]);
-          // Duplicate exact identities must never become two apparent choices.
-          if (files.has(key)) {files.get(key).ambiguous = true; limits.ambiguous++; continue;}
-          let origin = '(anonymous)', originIdentity = ['anonymous'], parts = [];
-          if (source.url) {
-            try {
-              const url = new URL(source.url);
-              origin = url.origin === 'null' ? url.protocol : url.origin;
-              originIdentity = ['url', origin];
-              parts = url.pathname.split('/');
-              if (url.pathname.startsWith('/')) parts.shift();
-            } catch {origin = '(generated)'; originIdentity = ['generated'];}
-          }
-          const directories = parts.slice(0, -1);
-          const bounded = directories.slice(0, SOURCE_TREE_LIMITS.depth);
-          const originKey = JSON.stringify([collection, 'origin', originIdentity]);
-          const directoryKeys = bounded.map((_, index) => JSON.stringify([collection, 'folder', originIdentity, bounded.slice(0, index + 1)]));
-          const newBranches = [originKey, ...directoryKeys].filter(value => !nodes.has(value)).length;
-          if (nodes.size + newBranches + 1 > SOURCE_TREE_LIMITS.nodes) {limits.omitted++; continue;}
-          if (directories.length > SOURCE_TREE_LIMITS.depth) limits.deep++;
-          let parent = branch(originKey, origin.replace(/^https?:\/\//, ''), 'origin', root);
-          const ancestors = [root, parent];
-          bounded.forEach((label, index) => {
-            parent = branch(directoryKeys[index], label || '(empty path segment)', 'folder', parent); ancestors.push(parent);
-          });
-          const node = {key, identity, kind: 'file', label: sourceDisplayName(source), source,
-            parent: parent.key, depth: parent.depth + 1, children: null};
-          nodes.set(key, node); files.set(key, node); parent.children.push(key);
-          for (const ancestor of ancestors) ancestor.count++;
-        }
-        for (const node of nodes.values()) {
-          if (!node.children) continue;
-          node.children.sort((a, b) => {
-            const left = nodes.get(a), right = nodes.get(b);
-            return Number(left.kind === 'file') - Number(right.kind === 'file') || left.label.localeCompare(right.label) || a.localeCompare(b);
-          });
-          node.children.forEach((key, index) => {const child = nodes.get(key); child.position = index + 1; child.size = node.children.length;});
-        }
-        root.position = 1; root.size = 1;
-        return {collection, rootKey, nodes, limits};
-      }
-
-      function sourceTreeVisible(model, collapsed) {
-        const visible = [], stack = model.nodes.get(model.rootKey).count ? [model.rootKey] : [];
-        while (stack.length && visible.length < SOURCE_TREE_LIMITS.visible) {
-          const node = model.nodes.get(stack.pop()); visible.push(node);
-          if (node.children && !collapsed.has(node.key)) {
-            for (let index = node.children.length - 1; index >= 0; index--) stack.push(node.children[index]);
-          }
-        }
-        return {visible, limited: stack.length > 0};
-      }
-
-      function sourceTreeState() {
-        return state.sourceNavigator ??= {scopes: new Map(), rows: new Map(), serial: 0, model: null, visible: []};
-      }
-
-      function sourceTreeScope(nav, collection) {
-        if (!nav.scopes.has(collection)) nav.scopes.set(collection, {collapsed: new Set(), focus: null, scrollTop: 0, scrollLeft: 0});
-        return nav.scopes.get(collection);
-      }
-
-      function sourceTreeFocus(key, reveal = false) {
-        const nav = sourceTreeState(), scope = sourceTreeScope(nav, nav.model.collection);
-        const entry = nav.rows.get(key);
-        if (!entry) return;
-        scope.focus = key;
-        for (const [rowKey, value] of nav.rows) value.row.tabIndex = rowKey === key ? 0 : -1;
-        entry.row.focus({preventScroll: true});
-        if (reveal) {
-          // Scroll only the navigator, never the editor or an outer workspace.
-          const row = entry.row.getBoundingClientRect(), pane = elements.sourceTree.getBoundingClientRect();
-          if (row.top < pane.top) elements.sourceTree.scrollTop += row.top - pane.top;
-          else if (row.bottom > pane.bottom) elements.sourceTree.scrollTop += row.bottom - pane.bottom;
-        }
-      }
-
-      function toggleSourceTree(key, expanded = null) {
-        const nav = sourceTreeState(), node = nav.model?.nodes.get(key);
-        if (!node?.children?.length) return;
-        const scope = sourceTreeScope(nav, nav.model.collection);
-        const open = expanded ?? scope.collapsed.has(key);
-        if (open) scope.collapsed.delete(key); else scope.collapsed.add(key);
-        renderSourceTree(false);
-      }
-
-      function sourceTreeKeydown(event, key) {
-        // Leave browser/history/OS chords and native button Enter/Space alone.
-        if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-        const nav = sourceTreeState(), node = nav.model?.nodes.get(key);
-        if (!node) return;
-        const scope = sourceTreeScope(nav, nav.model.collection);
-        const index = nav.visible.findIndex(value => value.key === key);
-        let next;
-        if (event.key === 'ArrowDown') next = nav.visible[Math.min(index + 1, nav.visible.length - 1)]?.key;
-        else if (event.key === 'ArrowUp') next = nav.visible[Math.max(0, index - 1)]?.key;
-        else if (event.key === 'Home') next = nav.visible[0]?.key;
-        else if (event.key === 'End') next = nav.visible.at(-1)?.key;
-        else if (event.key === 'ArrowRight') {
-          if (node.children?.length && scope.collapsed.has(key)) toggleSourceTree(key, true);
-          else if (node.children?.length) next = node.children[0];
-        } else if (event.key === 'ArrowLeft') {
-          if (node.children?.length && !scope.collapsed.has(key)) toggleSourceTree(key, false);
-          else next = node.parent;
-        } else return;
-        event.preventDefault(); event.stopPropagation();
-        if (next) sourceTreeFocus(next, true);
-      }
-
-      function sourceTreeRow(node, nav) {
-        const row = document.createElement('button');
-        row.type = 'button'; row.className = 'source-tree-row';
-        row.dataset.sourceTreeKey = node.key;
-        row.dataset.sourceTreeKind = node.kind;
-        row.setAttribute('role', 'treeitem');
-        const icon = document.createElement('span'); icon.setAttribute('aria-hidden', 'true');
-        const name = document.createElement('span'); name.className = 'source-tree-name';
-        // A researcher name leads the cell; the captured file label stays beside it.
-        const researcher = document.createElement('span'); researcher.className = 'researcher-name'; researcher.hidden = true;
-        const raw = document.createElement('span'); raw.className = 'source-tree-raw';
-        name.append(researcher, raw);
-        const detail = document.createElement('span'); detail.className = 'source-tree-meta';
-        row.append(icon, name, detail);
-        let group = null;
-        if (node.children) {
-          group = document.createElement('div'); group.setAttribute('role', 'group');
-          group.id = `source-tree-group-${++nav.serial}`;
-          // A button cannot contain interactive descendants. Own the adjacent
-          // group so the accessibility tree still has the real hierarchy.
-          row.setAttribute('aria-owns', group.id);
-        }
-        row.addEventListener('focus', () => {
-          const scope = sourceTreeScope(nav, nav.model.collection); scope.focus = node.key;
-          for (const [key, entry] of nav.rows) entry.row.tabIndex = key === node.key ? 0 : -1;
-        });
-        row.addEventListener('keydown', event => sourceTreeKeydown(event, node.key));
-        row.addEventListener('click', () => {
-          const current = nav.model?.nodes.get(node.key);
-          if (!current) return;
-          sourceTreeScope(nav, nav.model.collection).focus = node.key;
-          if (current.children) toggleSourceTree(node.key);
-          else if (sourceIsCurrent(current.source)) selectArtifact(current.source.artifact_id);
-          else {
-            state.sourceNoticeKind = 'warning';
-            state.sourceNotice = 'This exact source changed or is no longer available. Refresh the catalog before opening it.';
-            renderSourceHealth();
-          }
-        });
-        return {row, icon, name, raw, researcher, detail, group};
-      }
-
       function renderSourceTree(refresh = true) {
-        const nav = sourceTreeState(), tree = elements.sourceTree, previous = nav.model;
-        const activeKey = document.activeElement?.dataset?.sourceTreeKey;
-        const hadFocus = tree.contains(document.activeElement);
-        const previousScope = previous && sourceTreeScope(nav, previous.collection);
-        let anchor = null;
-        if (refresh && previous?.collection === state.sourceCollection && tree.scrollTop > 0 && tree.clientHeight > 0) {
-          const pane = tree.getBoundingClientRect();
-          for (const node of nav.visible) {
-            const bounds = nav.rows.get(node.key).row.getBoundingClientRect();
-            if (bounds.bottom > pane.top && bounds.top < pane.bottom) {anchor = {key: node.key, offset: bounds.top - pane.top}; break;}
-          }
+        sourceTreeView.render(refresh);
+      }
+
+      let sourceInternalToggleButton = null;
+      function sourceInternalToggle(internal) {
+        if (!globalThis.RebNetworkScope) return null;
+        if (!sourceInternalToggleButton) {
+          sourceInternalToggleButton = document.createElement('button');
+          sourceInternalToggleButton.type = 'button'; sourceInternalToggleButton.className = 'source-internal-toggle';
+          sourceInternalToggleButton.title = 'Hide chrome:, devtools: and other browser-internal sources; nothing is deleted';
+          sourceInternalToggleButton.addEventListener('click', () => setHideBrowserInternal(!state.hideBrowserInternal));
         }
-        if (previousScope) {previousScope.scrollTop = tree.scrollTop; previousScope.scrollLeft = tree.scrollLeft;}
-        if (refresh || !previous || previous.collection !== state.sourceCollection) nav.model = sourceTreeModel(state.sourceCollection);
-        const model = nav.model, scope = sourceTreeScope(nav, model.collection);
-        // Deleted branches cannot grow an unbounded preference history.
-        for (const key of scope.collapsed) if (!model.nodes.get(key)?.children) scope.collapsed.delete(key);
-        const {visible, limited} = sourceTreeVisible(model, scope.collapsed);
-        const keys = new Set(visible.map(node => node.key));
-        const nearest = key => {
-          for (let count = 0; key && count <= SOURCE_TREE_LIMITS.depth + 3; count++) {
-            if (keys.has(key)) return key;
-            key = (model.nodes.get(key) ?? previous?.nodes.get(key))?.parent;
-          }
-          return null;
-        };
-        const selectedCandidates = [...model.nodes.values()].filter(node => node.source && node.source.artifact_id === state.selectedArtifactId);
-        // Selection must agree with the authoritative raw catalog, including
-        // records omitted by path/node limits. Never scan beyond the catalog cap
-        // merely to decorate a row: an incomplete catalog cannot prove uniqueness.
-        const selected = !model.limits.catalog && selectedCandidates.length === 1 && !selectedCandidates[0].ambiguous &&
-          keys.has(selectedCandidates[0].key) && sourceIsCurrent(selectedCandidates[0].source) ? selectedCandidates[0] : null;
-        scope.focus = nearest(hadFocus ? activeKey : scope.focus) ?? selected?.key ?? visible[0]?.key ?? null;
-        const containers = new Map([[tree, []]]);
-        const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
-        const namedSources = Boolean(names?.has('captured-artifact'));
-        for (const node of visible) {
-          let entry = nav.rows.get(node.key);
-          if (!entry) {entry = sourceTreeRow(node, nav); nav.rows.set(node.key, entry);}
-          const {row, icon, name, raw, researcher, detail, group} = entry;
-          row.style.setProperty('--source-depth', String(Math.min(node.depth, 6)));
-          row.setAttribute('aria-level', String(node.depth + 1));
-          row.setAttribute('aria-posinset', String(node.position)); row.setAttribute('aria-setsize', String(node.size));
-          row.tabIndex = scope.focus === node.key ? 0 : -1;
-          const label = node.label.length > 512 ? node.label.slice(0, 509) + '…' : node.label;
-          if (raw.textContent !== label) raw.textContent = label;
-          const researcherName = namedSources && node.source ? names.nameFor('artifact', node.source) : null;
-          if (researcher.textContent !== (researcherName ?? '')) researcher.textContent = researcherName ?? '';
-          researcher.hidden = !researcherName;
-          name.title = researcherName ? `${researcherName} (researcher name) · ${node.source?.url || node.label}` : node.source?.url || node.label;
-          row.setAttribute('aria-label', researcherName ? `${researcherName} (researcher name), ${label}` : label);
-          icon.className = node.source ? `source-file-icon ${node.source.kind}` : 'tree-glyph';
-          icon.textContent = node.source ? sourceIcon(node.source) : scope.collapsed.has(node.key) ? '▸' : '▾';
-          icon.title = node.source ? sourceKindLabel(node.source.kind)?.[1] ?? node.source.kind : '';
-          detail.textContent = node.children ? String(node.count) : sourceDisplayMeta(node.source);
-          if (node.source) {
-            row.dataset.artifactId = node.source.artifact_id;
-            row.setAttribute('aria-selected', String(node === selected));
-          } else {
-            row.setAttribute('aria-expanded', String(!scope.collapsed.has(node.key)));
-            group.hidden = scope.collapsed.has(node.key); containers.set(group, []);
-          }
-          const container = node.parent ? nav.rows.get(node.parent).group : tree;
-          containers.get(container).push(row);
-          if (group) containers.get(container).push(group);
-        }
-        const notices = [];
-        if (model.limits.catalog) notices.push(`Only the first ${SOURCE_TREE_LIMITS.catalog.toLocaleString()} catalog records were inspected; ${model.limits.catalog.toLocaleString()} more records are outside this navigator. Selection markers are withheld until the full catalog fits this limit.`);
-        if (model.limits.omitted) notices.push(`${model.limits.omitted} sources exceed the navigator path, identity or node limit and are not listed.`);
-        if (model.limits.ambiguous) notices.push(`${model.limits.ambiguous} duplicate source identities are not shown twice; ambiguous sources cannot be opened.`);
-        if (model.limits.deep) notices.push(`${model.limits.deep} paths are shortened after ${SOURCE_TREE_LIMITS.depth} folders; file tooltips retain their full URLs.`);
-        if (limited) notices.push(`Showing the first ${SOURCE_TREE_LIMITS.visible.toLocaleString()} expanded rows. Collapse branches to see later rows, or use Open file.`);
-        if (!visible.length || notices.length) {
-          nav.notice ??= document.createElement('div'); nav.notice.className = 'source-tree-empty'; nav.notice.setAttribute('role', 'status');
-          nav.notice.textContent = notices.join(' ') || 'No source artifacts captured. Canvas images are shown in Fingerprinting.';
-          // Keep limit disclosures above the rows, including when the navigator
-          // itself is empty after filtering or rejecting over-limit paths.
-          containers.get(tree).unshift(nav.notice);
-        }
-        for (const [container, children] of containers) {
-          const wanted = new Set(children);
-          for (const child of [...container.children]) if (!wanted.has(child)) child.remove();
-          children.forEach((child, index) => {if (container.children[index] !== child) container.insertBefore(child, container.children[index] ?? null);});
-        }
-        for (const [key, entry] of nav.rows) if (!keys.has(key)) {entry.row.remove(); entry.group?.remove(); nav.rows.delete(key);}
-        nav.visible = visible;
-        tree.tabIndex = visible.length ? -1 : 0;
-        tree.scrollTop = scope.scrollTop; tree.scrollLeft = scope.scrollLeft;
-        if (anchor && nav.rows.has(anchor.key)) {
-          const bounds = nav.rows.get(anchor.key).row.getBoundingClientRect();
-          tree.scrollTop += bounds.top - tree.getBoundingClientRect().top - anchor.offset;
-        }
-        if (hadFocus) {
-          if (scope.focus) sourceTreeFocus(scope.focus, Boolean(activeKey && activeKey !== scope.focus));
-          else tree.focus({preventScroll: true});
-        }
+        globalThis.RebNetworkScope.renderBrowserInternalToggle(sourceInternalToggleButton, internal, state.hideBrowserInternal);
+        return sourceInternalToggleButton;
+      }
+
+      // One reversible view filter for Traffic and Sources; evidence is unchanged.
+      function setHideBrowserInternal(hide) {
+        state.hideBrowserInternal = hide;
+        state.trafficFlags = {...state.trafficFlags, hideInternal: hide};
+        document.querySelector('.request-flag[data-flag="hideInternal"]')?.setAttribute('aria-pressed', String(hide));
+        renderRequests();
+        renderSourceTree();
       }
 
       function renderSourceHealth() {
@@ -6385,25 +6839,32 @@ const entropyMap = createEntropyMap({
           elements.sourceEditorTabs.replaceChildren(placeholder);
           return;
         }
+        const shared = new Map();
+        for (const source of sources) shared.set(sourceDisplayName(source), (shared.get(sourceDisplayName(source)) ?? 0) + 1);
         const tabs = sources.map((source, index) => {
+          const label = sourceDisplayName(source);
           const tab = document.createElement('button');
           tab.type = 'button';
           tab.className = 'source-editor-tab';
           tab.setAttribute('role', 'tab');
-          tab.setAttribute('aria-label', `${sourceDisplayName(source)}. Press Delete to close.`);
+          tab.setAttribute('aria-label', `${label}, artifact ${source.artifact_id}. Press Delete to close.`);
           tab.setAttribute('aria-keyshortcuts', 'Delete');
           tab.dataset.sourceIdentity = sourceIdentity(source);
-          tab.title = source.url || sourceDisplayName(source);
+          tab.title = `${source.url || label} · artifact ${source.artifact_id}`;
           const selected = source.artifact_id === state.selectedArtifactId;
           tab.setAttribute('aria-selected', String(selected));
           tab.tabIndex = selected ? 0 : -1;
           const icon = document.createElement('span');
-          icon.className = `source-file-icon ${source.kind}`;
+          icon.className = 'source-file-icon';
+          icon.dataset.icon = sourceTreeFileIcon(source);
           icon.textContent = sourceIcon(source);
           icon.title = sourceKindLabel(source.kind)?.[1] ?? source.kind;
           const name = document.createElement('span');
-          name.textContent = sourceDisplayName(source);
-          name.title = source.url || sourceDisplayName(source);
+          name.textContent = label;
+          name.title = tab.title;
+          const suffix = document.createElement('span');
+          suffix.className = 'source-tab-suffix';
+          suffix.textContent = shared.get(label) > 1 ? source.artifact_id : '';
           const close = document.createElement('span');
           close.className = 'source-tab-close';
           close.textContent = '×';
@@ -6414,9 +6875,9 @@ const entropyMap = createEntropyMap({
             researcher.className = 'researcher-name';
             researcher.textContent = researcherName;
             researcher.title = `Researcher name: ${researcherName}`;
-            tab.setAttribute('aria-label', `${researcherName} (researcher name), ${sourceDisplayName(source)}. Press Delete to close.`);
-            tab.append(icon, researcher, name, close);
-          } else tab.append(icon, name, close);
+            tab.setAttribute('aria-label', `${researcherName} (researcher name), ${label}, artifact ${source.artifact_id}. Press Delete to close.`);
+            tab.append(icon, researcher, name, suffix, close);
+          } else tab.append(icon, name, suffix, close);
           tab.addEventListener('click', event => {
             if (event.target === close) {
               closeSource(source);
@@ -6478,9 +6939,13 @@ const entropyMap = createEntropyMap({
 
       function appendSourceSyntax(container, tokens) {
         const fragment = document.createDocumentFragment();
-        tokens.forEach(token => {
-          if (token.type === 'plain') fragment.append(document.createTextNode(token.text));
-          else {
+        tokens.forEach((token, at) => {
+          if (token.type === 'plain') {
+            // Leading indentation carries the editor's indent guides.
+            const indent = at === 0 ? token.text.match(/^[ \t]+/)?.[0] : null;
+            if (indent) fragment.append(textElement('span', 'source-indent', indent));
+            fragment.append(document.createTextNode(indent ? token.text.slice(indent.length) : token.text));
+          } else {
             const span = document.createElement('span');
             span.className = `syntax-${token.type}`;
             span.textContent = token.text;
@@ -6511,11 +6976,29 @@ const entropyMap = createEntropyMap({
         return null;
       }
 
+      // Rebuilding a page costs far more than scanning for a match, so a match
+      // already mounted moves only the caret. A column cut from its row still needs the render.
+      function moveSourceCaretInMountedPage(editor, line, column, length) {
+        const excerpt = editor.window.rows[line - editor.window.start];
+        if (excerpt?.line !== line || column < excerpt.columnStart || column + length > excerpt.columnEnd) return false;
+        editor.window = {...editor.window, line, column};
+        state.sourceWindow = {identity: editor.identity, representation: editor.representation, line, column};
+        elements.sourceCode.querySelector('.current-line')?.classList.remove('current-line');
+        elements.sourceCode.querySelector(`[data-local-line="${line}"]`)?.classList.add('current-line');
+        renderSourceWindowControls(editor);
+        return true;
+      }
+
       function applySourceSearch(reset = true, direction = 0, {reveal = true} = {}) {
         const query = elements.sourceSearch.value;
         let editor = state.sourceEditorView;
         const source = selectedSource();
-        const status = message => {if (elements.sourceSearchStatus) elements.sourceSearchStatus.textContent = message;};
+        // The coverage sentence is the Find field's tooltip and description.
+        const status = message => {
+          if (!elements.sourceSearchStatus) return;
+          elements.sourceSearchStatus.textContent = message;
+          elements.sourceSearch.title = `${message} Enter for next, Shift+Enter for previous.`;
+        };
         globalThis.CSS?.highlights?.delete('source-search-match');
         if (!editor || editor.identity !== sourceIdentity(source) || elements.sourceCode.hidden) {
           state.sourceSearchIndex = 0;
@@ -6528,8 +7011,12 @@ const entropyMap = createEntropyMap({
         if (!query) {
           state.sourceSearchIndex = 0;
           elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => row.classList.toggle('search-match', false));
-          elements.sourcePosition.textContent = `Line ${editor.window.line + 1}, Column ${editor.window.column + 1}`;
+          elements.sourcePosition.textContent = sourcePositionText(editor, editor.window.line, editor.window.column);
           status(`${coverage}. Find is a case-insensitive, single-line literal; no source is fetched.`);
+          return;
+        }
+        if (editor.view.formatted?.paged) {
+          applyPagedSourceSearch(editor, source, query, reset, direction, reveal, status);
           return;
         }
         if (editor.search?.query !== query) {
@@ -6545,12 +7032,12 @@ const entropyMap = createEntropyMap({
           state.sourceSearchIndex = 0; highlightRows();
           elements.sourcePosition.textContent = editor.view.wasmRows ? `0 matches in retained inspection rows; original module bytes were not searched.${incomplete ? ' Inspection coverage is incomplete.' : ''}`
             : incomplete ? '0 matches in the searched display; source coverage is incomplete.' : '0 matches in complete retained text.';
-          status(`${coverage}.${editor.index.complete ? '' : ' Search stopped at the 8 Mi UTF-16-unit bound.'}`);
+          status(`${coverage}.${editor.index.complete ? '' : ' Search stopped at the 64 Mi UTF-16-unit bound.'}`);
           return;
         }
         state.sourceSearchIndex = reset ? 0 : (state.sourceSearchIndex + direction + matches.length) % matches.length;
         const match = matches[state.sourceSearchIndex];
-        if (reveal) {
+        if (reveal && !moveSourceCaretInMountedPage(editor, match.line, match.column, match.length)) {
           // Mount only the matched line/column window. Never enter the full
           // Sources route, which can start explicitly selected analysis.
           renderSourceContent(source, editor.view, {line: match.line, column: match.column, search: false});
@@ -6560,8 +7047,8 @@ const entropyMap = createEntropyMap({
         const row = elements.sourceCode.querySelector(`[data-local-line="${match.line}"]`);
         const line = match.line;
         const column = match.column;
-        elements.sourcePosition.textContent = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches · ${editor.view.wasmRows ? 'Inspection row' : 'Line'} ${line + 1}, Column ${column + 1}`;
-        status(`${coverage}.${truncated ? ' First 1,000 matches; refine Find for later matches.' : ''}${editor.index.complete ? '' : ' Search stopped at the 8 Mi UTF-16-unit bound.'}`);
+        elements.sourcePosition.textContent = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches · ${editor.view.wasmRows ? `Inspection row ${line + 1}, Column ${column + 1}` : sourcePositionText(editor, line, column)}`;
+        status(`${coverage}.${truncated ? ' First 1,000 matches; refine Find for later matches.' : ''}${editor.index.complete ? '' : ' Search stopped at the 64 Mi UTF-16-unit bound.'}`);
         if (!row) return;
         const localColumn = match.column - Number(row.dataset.columnStart ?? 0);
         if (localColumn < 0 || localColumn + match.length > row.querySelector('.source-text').textContent.length) return;
@@ -6573,6 +7060,56 @@ const entropyMap = createEntropyMap({
         const viewport = elements.sourceCodeWrap.getBoundingClientRect();
         elements.sourceCodeWrap.scrollLeft += rect.left - viewport.left - Math.min(120, viewport.width / 4);
         elements.sourceCodeWrap.scrollTop += rect.top - viewport.top - viewport.height / 2;
+      }
+
+      // A paged layout holds one page, so Find searches the evidence and maps each match to its page.
+      function applyPagedSourceSearch(editor, source, query, reset, direction, reveal, status) {
+        const page = editor.view.formatted, original = editor.view.active;
+        const coverage = 'Complete retained source text; matches are found in the evidence and shown in the layout';
+        const originalIndex = editor.originalIndex ??= sourceDocumentIndex(original);
+        if (editor.search?.query !== query) editor.search = {query, ...sourceDocumentMatches(originalIndex, query, 1000)};
+        const {matches, truncated, error} = editor.search;
+        if (error) {elements.sourcePosition.textContent = error; status(coverage); return;}
+        const pageEnd = page.anchors[page.block + 1] ?? original.length;
+        const inverse = sourceWhitespaceInverse(page.sourceInput, page.text);
+        const shown = match => {
+          if (match.offset < page.base || match.offset >= pageEnd) return null;
+          const start = inverse(match.offset - page.base), last = inverse(match.offset + match.length - 1 - page.base);
+          const at = start === null ? null : sourceDocumentPosition(editor.index, start);
+          return at && {...at, length: Math.max(1, (last ?? start) + 1 - start)};
+        };
+        const placed = matches.map(shown);
+        const lines = new Set(placed.filter(Boolean).map(at => at.line));
+        elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => row.classList.toggle('search-match', lines.has(Number(row.dataset.localLine))));
+        if (!matches.length) {
+          state.sourceSearchIndex = 0;
+          elements.sourcePosition.textContent = '0 matches in complete retained text.';
+          status(coverage);
+          return;
+        }
+        state.sourceSearchIndex = reset ? 0 : (state.sourceSearchIndex + direction + matches.length) % matches.length;
+        const match = matches[state.sourceSearchIndex], count = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches`;
+        status(`${coverage}.${truncated ? ' First 1,000 matches; refine Find for later matches.' : ''}`);
+        const at = placed[state.sourceSearchIndex];
+        if (!at) {
+          if (reveal) {
+            // Typing stays in Find. A page read earlier mounts at once, and
+            // that render resumes this search, which places and marks the match.
+            state.sourcePagedFind = {identity: editor.identity, query, index: state.sourceSearchIndex};
+            moveSourceWindow(sourceFormatBlock(page.anchors, match.offset) * page.stride, 0, {focus: false});
+            if (!state.sourcePagedFind) return;
+          }
+          elements.sourcePosition.textContent = `${count} · original ${match.line + 1}:${match.column + 1} · reading its part of the layout…`;
+          return;
+        }
+        if (reveal && !moveSourceCaretInMountedPage(editor, at.line, at.column, at.length)) {
+          renderSourceContent(source, editor.view, {line: at.line, column: at.column, search: false});
+          editor = state.sourceEditorView;
+        }
+        elements.sourcePosition.textContent = `${count} · ${sourcePositionText(editor, at.line, at.column)}`;
+        if (!markSourceMatch(at.line, at.column, at.length) || !reveal) return;
+        const row = elements.sourceCode.querySelector(`[data-line="${at.line + 1}"]`);
+        revealSourceColumn(row, at.column);
       }
 
       function revealSourceColumn(row, column, focus = false) {
@@ -6594,12 +7131,17 @@ const entropyMap = createEntropyMap({
 
       function renderSourceWindowControls(editor = state.sourceEditorView) {
         if (!elements.sourceWindow) return;
-        elements.sourceWindow.hidden = !editor;
-        if (!editor) return;
+        elements.sourceGoto.disabled = !editor;
+        elements.sourceWindowPrevious.hidden = !editor || editor.window.start === 0;
+        elements.sourceWindowNext.hidden = !editor || editor.window.end === editor.index.lineCount;
+        if (!editor) {elements.sourceWindow.hidden = true; return;}
         const {window: window, index} = editor;
-        elements.sourceWindowLabel.textContent = `Lines ${window.start + 1}–${window.end} of ${index.lineCount}${index.complete ? '' : '+'}`;
-        elements.sourceWindowPrevious.disabled = window.start === 0;
-        elements.sourceWindowNext.disabled = window.end === index.lineCount;
+        const total = `${index.lineCount}${index.complete ? '' : '+'}`;
+        const loading = editor.view.pageLoadingLine ?? null;
+        elements.sourceWindowLabel.textContent = loading === null ? `Lines ${window.start + 1}–${window.end} of ${total}`
+          : `Lines ${window.start + 1}–${window.end} of ${total} · reading line ${loading + 1}…`;
+        elements.sourceWindowPrevious.textContent = window.start ? `↑ Lines ${Math.max(1, window.start - SOURCE_WINDOW_LINES + 1)}–${window.start}` : '';
+        elements.sourceWindowNext.textContent = window.end < index.lineCount ? `↓ Lines ${window.end + 1}–${Math.min(index.lineCount, window.end + SOURCE_WINDOW_LINES)} of ${total}` : '';
         if (document.activeElement !== elements.sourceWindowLine) elements.sourceWindowLine.value = String(window.line + 1);
         if (document.activeElement !== elements.sourceWindowColumn) elements.sourceWindowColumn.value = String(Math.max(0, window.column) + 1);
         elements.sourceWindowLine.max = String(index.lineCount);
@@ -6620,27 +7162,89 @@ const entropyMap = createEntropyMap({
         if (row) { row.scrollIntoView({block: 'center'}); row.setAttribute('data-graph-reveal', 'true'); }
       }
 
-      function moveSourceWindow(line, column = 0) {
+      // Go to line and the pane controls move focus to the code; that move is
+      // the researcher's own and drops a Find still waiting for its page. Find
+      // passes focus: false so typing stays in its field.
+      function moveSourceWindow(line, column = 0, {focus = true} = {}) {
         const editor = state.sourceEditorView, source = selectedSource();
+        const bounds = editor && sourceDocumentLine(editor.index, line), paged = Boolean(editor?.view.formatted?.paged);
         if (!editor || editor.identity !== sourceIdentity(source) || !Number.isSafeInteger(line) || line < 0 || line >= editor.index.lineCount ||
-            !Number.isSafeInteger(column) || column < 0 || column > (sourceDocumentLine(editor.index, line)?.length ?? 0)) return false;
-        renderSourceContent(source, editor.view, {line, column, search: false});
+            !Number.isSafeInteger(column) || column < 0 || column > (bounds?.length ?? (paged ? Infinity : 0))) return false;
+        const find = focus ? null : state.sourcePagedFind;
+        if (focus) state.sourcePagedFind = null;
+        if (!bounds) {
+          // Another page of a large layout; the editor moves once it is read,
+          // and that render (applySourceSearch) writes the position. A page
+          // read earlier is shown at once.
+          state.sourceWindow = {identity: editor.identity, representation: editor.representation, line, column};
+          renderSourceContent(source, sourceDisplayView(source), {line, column, search: false});
+          if (!sourceDocumentLine(state.sourceEditorView.index, line)) {
+            elements.sourcePosition.textContent = `Line ${line + 1} · reading this part of the layout…`;
+            return true;
+          }
+          // That render resumed a pending Find, which placed and marked its match.
+          if (find && !state.sourcePagedFind) return true;
+        } else renderSourceContent(source, editor.view, {line, column, search: false});
         applySourceSearch(false, 0, {reveal: false});
-        elements.sourcePosition.textContent = `Line ${line + 1}, Column ${column + 1} · Retained display location`;
+        elements.sourcePosition.textContent = sourcePositionText(state.sourceEditorView, line, column);
         const row = elements.sourceCode.querySelector(`[data-local-line="${line}"]`);
-        revealSourceColumn(row, column, true);
+        revealSourceColumn(row, column, focus);
         return true;
       }
 
-      function sourceFormattedView(source, value, variant) {
-        const key = `${sourceIdentity(source)}|${variant}`;
-        const prior = state.sourceFormatCache.get(key);
-        if (prior?.sourceInput === value) return prior;
-        const formatted = {...prettyPrintSource(source, value), sourceInput: value};
-        state.sourceFormatCache.set(key, formatted);
-        boundSourceAnalysis(state.sourceFormatCache, 2, 6 * 1024 * 1024, 500000);
-        return formatted;
+      // A displayed location, with its original one when the view is a layout or derived text.
+      // A layout prints every token as captured, so a caret after its line's last
+      // visible character, or on an empty line, sits just after the previous one.
+      function sourcePositionText(editor, line, column) {
+        const start = sourceDocumentOffset(editor.index, line), map = editor.mappingContext?.position;
+        let original = start === null || !map ? null : map(start + column, start + (sourceDocumentLine(editor.index, line)?.length ?? 0));
+        if (!original && start !== null && map && editor.view.formatted?.map && !editor.view.derived) {
+          const text = editor.index.text;
+          let at = Math.min(start + column, text.length) - 1;
+          while (at >= 0 && sourceFormatSpace(text.charCodeAt(at))) at--;
+          const previous = at < 0 ? null : map(at, at + 1);
+          if (previous) original = {line: previous.line, column: previous.column + 1};
+        }
+        return `Line ${line + 1}, Column ${column + 1}${original ? ` (original ${original.line + 1}:${original.column + 1})` : ''}`;
       }
+
+      // Each page of a large layout starts from the original's lexer state at its first character.
+      function sourceOriginalHighlighter(source, text) {
+        const identity = sourceIdentity(source), cached = state.sourceOriginalHighlighter;
+        if (cached?.identity === identity && cached.text === text) return cached.highlighter;
+        const highlighter = createSourceHighlighter(source, sourceDocumentIndex(text));
+        state.sourceOriginalHighlighter = {identity, text, highlighter};
+        return highlighter;
+      }
+
+      function sourceRepresentation(source) {
+        return JSON.stringify([sourceIdentity(source), state.sourceWasm, state.sourceDeobfuscated, state.sourceFormatted,
+          state.sourceDeobfuscated ? deobfuscationKey(source) : null]);
+      }
+
+      function sourceWantedLine(source) {
+        const saved = state.sourceWindow;
+        return saved?.identity === sourceIdentity(source) && saved.representation === sourceRepresentation(source) ? saved.line : 0;
+      }
+
+      function sourceFormattedView(source, value, variant) {
+        // The backend Oxc layout for JavaScript evidence, read one 1,000-line page at a time; otherwise the in-page layout, off the UI thread.
+        const backend = variant === 'original' ? sourceFormatClient.page(source, value, sourceWantedLine(source)) : null;
+        if (backend && !backend.fallback) return backend;
+        const key = `${sourceIdentity(source)}|${variant}`, notice = backend?.notice ?? null;
+        const prior = state.sourceFormatCache.get(key);
+        if (prior?.sourceInput === value && prior.notice === notice) return prior;
+        const entry = {pending: true, sourceInput: value, notice};
+        state.sourceFormatCache.set(key, entry);
+        sourceFormatClient.layout(source, value).then(result => {
+          if (state.sourceFormatCache.get(key) !== entry) return;
+          Object.assign(entry, result, {pending: false});
+          boundSourceAnalysis(state.sourceFormatCache, 8, 64 * 1024 * 1024, Infinity, key);
+          if (state.sourceFormatted && sourceIdentity(selectedSource()) === sourceIdentity(source)) renderSources();
+        });
+        return entry;
+      }
+
 
       function sourceDisplayView(source) {
         if (state.sourceWasm && source.kind === 'wasm' && source.source_type === 'artifact') {
@@ -6660,8 +7264,13 @@ const entropyMap = createEntropyMap({
         const formatResult = state.sourceFormatted
           ? sourceFormattedView(source, active, derived ? `derived:${deobfuscationKey(source)}` : 'original')
           : null;
-        const formatted = formatResult && !formatResult.error ? formatResult : null;
+        // While another page loads, the page shown last stays.
+        const shown = formatResult?.pending ? formatResult.previous ?? null : null;
+        const formatted = shown ?? (formatResult && !formatResult.error && !formatResult.pending ? formatResult : null);
         return {
+          formatPending: Boolean(formatResult?.pending && !shown),
+          pageLoadingLine: shown ? sourceWantedLine(source) : null,
+          formatNotice: formatResult?.notice ?? null,
           original,
           derived,
           active,
@@ -6742,21 +7351,33 @@ const entropyMap = createEntropyMap({
         }
         view ??= sourceDisplayView(source);
         const content = view.content;
-        const representation = JSON.stringify([identity, state.sourceWasm, state.sourceDeobfuscated, state.sourceFormatted,
-          state.sourceDeobfuscated ? deobfuscationKey(source) : null]);
+        const representation = sourceRepresentation(source);
+        const page = view.formatted?.paged ? view.formatted : null;
         const mapping = view.wasmRows ? state.wasmCache.get(wasmKey(source)) : view.derived ?? null;
         const formatting = view.formatted ?? null;
         const previous = state.sourceEditorView;
         const sameDocument = previous?.representation === representation && previous.content === content && previous.mapping === mapping && previous.formatting === formatting;
-        const index = sameDocument ? previous.index : sourceDocumentIndex(content);
+        const index = sameDocument ? previous.index : page ? sourcePageIndex(content, page.lineBase, page.lineCount) : sourceDocumentIndex(content);
         const savedWindow = state.sourceWindow?.identity === identity && state.sourceWindow.representation === representation ? state.sourceWindow : null;
         const requestedLine = target.line ?? savedWindow?.line ?? 0;
         const requestedColumn = target.column ?? savedWindow?.column ?? 0;
         const clampedLine = Math.max(0, Math.min(index.lineCount - 1, Number.isSafeInteger(requestedLine) ? requestedLine : 0));
-        const window = sameDocument && previous.window.line === clampedLine && previous.window.column === requestedColumn
+        // While another page of the layout is read, the page shown last stays
+        // exactly as it is: only the window controls say what is being read.
+        const window = sameDocument && (view.pageLoadingLine != null || previous.window.line === clampedLine && previous.window.column === requestedColumn)
           ? previous.window : sourceDocumentWindow(index, clampedLine, requestedColumn);
-        state.sourceWindow = {identity, representation, line: window.line, column: window.column};
-        const sameWindow = sameDocument && previous.window.line === window.line && previous.window.column === window.column;
+        state.sourceWindow = view.pageLoadingLine === null || view.pageLoadingLine === undefined
+          ? {identity, representation, line: window.line, column: window.column}
+          : {identity, representation, line: view.pageLoadingLine, column: target.column ?? savedWindow?.column ?? 0};
+        const highlighter = sameDocument && previous.highlighter ? previous.highlighter
+          : createSourceHighlighter(view.wasmRows ? {kind: 'plain', mime_type: 'text/plain'} : source, index,
+            page ? {highlighter: sourceOriginalHighlighter(source, view.active), offset: page.base} : null);
+        // The synchronous budget is spent in slices: a page of a large layout is
+        // seeded only once the original's lexer reaches its first character, so a
+        // page within the budget is colored before its first paint.
+        for (let spent = 0; spent < SOURCE_COLOR_SYNC_UNITS && !highlighter.ready(window.rows); spent += SOURCE_COLOR_SLICE_UNITS) highlighter.advance(SOURCE_COLOR_SLICE_UNITS);
+        const colored = highlighter.ready(window.rows);
+        const sameWindow = sameDocument && previous.window.line === window.line && previous.window.column === window.column && previous.colored === colored;
         if (sameWindow) {
           const coverageChanged = previous.view.searchCoverage !== view.searchCoverage || previous.view.searchIncomplete !== view.searchIncomplete;
           previous.view = view;
@@ -6772,29 +7393,43 @@ const entropyMap = createEntropyMap({
         const mappingContext = sameDocument ? previous.mappingContext : view.lineMap ? null : sourceWindowMapping(view.mapOriginal ?? '', view.active ?? '', view.derived, view.formatted);
         const mappedLines = mappingContext?.(window.rows);
         if (!sameDocument) state.sourceSearchIndex = 0;
-        state.sourceEditorView = {identity, representation, content, mapping, formatting, index, window, view, mappingContext,
+        state.sourceEditorView = {identity, representation, content, mapping, formatting, index, window, view, mappingContext, highlighter, colored,
           search: sameDocument ? previous.search : null};
         const lineMap = view.lineMap;
-        // Later/column-clipped windows cannot assume the lexical state of an omitted prefix.
-        const plainWindow = window.start > 0 || window.rows.some(row => row.columnStart > 0 || row.columnEnd < row.fullLength);
-        const tokenizer = createSourceTokenizer(view.wasmRows || plainWindow ? {kind: 'plain', mime_type: 'text/plain'} : source);
+        const colors = colored ? highlighter.rows(window.rows) : null;
+        // Checkpoints extend in small steps between tasks; the mounted rows recolor
+        // in place once they reach the window, so the rows are built once.
+        if (!highlighter.done() && !highlighter.pumping) {
+          highlighter.pumping = true;
+          const pump = () => {
+            const editor = state.sourceEditorView;
+            if (editor?.highlighter !== highlighter || editor.identity !== sourceIdentity(selectedSource())) {highlighter.pumping = false; return;}
+            highlighter.advance(SOURCE_COLOR_SLICE_UNITS);
+            if (!editor.colored && highlighter.ready(editor.window.rows)) {
+              if (!recolorSourceWindow(editor)) renderSourceContent(selectedSource(), editor.view, {line: editor.window.line, column: editor.window.column, search: false});
+              if (elements.sourceSearch.value) applySourceSearch(false, 0, {reveal: false});
+            }
+            if (highlighter.done()) highlighter.pumping = false; else setTimeout(pump, 0);
+          };
+          setTimeout(pump, 0);
+        }
 
         const nodes = window.rows.map((excerpt, rowIndex) => {
           const {text: line, line: index} = excerpt;
           const mapped = lineMap ? lineMap[index] ?? null : mappedLines?.[rowIndex] ?? null;
           const mappedLine = mapped?.originalLine ?? null;
           const row = document.createElement('span');
-          row.className = 'source-line';
+          row.className = index === window.line ? 'source-line current-line' : 'source-line';
           row.dataset.line = String(index + 1);
           row.dataset.localLine = String(index);
           row.dataset.columnStart = String(excerpt.columnStart);
           const gutter = document.createElement('button');
           gutter.type = 'button';
           gutter.className = 'source-gutter';
-          gutter.textContent = String((mappedLine ?? index) + 1);
+          gutter.textContent = String(index + 1);
           gutter.disabled = mappedLine === null;
-          gutter.title = mappedLine === null ? 'Retained source line' : `Show original source at line ${mappedLine + 1}`;
-          gutter.setAttribute('aria-label', gutter.title);
+          gutter.setAttribute('aria-label', mappedLine === null ? 'Retained source line' : `Show original source at line ${mappedLine + 1}`);
+          gutter.title = mappedLine === null ? 'Retained source line' : `Original ${mappedLine + 1}:${(mapped?.originalColumn ?? 0) + 1} · show the original source`;
           gutter.addEventListener('click', event => {
             event.stopPropagation();
             if (!view.wasmRows && mappedLine !== null) revealOriginalLine(source, mappedLine, mapped?.originalColumn ?? 0);
@@ -6817,7 +7452,7 @@ const entropyMap = createEntropyMap({
           }
           const text = document.createElement('span');
           text.className = 'source-text';
-          appendSourceSyntax(text, line ? sourceSyntaxTokens(line, tokenizer) : []);
+          appendSourceSyntax(text, colors ? colors.rows[rowIndex] : line ? [{type: 'plain', text: line}] : []);
           const displayed = document.createElement('span'); displayed.className = 'source-excerpt';
           if (excerpt.columnStart) displayed.append(textElement('span', 'source-excerpt-notice', `⟪ columns 1–${excerpt.columnStart} omitted ⟫ `));
           displayed.append(text);
@@ -6826,7 +7461,8 @@ const entropyMap = createEntropyMap({
           return row;
         });
         elements.sourceCode.replaceChildren(...nodes);
-        elements.sourceLanguage.textContent = view.wasmRows ? 'WASM disassembly · byte offsets' : `${sourceSyntaxLabel(tokenizer.language)}${plainWindow ? ' · bounded excerpt; omitted lexical context' : tokenizer.truncated ? ' · color limit reached' : ''}`;
+        elements.sourceCodeWrap.dataset.gutterDigits = String(Math.max(5, String(index.lineCount).length));
+        renderSourceLanguage(view, highlighter, colors);
         elements.sourceCode.hidden = false;
         elements.sourceCodeEmpty.hidden = true;
         renderSourceWindowControls();
@@ -6834,13 +7470,46 @@ const entropyMap = createEntropyMap({
           elements.sourceCodeWrap.scrollTop = scroll.top;
           elements.sourceCodeWrap.scrollLeft = scroll.left;
           const row = [...elements.sourceCode.children].find(value => value.dataset.line === focused?.line);
-          const target = focused?.gutter ? row?.querySelector('.source-gutter') : row;
-          if (target) {target.tabIndex = -1; target.focus({preventScroll: true});}
+          const focusTarget = focused?.gutter ? row?.querySelector('.source-gutter') : row;
+          if (focusTarget) {focusTarget.tabIndex = -1; focusTarget.focus({preventScroll: true});}
+          const coverageChanged = previous.view.searchCoverage !== view.searchCoverage || previous.view.searchIncomplete !== view.searchIncomplete;
+          if (coverageChanged && target.search !== false) applySourceSearch(false, 0, {reveal: false});
         } else {
           elements.sourceCodeWrap.scrollTop = 0;
           elements.sourceCodeWrap.scrollLeft = 0;
-          if (target.search !== false) applySourceSearch(false, 0, {reveal: false});
+          const find = state.sourcePagedFind;
+          if (find?.identity === identity && page && view.pageLoadingLine == null) {
+            state.sourcePagedFind = null;
+            // A new page is a new document, which reset the match index; Find resumes at its own match.
+            if (elements.sourceSearch.value === find.query) { state.sourceSearchIndex = find.index ?? 0; applySourceSearch(false, 0); }
+          } else if (target.search !== false) applySourceSearch(false, 0, {reveal: false});
         }
+      }
+
+      // Why the whitespace layout is used is stated in #source-limit-notice; the label stays short.
+      function renderSourceLanguage(view, highlighter, colors) {
+        const layout = view.formatPending ? ' · formatting…' : view.formatError ? ` · ${view.formatError}`
+          : view.formatted ? ` · ${view.formatted.engine === 'oxc' ? 'Oxc layout' : 'whitespace layout'}` : '';
+        elements.sourceLanguage.textContent = view.wasmRows ? 'WASM disassembly · byte offsets'
+          : `${sourceSyntaxLabel(highlighter.language)}${!colors ? ' · coloring…' : colors.truncated ? ' · color limit reached' : ''}${layout}`;
+        elements.sourceLanguage.title = `${elements.sourceLanguage.textContent}${view.formatted?.engine !== 'oxc' && view.formatNotice ? `: ${view.formatNotice}` : ''}`;
+      }
+
+      // Colors the mounted rows once the lexer reaches them. Only each row's text
+      // is replaced, so focus, the caret line, match bands and scroll stay. False
+      // when the mounted rows are not this window's, which then needs a render.
+      function recolorSourceWindow(editor) {
+        const rows = editor.window.rows, texts = elements.sourceCode.querySelectorAll(':scope > .source-line > .source-excerpt > .source-text');
+        if (texts.length !== rows.length || texts[0]?.closest('.source-line').dataset.localLine !== String(rows[0]?.line)) return false;
+        const colors = editor.highlighter.rows(rows);
+        if (!colors) return false;
+        rows.forEach((excerpt, index) => {
+          texts[index].replaceChildren();
+          appendSourceSyntax(texts[index], colors.rows[index]);
+        });
+        editor.colored = true;
+        renderSourceLanguage(editor.view, editor.highlighter, colors);
+        return true;
       }
 
       function renderSources() {
@@ -6856,7 +7525,7 @@ const entropyMap = createEntropyMap({
         renderSourceTabs();
         renderSourceFacts(source);
         elements.sourceLocation.textContent = source?.url || (source ? sourceDisplayName(source) : 'Select a source');
-        elements.sourceLocation.title = source?.url || (source ? sourceDisplayName(source) : '');
+        elements.sourceLocation.title = source ? `${source.url || sourceDisplayName(source)} · artifact ${source.artifact_id}` : '';
         elements.sourceSize.textContent = source ? formatByteSize(source.byte_size) : '0 bytes';
         elements.sourceHash.textContent = source?.sha256 ? `sha256 ${source.sha256}` : '';
         syncSourceDisplayControls(source, view);
@@ -6881,6 +7550,7 @@ const entropyMap = createEntropyMap({
       function renderSourcePane() {
         const search = state.sourcePane === 'search';
         elements.sourceTree.hidden = search;
+        document.querySelector('#source-tree-tools').hidden = search;
         document.querySelector('#source-search-all-panel').hidden = !search;
         document.querySelectorAll('.source-side-tab').forEach(tab => {
           const selected = search ? tab.id === 'source-tab-search' : tab.dataset.sourceCollection === state.sourceCollection;
@@ -6889,8 +7559,26 @@ const entropyMap = createEntropyMap({
         });
       }
 
+      // The viewer's own limit, stated beside the code so it is never mistaken for captured text.
+      function sourceLimitText(source, view) {
+        if (!source?.contentTruncated || source.content === undefined || view?.wasmRows || view?.derived || sourceFactsPanel.original(source) !== undefined) return '';
+        const hex = sourceHexArtifact(source);
+        const shown = hex ? `${source.wasmHexBytes.toLocaleString()} bytes` : `${SOURCE_PREVIEW_BYTES / 1048576} MiB`;
+        return `${hex ? 'Hex preview' : 'Preview'} limited to the first ${shown} of this ${source.byte_size.toLocaleString()}-byte file. Later bytes are not shown or searched; the original bytes are unchanged.`;
+      }
+
       function syncSourceDisplayControls(source, view) {
-        elements.sourceViewKind.textContent = sourceViewLabel(source, view);
+        // The full-width row above the code states the viewer's limits, and why a
+        // pretty-printed view uses the whitespace layout instead of Oxc's (such as a parse failure).
+        const fallback = view?.formatted && view.formatted.engine !== 'oxc' && view.formatNotice && !state.sourceDeobfuscated
+          ? `Pretty-printed with the whitespace layout because ${view.formatNotice}.` : '';
+        const limit = [sourceLimitText(source, view), fallback].filter(Boolean).join(' ');
+        if (elements.sourceLimitNotice) {elements.sourceLimitNotice.textContent = limit; elements.sourceLimitNotice.hidden = !limit;}
+        // The status bar names the evidence state; the full provenance is its tooltip.
+        const label = sourceViewLabel(source, view);
+        elements.sourceViewKind.textContent = (state.sourceWasm && source?.kind === 'wasm') || source?.content === undefined ? label
+          : `${state.sourceDeobfuscated && sourceDerivedView(source) ? 'Derived' : 'Original'}${source.contentTruncated ? ' · truncated' : ''}${source.contentLossy ? ' · lossy' : ''}`;
+        elements.sourceViewKind.title = label;
         elements.sourceWasm.hidden = source?.kind !== 'wasm' || source?.source_type !== 'artifact';
         elements.sourceWasm.setAttribute('aria-pressed', String(state.sourceWasm));
         elements.sourceWasm.setAttribute('aria-label', state.sourceWasm ? 'Show original WASM hex' : 'Inspect WebAssembly module');
@@ -6898,8 +7586,18 @@ const entropyMap = createEntropyMap({
         elements.sourceCode.classList.toggle('wasm-inspection', Boolean(view?.wasmRows));
         elements.sourcePretty.disabled = !source?.content || !sourcePrettySupported(source);
         elements.sourcePretty.setAttribute('aria-pressed', String(state.sourceFormatted));
-        elements.sourcePretty.setAttribute('aria-label', state.sourceFormatted ? 'Show source without pretty printing' : 'Pretty print source');
-        elements.sourcePretty.title = state.sourceFormatted ? 'Show source without pretty printing' : `Pretty print ${sourceSyntaxLabel(sourceSyntaxLanguage(source))}`;
+        elements.sourcePretty.setAttribute('aria-label', state.sourceFormatted ? 'Show original source' : 'Pretty print source');
+        // The label is its own span, so a narrow status bar can show only "{ }".
+        const prettyLabel = !state.sourceFormatted ? '' : view?.formatPending ? 'Formatting…'
+          : view?.formatError ? 'Pretty print unavailable' : 'Pretty-printed · Show original';
+        if (elements.sourcePretty.textContent !== `{ }${prettyLabel ? ` ${prettyLabel}` : ''}`) {
+          const label = document.createElement('span');
+          label.className = 'source-pretty-label';
+          label.textContent = ` ${prettyLabel}`;
+          elements.sourcePretty.replaceChildren('{ }', ...(prettyLabel ? [label] : []));
+        }
+        elements.sourcePretty.title = !state.sourceFormatted ? `Pretty print ${sourceSyntaxLabel(sourceSyntaxLanguage(source))}`
+          : view?.formatError ?? 'A display layout; the evidence is unchanged. Show the source as captured.';
         elements.sourceDeob.disabled = source?.kind !== 'javascript' || !source.content;
         elements.sourceDeob.setAttribute('aria-pressed', String(state.sourceDeobfuscated));
         elements.sourceDeob.setAttribute('aria-label', state.sourceDeobfuscated ? 'Show original evidence' : 'Run local static cleanup');
@@ -6920,12 +7618,14 @@ const entropyMap = createEntropyMap({
         const original = sourceFactsPanel.original(source) !== undefined ? 'Verified original evidence'
           : `Original evidence preview${source?.contentLossy ? ' · lossy UTF-8 display' : ''}${source?.contentTruncated ? ' · truncated' : ''}`;
         if (view?.formatError) return `${original} · ${view.formatError}`;
+        if (view?.formatPending) return `${original} · formatting…`;
+        if (view?.formatNotice && !state.sourceDeobfuscated) return `Pretty printed ${original.toLowerCase()} · whitespace layout · ${view.formatNotice}`;
         if (state.sourceDeobfuscated && sourceDerivedView(source)) {
           const status = state.deobfuscationRequests.get(deobfuscationKey(source))?.status;
           return `${state.sourceFormatted ? 'Pretty printed derived' : 'Derived'} · mapped to original source${status === 'error' ? ' · last successful analysis' : status === 'loading' ? ' · reanalyzing' : status === 'cancelled' ? ' · analysis cancelled' : ''}`;
         }
         if (!state.sourceDeobfuscated || !source) {
-          return state.sourceFormatted && source ? `Pretty printed ${original.toLowerCase()} · mapped to original source` : original;
+          return state.sourceFormatted && source ? `Pretty printed ${original.toLowerCase()} · ${view?.formatted?.engine === 'oxc' ? 'Oxc layout · ' : ''}mapped to original source` : original;
         }
         const request = state.deobfuscationRequests.get(deobfuscationKey(source));
         const prefix = state.sourceFormatted ? `Pretty printed ${original.toLowerCase()}` : original;
@@ -7483,11 +8183,14 @@ const entropyMap = createEntropyMap({
       async function loadArtifactContent(artifact, {retry = false, canvasOwner = null} = {}) {
         if (artifact?.kind === 'canvas_data_url' && (!canvasOwner ||
             state.canvasPreviewOwners?.get(sourceIdentity(artifact)) !== canvasOwner || !canvasGalleryVisible() || state.artifactReceiverError)) return;
-        // Request body bytes are read only by the Traffic body view.
-        if (artifact?.kind === 'request_body') return;
+        // Request content, header blocks, cookie lists and stacks are read only by their Traffic views.
+        if (['request_body', 'request_target', 'request_headers', 'response_headers', 'cookie_list', 'stack'].includes(artifact?.kind)) return;
         if (!sourceIsCurrent(artifact) || artifact.content !== undefined || artifact.loading || (artifact.loadError && !retry)) return;
         const identity = sourceIdentity(artifact);
         const controller = new AbortController();
+        // Text previews read the whole artifact, up to its 16 MiB cap, in 2 MiB pages.
+        const previewBytes = sourceHexArtifact(artifact) || canvasOwner ? 2097152 : SOURCE_PREVIEW_BYTES;
+        const pages = Math.max(1, Math.ceil(Math.min(artifact.byte_size, previewBytes) / 2097152));
         artifact.loading = true; artifact.loadError = null; artifact.controller = controller;
         artifact.previewUsed = state.sourcePreviewSequence = (state.sourcePreviewSequence ?? 0) + 1;
         if (!canvasOwner) boundSourcePreviews(artifact);
@@ -7499,7 +8202,7 @@ const entropyMap = createEntropyMap({
           delete artifact.controller; controller.abort();
           if (canvasOwner && canvasGalleryVisible()) renderFingerprintActivity();
           else if (sourceIdentity(selectedSource()) === identity) renderSources();
-        }, 10000);
+        }, 5000 + 5000 * pages);
         if (!canvasOwner) renderSources();
         let responseCancellation = null;
         try {
@@ -7516,12 +8219,32 @@ const entropyMap = createEntropyMap({
               return responseCancellation;
             }};
           }}} : response;
-          const buffer = await sourceFactsReadBytes(ownedResponse, 2097152, controller.signal);
+          let buffer = await sourceFactsReadBytes(ownedResponse, 2097152, controller.signal);
           if (!current()) return;
           if (buffer.length !== Math.min(artifact.byte_size, 2097152)) throw new Error('The artifact preview byte size changed.');
           const total = response.headers.get('X-Artifact-Total-Bytes');
           if (total !== null && Number(total) !== artifact.byte_size) throw new Error('The artifact total byte size changed.');
-          if (artifact.byte_size <= 2097152 && globalThis.crypto?.subtle) {
+          if (pages > 1) {
+            const whole = new Uint8Array(Math.min(artifact.byte_size, previewBytes));
+            whole.set(buffer);
+            for (let offset = buffer.length; offset < whole.length; offset += 2097152) {
+              const page = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?offset=${offset}&limit=2097152`, {cache: 'no-store', signal: controller.signal});
+              if (!current() || !page.ok) {
+                responseCancellation = page.body?.cancel().catch(() => {});
+                if (!current()) return;
+                throw new Error(`Artifact store returned ${page.status}`);
+              }
+              const bytes = await sourceFactsReadBytes(page, 2097152, controller.signal);
+              if (!current()) return;
+              const pageTotal = page.headers.get('X-Artifact-Total-Bytes');
+              if (bytes.length !== Math.min(2097152, whole.length - offset) || (pageTotal !== null && Number(pageTotal) !== artifact.byte_size)) {
+                throw new Error('The artifact preview byte size changed.');
+              }
+              whole.set(bytes, offset);
+            }
+            buffer = whole;
+          }
+          if (artifact.byte_size <= previewBytes && globalThis.crypto?.subtle) {
             const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', buffer)), byte => byte.toString(16).padStart(2, '0')).join('');
             if (!current()) return;
             if (hash !== artifact.sha256) throw new Error('The artifact bytes do not match the selected SHA-256.');
@@ -7546,16 +8269,15 @@ const entropyMap = createEntropyMap({
             else canvasOwner.imageInfo = inspection;
           }
           artifact.sourceTextLength = content.length;
+          artifact.contentLongLine = !sourceHexArtifact(artifact) && !canvasOwner && sourceHasLongLine(content);
           artifact.content = content;
           artifact.wasmHexBytes = sourceHexArtifact(artifact) ? hexBytes : undefined;
           artifact.contentTruncated = artifact.byte_size > buffer.length || (sourceHexArtifact(artifact) && buffer.length > hexBytes);
-          if (artifact.contentTruncated) artifact.content += sourceHexArtifact(artifact)
-            ? `\n\n[Hex preview limited to the first ${hexBytes} bytes; original bytes are unchanged]`
-            : '\n\n[Viewer preview limited to the first 2 MiB; original bytes are unchanged]';
           if (!canvasOwner) boundSourcePreviews();
+          if (!canvasOwner && !state.sourceFormatted && sourceIdentity(selectedSource()) === identity) state.sourceFormatted = sourceFormatWanted(artifact);
         } catch (error) {
           if (current()) {
-            if (canvasOwner) for (const field of ['content', 'sourceTextLength', 'contentVerified', 'contentLossy', 'contentTruncated']) delete artifact[field];
+            if (canvasOwner) for (const field of ['content', 'sourceTextLength', 'contentVerified', 'contentLossy', 'contentTruncated', 'contentLongLine']) delete artifact[field];
             artifact.loadError = `Artifact bytes are unavailable: ${String(error.message).slice(0, 1024)}`;
           }
         } finally {
@@ -7611,6 +8333,12 @@ const entropyMap = createEntropyMap({
           identity.bytes >= 0 && identity.bytes === source?.byte_size;
       }
 
+      // An explicit { } choice for this artifact wins; otherwise a minified file opens pretty-printed.
+      function sourceFormatWanted(source) {
+        if (!source) return false;
+        return state.sourceFormatChoices?.get(sourceIdentity(source)) ?? Boolean(source.contentLongLine && sourcePrettyByDefault(source));
+      }
+
       function selectArtifact(artifactId, line = null, {identity: expectedIdentity = null, passive = false, column = 0, length = 0} = {}) {
         const matches = state.artifacts.filter(candidate => candidate.artifact_id === artifactId);
         if (matches.length !== 1 || (expectedIdentity && !sourceArtifactIdentityMatches(matches[0], expectedIdentity))) {
@@ -7622,8 +8350,8 @@ const entropyMap = createEntropyMap({
         const artifact = matches[0];
         if (!isSourceArtifact(artifact)) {
           state.sourceNoticeKind = 'warning';
-          state.sourceNotice = artifact.kind === 'request_body'
-            ? 'Request bodies are shown with their request in Traffic. No source was opened.'
+          state.sourceNotice = artifact.kind !== 'canvas_data_url'
+            ? `${{request_body: 'Request bodies are', request_target: 'Full request targets are', cookie_list: 'Cookie lists are'}[artifact.kind] ?? 'Header blocks are'} shown with their request in Traffic. No source was opened.`
             : 'Canvas images are shown in Fingerprinting. No source was opened.';
           renderSourceHealth();
           return false;
@@ -7636,7 +8364,7 @@ const entropyMap = createEntropyMap({
         sourceFactsPanel.cancel();
         state.selectedArtifactId = artifactId;
         state.sourceDeobfuscated = false;
-        state.sourceFormatted = false;
+        state.sourceFormatted = sourceFormatWanted(artifact);
         state.sourceWasm = false;
         if (!state.openArtifactIds.includes(artifactId)) state.openArtifactIds.push(artifactId);
         // A requested location is revealed by renderSources once these bytes
@@ -7656,7 +8384,7 @@ const entropyMap = createEntropyMap({
           state.selectedArtifactId = state.openArtifactIds[Math.max(0, closedIndex - 1)] ?? null;
         }
         state.sourceDeobfuscated = false;
-        state.sourceFormatted = false;
+        state.sourceFormatted = sourceFormatWanted(selectedSource());
         state.sourceWasm = false;
         renderSources();
         const selected = selectedSource();
@@ -7667,14 +8395,15 @@ const entropyMap = createEntropyMap({
       function renderQuickOpen() {
         const needle = elements.quickOpenInput.value.trim().toLowerCase();
         const matches = capturedSources().map(sourceReference).filter(source =>
-          !needle || `${sourceDisplayName(source)} ${source.url}`.toLowerCase().includes(needle)
+          !needle || `${sourceDisplayName(source)} ${source.url} ${source.artifact_id}`.toLowerCase().includes(needle)
         );
-        const rows = matches.map(source => {
+        // The catalog can hold 100,000 sources; the list shows the first 200.
+        const rows = matches.slice(0, 200).map(source => {
           const row = document.createElement('button');
           row.type = 'button';
           row.className = 'quick-open-row';
           const name = document.createElement('span'); name.textContent = sourceDisplayName(source);
-          const path = document.createElement('small'); path.textContent = source.url || '(anonymous)';
+          const path = document.createElement('small'); path.textContent = `${source.url || '(anonymous)'} · artifact ${source.artifact_id}`;
           row.append(name, path);
           row.addEventListener('click', () => {
             elements.quickOpen.hidden = true;
@@ -7682,6 +8411,7 @@ const entropyMap = createEntropyMap({
           });
           return row;
         });
+        if (matches.length > rows.length) rows.push(textElement('p', 'quick-open-more', `${(matches.length - rows.length).toLocaleString()} more files match. Type more of the name or URL.`));
         elements.quickOpenResults.replaceChildren(...rows);
       }
 
@@ -7698,13 +8428,55 @@ const entropyMap = createEntropyMap({
         if (state.artifactRefreshing || location.protocol === 'file:') return;
         state.artifactRefreshing = true;
         try {
-          const headers = state.artifactEtag ? { 'If-None-Match': state.artifactEtag } : {};
-          const response = await fetch('/api/artifacts?limit=500', { cache: 'no-store', headers });
-          if (response.status === 304) return;
-          if (!response.ok) throw new Error(`Artifact store returned ${response.status}`);
-          const body = await response.json();
-          if (!isArtifactResponse(body)) throw new TypeError('Malformed artifact response');
-          state.artifactEtag = response.headers.get('ETag');
+          // The first 50,000 records of every kind are read in manifest order. Past them, only the kinds
+          // this catalog alone supplies are read, so request records cannot crowd out scripts; Traffic
+          // reads a request's records by ID. Growth continues from the last boundary.
+          const catalogLimit = 50000, sourceLimit = 100000;
+          const read = async (query, etag = null) => {
+            const response = await fetch(`/api/artifacts?${query}`, {cache: 'no-store', headers: etag ? {'If-None-Match': etag} : {}});
+            if (response.status === 304) return null;
+            if (!response.ok) throw new Error(`Artifact store returned ${response.status}`);
+            const body = await response.json();
+            if (!isArtifactResponse(body) || (body.query !== undefined && !/^(0|[1-9][0-9]{0,19})$/.test(String(body.query?.next_after)))) {
+              throw new TypeError('Malformed artifact response');
+            }
+            return {body, etag: response.headers.get('ETag')};
+          };
+          const probe = await read('after=0&limit=1', state.artifactEtag);
+          if (!probe) return;
+          const {body} = probe;
+          let records = body.artifacts, appended = null, cursor = null, complete = true, limit = sourceLimit;
+          if (body.query) {
+            const first = body.artifacts.length ? JSON.stringify(body.artifacts[0]) : null, previous = state.artifactCursor;
+            const grown = first !== null && previous?.first === first && previous.catalog === state.artifacts;
+            let after = grown ? previous.after : '0', everyKind = grown ? previous.everyKind : 0, sources = grown ? previous.sources : 0;
+            records = []; complete = false;
+            // A page is sized so a cursor never lands past a record that was not kept.
+            for (let page = 0; page < 256; page++) {
+              const unfiltered = everyKind < catalogLimit, full = !unfiltered && sources >= sourceLimit;
+              const size = unfiltered ? Math.min(5000, catalogLimit - everyKind) : full ? 1 : Math.min(5000, sourceLimit - sources);
+              const next = (await read(`after=${after}&limit=${size}${unfiltered ? '' : `&kind=${catalogOnlyArtifactKinds.join(',')}`}`))?.body;
+              if (!next) throw new TypeError('Malformed artifact response');
+              // One record past the bound proves more remain, and it is not kept.
+              if (full && next.artifacts.length) break;
+              records.push(...next.artifacts);
+              if (unfiltered) everyKind += next.artifacts.length;
+              sources += next.artifacts.filter(isSourceArtifact).length;
+              if (!next.query) {complete = true; break;}
+              after = next.query.next_after;
+              if (!next.query.limited && !next.query.budget_exhausted) {complete = true; break;}
+            }
+            cursor = {first, after, everyKind, sources};
+            if (grown) appended = records;
+          } else if (records.length) {
+            // A reader that does not page answers the one-record probe with one record, so read what it can give.
+            records = (await read('limit=5000'))?.body.artifacts ?? records;
+            complete = records.length < 5000;
+            limit = 5000;
+          }
+          const keepCursor = () => {state.artifactCursor = cursor && {...cursor, catalog: state.artifacts};};
+          state.artifactCatalogLimit = complete ? 0 : limit;
+          state.artifactEtag = probe.etag;
           if (typeof body.artifact_receiver_configured === 'boolean') {
             state.artifactReceiverConfigured = body.artifact_receiver_configured;
           }
@@ -7713,8 +8485,9 @@ const entropyMap = createEntropyMap({
           }
           state.artifactReceiverError = null;
           renderShellStatus();
-          const catalogSignature = JSON.stringify(body.artifacts);
-          if (catalogSignature === state.artifactCatalogSignature) {
+          const catalogSignature = appended ? null : JSON.stringify(records);
+          if (appended ? !appended.length : catalogSignature === state.artifactCatalogSignature) {
+            keepCursor();
             if (canvasGalleryVisible()) renderFingerprintActivity();
             renderSourceHealth();
             return;
@@ -7722,28 +8495,33 @@ const entropyMap = createEntropyMap({
           state.artifactCatalogSignature = catalogSignature;
           // A newly retained script can be another version of a saved one.
           if (typeof invocationSitesPanel !== 'undefined') invocationSitesPanel.refresh();
-          if (body.artifacts.length === 0) {
+          if (records.length === 0 && !appended) {
             if (state.sessionMode === 'live') {
               retireCanvasPreviews('Canvas previews released because the artifact catalog is empty.');
-              for (const artifact of state.artifacts) releaseSourcePreview(artifact);
+              for (const artifact of state.artifacts) releaseSourcePreview(artifact, artifact);
               state.artifacts = [];
+              trafficArtifacts.clear();
               state.openArtifactIds = [];
               state.selectedArtifactId = null;
               renderSources();
             } else {
               renderSourceHealth();
             }
+            keepCursor();
             return;
           }
-          const existing = new Map(state.artifacts.map(artifact => [sourceIdentity(artifact), artifact]));
-          const incoming = new Set(body.artifacts.map(sourceIdentity));
-          for (const artifact of state.artifacts) if (!incoming.has(sourceIdentity(artifact))) releaseSourcePreview(artifact);
-          state.artifacts = body.artifacts.map(artifact => {
-            const prior = existing.get(sourceIdentity(artifact));
-            // Preserve the pending operation's owner, never clone loading state.
-            const descriptor = Object.fromEntries(sourceFactsFields.filter(field => Object.hasOwn(artifact, field)).map(field => [field, artifact[field]]));
-            return Object.assign(prior ?? {}, descriptor, {origin: state.sessionMode === 'live' ? 'live' : 'demo'});
-          });
+          const origin = state.sessionMode === 'live' ? 'live' : 'demo';
+          // Preserve the pending operation's owner, never clone loading state.
+          const retain = (artifact, prior = {}) => Object.assign(prior,
+            Object.fromEntries(sourceFactsFields.filter(field => Object.hasOwn(artifact, field)).map(field => [field, artifact[field]])), {origin});
+          if (appended) state.artifacts = state.artifacts.concat(appended.map(artifact => retain(artifact)));
+          else {
+            const existing = new Map(state.artifacts.map(artifact => [sourceIdentity(artifact), artifact]));
+            const incoming = new Set(records.map(sourceIdentity));
+            for (const artifact of state.artifacts) if (!incoming.has(sourceIdentity(artifact))) releaseSourcePreview(artifact, artifact);
+            state.artifacts = records.map(artifact => retain(artifact, existing.get(sourceIdentity(artifact))));
+          }
+          keepCursor();
           if (!canvasGalleryVisible()) retireCanvasPreviews();
           state.openArtifactIds = state.openArtifactIds.filter(id => state.artifacts.some(artifact => artifact.artifact_id === id));
           if (!state.artifacts.some(artifact => artifact.artifact_id === state.selectedArtifactId && isSourceArtifact(artifact))) {
@@ -7764,6 +8542,7 @@ const entropyMap = createEntropyMap({
           }
           state.artifactReceiverError = error.message;
           state.artifactEtag = null;
+          state.artifactCursor = null;
           retireCanvasPreviews('Canvas previews released because the artifact catalog is unavailable.');
           if (canvasGalleryVisible()) renderFingerprintActivity();
           renderShellStatus();
@@ -7870,19 +8649,27 @@ const entropyMap = createEntropyMap({
           const response = await fetch('/api/events?limit=5000', { cache: 'no-store', headers, signal: deadline });
           if (stale()) { next = 'repeat'; return; }
           // A failed poll drops the entity tag, so 304 always follows a valid answer.
-          if (response.status === 304) { next = 'unchanged'; return; }
+          if (response.status === 304) {
+            state.trafficIndex?.retry();
+            next = 'unchanged';
+            return;
+          }
           if (!response.ok) throw new Error(`Broker returned ${response.status}`);
           const rawBody = await response.text();
           if (stale()) { next = 'repeat'; return; }
           let body;
           try { body = JSON.parse(rawBody); } catch { throw new TypeError('Malformed broker response'); }
           if (!isBrokerResponse(body)) throw new TypeError('Malformed broker response');
+          state.eventPollAnswered = true;
           state.eventEtag = response.headers.get('ETag');
           const brokerConnected = body.broker_connected !== false;
           state.captureStopped = body.capture_stopped === true;
           state.captureControlsAvailable = body.capture_controls_available === true;
-          state.sessionMode = ['demo', 'idle'].includes(body.capture_mode)
+          const nextSessionMode = ['demo', 'idle'].includes(body.capture_mode)
             ? body.capture_mode : 'live';
+          // Rows read for another kind of session are not this session's.
+          if (nextSessionMode !== state.sessionMode) state.trafficLoaded.clear();
+          state.sessionMode = nextSessionMode;
           state.vmStealthSession = body.stealth_session === true ||
             body.native_stealth === true || body.quiet_mode === true;
           state.canvasRenderCaptures = body.canvas_render_captures ?? [];
@@ -7904,7 +8691,10 @@ const entropyMap = createEntropyMap({
           state.malformedVmFindings = vmModel.malformedCount;
           const eventOrigin = state.sessionMode === 'demo' ? 'demo' : 'live';
           state.nativeRequests = requestsFromEvents(body.network_events ?? state.events, eventOrigin);
+          globalThis.RebRequestTabs?.attachRequestTabs(state.nativeRequests, body.network_events ?? state.events);
+          state.captureExclusions = globalThis.RebNetworkScope?.captureExclusionTotals(body.network_events ?? state.events) ?? null;
           rebuildTrafficRequests();
+          state.trafficIndex?.invalidate();
           let selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
           if (!selectedRequest && state.selectedRequestId !== null) resetRequestSelection();
           updateSelectionSummary(selectedRequest);
@@ -7949,6 +8739,7 @@ const entropyMap = createEntropyMap({
       // for minutes, bounded by its worker deadline) nor restarts it, so the
       // poll keeps the connection state current meanwhile.
       async function refreshPollDependents(eventsChanged) {
+        retryTrafficUnreadSelection();
         if (state.refreshingDependents) {
           if (eventsChanged) renderVmLab();
           return;
@@ -7963,6 +8754,14 @@ const entropyMap = createEntropyMap({
         } finally {
           state.refreshingDependents = false;
         }
+      }
+
+      // A row whose records could not be read is read again after each valid
+      // poll, one read at a time, until it opens or another row is selected.
+      function retryTrafficUnreadSelection() {
+        const failed = state.trafficUnreadSelection;
+        if (!failed || state.trafficLoadingId !== null) return;
+        loadTrafficRequest(state.trafficIndex?.row(failed.id) ?? failed.indexed, true);
       }
 
       // The single transition for the event connection. 'connected' and
@@ -8160,6 +8959,12 @@ const entropyMap = createEntropyMap({
         document.querySelectorAll('.type-filter').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
         renderRequests();
       }));
+      document.querySelectorAll('.request-flag').forEach(button => button.addEventListener('click', () => {
+        if (button.dataset.flag === 'hideInternal') return setHideBrowserInternal(!state.hideBrowserInternal);
+        state.trafficFlags = {...state.trafficFlags, [button.dataset.flag]: !state.trafficFlags[button.dataset.flag]};
+        button.setAttribute('aria-pressed', String(state.trafficFlags[button.dataset.flag]));
+        renderRequests();
+      }));
       document.querySelectorAll('.field-tab').forEach(button => button.addEventListener('click', () => {
         state.fieldTab = button.dataset.fieldTab;
         state.selectedField = fieldSets[state.fieldTab].find(field => field.traceable) || null;
@@ -8219,33 +9024,54 @@ const entropyMap = createEntropyMap({
         renderRequests();
       }));
       document.querySelector('#request-order').addEventListener('click', () => {
-        state.trafficSort = 'capture'; state.trafficSortDirection = 1; renderRequests();
+        state.trafficSort = 'capture'; state.trafficSortDirection = -1; renderRequests();
       });
-      for (const [id, direction] of [['request-window-prev', -1], ['request-window-next', 1]]) {
-        document.getElementById(id).addEventListener('click', () => {
-          state.trafficWindowAnchor = null;
-          state.trafficWindowStart += TRAFFIC_ROW_LIMIT * direction;
-          renderRequests(); elements.requestRows.scrollTop = 0;
-        });
-      }
       elements.requestLatest.addEventListener('click', () => {
-        state.trafficSort = 'capture'; state.trafficSortDirection = 1;
+        state.trafficSort = 'capture'; state.trafficSortDirection = -1;
+        state.trafficNewIds.clear(); state.trafficPendingCount = 0;
+        state.trafficWindowStart = 0; state.trafficWindowAnchor = null;
+        elements.requestRows.scrollTop = 0;
         renderRequests();
-        state.trafficWindowAnchor = null; state.trafficWindowStart = TRAFFIC_RETAINED_LIMIT;
-        state.trafficNewIds.clear(); renderRequests();
-        elements.requestRows.scrollTop = elements.requestRows.scrollHeight;
       });
+      document.querySelector('#payload-inspector').addEventListener('click', event => {
+        const key = event.target.closest?.('.traffic-body-more')?.dataset.contentKey;
+        if (key) loadMoreRequestBody(key);
+      });
+      // The list holds focus while a keyboard target loads; rows handle their own keys.
+      elements.requestRows.addEventListener('keydown', event => {
+        if (event.target === elements.requestRows) moveRequestSelection(event);
+      });
+      elements.requestRows.addEventListener('scroll', () => {
+        if (state.trafficScrollFrame) return;
+        state.trafficScrollFrame = requestAnimationFrame(() => {
+          state.trafficScrollFrame = 0;
+          const total = state.trafficRenderedView?.visibleCount ?? 0;
+          if (state.trafficPendingCount && trafficAtNewest()) {
+            state.trafficPendingCount = 0; state.trafficNewIds.clear(); renderTrafficLatest();
+          }
+          if (trafficBlockStart(elements.requestRows, total, state.trafficWindowStart) !== state.trafficWindowStart) renderRequests();
+          else remountTrafficRows(elements.requestRows);
+        });
+      }, {passive: true});
+      // A list that gains height, or is shown, mounts the rows that come into view.
+      if (typeof ResizeObserver === 'function') new ResizeObserver(() => remountTrafficRows(elements.requestRows)).observe(elements.requestRows);
       elements.requestCopyUrl.addEventListener('click', async () => {
         const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        if (!selected || selected.hostOnly || selected.urlTruncated || selected.targetKind === 'path') return;
+        const fullUrl = selected?.urlTruncated ? requestFullUrl(selected) : null;
+        if (!selected || selected.hostOnly || (selected.urlTruncated && !fullUrl) || selected.targetKind === 'path') return;
         try {
-          const url = selected.origin === 'sample' ? `https://checkout.acme.test${selected.path}` : selected.path;
+          const url = selected.origin === 'sample' ? `https://checkout.acme.test${selected.path}` : fullUrl ?? selected.path;
           await navigator.clipboard.writeText(url);
           elements.requestCopyUrl.textContent = 'Copied';
         } catch {
           elements.requestCopyUrl.textContent = 'Copy unavailable';
         }
         setTimeout(() => { elements.requestCopyUrl.textContent = 'Copy URL'; }, 1800);
+      });
+      document.querySelector('#request-unresolved').addEventListener('click', () => {
+        state.requestTabId = state.requestTabId === 'unresolved' ? 'all' : 'unresolved';
+        state.requestDomain = 'all';
+        renderRequests();
       });
       elements.requestDomain.addEventListener('change', () => {
         state.requestDomain = elements.requestDomain.value;
@@ -8275,17 +9101,104 @@ const entropyMap = createEntropyMap({
       });
       elements.sourceWindowPrevious.addEventListener('click', () => {
         const current = state.sourceEditorView?.window;
-        if (current) moveSourceWindow(Math.max(0, current.start - SOURCE_WINDOW_LINES));
+        if (current?.start) moveSourceWindow(current.start - 1);
       });
       elements.sourceWindowNext.addEventListener('click', () => {
         const current = state.sourceEditorView?.window;
         if (current) moveSourceWindow(current.end);
       });
+      function openSourceGoto() {
+        if (!state.sourceEditorView) return;
+        elements.sourceMore.open = false;
+        elements.sourceWindow.hidden = false;
+        renderSourceWindowControls();
+        elements.sourceWindowLine.focus();
+        elements.sourceWindowLine.select();
+      }
+      function closeSourceGoto(restoreFocus) {
+        if (elements.sourceWindow.hidden) return;
+        elements.sourceWindow.hidden = true;
+        if (restoreFocus) elements.sourceCodeWrap.focus({preventScroll: true});
+      }
+      elements.sourceGoto.addEventListener('click', openSourceGoto);
       elements.sourceWindow.addEventListener('submit', event => {
         event.preventDefault();
-        if (!moveSourceWindow(Number(elements.sourceWindowLine.value) - 1, Number(elements.sourceWindowColumn.value) - 1)) {
-          elements.sourcePosition.textContent = 'Choose a retained line and column within that line.';
+        if (moveSourceWindow(Number(elements.sourceWindowLine.value) - 1, Number(elements.sourceWindowColumn.value) - 1)) closeSourceGoto(false);
+        else elements.sourcePosition.textContent = 'Choose a retained line and column within that line.';
+      });
+      elements.sourceWindow.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {event.preventDefault(); closeSourceGoto(true);}
+      });
+      elements.sourceMore.addEventListener('click', event => {
+        const action = event.target.closest?.('.source-more-menu button');
+        if (!action) return;
+        elements.sourceMore.open = false;
+        if (document.activeElement === action || document.activeElement === document.body) elements.sourceMore.querySelector('summary').focus();
+      });
+      document.addEventListener('pointerdown', event => {
+        if (elements.sourceMore.open && !elements.sourceMore.contains(event.target)) elements.sourceMore.open = false;
+        if (!elements.sourceWindow.hidden && !elements.sourceWindow.contains(event.target) && !elements.sourceMore.contains(event.target)) closeSourceGoto(false);
+      });
+      // Cmd/Ctrl+F finds in the open source and Ctrl+G goes to a line, as in VS Code.
+      document.addEventListener('keydown', event => {
+        if (document.querySelector('#screen-sources').hidden || event.altKey || event.shiftKey || event.repeat || document.querySelector('dialog:modal')) return;
+        if (event.key === 'Escape' && elements.sourceMore.open) {
+          event.preventDefault();
+          const inside = elements.sourceMore.contains(document.activeElement);
+          elements.sourceMore.open = false;
+          if (inside) elements.sourceMore.querySelector('summary').focus();
+        } else if (event.code === 'KeyF' && (event.metaKey || event.ctrlKey)) {
+          event.preventDefault();
+          elements.sourceSearch.focus();
+          elements.sourceSearch.select();
+        } else if (event.code === 'KeyG' && event.ctrlKey && !event.metaKey) {
+          event.preventDefault();
+          openSourceGoto();
         }
+      });
+      // The raw range of formatted text as its two status-bar parts, or null when this view has none.
+      function sourceRawRangeParts(editor, start, end) {
+        const view = editor?.view;
+        if (!view?.formatted || view.derived) return null;
+        const local = sourceWhitespaceRange(view.formatted.map, view.formatted.sourceInput ?? view.active, view.formatted.text, start, end);
+        if (!local) return null;
+        const base = view.formatted.base ?? 0, range = {start: local.start + base, end: local.end + base};
+        const original = editor.originalIndex ??= sourceDocumentIndex(view.active), from = sourceDocumentPosition(original, range.start), to = sourceDocumentPosition(original, range.end);
+        return from && to ? {raw: ` · raw ${from.line + 1}:${from.column + 1}–${to.line + 1}:${to.column + 1}`, offsets: ` (offsets ${range.start}–${range.end})`} : null;
+      }
+      // The status bar follows the caret and the selection in the mounted source text.
+      function syncSourceSelection() {
+        const editor = state.sourceEditorView, selection = globalThis.getSelection?.();
+        const point = (node, offset) => {
+          const text = (node?.nodeType === 1 ? node : node?.parentElement)?.closest?.('.source-text');
+          if (!editor || !text || !elements.sourceCode.contains(text)) return null;
+          const prefix = document.createRange();
+          prefix.setStart(text, 0);
+          prefix.setEnd(node, offset);
+          const row = text.closest('.source-line'), line = Number(row.dataset.localLine);
+          const column = Number(row.dataset.columnStart ?? 0) + prefix.toString().length, start = sourceDocumentOffset(editor.index, line);
+          return start === null ? null : {line, column, offset: start + column};
+        };
+        const anchor = selection?.rangeCount ? point(selection.anchorNode, selection.anchorOffset) : null;
+        const focus = anchor ? point(selection.focusNode, selection.focusOffset) : null;
+        const length = focus ? Math.abs(focus.offset - anchor.offset) : 0;
+        elements.sourceSelection.hidden = !length;
+        elements.sourceSelection.textContent = length ? `${length} selected` : '';
+        if (focus) {
+          const start = anchor.offset <= focus.offset ? anchor : focus;
+          const raw = length ? sourceRawRangeParts(editor, start.offset, start.offset + length) : null;
+          // Separate parts, so a narrow status bar can move the offsets, then the
+          // raw range, into the position's tooltip instead of cutting the text.
+          if (raw) {
+            elements.sourcePosition.replaceChildren(`Line ${start.line + 1}, Column ${start.column + 1}`,
+              textElement('span', 'source-position-raw', raw.raw), textElement('span', 'source-position-offsets', raw.offsets));
+          } else elements.sourcePosition.textContent = sourcePositionText(editor, focus.line, focus.column);
+        }
+      }
+      let sourceSelectionFrame = 0;
+      document.addEventListener('selectionchange', () => {
+        if (sourceSelectionFrame || document.querySelector('#screen-sources').hidden) return;
+        sourceSelectionFrame = requestAnimationFrame(() => {sourceSelectionFrame = 0; syncSourceSelection();});
       });
       elements.sourceSearch.addEventListener('paste', event => {
         const pasted = event.clipboardData?.getData('text/plain');
@@ -8338,11 +9251,23 @@ const entropyMap = createEntropyMap({
       });
       elements.sourcePretty.addEventListener('click', () => {
         sourceFactsPanel.cancel();
+        const source = selectedSource();
         state.sourceFormatted = !state.sourceFormatted;
+        if (source) state.sourceFormatChoices.set(sourceIdentity(source), state.sourceFormatted);
+        if (state.sourceFormatted) sourceFormatClient.forget(source);
         renderSources();
       });
-      // Search all files. Reads use the artifact content route with the Sources
-      // preview's 2 MiB limit and checks. A loaded preview is reused as is;
+      // A click selects the formatted token, whose characters are its raw range; the status bar then names that range.
+      elements.sourceCode.addEventListener('click', event => {
+        const editor = state.sourceEditorView, view = editor?.view;
+        const token = event.target instanceof Element ? event.target.closest('.source-text > span:not(.source-indent)') : null;
+        if (!view?.formatted || view.derived || !token || editor.identity !== sourceIdentity(selectedSource())) return;
+        codeViewSelectToken(token);
+        // After the caret update that the same click schedules.
+        requestAnimationFrame(syncSourceSelection);
+      });
+      // Search all files. Reads use the artifact content route with a 2 MiB
+      // limit and the Sources preview's checks. A loaded preview is reused as is;
       // other text stays in a small search-owned cache, so typing does not
       // refetch every file and neither cache grows the other's bound.
       const SOURCE_SEARCH_CACHE_UNITS = 8 * 1024 * 1024;
@@ -8350,7 +9275,7 @@ const entropyMap = createEntropyMap({
       function sourceSearchFiles() {
         const sources = capturedSources(), retained = new Set(sources.map(sourceIdentity));
         for (const key of sourceSearchCache.keys()) if (!retained.has(key)) sourceSearchCache.delete(key);
-        return sources.map(source => ({identity: sourceIdentity(source), artifactId: source.artifact_id, name: sourceDisplayName(source),
+        return sources.map(source => ({identity: sourceIdentity(source), artifactId: source.artifact_id, name: `${sourceDisplayName(source)} · artifact ${source.artifact_id}`,
           url: source.url ?? '', icon: sourceIcon(source), byteSize: source.byte_size, binary: sourceHexArtifact(source)}));
       }
       async function readSourceSearchText(entry, signal, limit) {
@@ -8789,8 +9714,9 @@ const entropyMap = createEntropyMap({
         let requestItems = {requests: null, items: []};
         const requests = {id: 'requests', group: 'Requests', search: () => {
           if (requestItems.requests !== state.requests) requestItems = {requests: state.requests, items: state.requests.map(request => {
-            const {name, host} = trafficTargetParts(request), id = request.id, identity = investigationRequestIdentity(request);
-            return {title: `${request.method} ${request.hostOnly ? name : `${host}${name}`}`,
+            const id = request.id, identity = investigationRequestIdentity(request);
+            // The host and full captured path, without the scheme.
+            return {title: `${request.method} ${String(request.path ?? '').trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')}${request.urlTruncated ? '…' : ''}`,
               detail: [request.status, trafficTypeLabel(request.type), request.hostOnly ? 'host only' : '',
                 identity ? `request ${identity.request} · session ${identity.session} · process ${identity.process} · sequence ${identity.sequence}` : 'no exact retained identity'].filter(Boolean).join(' · '),
               run: () => openPaletteRequest(id, identity)};
@@ -8800,7 +9726,7 @@ const entropyMap = createEntropyMap({
         const files = {id: 'files', group: 'Files', search: () => capturedSources().map(source => {
           const id = source.artifact_id, identity = investigationArtifactIdentity(source);
           return {title: sourceDisplayName(source),
-            detail: [source.url || '(anonymous)', sourceKindLabel(source.kind)?.[1] ?? source.kind, formatByteSize(source.byte_size)].join(' · '),
+            detail: [source.url || '(anonymous)', sourceKindLabel(source.kind)?.[1] ?? source.kind, formatByteSize(source.byte_size), `artifact ${id}`].join(' · '),
             run() { if (identity) openInvestigation({kind: 'artifact', identity}); else { showScreen('sources'); selectArtifact(id); } }};
         })};
         function openPaletteFinding(id) {
@@ -8956,7 +9882,7 @@ const entropyMap = createEntropyMap({
           add('Request', evidenceNames.identityFor('request', request), `${request.method} ${request.path}`, () => openNamedRequest(evidenceNames.identityFor('request', request)));
         }
         if (evidenceNames.has('captured-artifact')) for (const source of capturedSources()) {
-          add('Source', evidenceNames.identityFor('artifact', source), sourceDisplayName(source), () => openNamedSource(evidenceNames.identityFor('artifact', source)));
+          add('Source', evidenceNames.identityFor('artifact', source), `${sourceDisplayName(source)} · artifact ${source.artifact_id}`, () => openNamedSource(evidenceNames.identityFor('artifact', source)));
         }
         if (evidenceNames.has('vm-handler')) for (const finding of state.vmFindings) {
           const workspace = vmOpcodeWorkspaceForFinding(state.vmOpcodeWorkspace, finding);
@@ -9001,6 +9927,14 @@ const entropyMap = createEntropyMap({
         return true;
       }
 
+      state.trafficIndex = location.protocol === 'file:' || typeof createTrafficIndex !== 'function' ? null
+        : createTrafficIndex({onChange: () => { renderRequests(); renderNetworkNotice(); }});
+      if (typeof mountTrafficColumns === 'function') mountTrafficColumns(document.querySelector('#screen-traffic .request-table'));
+      state.trafficOverview = typeof mountTrafficOverview === 'function'
+        ? mountTrafficOverview(document.querySelector('#request-overview'), {onRange: range => {
+          state.trafficRange = range;
+          renderRequests();
+        }}) : null;
       renderRequests();
       renderInspector();
       renderEvidence();

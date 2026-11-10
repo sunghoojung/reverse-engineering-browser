@@ -249,6 +249,95 @@ fn tool_text(message: &Value) -> &str {
     message["result"]["content"][0]["text"].as_str().unwrap()
 }
 
+/// A retained artifact of `kind` in the backend's store, with `body` as its
+/// bytes. Every value is synthetic.
+fn retained_artifact(server: &Server, id: &str, kind: &str, body: &[u8]) -> Value {
+    use sha2::{Digest, Sha256};
+    let hash = hex::encode(Sha256::digest(body));
+    let (origin, context) = match kind {
+        "response_body" => ("network_response", "0"),
+        "canvas_data_url" => ("canvas_to_data_url", "0"),
+        "bytecode_buffer" => ("runtime_typed_array", "1"),
+        _ => ("network_request", "0"),
+    };
+    let sensitive = kind != "bytecode_buffer";
+    let artifact = json!({
+        "protocol_version": 1, "artifact_id": id, "session_id": "1", "navigation_id": "1",
+        "frame_id": "1", "parent_artifact_id": "0", "creator_event_id": "1",
+        "execution_context_id": context, "capture_origin": origin, "kind": kind,
+        "url": "https://owned.test/fixture", "mime_type": "application/octet-stream",
+        "byte_size": body.len(), "sha256": hash, "sensitive": sensitive,
+        "content_path": format!("blobs/{hash}.bin"),
+    });
+    let artifacts = server._root.path().join("artifacts");
+    std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
+    std::fs::write(artifacts.join(format!("blobs/{hash}.bin")), body).unwrap();
+    let mut manifest = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(artifacts.join("manifest.jsonl"))
+        .unwrap();
+    writeln!(manifest, "{artifact}").unwrap();
+    artifact
+}
+
+fn float32_artifact_request(artifact: &Value) -> Value {
+    let frames = artifact["byte_size"].as_u64().unwrap() / 4;
+    json!({"body": {"protocol_version": 1, "reference": null,
+        "input": {"representation": "float32-be", "channels": 1, "frames": frames,
+            "source": {"kind": "artifact", "session_id": "1", "artifact_id": artifact["artifact_id"],
+                "sha256": artifact["sha256"], "byte_length": artifact["byte_size"]}},
+        "tolerances": {"absolute": 0, "relative": 0, "ulps": 0},
+        "detail": {"start": 0, "limit": 256}}})
+}
+
+#[test]
+fn compare_float32_returns_no_bytes_of_a_sensitive_artifact_through_mcp() {
+    let server = Server::start();
+    let mut mcp = Mcp::start(&server.url, false);
+    let secret = b"SYNTHETIC-SECRET-BYTES-0123456!!";
+    assert_eq!(secret.len() % 4, 0);
+    let words: Vec<String> = secret.chunks(4).map(|word| hex::encode(word)).collect();
+    let readable = retained_artifact(&server, "1", "bytecode_buffer", secret);
+    let answer = mcp.request(
+        "tools/call",
+        json!({"name": "compare_float32", "arguments": float32_artifact_request(&readable)}),
+    );
+    assert_eq!(answer["result"]["isError"], false, "{answer}");
+    assert!(
+        tool_text(&answer).contains(&words[0]),
+        "the non-sensitive control must return its words: {answer}"
+    );
+    for (index, kind) in [
+        "response_body",
+        "request_body",
+        "request_target",
+        "request_headers",
+        "response_headers",
+        "cookie_list",
+        "canvas_data_url",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Each artifact has its own bytes, so every refusal is checked by content.
+        let mut body = secret.to_vec();
+        body[0] = b'A' + index as u8;
+        let artifact = retained_artifact(&server, &(index + 2).to_string(), kind, &body);
+        let answer = mcp.request(
+            "tools/call",
+            json!({"name": "compare_float32", "arguments": float32_artifact_request(&artifact)}),
+        );
+        assert_eq!(answer["result"]["isError"], true, "{kind}: {answer}");
+        let text = tool_text(&answer);
+        assert!(text.contains("sensitive artifacts"), "{kind}: {text}");
+        for word in body.chunks(4).map(hex::encode) {
+            assert!(!text.contains(&word), "{kind} returned {word}: {text}");
+        }
+        assert!(!text.contains("SYNTHETIC"), "{kind}: {text}");
+    }
+}
+
 #[tokio::test]
 async fn openapi_mcp_matches_the_live_loopback_api() {
     let spec = specification();
@@ -1413,6 +1502,8 @@ dir="$REB_LIVE_SESSION_ROOT/$((4242 + $(ls "$REB_LIVE_SESSION_ROOT" | wc -l)))"
 mkdir -p "$dir/profile" "$dir/artifacts"
 printf '%s\n' "$REB_NATIVE_WASM_DISPATCH $REB_CAPTURE_CATEGORY_MASK $REB_USE_SYSTEM_KEYCHAIN $REB_CONSOLE_DOCUMENT_START $REB_CAPTURE_REQUEST_CONTENT ${{REB_NATIVE_JS_INVOCATION_SITES-unset}} ${{REB_NATIVE_JS_INVOCATION_DIGESTS-unset}}" > "$dir/options"
 printf '%s\n' "${{REB_NATIVE_JS_INVOCATION_IF_SUPPORTED-unset}} ${{REB_JS_INVOCATION_SITE_STORE-unset}}" > "$dir/site-store"
+printf '%s\n' "${{REB_NATIVE_REQUEST_STACKS-unset}} ${{REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED-unset}}" > "$dir/stacks"
+printf '%s\n' "${{REB_REQUEST_CONTENT_BUDGET_MIB-unset}}" > "$dir/content-budget"
 labels=()
 if [[ -n "${{REB_NATIVE_JS_INVOCATION_SITES-}}" ]]; then
   cp "$REB_NATIVE_JS_INVOCATION_SITES" "$dir/sites"
@@ -1421,6 +1512,7 @@ if [[ -n "${{REB_NATIVE_JS_INVOCATION_SITES-}}" ]]; then
 fi
 [[ "$REB_CAPTURE_REQUEST_CONTENT" == 1 ]] && labels+=(--session-request-content)
 [[ "$REB_CONSOLE_DOCUMENT_START" == 1 ]] && labels+=(--session-document-start)
+[[ "${{REB_NATIVE_REQUEST_STACKS-0}}" == 1 ]] && labels+=(--session-request-stacks)
 ln -s "test-host-$$" "$dir/profile/SingletonLock"
 # The stand-in broker holds its event store guard for its life, as the real
 # broker does; the backend reads that lock as the broker running.
@@ -1495,6 +1587,9 @@ wait "$backend"
             )
             .env("REB_NATIVE_JS_INVOCATION_DIGESTS", "1")
             .env("REB_NATIVE_JS_INVOCATION_IF_SUPPORTED", "1")
+            .env("REB_NATIVE_REQUEST_STACKS", "1")
+            .env("REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED", "1")
+            .env("REB_REQUEST_CONTENT_BUDGET_MIB", "999")
             .env(
                 "REB_JS_INVOCATION_SITE_STORE",
                 self.root.path().join("app-sites.json"),
@@ -1600,10 +1695,18 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
             .any(|line| line == "https://example.test/page")
     );
     // Inherited switches reach nothing: no request content, document-start
-    // permission, invocation sites or digests.
+    // permission, invocation sites, digests or request stacks.
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("options")).unwrap(),
         "1 4095 0 0 0 unset 0\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4242").join("stacks")).unwrap(),
+        "0 unset\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4242").join("content-budget")).unwrap(),
+        "unset\n"
     );
     // Nor may it read or change the app's saved invocation sites.
     let store = std::fs::read_to_string(fixture.session("4242").join("site-store")).unwrap();
@@ -1626,7 +1729,7 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
     assert_eq!(
         context["capture_options"],
         json!({"source":"launcher","request_content":false,"canvas_images":false,
-            "document_start":"not_permitted",
+            "request_stacks":false,"document_start":"not_permitted",
             "js_invocation":{"state":"not_armed","count":0,"digests":false}})
     );
     let summary = mcp.request("tools/call", json!({"name": "get_session_summary"}));
@@ -1745,6 +1848,14 @@ fn agent_session_options_are_named_never_inherited() {
             json!({"js_invocation_saved_sites": true}),
             "saved set, which is empty",
         ),
+        (
+            json!({"request_content_budget_mib": 64}),
+            "requires request_content",
+        ),
+        (
+            json!({"request_stacks": true, "category_mask": 256}),
+            "request_stacks needs Network and Artifact",
+        ),
     ] {
         let refused = call(&mut mcp, arguments.clone());
         assert_eq!(refused["result"]["isError"], true, "{arguments}");
@@ -1783,6 +1894,7 @@ fn agent_session_options_are_named_never_inherited() {
     let started = call(
         &mut mcp,
         json!({"document_start": true, "request_content": true,
+            "request_content_budget_mib": 64, "request_stacks": true,
             "confirm_sensitive_capture": true, "js_invocation_sites": agent_file,
             "timeout_seconds": 30}),
     );
@@ -1798,6 +1910,8 @@ fn agent_session_options_are_named_never_inherited() {
     for (option, value) in [
         ("document_start", json!(true)),
         ("request_content", json!(true)),
+        ("request_content_budget_mib", json!(64)),
+        ("request_stacks", json!(true)),
         ("js_invocation_saved_sites", json!(false)),
         ("js_invocation_digests", json!(false)),
         ("canvas_images", json!(false)),
@@ -1819,6 +1933,15 @@ fn agent_session_options_are_named_never_inherited() {
         std::fs::read_to_string(fixture.session("4242").join("sites")).unwrap(),
         site_file(&[120])
     );
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4242").join("stacks")).unwrap(),
+        "1 unset\n",
+        "named stacks are strict"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4242").join("content-budget")).unwrap(),
+        "64\n"
+    );
     let log = std::fs::read_to_string(launch_logs().last().unwrap()).unwrap();
     let first = log.lines().next().unwrap();
     let named: Value =
@@ -1831,7 +1954,7 @@ fn agent_session_options_are_named_never_inherited() {
     assert_eq!(
         context["capture_options"],
         json!({"source":"launcher","request_content":true,"canvas_images":false,
-            "document_start":"permitted",
+            "request_stacks":true,"document_start":"permitted",
             "js_invocation":{"state":"armed","count":1,"digests":false}})
     );
 
@@ -1867,6 +1990,10 @@ fn agent_session_options_are_named_never_inherited() {
         std::fs::read_to_string(fixture.session("4243").join("sites")).unwrap(),
         site_file(&[120, 200])
     );
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4243").join("content-budget")).unwrap(),
+        "unset\n"
+    );
     let context = mcp.request("tools/call", json!({"name": "get_session_context"}));
     let context: Value = serde_json::from_str(tool_text(&context)).unwrap();
     assert_eq!(
@@ -1878,6 +2005,7 @@ fn agent_session_options_are_named_never_inherited() {
         "not_permitted"
     );
     assert_eq!(context["capture_options"]["request_content"], false);
+    assert_eq!(context["capture_options"]["request_stacks"], false);
 
     let ended = mcp.request(
         "tools/call",
@@ -1885,6 +2013,43 @@ fn agent_session_options_are_named_never_inherited() {
     );
     assert_eq!(ended["result"]["isError"], false, "{}", tool_text(&ended));
     fixture.wait_ended("4243");
+}
+
+/// The CLI keeps the start tool's gates: a request content budget needs
+/// request content, which needs the sensitive-capture confirmation.
+#[cfg(unix)]
+#[test]
+fn session_start_cli_gates_the_request_content_budget() {
+    for (arguments, needle) in [
+        (
+            &["--request-content-budget-mib", "64"][..],
+            "--request-content",
+        ),
+        (
+            &["--request-content", "--request-content-budget-mib", "64"][..],
+            "--confirm-sensitive-capture",
+        ),
+        (
+            &[
+                "--request-content",
+                "--confirm-sensitive-capture",
+                "--request-content-budget-mib",
+                "4097",
+            ][..],
+            "from 1 to 4096",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args(["session", "start"])
+            .args(arguments)
+            .env("REB_LIVE_SESSION_SCRIPT", "/nonexistent/launcher.sh")
+            .env_remove("REB_LIVE_SESSION_ROOT")
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{arguments:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(needle), "{arguments:?}: {stderr}");
+    }
 }
 
 #[test]

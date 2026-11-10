@@ -137,6 +137,8 @@ export async function checkAgentPanel() {
   assert.ok(posted.some(message => message.op === 'transcriptAppend' && message.row.role === 'user'), 'the question is kept locally');
   const emit = event => runInContext(`__runtimeEmit(${JSON.stringify(event)})`, context);
   emit({type: 'text', rowId: 'a1', turnId: 't', delta: 'Answer <img src=x onerror=alert(1)> [cite session=9 artifact=999]'});
+  const fencedSource = 'const a = "<b>x</b>"; // <img src=x onerror=alert(2)>';
+  emit({type: 'text', rowId: 'a2', turnId: 't', delta: 'Code:\n```js\n' + fencedSource + '\n```\n'});
   emit({type: 'tool', id: 'tool1', turnId: 't', name: 'get_events', arguments: '{"limit":5}', state: 'running', readOnly: true});
   emit({type: 'tool', id: 'tool1', turnId: 't', name: 'get_events', arguments: '{"limit":5}', state: 'done', result: '{"count":1}', resultBytes: 11, isError: false});
   await settle();
@@ -144,6 +146,23 @@ export async function checkAgentPanel() {
   assert.match(logNode.textContent, /get_events/);
   assert.equal(logNode.querySelector('img'), null, 'model markup is never instantiated');
   assert.match(logNode.textContent, /<img src=x onerror=alert\(1\)>/);
+  // Fenced code takes the shared code view's colors, and its markup stays text.
+  const fencedBody = logNode.querySelector('.agent-code-body');
+  assert.equal(fencedBody.textContent, fencedSource);
+  assert.ok(['keyword', 'string', 'comment'].every(kind => fencedBody.querySelector(`.syntax-${kind}`)), 'fenced code is colored by the shared lexer');
+  assert.ok([...fencedBody.querySelectorAll('*')].every(node => node.tagName === 'SPAN'), 'colored code holds only text spans');
+  assert.equal(logNode.querySelector('b'), null, 'markup in fenced code is never instantiated');
+  // A streamed reply keeps the blocks it drew; in pieces it must draw what the whole reply does.
+  const reply = 'Intro <b>x</b>\nmore\n\n# Head\n- one\n- two\n\n```json\n{"a": [1, "<i>"]}\n```\n1. after\n\n```js\nlet open = 1;';
+  for (let at = 0; at < reply.length; at += 7) {
+    emit({type: 'text', rowId: 'p1', turnId: 't', delta: reply.slice(at, at + 7)});
+    await settle();
+  }
+  emit({type: 'text', rowId: 'p2', turnId: 't', delta: reply});
+  await settle();
+  const rowMarkup = id => logNode.querySelector(`[data-row-id="${id}"]`).innerHTML;
+  assert.equal(rowMarkup('p1'), rowMarkup('p2'), 'a reply streamed in pieces draws as the whole reply does');
+  assert.equal(logNode.querySelector('b, i'), null);
   await settle();
   assert.match(logNode.textContent, /not verified/, 'an invented citation stays labeled plain text');
   assert.equal(logNode.querySelector('.agent-cite'), null);
@@ -153,6 +172,7 @@ export async function checkAgentPanel() {
   await settle();
   const allow = logNode.querySelector('[data-approve="c1"]');
   assert.equal(allow.textContent, 'Allow once');
+  assert.ok(logNode.querySelector('.agent-approval .agent-tool-pre .syntax-key'), 'tool arguments are colored as JSON');
   assert.ok(![...logNode.querySelectorAll('button')].some(node => /always/i.test(node.textContent)), 'there is no Always allow');
   allow.click();
   await settle();

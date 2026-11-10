@@ -12,12 +12,15 @@
 #include <utility>
 #include <vector>
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
 
 #include "base/functional/bind.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_script_cookie_sink.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_script_position.h"
 #include "mojo/public/cpp/base/big_buffer.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 
@@ -38,7 +41,7 @@ std::uint64_t CurrentFrameId() noexcept {
     return 0;
   }
   const base::UnguessableToken& token = frame->GetLocalFrameToken().value();
-  return std::rotl(token.GetHighForSerialization(), 17) ^ token.GetLowForSerialization();
+  return NativeFrameIdOf(token.GetHighForSerialization(), token.GetLowForSerialization());
 }
 
 // Fixed-layout probe records cross Mojo as their exact bytes.
@@ -84,7 +87,8 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
                                      const std::vector<std::uint8_t>& js_dispatch_sites,
                                      const std::vector<std::uint8_t>& js_invocation_sites,
                                      const bool js_invocation_digests,
-                                     const bool capture_request_content) {
+                                     const bool capture_request_content,
+                                     const bool capture_browser_internal) {
   Disable();
   const std::uint64_t now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
@@ -110,10 +114,13 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
   NativeProbeSink::Get().SetNativeWasmDispatchEmitter(&EmitWasmDispatch);
   NativeProbeSink::Get().SetNativeWasmIndirectEmitter(&EmitWasmIndirect);
   NativeProbeSink::Get().SetNativeWasmExecutionEmitter(&EmitWasmExecution);
-  NativeProbeSink::Get().SetEmitters(&NativeProbeTransport::EmitStatus,
-                                     &NativeProbeTransport::EmitArtifact, session_id, category_mask,
-                                     expires_at_monotonic_ns, capture_canvas_images,
-                                     &CurrentFrameId, capture_request_content);
+  NativeProbeSink::Get().SetEmitters(
+      &NativeProbeTransport::EmitStatus, &NativeProbeTransport::EmitArtifact, session_id,
+      category_mask, expires_at_monotonic_ns, capture_canvas_images, &CurrentFrameId,
+      {.capture_request_content = capture_request_content,
+       .capture_browser_internal = capture_browser_internal,
+       .exclusion_counter = &NativeProbeTransport::CountExclusion});
+  NativeScriptCookieSink::Get().Configure(capture_request_content, &CurrentNativeScriptFrame);
   if (!guest_adapter_json.empty())
     NativeProbeSink::Get().ConfigureNativeWasmGuest(ParseNativeWasmGuestAdapter(guest_adapter_json),
                                                     &EmitNativeGuest, &EmitNativeGuestHost);
@@ -152,6 +159,7 @@ void NativeProbeTransport::ResetWasmSampleBudgets() {
 }
 
 void NativeProbeTransport::Disable() {
+  NativeScriptCookieSink::Get().Flush();
   wasm_capture_epoch_.store(0, std::memory_order_release);
   // Wasm callbacks then fail their first enabled check, not a later one.
   NativeProbeSink::Get().SetNativeWasmDispatchEmitter(nullptr);
@@ -159,6 +167,10 @@ void NativeProbeTransport::Disable() {
   NativeProbeSink::Get().SetNativeWasmExecutionEmitter(nullptr);
   NativeProbeSink::Get().SetEmitters(nullptr, nullptr, 0, 0, 0, false);
   queue_.store(nullptr, std::memory_order_release);
+}
+
+void NativeProbeTransport::NativeStackArtifactRefused(const std::uint64_t creator_event_id) {
+  NativeRequestStackWalk::StackArtifactRefused(creator_event_id);
 }
 
 void NativeProbeTransport::NativeGuestModuleStatus(const std::uint64_t wasm_capture_epoch,
@@ -325,6 +337,29 @@ NativeProbeEmitStatus NativeProbeTransport::EmitEvent(
     (*thread_host)->EventsAvailable();
   }
   return NativeProbeEmitStatus::kAdmitted;
+}
+
+void NativeProbeTransport::CountExclusion(const NativeSchemeClass scheme_class,
+                                          const std::uint64_t session_id,
+                                          const std::uint64_t config_generation) noexcept {
+  auto& transport = Get();
+  NativeProbeQueue* const queue = transport.queue_.load(std::memory_order_acquire);
+  NativeProbeEvent scope;
+  scope.header.category = NativeProbeCategory::kNetwork;
+  scope.header.session_id = session_id;
+  // Same retained-mapping rule as EmitEvent; the browser reports the count
+  // at its next drain, so the wake-up is shared with ordinary records.
+  if (!queue || !NativeProbeSink::Get().CanAdmitEvent(scope, config_generation)) {
+    return;
+  }
+  queue->CountExclusion(scheme_class);
+  if (!queue->MarkNotificationPending()) {
+    return;
+  }
+  auto* const thread_host = transport.HostForCurrentSequence();
+  if (*thread_host) {
+    (*thread_host)->EventsAvailable();
+  }
 }
 
 void NativeProbeTransport::EmitGeneratedArtifact(const NativeArtifactKind kind,

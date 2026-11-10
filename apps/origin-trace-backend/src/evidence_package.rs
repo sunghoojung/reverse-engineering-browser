@@ -467,15 +467,24 @@ fn identities<'a>(
                 let kind = value["kind"].as_str().unwrap_or("");
                 let origin = value["capture_origin"].as_str().unwrap_or("");
                 let context = unsigned(&value["execution_context_id"], false);
+                let network_request = matches!(
+                    kind,
+                    "request_body"
+                        | "request_target"
+                        | "request_headers"
+                        | "response_headers"
+                        | "cookie_list"
+                );
                 if value["sensitive"].as_bool()
-                    != Some(matches!(
-                        kind,
-                        "response_body" | "canvas_data_url" | "request_body"
-                    ))
-                    || ((kind == "request_body") != (origin == "network_request"))
+                    != Some(network_request || matches!(kind, "response_body" | "canvas_data_url"))
+                    || (network_request != (origin == "network_request"))
                     || (value["execution_context_id"].is_null() && origin != "unknown")
-                    || (matches!(origin, "dynamic_javascript" | "compiled_script")
-                        && (kind != "javascript" || context.is_none_or(|id| id == 0)))
+                    || (matches!(
+                        origin,
+                        "dynamic_javascript" | "stack_script" | "compiled_script"
+                    ) && (kind != "javascript" || context.is_none_or(|id| id == 0)))
+                    || ((kind == "stack") != (origin == "request_stack"))
+                    || (origin == "request_stack" && context.is_none_or(|id| id == 0))
                     || (origin.starts_with("webassembly_")
                         && (kind != "wasm" || context.is_none_or(|id| id == 0)))
                     || (origin == "canvas_to_data_url"
@@ -1743,6 +1752,16 @@ mod tests {
             "wasm_execution_outcome",
             "wasm_dispatch_overflow",
             "wasm_indirect_overflow",
+            "request_headers",
+            "response_headers",
+            "cookie_list",
+            "script_cookie",
+            "request_watch_match",
+            "listener_dispatch",
+            "timer_observation",
+            "csp_violation",
+            "exception_observation",
+            "dom_mutation",
             "script_compiled",
         ] {
             let mut event: Value = serde_json::from_slice(first).unwrap();

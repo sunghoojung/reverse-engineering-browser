@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <span>
 #include <string>
@@ -88,6 +89,22 @@ template <class T>
 T* Unretained(T* value) {
   return value;
 }
+class Lock {
+ public:
+  void Acquire() { mutex_.lock(); }
+  void Release() { mutex_.unlock(); }
+
+ private:
+  std::mutex mutex_;
+};
+class AutoLock {
+ public:
+  explicit AutoLock(Lock& lock) : lock_(lock) { lock_.Acquire(); }
+  ~AutoLock() { lock_.Release(); }
+
+ private:
+  Lock& lock_;
+};
 struct UnguessableToken {
   std::uint64_t GetHighForSerialization() const { return 1; }
   std::uint64_t GetLowForSerialization() const { return 2; }
@@ -96,7 +113,8 @@ struct UnguessableToken {
 
 namespace mojo_base {
 struct BigBuffer {
-  explicit BigBuffer(std::span<const std::uint8_t>) {}
+  explicit BigBuffer(std::span<const std::uint8_t> bytes) : data(bytes.begin(), bytes.end()) {}
+  std::vector<std::uint8_t> data;
 };
 }  // namespace mojo_base
 
@@ -113,11 +131,13 @@ struct NativeProbeClient {
                          const std::vector<std::uint8_t>&,
                          const std::vector<std::uint8_t>&,
                          bool,
+                         bool,
                          bool) = 0;
   virtual void SetWasmSampleBudget(const std::vector<std::uint8_t>&) = 0;
   virtual void ResetWasmSampleBudgets() = 0;
   virtual void Disable() = 0;
   virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
+  virtual void NativeStackArtifactRefused(std::uint64_t) = 0;
 };
 struct NativeProbeHost {
   inline static std::atomic<unsigned> notifications{0};
@@ -144,9 +164,23 @@ struct NativeProbeHost {
   void CaptureNativeGuestHost(Args&&...) {
     ++artifacts;
   }
+  // The newest stack artifact (capture origin 12), for content checks.
+  inline static std::vector<std::uint8_t> generated;
+  inline static std::uint64_t generated_creator = 0;
   template <class... Args>
-  void CaptureGeneratedArtifact(Args&&...) {
+  void CaptureGeneratedArtifact(std::uint16_t,
+                                std::uint16_t origin,
+                                std::uint64_t creator,
+                                std::uint64_t,
+                                std::uint64_t,
+                                std::string,
+                                mojo_base::BigBuffer content,
+                                Args&&...) {
     ++artifacts;
+    if (origin == 12) {
+      generated = std::move(content.data);
+      generated_creator = creator;
+    }
   }
 };
 }  // namespace reb::mojom

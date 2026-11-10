@@ -29,10 +29,11 @@ Tool names are OpenAPI operation IDs. The same names work with
 | Which backend and session am I connected to? | `get_session_context` |
 | Did the capture work? What was recorded, what went wrong? | `get_session_summary` |
 | Which events match a type, frame, request or time range? | `get_events` with filters and a small `limit` |
+| Which requests did the session make? | `get_requests` with `q` (Traffic tokens such as `domain:`, `status-code:`, `larger-than:`), `type`, `tab_id`, `domain`, `failed`, `third_party` or `from_ns`/`to_ns`; rows carry sizes, MIME type and initiator class; a row's `members` and `first_offset` read its records with `get_events` |
 | Which scripts and Wasm modules were stored, with digests? | `get_artifacts` with `kind`, `frame_id`, `host`, `sha256` |
 | What does a stored Wasm module contain? | `inspect_wasm` with `artifact_id` and `sections` |
 | Wait until the browser produces something | `wait_for_events` |
-| How did a native request come about? | `get_origin_trace`, `get_request_signal_profile` |
+| How did a native request come about? | `get_origin_trace`, `get_request_signal_profile`, `get_request_stack` (the JavaScript and Wasm stack and async tasks that started it; `navigation_sequence` for a script navigation) |
 | VM analysis of retained samples | `get_vm_analysis`, `get_vm_opcode_workspace`, `get_vm_host_links` (need `--allow-effects`: they write a derived cache) |
 | Start a session with named capture options | `start_live_session` (needs `--allow-effects --allow-session-start`) or `reb-api session start` |
 | Open a page in a session you started, or end it | `session_action` with `open_url` or `end` (listed with `--allow-session-start`; check `capture_observed`) |

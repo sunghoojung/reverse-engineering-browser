@@ -44,6 +44,8 @@ readonly open_command="${REB_OPEN_COMMAND:-open}"
 readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-0}"
 readonly native_wasm_dispatch="${REB_NATIVE_WASM_DISPATCH:-0}"
 readonly native_wasm_call_indirect="${REB_NATIVE_WASM_CALL_INDIRECT:-0}"
+readonly native_request_stacks="${REB_NATIVE_REQUEST_STACKS:-0}"
+readonly native_request_stacks_if_supported="${REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED:-0}"
 readonly native_wasm_samples_per_function="${REB_NATIVE_WASM_SAMPLES_PER_FUNCTION:-}"
 readonly native_wasm_samples_per_indirect_site="${REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE:-}"
 readonly native_wasm_function_allow="${REB_NATIVE_WASM_FUNCTION_ALLOW:-}"
@@ -61,6 +63,16 @@ readonly capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-0}"
 # Raw request paths, queries and bounded request bodies (native-network-v2.md).
 # Body length, type and digest are recorded whenever Network capture is on.
 readonly capture_request_content="${REB_CAPTURE_REQUEST_CONTENT:-0}"
+# Browser-internal pages (chrome:, devtools: and WebUI renderers) are excluded
+# and counted unless this is 1 (native-network-v3.md).
+readonly capture_browser_internal="${REB_CAPTURE_BROWSER_INTERNAL:-0}"
+readonly capture_extension_traffic="${REB_CAPTURE_EXTENSION_TRAFFIC:-0}"
+# Unique body and full-target bytes one content session retains.
+readonly request_content_budget_mib="${REB_REQUEST_CONTENT_BUDGET_MIB:-256}"
+# Content sessions also retain response bodies (native-network-v3.md): unique
+# bytes per session, and whether element images, audio, video and fonts count.
+readonly response_body_budget_mib="${REB_RESPONSE_BODY_BUDGET_MIB:-512}"
+readonly capture_response_media="${REB_CAPTURE_RESPONSE_MEDIA:-0}"
 readonly use_system_keychain="${REB_USE_SYSTEM_KEYCHAIN:-1}"
 readonly localhost_only="${REB_LOCALHOST_ONLY:-0}"
 readonly embedded_session="${REB_EMBEDDED_SESSION:-0}"
@@ -111,6 +123,13 @@ fi
 if [[ "${native_wasm_call_indirect}" == 1 ]] &&
    (( (category_mask & 512) == 0 || (category_mask & 1024) == 0 )); then
   fail_live_session 2 "REB_NATIVE_WASM_CALL_INDIRECT requires VM and Artifact capture categories."
+fi
+if [[ "${native_request_stacks}" != 0 && "${native_request_stacks}" != 1 ]]; then
+  fail_live_session 2 "REB_NATIVE_REQUEST_STACKS must be 0 or 1."
+fi
+if [[ "${native_request_stacks}" == 1 ]] &&
+   (( (category_mask & 256) == 0 || (category_mask & 1024) == 0 )); then
+  fail_live_session 2 "REB_NATIVE_REQUEST_STACKS requires Network and Artifact capture categories."
 fi
 validate_wasm_count() {
   local name="$1" text="$2"
@@ -225,6 +244,24 @@ if [[ "${capture_canvas_images}" != 0 && "${capture_canvas_images}" != 1 ]]; the
 fi
 if [[ "${capture_request_content}" != 0 && "${capture_request_content}" != 1 ]]; then
   fail_live_session 2 "REB_CAPTURE_REQUEST_CONTENT must be 0 or 1."
+fi
+if [[ "${capture_browser_internal}" != 0 && "${capture_browser_internal}" != 1 ]]; then
+  fail_live_session 2 "REB_CAPTURE_BROWSER_INTERNAL must be 0 or 1."
+fi
+if [[ "${capture_extension_traffic}" != 0 && "${capture_extension_traffic}" != 1 ]]; then
+  fail_live_session 2 "REB_CAPTURE_EXTENSION_TRAFFIC must be 0 or 1."
+fi
+if ! [[ "${request_content_budget_mib}" =~ ^[1-9][0-9]{0,3}$ ]] || ((request_content_budget_mib > 4096)); then
+  fail_live_session 2 "REB_REQUEST_CONTENT_BUDGET_MIB must be an integer from 1 to 4096."
+fi
+if ! [[ "${response_body_budget_mib}" =~ ^[1-9][0-9]{0,4}$ ]] || ((response_body_budget_mib > 16384)); then
+  fail_live_session 2 "REB_RESPONSE_BODY_BUDGET_MIB must be an integer from 1 to 16384."
+fi
+if [[ "${capture_response_media}" != 0 && "${capture_response_media}" != 1 ]]; then
+  fail_live_session 2 "REB_CAPTURE_RESPONSE_MEDIA must be 0 or 1."
+fi
+if [[ "${capture_response_media}" == 1 && "${capture_request_content}" != 1 ]]; then
+  fail_live_session 2 "REB_CAPTURE_RESPONSE_MEDIA requires REB_CAPTURE_REQUEST_CONTENT=1."
 fi
 if [[ "${use_system_keychain}" != 0 && "${use_system_keychain}" != 1 ]]; then
   fail_live_session 2 "REB_USE_SYSTEM_KEYCHAIN must be 0 or 1."
@@ -505,6 +542,26 @@ if [[ -n "${native_js_invocation_sites:-}" ]]; then
   fi
 fi
 readonly js_invocation_session_state
+# Request initiator stacks (protocol/native-network-v3.md). The packaged
+# app's default drops the flag from a Brave that predates it instead of
+# refusing the session; an explicit request keeps the strict check.
+request_stacks_state=off
+if [[ "${native_request_stacks:-0}" == 1 ]]; then
+  request_stacks_state=on
+  if [[ "${native_request_stacks_if_supported:-0}" == 1 ]] &&
+     stack_image="$(locate_brave_v8_image "${brave_binary}")"; then
+    stack_scan_status=0
+    LC_ALL=C grep -a -q -F -e reb_request_stacks "${stack_image}" || stack_scan_status=$?
+    if (( stack_scan_status == 1 )); then
+      request_stacks_state=browser_unsupported
+    fi
+  fi
+fi
+readonly request_stacks_state
+if [[ "${request_stacks_state}" == on ]]; then
+  add_native_js_flag --reb-request-stacks \
+    REB_NATIVE_REQUEST_STACKS=1 REB_NATIVE_REQUEST_STACKS=0
+fi
 if [[ "${js_invocation_session_state}" == armed ]]; then
   add_native_js_flag --reb-js-invocation-capture \
     REB_NATIVE_JS_INVOCATION_SITES "unset REB_NATIVE_JS_INVOCATION_SITES"
@@ -628,6 +685,25 @@ if ((category_mask & (512 | 1024))); then
   if [[ "${capture_canvas_images}" == 1 || "${capture_request_content}" == 1 ]]; then
     artifact_receiver_arguments+=(--allow-sensitive)
   fi
+  # The store is bounded by bytes and the item count follows from them at
+  # 4 KiB an artifact, so a capture of small headers, cookie lists and stacks
+  # reaches the byte budget, not the count. Content capture grows the budget.
+  artifact_store_mib=256
+  if [[ "${capture_request_content}" == 1 ]]; then
+    artifact_store_mib=$((256 + request_content_budget_mib + response_body_budget_mib))
+  fi
+  artifact_store_bytes=$((artifact_store_mib * 1048576))
+  artifact_item_limit=$((artifact_store_bytes / 4096))
+  # A manifest row can carry an 8 KiB URL, so small budgets keep a 256 MiB manifest.
+  artifact_manifest_bytes=$((artifact_item_limit * 1024))
+  if ((artifact_manifest_bytes < 268435456)); then
+    artifact_manifest_bytes=268435456
+  fi
+  artifact_receiver_arguments+=(
+    --max-store-bytes "${artifact_store_bytes}"
+    --max-artifacts "${artifact_item_limit}"
+    --max-manifest-bytes "${artifact_manifest_bytes}"
+  )
   "${artifact_receiver_binary}" "${artifact_receiver_arguments[@]}" \
     >"${artifact_receiver_log}" 2>&1 &
   artifact_receiver_pid=$!
@@ -717,6 +793,9 @@ if [[ "${capture_canvas_images}" == 1 ]]; then
 fi
 if [[ "${console_document_start}" == 1 ]]; then
   ui_arguments+=(--session-document-start)
+fi
+if [[ "${request_stacks_state}" == on ]]; then
+  ui_arguments+=(--session-request-stacks)
 fi
 # The session header says which functions this capture tracks, or why not.
 if [[ -n "${js_invocation_session_state}" ]]; then
@@ -823,7 +902,18 @@ if [[ "${capture_canvas_images}" == 1 ]]; then
   brave_arguments+=(--reb-capture-canvas-images)
 fi
 if [[ "${capture_request_content}" == 1 ]]; then
-  brave_arguments+=(--reb-capture-request-content)
+  brave_arguments+=(--reb-capture-request-content
+    "--reb-request-content-budget-bytes=$((request_content_budget_mib * 1048576))"
+    "--reb-response-body-budget-bytes=$((response_body_budget_mib * 1048576))")
+  if [[ "${capture_response_media}" == 1 ]]; then
+    brave_arguments+=(--reb-capture-response-media)
+  fi
+fi
+if [[ "${capture_browser_internal}" == 1 ]]; then
+  brave_arguments+=(--reb-capture-browser-internal)
+fi
+if [[ "${capture_extension_traffic}" == 1 ]]; then
+  brave_arguments+=(--reb-capture-extension-traffic)
 fi
 if [[ "${use_system_keychain}" == 0 ]]; then
   brave_arguments+=(--use-mock-keychain)
@@ -901,9 +991,20 @@ else
   echo "Canvas image capture: disabled; set REB_CAPTURE_CANVAS_IMAGES=1 to enable it for one session"
 fi
 if [[ "${capture_request_content}" == 1 ]]; then
-  echo "Request content capture: enabled for this session; request paths, queries and bodies are retained locally"
+  echo "Request content capture: enabled for this session; request paths, queries, headers, cookies and bodies are retained locally, at most ${request_content_budget_mib} MiB of unique content"
+  echo "Response body capture: enabled for this session; at most ${response_body_budget_mib} MiB of unique response bytes, element media $([[ "${capture_response_media}" == 1 ]] && echo retained || echo skipped)"
 else
-  echo "Request content capture: disabled; hosts and body length, type and digest only. Set REB_CAPTURE_REQUEST_CONTENT=1 to retain paths and bodies"
+  echo "Request content capture: disabled; hosts and body length, type and digest only. Set REB_CAPTURE_REQUEST_CONTENT=1 to retain paths, request bodies and response bodies"
+fi
+if [[ "${capture_browser_internal}" == 1 ]]; then
+  echo "Browser-internal capture: enabled; chrome:, devtools: and WebUI renderer evidence is recorded"
+else
+  echo "Browser-internal capture: excluded and counted; set REB_CAPTURE_BROWSER_INTERNAL=1 to record it"
+fi
+if [[ "${capture_extension_traffic}" == 1 ]]; then
+  echo "Extension worker traffic: recorded under each extension id"
+else
+  echo "Extension worker traffic: excluded and counted; set REB_CAPTURE_EXTENSION_TRAFFIC=1 to record it"
 fi
 if [[ "${console_document_start}" == 1 && "${native_console_bound}" == 1 ]]; then
   echo "Console document-start scripts: permitted for this capture browser; nothing runs until a live Console connection arms a confirmed rule"
@@ -912,7 +1013,10 @@ elif [[ "${console_document_start}" == 1 ]]; then
 else
   echo "Console document-start scripts: not permitted; set REB_CONSOLE_DOCUMENT_START=1 to permit them for one session"
 fi
-echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0) js_invocation=$([[ "${js_invocation_session_state}" == armed ]] && echo 1 || echo 0)"
+if [[ "${request_stacks_state}" == browser_unsupported ]]; then
+  echo "Request call stacks: unavailable; this Brave does not define --reb-request-stacks"
+fi
+echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0) js_invocation=$([[ "${js_invocation_session_state}" == armed ]] && echo 1 || echo 0) request_stacks=$([[ "${request_stacks_state}" == on ]] && echo 1 || echo 0)"
 echo "Wasm sample budgets: per_function=${native_wasm_samples_per_function:-unset} per_indirect_site=${native_wasm_samples_per_indirect_site:-unset} function_allow=${native_wasm_function_allow:-unset} function_deny=${native_wasm_function_deny:-unset} module_allowlist=$([[ -n "${native_wasm_module_allowlist:-}" ]] && echo 1 || echo 0) reset_file=${wasm_budget_reset_file:-unset}"
 if [[ "${js_invocation_session_state}" == browser_unsupported ]]; then
   echo "JavaScript invocation tracking: unavailable; Brave at ${brave_binary} does not define --reb-js-invocation-capture, so this session started without the saved invocation sites and records no invocation evidence"

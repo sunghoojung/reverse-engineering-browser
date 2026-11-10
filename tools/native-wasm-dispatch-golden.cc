@@ -202,7 +202,9 @@ int main(int argc, char** argv) {
   CHECK_FIELD(flags);
   CHECK_FIELD(initiator_request_id);
   CHECK_FIELD(initiator_process_id);
-  CHECK_FIELD(reserved1);
+  CHECK_FIELD(scheme_class);
+  CHECK_FIELD(loader_kind);
+  CHECK_FIELD(reserved2);
 #undef CHECK_FIELD
   const auto event = std::bit_cast<reb::EventRecord>(native);
   assert(reb::IsValidEvent(event) == syntactically_valid);

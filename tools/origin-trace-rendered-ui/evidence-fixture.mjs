@@ -27,6 +27,12 @@ export const REQUEST_BODY_HOST = 'api.body.test';
 export const REQUEST_BODY_TARGET = '/getcaptcha/site-key?s=<svg/onload=window.__rebInjected=5>';
 export const REQUEST_BODY_MARKER = '<img src=x onerror="window.__rebInjected=4">';
 export const METADATA_BODY_HOST = 'api.metadata.test';
+// A content-session response body (native-network-v3.md) whose JSON carries markup.
+export const RESPONSE_BODY_HOST = 'api.response.test';
+const FIXTURE_TAB_ID = 1;
+export const RESPONSE_BODY_MARKER = '<img src=x onerror="window.__rebInjected=9">';
+export const HEADER_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=7">';
+export const COOKIE_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=8">';
 // A retained glue script for Track calls: the real window.hsw binder, decoys
 // in a string and a comment that must never match, and two definitions of
 // o.dup that must be refused as ambiguous. Context lines carry markup as text.
@@ -34,6 +40,12 @@ export const INVOCATION_ARTIFACT_ID = '330';
 export const INVOCATION_SOURCE = "var s='window.hsw=function(a){}';/* window.hsw=function(b){} <img src=x onerror=\"window.__rebInjected=6\"> */\n" +
   '(function(){window.hsw=function(aGh,jR,qN){if(0===aGh)return Mk().then(function(){return awb(jR)});return qN}})();\n' +
   "o.dup=function(d){return '<img src=x onerror=\"window.__rebInjected=7\">'};if(z){o.dup=function(e){return e}}\n";
+
+// A one-line source map over 16 KiB, which Sources opens pretty-printed (#433).
+export const MINIFIED_ARTIFACT_ID = '332';
+const MINIFIED_SOURCE_MAP = JSON.stringify({version: 3, file: 'vendor.min.js',
+  sources: Array.from({length: 400}, (_, index) => `src/module-${index}.js`),
+  names: Array.from({length: 6000}, (_, index) => `n${index.toString(36)}`), mappings: 'AAAA,SAASA,CAAC;'.repeat(12000)});
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const hex = text => Buffer.from(text, 'utf8').toString('hex');
@@ -143,6 +155,8 @@ function timeAdjacentRequest(template, firstSequence, firstTime) {
 }
 
 // Enough native network rows to require list scrolling, one with a hostile URL.
+// Each completion records the lengths Size shows (syntheticTransferSize).
+export const syntheticTransferSize = index => 1000 + index * 10;
 function syntheticRequests(template, firstSequence, firstTime) {
   const events = [];
   let sequence = firstSequence, time = BigInt(firstTime);
@@ -150,13 +164,14 @@ function syntheticRequests(template, firstSequence, firstTime) {
     const requestId = String(1000 + index);
     // Native network payloads carry the method and host only.
     const url = index === 7 ? HOSTILE_URL : `item-${index}.scroll.test`;
+    const lengths = {encoded_data_length: String(syntheticTransferSize(index)), decoded_body_length: String(2000 + index)};
     const steps = [['request_initiated', `GET ${url}`, 0], ['request_started', `GET ${url}`, 0],
-      ['response_started', 'application/json', 200], ['request_completed', 'completed', 200]];
+      ['response_started', 'application/json; protocol=h2', 200], ['request_completed', 'completed', 200, lengths]];
     let parent = '0';
-    for (const [type, text, status] of steps) {
+    for (const [type, text, status, extra = {}] of steps) {
       time += 1000n;
       const event = {...template, sequence_number: String(sequence), monotonic_time_ns: String(time), request_id: requestId,
-        parent_event_id: parent, type, status_code: status, payload_size: Buffer.byteLength(text), payload: hex(text)};
+        parent_event_id: parent, type, status_code: status, payload_size: Buffer.byteLength(text), payload: hex(text), ...extra};
       parent = event.sequence_number;
       sequence += 1;
       events.push(event);
@@ -181,6 +196,95 @@ function requestBodyPayload({state, content, bytes, contentType = 'application/j
   return payload.toString('hex');
 }
 
+// protocol/native-network-v3.md: one header record per block.
+function headerBlockPayload({source, block, status = 0, policy = 0, hop = 0}) {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = source;
+  payload[5] = 1;
+  payload[6] = policy;
+  payload.writeUInt32LE(block.toString().split('\r\n').length - 1, 8);
+  payload.writeUInt32LE(block.length, 12);
+  payload.writeUInt32LE(hop, 16);
+  payload.writeUInt16LE(status, 20);
+  if (status) {
+    payload[7] = 4;
+    payload.writeUInt16LE(8443, 22);
+    Buffer.from([127, 0, 0, 1]).copy(payload, 24);
+  }
+  createHash('sha256').update(block).digest().copy(payload, 48);
+  return payload.toString('hex');
+}
+
+// "Cookies" in protocol/native-network-v3.md: an RBCK list, its record and a
+// renderer script_cookie write.
+function cookieListBytes(direction, cookies) {
+  const header = Buffer.alloc(16);
+  header.write('RBCK', 0, 'latin1');
+  header.writeUInt16LE(1, 4);
+  header[6] = direction;
+  header.writeUInt32LE(cookies.length, 8);
+  return Buffer.concat([header, ...cookies.map(({strings, exclusions = 0n, flags = 0x07, sameSite = 3}) => {
+    const fixed = Buffer.alloc(64);
+    fixed.writeBigUInt64LE(exclusions, 0);
+    fixed[24] = flags;
+    fixed[25] = sameSite;
+    fixed[26] = 2;
+    fixed[27] = 2;
+    fixed[28] = 2;
+    fixed.writeInt32LE(443, 32);
+    const parts = strings.map(text => Buffer.from(text));
+    parts.forEach((part, index) => fixed.writeUInt32LE(part.length, 36 + index * 4));
+    return Buffer.concat([fixed, ...parts]);
+  })]);
+}
+
+function cookieListPayload(direction, bytes, count, blocked) {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = direction;
+  payload[5] = 1;
+  payload.writeUInt32LE(count, 8);
+  payload.writeUInt32LE(blocked, 12);
+  payload.writeUInt32LE(bytes.length, 16);
+  createHash('sha256').update(bytes).digest().copy(payload, 32);
+  return payload.toString('hex');
+}
+
+function scriptCookiePayload(name, value) {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = 1;
+  payload[5] = 2;
+  payload.writeUInt32LE(1, 8);
+  payload.writeUInt32LE(name.length, 12);
+  payload.writeUInt32LE(value.length, 16);
+  payload.writeUInt32LE(name.length + value.length + 8, 20);
+  payload[24] = 1;
+  payload.writeUInt32LE(77, 28);
+  payload.writeUInt32LE(1234, 32);
+  createHash('sha256').update(value).digest().copy(payload, 72);
+  payload.write(name, 104, 'latin1');
+  return payload.toString('hex');
+}
+
+function responseBodyPayload(bytes, contentType = 'application/json') {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = 1;
+  payload[5] = 0x40;
+  payload[6] = contentType.length;
+  payload.writeBigUInt64LE(BigInt(bytes.length), 8);
+  payload.writeBigUInt64LE(BigInt(bytes.length), 16);
+  createHash('sha256').update(bytes).digest().copy(payload, 32);
+  payload.write(contentType, 64, 'ascii');
+  return payload.toString('hex');
+}
+
 function requestTargetPayload(target) {
   const payload = Buffer.alloc(128);
   payload.writeUInt16LE(1, 0);
@@ -195,7 +299,7 @@ function requestTargetPayload(target) {
 // target, body record, body artifact and receiver acknowledgment as exact
 // children, and one from a metadata-only session with only its body summary.
 async function requestBodyRequests(template, firstSequence, firstTime, artifactsRoot) {
-  const body = Buffer.from(`{"sitekey":"site-key","note":"${REQUEST_BODY_MARKER}","motionData":"${'m'.repeat(600)}"}`);
+  const body = Buffer.from(JSON.stringify({sitekey: 'site-key', note: REQUEST_BODY_MARKER, motionData: 'm'.repeat(600)}));
   const metadataBody = Buffer.from('v=1&answers=redacted-by-session');
   let sequence = firstSequence, time = BigInt(firstTime);
   const events = [];
@@ -215,7 +319,23 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
   row(retained, 'request_target', requestTargetPayload(REQUEST_BODY_TARGET), {parent_event_id: start.sequence_number});
   const record = row(retained, 'request_body', requestBodyPayload({state: 4, content: true, bytes: body, captured: body.length}),
     {parent_event_id: start.sequence_number, artifact_id: '320'});
-  row(retained, 'response_started', hex('application/json'), {status_code: 200});
+  const sentBlock = Buffer.from(`:method: POST\r\n:path: /getcaptcha/site-key\r\ncookie: sid=fixture\r\nx-note: ${HEADER_VALUE_MARKER}\r\n`);
+  const receivedBlock = Buffer.from('content-type: application/json\r\nset-cookie: hc=1; Secure; HttpOnly\r\n');
+  const sent = row(retained, 'request_headers', headerBlockPayload({source: 2, block: sentBlock}),
+    {parent_event_id: start.sequence_number, artifact_id: '321'});
+  const sentCookies = cookieListBytes(1, [{strings: ['sid', 'fixture', 'api.body.test', '/', '', '']},
+    {strings: ['pref', 'dark', 'api.body.test', '/settings', '', ''], exclusions: 1n << 5n, flags: 0x01, sameSite: 4}]);
+  const sentList = row(retained, 'cookie_list', cookieListPayload(1, sentCookies, 2, 1),
+    {parent_event_id: start.sequence_number, artifact_id: '323'});
+  const response = row(retained, 'response_started', hex('application/json'), {status_code: 200});
+  const received = row(retained, 'response_headers', headerBlockPayload({source: 1, block: receivedBlock, status: 200}),
+    {parent_event_id: response.sequence_number, artifact_id: '322'});
+  const receivedCookies = cookieListBytes(2, [{strings: ['hc', '1', 'api.body.test', '/', '', 'hc=1; Secure; HttpOnly']},
+    {strings: ['track', COOKIE_VALUE_MARKER, 'api.body.test', '/', '', `track=${COOKIE_VALUE_MARKER}; SameSite=None`],
+      exclusions: 1n << 8n, flags: 0x01, sameSite: 2}]);
+  const receivedList = row(retained, 'cookie_list', cookieListPayload(2, receivedCookies, 2, 1),
+    {parent_event_id: start.sequence_number, artifact_id: '324'});
+  row({request_id: '0'}, 'script_cookie', scriptCookiePayload('sid', 'fixture'));
   row(retained, 'request_completed', hex('completed'), {status_code: 200});
   row({...retained, category: 'artifact'}, 'artifact_captured', hex('accepted'),
     {artifact_id: '320', parent_event_id: record.sequence_number});
@@ -229,7 +349,28 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
     frame_id: template.frame_id, creator_event_id: record.sequence_number, execution_context_id: '0',
     capture_origin: 'network_request', kind: 'request_body', mime_type: 'application/json', sensitive: true,
     url: `https://${REQUEST_BODY_HOST}${REQUEST_BODY_TARGET}`}, body);
-  return {events, artifact: bodyArtifact};
+  const headerArtifacts = [];
+  for (const [id, kind, creator, bytes] of [['321', 'request_headers', sent, sentBlock], ['322', 'response_headers', received, receivedBlock],
+    ['323', 'cookie_list', sentList, sentCookies], ['324', 'cookie_list', receivedList, receivedCookies]]) {
+    headerArtifacts.push(await artifact(artifactsRoot, {artifact_id: id, session_id: template.session_id, navigation_id: '0',
+      frame_id: template.frame_id, creator_event_id: creator.sequence_number, execution_context_id: '0',
+      capture_origin: 'network_request', kind, mime_type: kind === 'cookie_list' ? 'application/x-reb-cookie-list' : 'text/plain',
+      sensitive: true, url: `https://${REQUEST_BODY_HOST}${REQUEST_BODY_TARGET}`}, bytes));
+  }
+  // The response body artifact is created by response_started, its record's parent.
+  const answer = Buffer.from(JSON.stringify({challenge: 'c1', tasks: [{id: 1, note: RESPONSE_BODY_MARKER}], pass: false}));
+  const responding = {request_id: '3002'};
+  row(responding, 'request_started', hex(`GET ${RESPONSE_BODY_HOST}`), {resource_type: 13});
+  const responded = row(responding, 'response_started', hex('application/json'), {status_code: 200});
+  row(responding, 'response_body', responseBodyPayload(answer), {parent_event_id: responded.sequence_number, artifact_id: '325'});
+  row(responding, 'request_completed', hex('completed'), {status_code: 200});
+  row({...responding, category: 'artifact'}, 'artifact_captured', hex('accepted'),
+    {artifact_id: '325', parent_event_id: responded.sequence_number});
+  const responseArtifact = await artifact(artifactsRoot, {artifact_id: '325', session_id: template.session_id, navigation_id: '0',
+    frame_id: template.frame_id, creator_event_id: responded.sequence_number, execution_context_id: '0',
+    capture_origin: 'network_response', kind: 'response_body', mime_type: 'application/json', sensitive: true,
+    url: `https://${RESPONSE_BODY_HOST}/challenge`}, answer);
+  return {events, artifacts: [bodyArtifact, ...headerArtifacts, responseArtifact]};
 }
 
 // Like the browser, each gap takes its renderer's own sequence slot, so the
@@ -248,6 +389,8 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   await mkdir(join(artifacts, 'blobs'), {recursive: true});
   for (const name of ['origin-trace.jsonl', 'request-signals.jsonl']) await cp(join(sessions, name), join(root, name));
   const demoEvents = jsonLines(await readFile(join(sessions, 'demo.jsonl'), 'utf8'));
+  // Browser network records carry their tab (protocol/native-network-v3.md); the demo producer's do not.
+  for (const event of demoEvents) if (event.category === 'network') event.tab_id = FIXTURE_TAB_ID;
   const demoArtifacts = jsonLines(await readFile(join(sessions, 'artifacts/manifest.jsonl'), 'utf8'));
   for (const record of demoArtifacts) await cp(join(sessions, 'artifacts', record.content_path), join(artifacts, record.content_path));
   const network = demoEvents.find(event => event.category === 'network');
@@ -276,6 +419,9 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const glue = await artifact(artifacts, {artifact_id: INVOCATION_ARTIFACT_ID, session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'network_response', kind: 'javascript', mime_type: 'text/javascript', url: 'https://hcaptcha.test/glue.js'},
   Buffer.from(INVOCATION_SOURCE, 'utf8'));
+  const sourceMap = await artifact(artifacts, {artifact_id: MINIFIED_ARTIFACT_ID, session_id: '1', navigation_id: '100', frame_id: '200',
+    capture_origin: 'network_response', kind: 'source_map', mime_type: 'application/json', url: 'https://cdn.test/vendor.min.js.map'},
+  Buffer.from(MINIFIED_SOURCE_MAP, 'utf8'));
   const mapped = await artifact(artifacts, {artifact_id: '312', session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'network_response', kind: 'wasm', execution_context_id: '0', mime_type: 'application/wasm', url: 'https://fixture.invalid/map-module.wasm'},
   mapFixtureModule());
@@ -290,7 +436,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   // static arm label, and an inner interpreter linked to its outer handler.
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, mapped, graphWasm, withBodies.artifact, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, ...withBodies.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   const vm = demoEvents.find(event => event.category === 'vm');
   assert(vm, 'demo store must contain a native vm event');

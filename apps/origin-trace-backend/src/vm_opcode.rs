@@ -1216,7 +1216,10 @@ fn snapshots(root: &Path, interpreter: &Value, artifacts: &[Value]) -> (Vec<Valu
     let linked = artifacts
         .iter()
         .filter(|artifact| {
-            artifact["kind"] != "wasm_guest_adapter"
+            // `preview_hex` returns these bytes, and a manifest link alone must
+            // not turn a body or header block into an interpreter snapshot.
+            artifact["sensitive"] == false
+                && artifact["kind"] != "wasm_guest_adapter"
                 && artifact["parent_artifact_id"] != "0"
                 && artifact["parent_artifact_id"] == interpreter["artifact_id"]
                 && artifact["session_id"] == interpreter["session_id"]
@@ -3421,7 +3424,7 @@ mod tests {
             .map(|index| {
                 json!({
                     "artifact_id": (index + 2).to_string(), "parent_artifact_id":"1",
-                    "session_id":"1", "navigation_id":"1", "frame_id":"1",
+                    "session_id":"1", "navigation_id":"1", "frame_id":"1", "sensitive":false,
                     "sha256":hash, "byte_size":1, "content_path":format!("blobs/{hash}.bin")
                 })
             })
@@ -3683,6 +3686,14 @@ mod tests {
                     .is_empty(),
                 "{field}"
             );
+        }
+        // A sensitive child of the interpreter, or one with no flag, yields no preview.
+        let mut sensitive = snapshot.clone();
+        sensitive["sensitive"] = json!(true);
+        let mut unflagged = snapshot.clone();
+        unflagged.as_object_mut().unwrap().remove("sensitive");
+        for child in [sensitive, unflagged] {
+            assert!(snapshots(&fixture_root, interpreter, &[child]).0.is_empty());
         }
         for (field, value) in [
             ("execution_context_id", "0"),

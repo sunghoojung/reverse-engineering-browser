@@ -56,8 +56,10 @@ auto& transport = reb::NativeProbeTransport::Get();
 void Configure(NativeProbeQueue& queue,
                std::uint64_t session = 42,
                std::uint64_t expires = kForever,
-               std::uint64_t mask = reb::kAllNativeProbeCategoryMask) {
-  transport.Configure(session, mask, expires, false, {&queue, sizeof(queue)});
+               std::uint64_t mask = reb::kAllNativeProbeCategoryMask,
+               const bool capture_content = true) {
+  transport.Configure(session, mask, expires, false, {&queue, sizeof(queue)}, 0, {}, {}, {}, false,
+                      capture_content);
 }
 void Record(std::atomic<std::uint64_t>& observed) {
   sink.RecordApiCallOnce(kRuntime, "Math.acos", observed);
@@ -112,7 +114,7 @@ reb::WasmIndirectOverflowPayload ReadIndirectOverflow(const NativeProbeEvent& ev
 void QueueMappingAndCanvasBurst() {
   NativeProbeQueue queue;
   constexpr std::size_t kOldQueueBytes = 393536;
-  static_assert(sizeof(NativeProbeQueue) == 3146048);
+  static_assert(sizeof(NativeProbeQueue) == 3146112);
   static_assert(reb::kNativeProbeQueueCapacity == 8192);
   assert(queue.IsValid());
   for (const std::size_t bytes : {kOldQueueBytes, sizeof(queue) - 1, sizeof(queue) + 64}) {
@@ -884,7 +886,7 @@ void DisabledExpiredAndMalformed() {
   const auto before = allocations.load();
   for (unsigned index = 0; index < 10000; ++index) {
     Record(observed);
-    sink.RecordRequestInitiated(1, "GET", "example.test");
+    static_cast<void>(sink.RecordRequestInitiated(1, "GET", "https", "example.test"));
   }
   assert(allocations == before && observed == 0);
   NativeProbeQueue queue;
@@ -921,7 +923,7 @@ void DisabledExpiredAndMalformed() {
   sink.RecordPropertyReadOnce(kRuntime, "Intl.locale", property);
   sink.RecordPropertyReadOnce(kRuntime, "Intl.locale", property);
   assert(One(queue).header.type == reb::NativeProbeType::kPropertyRead);
-  sink.RecordRequestInitiated(1, "GET", "example.test");
+  static_cast<void>(sink.RecordRequestInitiated(1, "GET", "https", "example.test"));
   assert(One(queue).header.type == reb::NativeProbeType::kRequestInitiated);
   transport.Disable();
   std::cout << "PASS disabled allocation-free, expired/masked/malformed and other emit paths\n";
@@ -937,7 +939,7 @@ void RequestInitiatedFrameAttribution() {
   sink.RecordApiCall(reb::NativeProbeCategory::kCanvas, "canvas.getImageData");
   const std::uint64_t sibling_frame_id = One(queue).header.frame_id;
   assert(sibling_frame_id != 0);
-  sink.RecordRequestInitiated(7, "GET", "example.test");
+  static_cast<void>(sink.RecordRequestInitiated(7, "GET", "https", "example.test"));
   const auto initiated = One(queue);
   assert(initiated.header.type == reb::NativeProbeType::kRequestInitiated);
   assert(initiated.header.category == reb::NativeProbeCategory::kNetwork);
@@ -947,7 +949,7 @@ void RequestInitiatedFrameAttribution() {
   // tab_id stays renderer-unknown; only the browser bridge may assign it.
   assert(initiated.header.tab_id == 0);
   blink::test_frame_present = false;
-  sink.RecordRequestInitiated(8, "GET", "example.test");
+  static_cast<void>(sink.RecordRequestInitiated(8, "GET", "https", "example.test"));
   const auto unattributed = One(queue);
   // No entered script context is an explicit unknown frame, never a guess.
   assert(unattributed.header.request_id == 8 && unattributed.header.frame_id == 0);
@@ -2222,9 +2224,13 @@ void NativeWasmExecutionOutcomes() {
 }
 
 #include "compiled_script_tests.h"
+#include "debugger_observation_tests.h"
 #include "guest_sampler_tests.h"
 #include "js_dispatch_tests.h"
 #include "js_invocation_tests.h"
+#include "network_scope_tests.h"
+#include "request_stack_tests.h"
+#include "script_cookie_tests.h"
 
 // Each test keeps a multi-megabyte ring on its own stack. Inlining every test
 // into main can exceed the default 8 MiB main-thread stack, so each runs in
@@ -2254,6 +2260,12 @@ int main() {
   Run<&NativeJsInvocationAdmission>();
   Run<&NativeJsInvocationOpenStarts>();
   Run<&NativeJsInvocationBudgetCaps>();
+  Run<&NativeRequestStacks>();
+  Run<&NativeTaskChainsAndNavigations>();
+  Run<&NativeAsyncSegmentNotAdmitted>();
+  Run<&NativeAsyncSegmentArtifactRefused>();
+  Run<&NativeRefusedStackBudgets>();
+  Run<&NativeDebuggerObservations>();
   Run<&DispatchSampleAdmission>();
   Run<&DispatchEmitFailureReleasesBudget>();
   Run<&OwnedRegisterSamplerAdmission>();
@@ -2264,6 +2276,10 @@ int main() {
   Run<&ConfigurationRaces>();
   Run<&DisabledExpiredAndMalformed>();
   Run<&RequestInitiatedFrameAttribution>();
+  Run<&BrowserInternalExclusion>();
+  Run<&RendererAnsweredRequests>();
+  Run<&RendererFetchOwners>();
+  Run<&ScriptCookieAccess>();
   Run<&CanvasCreatorAdmission>();
   Run<&RuntimeCreatorAdmission>();
   Run<&RuntimeScriptProvenance>();

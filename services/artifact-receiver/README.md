@@ -40,6 +40,13 @@ build/reb-artifact-receiver \
   --session-id 42
 ```
 
+Version 2 streams interleave with whole frames on one input: an open header,
+then data, checkpoint, end or abort frames, each acknowledged
+([wire contract](../../docs/architecture/artifact-transfer-channel.md#streamed-artifacts-version-2)).
+An open stream counts against the artifact and store limits until it publishes.
+At most 128 are open at once; a stream still open when its connection closes,
+or when standard input ends, is discarded and counted as `streams_abandoned`.
+
 The socket is mode 0600 and accepts only same-user peers that prove possession
 of the 256-bit token. Every frame must also match the authenticated session ID.
 Stores and their files are restricted to the current user. Each accepted
@@ -58,7 +65,8 @@ accepts a later authenticated connection; the browser reconnects within a
 bounded budget and records an `artifact_channel_lost` gap if it cannot. The live
 launcher stops the listener explicitly when the browser session ends.
 
-Response bodies, request bodies and Canvas data URLs are rejected by default.
+Response bodies, request bodies, full request targets and Canvas data URLs are
+rejected by default.
 Add `--allow-sensitive` only under the sensitive-capture rules in
 [`SAFETY.md`](../../SAFETY.md), for a session whose visible authorization scope
 permits that bounded content. The live launcher adds it for

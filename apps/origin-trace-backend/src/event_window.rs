@@ -19,6 +19,9 @@ use std::{
 pub const SCAN_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RECORD_BYTES: usize = 4096;
 const MAX_EVENTS: usize = 5000;
+// Damaged lines remembered between polls. A store with more of them is parsed
+// again on every poll, which is slower but keeps the cache bounded.
+const MAX_REMEMBERED_DAMAGED: usize = 65_536;
 // Browser reasons are fixed producer identifiers, so 64 distinct pairs covers
 // every documented one. A further pair stays an unexplained queue-drop marker.
 pub(crate) const MAX_NAMED_GAPS: usize = 64;
@@ -76,7 +79,7 @@ impl Identity {
 // mtime without advancing ctime, and that must not produce a false 304.
 pub fn etag(path: &Path, signature: &str) -> String {
     let identity = evidence::observed_identity(path, true);
-    evidence::resource_etag(path, &format!("{signature}:event-window-v4:{identity}"))
+    evidence::resource_etag(path, &format!("{signature}:event-window-v5:{identity}"))
 }
 
 struct Record {
@@ -98,6 +101,8 @@ struct Snapshot {
     predecessor: Option<u8>,
     bytes: Vec<u8>,
     records: Vec<Record>,
+    // Start offsets of terminated lines skipped as unreadable or invalid.
+    damaged: Vec<u64>,
 }
 impl Snapshot {
     fn overlaps(&self, newer: &Self) -> bool {
@@ -150,7 +155,7 @@ impl EventWindowCache {
         }
         let mut snapshot = match read_tail(path, self.maximum_bytes)? {
             Some(snapshot) => snapshot,
-            None => return Ok(summarize(&mut [], 0, 0, self.maximum_bytes, limit, &[])?.0),
+            None => return Ok(summarize(&mut [], 0, 0, self.maximum_bytes, limit, &[], 0)?.0),
         };
         let skip = if snapshot.start == 0 || snapshot.predecessor == Some(b'\n') {
             0
@@ -163,12 +168,9 @@ impl EventWindowCache {
                 .position(|byte| *byte == b'\n')
                 .map_or(snapshot.bytes.len(), |n| n + 1)
         };
-        if skip > MAX_RECORD_BYTES + 1 {
-            return Err(Error::new(
-                500,
-                "The evidence store contains an oversized event",
-            ));
-        }
+        // A prefix longer than any record is the end of a damaged line, not a
+        // record the scan happened to cut through.
+        let mut damaged_lines = u64::from(skip > MAX_RECORD_BYTES + 1);
         let first = snapshot.start + skip as u64;
         let mut parse_from = first;
         if let Some(mut old) = previous.filter(|old| old.overlaps(&snapshot)) {
@@ -178,7 +180,13 @@ impl EventWindowCache {
                 parse_from = last.end;
             }
             snapshot.records = old.records;
+            // Lines past the resume point are read and counted again below.
+            old.damaged
+                .retain(|start| (first..parse_from).contains(start));
+            snapshot.damaged = old.damaged;
         }
+        damaged_lines += snapshot.damaged.len() as u64;
+        let mut remember = true;
         let mut position = (parse_from - snapshot.start) as usize;
         while position < snapshot.bytes.len() {
             let rest = &snapshot.bytes[position..];
@@ -187,14 +195,22 @@ impl EventWindowCache {
             let end = position + length + usize::from(newline.is_some());
             let line = &rest[..length];
             if !line.iter().all(u8::is_ascii_whitespace) {
-                if length > MAX_RECORD_BYTES {
-                    return Err(Error::new(
-                        500,
-                        "The evidence store contains an oversized event",
-                    ));
-                }
-                let event: Value = serde_json::from_slice(line).map_err(|_| malformed())?;
-                validate(&event)?;
+                let Some(event) = readable_event(line, validate) else {
+                    // A torn tail still being written is neither damage nor a record.
+                    if newline.is_some() || length > MAX_RECORD_BYTES {
+                        damaged_lines += 1;
+                        if newline.is_some() {
+                            if snapshot.damaged.len() < MAX_REMEMBERED_DAMAGED {
+                                snapshot.damaged.push(snapshot.start + position as u64);
+                            } else {
+                                remember = false;
+                            }
+                        }
+                    }
+                    position = end;
+                    continue;
+                };
+                // `readable_event` proved these parse.
                 let session = unsigned(&event["session_id"]).ok_or_else(malformed)?;
                 let process = unsigned(&event["process_id"]).ok_or_else(malformed)?;
                 let sequence = unsigned(&event["sequence_number"]).ok_or_else(malformed)?;
@@ -228,15 +244,30 @@ impl EventWindowCache {
             self.maximum_bytes,
             limit,
             &snapshot.bytes[skip..],
+            damaged_lines,
         )?;
         for (index, record) in snapshot.records.iter_mut().enumerate() {
             if !retained[index] {
                 record.event = None;
             }
         }
-        self.snapshot = Some(snapshot);
+        self.snapshot = remember.then_some(snapshot);
         Ok(window)
     }
+}
+
+// The event on one stored line, or `None` for a line that cannot be one, so
+// one torn or corrupted record cannot fail every later poll of the store.
+fn readable_event(line: &[u8], validate: fn(&Value) -> Result<()>) -> Option<Value> {
+    if line.len() > MAX_RECORD_BYTES {
+        return None;
+    }
+    let event: Value = serde_json::from_slice(line).ok()?;
+    validate(&event).ok()?;
+    unsigned(&event["session_id"])?;
+    unsigned(&event["process_id"])?;
+    unsigned(&event["sequence_number"])?;
+    Some(event)
 }
 
 pub(crate) fn malformed() -> Error {
@@ -307,6 +338,17 @@ fn is_network(event: &Value) -> bool {
                     | "request_failed"
                     | "request_target"
                     | "request_body"
+                    | "capture_exclusion"
+                    | "tab_set"
+                    | "request_tab_link"
+                    | "request_extension_link"
+                    | "response_body"
+                    | "request_headers"
+                    | "response_headers"
+                    | "cookie_list"
+                    | "request_initiator_stack"
+                    | "navigation_initiator_link"
+                    | "request_watch_match"
             )
         )
 }
@@ -351,6 +393,7 @@ fn read_tail(path: &Path, maximum: usize) -> Result<Option<Snapshot>> {
         predecessor,
         bytes,
         records: Vec::new(),
+        damaged: Vec::new(),
     }))
 }
 
@@ -361,6 +404,7 @@ fn summarize(
     maximum: usize,
     limit: usize,
     bytes: &[u8],
+    malformed_lines: u64,
 ) -> Result<(EventWindow, Vec<bool>)> {
     let limit = limit.min(MAX_EVENTS);
     let mut window = EventWindow {
@@ -443,7 +487,8 @@ fn summarize(
     window.coverage = json!({
         "scope": if start == 0 { "store" } else { "bounded_tail" },
         "scan_start": start.to_string(), "scan_end": end.to_string(), "scan_limit": maximum,
-        "events_limited": records.len() > limit, "network_events_limited": network_count > limit
+        "events_limited": records.len() > limit, "network_events_limited": network_count > limit,
+        "malformed_lines": malformed_lines
     });
     Ok((window, retained))
 }
@@ -519,12 +564,13 @@ mod tests {
             event(1, "network", "request_started", ""),
             event(2, "network", "request_target", ""),
             event(3, "network", "request_body", ""),
+            event(4, "network", "response_body", ""),
         ];
-        events.extend((4..=40).map(|n| event(n, "canvas", "api_call", "")));
+        events.extend((5..=40).map(|n| event(n, "canvas", "api_call", "")));
         write(&path, &events);
-        let window = poll(&mut EventWindowCache::default(), &path, 3);
+        let window = poll(&mut EventWindowCache::default(), &path, 4);
         // Busy fingerprint traffic cannot evict a request's own child records.
-        assert_eq!(ids(&window.network_events), vec![1, 2, 3]);
+        assert_eq!(ids(&window.network_events), vec![1, 2, 3, 4]);
     }
 
     #[test]
@@ -613,22 +659,88 @@ mod tests {
         assert_eq!(cache.parsed_records, 5);
         write(&path, &events[..1]);
         assert_eq!(ids(&poll(&mut cache, &path, 10).events), vec![10]);
+        // A torn tail still being written is omitted, and it is not damage.
         fs::OpenOptions::new()
             .append(true)
             .open(&path)
             .unwrap()
             .write_all(b"{\"protocol_version\":")
             .unwrap();
-        assert!(cache.read(&path, 10, validate_event).is_err());
-        assert!(cache.snapshot.is_none());
+        let window = poll(&mut cache, &path, 10);
+        assert_eq!(ids(&window.events), vec![10]);
+        assert_eq!(window.coverage["malformed_lines"], 0);
         write(&path, &events[..2]);
         assert_eq!(poll(&mut cache, &path, 10).events.len(), 2);
         assert_eq!(cache.parsed_records, 2);
-        fs::write(&path, b"[]\n").unwrap();
-        assert!(cache.read(&path, 10, validate_event).is_err());
+    }
+
+    #[test]
+    fn unreadable_lines_are_counted_and_skipped_across_polls() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events");
+        let good = |n| line(&event(n, "canvas", "api_call", ""));
+        let mut invalid = event(4, "canvas", "gap", "");
+        invalid["payload"] = json!("not-hex");
+        let mut bytes = good(1);
+        bytes.extend_from_slice(b"{\"category\":\"network\",\"broken\":true\n");
+        bytes.extend(good(2));
+        bytes.extend_from_slice(b"not json\n");
+        bytes.extend_from_slice(b"[]\n");
+        bytes.extend(line(&invalid));
+        bytes.extend(good(3));
+        fs::write(&path, &bytes).unwrap();
+        let mut cache = EventWindowCache::default();
+        let window = poll(&mut cache, &path, 10);
+        assert_eq!(ids(&window.events), vec![1, 2, 3]);
+        assert_eq!(window.coverage["malformed_lines"], 4);
+        // A slide past the first damaged line neither recounts nor forgets the rest.
+        let broken = b"{\"category\":\"network\",\"broken\":true\n".len();
+        cache.maximum_bytes = bytes.len() - broken;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&good(5))
+            .unwrap();
+        let window = poll(&mut cache, &path, 10);
+        assert_eq!(ids(&window.events), vec![2, 3, 5]);
+        assert_eq!(window.coverage["malformed_lines"], 3);
+        assert_eq!(cache.parsed_records, 1);
+        // An oversized line, then a whole store of nothing readable.
         cache.maximum_bytes = SCAN_BYTES;
+        fs::write(&path, b"[]\n").unwrap();
+        let window = poll(&mut cache, &path, 10);
+        assert!(window.events.is_empty());
+        assert_eq!(window.coverage["malformed_lines"], 1);
+        let mut oversized = vec![b'x'; 4097];
+        oversized.push(b'\n');
+        oversized.extend(good(9));
+        fs::write(&path, &oversized).unwrap();
+        let window = poll(&mut cache, &path, 10);
+        assert_eq!(ids(&window.events), vec![9]);
+        assert_eq!(window.coverage["malformed_lines"], 1);
+        // A partial record past any record size can never become one.
         fs::write(&path, vec![b'x'; 4097]).unwrap();
-        assert!(cache.read(&path, 10, validate_event).is_err());
+        let window = poll(&mut cache, &path, 10);
+        assert!(window.events.is_empty());
+        assert_eq!(window.coverage["malformed_lines"], 1);
+    }
+
+    #[test]
+    fn more_damage_than_the_cache_remembers_stays_counted_and_is_not_cached() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events");
+        let mut bytes = line(&event(1, "canvas", "api_call", ""));
+        bytes.extend(b"x\n".repeat(MAX_REMEMBERED_DAMAGED + 3));
+        fs::write(&path, &bytes).unwrap();
+        let mut cache = EventWindowCache::default();
+        let window = poll(&mut cache, &path, 10);
+        assert_eq!(ids(&window.events), vec![1]);
+        assert_eq!(
+            window.coverage["malformed_lines"],
+            MAX_REMEMBERED_DAMAGED as u64 + 3
+        );
+        assert!(cache.snapshot.is_none());
     }
 
     #[test]
@@ -704,10 +816,12 @@ mod tests {
             write(&path, &[event(1, "webgl", "gap", payload)]);
             assert_eq!(poll(&mut cache, &path, 1).queue_drops, 1);
         }
-        // A malformed old record cannot silently influence a trusted summary.
+        // A malformed old record is left out of the summary and counted, never trusted.
         events[0]["payload"] = json!("not-hex");
         write(&path, &events);
-        assert!(cache.read(&path, 1, validate_event).is_err());
+        let window = poll(&mut cache, &path, 1);
+        assert_eq!(window.coverage["malformed_lines"], 1);
+        assert_eq!(window.sequence_gaps, 1);
     }
 
     #[test]
@@ -825,9 +939,7 @@ mod tests {
         let saved = bytes.clone();
         bytes.extend_from_slice(b"{\"protocol_version\":");
         fs::write(&path, &bytes).unwrap();
-        let mut fresh = cache_with_budget(cache.maximum_bytes);
-        assert!(cache.read(&path, 5000, validate_event).is_err());
-        assert!(fresh.read(&path, 5000, validate_event).is_err());
+        compare(&mut cache, &path, 5000); // A torn tail is omitted, cached or not.
         fs::write(&path, &saved).unwrap();
         compare(&mut cache, &path, 5000);
         // Same-size valid rewrite, atomic replacement, truncation, disappearance,

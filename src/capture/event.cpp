@@ -1,8 +1,15 @@
 #include "reb/event.hpp"
 #include "reb/compiled_script.hpp"
+#include "reb/debugger_observation.hpp"
 #include "reb/js_dispatch.hpp"
 #include "reb/js_invocation.hpp"
+#include "reb/network_cookies.hpp"
+#include "reb/network_headers.hpp"
 #include "reb/network_request.hpp"
+#include "reb/network_response_body.hpp"
+#include "reb/network_scope.hpp"
+#include "reb/request_stack.hpp"
+#include "reb/tab_link.hpp"
 #include "reb/wasm_dispatch.hpp"
 #include "reb/wasm_guest.hpp"
 
@@ -78,6 +85,26 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kWasmExecutionOutcome:
     case EventType::kWasmDispatchOverflow:
     case EventType::kWasmIndirectOverflow:
+    case EventType::kRequestHeaders:
+    case EventType::kResponseHeaders:
+    case EventType::kCookieList:
+    case EventType::kScriptCookie:
+    case EventType::kResponseBody:
+    case EventType::kCaptureExclusion:
+    case EventType::kTabSet:
+    case EventType::kRequestTabLink:
+    case EventType::kRequestExtensionLink:
+    case EventType::kRequestInitiatorStack:
+    case EventType::kScriptIdentity:
+    case EventType::kRequestWatchMatch:
+    case EventType::kListenerDispatch:
+    case EventType::kTimerObservation:
+    case EventType::kCspViolation:
+    case EventType::kExceptionObservation:
+    case EventType::kDomMutation:
+    case EventType::kNavigationInitiatorStack:
+    case EventType::kNavigationInitiatorLink:
+    case EventType::kAsyncTaskStack:
     case EventType::kScriptCompiled:
       return true;
     case EventType::kUnknown:
@@ -172,11 +199,49 @@ bool IsValidEvent(const EventRecord& event) noexcept {
     return false;
   if (event.header.type == EventType::kWasmIndirectOverflow && !IsValidWasmIndirectOverflow(event))
     return false;
+  if (event.header.type == EventType::kRequestInitiatorStack && !IsValidRequestStackEvent(event))
+    return false;
+  if (event.header.type == EventType::kScriptIdentity && !IsValidScriptIdentityEvent(event))
+    return false;
+  if (event.header.type == EventType::kNavigationInitiatorStack &&
+      !IsValidNavigationStackEvent(event))
+    return false;
+  if (event.header.type == EventType::kNavigationInitiatorLink &&
+      !IsValidNavigationLinkEvent(event))
+    return false;
+  if (event.header.type == EventType::kAsyncTaskStack && !IsValidAsyncTaskStackEvent(event))
+    return false;
+  if (event.header.type >= EventType::kRequestWatchMatch &&
+      event.header.type <= EventType::kDomMutation && !IsValidObservationEvent(event))
+    return false;
+  if ((event.header.type == EventType::kRequestHeaders ||
+       event.header.type == EventType::kResponseHeaders) &&
+      !IsValidHeaderBlockEvent(event))
+    return false;
+  if (event.header.type == EventType::kCookieList && !IsValidCookieListEvent(event))
+    return false;
+  if (event.header.type == EventType::kScriptCookie && !IsValidScriptCookieEvent(event))
+    return false;
+  if (event.header.type == EventType::kResponseBody && !IsValidResponseBodyEvent(event))
+    return false;
+  if (event.header.type == EventType::kCaptureExclusion && !IsValidCaptureExclusionEvent(event))
+    return false;
+  if (event.header.type == EventType::kTabSet && !IsValidTabSetEvent(event))
+    return false;
+  if (event.header.type == EventType::kRequestTabLink && !IsValidRequestTabLinkEvent(event))
+    return false;
+  if (event.header.type == EventType::kRequestExtensionLink &&
+      !IsValidRequestExtensionLinkEvent(event))
+    return false;
   if (event.header.type == EventType::kScriptCompiled && !IsValidScriptCompiled(event))
+    return false;
+  if (!IsKnownSchemeClass(event.header.scheme_class) ||
+      (event.header.scheme_class != 0 && !CarriesSchemeClass(event.header)) ||
+      !IsValidLoaderKind(event.header))
     return false;
   return event.header.protocol_version == kEventProtocolVersion &&
          event.header.header_size == sizeof(EventHeader) &&
-         event.header.payload_size <= event.inline_payload.size() && event.header.reserved1 == 0 &&
+         event.header.payload_size <= event.inline_payload.size() && event.header.reserved2 == 0 &&
          IsKnownCategory(event.header.category) && IsKnownType(event.header.type) &&
          (event.header.flags & static_cast<std::uint16_t>(~kKnownEventFlags)) == 0 &&
          std::ranges::all_of(event.reserved,
@@ -233,6 +298,15 @@ void WriteEventJson(const EventRecord& event, std::string& output) {
   AppendInteger(output, event.header.initiator_request_id);
   output.append(",\"initiator_process_id\":");
   AppendInteger(output, event.header.initiator_process_id);
+  // Absent means 0, so records without a scheme keep their earlier JSON.
+  if (event.header.scheme_class != 0) {
+    output.append(",\"scheme_class\":");
+    AppendInteger(output, event.header.scheme_class);
+  }
+  if (event.header.loader_kind != 0) {
+    output.append(",\"loader_kind\":");
+    AppendInteger(output, event.header.loader_kind);
+  }
   output.append(",\"payload_truncated\":");
   output.append((event.header.flags & static_cast<std::uint16_t>(EventFlag::kPayloadTruncated)) != 0
                     ? "true"
@@ -354,6 +428,46 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "wasm_dispatch_overflow";
     case EventType::kWasmIndirectOverflow:
       return "wasm_indirect_overflow";
+    case EventType::kRequestHeaders:
+      return "request_headers";
+    case EventType::kResponseHeaders:
+      return "response_headers";
+    case EventType::kCookieList:
+      return "cookie_list";
+    case EventType::kScriptCookie:
+      return "script_cookie";
+    case EventType::kResponseBody:
+      return "response_body";
+    case EventType::kCaptureExclusion:
+      return "capture_exclusion";
+    case EventType::kTabSet:
+      return "tab_set";
+    case EventType::kRequestTabLink:
+      return "request_tab_link";
+    case EventType::kRequestExtensionLink:
+      return "request_extension_link";
+    case EventType::kRequestInitiatorStack:
+      return "request_initiator_stack";
+    case EventType::kScriptIdentity:
+      return "script_identity";
+    case EventType::kRequestWatchMatch:
+      return "request_watch_match";
+    case EventType::kListenerDispatch:
+      return "listener_dispatch";
+    case EventType::kTimerObservation:
+      return "timer_observation";
+    case EventType::kCspViolation:
+      return "csp_violation";
+    case EventType::kExceptionObservation:
+      return "exception_observation";
+    case EventType::kDomMutation:
+      return "dom_mutation";
+    case EventType::kNavigationInitiatorStack:
+      return "navigation_initiator_stack";
+    case EventType::kNavigationInitiatorLink:
+      return "navigation_initiator_link";
+    case EventType::kAsyncTaskStack:
+      return "async_task_stack";
     case EventType::kScriptCompiled:
       return "script_compiled";
     case EventType::kUnknown:

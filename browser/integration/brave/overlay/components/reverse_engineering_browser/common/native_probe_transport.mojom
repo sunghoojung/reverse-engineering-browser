@@ -24,9 +24,13 @@ interface NativeProbeClient {
             array<uint8> js_invocation_sites,
             // The session's sensitive opt-in for settled-value digests.
             bool js_invocation_digests,
-            // --reb-capture-request-content: compiled script source that no
-            // response body carries is retained only in content capture.
-            bool capture_request_content);
+            // --reb-capture-request-content: renderer request targets,
+            // script cookie records (protocol/native-network-v3.md), and
+            // compiled script source that no response body carries
+            // (protocol/native-compiled-scripts-v1.md).
+            bool capture_request_content,
+            // --reb-capture-browser-internal: record internal schemes.
+            bool capture_browser_internal);
   // Fixed 524-byte sample-budget policy, or empty for the unrestricted
   // historical budgets. The next Configure publishes it. It does not arm
   // compilation, so a later session may replace it.
@@ -40,6 +44,10 @@ interface NativeProbeClient {
   NativeGuestModuleStatus(uint64 wasm_capture_epoch,
                           uint64 module_token,
                           bool accepted);
+  // The stack artifact created by this renderer record was refused or lost.
+  // The renderer forgets its digest, so an identical later stack is sent again
+  // instead of claiming a captured artifact (protocol/native-network-v3.md).
+  NativeStackArtifactRefused(uint64 creator_event_id);
 };
 
 // Process-wide renderer connection. Event records travel through the shared

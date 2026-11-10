@@ -34,9 +34,24 @@
           'vm_dispatch_sample', 'wasm_dispatch_observation', 'wasm_guest_dispatch', 'wasm_guest_invocation',
           'wasm_indirect_observation', 'wasm_execution_outcome', 'js_dispatch_observation', 'js_invocation_start', 'js_invocation_settle',
           'js_invocation_request', 'wasm_dispatch_overflow', 'wasm_indirect_overflow', 'script_compiled',
-          'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target'
+          'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target', 'response_body',
+          'request_headers', 'response_headers', 'cookie_list', 'script_cookie', 'request_initiator_stack',
+          'script_identity', 'capture_exclusion', 'tab_set', 'request_tab_link', 'navigation_initiator_stack',
+          'navigation_initiator_link', 'async_task_stack',
+          'request_extension_link', 'request_watch_match', 'listener_dispatch', 'timer_observation',
+          'csp_violation', 'exception_observation', 'dom_mutation'
         ])
       };
+      // Scheme classes of protocol/native-network-v3.md; absent means 0.
+      const requestSchemeClassNames = new Map([[1, 'http'], [2, 'https'], [3, 'ws'], [4, 'wss'], [5, 'data'],
+        [6, 'blob'], [7, 'file'], [8, 'chrome-extension'], [15, 'other'], [16, 'chrome'], [17, 'chrome-untrusted'],
+        [18, 'brave'], [19, 'devtools'], [20, 'chrome-search']]);
+      const schemeClassTypes = new Set(['request_initiated', 'request_started', 'request_completed', 'request_failed']);
+      // Loader kinds: browser 1..10 on request_started, renderer 16..21 on request_initiated.
+      const loaderKindValid = event => event.protocol_version === 3 && event.category === 'network' &&
+        Number.isInteger(event.loader_kind) && (event.type === 'request_started'
+          ? event.loader_kind >= 1 && event.loader_kind <= 10
+          : event.type === 'request_initiated' && event.loader_kind >= 16 && event.loader_kind <= 21);
       const uint64Fields = [
         'session_id', 'sequence_number', 'monotonic_time_ns', 'navigation_id',
         'frame_id', 'artifact_id', 'parent_event_id', 'request_id'
@@ -48,9 +63,10 @@
       const uint64Max = 18446744073709551615n;
       const int64Min = -9223372036854775808n;
       const int64Max = 9223372036854775807n;
+      // blink::mojom::ResourceType at the pin; 11 is a prefetch, not XHR.
       const resourceTypeFilters = new Map([
         [0, 'doc'], [1, 'doc'], [2, 'css'], [3, 'js'], [4, 'img'], [5, 'font'],
-        [8, 'media'], [11, 'xhr'], [13, 'xhr'], [19, 'doc'], [20, 'doc']
+        [8, 'media'], [9, 'js'], [10, 'js'], [12, 'img'], [13, 'xhr'], [15, 'js'], [19, 'doc'], [20, 'doc']
       ]);
       const lifecycleRanks = new Map([
         ['request_initiated', 1], ['request_started', 2], ['request_redirected', 3],
@@ -58,18 +74,29 @@
         ['request_failed', 5]
       ]);
       const networkLifecycleTypes = new Set(lifecycleRanks.keys());
-      // Children of a lifecycle record (protocol/native-network-v2.md). They
-      // describe a request; they never advance its lifecycle rank.
-      const networkRequestDetailTypes = new Set(['request_target', 'request_body']);
+      // Children of a lifecycle record (protocol/native-network-v2.md and v3).
+      // They describe a request; they never advance its lifecycle rank.
+      const networkRequestDetailTypes = new Set(['request_target', 'request_body', 'response_body', 'request_headers',
+        'response_headers', 'cookie_list', 'request_initiator_stack', 'navigation_initiator_link']);
+      // Session-level network records the backend keeps in its network window.
+      const networkContextTypes = new Set(['capture_exclusion', 'tab_set', 'request_tab_link',
+        'request_extension_link', 'request_watch_match']);
+      const networkRequestArtifactKinds = new Set(['request_body', 'request_target', 'request_headers', 'response_headers',
+        'cookie_list']);
       const artifactKinds = new Set([
         'javascript', 'wasm', 'source_map', 'response_body', 'canvas_data_url',
-        'bytecode_buffer', 'wasm_guest_adapter', 'request_body'
+        'bytecode_buffer', 'wasm_guest_adapter', 'request_body', 'request_target', 'request_headers', 'response_headers',
+        'cookie_list', 'stack'
       ]);
+      // Every kind Sources lists, plus Canvas images. Traffic reads a request's other
+      // records by ID, so only these need the artifact catalog past its unfiltered prefix.
+      const catalogOnlyArtifactKinds = [...artifactKinds].filter(kind => !networkRequestArtifactKinds.has(kind) && kind !== 'stack');
       const artifactCaptureOrigins = new Set([
         'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
         'webassembly_module', 'webassembly_instantiate', 'canvas_to_data_url',
         'runtime_typed_array',
-        'runtime_allocating_script', 'native_wasm_guest', 'network_request', 'compiled_script'
+        'runtime_allocating_script', 'native_wasm_guest', 'network_request', 'request_stack', 'stack_script',
+        'compiled_script'
       ]);
       const canvasReplayProperties = new Set([
         'fillStyle', 'strokeStyle', 'font', 'textBaseline', 'textAlign',
@@ -336,6 +363,7 @@
         state.eventsLimited = body.event_window?.events_limited ?? body.count >= 5000;
         state.networkEventsAvailable = Array.isArray(body.network_events);
         state.networkEventsLimited = body.event_window?.network_events_limited === true;
+        state.eventMalformedLines = body.event_window?.malformed_lines ?? 0;
       }
 
       function eventGapLabel(gapCount, reportedDrops, namedGaps = []) {
@@ -369,7 +397,8 @@
           BigInt(value.scan_start) <= BigInt(value.scan_end) && value.scan_limit === 64 * 1024 * 1024 &&
           BigInt(value.scan_end) - BigInt(value.scan_start) <= BigInt(value.scan_limit) &&
           (value.scope === 'store') === (value.scan_start === '0') &&
-          typeof value.events_limited === 'boolean' && typeof value.network_events_limited === 'boolean';
+          typeof value.events_limited === 'boolean' && typeof value.network_events_limited === 'boolean' &&
+          (value.malformed_lines === undefined || (Number.isSafeInteger(value.malformed_lines) && value.malformed_lines >= 0));
       }
 
       // The JavaScript invocation context of a Wasm consumer record,
@@ -558,25 +587,38 @@
       }
 
       const requestSchemes = new Map([[0, null], [1, 'http'], [2, 'https'], [3, 'ws'], [4, 'wss']]);
+      const requestTargetRetentions = ['complete', 'retained', 'not_retained_artifact_unavailable',
+        'not_retained_transfer_refused', 'not_retained_session_budget', 'not_retained_url'];
 
       function decodeRequestTargetRecord(event) {
-        if (!isRequestChildEnvelope(event, 'request_target') || event.artifact_id !== '0') return null;
+        if (!isRequestChildEnvelope(event, 'request_target') ||
+            !isCanonicalInteger(event.artifact_id, 0n, uint64Max)) return null;
         const bytes = bytesFromHex(event.payload);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const version = view.getUint16(0, true);
         const length = view.getUint32(4, true);
         const prefix = Math.min(length, 116);
-        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || !requestSchemes.has(bytes[8]) ||
-            bytes[9] !== 0 || bytes.slice(12, 12 + prefix).some(byte => byte === 0) ||
+        const hasArtifact = event.artifact_id !== '0';
+        // Version 2 byte 9 says where bytes past the prefix went; version 1 has none.
+        const retentionValid = version === 1 ? bytes[9] === 0 && !hasArtifact
+          : version === 2 && bytes[9] < requestTargetRetentions.length &&
+            (bytes[9] === 0) !== (length > 116) && (bytes[9] === 1) === hasArtifact;
+        if (!retentionValid || view.getUint16(2, true) !== 128 || !requestSchemes.has(bytes[8]) ||
+            bytes.slice(12, 12 + prefix).some(byte => byte === 0) ||
             bytes.slice(12 + prefix).some(byte => byte !== 0)) return null;
         return {scheme: requestSchemes.get(bytes[8]), port: view.getUint16(10, true), targetLength: length,
           // Decoded as text and only ever assigned to textContent.
-          target: new TextDecoder().decode(bytes.slice(12, 12 + prefix)), truncated: length > prefix};
+          target: new TextDecoder().decode(bytes.slice(12, 12 + prefix)), truncated: length > prefix,
+          retention: version === 1 ? (length > prefix ? 'not_recorded' : 'complete') : requestTargetRetentions[bytes[9]],
+          artifactId: event.artifact_id, sequenceNumber: event.sequence_number, sessionId: event.session_id,
+          processId: event.process_id};
       }
 
       const requestBodyKinds = ['none', 'bytes', 'file', 'data_pipe', 'chunked_data_pipe', 'mixed', 'unknown'];
       const requestBodyStates = [null, 'no_body', 'empty', 'metadata_only', 'captured', 'captured_truncated',
         'not_captured_body_kind', 'not_captured_artifact_unavailable', 'not_captured_transfer_refused',
-        'not_captured_url', 'not_captured_session_budget', 'not_captured_credential_form'];
+        'not_captured_url', 'not_captured_session_budget', 'not_captured_credential_form',
+        'not_captured_read_incomplete'];
       const requestTokenCharacters = /^[a-z0-9!#$%&'*+.^_`|~-]+\/[a-z0-9!#$%&'*+.^_`|~-]+$/;
 
       // Every rule of the request_body payload, shared with the C++ core and the
@@ -594,14 +636,40 @@
         const typeBytes = bytes.slice(64, 128);
         const contentType = String.fromCharCode(...typeBytes.slice(0, Math.min(typeLength, 64)));
         const has = bit => (flags & bit) !== 0;
-        const [content, hasDigest, sizeLimit, partial, typePresent, typeOmitted] = [1, 2, 4, 8, 16, 32].map(has);
+        const [content, hasDigest, sizeLimit, partial, typePresent, typeOmitted, read] =
+          [1, 2, 4, 8, 16, 32, 64].map(has);
         const digestLimit = 4n * 1024n * 1024n;
+        const readLimit = 16n * 1024n * 1024n;
         if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || view.getUint32(28, true) !== 0 ||
-            kindCode > 6 || stateCode < 1 || stateCode > 11 || (flags & ~0x3f) !== 0 || typeLength > 64 ||
+            kindCode > 6 || stateCode < 1 || stateCode > 12 || (flags & ~0x7f) !== 0 || typeLength > 64 ||
             (typePresent && typeOmitted) || typePresent !== (typeLength !== 0) ||
             typeBytes.slice(typeLength).some(byte => byte !== 0) ||
             (typePresent && !requestTokenCharacters.test(contentType)) || captured > bodyLength) return null;
         const isBytes = kindCode === 1, isNone = kindCode === 0, state = requestBodyStates[stateCode];
+        const readable = kindCode >= 2 && kindCode <= 5;
+        const decoded = () => ({
+          kind: requestBodyKinds[kindCode], state, contentCapture: content, lengthPartial: partial, read,
+          contentType: typePresent ? contentType : null, contentTypeOmitted: typeOmitted,
+          bodyLength: String(bodyLength), capturedLength: String(captured), elementCount: elements,
+          sha256: hasDigest ? Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') : null,
+          digestSizeLimit: sizeLimit, artifactId: event.artifact_id,
+          sequenceNumber: event.sequence_number, sessionId: event.session_id, processId: event.process_id
+        });
+        if (read) {
+          // File, blob or stream parts the browser read (native-network-v3.md).
+          const exact = [2, 4, 5].includes(stateCode), kept = stateCode === 4 || stateCode === 5;
+          if (!content || !readable || partial === exact || (event.artifact_id !== '0') !== kept ||
+              (!kept && captured !== 0n) || hasDigest !== digest.some(byte => byte !== 0) ||
+              (kindCode === 5 && elements < 2) || (kindCode === 4 && elements !== 1)) return null;
+          const readValid = {
+            2: hasDigest && !sizeLimit && bodyLength === 0n,
+            4: hasDigest && !sizeLimit && bodyLength !== 0n && bodyLength <= readLimit && captured === bodyLength,
+            5: !hasDigest && sizeLimit && bodyLength > readLimit && captured === readLimit,
+            8: !hasDigest && !sizeLimit, 10: !hasDigest && !sizeLimit, 12: !hasDigest && !sizeLimit
+          }[stateCode];
+          return readValid ? decoded() : null;
+        }
+        if (stateCode === 12) return null;
         if ((hasDigest && (!isBytes || sizeLimit || bodyLength > digestLimit)) ||
             (!hasDigest && digest.some(byte => byte !== 0)) ||
             (sizeLimit && (!isBytes || bodyLength <= digestLimit)) ||
@@ -619,15 +687,188 @@
           captured: content && isBytes && bodyLength !== 0n && captured === bodyLength,
           captured_truncated: content && isBytes && captured !== 0n && captured < bodyLength,
           not_captured_body_kind: content && !isNone && !isBytes
-        }[state] ?? (content && isBytes && bodyLength !== 0n);
+        }[state] ?? (content && ((isBytes && bodyLength !== 0n) || readable));
         if (!stateValid) return null;
+        return decoded();
+      }
+
+      const responseBodyStates = [null, 'captured', 'captured_truncated', 'partial', 'aborted', 'cancelled', 'empty',
+        'not_modified', 'redirected', 'not_captured_type', 'not_captured_artifact_unavailable',
+        'not_captured_transfer_refused', 'not_captured_session_budget'];
+      const responseCodings = new Map([[1, 'gzip'], [2, 'deflate'], [3, 'br'], [4, 'zstd'], [5, 'dcb'], [6, 'dcz'],
+        [7, 'compress'], [15, 'other']]);
+      const responseCaptureBytes = 16n * 1024n * 1024n;
+
+      // Every rule of the response_body payload (protocol/native-network-v3.md),
+      // shared with the C++ core and the Python evidence validator through
+      // tools/check-network-request-wire.mjs.
+      function decodeResponseBodyRecord(event) {
+        if (!isRequestChildEnvelope(event, 'response_body') ||
+            !isCanonicalInteger(event.artifact_id, 0n, uint64Max)) return null;
+        const bytes = bytesFromHex(event.payload);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const [stateCode, flags, typeLength, codingCount] = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        const bodyLength = view.getBigUint64(8, true);
+        const captured = view.getBigUint64(16, true);
+        const codings = Array.from(bytes.slice(24, 28));
+        const partialIndex = view.getUint16(28, true);
+        const digest = bytes.slice(32, 64);
+        const typeBytes = bytes.slice(64, 128);
+        const contentType = String.fromCharCode(...typeBytes.slice(0, Math.min(typeLength, 64)));
+        const has = bit => (flags & bit) !== 0;
+        const typePresent = has(0x40);
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || view.getUint16(30, true) !== 0 ||
+            stateCode < 1 || stateCode > 12 || (flags & ~0x7f) !== 0 || typeLength > 64 ||
+            typePresent !== (typeLength !== 0) || typeBytes.slice(typeLength).some(byte => byte !== 0) ||
+            (typePresent && !requestTokenCharacters.test(contentType)) || codingCount > 4 ||
+            (has(0x10) && codingCount !== 4) ||
+            codings.some((coding, index) => index < codingCount ? !responseCodings.has(coding) : coding !== 0)) return null;
+        const retained = captured !== 0n;
+        const whole = bodyLength < responseCaptureBytes ? bodyLength : responseCaptureBytes;
+        if (captured > bodyLength || (event.artifact_id !== '0') !== retained || digest.some(byte => byte !== 0) !== retained ||
+            (has(1) && !retained) || (partialIndex !== 0) !== (stateCode === 3) ||
+            (has(0x20) && ![1, 2, 6].includes(stateCode))) return null;
+        const valid = stateCode === 1 ? bodyLength !== 0n && captured === bodyLength
+          : stateCode === 2 ? bodyLength > responseCaptureBytes && captured === responseCaptureBytes
+            : stateCode === 3 ? bodyLength !== 0n && captured === whole
+              : stateCode <= 5 ? !retained || captured === whole
+                : stateCode <= 9 ? bodyLength === 0n : !retained;
+        if (!valid) return null;
         return {
-          kind: requestBodyKinds[kindCode], state, contentCapture: content, lengthPartial: partial,
-          contentType: typePresent ? contentType : null, contentTypeOmitted: typeOmitted,
-          bodyLength: String(bodyLength), capturedLength: String(captured), elementCount: elements,
-          sha256: hasDigest ? Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') : null,
-          digestSizeLimit: sizeLimit, artifactId: event.artifact_id,
-          sequenceNumber: event.sequence_number, sessionId: event.session_id, processId: event.process_id
+          state: responseBodyStates[stateCode], shared: has(1), fromCache: has(2), serviceWorker: has(4),
+          stillEncoded: has(8), codingsOmitted: has(0x10), completionUnobserved: has(0x20),
+          contentType: typePresent ? contentType : null,
+          codings: codings.slice(0, codingCount).map(coding => responseCodings.get(coding)),
+          bodyLength: String(bodyLength), capturedLength: String(captured), partialIndex,
+          sha256: retained ? Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') : null,
+          artifactId: event.artifact_id, sequenceNumber: event.sequence_number, parentEventId: event.parent_event_id,
+          sessionId: event.session_id, processId: event.process_id
+        };
+      }
+
+      const headerSources = [null, 'browser', 'network', 'early_hints'];
+      const headerStates = [null, 'captured', 'captured_shared', 'empty', 'not_captured_block_limit',
+        'not_captured_artifact_unavailable', 'not_captured_transfer_refused', 'not_captured_session_budget',
+        'not_captured_url'];
+      // net::ReferrerPolicy + 1, as the Fetch policy names DevTools shows.
+      const referrerPolicies = [null, 'no-referrer-when-downgrade', 'strict-origin-when-cross-origin',
+        'origin-when-cross-origin', 'unsafe-url', 'origin', 'same-origin', 'strict-origin', 'no-referrer'];
+      const HEADER_BLOCK_LIMIT = 320 * 1024;
+
+      // Every rule of the request_headers and response_headers payload
+      // (protocol/native-network-v3.md), shared with the C++ core and the
+      // Python evidence validator through tools/check-network-request-wire.mjs.
+      function decodeHeaderBlockRecord(event) {
+        const response = event?.type === 'response_headers';
+        if (!isRequestChildEnvelope(event, response ? 'response_headers' : 'request_headers') ||
+            !isCanonicalInteger(event.artifact_id, 0n, uint64Max)) return null;
+        const bytes = bytesFromHex(event.payload);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const [source, state, policy, family] = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        const count = view.getUint32(8, true), length = view.getUint32(12, true);
+        const status = view.getUint16(20, true), port = view.getUint16(22, true);
+        const address = bytes.slice(24, 40), digest = bytes.slice(48, 80);
+        const zero = list => list.every(byte => byte === 0);
+        const addressed = family !== 0;
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || state < 1 || state > 8 ||
+            !zero(bytes.slice(44, 48)) || !zero(bytes.slice(80))) return null;
+        if (response ? policy !== 0 || (source === 1 ? status > 999 || (status !== 0 && status < 100)
+          : source !== 3 || status !== 103 || addressed)
+          : status !== 0 || addressed || (source === 1 ? policy < 1 || policy > 8 : source !== 2 || policy !== 0)) return null;
+        if (![0, 4, 6].includes(family) || (!addressed && (port !== 0 || !zero(address))) ||
+            (family === 4 && !zero(address.slice(4)))) return null;
+        const empty = state === 3, limited = state === 4;
+        if ((count === 0) !== empty || (length === 0) !== empty || length < 5 * count ||
+            limited !== (length > HEADER_BLOCK_LIMIT) || zero(digest) !== limited) return null;
+        if ((event.artifact_id !== '0') !== (state === 1 || state === 2)) return null;
+        const hex = list => Array.from(list, byte => byte.toString(16).padStart(2, '0')).join('');
+        let remoteAddress = null;
+        if (family === 4) remoteAddress = Array.from(address.slice(0, 4)).join('.');
+        if (family === 6) {
+          const groups = Array.from({length: 8}, (_, index) => view.getUint16(24 + index * 2, false).toString(16));
+          remoteAddress = `[${groups.join(':').replace(/(^|:)0(:0)+(:|$)/, '::')}]`;
+        }
+        return {
+          kind: response ? 'response' : 'request', source: headerSources[source], state: headerStates[state],
+          headerCount: count, blockLength: length, hop: view.getUint32(16, true), statusCode: status,
+          referrerPolicy: referrerPolicies[policy], remoteAddress, remotePort: port,
+          unattributedBlocks: view.getUint32(40, true), sha256: limited ? null : hex(digest),
+          artifactId: event.artifact_id, sequenceNumber: event.sequence_number, parentEventId: event.parent_event_id,
+          sessionId: event.session_id, processId: event.process_id
+        };
+      }
+
+      const COOKIE_LIST_LIMIT = 2 * 1024 * 1024;
+
+      // The cookie_list record ("Cookies" in protocol/native-network-v3.md),
+      // shared with the C++ core and the Python validator through
+      // tools/check-network-request-wire.mjs.
+      function decodeCookieListRecord(event) {
+        if (!isRequestChildEnvelope(event, 'cookie_list') || !isCanonicalInteger(event.artifact_id, 0n, uint64Max)) return null;
+        const bytes = bytesFromHex(event.payload);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const [direction, state] = [bytes[4], bytes[5]];
+        const count = view.getUint32(8, true), blocked = view.getUint32(12, true), length = view.getUint32(16, true);
+        const digest = bytes.slice(32, 64);
+        const zero = list => list.every(byte => byte === 0);
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || ![1, 2].includes(direction) ||
+            state < 1 || state > 8 || !zero(bytes.slice(6, 8)) || !zero(bytes.slice(28, 32)) || !zero(bytes.slice(64)) ||
+            blocked > count) return null;
+        const empty = state === 3, limited = state === 4;
+        if ((count === 0) !== empty || (length === 0) !== empty || (!empty && length < 16 + 64 * count) ||
+            limited !== (length > COOKIE_LIST_LIMIT) || zero(digest) !== limited) return null;
+        if ((event.artifact_id !== '0') !== (state === 1 || state === 2)) return null;
+        return {
+          direction: direction === 1 ? 'sent' : 'received', state: headerStates[state], cookieCount: count,
+          blockedCount: blocked, listLength: length, hop: view.getUint32(20, true),
+          unattributedLists: view.getUint32(24, true),
+          sha256: limited ? null : Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join(''),
+          artifactId: event.artifact_id, sequenceNumber: event.sequence_number, parentEventId: event.parent_event_id,
+          sessionId: event.session_id, processId: event.process_id
+        };
+      }
+
+      const scriptCookieApis = [null, 'document.cookie set', 'document.cookie get', 'cookieStore.set',
+        'cookieStore.get', 'cookieStore.getAll', 'cookieStore.delete'];
+
+      // The renderer's script_cookie record (protocol/native-network-v3.md).
+      function decodeScriptCookieRecord(event) {
+        if (event?.type !== 'script_cookie' || event.protocol_version !== 3 || event.category !== 'network' ||
+            event.flags !== 0 || event.payload_truncated !== false || event.payload_size !== 128 ||
+            event.payload_encoding !== 'hex' || typeof event.payload !== 'string' || !/^[0-9a-f]{256}$/i.test(event.payload) ||
+            !['session_id', 'sequence_number'].every(key => isCanonicalInteger(event[key], 1n, uint64Max)) ||
+            !isSafeIntegerInRange(event.process_id, 1, 0xffffffff) ||
+            !['parent_event_id', 'request_id', 'artifact_id', 'navigation_id', 'encoded_data_length', 'decoded_body_length']
+              .every(key => event[key] === '0') ||
+            event.status_code !== 0 || event.error_code !== 0 || event.resource_type !== 0) return null;
+        const bytes = bytesFromHex(event.payload);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const [api, flags] = [bytes[4], bytes[5]];
+        const count = view.getUint32(8, true), nameLength = view.getUint32(12, true);
+        const valueLength = view.getUint32(16, true), stringLength = view.getUint32(20, true);
+        const frame = {kind: bytes[24], flags: bytes[25], combinator: view.getUint16(26, true),
+          scriptId: view.getUint32(28, true), position: view.getUint32(32, true), functionStart: view.getUint32(36, true)};
+        const stack = bytes.slice(40, 72), value = bytes.slice(72, 104), prefix = bytes.slice(104, 128);
+        const zero = list => list.every(byte => byte === 0);
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || api < 1 || api > 6 ||
+            (flags & ~0x0f) !== 0 || !zero(bytes.slice(6, 8)) || count === 0) return null;
+        const write = [1, 3, 6].includes(api), truncated = nameLength > 24;
+        if (truncated !== Boolean(flags & 1) || (!truncated && !zero(prefix.slice(nameLength)))) return null;
+        if (write ? count !== 1 || zero(value) || (flags & 8) : valueLength !== 0 || !zero(value)) return null;
+        if (api === 1 ? stringLength < nameLength + valueLength : api !== 2 && stringLength !== 0) return null;
+        const recorded = Boolean(flags & 2), stacked = Boolean(flags & 4);
+        const framed = [1, 2].includes(frame.kind) && frame.scriptId !== 0 && frame.combinator === 0 && (frame.flags & ~3) === 0;
+        if (recorded ? !framed : !zero(bytes.slice(24, 40))) return null;
+        if (stacked === zero(stack) || (stacked && !recorded)) return null;
+        const hex = list => Array.from(list, byte => byte.toString(16).padStart(2, '0')).join('');
+        return {
+          api: scriptCookieApis[api], write, count, nameLength, nameTruncated: truncated,
+          namePrefix: new TextDecoder('utf-8', {fatal: false}).decode(prefix.slice(0, Math.min(nameLength, 24))),
+          namePrefixHex: hex(prefix.slice(0, Math.min(nameLength, 24))),
+          valueLength, stringLength, frame: recorded ? frame : null, stackDigest: stacked ? hex(stack) : null,
+          valueSha256: write ? hex(value) : null, tableFull: Boolean(flags & 8), frameId: event.frame_id,
+          sessionId: event.session_id, processId: event.process_id, sequenceNumber: event.sequence_number,
+          monotonicTimeNs: event.monotonic_time_ns
         };
       }
 
@@ -648,16 +889,49 @@
           const start = request.events.find(event => event.type === 'request_started') ?? null;
           const bodyEvent = requestChildOf(request.details, start, 'request_body');
           request.body = bodyEvent ? decodeRequestBodyRecord(bodyEvent) ?? {malformed: true} : null;
+          // The final response's newest body record: a later end supersedes partial snapshots.
+          const newest = (latest, event) => !latest || BigInt(event.sequence_number) > BigInt(latest.sequence_number) ? event : latest;
+          const response = request.events.filter(event => event.type === 'response_started').reduce(newest, null);
+          request.responseStarted = response ? {sequenceNumber: response.sequence_number, sessionId: response.session_id,
+            processId: response.process_id} : null;
+          const responseBody = response ? request.details.filter(event => event.type === 'response_body' &&
+            event.parent_event_id === response.sequence_number && event.session_id === response.session_id &&
+            event.process_id === response.process_id).reduce(newest, null) : null;
+          request.responseBody = responseBody ? decodeResponseBodyRecord(responseBody) ?? {malformed: true} : null;
+          request.redirectedBody = request.events.some(event => event.type === 'request_redirected' &&
+            requestChildOf(request.details, event, 'response_body'));
+          // Header blocks join an exact lifecycle parent of this request.
+          const parents = new Set(request.events.map(event => `${event.session_id}:${event.process_id}:${event.sequence_number}`));
+          request.headerBlocks = request.details
+            .filter(event => (event.type === 'request_headers' || event.type === 'response_headers') &&
+              parents.has(`${event.session_id}:${event.process_id}:${event.parent_event_id}`))
+            .map(event => decodeHeaderBlockRecord(event) ?? {malformed: true, kind: event.type === 'response_headers' ? 'response' : 'request',
+              sequenceNumber: event.sequence_number});
+          request.cookieLists = request.details
+            .filter(event => event.type === 'cookie_list' &&
+              parents.has(`${event.session_id}:${event.process_id}:${event.parent_event_id}`))
+            .map(event => decodeCookieListRecord(event) ?? {malformed: true, sequenceNumber: event.sequence_number});
           const targetEvent = requestChildOf(request.details, request.targetEvent, 'request_target');
           const target = targetEvent ? decodeRequestTargetRecord(targetEvent) : null;
           request.targetMalformed = Boolean(targetEvent) && !target;
           if (!target || request.targetKind !== 'host') continue;
+          if (request.schemeOnly) {
+            request.host = request.path;
+            request.target = target.target;
+            request.urlTruncated = target.truncated;
+            request.targetLength = target.targetLength;
+            request.path = `${request.path}${target.target}`;
+            request.targetKind = 'url';
+            request.hostOnly = false;
+            continue;
+          }
           const host = request.path;
           // Rows show these exact captured bytes; the composed URL is for copying.
           request.host = target.port ? `${host}:${target.port}` : host;
           request.target = target.target;
           request.urlTruncated = target.truncated;
           request.targetLength = target.targetLength;
+          request.fullTarget = target.truncated ? target : null;
           request.path = target.scheme
             ? `${target.scheme}://${host}${target.port ? `:${target.port}` : ''}${target.target}`
             : `${host}${target.target}`;
@@ -794,6 +1068,10 @@
         if (!uint32Fields.every(field => isSafeIntegerInRange(event[field], 0, 0xffffffff))) return false;
         if (!uint16Fields.every(field => isSafeIntegerInRange(event[field], 0, 0xffff))) return false;
         if ((event.flags & ~0x7) !== 0) return false;
+        if (Object.hasOwn(event, 'scheme_class') && (event.protocol_version !== 3 ||
+          !requestSchemeClassNames.has(event.scheme_class) || event.category !== 'network' ||
+          !schemeClassTypes.has(event.type))) return false;
+        if (Object.hasOwn(event, 'loader_kind') && !loaderKindValid(event)) return false;
         if (!isSafeIntegerInRange(event.status_code, -0x80000000, 0x7fffffff)) return false;
         if (!isSafeIntegerInRange(event.error_code, -0x80000000, 0x7fffffff)) return false;
         if (typeof event.payload_truncated !== 'boolean') return false;
@@ -836,7 +1114,8 @@
           (body.event_window === undefined || isEventWindow(body.event_window)) &&
           (body.network_events === undefined || (Array.isArray(body.network_events) && body.network_events.length <= 5000 &&
             body.network_events.every(event => isBrokerEvent(event) && event.category === 'network' &&
-              (networkLifecycleTypes.has(event.type) || networkRequestDetailTypes.has(event.type))))) &&
+              (networkLifecycleTypes.has(event.type) || networkRequestDetailTypes.has(event.type) ||
+                networkContextTypes.has(event.type))))) &&
           body.events.every(isBrokerEvent);
       }
 
@@ -872,17 +1151,19 @@
           return false;
         }
         if (artifact.kind === 'wasm_guest_adapter' && artifact.capture_origin !== 'native_wasm_guest') return false;
-        // A request body is created by its browser request_body record only.
-        if ((artifact.kind === 'request_body') !== (artifact.capture_origin === 'network_request') ||
-          (artifact.kind === 'request_body' && (artifact.execution_context_id !== '0' ||
+        // Request content and header blocks are created by one browser network record.
+        if (networkRequestArtifactKinds.has(artifact.kind) !== (artifact.capture_origin === 'network_request') ||
+          (networkRequestArtifactKinds.has(artifact.kind) && (artifact.execution_context_id !== '0' ||
             !isCanonicalInteger(artifact.creator_event_id, 1n, uint64Max)))) return false;
         if (artifact.capture_origin === 'native_wasm_guest' && (!['bytecode_buffer','wasm_guest_adapter'].includes(artifact.kind) ||
           !['frame_id','parent_artifact_id','creator_event_id','execution_context_id'].every(k => isCanonicalInteger(artifact[k],1n,uint64Max)))) return false;
         if (Object.hasOwn(artifact, 'execution_context_id')) {
           if (!isCanonicalInteger(artifact.execution_context_id, 0n, uint64Max) ||
             !artifactCaptureOrigins.has(artifact.capture_origin) ||
-            (['dynamic_javascript', 'runtime_allocating_script', 'compiled_script'].includes(artifact.capture_origin) &&
+            (['dynamic_javascript', 'runtime_allocating_script', 'stack_script', 'compiled_script']
+              .includes(artifact.capture_origin) &&
               (artifact.kind !== 'javascript' || artifact.execution_context_id === '0')) ||
+            ((artifact.kind === 'stack') !== (artifact.capture_origin === 'request_stack')) ||
             (artifact.capture_origin.startsWith('webassembly_') &&
               (artifact.kind !== 'wasm' || artifact.execution_context_id === '0')) ||
             (artifact.capture_origin === 'canvas_to_data_url' &&
@@ -898,7 +1179,8 @@
           isSafeIntegerInRange(artifact.byte_size, 0, Number.MAX_SAFE_INTEGER) &&
           typeof artifact.sha256 === 'string' && /^[0-9a-f]{64}$/.test(artifact.sha256) &&
           typeof artifact.sensitive === 'boolean' &&
-          artifact.sensitive === ['response_body', 'canvas_data_url', 'request_body'].includes(artifact.kind);
+          artifact.sensitive === (['response_body', 'canvas_data_url'].includes(artifact.kind) ||
+            networkRequestArtifactKinds.has(artifact.kind));
       }
 
       function isArtifactResponse(body) {
@@ -1177,7 +1459,7 @@
         }
 
         const requestId = integerText(event, 'request_id');
-        if (event.type === 'request_initiated') {
+        if (event.type === 'request_initiated' || event.type === 'request_initiator_stack') {
           return rendererRequestIdentity(event);
         }
         const hasInitiator = event.initiator_process_id > 0;
@@ -1192,12 +1474,44 @@
         return requestKey ? browserRequestKeys.get(requestKey) ?? correlatedId : correlatedId;
       }
 
-      function resourceTypeFilter(event, previous, payload) {
+      // A resource type that says only "other" is classed by its response MIME type.
+      function mimeTypeFilter(mime) {
+        if (mime === 'text/css') return 'css';
+        if (['text/javascript', 'application/javascript', 'application/x-javascript', 'text/ecmascript',
+          'application/ecmascript'].includes(mime)) return 'js';
+        if (mime === 'text/html' || mime === 'application/xhtml+xml') return 'doc';
+        if (mime.startsWith('image/')) return 'img';
+        if (mime.startsWith('font/') || mime.startsWith('application/font-') || mime.startsWith('application/x-font-') ||
+          mime === 'application/vnd.ms-fontobject') return 'font';
+        if (mime.startsWith('audio/') || mime.startsWith('video/')) return 'media';
+        return 'other';
+      }
+
+      function resourceTypeFilter(event, previous, payload, response) {
         if (/^application\/wasm(?:;|$)/i.test(payload)) return 'wasm';
         if (event.protocol_version >= 2 && event.type === 'request_started') {
           return resourceTypeFilters.get(event.resource_type) ?? 'other';
         }
-        return previous?.type ?? 'other';
+        const type = previous?.type ?? 'other';
+        return type === 'other' && response?.mimeType ? mimeTypeFilter(response.mimeType) : type;
+      }
+
+      // response_started carries "mime; protocol=alpn", or "synthetic_shields; mime"
+      // for a Shields-synthesized response (the browser network sink).
+      function responseMetadata(payload) {
+        const synthetic = payload.startsWith('synthetic_shields; ');
+        const text = synthetic ? payload.slice(19) : payload;
+        const at = synthetic ? -1 : text.indexOf('; protocol=');
+        const essence = (at < 0 ? text : text.slice(0, at)).split(';')[0].trim();
+        const protocol = at < 0 ? '' : text.slice(at + 11).trim();
+        return {mimeType: /^[a-z0-9!#$%&'*+.^_`|~-]+\/[a-z0-9!#$%&'*+.^_`|~-]+$/i.test(essence) ? essence.toLowerCase() : null,
+          protocol: /^[\x21-\x7e]{1,32}$/.test(protocol) ? protocol : null};
+      }
+
+      function nonNegativeLength(event, field) {
+        if (!isCanonicalInteger(event[field], int64Min, int64Max, true)) return null;
+        const value = BigInt(event[field]);
+        return value >= 0n ? Number(value) : null;
       }
 
       function networkTargetFromPayload(payload, eventType) {
@@ -1215,13 +1529,23 @@
         return host ? {method: null, value: host, kind: 'host'} : null;
       }
 
+      // Hostless URLs (data:, blob:) and browser schemes name their scheme, so
+      // a row never reads as a bare host of the web.
+      function scopedNetworkTarget(target, payload, event) {
+        const scheme = requestSchemeClassNames.get(event.scheme_class);
+        if (!scheme || event.scheme_class <= 4 || !['request_initiated', 'request_started'].includes(event.type)) return target;
+        if (target?.kind === 'host' && target.method) return {...target, value: `${scheme}://${target.value}`};
+        const method = target ? null : payload.match(/^([A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,31}) $/)?.[1];
+        return method ? {method, value: `${scheme}:`, kind: 'host', schemeOnly: true} : target;
+      }
+
       function requestsFromEvents(events, origin = 'live') {
         const requests = new Map();
         const lifecycleEvents = events.filter(event => event.category === 'network' && networkLifecycleTypes.has(event.type));
         const browserRequestKeys = buildBrowserRequestKeys(lifecycleEvents);
         lifecycleEvents.forEach(event => {
           const payload = decodePayload(event);
-          const target = networkTargetFromPayload(payload, event.type);
+          const target = scopedNetworkTarget(networkTargetFromPayload(payload, event.type), payload, event);
           const id = requestIdentity(event, browserRequestKeys);
           const previous = requests.get(id);
           const timestamp = integerValue(event, 'monotonic_time_ns');
@@ -1250,16 +1574,27 @@
             : previous?.targetRank ?? 0;
           const updatesTarget = Boolean(target) && targetRank === incomingRank;
           const terminal = rank >= 5;
+          const versioned = event.protocol_version >= 2;
+          const response = versioned && event.type === 'response_started' ? responseMetadata(payload) : null;
+          const ended = versioned && incomingRank === 5;
+          // Initiator inputs: 1 renderer record, 2 service-worker start, 4 versioned record.
+          const initiatorBits = (previous?.initiatorBits ?? 0) |
+            (event.type === 'request_initiated' || (versioned && event.initiator_process_id > 0) ? 1 : 0) |
+            (versioned && event.type === 'request_started' && (event.flags & 4) !== 0 ? 2 : 0) | (versioned ? 4 : 0);
+          const loaderObserved = Boolean(previous?.loaderObserved) || event.type !== 'request_initiated';
           requests.set(id, {
             id,
             path: updatesTarget ? target.value : previous?.path ?? 'Unidentified network event',
             method: updatesTarget && target.method ? target.method : previous?.method ?? 'EVENT',
             status,
             time: terminal ? formatMilliseconds(lastTimestamp - firstTimestamp) : 'pending',
-            type: resourceTypeFilter(event, previous, payload),
+            type: resourceTypeFilter(event, previous, payload, response),
             origin: ['live', 'demo'].includes(origin) ? origin : 'live',
             targetKind: updatesTarget ? target.kind : previous?.targetKind ?? 'unknown',
             hostOnly: (updatesTarget ? target.kind : previous?.targetKind) === 'host',
+            schemeOnly: updatesTarget ? Boolean(target.schemeOnly) : previous?.schemeOnly ?? false,
+            schemeClass: event.scheme_class > 0 ? event.scheme_class : previous?.schemeClass ?? 0,
+            browserObserved: Boolean(previous?.browserObserved || browserContextToken(event)),
             start: 8,
             mid: Math.min(80, 18 + rank * 11),
             end: Math.min(94, 30 + rank * 12),
@@ -1276,11 +1611,36 @@
               ? String(event.tab_id) : previous?.tabId ?? '0',
             operation: incomingRank >= (previous?.rank ?? 0) ? event.type : previous.operation,
             firstTimestamp,
-            lastTimestamp
+            lastTimestamp,
+            transferSize: ended ? nonNegativeLength(event, 'encoded_data_length') : previous?.transferSize ?? null,
+            resourceSize: ended ? nonNegativeLength(event, 'decoded_body_length') : previous?.resourceSize ?? null,
+            fromCache: Boolean(previous?.fromCache) || (response !== null && (event.flags & 2) !== 0),
+            fromServiceWorker: Boolean(previous?.fromServiceWorker) || (response !== null && (event.flags & 4) !== 0),
+            mimeType: response ? response.mimeType : previous?.mimeType ?? null,
+            protocol: response ? response.protocol : previous?.protocol ?? null,
+            responseTimestamp: previous?.responseTimestamp ?? (response ? timestamp : null),
+            errorCode: versioned && event.error_code !== 0 ? event.error_code : previous?.errorCode ?? 0,
+            loaderObserved,
+            initiatorBits,
+            initiator: initiatorBits & 2 ? 'worker' : initiatorBits & 1 ? 'renderer' : initiatorBits & 4 && loaderObserved ? 'browser' : null,
+            mainFrame: Boolean(previous?.mainFrame) || (versioned && event.type === 'request_started' && event.resource_type === 0)
           });
         });
         const rows = [...requests.values()];
         attachRequestDetails(rows, events, browserRequestKeys);
+        // A walked initiator stack tells script starts from parser starts (protocol/native-network-v3.md).
+        for (const row of rows) {
+          // A navigation script started names its renderer stack.
+          if (row.details.some(event => event.type === 'navigation_initiator_link')) {
+            row.initiator = 'script';
+            continue;
+          }
+          if (row.initiator !== 'renderer') continue;
+          const stack = row.details.find(event => event.type === 'request_initiator_stack');
+          const stackState = typeof stack?.payload === 'string' ? Number.parseInt(stack.payload.slice(8, 10), 16) : 0;
+          if ([1, 4, 5].includes(stackState)) row.initiator = 'script';
+          else if (stackState === 2) row.initiator = 'parser';
+        }
         return rows;
       }
 

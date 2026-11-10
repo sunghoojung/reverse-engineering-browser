@@ -642,7 +642,7 @@ console.log("PASS WASM inspection identity, coordinate and resource bounds");
 // pixels. `make rendered-ui-check` is the separate rendered interaction path.
 class TrafficFixtureNode {
   constructor(tag = "div") {
-    this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = new Map();
+    this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = new Map(); this.style = {};
     this.listeners = new Map(); this.className = ""; this._text = ""; this.value = ""; this.scrollTop = 0; this.parentNode = null;
     this.classList = {add: name => {if (!this.className.split(" ").includes(name)) this.className += ` ${name}`;},
       remove: name => {this.className = this.className.split(" ").filter(value => value !== name).join(" ");},
@@ -935,84 +935,46 @@ assert.equal(ledger.children[2], selectedRow);
 assert.equal(ledger.scrollTop, 56, "Retained-window eviction preserves the first visible row anchor");
 assert.equal(trafficDocument.activeElement, selectedRow);
 trafficUI.renderTrafficRows(ledger, retainedTraffic.slice(4, 504), rowOptions);
-assert.equal(trafficDocument.activeElement, ledger.children[0]);
-assert.equal(ledger.children.length, 500);
+// A focused row that leaves the mounted rows leaves focus on the list, never on a row it did not select.
+assert.equal(trafficDocument.activeElement, ledger);
+assert.equal(ledger.children.length, 2 + 40 + 8 + 1, "Only the rows near the view mount, with a spacer for the rest");
+assert.equal(ledger.children[0].getAttribute("aria-setsize"), "500");
 const details = new TrafficFixtureNode();
-// Native rows carry no headers or response bodies: the inspector shows General
-// and the request body record, and search never reads beyond URL, method and status.
+// Native rows carry no headers or response bodies: General shows coverage and
+// the URL, the body is on Payload (check-traffic-payload-ui.mjs), and search
+// never reads beyond URL, method and status.
 let selectedTraffic = uiRequest("inspect", {status: 200, hostOnly: true, path: "fixture.invalid"});
 trafficUI.renderTrafficDetails(details, selectedTraffic);
 const generalSection = details.querySelector(".traffic-general");
-assert.match(details.textContent, /Request and response headers and response bodies are not captured/);
+assert.match(details.textContent, /The request body is on the Payload tab\. Response bodies are on the Response tab\./);
+assert.match(details.textContent, /headers and body bytes are recorded only in content capture sessions/);
 assert.match(details.textContent, /host only; path and query not captured/);
 {
-  // Request body section: every record state reads as its own sentence and the
-  // retained bytes are assigned as text, never parsed.
   const bodyDetails = new TrafficFixtureNode();
-  const body = (state, extra = {}) => ({kind: "bytes", state, contentCapture: true, lengthPartial: false,
-    contentType: "application/json", contentTypeOmitted: false, bodyLength: "816", capturedLength: "0", elementCount: 1,
-    sha256: "ab".repeat(32), digestSizeLimit: false, artifactId: "0", sequenceNumber: "12", sessionId: "7", processId: 42, ...extra});
   const live = (requestBody, extra = {}) => ({...uiRequest("body", {status: 200, origin: "live",
     path: "https://api.hcaptcha.test/checksiteconfig?v=1", hostOnly: false, targetKind: "url"}), body: requestBody, ...extra});
-  const section = () => bodyDetails.querySelector(".traffic-body");
-  const markup = "<img src=x onerror=alert(1)>{\"sitekey\":\"s\"}";
-  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "",
-    {status: "ready", text: markup, lossy: false, verified: true, url: "https://api.hcaptcha.test/checksiteconfig?v=1&host=x"});
-  assert.equal(section().dataset.state, "captured");
-  assert.match(section().textContent, /Retained in full/);
-  assert.match(section().textContent, /application\/json/);
-  assert.match(section().textContent, /816 bytes/);
-  assert.match(section().textContent, /SHA-256(ab){32}Body kind/);
-  const pre = section().querySelector("pre");
-  assert.equal(pre.textContent, markup, "captured bytes are text content");
-  assert.equal(pre.children.length, 0, "captured markup creates no element");
-  assert.match(section().textContent, /Body artifact URL.*host=x/);
-  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured_truncated", {bodyLength: "300000", capturedLength: "262144", artifactId: "902"})),
-    "", {status: "ready", text: "m", lossy: true, verified: false});
-  assert.match(section().textContent, /Retained prefix: 262,144 bytes of 300,000 bytes/);
-  assert.match(section().textContent, /Not valid UTF-8/);
-  assert.match(section().textContent, /could not be rechecked/);
-  for (const [state, extra, pattern] of [
-    ["metadata_only", {contentCapture: false}, /content capture was off for this session/],
-    ["no_body", {kind: "none", elementCount: 0, bodyLength: "0", sha256: null, contentType: null}, /No request body/],
-    ["empty", {bodyLength: "0"}, /Empty body/],
-    ["not_captured_body_kind", {kind: "file", lengthPartial: true, sha256: null, bodyLength: "0"}, /file upload bodies are never read/],
-    ["not_captured_body_kind", {kind: "chunked_data_pipe", lengthPartial: true, sha256: null, bodyLength: "0"}, /streaming upload bodies are never read/],
-    ["not_captured_artifact_unavailable", {}, /artifact channel was unavailable/],
-    ["not_captured_session_budget", {}, /request body budget/],
-    ["not_captured_credential_form", {sha256: null}, /Withheld for a password form/],
-    ["metadata_only", {sha256: null, digestSizeLimit: true, bodyLength: "5242881", contentCapture: false}, /exceeds the 4 MiB digest bound/],
-  ]) {
-    trafficUI.renderTrafficDetails(bodyDetails, live(body(state, extra)));
-    assert.match(section().textContent, pattern, state);
-    assert.equal(section().querySelector("pre"), null, `${state} has no body text`);
-  }
-  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "",
-    {status: "refused", reason: "sensitive_capture_disabled"});
-  assert.match(section().textContent, /not started for sensitive capture/);
-  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "", {status: "missing"});
-  assert.match(section().textContent, /not in the current catalog/);
-  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "",
-    {status: "error", error: "timed out after 10 seconds", retryable: true});
-  assert.match(section().textContent, /could not be read: timed out after 10 seconds\. It is read again on the next refresh\./);
-  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "",
-    {status: "error", error: "its bytes do not match the retained SHA-256", retryable: false});
-  assert.match(section().textContent, /do not match the retained SHA-256\./);
-  assert.doesNotMatch(section().textContent, /read again/, "An integrity failure is not retried");
-  assert.equal(section().querySelector("pre"), null, "A failed read shows no body text");
-  trafficUI.renderTrafficDetails(bodyDetails, live({malformed: true}));
-  assert.equal(section().dataset.state, "malformed");
-  assert.match(section().textContent, /malformed and was not interpreted/);
-  trafficUI.renderTrafficDetails(bodyDetails, live(null));
-  assert.equal(section().dataset.state, "missing");
-  assert.match(section().textContent, /No body record for this request/);
+  trafficUI.renderTrafficDetails(bodyDetails, live({state: "captured", artifactId: "901"}));
+  assert.equal(bodyDetails.querySelector(".traffic-body"), null, "General has no request body section");
   trafficUI.renderTrafficDetails(bodyDetails, live(null, {urlTruncated: true, targetLength: 412}));
-  assert.match(bodyDetails.textContent, /truncated; the original path and query are 412 bytes/);
+  assert.match(bodyDetails.textContent, /truncated; the original path and query are 412 bytes\)/);
+  trafficUI.renderTrafficDetails(bodyDetails, live(null, {urlTruncated: true, targetLength: 412,
+    fullTarget: {retention: "not_retained_session_budget"}}));
+  assert.match(bodyDetails.textContent, /412 bytes; the full target was not retained: this session had used its request content budget/);
+  trafficUI.renderTrafficDetails(bodyDetails, live(null, {urlTruncated: true, targetLength: 412, fullTarget: {retention: "retained"}}),
+    "", {status: "ready", complete: true, url: "https://api.hcaptcha.test", text: "/checksiteconfig?v=1&full"});
+  assert.match(bodyDetails.textContent, /https:\/\/api\.hcaptcha\.test\/checksiteconfig\?v=1&full/);
+  assert.doesNotMatch(bodyDetails.textContent, /Request URL truncated/);
   // Spread copies the other realm's object so prototypes compare equal.
   assert.deepEqual({...trafficUI.trafficTargetParts(live(null, {urlTruncated: true}))},
-    {name: "/checksiteconfig?v=1…", host: "api.hcaptcha.test"});
+    {name: "checksiteconfig?v=1…", host: "api.hcaptcha.test"});
   assert.deepEqual({...trafficUI.trafficTargetParts({path: "api.test/opaque", targetKind: "path", hostOnly: false})},
-    {name: "/opaque", host: "api.test"});
+    {name: "opaque", host: "api.test"});
+  // The name is the last segment plus the query; a root path is named by its host.
+  for (const [target, name, host] of [["/a/b/", "b/", "api.test"], ["/", "api.test", ""], ["/?q=1", "?q=1", "api.test"]]) {
+    assert.deepEqual({...trafficUI.trafficTargetParts({path: `https://api.test${target}`, target, host: "api.test", targetKind: "url"})}, {name, host});
+  }
+  assert.deepEqual({...trafficUI.trafficTargetParts({path: "fixture.invalid", hostOnly: true})}, {name: "fixture.invalid", host: ""},
+    "a host-only row has no host sublabel");
 }
 assert.equal(details.querySelector(".exchange-pane"), null, "No request/response panes for native rows");
 selectedTraffic = {...selectedTraffic, status: 404};
@@ -1255,16 +1217,20 @@ const summaryState = {selectedRequestId: "current", requests: [uiRequest("curren
   trafficDetailOpen: true, trafficSelectionNotice: null};
 const summaryElements = {};
 for (const name of ["selectedMethod", "selectedStatus", "selectedUrl", "requestCopyUrl", "requestCollectionPivot", "requestInspector", "requestFilter"]) summaryElements[name] = new TrafficFixtureNode();
-const summaryNodes = new Map(["#exchange-inspector", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
-let renderedSummaryRequest;
+const summaryNodes = new Map(["#exchange-inspector", "#response-inspector", "#headers-inspector", "#cookies-inspector", "#payload-inspector", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
+let renderedSummaryRequest, renderedHeadersRequest, renderedCookiesRequest;
+const summaryTabs = ["general", "headers", "payload", "cookies"].map(name => Object.assign(new TrafficFixtureNode("button"), {dataset: {inspectorTab: name}}));
 const summaryInspector = runInNewContext(
   appSection("      function updateSelectionSummary(", "      function selectRequest(") +
   appSection("      function renderInspector()", "      function renderEvidence()") + ";renderInspector", {
     state: summaryState, elements: summaryElements, evidencePackagePanel: {sync() {}}, trafficCaptureExport: {sync() {}}, passiveSecurityPanel: {sync() {}}, capturedClientWorkflow: {sync() {}},
-    document: {querySelectorAll: () => [], querySelector: selector => summaryNodes.get(selector)},
-    renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;},
-    // Body loading is outside this slice; its states are checked with traffic_view.js.
-    requestBodyView: () => null, requestBodyViewKey: () => '',
+    document: {querySelectorAll: selector => selector === ".inspector-tab" ? summaryTabs : [], querySelector: selector => summaryNodes.get(selector)},
+    renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;}, renderTrafficPayload() {},
+    renderTrafficHeaders: (container, request) => {assert.equal(container, summaryNodes.get("#headers-inspector")); renderedHeadersRequest = request;},
+    renderTrafficCookies: (container, request, _rerender, context) => {assert.equal(container, summaryNodes.get("#cookies-inspector")); renderedCookiesRequest = [request, context];},
+    selectRequest: () => {}, openResolvedFrame: () => {},
+    // Body loading is outside this slice; its states are checked with traffic_view.js and check-traffic-payload-ui.mjs.
+    requestBodyView: () => null, requestTargetView: () => null, requestContentViewKey: () => '', requestFullUrl: () => null,
   });
 for (const [status, failed] of [["pending", false], [200, false], ["failed", true]]) {
   summaryState.requests = [{...summaryState.requests[0], status, failed}];
@@ -1277,6 +1243,23 @@ summaryState.requests = [{...summaryState.requests[0], method: "POST", path: "ht
 summaryInspector();
 assert.equal(summaryElements.selectedMethod.textContent, "POST");
 assert.equal(summaryElements.selectedUrl.textContent, "https://fixture.invalid/new-path");
+summaryState.inspectorTab = "headers";
+summaryInspector();
+assert.equal(renderedHeadersRequest, summaryState.requests[0]);
+assert.equal(summaryNodes.get("#headers-inspector").hidden, false);
+assert.equal(summaryNodes.get("#exchange-inspector").hidden, true);
+assert.equal(summaryElements.requestInspector.hidden, true);
+summaryState.inspectorTab = "cookies";
+summaryInspector();
+assert.equal(renderedCookiesRequest[0], summaryState.requests[0]);
+assert.equal(renderedCookiesRequest[1].requests, summaryState.requests, "provenance reads the loaded requests");
+assert.equal(summaryNodes.get("#cookies-inspector").hidden, false);
+assert.equal(summaryNodes.get("#headers-inspector").hidden, true);
+assert.equal(summaryElements.requestInspector.hidden, true);
+summaryState.inspectorTab = "general";
+summaryInspector();
+assert.equal(summaryNodes.get("#headers-inspector").hidden, true);
+assert.equal(summaryNodes.get("#cookies-inspector").hidden, true);
 summaryState.requests = []; summaryState.selectedRequestId = null;
 summaryInspector();
 assert.equal(summaryElements.selectedStatus.textContent, "-");
@@ -1292,17 +1275,18 @@ console.log("PASS selected strip and inspector share current pending/response/fa
   const artifact = {artifact_id: "901", kind: "request_body", session_id: "7", creator_event_id: "12", sha256,
     byte_size: bytes.length, url: "https://api.example/getcaptcha?s=1"};
   const request = {id: "r", body: {state: "captured", artifactId: "901", sessionId: "7", sequenceNumber: "12", processId: 42}};
-  const bodyState = {artifacts: [artifact], events: [], requests: [request], selectedRequestId: "r", inspectorTab: "general", requestBodyViewKey: ""};
+  const bodyState = {artifacts: [artifact], events: [], requests: [request], selectedRequestId: "r", inspectorTab: "payload", requestBodyViewKey: ""};
   let clock = 1000, renders = 0;
   const timers = [], fetches = [];
   const respond = [];
-  const context = {state: bodyState, location: {protocol: "http:"}, AbortController, TextDecoder, Uint8Array, crypto,
-    Date: {now: () => clock}, sourceFactsReadBytes: sourceFactsUI.sourceFactsReadBytes, decodePayload: () => "",
+  const context = {state: bodyState, location: {protocol: "http:"}, AbortController, TextDecoder, Uint8Array, crypto, URLSearchParams, AbortSignal,
+    Date: {now: () => clock}, sourceFactsReadBytes: sourceFactsUI.sourceFactsReadBytes, decodePayload: () => "", isArtifactResponse: body => Array.isArray(body?.artifacts),
     setTimeout: (fn) => {timers.push(fn); return timers.length;}, clearTimeout: () => {},
     fetch: (url, {signal}) => {fetches.push(url); return respond.shift()(signal);},
-    renderInspector: () => {renders++; bodyState.requestBodyViewKey = body.requestBodyViewKey(body.requestBodyView(request));}};
-  const body = runInNewContext(appSection("      const REQUEST_BODY_READ_LIMIT", "      function renderInspectorMessage(") +
-    ";({requestBodyView,requestBodyViewKey,refreshSelectedRequestBody})", context);
+    renderInspector: () => {renders++; bodyState.requestBodyViewKey = body.requestContentViewKey(request);}};
+  const body = runInNewContext(trafficSource + "\n" +
+    appSection("      const REQUEST_BODY_PAGE_BYTES", "      function renderInspectorMessage(") +
+    ";({requestBodyView,requestContentViewKey,refreshSelectedRequestBody,loadMoreRequestBody,requestFullUrl})", context);
   const settle = () => new Promise(resolve => setTimeout(resolve, 20));
   // The first read times out.
   respond.push(signal => new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")))));
@@ -1321,6 +1305,7 @@ console.log("PASS selected strip and inspector share current pending/response/fa
   await settle();
   view = body.requestBodyView(request);
   assert.equal(view.status, "ready"); assert.equal(view.text, text); assert.equal(view.verified, true);
+  assert.deepEqual([...view.bytes], [...bytes], "the ready view keeps the verified bytes for hex");
   assert(renders > beforeRetry, "A successful retry re-renders the selected body");
   // A non-2xx status is transient too; the same failure again does not re-render.
   const failing = {...artifact, artifact_id: "902", sha256: "ab".repeat(32)};
@@ -1329,7 +1314,7 @@ console.log("PASS selected strip and inspector share current pending/response/fa
   respond.push(async () => new Response("busy", {status: 503}));
   body.requestBodyView(failingRequest); await settle();
   assert.match(body.requestBodyView(failingRequest).error, /returned 503/);
-  bodyState.requestBodyViewKey = body.requestBodyViewKey(body.requestBodyView(failingRequest));
+  bodyState.requestBodyViewKey = body.requestContentViewKey(failingRequest);
   const quiet = renders;
   clock += 2000; respond.push(async () => new Response("busy", {status: 503}));
   body.requestBodyView(failingRequest); await settle();
@@ -1341,7 +1326,86 @@ console.log("PASS selected strip and inspector share current pending/response/fa
   assert.match(view.error, /do not match the retained SHA-256/); assert.equal(view.retryable, false);
   clock += 60000; body.requestBodyView(failingRequest); body.refreshSelectedRequestBody(); await settle();
   assert.equal(fetches.length, 5, "An integrity failure is not retried");
-  console.log("PASS request body loading retries transient failures after the visible error, keeps integrity failures with their reason, and re-renders only on change (production app.js block)");
+  // The store names a blob that changed on disk: it is shown as a mismatch and not reread.
+  const altered = {...artifact, artifact_id: "905"};
+  const alteredRequest = {id: "a", body: {...request.body, artifactId: "905"}};
+  bodyState.artifacts.push(altered); bodyState.requests.push(alteredRequest); bodyState.selectedRequestId = "a";
+  respond.push(async () => new Response(JSON.stringify({error: "Artifact content integrity is invalid", code: "artifact_integrity"}), {status: 500}));
+  body.requestBodyView(alteredRequest); await settle();
+  view = body.requestBodyView(alteredRequest);
+  assert.match(view.error, /do not match the retained SHA-256/); assert.equal(view.retryable, false);
+  clock += 60000; body.requestBodyView(alteredRequest); body.refreshSelectedRequestBody(); await settle();
+  assert.equal(fetches.length, 6, "A blob the store reports as changed is not retried");
+  // A record digest that disagrees with the retained artifact is refused before any read.
+  bodyState.artifacts.push({...artifact, artifact_id: "906"});
+  const conflict = {id: "c", body: {...request.body, artifactId: "906", sha256: "cd".repeat(32)}};
+  bodyState.requests.push(conflict); bodyState.selectedRequestId = "c";
+  view = body.requestBodyView(conflict);
+  assert.match(view.error, /request record's SHA-256 does not match/); assert.equal(view.retryable, false);
+  assert.equal(fetches.length, 6, "A record digest mismatch reads nothing");
+  // A cut body's record digests more than was kept, so it is not compared.
+  bodyState.artifacts.push({...artifact, artifact_id: "907"});
+  const cut = {id: "t", body: {...request.body, state: "captured_truncated", artifactId: "907", sha256: "cd".repeat(32)}};
+  bodyState.requests.push(cut); bodyState.selectedRequestId = "t";
+  respond.push(async () => new Response(bytes));
+  assert.equal(body.requestBodyView(cut).status, "loading"); await settle();
+  assert.equal(body.requestBodyView(cut).status, "ready");
+  // Bytes that fail integrity on a later range are not kept.
+  const longBody = new Uint8Array(3 * 1024 * 1024).fill(97);
+  bodyState.artifacts.push({...artifact, artifact_id: "908", sha256: "ef".repeat(32), byte_size: longBody.length});
+  const long = {id: "g", body: {...request.body, artifactId: "908"}};
+  bodyState.requests.push(long); bodyState.selectedRequestId = "g";
+  respond.push(async () => new Response(longBody.slice(0, 2 * 1024 * 1024)));
+  body.requestBodyView(long); await settle();
+  view = body.requestBodyView(long);
+  respond.push(async () => new Response(longBody.slice(2 * 1024 * 1024)));
+  body.loadMoreRequestBody(view.key); await settle();
+  view = body.requestBodyView(long);
+  assert.equal(view.status, "error"); assert.equal(view.bytes, undefined, "A mismatch keeps no bytes"); assert.equal(view.retryable, false);
+  // Bodies past one range load 2 MiB at a time, on request, and verify once whole.
+  const large = new Uint8Array(3 * 1024 * 1024).map((_, index) => 97 + index % 26);
+  const largeDigest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", large)), b => b.toString(16).padStart(2, "0")).join("");
+  bodyState.artifacts.push({...artifact, artifact_id: "903", sha256: largeDigest, byte_size: large.length});
+  const largeRequest = {id: "l", body: {...request.body, artifactId: "903"}};
+  bodyState.requests.push(largeRequest); bodyState.selectedRequestId = "l";
+  respond.push(async () => new Response(large.slice(0, 2 * 1024 * 1024)));
+  body.requestBodyView(largeRequest); await settle();
+  view = body.requestBodyView(largeRequest);
+  assert.equal(view.complete, false); assert.equal(view.loaded, 2 * 1024 * 1024); assert.equal(view.verified, false);
+  assert.match(fetches.at(-1), /offset=0&limit=2097152$/);
+  respond.push(async () => new Response(large.slice(2 * 1024 * 1024)));
+  body.loadMoreRequestBody(view.key); await settle();
+  view = body.requestBodyView(largeRequest);
+  assert.match(fetches.at(-1), /offset=2097152&limit=1048576$/, "The next range starts where the shown bytes end");
+  assert.equal(view.complete, true); assert.equal(view.verified, true); assert.equal(view.text.length, large.length);
+  // A body past the catalog's cap is read by ID: one manifest read, then its bytes.
+  const byIdRequest = {id: "byid", body: {...request.body, artifactId: "904"}};
+  bodyState.requests.push(byIdRequest); bodyState.selectedRequestId = "byid";
+  const manifestReply = {artifacts: [{...artifact, artifact_id: "904"}], query: {next_after: "5", budget_exhausted: false, limited: false}};
+  const before = fetches.length;
+  respond.push(async () => new Response(JSON.stringify(manifestReply)), async () => new Response(bytes));
+  assert.equal(body.requestBodyView(byIdRequest).status, "loading");
+  await settle();
+  assert.match(fetches[before], /^\/api\/artifacts\?artifact_id=904&session_id=7&after=0&limit=1$/);
+  await settle();
+  view = body.requestBodyView(byIdRequest);
+  assert.equal(view.status, "ready"); assert.equal(view.verified, true);
+  assert.equal(fetches.length, before + 2, "One manifest read, then the bytes");
+  // A long target's retained artifact completes the request URL.
+  const full = "/graphql?variables=" + "v".repeat(8000);
+  const fullBytes = new TextEncoder().encode(full);
+  const fullDigest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", fullBytes)), b => b.toString(16).padStart(2, "0")).join("");
+  bodyState.artifacts.push({artifact_id: "904", kind: "request_target", session_id: "7", creator_event_id: "13",
+    sha256: fullDigest, byte_size: fullBytes.length, url: "https://api.example"});
+  const targetRequest = {id: "t", body: null, urlTruncated: true,
+    fullTarget: {retention: "retained", artifactId: "904", sessionId: "7", sequenceNumber: "13", processId: 42}};
+  bodyState.requests.push(targetRequest); bodyState.selectedRequestId = "t";
+  respond.push(async () => new Response(fullBytes));
+  assert.equal(body.requestFullUrl(targetRequest), null, "Nothing is composed before the bytes load");
+  await settle();
+  assert.equal(body.requestFullUrl(targetRequest), `https://api.example${full}`);
+  assert.match(fetches.at(-1), new RegExp(`/api/artifacts/904/content\\?offset=0&limit=${fullBytes.length}$`));
+  console.log("PASS request content loading retries transient failures after the visible error, keeps integrity failures with their reason, pages bodies by range, completes long URLs from their full target, and re-renders only on change (production app.js block)");
 }
 
 // Exercise the actual production listeners: selecting a tab is idempotent,
@@ -1398,13 +1462,13 @@ function sourceProductionFunction(name) {
   assert(end, name);
   return appSource.slice(start, start + end.index + end[0].length);
 }
-const ownershipFunctionNames = ['sourceIdentity', 'isSourceArtifact', 'sourceIsCurrent', 'sourceReference',
+const ownershipFunctionNames = ['sourceIdentity', 'isSourceArtifact', 'sourceIsCurrent', 'sourceReference', 'sourceLimitText',
   'retireSourceAnalysis', 'releaseSourcePreview', 'canvasGalleryVisible', 'releaseCanvasPreview', 'retireCanvasPreviews', 'syncCanvasPreviews', 'pumpCanvasPreviews', 'retryCanvasPreview', 'boundSourcePreviews', 'boundSourceAnalysis',
   'capturedSources', 'selectedSource', 'deobfuscationKey', 'validateSourceAnalysis', 'loadDeobfuscation',
   'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
   'closeSource',
-  'sourceDisplayName', 'sourceKindLabel', 'sourceIcon', 'renderSourceWindowControls', 'revealSourceColumn', 'moveSourceWindow', 'syncSourceDisplayControls', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent',
-  'sourceArtifactIdentityMatches', 'selectArtifact', 'sourceFormattedView', 'syncFloat32Panel', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
+  'sourceDisplayName', 'sourceKindLabel', 'sourceIcon', 'renderSourceWindowControls', 'revealSourceColumn', 'moveSourceWindow', 'syncSourceDisplayControls', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent', 'renderSourceLanguage', 'recolorSourceWindow',
+  'sourceArtifactIdentityMatches', 'selectArtifact', 'sourceRepresentation', 'sourceWantedLine', 'sourceOriginalHighlighter', 'sourceFormattedView', 'sourceFormatWanted', 'sourcePositionText', 'syncFloat32Panel', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
   'discardStaticCleanup', 'toggleStaticCleanupComparison', 'updateDeobfuscationView', 'setDeobfuscationDisclosure', 'revealDeobfuscationChange', 'deobfuscationButton', 'deobfuscationDisclosure', 'renderDeobfuscationReport'];
 const canvasProductionRules=runInNewContext(
   appSection('      const nativeCanvasCaptureDisplayLimit =','      const nativeCanvasDrawingMethods')+
@@ -1433,7 +1497,7 @@ function ownedContext(patch = {}) {
     sourceFactsPanel:{original:()=>undefined,cancel(){}}, investigationBeforeSelection(){}, investigationPassiveSource:false, location:{protocol:'http:'}, document:{querySelector:()=>({hidden:true})},
     renderSources(){}, renderSourceHealth(){}, renderShellStatus(){}, renderFingerprintActivity(){}, applySourceSearch(){},
     elements:{signalRenderList:new TrafficFixtureNode()}, ...canvasProductionRules,
-    sourceName:source=>source.url, evidencePackagePanel:{sync(){}}, evidenceWorkspace:{sync(){}},
+    sourceName:source=>source.url, sourceTreeFileIcon:()=>'file', evidencePackagePanel:{sync(){}}, evidenceWorkspace:{sync(){}},
     ...patch, state};
   const functions = [...(patch.productionFunctions ?? ownershipFunctionNames), ...(patch.functions ?? [])];
   return {state, sandbox, api:runInNewContext(ownershipModels + ownershipSyntax + ownershipProvenanceSite + functions.map(sourceProductionFunction).join('\n') +
@@ -1489,6 +1553,80 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   sourceOwnershipReceipt.push({test:'session_reuse_retires_late_preview',status:'passed'});
 }
 {
+  // The catalog is the whole manifest, read forward in 5,000-record pages
+  // like get_artifacts: a one-record probe carries the ETag, growth is read
+  // from the last boundary and any other change from the start. The first
+  // 50,000 records are every kind; later ones only the kinds Sources needs.
+  const template=await ownedArtifact('1');
+  const records=(count,from=1,url='p')=>Array.from({length:count},(_,i)=>({...template,artifact_id:String(from+i),url:`https://fixture.invalid/${url}/${from+i}.js`}));
+  const noise=(count,from)=>Array.from({length:count},(_,i)=>({...template,artifact_id:String(from+i),kind:'request_headers',capture_origin:'network_request',execution_context_id:'0',creator_event_id:'1',sensitive:true,url:`https://fixture.invalid/r/${from+i}`}));
+  let manifest=records(12001);const lists=[];
+  const {state,api}=ownedContext({fetch:async(url,options)=>{
+    if(!url.startsWith('/api/artifacts?'))return new Response('const a = 1;');
+    lists.push(url);const query=new URL(url,'http://fixture.invalid').searchParams,after=Number(query.get('after')),limit=Number(query.get('limit'));
+    const etag=`"${manifest.length}:${manifest[0]?.artifact_id}:${url}"`;
+    if(options.headers['If-None-Match']===etag)return new Response(null,{status:304});
+    if(after>manifest.length)return Response.json({error:'The cursor is not a record boundary'},{status:400});
+    const kinds=query.get('kind')?.split(','),page=[];let at=after;
+    while(at<manifest.length&&page.length<limit){const record=manifest[at++];if(!kinds||kinds.includes(record.kind))page.push(record);}
+    const next=String(at);
+    return Response.json({count:page.length,artifacts:page,artifact_receiver_configured:true,artifact_receiver_connected:true,
+      query:{direction:'forward',limit,returned:page.length,store_end:String(manifest.length),next_after:next,next_before:null,
+        limited:page.length===limit,budget_exhausted:false,filters:{},scope:'all',scan_start:String(after),scan_end:next}},{headers:{ETag:etag}});
+  }});
+  await api.refreshArtifacts();
+  assert.equal(state.artifacts.length,12001,'Every retained record is loaded, not the newest 500');
+  assert.deepEqual(lists,['/api/artifacts?after=0&limit=1','/api/artifacts?after=0&limit=5000','/api/artifacts?after=5000&limit=5000','/api/artifacts?after=10000&limit=5000']);
+  assert.equal(state.artifactCatalogLimit,0);
+  const catalog=state.artifacts,first=catalog[0];lists.length=0;
+  await api.refreshArtifacts();assert.deepEqual(lists,['/api/artifacts?after=0&limit=1']);assert.equal(state.artifacts,catalog,'An unchanged manifest is one 304 probe');
+  manifest=[...manifest,...records(2,12002)];lists.length=0;await api.refreshArtifacts();
+  assert.deepEqual(lists,['/api/artifacts?after=0&limit=1','/api/artifacts?after=12001&limit=5000'],'Growth is read from the last boundary');
+  assert.equal(state.artifacts.length,12003);assert.equal(state.artifacts[0],first,'Appending keeps retained owners');
+  manifest=records(3,90000,'replaced');lists.length=0;await api.refreshArtifacts();
+  assert.deepEqual(lists,['/api/artifacts?after=0&limit=1','/api/artifacts?after=0&limit=5000'],'A replaced manifest is read from the start');
+  assert.deepEqual([...state.artifacts.map(value=>value.artifact_id)],['90000','90001','90002']);
+  // Request records past the first 50,000 records never push a source out of the catalog.
+  const pageKinds=/&kind=([a-z_,]+)$/;
+  manifest=[...noise(30000,1000000),...records(20000)];lists.length=0;await api.refreshArtifacts();
+  assert.equal(state.artifacts.length,50000);assert.equal(state.artifactCatalogLimit,0,'Exactly 50,000 records is a whole catalog, not a capped one');
+  manifest=[...noise(50000,1000000),...records(25000)];lists.length=0;await api.refreshArtifacts();
+  assert.equal(state.artifacts.length,75000);assert.equal(state.artifactCatalogLimit,0,'A source after 50,000 request records is still listed');
+  assert.equal(state.artifacts[0].kind,'request_headers','The unfiltered prefix keeps what Traffic, Evidence and packages read');
+  assert.equal(state.artifacts.at(-1).artifact_id,'25000','Manifest order is kept across the two reads');
+  assert.equal(lists.at(-1).match(pageKinds)[1].split(',').sort().join(),'bytecode_buffer,canvas_data_url,javascript,response_body,source_map,wasm,wasm_guest_adapter');
+  assert(!/request_|cookie_list|stack/.test(lists.at(-1)),'Past the prefix only the kinds this catalog alone supplies are read');
+  manifest=[...manifest,...noise(4,2000000),...records(2,30000)];lists.length=0;await api.refreshArtifacts();
+  assert.equal(state.artifacts.length,75002);assert.equal(lists.length,2);assert.match(lists[1],pageKinds,'Growth past the prefix continues as a filtered read');
+  manifest=[...records(49997),...noise(3,1000000),...records(100000,200000),...records(2,900000)];lists.length=0;await api.refreshArtifacts();
+  assert.equal(state.artifacts.filter(api.isSourceArtifact).length,100000);assert.equal(state.artifactCatalogLimit,100000,'Sources stop at a visible bound');
+  manifest=[...records(49997),...noise(3,1000000),...records(50003,200000)];lists.length=0;await api.refreshArtifacts();
+  assert.equal(state.artifacts.filter(api.isSourceArtifact).length,100000);assert.equal(state.artifactCatalogLimit,0,'Exactly the bound is not reported as over it');
+  manifest=[...manifest,...records(1,900000)];lists.length=0;await api.refreshArtifacts();
+  assert.equal(state.artifactCatalogLimit,100000);assert.deepEqual(lists.length,2,'A full catalog reads one record past its boundary and keeps none');
+  manifest=[];lists.length=0;await api.refreshArtifacts();assert.equal(state.artifacts.length,0,'An emptied live manifest clears the catalog');
+  sourceOwnershipReceipt.push({test:'catalog_pages_whole_manifest',status:'passed',records:12003});
+}
+{
+  // The bare native route honors only limit, keeps the newest records and sends no query or ETag.
+  const template=await ownedArtifact('1');
+  const manifest=Array.from({length:7},(_,i)=>({...template,artifact_id:String(i+1),url:`https://fixture.invalid/native/${i+1}.js`}));
+  const lists=[];
+  const {state,api}=ownedContext({fetch:async url=>{
+    if(!url.startsWith('/api/artifacts?'))return new Response('const a = 1;');
+    lists.push(url);const limit=Number(new URL(url,'http://fixture.invalid').searchParams.get('limit'));
+    const page=manifest.slice(-Math.min(Math.max(limit,1),5000));
+    return Response.json({count:page.length,artifacts:page});
+  }});
+  await api.refreshArtifacts();
+  assert.deepEqual(lists,['/api/artifacts?after=0&limit=1','/api/artifacts?limit=5000'],'A one-record probe from a reader that does not page is never the catalog');
+  assert.equal(state.artifacts.length,7);assert.equal(state.artifactCatalogLimit,0);
+  manifest.length=0;for(let i=0;i<5000;i++)manifest.push({...template,artifact_id:String(i+1),url:`https://fixture.invalid/native/${i+1}.js`});
+  await api.refreshArtifacts();
+  assert.equal(state.artifacts.length,5000);assert.equal(state.artifactCatalogLimit,5000,'A full unpaged answer is reported as partial');
+  sourceOwnershipReceipt.push({test:'catalog_reads_unpaged_native_reply',status:'passed',records:5000});
+}
+{
   const artifact=await ownedArtifact('1'); let reads=0, bytes='const b = 1;';
   const {state,api}=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'1'},fetch:async()=>{reads++;return new Response(bytes);}});
   await api.loadArtifactContent(artifact); assert.match(artifact.loadError,/SHA-256/); assert.equal(artifact.content,undefined);
@@ -1533,7 +1671,7 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   const {state,api}=ownedContext({state:{artifacts,openArtifactIds:artifacts.map(value=>value.artifact_id)},fetch:async()=>new Response(text)});
   for(const artifact of artifacts){state.selectedArtifactId=artifact.artifact_id;await api.loadArtifactContent(artifact);}
   const loaded=artifacts.filter(value=>value.content!==undefined), characters=loaded.reduce((sum,value)=>sum+value.content.length,0);
-  assert(loaded.length<=8 && characters<=8*1024*1024); assert.equal(artifacts[0].content,undefined);
+  assert(loaded.length<=8 && characters<=32*1024*1024); assert.equal(artifacts[0].content,undefined);
   state.selectedArtifactId='1';await api.loadArtifactContent(artifacts[0]);assert.equal(artifacts[0].content,text);
   const binary=new Uint8Array(2097152);const wasm={...await ownedArtifact('99'),kind:'wasm',mime_type:'application/wasm',byte_size:binary.length,sha256:await ownershipHash(binary)};
   const hex=ownedContext({state:{artifacts:[wasm],selectedArtifactId:'99'},fetch:async()=>new Response(binary)});
@@ -1541,9 +1679,28 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   assert(wasm.contentTruncated);
   assert(wasm.wasmHexBytes < binary.length && wasm.wasmHexBytes % 16 === 0);
   assert(wasm.content.length <= 8 * 1024 * 1024);
-  assert(wasm.content.includes('Hex preview limited'));
+  assert.equal(wasm.contentTruncated,true);assert(!wasm.content.includes('preview limited'),'A viewer limit never enters the retained text');
   assert(wasm.content.split('\n').length > 20003);
   sourceOwnershipReceipt.push({test:'preview_byte_budget_and_bounded_hex',status:'passed',retainedPreviews:loaded.length,retainedUTF16TextBytes:characters*2,hexRows:wasm.content.split('\n').length});
+}
+{
+  // A 12 MiB one-line bundle loads whole and verified in 2 MiB pages, then opens
+  // pretty-printed; past the 16 MiB cap the first 16 MiB show with a limit notice.
+  const page=2097152,line='var a=1;'.repeat(12*1024*1024/8),big=await ownedArtifact('12',line),bytes=new TextEncoder().encode(line);
+  const over={...await ownedArtifact('17','x'),byte_size:16*1024*1024+1},urls=[];
+  const serve=(body,total)=>async url=>{urls.push(url);const offset=Number(/offset=(\d+)/.exec(url)?.[1]??0);
+    return new Response(body.subarray(offset,offset+page),{headers:{'X-Artifact-Total-Bytes':String(total)}});};
+  const ctx=ownedContext({state:{artifacts:[big],selectedArtifactId:'12',sourceFormatChoices:new Map()},fetch:serve(bytes,bytes.length)});
+  await ctx.api.loadArtifactContent(big);
+  assert.equal(big.content,line);assert.equal(big.contentVerified,true);assert.equal(big.contentTruncated,false);assert.equal(big.contentLongLine,true);
+  assert.deepEqual([urls[0],urls.at(-1),urls.length],['/api/artifacts/12/content?limit=2097152',`/api/artifacts/12/content?offset=${5*page}&limit=2097152`,6]);
+  assert.equal(ctx.state.sourceFormatted,true,'A minified bundle opens pretty-printed');
+  ctx.state.sourceFormatChoices.set(ctx.api.sourceIdentity(big),false);assert.equal(ctx.api.sourceFormatWanted(big),false,'The researcher choice is remembered for the artifact');
+  const overCtx=ownedContext({state:{artifacts:[over],selectedArtifactId:'17'},fetch:serve(new Uint8Array(over.byte_size).fill(0x61),over.byte_size)});
+  await overCtx.api.loadArtifactContent(over);
+  assert.equal(over.loadError,null);assert.equal(over.contentTruncated,true);assert.equal(over.sourceTextLength,16*1024*1024);
+  assert.equal(over.content.length,16*1024*1024,'The retained prefix gains no text');assert(!over.content.includes('preview limited'));
+  sourceOwnershipReceipt.push({test:'paged_preview_to_cap_and_limit_notice',status:'passed',pages:urls.length});
 }
 {
   const artifact=await ownedArtifact('1');artifact.content='const a = 1;';let reads=0;
@@ -1629,7 +1786,7 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
 // Corrective integration regressions from independent review. These use the
 // actual renderer, decoration updater, cursor receiver and Field trace pivot.
 class SourceReviewNode {
-  constructor(tag='div',doc){this.tagName=tag;this.doc=doc;this.children=[];this.attributes={};this.listeners={};this.dataset={};this.scrollLeft=0;this.scrollTop=0;this.hidden=false;this._text='';this.classes=new Set();this.classList={add:value=>this.classes.add(value),contains:value=>this.classes.has(value),toggle:(value,on)=>on?this.classes.add(value):this.classes.delete(value)};this.style={setProperty(){}};}
+  constructor(tag='div',doc){this.tagName=tag;this.doc=doc;this.children=[];this.attributes={};this.listeners={};this.dataset={};this.scrollLeft=0;this.scrollTop=0;this.hidden=false;this._text='';this.classes=new Set();this.classList={add:value=>this.classes.add(value),remove:value=>this.classes.delete(value),contains:value=>this.classes.has(value),toggle:(value,on)=>on?this.classes.add(value):this.classes.delete(value)};this.style={setProperty(){}};}
   set className(value){this.classes=new Set(value.split(' '));}get className(){return [...this.classes].join(' ');}
   get textContent(){return this._text+this.children.map(node=>node.textContent??'').join('');}set textContent(value){this._text=value;this.children=[];}
   setAttribute(key,value){this.attributes[key]=value;}getAttribute(key){return this.attributes[key];}
@@ -1647,12 +1804,24 @@ function sourceReviewDOM() {
   return {document,elements};
 }
 {
+  // What the reader sees: a notice beside the code that states the limit, in every text view.
+  const over={...await ownedArtifact('17','x'),byte_size:16*1024*1024+1,content:'x'.repeat(16),contentTruncated:true};
+  const {document:shownDocument,elements:shownElements}=sourceReviewDOM();
+  shownElements.sourceLimitNotice=shownDocument.createElement('p');shownElements.sourceLimitNotice.hidden=true;
+  const shown=ownedContext({state:{artifacts:[over],selectedArtifactId:'17'},document:shownDocument,elements:shownElements});
+  const noticeFor=view=>{shown.api.syncSourceDisplayControls(over,view);return shownElements.sourceLimitNotice;};
+  for(const view of [{},{formatted:{}},{formatPending:true}]){assert.equal(noticeFor(view).hidden,false);assert.equal(noticeFor(view).textContent,'Preview limited to the first 16 MiB of this 16,777,217-byte file. Later bytes are not shown or searched; the original bytes are unchanged.');}
+  for(const view of [{wasmRows:[]},{derived:{}}])assert.equal(noticeFor(view).hidden,true,'A view that is not the retained prefix states no limit');
+  over.contentTruncated=false;assert.equal(noticeFor({}).hidden,true,'A whole file states no limit');
+  sourceOwnershipReceipt.push({test:'over_cap_notice_is_rendered_beside_the_code',status:'passed'});
+}
+{
   const original='\ufeff'+Array.from({length:20001},(_,line)=>line===20000?'const lateNeedle="😀";':`// row ${line}`).join('\r\n');
   const artifact=await ownedArtifact('20001',original);Object.assign(artifact,{content:original,sourceTextLength:original.length});
   const {document,elements}=sourceReviewDOM();
   elements.sourceSearch=document.createElement('input');elements.sourceSearch.value='';elements.sourceSearchStatus=document.createElement('p');
   const ctx=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'20001'},document,elements,sourceOccurrenceRange:()=>null,
-    functions:['applySourceSearch'],renderSources(){}});
+    functions:['applySourceSearch','moveSourceCaretInMountedPage'],renderSources(){}});
   ctx.api.renderSourceContent(ctx.api.selectedSource());elements.sourceSearch.value='lateNeedle';ctx.api.applySourceSearch();
   assert.equal(ctx.state.sourceEditorView.window.line,20000);assert.match(elements.sourcePosition.textContent,/1 of 1 matches.*Line 20001, Column 7/);
   assert.equal(elements.sourceCode.querySelector('[data-local-line="20000"]').querySelector('.source-text').textContent,'const lateNeedle="😀";');
@@ -1666,8 +1835,70 @@ function sourceReviewDOM() {
   elements.sourceSearch.value='';ctx.api.applySourceSearch();assert(!elements.sourcePosition.textContent.includes('matches'));
   ctx.api.moveSourceWindow(999,3);assert.equal(document.activeElement.dataset.localLine,'999');
   ctx.api.moveSourceWindow(1000,3);assert.equal(document.activeElement.dataset.localLine,'1000');
+  // A match already mounted moves the caret and keeps the page; one on another page mounts that page.
+  ctx.api.moveSourceWindow(999,3);const mountedRow=elements.sourceCode.children[0];
+  elements.sourceSearch.value='row 12';ctx.api.applySourceSearch();
+  assert.equal(elements.sourceCode.children[0],mountedRow,'Find keeps a page holding the match');
+  assert.equal(ctx.state.sourceEditorView.window.line,12);assert.equal(ctx.state.sourceWindow.line,12);
+  assert.deepEqual(elements.sourceCode.querySelectorAll('.current-line').map(row=>row.dataset.localLine),['12']);
+  ctx.api.renderSourceContent(ctx.api.selectedSource());assert.equal(elements.sourceCode.children[0],mountedRow,'A later refresh keeps the moved caret and page');
+  elements.sourceSearch.value='row 1000';ctx.api.applySourceSearch();
+  assert.notEqual(elements.sourceCode.children[0],mountedRow,'A match on another page mounts it');assert.equal(ctx.state.sourceEditorView.window.start,1000);
+  elements.sourceSearch.value='';ctx.api.applySourceSearch();
   ctx.state.selectedArtifactId='missing';elements.sourceSearch.value='lateNeedle';ctx.api.applySourceSearch();assert.match(elements.sourcePosition.textContent,/nothing searched/);
   sourceOwnershipReceipt.push({test:'retained_find_20001_line_coverage_notice_exclusion_stale_owner_and_window_boundaries',status:'passed'});
+}
+{
+  // A match past a row's mounted columns still mounts the row around it.
+  const original=`short\n${'x'.repeat(600)}needle`;
+  const artifact=await ownedArtifact('20003',original);Object.assign(artifact,{content:original,sourceTextLength:original.length});
+  const {document,elements}=sourceReviewDOM();
+  elements.sourceSearch=document.createElement('input');elements.sourceSearch.value='';elements.sourceSearchStatus=document.createElement('p');
+  const ctx=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'20003'},document,elements,sourceOccurrenceRange:()=>null,
+    functions:['applySourceSearch','moveSourceCaretInMountedPage'],renderSources(){}});
+  ctx.api.renderSourceContent(ctx.api.selectedSource());const row=elements.sourceCode.children[0];
+  elements.sourceSearch.value='needle';ctx.api.applySourceSearch();
+  assert.notEqual(elements.sourceCode.children[0],row,'A cut column is not mounted, so the page renders');assert.equal(ctx.state.sourceEditorView.window.line,1);
+  assert.equal(ctx.state.sourceEditorView.window.column,600);
+  sourceOwnershipReceipt.push({test:'find_renders_only_when_the_match_is_not_mounted',status:'passed'});
+}
+{
+  // A large Oxc layout is read one 1,000-line page at a time: absolute lines, the next page on request, Find in the evidence across pages.
+  const unit='var a=[1,2],b=function(){return 3};',text=unit.repeat(899)+'var needle=[1,2],b=function(){return 3};';
+  const laid=('var a = [1, 2],\n  b = function () {\n    return 3\n  };\n'.repeat(899)+'var needle = [1, 2],\n  b = function () {\n    return 3\n  };').split('\n');
+  const anchors=[];
+  for(let block=0;block*1000<laid.length;block++){const before=laid.slice(0,block*1000).join('').replace(/\s/g,'').length;let at=0;for(let seen=0;seen<before;at++)if(!/\s/.test(text[at]))seen++;while(/\s/.test(text[at]??''))at++;anchors.push(at);}
+  const artifact={...await ownedArtifact('paged',text),source_type:'artifact',content:text};
+  const {document,elements}=sourceReviewDOM();
+  elements.sourceSearch=document.createElement('input');elements.sourceSearch.value='';elements.sourceSearchStatus=document.createElement('p');
+  const loaded=new Set([0]),asked=[];let shown=0,ctx;
+  const pageOf=block=>{const pageText=laid.slice(block*1000,block*1000+1000).join('\n'),base=anchors[block],input=text.slice(base,anchors[block+1]??text.length);
+    return {paged:true,text:pageText,map:ctx.api.sourceWhitespaceMap(input,pageText),sourceInput:input,base,block,lineBase:block*1000,lineCount:laid.length,anchors,stride:1000,engine:'oxc',offset_unit:'utf-16-code-unit'};};
+  const pages=new Map();
+  const sourceFormatClient={page:(source,value,line)=>{const block=Math.min(anchors.length-1,Math.floor(line/1000));asked.push(block);
+    if(!loaded.has(block))return {pending:true,previous:pages.get(shown)??null};shown=block;if(!pages.has(block))pages.set(block,pageOf(block));return pages.get(block);},forget(){}};
+  ctx=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'paged',sourceFormatted:true,sourceOriginalHighlighter:null,sourcePagedFind:null},document,elements,
+    sourceOccurrenceRange:()=>null,sourceFormatClient,functions:['applySourceSearch','applyPagedSourceSearch','markSourceMatch','moveSourceCaretInMountedPage'],productionExports:['sourceWhitespaceMap'],renderSources(){}});
+  ctx.api.renderSourceContent(ctx.api.selectedSource());
+  const editor=()=>ctx.state.sourceEditorView;
+  assert.equal(editor().index.lineCount,laid.length);assert.equal(elements.sourceCode.children.length,1000,'one page is mounted');
+  assert.equal(elements.sourceCode.children[0].querySelector('.source-gutter').textContent,'1');
+  assert(ctx.api.moveSourceWindow(2500,0),'a line on an unread page is accepted');
+  assert.equal(editor().window.start,0,'the page shown last stays while the next is read');
+  assert.equal(ctx.state.sourceWindow.line,2500);assert.match(elements.sourcePosition.textContent,/reading this part of the layout/);
+  loaded.add(2);ctx.api.renderSourceContent(ctx.api.selectedSource());
+  assert.deepEqual([editor().window.start,editor().window.line],[2000,2500]);
+  const gutter=elements.sourceCode.children[0].querySelector('.source-gutter');
+  assert.equal(gutter.textContent,'2001','the gutter numbers formatted lines of the whole layout');
+  assert.match(gutter.title,/^Original 1:\d+ · show the original source$/);
+  assert.equal(Number(gutter.title.match(/^Original 1:(\d+)/)[1])-1,anchors[2],'each row maps through its page anchor');
+  elements.sourceSearch.value='needle';ctx.api.applySourceSearch();
+  assert.match(elements.sourcePosition.textContent,/1 of 1 matches · original 1:\d+ · reading its part of the layout/);
+  assert.equal(ctx.state.sourceWindow.line,3000);loaded.add(3);
+  ctx.api.renderSourceContent(ctx.api.selectedSource());
+  assert.equal(editor().window.line,laid.length-4,'Find moves to the match once its page is read');
+  assert.match(elements.sourcePosition.textContent,new RegExp(`1 of 1 matches · Line ${laid.length-3}, Column 5`));
+  sourceOwnershipReceipt.push({test:'paged_oxc_layout_absolute_lines_pending_page_find_across_pages',status:'passed'});
 }
 // Live script column selection retired with the CDP source transport.
 {

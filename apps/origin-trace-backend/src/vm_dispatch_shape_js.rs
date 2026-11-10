@@ -2306,21 +2306,31 @@ fn unavailable(meter: &Meter, reason: &str, detail: &'static str) -> Classified 
 /// nesting, so either reading of that slash stays inside the reserved stack.
 /// This pass only limits parser stack growth and cannot authorize a site. Oxc
 /// still owns parsing and all semantic decisions.
-fn syntax_stack(source: &str) -> Option<usize> {
+pub(crate) fn syntax_stack(source: &str) -> Option<usize> {
     use crate::vm::js_lexer::{Kind, Lexer};
     const OPERATORS: &[u8] = b"=+-!~?&|*/%<>^.";
     let mut delimiters = Vec::new();
     let mut chain = 0usize;
     let mut stack = PARSER_STACK;
+    let mut after_call_or_index = false;
     for token in Lexer::new(source) {
         let text = &source.as_bytes()[token.start..token.end];
         let mut uncertain = 0;
+        // `f()()` and `a[0][1]` nest one level per link with no operator between.
+        if after_call_or_index && matches!(text[0], b'(' | b'[') {
+            chain += 1;
+        }
+        if token.kind != Kind::Comment {
+            after_call_or_index = token.kind == Kind::Close && matches!(text[0], b')' | b']');
+        }
         match token.kind {
             Kind::Open => {
                 delimiters.push(chain);
                 chain = 0;
             }
             Kind::Close => chain = delimiters.pop().unwrap_or(0),
+            // Each tagged template in `a`x``y`` nests one level as well.
+            Kind::TemplateText if text[0] == b'`' => chain += 1,
             Kind::Word
                 if matches!(
                     text,
@@ -2510,12 +2520,19 @@ pub fn worker_main() -> std::io::Result<()> {
 /// Enter before an application runtime or libtest worker starts analysis.
 #[doc(hidden)]
 pub fn worker_entry() {
-    if std::env::args().nth(1).as_deref() != Some("--classify-javascript-worker")
+    let format = std::env::args().nth(1).as_deref() == Some(crate::source_format::WORKER_FLAG)
+        || std::env::var("REB_JS_TEST_WORKER").as_deref()
+            == Ok(crate::source_format::WORKER_TEST_VALUE);
+    if !format
+        && std::env::args().nth(1).as_deref() != Some("--classify-javascript-worker")
         && std::env::var_os("REB_JS_TEST_WORKER").is_none()
     {
         return;
     }
     let result = crate::js_worker_alloc::contain().and_then(|()| {
+        if format {
+            return crate::source_format::worker_main();
+        }
         #[cfg(test)]
         match std::env::var("REB_JS_TEST_FAULT").as_deref() {
             Ok("timeout") => {
@@ -2553,6 +2570,15 @@ pub fn worker_entry() {
 }
 
 fn worker_command() -> std::io::Result<tokio::process::Command> {
+    worker_command_for("--classify-javascript-worker", "1")
+}
+
+/// The contained worker for one JavaScript operation, selected by `flag`
+/// (or `test_value` when a test harness re-executes itself).
+pub(crate) fn worker_command_for(
+    flag: &'static str,
+    test_value: &'static str,
+) -> std::io::Result<tokio::process::Command> {
     let current = std::env::current_exe()?;
     let harness = current
         .parent()
@@ -2592,9 +2618,9 @@ fn worker_command() -> std::io::Result<tokio::process::Command> {
                 "__reb_javascript_worker",
                 "--nocapture",
             ])
-            .env("REB_JS_TEST_WORKER", "1");
+            .env("REB_JS_TEST_WORKER", test_value);
     } else {
-        command.arg("--classify-javascript-worker");
+        command.arg(flag);
     }
     Ok(command)
 }

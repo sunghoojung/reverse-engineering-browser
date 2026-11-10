@@ -79,7 +79,10 @@
 .agent-code-copy { border: 0; background: transparent; color: var(--faint); font: 10px var(--sans); padding: 1px 2px; }
 .agent-code-copy:hover { color: var(--text); }
 .agent-code-copy.copied { color: var(--green); }
-.agent-code-body { margin: 0; padding: 7px 8px; overflow-x: auto; font: 11px/1.45 var(--mono); white-space: pre; color: var(--text); }
+/* Fenced code and tool JSON read like every other code view: the shared
+ * lexer's token colors (code_view.js), Menlo 12/18 px and the editor colors. */
+.agent-code-body { margin: 0; padding: 7px 8px; overflow-x: auto; font: 12px/18px var(--code-font); tab-size: 2; white-space: pre; color: var(--code-text); background: var(--code-bg); }
+:is(.agent-code-body, .agent-tool-pre) ::selection { background: var(--code-selection); }
 
 .agent-cite { display: inline; padding: 0 4px; border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--cyan); font: 10px var(--mono); }
 .agent-cite:hover { background: var(--panel-3); }
@@ -97,7 +100,8 @@
 .agent-tool-state-running { color: var(--amber); }
 .agent-tool-detail { margin-top: 4px; padding: 6px 8px; border: 1px solid var(--line-soft); border-radius: 3px; display: grid; gap: 3px; }
 .agent-tool-label { color: var(--faint); font: 10px var(--sans); margin-top: 2px; }
-.agent-tool-pre { margin: 0; max-height: 240px; overflow: auto; font: 11px/1.4 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); }
+.agent-tool-pre { margin: 0; max-height: 240px; overflow: auto; padding: 4px 6px; border-radius: 2px; font: 12px/18px var(--code-font); tab-size: 2;
+  white-space: pre-wrap; overflow-wrap: anywhere; color: var(--code-text); background: var(--code-bg); }
 
 .agent-approval { padding: 8px; border: 1px solid var(--amber); border-radius: 3px; display: grid; gap: 6px; }
 .agent-approval-title { font: 600 12px var(--sans); color: var(--amber); }

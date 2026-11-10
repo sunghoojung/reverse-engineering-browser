@@ -53,6 +53,15 @@ whole-program budget can still produce facts for one callable. See
 [JavaScript source facts v1](javascript-source-facts-v1.md) for exact-byte ranges,
 limits, `coverage.analyzed_range`, and partial/unavailable coverage semantics.
 
+`get_source_format` returns the same exact JavaScript artifact, or JavaScript or
+JSON body, laid out like Prettier, with only whitespace changed: `reb-api call
+get_source_format --endpoint-file /tmp/reb-api-endpoint --param session_id=1
+--param artifact_id=2`. Add `start_line` and `line_count` to read one window of
+a large layout; `anchors` map whole 1,000-line windows to original offsets. It
+runs the contained formatter worker, so it is listed only with
+`--allow-effects`, and MCP refuses a request or response body. See
+[Source format v1](source-format-v1.md).
+
 `spec` prints the complete embedded OpenAPI document for validators and client
 generators without contacting a server. `describe` is an operation-detail
 document rather than a complete OpenAPI document. It includes the referenced
@@ -200,6 +209,10 @@ exposes stored-evidence operations and returns explicit unavailable state or 409
 for live controls. Every retired `/api/debugger` route returns 410
 `debugger_unavailable`.
 
+A retained artifact whose bytes no longer match the size or SHA-256 in its
+manifest record answers 500 with `artifact_integrity`. Reading it again cannot
+help, unlike any other 500.
+
 Health, events, session context, session summary and capture action results
 report `capture_state`, the live capture lifecycle: `running`,
 `stop_requested`, `stopped`, `ended`, `lost`, or `not_live` for idle and demo
@@ -323,12 +336,13 @@ conditional reads. No target/session join is inferred from URL or timing.
 
 `capture_options` labels what this session's launcher passed to Brave, for
 every live session (agent, app or `make live`): `request_content`,
-`canvas_images`, `document_start` (`permitted` or `not_permitted`; whether
+`canvas_images`, `request_stacks`, `document_start` (`permitted` or `not_permitted`; whether
 this Brave honors it is `document_start_supported` in `get_native_console`),
 and `js_invocation` with `state` (`not_armed`, `armed`, `browser_unsupported`
 or `unreadable`), `count` and `digests`. `run-live-session.sh` passes the
-backend `--session-request-content`, `--session-canvas-images` and
-`--session-document-start`; they grant and enable nothing. Idle and demo
+backend `--session-request-content`, `--session-canvas-images`,
+`--session-request-stacks` and `--session-document-start`; they grant and
+enable nothing. Idle and demo
 backends report `source: not_live` with everything off. Site labels and
 source URLs stay in `get_js_invocation_sites`.
 
@@ -413,7 +427,8 @@ returns 409 `dependency_unavailable` for these actions.
 `LiveSessionStart` options: `url`, `wasm_dispatch`, `wasm_call_indirect`,
 `guest_adapter`, `js_dispatch_sites`, `quiet`, `category_mask`,
 `duration_seconds`, `localhost_only`, `canvas_images`, `request_content`,
-`document_start`, `js_invocation_sites`, `js_invocation_saved_sites`,
+`request_content_budget_mib`, `request_stacks`, `document_start`,
+`js_invocation_sites`, `js_invocation_saved_sites`,
 `js_invocation_digests`, `confirm_sensitive_capture`,
 `publish_canonical_endpoint`, `brave_binary`, `timeout_seconds`,
 `wasm_samples_per_function`, `wasm_samples_per_indirect_site`,
@@ -423,12 +438,15 @@ do not raise the 16-record cap. Every
 capture switch is off unless named; an inherited capture switch, site file,
 browser profile or embedded-session variable is ignored, so an inherited
 `REB_CAPTURE_REQUEST_CONTENT`, `REB_CONSOLE_DOCUMENT_START`,
-`REB_NATIVE_JS_INVOCATION_SITES` or `REB_NATIVE_JS_INVOCATION_DIGESTS` never
-reaches an agent session.
+`REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS` or
+`REB_NATIVE_REQUEST_STACKS` never reaches an agent session, and neither does
+`REB_REQUEST_CONTENT_BUDGET_MIB`.
 
 | Option | Launcher switch | Rule |
 | --- | --- | --- |
 | `request_content` | `REB_CAPTURE_REQUEST_CONTENT=1` | Sensitive: needs `confirm_sensitive_capture` and category bits 256 and 1024. Without it, request body length, type and digest are still recorded, but no path, query or body bytes. |
+| `request_content_budget_mib` | `REB_REQUEST_CONTENT_BUDGET_MIB` | 1..4096 MiB of unique request bodies and full targets, default 256. Needs `request_content`, so it is behind the same confirmation. |
+| `request_stacks` | `REB_NATIVE_REQUEST_STACKS=1` | The stack that started each renderer request, read with `get_request_stack`. Needs category bits 256 and 1024. Strict: `REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED` is removed, so a Brave without `--reb-request-stacks` refuses the start. |
 | `document_start` | `REB_CONSOLE_DOCUMENT_START=1` | Permits document-start Console scripts in this capture browser. Arms nothing: a rule still needs a live Console connection and a confirmed `arm_document_start`. |
 | `js_invocation_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Absolute path of a `native-js-invocation-sites-v1` file. Checked, then armed from a private copy under the agent session directory. Needs category bit 512. |
 | `js_invocation_saved_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Arms the agent sessions' own saved set, `~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which `js_invocation_site_action` edits in an agent session. Never the app's set. Refused when empty. Not with `js_invocation_sites`. |
@@ -535,8 +553,16 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `queue_drops` | Records lost to a full queue, beyond named gap markers. |
 | `sequence_gaps` | Sequence numbers missing inside the scanned events. |
 | `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. A Wasm reason ending in `filtered` is a sample-policy exclusion: that execution was not sampled and did not take a slot. |
+| `browser_internal_excluded` | Capture counted `chrome:`, `devtools:` and other browser-internal requests, requests WebUI renderers sent (`webui_request`), or WebUI renderers, instead of recording them; `count` is the requests. Not a gap. |
+| `no_tab_traffic_excluded` | Capture counted extension-worker requests and DevTools loads instead of recording them; `count` is the requests. Not a gap. `REB_CAPTURE_EXTENSION_TRAFFIC=1` records the extension requests instead. |
+| `network_tab_unresolved` | Severity `error`: `count` request rows have no tab. A capture bug; `request_tabs.unresolved_requests` names up to 16 by `process_id` and `request_id`. |
 | `bounded_scope` | Only the newest 64 MiB of events were summarized. |
 
+`exclusions` lists those counts by class and unit; see
+[native network v3](native-network-v3.md#browser-internal-exclusion).
+`request_tabs` counts request rows, the ones under an extension
+(`extension_rows`) and the ones without an owner; see
+[request owners and tabs](native-network-v3.md#request-owners-and-tabs).
 The summary scans the same newest 64 MiB as the polling window and the newest
 64 MiB of the manifest. It contains counts, identifiers and origin or
 `wasm://wasm/<hex>` labels only: no payloads, URL paths or queries, source or
@@ -918,6 +944,9 @@ offsets (end exclusive), `scan_limit`, and separate `events_limited` and
 `network_events_limited` flags. A cut-through record prefix is omitted, not
 parsed as a new record. `scope: "store"` means the scan starts at byte zero;
 `"bounded_tail"` excludes an older prefix, even if fewer than 5,000 rows remain.
+A stored line that is not a valid event is skipped and counted in
+`malformed_lines`, so one damaged record cannot fail every poll. A tail still
+being written is omitted and not counted.
 
 `sequence_gaps` and `queue_drops` are canonical unsigned decimal strings over
 validated records in this declared scope. They are not session totals.
@@ -998,7 +1027,8 @@ modules usually have a `wasm://wasm/<hex>` URL, so select them with `kind=wasm`
 or `frame_id`, not `host`.
 
 The Rust backend serves these reads. The native stored-evidence `reb://` reader
-serves only the unfiltered window.
+serves the unfiltered window itself and passes filtered reads to the bundled
+backend.
 
 ### Waiting for events
 
@@ -1012,6 +1042,24 @@ the next wait. `event_window` covers every byte read while waiting. The server
 checks the store length every 200 ms and holds no reader between checks. At
 most eight waits run at once; a ninth returns 503 `resource_limit`. Waiting
 changes nothing in the browser or the stores.
+
+### Session request index
+
+`GET /api/requests` (`get_requests`) pages one row per network request of the
+whole session, from an index the backend folds incrementally from the event
+store and keeps beside it as a private sidecar. `total`, `matching` and the tab
+and domain `facets` are exact for the indexed bytes; filters (`tab_id`,
+`domain`, `type`, `failed`, `invert`, `hide_internal`, `third_party`, `from_ns`,
+`to_ns`), the Traffic filter grammar (`q`) and sort cover every request, and
+`offset` with `through` pages the same requests, whose fields stay live. Rows carry recorded sizes, MIME type,
+protocol and initiator class; the answer adds matching sizes and a start
+timeline. Each row names its root event and the
+`session_id`, `process_id` and `request_id` members whose records form it, so
+`get_events` with `category=network`, `after=first_offset` and the member's
+`records` as `limit` reads them. The
+contract, bounds and invalidation rules are in
+[request-index-v1.md](request-index-v1.md). The `reb://` stored-evidence
+workspace answers it through the bundled backend.
 
 ## Cross-references
 

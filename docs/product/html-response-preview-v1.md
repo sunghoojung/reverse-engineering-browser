@@ -1,6 +1,6 @@
 # HTML Response Preview v1
 
-> **Retired.** Preview rendered response bodies that only CDP capture retained. Native Traffic rows carry no response bodies, so Origin Trace removed the Payload, Preview and Response tabs; the inspector's General view states that coverage. This page is kept as a historical record.
+> **Retired.** Preview rendered response bodies that only CDP capture retained. Native Preview and Response tabs ([native network v3](../../protocol/native-network-v3.md)) show HTML as source and never render it; a sandboxed render needs this design re-approved. This page is kept as a historical record.
 
 Traffic provides an explicit **Preview** tab for response records whose MIME
 type is `text/html`, ignoring case and Content-Type parameters. Request bodies

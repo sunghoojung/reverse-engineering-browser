@@ -9,6 +9,9 @@ namespace reb {
 // 256 snapshots and 16 module/adapter pairs, still bounded by the same 32 MiB.
 inline constexpr std::size_t kNativeArtifactMaxQueuedCount = 288;
 inline constexpr std::size_t kNativeArtifactMaxQueuedBytes = 32U * 1024U * 1024U;
+// Stream data frames are bounded by bytes and by this count; the pool already
+// bounds their bytes, and end, abort and checkpoint frames carry none.
+inline constexpr std::size_t kNativeArtifactMaxQueuedStreamFrames = 4096;
 [[nodiscard]] constexpr bool CanQueueNativeArtifact(std::size_t count,
                                                     std::size_t bytes,
                                                     std::size_t incoming) noexcept {

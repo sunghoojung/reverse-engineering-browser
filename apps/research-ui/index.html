@@ -68,7 +68,7 @@
             <div class="traffic-grid" data-detail-open="false">
               <div class="request-pane">
                 <div class="network-tools">
-                  <label class="filter-box"><input id="request-filter" type="search" maxlength="512" placeholder="Search requests" aria-label="Filter requests" /></label>
+                  <label class="filter-box"><input id="request-filter" type="search" maxlength="512" placeholder="Filter: text, -text, domain:, method:, status-code:, larger-than:, mime-type:" aria-label="Filter requests" title="Text matches method, URL and status. -text excludes it. domain: (with * wildcards), method:, status-code:, larger-than: (k and m are 1,024 multiples) and mime-type: match exactly; a leading - negates them." /></label>
                   <div class="request-filters" id="request-filters">
                   <div class="type-filters" aria-label="Resource type filters">
                     <button class="type-filter" type="button" data-filter="all" aria-pressed="true">All</button>
@@ -83,13 +83,22 @@
                     <button class="type-filter" type="button" data-filter="wasm" aria-pressed="false">Wasm</button>
                     <button class="type-filter" type="button" data-filter="other" aria-pressed="false">Other</button>
                   </div>
+                  <div class="request-flags" role="group" aria-label="Request filters">
+                    <button class="request-flag" type="button" data-flag="invert" aria-pressed="false" title="Show the requests the filter text does not match">Invert</button>
+                    <button class="request-flag" type="button" data-flag="hideInternal" aria-pressed="false" title="Hide browser-internal requests (chrome:, devtools: and other internal schemes); nothing is deleted">Hide internal</button>
+                    <button class="request-flag" type="button" data-flag="thirdParty" aria-pressed="false" title="Only requests whose site differs from their tab's top-level document. Sites are the last two host labels, or three after a short second level and a two-letter country code; there is no public suffix list.">3rd-party</button>
+                    <button class="request-flag" type="button" data-flag="failed" aria-pressed="false" title="Only failed requests">Failed</button>
+                  </div>
                   </div>
                 </div>
 
                 <div id="network-notice" class="network-notice" data-kind="loading" role="status" aria-live="polite">Connecting to the local evidence broker…</div>
 
                 <div class="request-scope" aria-label="Captured request scope">
-                  <div id="request-tab-scopes" class="request-tab-scopes" role="tablist" aria-label="Browser tabs"></div>
+                  <div class="request-tab-row">
+                    <div id="request-tab-scopes" class="request-tab-scopes" role="tablist" aria-label="Browser tabs"></div>
+                    <select id="request-tab-more" class="request-tab-more" aria-label="More browser tabs" hidden></select>
+                  </div>
                   <label class="request-domain-filter">Domain
                     <select id="request-domain" aria-label="Filter requests by domain">
                       <option value="all">All domains</option>
@@ -97,10 +106,16 @@
                   </label>
                 </div>
 
-                <div class="request-table">
-                  <div class="request-head" role="group" aria-label="Sort requests"><button type="button" data-request-sort="name" aria-pressed="false">Name<span aria-hidden="true"></span></button><button type="button" data-request-sort="status" aria-pressed="false">Status<span aria-hidden="true"></span></button><button type="button" data-request-sort="type" aria-pressed="false">Type<span aria-hidden="true"></span></button><button type="button" data-request-sort="method" aria-pressed="false">Method<span aria-hidden="true"></span></button><button type="button" data-request-sort="time" aria-pressed="false">Time<span aria-hidden="true"></span></button></div>
+                <div id="request-overview" class="request-overview" data-empty="true" data-range="false">
+                  <div class="overview-track" tabindex="0" role="slider" aria-label="Request starts over time" aria-describedby="request-overview-range"></div>
+                  <span id="request-overview-range" class="overview-range" aria-live="polite">No request timeline yet</span>
+                  <button class="overview-clear" type="button" hidden>Clear range</button>
+                </div>
+
+                <div class="request-table" data-hidden-columns="protocol">
+                  <div class="request-head" role="group" aria-label="Sort requests"><button type="button" data-column="name" data-request-sort="name" aria-pressed="false">Name<span aria-hidden="true"></span></button><button type="button" data-column="status" data-request-sort="status" aria-pressed="false">Status<span aria-hidden="true"></span></button><button type="button" data-column="type" data-request-sort="type" aria-pressed="false">Type<span aria-hidden="true"></span></button><button type="button" data-column="method" data-request-sort="method" aria-pressed="false">Method<span aria-hidden="true"></span></button><button type="button" data-column="protocol" data-request-sort="protocol" aria-pressed="false">Protocol<span aria-hidden="true"></span></button><button type="button" data-column="initiator" data-request-sort="initiator" aria-pressed="false">Initiator<span aria-hidden="true"></span></button><button type="button" data-column="size" data-request-sort="size" aria-pressed="false">Size<span aria-hidden="true"></span></button><button type="button" data-column="time" data-request-sort="time" aria-pressed="false">Time<span aria-hidden="true"></span></button><button type="button" data-column="waterfall" data-request-sort="start" aria-pressed="false">Waterfall<span aria-hidden="true"></span></button></div>
                   <div id="request-rows" class="request-rows" role="listbox" aria-label="Captured requests" tabindex="0"></div>
-                  <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-window-prev" type="button" aria-label="Previous 500 requests">Previous</button><button id="request-window-next" type="button" aria-label="Next 500 requests">Next</button><button id="request-latest" type="button" hidden>New requests</button><button id="request-order" type="button" title="Restore capture order">Capture order</button><button id="open-captured-export" type="button" data-export-open="capture" aria-haspopup="dialog">Export…</button></div>
+                  <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-latest" type="button" hidden>New requests</button><button id="request-unresolved" type="button" aria-pressed="false" title="List the requests the capture could not link to a tab" hidden></button><button id="request-order" type="button" title="Restore capture order, newest first">Capture order</button><button id="open-captured-export" type="button" data-export-open="capture" aria-haspopup="dialog">Export…</button></div>
                 </div>
               </div>
 
@@ -118,12 +133,21 @@
                 <div id="request-name-host" class="evidence-name-host"></div>
                 <div class="inspector-tabs" role="tablist" aria-label="Request inspector">
                   <button id="inspector-tab-general" class="inspector-tab" type="button" role="tab" data-inspector-tab="general" aria-controls="exchange-inspector" aria-selected="true">General</button>
+                  <button id="inspector-tab-headers" class="inspector-tab" type="button" role="tab" data-inspector-tab="headers" aria-controls="headers-inspector" aria-selected="false" tabindex="-1">Headers</button>
+                  <button id="inspector-tab-payload" class="inspector-tab" type="button" role="tab" data-inspector-tab="payload" aria-controls="payload-inspector" aria-selected="false" tabindex="-1">Payload</button>
+                  <button id="inspector-tab-preview" class="inspector-tab" type="button" role="tab" data-inspector-tab="preview" aria-controls="response-inspector" aria-selected="false" tabindex="-1">Preview</button>
+                  <button id="inspector-tab-response" class="inspector-tab" type="button" role="tab" data-inspector-tab="response" aria-controls="response-inspector" aria-selected="false" tabindex="-1">Response</button>
+                  <button id="inspector-tab-cookies" class="inspector-tab" type="button" role="tab" data-inspector-tab="cookies" aria-controls="cookies-inspector" aria-selected="false" tabindex="-1">Cookies</button>
                   <button id="inspector-tab-initiator" class="inspector-tab" type="button" role="tab" data-inspector-tab="initiator" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Initiator</button>
                   <button id="inspector-tab-timing" class="inspector-tab" type="button" role="tab" data-inspector-tab="timing" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Timing</button>
                   <button id="inspector-tab-signals" class="inspector-tab" type="button" role="tab" data-inspector-tab="signals" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Signals</button>
                   <button id="inspector-tab-evidence" class="inspector-tab" type="button" role="tab" data-inspector-tab="evidence" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Evidence</button>
                 </div>
                 <div id="exchange-inspector" class="exchange-inspector" role="tabpanel" aria-labelledby="inspector-tab-general"></div>
+                <div hidden id="headers-inspector" class="exchange-inspector traffic-headers" role="tabpanel" aria-labelledby="inspector-tab-headers"></div>
+                <div hidden id="cookies-inspector" class="exchange-inspector traffic-headers" role="tabpanel" aria-labelledby="inspector-tab-cookies"></div>
+                <div hidden id="response-inspector" class="exchange-inspector traffic-response" role="tabpanel" aria-labelledby="inspector-tab-response"></div>
+                <div hidden id="payload-inspector" class="exchange-inspector traffic-payload" role="tabpanel" aria-labelledby="inspector-tab-payload"></div>
                 <div hidden id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-initiator" tabindex="0">
                   <h1 id="request-prompt">Choose a request value and trace where it came from</h1>
                   <div id="request-package-entry" class="package-entry" hidden><button class="secondary-button" type="button" data-screen="evidence">Inspect observations &amp; artifacts</button><span>Recorded links, context correlations and missing evidence</span></div>
@@ -230,6 +254,11 @@
                 <button id="source-tab-search" class="source-side-tab" type="button" role="tab" aria-selected="false" aria-controls="source-search-all-panel" tabindex="-1">Search</button>
               </div>
               <div id="source-health" class="source-health" data-kind="warning" role="status" aria-live="polite" hidden></div>
+              <div id="source-tree-tools" class="source-tree-tools">
+                <input id="source-tree-filter" class="source-tree-filter" type="search" maxlength="512" autocomplete="off" spellcheck="false" placeholder="Filter files" aria-label="Filter files by name, URL or artifact ID" aria-controls="source-tree" />
+                <button id="source-tree-expand" class="source-tree-tool" type="button" data-icon="expand-all" aria-controls="source-tree" aria-label="Expand all" title="Expand all"></button>
+                <button id="source-tree-collapse" class="source-tree-tool" type="button" data-icon="collapse-all" aria-controls="source-tree" aria-label="Collapse all" title="Collapse all"></button>
+              </div>
               <div id="source-tree" class="source-tree" role="tree" aria-labelledby="source-tab-captured"></div>
               <section id="source-search-all-panel" class="source-search-all" role="tabpanel" aria-labelledby="source-tab-search" hidden>
                 <div class="source-search-all-form" role="search">
@@ -245,45 +274,53 @@
             <section class="sources-editor" aria-label="Source editor">
               <div id="source-editor-tabs" class="source-editor-tabs" role="tablist" aria-label="Open source files"></div>
               <div class="source-editor-toolbar">
+                <div id="source-editor-controls" class="source-editor-controls">
                 <span id="source-location" class="source-location">Select a captured artifact</span>
-                <button id="source-rename" class="source-tool" type="button" aria-keyshortcuts="F2" title="Open a captured source to name it." disabled>Rename</button>
                 <button id="source-quick-open" class="source-tool" type="button">Open file</button>
-                <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" maxlength="512" placeholder="Find" aria-label="Find in source" title="Find retained text; Enter for next, Shift+Enter for previous (single-line literal, first 1000 matches)" /></label>
-                <button id="source-pretty" class="source-tool" type="button" aria-label="Pretty print source" title="Pretty print source" disabled>{ }</button>
+                <input id="source-search" class="source-search" type="search" maxlength="512" placeholder="Find" aria-label="Find in source" aria-keyshortcuts="Meta+F Control+F" aria-describedby="source-search-status" title="Find retained text; Enter for next, Shift+Enter for previous (single-line literal, first 1000 matches)" />
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
                 <button id="source-graph" class="source-tool" type="button" aria-label="Show basic-block graph" aria-pressed="false" hidden>Graph</button>
                 <button id="source-map" class="source-tool" type="button" aria-label="Show artifact map" aria-pressed="false" hidden>Map</button>
-                <button id="investigation-decode-range" class="source-tool" type="button" title="First select an Original bytes link in Facts; this copies at most 64 KiB without running a transformation" disabled>Decode range</button>
-                <button id="source-facts-toggle" class="source-tool" type="button" aria-controls="source-facts-details" aria-expanded="false" disabled>Facts</button>
-                <button id="source-track-calls" class="source-tool" type="button" aria-controls="invocation-sites-details" disabled>Track calls</button>
-                <button id="source-deob" class="source-tool" type="button" aria-label="Run local static cleanup" title="Run local static cleanup" disabled>Static cleanup</button>
-
-                <button id="source-sidebar-toggle" class="source-tool" type="button" aria-controls="source-sidebar" aria-expanded="false">Details</button>
-
-                <form id="source-window" class="source-window" aria-label="Source display window" hidden>
+                <details id="source-more" class="source-more">
+                  <summary class="source-tool" title="More source actions">More</summary>
+                  <div class="source-more-menu" role="group" aria-label="Source actions">
+                    <button id="source-goto" class="source-tool" type="button" aria-keyshortcuts="Control+G" disabled>Go to line…</button>
+                    <button id="source-rename" class="source-tool" type="button" aria-keyshortcuts="F2" title="Open a captured source to name it." disabled>Rename</button>
+                    <button id="investigation-decode-range" class="source-tool" type="button" title="First select an Original bytes link in Facts; this copies at most 64 KiB without running a transformation" disabled>Decode range</button>
+                    <button id="source-facts-toggle" class="source-tool" type="button" aria-controls="source-facts-details" aria-expanded="false" disabled>Facts</button>
+                    <button id="source-track-calls" class="source-tool" type="button" aria-controls="invocation-sites-details" disabled>Track calls</button>
+                    <button id="source-deob" class="source-tool" type="button" aria-label="Run local static cleanup" title="Run local static cleanup" disabled>Static cleanup</button>
+                    <button id="source-sidebar-toggle" class="source-tool" type="button" aria-controls="source-sidebar" aria-expanded="false">Details</button>
+                  </div>
+                </details>
+                </div>
+                <form id="source-window" class="source-window" aria-label="Go to line" hidden>
                   <span id="source-window-label"></span>
-                  <button id="source-window-previous" class="source-tool" type="button" aria-label="Previous source lines">Previous</button>
-                  <button id="source-window-next" class="source-tool" type="button" aria-label="Next source lines">Next</button>
                   <label>Line <input id="source-window-line" type="number" min="1" step="1" value="1" aria-label="Local source line" /></label>
                   <label>Column <input id="source-window-column" type="number" min="1" step="1" value="1" aria-label="Local source column" /></label>
                   <button class="source-tool" type="submit">Go</button>
                 </form>
-                <p id="source-search-status" class="source-search-status" role="status"></p>
+                <p id="source-search-status" class="source-search-status" hidden></p>
                 <div id="source-name-host" class="evidence-name-host"></div>
+                <p id="source-limit-notice" class="source-limit-notice" role="status" hidden></p>
               </div>
               <div id="source-view-split" class="source-view-split">
               <div id="source-graph-host" class="block-graph" hidden></div>
               <div id="source-code-wrap" class="source-code-wrap" tabindex="0">
+                <button id="source-window-previous" class="source-window-edge" type="button" aria-label="Previous source lines" hidden></button>
                 <div id="source-code-empty" class="source-empty">Select a JavaScript file, WASM module, source map, or approved response body.</div>
                 <code id="source-code" class="source-code" aria-label="Source content" hidden></code>
+                <button id="source-window-next" class="source-window-edge" type="button" aria-label="Next source lines" hidden></button>
               </div>
               </div>
               <section id="source-map-view" class="source-map-view" aria-label="Artifact map" hidden></section>
               <div class="source-editor-status">
                 <span id="source-position">Line 1, Column 1</span>
-                <span id="source-size">0 bytes</span>
-                <span id="source-view-kind">Original evidence</span>
+                <span id="source-selection" hidden></span>
+                <span id="source-view-kind">Original</span>
                 <span id="source-language">Plain text</span>
+                <button id="source-pretty" class="source-status-button" type="button" aria-label="Pretty print source" aria-pressed="false" title="Pretty print source" disabled>{ }</button>
+                <span id="source-size">0 bytes</span>
                 <span id="source-hash" class="source-hash"></span>
               </div>
 
@@ -536,7 +573,7 @@
                   <div class="analyst-form-row"><label>Name<input id="analyst-name" type="text" maxlength="128" autocomplete="off" /></label><label>Folder<select id="analyst-folder"></select></label></div>
                   <div class="analyst-form-row"><label>Type<select id="analyst-kind"><option value="analyst-script">Analyst script</option><option value="scratchpad">Scratchpad</option></select></label><label>Language<select id="analyst-language"><option value="javascript">JavaScript</option><option value="json">JSON</option><option value="markdown">Markdown</option><option value="text">Plain text</option></select></label></div>
                   </details>
-                  <label>Content<textarea id="analyst-content" maxlength="32768" spellcheck="false" placeholder="const events = WB.Node.Evidence.events();&#10;console.info('events', events.length);&#10;return {count: events.length};"></textarea></label>
+                  <label>Content<div class="code-edit"><pre id="analyst-content-colors" class="code-edit-colors" aria-hidden="true"></pre><textarea id="analyst-content" maxlength="32768" spellcheck="false" placeholder="const events = WB.Node.Evidence.events();&#10;console.info('events', events.length);&#10;return {count: events.length};"></textarea></div></label>
                   <div id="analyst-draft-status" class="analyst-draft-status" role="status">Saved locally</div>
                   <div class="analyst-form-actions"><button id="analyst-save" class="trace-button analyst-primary" type="submit">Save file</button><button id="analyst-revert" class="secondary-button" type="button">Discard changes</button><button id="analyst-delete" class="secondary-button" type="button">Delete</button></div>
                 </form>
@@ -807,9 +844,22 @@
     <script src="float32_inspector.js"></script>
     <script src="evidence_comparison.js"></script>
     <script src="source_syntax.js"></script>
+    <script src="source_format.js"></script>
+    <script src="code_view.js"></script>
     <script src="source_facts.js"></script>
     <script src="source_search.js"></script>
+    <script src="source_tree.js"></script>
     <script src="traffic_view.js"></script>
+    <script src="network_scope.js"></script>
+    <script src="request_tabs.js"></script>
+    <script src="traffic_response.js"></script>
+    <script src="traffic_headers.js"></script>
+    <script src="traffic_cookies.js"></script>
+    <script src="traffic_payload.js"></script>
+    <script src="traffic_index.js"></script>
+    <script src="traffic_filter.js"></script>
+    <script src="traffic_columns.js"></script>
+    <script src="traffic_overview.js"></script>
     <script src="captured_client.js"></script>
     <script src="captured_export_formats.js"></script>
     <script src="vm_debugger.js"></script>
@@ -832,6 +882,7 @@
     <script src="investigation_notebook.js"></script>
     <script src="evidence_names.js"></script>
     <script src="invocation_sites.js"></script>
+    <script src="request_stack.js"></script>
     <script src="entropy_map.js"></script>
 
     <script src="app.js"></script>

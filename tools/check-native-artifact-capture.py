@@ -46,16 +46,29 @@ HEADERS = (
     "net/http/http_request_headers.h",
     "services/network/public/cpp/data_element.h",
     "services/network/public/cpp/resource_request_body.h",
+    "base/component_export.h",
+    "base/synchronization/lock.h",
+    "services/network/public/mojom/http_raw_headers.mojom.h",
+    "net/cookies/canonical_cookie.h",
+    "net/cookies/cookie_access_result.h",
+    "net/cookies/cookie_constants.h",
+    "net/cookies/cookie_inclusion_status.h",
+    "net/cookies/cookie_partition_key.h",
     "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h",
     "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h",
+    "brave/components/reverse_engineering_browser/browser/native_request_body_reader.h",
     "brave/components/reverse_engineering_browser/browser/native_probe_session.h",
     "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h",
+    "base/functional/callback.h",
     "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h",
     "base/memory/raw_ptr.h",
     "base/memory/raw_ref.h",
+    "base/memory/scoped_refptr.h",
+    "base/task/thread_pool.h",
     "base/memory/weak_ptr.h",
     "base/memory/shared_memory_mapping.h",
     "base/memory/unsafe_shared_memory_region.h",
+    "content/public/browser/child_process_security_policy.h",
     "content/public/browser/render_frame_host.h",
     "content/public/browser/render_process_host.h",
     "content/public/browser/web_contents.h",
@@ -136,8 +149,13 @@ def compile_driver(build: Path) -> Path:
         f"-I{ROOT / 'include'}",
         str(fixture / "main.cc"),
         str(sources / "browser/native_network_capture_sink.cc"),
+        str(sources / "common/native_network_headers_hook.cc"),
+        str(sources / "common/native_navigation_initiator_hook.cc"),
         str(sources / "browser/native_artifact_capture_sink.cc"),
+        str(sources / "browser/native_artifact_stream.cc"),
+        str(sources / "browser/native_response_body_capture.cc"),
         str(sources / "browser/native_probe_host.cc"),
+        str(sources / "browser/native_tab_resolver.cc"),
         str(sources / "common/native_probe_queue.cc"),
         str(ROOT / "src/evidence/artifact.cpp"),
         str(ROOT / "src/capture/event.cpp"),
@@ -210,17 +228,45 @@ def artifact_frame(
     return header + url + mime + content
 
 
-def read_ack(connection: socket.socket) -> tuple[int, int] | None:
+STREAM_MAGIC = 0x53424552
+OP_DATA, OP_CHECKPOINT, OP_END = 1, 2, 3
+
+
+def open_frame(artifact_id: int) -> bytes:
+    """A version 2 open header: no size or digest; stream frames carry the content."""
+    url = f"https://fixture.test/{artifact_id}.js".encode()
+    mime = b"text/javascript"
+    header = struct.pack(
+        "<IHHHHI7QII32sQHHI",
+        *(ARTIFACT_MAGIC, 2, 128, KIND_JAVASCRIPT, 0, 0),
+        *(7, 0, 0, artifact_id, 0, 0, 0),
+        *(len(url), len(mime), bytes(32), 0, 0, 0, 0),
+    )
+    return header + url + mime
+
+
+def stream_frame(
+    op: int, artifact_id: int, data: bytes = b"", *, value: int = 0, size: int = 0,
+    digest: bytes = bytes(32),
+) -> bytes:
+    # magic, version, frame size, op, reserved, data size; session, artifact,
+    # value and content size; expected digest.
+    return struct.pack(
+        "<IHHHHI4Q32s", STREAM_MAGIC, 2, 80, op, 0, len(data), 7, artifact_id, value, size, digest
+    ) + data
+
+
+def read_ack(connection: socket.socket, version: int = 1) -> tuple[int, int] | None:
     data = b""
     while len(data) < 32:
         chunk = connection.recv(32 - len(data))
         if not chunk:
             return None
         data += chunk
-    magic, version, size, status, reserved0, artifact_id, reserved1 = struct.unpack(
+    magic, acked, size, status, reserved0, artifact_id, reserved1 = struct.unpack(
         "<IHHIIQ8s", data
     )
-    assert (magic, version, size, reserved0, reserved1) == (ACK_MAGIC, 1, 32, 0, bytes(8))
+    assert (magic, acked, size, reserved0, reserved1) == (ACK_MAGIC, version, 32, 0, bytes(8))
     return status, artifact_id
 
 
@@ -288,19 +334,51 @@ def check_receiver_socket(receiver: str) -> None:
             with connect() as connection:
                 connection.sendall(artifact_frame(6, b"six();"))
                 assert read_ack(connection) == (STATUS_ACCEPTED, 6)
+                # Two interleaved streams and a checkpoint, a refused end and an
+                # oversize stream on the same connection, and one left open.
+                head = b"head();" * 9000
+                digest = hashlib.sha256(head).digest()
+                for frame, expected in (
+                    (open_frame(10), (STATUS_ACCEPTED, 10)),
+                    (open_frame(11), (STATUS_ACCEPTED, 11)),
+                    (stream_frame(OP_DATA, 10, head[:40000]), (STATUS_ACCEPTED, 10)),
+                    (stream_frame(OP_DATA, 11, b"eleven();"), (STATUS_ACCEPTED, 11)),
+                    (stream_frame(OP_CHECKPOINT, 10, value=12, size=40000), (STATUS_ACCEPTED, 12)),
+                    (stream_frame(OP_DATA, 10, head[40000:]), (STATUS_ACCEPTED, 10)),
+                    (stream_frame(OP_END, 10, size=len(head), digest=digest), (STATUS_ACCEPTED, 10)),
+                    (stream_frame(OP_END, 11, size=9, digest=bytes([1]) * 32), (STATUS_INVALID, 11)),
+                    (open_frame(13), (STATUS_ACCEPTED, 13)),
+                    (stream_frame(OP_DATA, 13, b"x" * 60000), (STATUS_ACCEPTED, 13)),
+                    (stream_frame(OP_DATA, 13, b"x" * 10000), (STATUS_TOO_LARGE, 13)),
+                    (stream_frame(OP_DATA, 13, b"y"), (STATUS_INVALID, 13)),
+                    (open_frame(14), (STATUS_ACCEPTED, 14)),
+                    (stream_frame(OP_DATA, 14, b"open();"), (STATUS_ACCEPTED, 14)),
+                ):
+                    connection.sendall(frame)
+                    assert read_ack(connection, 2) == expected, frame[:16]
         finally:
             child.send_signal(signal.SIGTERM)
             _, errors = child.communicate(timeout=10)
         assert child.returncode == 0, errors.decode()
         log = errors.decode()
-        assert log.count("rejected; connection kept") == 1, log
+        assert log.count("rejected; connection kept") == 4, log
         assert log.count("closed after an unsynchronized frame") == 3, log
-        assert "accepted=3 " in log and "too_large=2 " in log and "invalid=2 " in log, log
-        manifest = (root / "artifacts/manifest.jsonl").read_text().splitlines()
-        assert [json.loads(line)["artifact_id"] for line in manifest] == ["1", "3", "6"]
+        assert "accepted=5 " in log and "too_large=3 " in log and "invalid=4 " in log, log
+        assert "streams_abandoned=1 " in log, log
+        manifest = [
+            json.loads(line)
+            for line in (root / "artifacts/manifest.jsonl").read_text().splitlines()
+        ]
+        assert [item["artifact_id"] for item in manifest] == ["1", "3", "6", "12", "10"]
+        assert manifest[3]["byte_size"] == 40000 and manifest[4]["byte_size"] == len(head)
+        assert manifest[3]["sha256"] == hashlib.sha256(head[:40000]).hexdigest()
+        assert manifest[4]["sha256"] == digest.hex()
+        assert not list((root / "artifacts").glob("*.part")), "no stream outlives its connection"
     print(
         "PASS artifact receiver socket: a valid rejected frame is discarded and answered on the "
-        "same connection; invalid, mismatched and undiscardable frames close it"
+        "same connection; invalid, mismatched and undiscardable frames close it; interleaved "
+        "version 2 streams publish a checkpoint and an end with exact digests, stream refusals "
+        "keep the connection, and a stream open at disconnect is abandoned"
     )
 
 
@@ -344,9 +422,44 @@ def check_receiver_recovery(receiver: str) -> None:
         )
         assert b"removed an unacknowledged" not in resumed.stderr
         assert len(manifest.read_bytes().splitlines()) == 2
+        # A receiver killed with streams open leaves their partial files, and
+        # no later clean exit would reach them.
+        killed = subprocess.Popen(
+            [receiver, "--store", str(store)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        partial = [store / "artifact-500.part", store / "artifact-501.part"]
+        try:
+            assert killed.stdin is not None
+            killed.stdin.write(
+                open_frame(500)
+                + open_frame(501)
+                + stream_frame(OP_DATA, 500, b"partial();")
+            )
+            killed.stdin.flush()
+            deadline = time.monotonic() + 10
+            while not all(path.exists() for path in partial):
+                assert killed.poll() is None and time.monotonic() < deadline, "partial stream files"
+                time.sleep(0.01)
+        finally:
+            killed.kill()
+            killed.communicate(timeout=10)
+        assert killed.returncode == -signal.SIGKILL
+        assert all(path.exists() for path in partial), "SIGKILL leaves the partial files"
+        restarted = subprocess.Popen(
+            [receiver, "--store", str(store)], stdin=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        _, errors = restarted.communicate(artifact_frame(3, b"three();"), timeout=10)
+        assert restarted.returncode == 0, errors.decode()
+        assert b"removed 2 partial stream files" in errors, errors.decode()
+        assert not list(store.glob("*.part")), "no partial stream file survives a restart"
+        assert len(manifest.read_bytes().splitlines()) == 3, "capture resumes on the same store"
     print(
-        "PASS artifact receiver recovery: an interrupted final record is cut back with a note "
-        "and capture resumes on the same store"
+        "PASS artifact receiver recovery: an interrupted final record is cut back with a note, "
+        "partial stream files from a killed receiver are removed and counted, and capture "
+        "resumes on the same store"
     )
 
 
@@ -398,9 +511,73 @@ def check_stores(output: Path, cases: list[dict]) -> None:
             )
             assert capture["parent_event_id"] == item["creator_event_id"] != "0"
     check_request_bodies(output, artifacts, events)
+    check_response_bodies(output, artifacts, events)
+    check_request_headers(output, artifacts, events)
     print(
         "PASS production receiver/broker consumed exact native bytes, preserved metadata/hash/uint64 identity"
     )
+
+
+def check_response_bodies(output: Path, artifacts: list[dict], events: list[dict]) -> None:
+    """Response bodies (native-network-v3.md) survive the production receiver and broker."""
+    expected = json.loads((output / "response-bodies.json").read_text())
+    by_sequence = {item["sequence_number"]: item for item in events}
+    retained = 0
+    for body in expected:
+        record = by_sequence[body["record_sequence"]]
+        assert record["type"] == "response_body" and record["category"] == "network"
+        assert record["parent_event_id"] == body["response_sequence"]
+        assert record["request_id"] == body["request_id"]
+        assert record["artifact_id"] == body["artifact_id"]
+        payload = bytes.fromhex(record["payload"])
+        assert payload[4] == body["state"]
+        assert int.from_bytes(payload[8:16], "little") == body["body_length"]
+        assert int.from_bytes(payload[16:24], "little") == body["captured_length"]
+        assert payload[32:64].hex() == body["sha256"]
+        if body["artifact_id"] == "0":
+            assert body["captured_length"] == 0 and body["sha256"] == "00" * 32
+            continue
+        retained += 1
+        item = next(a for a in artifacts if a["artifact_id"] == body["artifact_id"])
+        assert item["kind"] == "response_body" and item["capture_origin"] == "network_response"
+        assert item["sensitive"] is True and item["execution_context_id"] == "0"
+        assert item["creator_event_id"] == body["response_sequence"]
+        assert item["url"] == body["url"] and item["mime_type"] == body["mime_type"]
+        data = (output / "artifacts" / item["content_path"]).read_bytes()
+        assert len(data) == body["captured_length"] == item["byte_size"]
+        assert hashlib.sha256(data).hexdigest() == body["sha256"] == item["sha256"]
+        captured = next(
+            e
+            for e in events
+            if e["type"] == "artifact_captured" and e["artifact_id"] == body["artifact_id"]
+        )
+        assert captured["parent_event_id"] == body["response_sequence"]
+    assert retained >= 7 and len(expected) > retained
+    print(
+        "PASS production receiver/broker retained response bodies, partial and refused records, exact creator joins"
+    )
+
+
+def check_request_headers(output: Path, artifacts: list[dict], events: list[dict]) -> None:
+    """Content-mode header blocks (native-network-v3.md) survive the receiver and broker."""
+    expected = json.loads((output / "request-headers.json").read_text())
+    assert expected, "The corpus must contain header blocks"
+    by_sequence = {item["sequence_number"]: item for item in events}
+    for block in expected:
+        item = next(a for a in artifacts if a["artifact_id"] == block["artifact_id"])
+        assert item["kind"] == "request_headers" and item["capture_origin"] == "network_request"
+        assert item["sensitive"] is True and item["execution_context_id"] == "0"
+        assert item["url"] == block["url"] and item["mime_type"] == "text/plain"
+        assert item["creator_event_id"] == block["header_sequence"]
+        data = (output / "artifacts" / item["content_path"]).read_bytes()
+        assert data == b"Content-Type: application/json;charset=UTF-8\r\n", data
+        record = by_sequence[block["header_sequence"]]
+        assert record["type"] == "request_headers" and record["category"] == "network"
+        assert record["artifact_id"] == block["artifact_id"]
+        assert record["parent_event_id"] == block["start_sequence"]
+        payload = bytes.fromhex(record["payload"])
+        assert payload[48:80].hex() == hashlib.sha256(data).hexdigest()
+        assert int.from_bytes(payload[12:16], "little") == len(data)
 
 
 def check_request_bodies(output: Path, artifacts: list[dict], events: list[dict]) -> None:
@@ -412,7 +589,7 @@ def check_request_bodies(output: Path, artifacts: list[dict], events: list[dict]
         item = next(a for a in artifacts if a["artifact_id"] == body["artifact_id"])
         assert item["kind"] == "request_body" and item["capture_origin"] == "network_request"
         assert item["sensitive"] is True and item["execution_context_id"] == "0"
-        assert item["url"] == body["url"] and item["mime_type"] == "application/json"
+        assert item["url"] == body["url"] and item["mime_type"] == body["mime_type"]
         assert item["creator_event_id"] == body["body_sequence"]
         data = (output / "artifacts" / item["content_path"]).read_bytes()
         assert len(data) == body["captured_length"] == item["byte_size"]
@@ -425,7 +602,9 @@ def check_request_bodies(output: Path, artifacts: list[dict], events: list[dict]
         assert record["artifact_id"] == body["artifact_id"]
         assert record["parent_event_id"] == body["start_sequence"]
         payload = bytes.fromhex(record["payload"])
-        assert payload[32:64].hex() == body["sha256"]
+        # Past 4 MiB the record carries no digest; the artifact's is checked above.
+        hashed = body["body_length"] <= 4 * 1024 * 1024
+        assert payload[32:64].hex() == (body["sha256"] if hashed else "00" * 32)
         assert int.from_bytes(payload[8:16], "little") == body["body_length"]
         target = next(
             e
@@ -441,6 +620,28 @@ def check_request_bodies(output: Path, artifacts: list[dict], events: list[dict]
             if e["type"] == "artifact_captured" and e["artifact_id"] == body["artifact_id"]
         )
         assert captured["parent_event_id"] == body["body_sequence"]
+    for target in json.loads((output / "request-targets.json").read_text()):
+        item = next(a for a in artifacts if a["artifact_id"] == target["artifact_id"])
+        assert item["kind"] == "request_target" and item["capture_origin"] == "network_request"
+        assert item["sensitive"] is True and item["execution_context_id"] == "0"
+        assert item["url"] == target["origin"] and item["mime_type"] == "text/plain"
+        assert item["creator_event_id"] == target["target_sequence"]
+        data = (output / "artifacts" / item["content_path"]).read_bytes()
+        assert len(data) == target["target_length"] == item["byte_size"]
+        assert hashlib.sha256(data).hexdigest() == target["sha256"] == item["sha256"]
+        record = by_sequence[target["target_sequence"]]
+        assert record["type"] == "request_target" and record["artifact_id"] == item["artifact_id"]
+        assert record["parent_event_id"] == target["start_sequence"]
+        payload = bytes.fromhex(record["payload"])
+        assert payload[0:2] == b"\x02\x00" and payload[9] == 1
+        assert int.from_bytes(payload[4:8], "little") == target["target_length"]
+        assert data.startswith(payload[12:].rstrip(b"\0"))
+        captured = next(
+            e
+            for e in events
+            if e["type"] == "artifact_captured" and e["artifact_id"] == item["artifact_id"]
+        )
+        assert captured["parent_event_id"] == target["target_sequence"]
     # The independent Python mirror of the record rules accepts the broker output.
     run(
         "python3",
@@ -448,7 +649,7 @@ def check_request_bodies(output: Path, artifacts: list[dict], events: list[dict]
         str(output / "events.jsonl"),
     )
     print(
-        "PASS production receiver/broker retained sensitive request bodies, targets and exact body-record joins"
+        "PASS production receiver/broker retained sensitive request bodies, full targets and exact creator-record joins"
     )
 
 

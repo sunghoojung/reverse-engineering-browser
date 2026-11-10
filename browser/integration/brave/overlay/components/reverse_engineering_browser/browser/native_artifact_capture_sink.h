@@ -22,13 +22,22 @@
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
 
+#include "base/functional/callback.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/no_destructor.h"
+#include "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h"
+#include "brave/components/reverse_engineering_browser/browser/native_artifact_stream.h"
+#include "brave/components/reverse_engineering_browser/browser/native_request_body_reader.h"
+#include "brave/components/reverse_engineering_browser/common/native_artifact_memory_pool.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_request.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_response_body.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "mojo/public/cpp/base/big_buffer.h"
 #include "mojo/public/cpp/system/data_pipe.h"
 
 namespace network {
+class ResourceRequestBody;
 struct ResourceRequest;
 namespace mojom {
 class URLResponseHead;
@@ -37,9 +46,43 @@ class URLResponseHead;
 
 namespace reb {
 
+// The first `size` bytes of `body`'s in-memory elements, or of `text`.
+struct NativeRequestContent final {
+  NativeArtifactKind kind = NativeArtifactKind::kUnknown;
+  std::uint64_t request_id = 0;
+  std::uint64_t frame_id = 0;
+  std::uint64_t creator_event_id = 0;
+  std::string url;
+  std::string mime_type;
+  std::size_t size = 0;
+  scoped_refptr<network::ResourceRequestBody> body{};
+  std::string text{};
+};
+
+enum class NativeRequestContentAdmission : std::uint8_t {
+  kQueued,
+  kUnavailable,
+  kSessionBudget,
+  kRefused,
+};
+
+// What a request body read retained, for the record that names it.
+struct NativeRequestBodyReadOutcome final {
+  NativeRequestBodyState state = NativeRequestBodyState::kNotCapturedReadIncomplete;
+  std::uint64_t artifact_id = 0;
+  std::uint64_t body_length = 0;
+  std::uint64_t captured_length = 0;
+  std::array<std::uint8_t, 32> sha256{};
+};
+// Emits the body record and returns its sequence, the artifact's creator; zero
+// when the session no longer records it.
+using NativeRequestBodyRecorder =
+    base::OnceCallback<std::uint64_t(const NativeRequestBodyReadOutcome&)>;
+
 // Browser-process capture boundary for immutable JavaScript and WebAssembly
-// response bodies plus renderer-submitted generated source. It is enabled only
-// for an authorized artifact category and keeps every item explicitly bounded.
+// response bodies plus renderer-submitted generated source. Other response
+// bodies go to NativeResponseBodyCapture in content sessions. It is enabled
+// only for an authorized artifact category and keeps every item bounded.
 class NativeArtifactCaptureSink final {
  public:
   static NativeArtifactCaptureSink& Get();
@@ -51,7 +94,9 @@ class NativeArtifactCaptureSink final {
   void SetEmitter(NativeProbeEmitter emitter,
                   std::uint64_t session_id,
                   std::uint64_t category_mask,
-                  std::uint64_t expires_at_monotonic_ns) noexcept;
+                  std::uint64_t expires_at_monotonic_ns,
+                  std::uint64_t request_content_budget = kNativeRequestContentDefaultBudgetBytes,
+                  const NativeResponseBodyPolicy& response_bodies = {}) noexcept;
 
   [[nodiscard]] mojo::ScopedDataPipeConsumerHandle MaybeCaptureResponse(
       std::uint64_t request_id,
@@ -96,6 +141,8 @@ class NativeArtifactCaptureSink final {
                                 std::string_view source_url,
                                 mojo_base::BigBuffer script_source,
                                 mojo_base::BigBuffer content);
+  // `on_refused`, if set, runs once when the artifact is refused or lost, so a
+  // renderer that claimed it captured can stop claiming it for later repeats.
   std::uint64_t CaptureGeneratedArtifact(NativeArtifactKind kind,
                                          NativeArtifactCaptureOrigin capture_origin,
                                          std::uint64_t creator_event_id,
@@ -103,34 +150,69 @@ class NativeArtifactCaptureSink final {
                                          std::uint64_t frame_id,
                                          std::string_view source_url,
                                          mojo_base::BigBuffer content,
-                                         std::uint64_t parent_artifact_id = 0);
+                                         std::uint64_t parent_artifact_id = 0,
+                                         std::function<void()> on_refused = {});
 
-  // Queues the bounded request-body prefix chosen by the network sink as a
-  // sensitive request_body artifact. Returns its ID, or zero when nothing was
-  // queued; the caller records that outcome in its request_body event, so no
-  // failure event is emitted here. The later receiver ACK reports
-  // artifact_captured or artifact_capture_failed with creator_event_id as parent.
-  [[nodiscard]] std::uint64_t CaptureRequestBody(std::uint64_t request_id,
+  // UI sequence. Copies off it; every loss, from stream open on, is one event
+  // parented to the creator.
+  [[nodiscard]] NativeRequestContentAdmission CaptureRequestContent(NativeRequestContent content,
+                                                                    std::uint64_t& artifact_id);
+  // UI sequence. Reads a body with file, blob or stream parts through
+  // NativeRequestBodyReader and streams it as a request_body artifact. A
+  // stream part is forwarded through an observational tee, so `request` is
+  // changed only by that interposed getter. `record` runs once, here.
+  [[nodiscard]] NativeRequestContentAdmission ReadRequestBody(network::ResourceRequest& request,
+                                                              std::uint64_t request_id,
+                                                              std::uint64_t frame_id,
+                                                              std::string url,
+                                                              std::string mime_type,
+                                                              NativeRequestBodyRecorder record);
+  // Queues one header block (text/plain) or cookie list
+  // (application/x-reb-cookie-list) as a sensitive artifact within the
+  // in-flight pool. Returns its ID, or zero when nothing was queued; the caller
+  // records that outcome (protocol/native-network-v3.md).
+  [[nodiscard]] std::uint64_t CaptureHeaderBlock(NativeArtifactKind kind,
+                                                 std::uint64_t request_id,
                                                  std::uint64_t frame_id,
                                                  std::uint64_t creator_event_id,
                                                  std::string url,
-                                                 std::string mime_type,
                                                  std::vector<std::uint8_t> content);
 
   static void TransferCompleted(std::uint64_t artifact_id,
                                 NativeArtifactReceiveStatus status) noexcept;
+  [[nodiscard]] std::size_t in_flight_bytes() const noexcept { return memory_pool_.used(); }
+  // Response bodies share the pool, the artifact IDs and the ACK path.
+  [[nodiscard]] NativeArtifactMemoryPool& memory_pool() noexcept { return memory_pool_; }
+  [[nodiscard]] std::uint64_t NextArtifactId() noexcept {
+    return next_artifact_id_.fetch_add(1, std::memory_order_relaxed);
+  }
+  // A response body stream opened by NativeResponseBodyCapture. Its end ACK,
+  // or first refusal, becomes artifact_captured or artifact_capture_failed
+  // parented to the creator record and is passed back to that capture.
+  void TrackResponseBody(std::uint64_t artifact_id,
+                         std::uint64_t request_id,
+                         std::uint64_t frame_id,
+                         std::uint64_t creator_event_id) noexcept;
 
  private:
   friend class base::NoDestructor<NativeArtifactCaptureSink>;
 
   struct CaptureContext final {
     NativeArtifactHeader header;
-    std::string url;
-    std::string mime_type;
-    std::size_t reservation_bytes = 0;
     std::uint64_t request_id = 0;
     std::uint64_t frame_id = 0;
     std::uint64_t generation = 0;
+  };
+
+  struct CopiedContent final {
+    NativeArtifactStream stream;
+    std::size_t size = 0;
+  };
+  // A script or Wasm response streaming through the tee.
+  struct ResponseStream final {
+    std::uint64_t request_id = 0;
+    std::uint64_t frame_id = 0;
+    NativeArtifactStream stream;
   };
 
   struct PendingContext final {
@@ -141,6 +223,15 @@ class NativeArtifactCaptureSink final {
     // Only network creators share the browser event's sequence namespace.
     std::uint64_t parent_event_id = 0;
     NativeProbeCategory result_category = NativeProbeCategory::kArtifact;
+    bool response_body = false;
+    // A header block or cookie list; its ACK decides whether later requests
+    // can share it by artifact ID.
+    bool shared_block = false;
+    std::function<void()> on_refused = {};
+    // A request body still being read: no record exists yet to parent a loss
+    // to, so a report sets read_lost and OnRequestBodyRead records it.
+    bool read_open = false;
+    bool read_lost = false;
     // Physical dispatch observations that share this module artifact.
     std::vector<std::pair<NativeProbeEvent, std::function<bool()>>> wasm_observations = {};
   };
@@ -203,8 +294,9 @@ class NativeArtifactCaptureSink final {
   // Runs shortly before session expiry, after which the session drops every
   // record: unresolved guest work becomes explicit gaps, held hosts survive.
   void FlushBeforeExpiry(std::uint64_t generation);
-  // Turns every unresolved guest dispatch and held Wasm observation into a
-  // gap in its own slot, publishing held hosts unparented.
+  // Retains open response bodies, then turns every unresolved guest dispatch
+  // and held Wasm observation into a gap in its own slot, publishing held
+  // hosts unparented.
   void FlushPendingWork(std::string_view guest_reason, std::string_view wasm_reason);
   std::vector<GuestGroup> guest_groups_;
   std::map<GuestEventKey, GuestInvocation> guest_invocations_;
@@ -229,11 +321,25 @@ class NativeArtifactCaptureSink final {
                                                  std::string_view source_url,
                                                  mojo_base::BigBuffer content,
                                                  std::uint64_t parent_artifact_id,
-                                                 bool native_wasm_runtime);
+                                                 bool native_wasm_runtime,
+                                                 std::function<void()> on_refused = {});
 
-  void OnBodyComplete(std::unique_ptr<CaptureContext> context,
-                      bool complete,
-                      std::vector<std::uint8_t> content);
+  void OnBodyData(std::uint64_t artifact_id, std::span<const std::uint8_t> chunk);
+  void OnBodyComplete(std::uint64_t artifact_id, NativeArtifactBodyEnd end);
+  // Ends a response stream that failed, with the reason it carries.
+  void FailResponseStream(std::uint64_t artifact_id, const char* reason);
+  static CopiedContent CopyRequestContent(scoped_refptr<network::ResourceRequestBody> body,
+                                          std::string text,
+                                          std::size_t size,
+                                          NativeArtifactStream stream);
+  void OnRequestContentCopied(std::unique_ptr<CaptureContext> context, CopiedContent copied);
+  void OnRequestBodyRead(std::uint64_t generation,
+                         std::uint64_t request_id,
+                         std::uint64_t frame_id,
+                         std::size_t allowance,
+                         NativeRequestBodyRecorder record,
+                         NativeRequestBodyReadResult result);
+  void RefundRequestContent(std::size_t bytes) noexcept;
   void OnTransferCompleted(std::uint64_t artifact_id, NativeArtifactReceiveStatus status) noexcept;
   void EmitResult(NativeProbeType type,
                   std::uint64_t artifact_id,
@@ -245,8 +351,6 @@ class NativeArtifactCaptureSink final {
   [[nodiscard]] bool IsEnabledFor(NativeProbeCategory category) const noexcept;
   [[nodiscard]] bool IsCurrentCapture(std::uint64_t session_id,
                                       std::uint64_t generation) const noexcept;
-  [[nodiscard]] bool Reserve(std::size_t bytes) noexcept;
-  void Release(std::size_t bytes) noexcept;
 
   // Configuration, body completions and posted transfer ACKs run on the browser
   // sequence. A new generation retires admitted work even if session ID is reused.
@@ -256,9 +360,13 @@ class NativeArtifactCaptureSink final {
   std::atomic<std::uint64_t> category_mask_{0};
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
   std::atomic<std::uint64_t> next_artifact_id_{1};
-  std::atomic<std::size_t> active_bytes_{0};
+  NativeArtifactMemoryPool memory_pool_{kNativeArtifactInFlightBytes};
+  std::uint64_t request_content_budget_ = 0;
+  std::uint64_t request_content_used_ = 0;
+  std::set<std::array<std::uint8_t, 32>> request_content_digests_;
   std::atomic<std::size_t> runtime_typed_array_count_{0};
   std::map<std::uint64_t, PendingContext> pending_;
+  std::map<std::uint64_t, ResponseStream> response_streams_;
   std::size_t wasm_dispatch_count_ = 0;
   // One artifact per exact module and document for physical observations.
   // Value is the artifact ID and whether its transfer was already accepted.

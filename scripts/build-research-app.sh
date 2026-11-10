@@ -21,6 +21,7 @@ macos_path="${contents_path}/MacOS"
 resources_path="${contents_path}/Resources"
 swift_source="${repo_root}/apps/research-ui/macos/OriginTraceApp.swift"
 stored_event_window_source="${repo_root}/apps/research-ui/macos/StoredEventWindow.swift"
+stored_evidence_backend_source="${repo_root}/apps/research-ui/macos/StoredEvidenceBackend.swift"
 trace_document_source="${repo_root}/apps/research-ui/macos/OriginTraceDocument.swift"
 workspace_lease_source="${repo_root}/apps/research-ui/macos/NativeWorkspaceLease.swift"
 analyst_runner_source="${repo_root}/apps/research-ui/macos/AnalystRunner.swift"
@@ -74,7 +75,7 @@ if application.is_dir():
 PY
 mkdir -p "${research_ui_resources}"
 # One explicit packaged copy serves both the native scheme and live HTTP UI.
-for asset in index.html app.css block_graph.css block_graph.js block_graph_layout.js entropy_map.css entropy_map.js command_palette.js app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_facts.js source_search.js traffic_view.js captured_client.js captured_export_formats.js vm_debugger.js vm_static.js vm_static_view.js vm_contextual.js vm_contextual_evidence.js vm_contextual_view.js vm_analysis_packs.js vm_opcode_ledger.js vm_opcode_ledger_view.js vm_semantics.js pane_layout.js native_console_completion.js native_console.js investigation_navigation.js investigation_notebook.js evidence_names.js invocation_sites.js app.js agent_panel.js agent_panel.css vm_program_workspace.js xrefs_view.js xrefs_view.css analyst_runner_core.js analyst_runner_node.js; do
+for asset in index.html app.css block_graph.css block_graph.js block_graph_layout.js entropy_map.css entropy_map.js command_palette.js app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_format.js code_view.js source_facts.js source_search.js source_tree.js traffic_view.js traffic_payload.js traffic_index.js traffic_filter.js traffic_columns.js traffic_overview.js network_scope.js request_tabs.js traffic_response.js traffic_headers.js traffic_cookies.js captured_client.js captured_export_formats.js vm_debugger.js vm_static.js vm_static_view.js vm_contextual.js vm_contextual_evidence.js vm_contextual_view.js vm_analysis_packs.js vm_opcode_ledger.js vm_opcode_ledger_view.js vm_semantics.js pane_layout.js native_console_completion.js native_console.js investigation_navigation.js investigation_notebook.js evidence_names.js invocation_sites.js request_stack.js app.js agent_panel.js agent_panel.css vm_program_workspace.js xrefs_view.js xrefs_view.css analyst_runner_core.js analyst_runner_node.js; do
   cp "${repo_root}/apps/research-ui/${asset}" "${research_ui_resources}/${asset}"
 done
 # The agent dock's LangGraph loop: one browser bundle per provider, built from
@@ -171,12 +172,17 @@ xcrun swiftc -parse-as-library \
   -o "${repo_root}/build/check-stored-event-window"
 "${repo_root}/build/check-stored-event-window"
 
+xcrun swiftc -parse-as-library \
+  "${stored_evidence_backend_source}" "${repo_root}/tools/check-stored-evidence-backend.swift" \
+  -o "${repo_root}/build/check-stored-evidence-backend"
+"${repo_root}/build/check-stored-evidence-backend" "${macos_path}/OriginTraceBackend"
+
 xcrun swiftc \
   -parse-as-library \
   -framework Cocoa \
   -framework WebKit \
   -framework Security \
-  "${swift_source}" "${stored_event_window_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${agent_core_source}" "${agent_bridge_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
+  "${swift_source}" "${stored_event_window_source}" "${stored_evidence_backend_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${agent_core_source}" "${agent_bridge_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
   -o "${macos_path}/OriginTrace"
 
 "${macos_path}/OriginTrace" --check-native-ui-url

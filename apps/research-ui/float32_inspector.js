@@ -115,7 +115,7 @@ function mountFloat32Inspector(root,{getArtifacts=()=>[],protocol=location.proto
     return {protocol_version:1,input:selected('input'),reference:$('#float32-reference-enabled').checked?selected('reference'):null,tolerances:{absolute,relative,ulps},detail:{start,limit:64}};
   }
   function refreshSources() {
-    const artifacts=getArtifacts().slice(0,2048).filter(row=>typeof row.session_id==='string'&&typeof row.artifact_id==='string'&&/^[0-9a-f]{64}$/.test(row.sha256)&&float32Integer(row.byte_size,262144)).slice(0,2048);
+    const artifacts=getArtifacts().slice(0,2048).filter(row=>row.sensitive===false&&typeof row.session_id==='string'&&typeof row.artifact_id==='string'&&/^[0-9a-f]{64}$/.test(row.sha256)&&float32Integer(row.byte_size,262144)).slice(0,2048);
     const key=JSON.stringify(artifacts.map(row=>[row.session_id,row.artifact_id,row.sha256,row.byte_size]));if(key===lastArtifacts)return;lastArtifacts=key;
     let activeSelectionChanged=false;
     for(const side of ['input','reference']) {

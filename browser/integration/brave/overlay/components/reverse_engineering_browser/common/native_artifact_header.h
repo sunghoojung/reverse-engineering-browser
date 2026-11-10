@@ -24,6 +24,12 @@ inline constexpr std::uint32_t kNativeArtifactMaxUrlBytes = 8'192;
 inline constexpr std::uint32_t kNativeArtifactMaxMimeTypeBytes = 255;
 inline constexpr std::size_t kNativeArtifactMaxContentBytes = 16U * 1024U * 1024U;
 inline constexpr std::uint16_t kNativeArtifactFlagSensitive = 1U << 0U;
+// Version 2 streams teed bodies: an open header, then stream frames.
+inline constexpr std::uint16_t kNativeArtifactStreamProtocolVersion = 2;
+inline constexpr std::uint32_t kNativeArtifactStreamMagic = 0x53424552U;
+inline constexpr std::size_t kNativeArtifactStreamFrameSize = 80;
+inline constexpr std::size_t kNativeArtifactStreamChunkBytes = 64U * 1024U;
+inline constexpr std::size_t kNativeArtifactMaxOpenStreams = 128;
 
 enum class NativeArtifactKind : std::uint16_t {
   kUnknown = 0,
@@ -35,6 +41,11 @@ enum class NativeArtifactKind : std::uint16_t {
   kBytecodeBuffer = 6,
   kWasmGuestAdapter = 7,
   kRequestBody = 8,
+  kRequestTarget = 9,
+  kRequestHeaders = 10,
+  kResponseHeaders = 11,
+  kCookieList = 12,
+  kStack = 13,
 };
 
 enum class NativeArtifactCaptureOrigin : std::uint16_t {
@@ -49,6 +60,8 @@ enum class NativeArtifactCaptureOrigin : std::uint16_t {
   kRuntimeAllocatingScript = 8,
   kNativeWasmGuest = 9,
   kNetworkRequest = 10,
+  kRequestStack = 12,
+  kStackScript = 13,
   kCompiledScript = 14,
 };
 
@@ -148,6 +161,40 @@ REB_ASSERT_NATIVE_ARTIFACT_HEADER_OFFSET(capture_origin, 120);
 REB_ASSERT_NATIVE_ARTIFACT_HEADER_OFFSET(reserved1, 122);
 REB_ASSERT_NATIVE_ARTIFACT_HEADER_OFFSET(reserved2, 124);
 #undef REB_ASSERT_NATIVE_ARTIFACT_HEADER_OFFSET
+
+enum class NativeArtifactStreamOp : std::uint16_t {
+  kData = 1,
+  kCheckpoint = 2,
+  kEnd = 3,
+  kAbort = 4,
+};
+
+// Mirrors reb::ArtifactStreamFrame.
+struct NativeArtifactStreamFrame final {
+  std::uint32_t magic = kNativeArtifactStreamMagic;
+  std::uint16_t protocol_version = kNativeArtifactStreamProtocolVersion;
+  std::uint16_t frame_size = static_cast<std::uint16_t>(kNativeArtifactStreamFrameSize);
+  NativeArtifactStreamOp op = NativeArtifactStreamOp::kData;
+  std::uint16_t reserved0 = 0;
+  std::uint32_t data_size = 0;
+  std::uint64_t session_id = 0;
+  std::uint64_t artifact_id = 0;
+  std::uint64_t value = 0;
+  std::uint64_t content_size = 0;
+  std::array<std::uint8_t, 32> expected_sha256{};
+};
+
+static_assert(sizeof(NativeArtifactStreamFrame) == kNativeArtifactStreamFrameSize);
+static_assert(std::is_standard_layout_v<NativeArtifactStreamFrame>);
+static_assert(std::is_trivially_copyable_v<NativeArtifactStreamFrame>);
+static_assert(std::has_unique_object_representations_v<NativeArtifactStreamFrame>);
+static_assert(offsetof(NativeArtifactStreamFrame, op) == 8);
+static_assert(offsetof(NativeArtifactStreamFrame, data_size) == 12);
+static_assert(offsetof(NativeArtifactStreamFrame, session_id) == 16);
+static_assert(offsetof(NativeArtifactStreamFrame, artifact_id) == 24);
+static_assert(offsetof(NativeArtifactStreamFrame, value) == 32);
+static_assert(offsetof(NativeArtifactStreamFrame, content_size) == 40);
+static_assert(offsetof(NativeArtifactStreamFrame, expected_sha256) == 48);
 
 // Only the browser-process bridge owns the authenticated receiver connection.
 // Renderer probes may submit bounded generated-source bytes to that bridge,

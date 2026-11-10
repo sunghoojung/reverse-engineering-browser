@@ -13,15 +13,17 @@
 #include <limits>
 
 #if __has_include("brave/components/reverse_engineering_browser/common/native_probe_event.h")
+#include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #else
+#include "native_network_scope.h"
 #include "native_probe_event.h"
 #endif
 
 namespace reb {
 
 inline constexpr std::uint32_t kNativeProbeQueueMagic = 0x52454251;
-inline constexpr std::uint16_t kNativeProbeQueueVersion = 2;
+inline constexpr std::uint16_t kNativeProbeQueueVersion = 3;
 // More headroom for bursts that overflowed 1,024 slots; not a no-loss guarantee.
 // A producer that stays ahead of the consumer can still drop.
 inline constexpr std::size_t kNativeProbeQueueCapacity = 8192;
@@ -160,6 +162,23 @@ class alignas(64) NativeProbeQueue final {
     return dropped_.load(std::memory_order_relaxed);
   }
 
+  // Browser-internal requests the producer did not record, per scheme class.
+  // Like drops they are counts, never records; the consumer reports them.
+  void CountExclusion(const NativeSchemeClass scheme_class) noexcept {
+    if (!IsBrowserInternalSchemeClass(scheme_class))
+      return;
+    auto& count = excluded_[static_cast<std::size_t>(scheme_class) - 16];
+    std::uint64_t value = count.load(std::memory_order_relaxed);
+    while (value != std::numeric_limits<std::uint64_t>::max() &&
+           !count.compare_exchange_weak(value, value + 1, std::memory_order_relaxed,
+                                        std::memory_order_relaxed)) {
+    }
+  }
+
+  [[nodiscard]] std::uint64_t ExclusionCount(const std::size_t slot) const noexcept {
+    return slot < excluded_.size() ? excluded_[slot].load(std::memory_order_relaxed) : 0;
+  }
+
  private:
   struct alignas(64) Slot final {
     std::atomic<std::uint64_t> sequence{0};
@@ -203,10 +222,12 @@ class alignas(64) NativeProbeQueue final {
   [[maybe_unused]] std::array<std::byte, 56> dropped_padding_{};
   alignas(64) std::atomic<bool> notification_pending_{false};
   [[maybe_unused]] std::array<std::byte, 63> notification_padding_{};
+  alignas(64) std::array<std::atomic<std::uint64_t>, kNativeSchemeExclusionSlots> excluded_{};
+  [[maybe_unused]] std::array<std::byte, 64 - 8 * kNativeSchemeExclusionSlots> excluded_padding_{};
   alignas(64) std::array<Slot, kNativeProbeQueueCapacity> slots_{};
 };
 
-static_assert(sizeof(NativeProbeQueue) == 3146048);
+static_assert(sizeof(NativeProbeQueue) == 3146112);
 static_assert(alignof(NativeProbeQueue) == 64);
 
 }  // namespace reb

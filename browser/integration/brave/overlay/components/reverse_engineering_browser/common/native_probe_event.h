@@ -87,6 +87,34 @@ enum class NativeProbeType : std::uint16_t {
   // Compact identities for Wasm samples a budget refused. Not full observations.
   kWasmDispatchOverflow = 28,
   kWasmIndirectOverflow = 29,
+  // Header block summaries; see protocol/native-network-v3.md.
+  kRequestHeaders = 30,
+  kResponseHeaders = 31,
+  kCookieList = 32,
+  // What happened to a response body; see protocol/native-network-v3.md.
+  kResponseBody = 33,
+  // Request initiator stack and the script identities it names; see
+  // protocol/native-network-v3.md.
+  kRequestInitiatorStack = 34,
+  kScriptIdentity = 35,
+  // Counted browser-internal exclusion; see protocol/native-network-v3.md.
+  kCaptureExclusion = 36,
+  kTabSet = 37,
+  kRequestTabLink = 38,
+  kScriptCookie = 39,
+  // See protocol/native-debugger-observation-v1.md.
+  kRequestWatchMatch = 40,
+  kListenerDispatch = 41,
+  kTimerObservation = 42,
+  kCspViolation = 43,
+  kExceptionObservation = 44,
+  kDomMutation = 45,
+  // Navigation and async task callers; see protocol/native-network-v3.md.
+  kNavigationInitiatorStack = 46,
+  kNavigationInitiatorLink = 47,
+  kAsyncTaskStack = 48,
+  // Extension traffic recorded by opt-in; see protocol/native-network-v3.md.
+  kRequestExtensionLink = 50,
   // See protocol/native-compiled-scripts-v1.md.
   kScriptCompiled = 51,
 };
@@ -127,7 +155,11 @@ struct NativeProbeHeader final {
   std::uint16_t flags = 0;
   std::uint32_t initiator_request_id = 0;
   std::uint32_t initiator_process_id = 0;
-  std::uint32_t reserved1 = 0;
+  // NativeSchemeClass and NativeLoaderKind of a request record
+  // (protocol/native-network-v3.md).
+  std::uint8_t scheme_class = 0;
+  std::uint8_t loader_kind = 0;
+  std::uint16_t reserved2 = 0;
 };
 
 struct alignas(64) NativeProbeEvent final {
@@ -170,7 +202,9 @@ REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET(resource_type, 128);
 REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET(flags, 130);
 REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET(initiator_request_id, 132);
 REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET(initiator_process_id, 136);
-REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET(reserved1, 140);
+REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET(scheme_class, 140);
+REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET(loader_kind, 141);
+REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET(reserved2, 142);
 #undef REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET
 static_assert(sizeof(NativeProbeHeader) == 144);
 static_assert(sizeof(NativeProbeEvent) == 320);

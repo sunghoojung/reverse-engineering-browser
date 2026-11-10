@@ -64,6 +64,23 @@ it.
   or `js_invocation_saved_sites`), never inherited, and keep their own saved
   set, so an agent cannot read or change what the researcher's next capture
   arms.
+- Request call stacks (`REB_NATIVE_REQUEST_STACKS`, on by default in the
+  packaged app when Network and Artifact are captured) record script IDs and
+  positions of the stack that started each document request or script
+  navigation, and of the stack that scheduled each async task it came from,
+  never names or values. Content capture sessions also retain the source of
+  each script a stack names as an artifact; metadata-only sessions do not.
+  Agent-started sessions record them only when the start names
+  `request_stacks`.
+  See [Native network v3](protocol/native-network-v3.md).
+- Debugger observation rules (Console `watch`) are off until armed on one
+  selected live document and never pause it. They record request matches,
+  listener dispatch, timers, CSP violations, exceptions and mutations of at most
+  4 selected elements as script IDs, positions, kinds, the blocked host and
+  attribute names, never values, text, paths or queries. Navigation, `unwatch`,
+  a Console Stop or a new capture disarms them. A lost backend connection leaves
+  them armed until navigation or the capture ends. See
+  [Native debugger observation v1](protocol/native-debugger-observation-v1.md).
 - With Artifact capture on, every script V8 compiles records its V8 script ID,
   realm, kind, UTF-8 length, SHA-256 and, for `eval` and `Function`, the script
   and position that created it. A digest of a short or predictable source can be
@@ -80,8 +97,22 @@ it.
   can be confirmed by guessing; password form posts keep no digest. Request
   paths, queries and body bytes are sensitive capture: they are retained only
   with `REB_CAPTURE_REQUEST_CONTENT=1`, which the packaged app's default content
-  mode sets, at most 256 KiB per body and 1,024 bodies or 64 MiB per session. See
-  [Native network v2](protocol/native-network-v2.md).
+  mode sets, at most 16 MiB per body and 256 MiB of unique body and full-URL
+  bytes per session unless `REB_REQUEST_CONTENT_BUDGET_MIB` sets another
+  budget. Those bytes include uploaded files, blobs and stream bodies, which the
+  browser reads for that purpose. See [Native network v2](protocol/native-network-v2.md). The same
+  sessions retain response bodies, at most 16 MiB each and 512 MiB of unique
+  bytes unless `REB_RESPONSE_BODY_BUDGET_MIB` sets another budget; images,
+  audio, video and fonts that page elements load need
+  `REB_CAPTURE_RESPONSE_MEDIA=1`. See [Native network v3](protocol/native-network-v3.md).
+  The backend's request index keeps a private derived copy of those paths
+  beside the event store; capture clear removes it
+  ([request index v1](protocol/request-index-v1.md)).
+- Browser-internal pages (WebUI, DevTools) and extension background workers are
+  counted, not recorded. `REB_CAPTURE_BROWSER_INTERNAL=1` and
+  `REB_CAPTURE_EXTENSION_TRAFFIC=1` record them, extension traffic under its
+  extension id, with the same content gates; agent-started sessions never set
+  them.
 - Historical captures can include sensitive URLs, headers, bodies and source.
   Removal of CDP does not sanitize previously saved evidence. Only collect and
   disclose data covered by authorization.
@@ -98,9 +129,11 @@ it.
 
 - Sensitive capture requires an enabled, visibly labeled session. Content mode
   is the default for captures the packaged app starts: for its bounded session
-  it turns on retention of request paths, queries and bodies up to 256 KiB each
-  and of Canvas images, and the titlebar labels that session "Content
-  capture". **Metadata
+  it turns on retention of request paths, queries and bodies and of response
+  bodies, up to 16 MiB each, of request and response headers, including `Cookie`, `Set-Cookie` and
+  `Authorization`, of the cookies each request sent and received and the
+  cookie names and value digests page script used, and of Canvas images, and
+  the titlebar labels that session "Content capture". **Metadata
   only** is the opt-out, chosen in **New Live Session…** or with
   `REB_AUTOMATIC_CAPTURE_MODE=metadata`; any other value but `content` also
   selects it. The app saves no choice between launches, and a choice made in the
@@ -150,6 +183,10 @@ it.
   invent memory bytes or return values. A current Brave build does not implement
   that peer. Other Wasm evidence comes from native capture and stored artifacts.
   The owned VM debugger controls only the project's own native fixture helper.
+  A pausing page debugger is proposed in
+  [Native debugger v1](docs/product/native-debugger-v1.md) and is not policy
+  until a maintainer approves that wording here; `get_native_debugger` reports
+  it unsupported.
 - An agent starts, drives and ends a live capture session only through the
   session tools: `start_live_session` or `reb-api session start`, and
   `session_action` with `open_url` or `end`. They stay hidden until the

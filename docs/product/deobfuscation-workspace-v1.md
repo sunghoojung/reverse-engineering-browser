@@ -28,19 +28,22 @@ server use the same Rust backend and analysis worker.
 
 Sources keeps semantic rewriting and display formatting as separate controls.
 **Deob** selects the mapped representation returned by the analysis engine.
-The DevTools-style **{ }** control pretty prints whichever representation is
-active. This means a source classified as minified can still be expanded when
-the semantic deobfuscator correctly reports that no safe rewrite was found.
+The DevTools-style **{ }** toggle in the status bar pretty prints whichever
+representation is active. This means a source classified as minified can still
+be expanded when the semantic deobfuscator correctly reports that no safe
+rewrite was found. JavaScript, CSS and JSON with a line over 16 KiB open
+pretty-printed; the researcher's choice is remembered per artifact.
 
 Pretty printing detects JavaScript, JSON, CSS, and HTML from the captured kind,
 MIME type, and filename. It changes only display whitespace, preserves strings,
-comments, regular expressions, and template literals, and produces a UTF-16
-segment map back to its input. When pretty print is layered over Deob, Sources
-composes both maps so every displayed line can return to original evidence.
-Formatting is bounded to 2 MiB of input and 4 MiB of output, cached for the last
-eight representations, and never changes the artifact or live runtime source.
-The formatter stops at 250,000 lexical tokens or 500,000 mapping segments so a
-small but adversarial source cannot create an unbounded display structure.
+comments, regular expressions, and template literals, and maps back to its input
+by walking both texts in step from one sync point per 4 Ki formatted UTF-16
+units. When pretty print is layered over Deob, Sources composes both maps so
+every displayed line can return to original evidence. The in-page formatter runs
+in a Web Worker, streams its tokens, accepts the 16 MiB artifact cap and stops
+when its output exceeds three times that. In-page layouts are cached for the
+last eight representations within 64 Mi UTF-16 units, and formatting never
+changes the artifact or live runtime source.
 
 ## Analysis schema
 

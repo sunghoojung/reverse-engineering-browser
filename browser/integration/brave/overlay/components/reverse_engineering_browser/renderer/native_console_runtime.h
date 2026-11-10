@@ -41,6 +41,8 @@ class NativeConsoleRuntime final {
                   v8::Local<v8::Context> context,
                   blink::WebLocalFrame* frame,
                   const std::string& command);
+  // Disarms this document's watch rules, protocol/native-debugger-observation-v1.md.
+  void Unwatch();
 
  private:
   struct Slot {
@@ -72,6 +74,11 @@ class NativeConsoleRuntime final {
   base::DictValue Complete(v8::Isolate* isolate,
                            v8::Local<v8::Context> context,
                            const base::DictValue& command);
+  base::DictValue Watch(v8::Isolate* isolate,
+                        blink::WebLocalFrame* frame,
+                        const base::DictValue& command);
+  std::uint64_t watch_frame_ = 0;
+  v8::Isolate* watch_isolate_ = nullptr;
   std::array<Slot, 128> slots_;
   std::size_t next_slot_ = 0;
   std::uint64_t next_handle_ = 1;

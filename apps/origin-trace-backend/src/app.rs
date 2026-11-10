@@ -15,7 +15,10 @@ use crate::{
     native_console::NativeConsole,
     origin_trace,
     owned_vm_debugger::OwnedVmDebugger,
-    session_context, session_summary, source_facts, validation, vm, wasm, wasm_graph,
+    request_cookies, request_headers,
+    request_index::{self, RequestIndex},
+    session_context, session_summary, source_facts, source_format, validation, vm, wasm,
+    wasm_graph,
     workspace::{Kind, Store},
 };
 use axum::{
@@ -28,14 +31,14 @@ use axum::{
 use serde_json::{Value, json};
 use sha2::Digest;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 44] = [
+const UI_ASSETS: [&str; 58] = [
     "index.html",
     "block_graph.css",
     "block_graph.js",
@@ -54,13 +57,27 @@ const UI_ASSETS: [&str; 44] = [
     "float32_inspector.js",
     "evidence_comparison.js",
     "source_syntax.js",
+    "source_format.js",
+    "code_view.js",
     "source_facts.js",
     "source_search.js",
+    "source_tree.js",
     "investigation_navigation.js",
     "investigation_notebook.js",
     "evidence_names.js",
     "invocation_sites.js",
+    "request_stack.js",
     "traffic_view.js",
+    "network_scope.js",
+    "request_tabs.js",
+    "traffic_response.js",
+    "traffic_headers.js",
+    "traffic_cookies.js",
+    "traffic_payload.js",
+    "traffic_index.js",
+    "traffic_filter.js",
+    "traffic_columns.js",
+    "traffic_overview.js",
     "captured_client.js",
     "captured_export_formats.js",
     "vm_semantics.js",
@@ -131,6 +148,7 @@ pub struct App {
     decoder: Decoder,
     analyst: Analyst,
     deobfuscator: Deobfuscator,
+    source_format: source_format::SourceFormat,
     /// Process-lifetime identity for `/api/health` and `X-REB-Expected-Instance`.
     instance_id: String,
     native_console: NativeConsole,
@@ -146,6 +164,8 @@ pub struct App {
     /// Cursors of the current cross-reference selection; one entry only.
     xrefs: Arc<crate::xrefs::Cursors>,
     events: Arc<Mutex<event_window::EventWindowCache>>,
+    requests: Arc<Mutex<RequestIndex>>,
+    initiator_frames: Arc<std::sync::Mutex<crate::request_stack::InitiatorFrames>>,
     artifact_lookup: Arc<Mutex<ArtifactLookupCache>>,
     /// Bounds concurrent `/api/events/wait` callers; a full pool refuses.
     event_waiters: Arc<Semaphore>,
@@ -174,6 +194,8 @@ fn cached_artifact_lookup(
 
 impl App {
     pub async fn stop(&self) {
+        let mut index = self.requests.clone().lock_owned().await;
+        let _ = tokio::task::spawn_blocking(move || index.maintain()).await;
         self.analyst.stop();
         self.native_console.stop().await;
         if self.owned_vm_debugger.stop().await.is_err() {
@@ -208,6 +230,7 @@ impl App {
                 "OriginTraceDeobfuscator",
                 "apps/deobfuscator-worker/target/debug/reb-deobfuscator-worker",
             )),
+            source_format: source_format::SourceFormat::default(),
             instance_id: format!(
                 "{}:{}",
                 std::process::id(),
@@ -233,6 +256,8 @@ impl App {
             ),
             live_browser: LiveBrowser::new(&options),
             lifecycle: Capture::new(&options),
+            requests: Arc::new(Mutex::new(RequestIndex::new(&options.store))),
+            initiator_frames: Arc::default(),
             invocation_sites,
             invocation_session,
             text_digests: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
@@ -247,6 +272,15 @@ impl App {
             event_waiters: Arc::new(Semaphore::new(event_query::MAX_WAITERS)),
         });
         app.native_console.arm_live_bridge().await;
+        let index = app.requests.clone();
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(request_index::PERSIST_INTERVAL);
+            loop {
+                ticks.tick().await;
+                let mut index = index.clone().lock_owned().await;
+                let _ = tokio::task::spawn_blocking(move || index.maintain()).await;
+            }
+        });
         app
     }
     pub fn router(self: &Arc<Self>) -> Router {
@@ -477,6 +511,21 @@ impl App {
                 }
                 self.live_wasm.state()?
             }
+            "/api/native-debugger" => {
+                if !q.0.is_empty() {
+                    return Err(Error::bad(
+                        "Native debugger state takes no query parameters",
+                    ));
+                }
+                let console = self.native_console.state().await;
+                let watch = self.native_console.watch();
+                let store = self.options.store.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::native_debugger::state(&store, &console, watch)
+                })
+                .await
+                .map_err(|_| Error::new(500, "Native debugger state read failed"))??
+            }
             "/api/native-console" => self.native_console.state().await,
             "/api/native-console/document-start" => {
                 if q.0.keys().any(|key| key != "after_sequence") {
@@ -621,6 +670,51 @@ impl App {
                 result["source"] = identity;
                 result
             }
+            "/api/source-format" => {
+                q.only(
+                    &["session_id", "artifact_id"],
+                    &["start_line", "line_count", "language"],
+                )?;
+                q.number("session_id", None, 64, false)?;
+                q.number("artifact_id", None, 64, false)?;
+                let language = match q.one("language")? {
+                    None => None,
+                    Some(value) => Some(
+                        source_format::Language::parse(value)
+                            .ok_or_else(|| Error::bad("language must be javascript or json"))?,
+                    ),
+                };
+                let window = match (q.one("start_line")?, q.one("line_count")?) {
+                    (None, None) => None,
+                    (Some(_), Some(_)) => {
+                        let start_line = q.number("start_line", None, 64, true)?;
+                        let line_count = q.number("line_count", None, 64, true)?;
+                        if line_count > source_format::MAX_WINDOW_LINES {
+                            return Err(Error::bad(
+                                "line_count exceeds the formatted window limit",
+                            ));
+                        }
+                        Some(source_format::Window {
+                            start_line,
+                            line_count,
+                        })
+                    }
+                    _ => {
+                        return Err(Error::bad(
+                            "A formatted window requires start_line and line_count",
+                        ));
+                    }
+                };
+                let session = q.required("session_id")?.to_owned();
+                let id = q.required("artifact_id")?.to_owned();
+                let root = self.options.artifacts.clone();
+                let (source, identity, language) = self
+                    .blocking(move || source_format::load(&root, &session, &id, language))
+                    .await?;
+                self.source_format
+                    .format(source, identity, language, window)
+                    .await?
+            }
             "/api/js-invocation-sites" => {
                 if !q.0.is_empty() {
                     return Err(Error::bad(
@@ -647,6 +741,49 @@ impl App {
                 )
                 .await?
                 .0
+            }
+            "/api/request-stack" => {
+                q.only(
+                    &[
+                        "session_id",
+                        "process_id",
+                        "request_id",
+                        "navigation_sequence",
+                    ],
+                    &[],
+                )?;
+                let session = match q.one("session_id")? {
+                    Some(_) => Some(q.number("session_id", None, 64, true)?),
+                    None => None,
+                };
+                let process = q.number("process_id", None, 32, true)?;
+                let navigation = match q.one("navigation_sequence")? {
+                    Some(_) => Some(q.number("navigation_sequence", None, 64, true)?),
+                    None => None,
+                };
+                let request = match navigation {
+                    Some(_) if q.one("request_id")?.is_some() => {
+                        return Err(Error::bad(
+                            "Specify request_id or navigation_sequence, not both",
+                        ));
+                    }
+                    Some(_) => 0,
+                    None => q.number("request_id", None, 64, true)?,
+                };
+                let (store, artifacts, requests) = (
+                    self.options.store.clone(),
+                    self.options.artifacts.clone(),
+                    self.requests.clone(),
+                );
+                self.blocking(move || match navigation {
+                    Some(sequence) => crate::request_stack::navigation_document(
+                        &store, &artifacts, &requests, session, process, sequence,
+                    ),
+                    None => crate::request_stack::document(
+                        &store, &artifacts, &requests, session, process, request,
+                    ),
+                })
+                .await?
             }
             "/api/deobfuscation" => {
                 let artifact = q.required("artifact_id")?;
@@ -726,6 +863,44 @@ impl App {
                             .expect("Demo canvas capture");
                 }
                 result
+            }
+            "/api/requests" => {
+                let query = request_index::RequestQuery::parse(&q, raw_query)?;
+                let tag = headers
+                    .get("if-none-match")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                let mut index = self.requests.clone().lock_owned().await;
+                let (frames, root) = (
+                    self.initiator_frames.clone(),
+                    self.options.artifacts.clone(),
+                );
+                return match self
+                    .blocking(move || {
+                        let mut answer = index.respond(&query, tag.as_deref())?;
+                        let mut settled = true;
+                        if let request_index::Answer::Document(document, _) = &mut answer {
+                            settled = frames
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .resolve(document, &root);
+                        }
+                        Ok((answer, settled))
+                    })
+                    .await?
+                {
+                    (request_index::Answer::Unchanged(tag), _) => Ok(not_modified(&tag)),
+                    (request_index::Answer::Document(document, tag), settled) => {
+                        let mut response = axum::Json(document).into_response();
+                        // Frames left for a later answer must not be cached behind a 304.
+                        if settled {
+                            response
+                                .headers_mut()
+                                .insert("etag", HeaderValue::from_str(&tag).unwrap());
+                        }
+                        Ok(response)
+                    }
+                };
             }
             "/api/artifacts" => {
                 q.only(&artifact_query::ARTIFACT_QUERY_KEYS, &["limit"])?;
@@ -877,6 +1052,153 @@ impl App {
                         sequence.as_deref(),
                         Some(&options.artifacts),
                     )
+                })
+                .await?
+            }
+            "/api/request-headers" => {
+                q.only(&["session_id", "request_id"], &[])?;
+                let session = q.required("session_id")?.to_owned();
+                let request = q.required("request_id")?.to_owned();
+                for key in ["session_id", "request_id"] {
+                    q.number(key, None, 64, true)?;
+                }
+                let filter = event_query::event_filter(&q)?;
+                let options = self.options.clone();
+                // Coverage also depends on how far the index has read, with no store change.
+                let progress = self.requests.lock().await.progress_marker();
+                etag = Some(evidence::resource_etag(
+                    &options.store,
+                    &format!(
+                        "{}:{session}:{request}:{progress}",
+                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), "")
+                    ),
+                ));
+                if matches_etag(headers, etag.as_deref()) {
+                    return Ok(not_modified(etag.as_deref().unwrap()));
+                }
+                let requests = self.requests.clone();
+                self.blocking(move || {
+                    let range =
+                        requests
+                            .blocking_lock()
+                            .member_range(Some(&session), None, &request)?;
+                    let detail =
+                        event_query::read_request_records(&options.store, range, 1024, &filter)?;
+                    let artifacts =
+                        evidence::artifacts_named(&options.artifacts, &detail.records, |_| false)?;
+                    let mut document = request_headers::build(
+                        &detail.records,
+                        &artifacts,
+                        &options.artifacts,
+                        &session,
+                        &request,
+                    );
+                    document["coverage"] = detail.coverage.to_json();
+                    Ok(document)
+                })
+                .await?
+            }
+            "/api/request-cookies" => {
+                q.only(&["session_id", "request_id"], &[])?;
+                let session = q.required("session_id")?.to_owned();
+                let request = q.required("request_id")?.to_owned();
+                for key in ["session_id", "request_id"] {
+                    q.number(key, None, 64, true)?;
+                }
+                let filter = event_query::event_filter(&q)?;
+                let options = self.options.clone();
+                let progress = self.requests.lock().await.progress_marker();
+                etag = Some(evidence::resource_etag(
+                    &options.store,
+                    &format!(
+                        "cookies:{}:{session}:{request}:{progress}",
+                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), "")
+                    ),
+                ));
+                if matches_etag(headers, etag.as_deref()) {
+                    return Ok(not_modified(etag.as_deref().unwrap()));
+                }
+                let requests = self.requests.clone();
+                self.blocking(move || {
+                    let range =
+                        requests
+                            .blocking_lock()
+                            .member_range(Some(&session), None, &request)?;
+                    let detail =
+                        event_query::read_request_records(&options.store, range, 1024, &filter)?;
+                    let artifacts =
+                        evidence::artifacts_named(&options.artifacts, &detail.records, |_| false)?;
+                    let mut document = request_cookies::build(
+                        &detail.records,
+                        &artifacts,
+                        &options.artifacts,
+                        &session,
+                        &request,
+                    );
+                    document["coverage"] = detail.coverage.to_json();
+                    Ok(document)
+                })
+                .await?
+            }
+            "/api/cookie-provenance" => {
+                q.only(&["session_id", "name"], &[])?;
+                let session = q.required("session_id")?.to_owned();
+                q.number("session_id", None, 64, true)?;
+                let name = q.required("name")?.to_owned();
+                if name.len() > 4096 {
+                    return Err(Error::bad("name is longer than 4096 bytes"));
+                }
+                let filter = event_query::event_filter(&Query::new(&format!(
+                    "session_id={session}&category=network"
+                )))?;
+                let options = self.options.clone();
+                let progress = self.requests.lock().await.progress_marker();
+                etag = Some(evidence::resource_etag(
+                    &options.store,
+                    &format!(
+                        "provenance:{}:{session}:{name}:{progress}",
+                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), "")
+                    ),
+                ));
+                if matches_etag(headers, etag.as_deref()) {
+                    return Ok(not_modified(etag.as_deref().unwrap()));
+                }
+                let requests = self.requests.clone();
+                self.blocking(move || {
+                    // A cookie spans the session, so no one request's bytes bound it.
+                    let detail =
+                        event_query::read_request_records(&options.store, None, 5000, &filter)?;
+                    // Script writes resolve through this session's stacks and sources.
+                    let artifacts =
+                        evidence::artifacts_named(&options.artifacts, &detail.records, |a| {
+                            a["session_id"].as_str() == Some(session.as_str())
+                                && matches!(
+                                    a["kind"].as_str(),
+                                    Some("stack" | "javascript" | "wasm")
+                                )
+                        })?;
+                    let complete = detail.coverage.complete();
+                    let identities = |process: u64| {
+                        requests
+                            .blocking_lock()
+                            .identities(&session, process as u32)
+                            .map_or((HashMap::new(), complete), |(indexed, exhaustive)| {
+                                (
+                                    crate::request_stack::decode_indexed_identities(&indexed),
+                                    exhaustive || complete,
+                                )
+                            })
+                    };
+                    let mut document = request_cookies::provenance(
+                        &detail.records,
+                        &artifacts,
+                        &options.artifacts,
+                        &session,
+                        &name,
+                        &identities,
+                    );
+                    document["coverage"] = detail.coverage.to_json();
+                    Ok(document)
                 })
                 .await?
             }
@@ -1144,7 +1466,7 @@ impl App {
                     cursor,
                     limit,
                     event_query::SCAN_BYTES,
-                    event_query::EVENT_RECORD_BYTES,
+                    event_query::DAMAGED_LINE_BYTES,
                     event_query::event_visitor(&filter, &mut tally),
                 )?;
                 Ok((page, tally, filter))
@@ -1204,7 +1526,7 @@ impl App {
                             event_query::Cursor::After(cursor),
                             limit,
                             event_query::SCAN_BYTES,
-                            event_query::EVENT_RECORD_BYTES,
+                            event_query::DAMAGED_LINE_BYTES,
                             event_query::event_visitor(&filter, &mut tally),
                         )?;
                         Ok((page, tally, filter))
@@ -1438,6 +1760,7 @@ impl App {
                 _ => Err(Error::bad("Analyst workspace action is invalid")),
             },
             "/api/live-wasm/actions" => self.live_wasm.action(value),
+            "/api/native-debugger/actions" => crate::native_debugger::action(value),
             "/api/native-console/actions" => self.native_console.action(value).await,
             "/api/js-invocation-sites/actions" => {
                 validation::schema("JsInvocationSiteAction", value, 400)?;
@@ -1493,8 +1816,12 @@ impl App {
                 self.options.trace_store.clone(),
                 self.options.signal_store.clone(),
             ];
-            self.blocking(move || evidence::clear_stores(&paths))
-                .await?;
+            let mut index = self.requests.clone().lock_owned().await;
+            self.blocking(move || {
+                index.discard()?;
+                evidence::clear_stores(&paths)
+            })
+            .await?;
         } else {
             return Err(Error::bad("Capture action is invalid"));
         }
@@ -1966,7 +2293,7 @@ mod tests {
         // A sparse over-byte-cap manifest selects fallback without expensive reads.
         std::fs::File::create(root.path().join("manifest.jsonl"))
             .unwrap()
-            .set_len(64 * 1024 * 1024 + 1)
+            .set_len(256 * 1024 * 1024 + 1)
             .unwrap();
         let cache = Arc::new(Mutex::new(ArtifactLookupCache::default()));
         let guard = cache.clone().lock_owned().await;

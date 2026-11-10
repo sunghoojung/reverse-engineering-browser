@@ -7,7 +7,9 @@ import {runInNewContext} from 'node:vm';
 // Deterministic production-controller/DOM-work checks, not rendered latency.
 // Layout getters below count requests for geometry; they do not simulate a browser.
 const app = await readFile(new URL('../apps/research-ui/app.js', import.meta.url), 'utf8');
-const traffic = await readFile(new URL('../apps/research-ui/traffic_view.js', import.meta.url), 'utf8');
+const traffic = await readFile(new URL('../apps/research-ui/traffic_view.js', import.meta.url), 'utf8') +
+  await readFile(new URL('../apps/research-ui/traffic_filter.js', import.meta.url), 'utf8') +
+  await readFile(new URL('../apps/research-ui/traffic_index.js', import.meta.url), 'utf8');
 const part = (source, first, last) => {
   const start = source.indexOf(first), end = source.indexOf(last, start);
   assert(start >= 0 && end > start, `Missing production boundary: ${first}`);
@@ -22,7 +24,7 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
   clearStats();
   class Node {
     constructor(tag = 'div') {
-      this.tagName = tag; this.children = []; this.dataset = {}; this.attributes = new Map();
+      this.tagName = tag; this.children = []; this.dataset = {}; this.attributes = new Map(); this.style = {};
       this.listeners = new Map(); this.className = ''; this.textContent = ''; this.tabIndex = -1;
       this._scrollTop = 0; this.scrollLeft = 0; this.value = ''; this.hidden = false;
       this.classList = {
@@ -39,6 +41,7 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
     get lastElementChild() { return this.children.at(-1); }
     setAttribute(key, value) { stats.attributeWrites++; this.attributes.set(key, String(value)); }
     getAttribute(key) { return this.attributes.get(key) ?? null; }
+    removeAttribute(key) { this.attributes.delete(key); }
     addEventListener(key, callback) { this.listeners.set(key, callback); }
     append(...nodes) { for (const node of nodes) this.insertBefore(node, null); }
     replaceChildren(...nodes) { for (const node of [...this.children]) node.remove(); this.append(...nodes); }
@@ -74,17 +77,20 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
   };
   const elements = Object.fromEntries(['requestTabScopes', 'requestDomain', 'requestFilter', 'requestRows', 'requestLatest', 'selectedMethod', 'selectedStatus', 'selectedUrl',
     'requestCopyUrl', 'prompt'].map(name => [name, new Node()]));
+  // A 20-row view: 20 rows plus 8 of overscan mount at the top of the list.
+  elements.requestRows.clientHeight = 480; elements.requestRows.dataset.rowHeight = '24';
   const requests = Array.from({length: count}, (_, index) => ({id: `request-${index}`,
     method: index % 3 ? 'GET' : 'POST', path: `https://fixture-${index % 8}.invalid/item-${String(index).padStart(5, '0')}`,
     status: 200, time: index / 10, type: 'xhr', origin: 'demo', tabId: String(index % 8),
     firstTimestamp: BigInt(index), operation: 'authored_fixture', events: []}));
-  const state = {requests, selectedRequestId: null, requestTabId: 'all', requestDomain: 'all', requestType: 'all',
+  const state = {requests, nativeRequests: requests, selectedRequestId: null, requestTabId: 'all', requestDomain: 'all', requestType: 'all',
     trafficSort: 'name', trafficSortDirection: 1, trafficWindowStart: 0, trafficWindowAnchor: null,
     trafficNewIds: new Set(), trafficKnownIds: null, originTraceGeneration: 0, signalProfileGeneration: 0,
-    sessionMode: 'demo'};
+    sessionMode: 'demo', trafficLoaded: new Map(), trafficLoadController: null, trafficLoadingId: null,
+    trafficFlags: {}, trafficRange: null, trafficIndex: undefined, trafficIndexEpoch: null};
   // Native rows carry no bodies; search covers URL, method and status only.
   elements.requestFilter.value = 'fixture-1.invalid';
-  const context = {state, elements, document, URL, TextDecoder, TextEncoder, Uint8Array, stats,
+  const context = {state, elements, document, URL, URLSearchParams, AbortController, AbortSignal, TextDecoder, TextEncoder, Uint8Array, stats,
     matchMedia: () => ({matches: true}), fieldSets: {body: []},
     renderRequestCount() {}, renderEvidence() {},
     resetRequestSelection: () => { state.selectedRequestId = null; },
@@ -93,7 +99,13 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
     refreshRequestSignalProfile: () => { stats.profiles++; },
     investigationSame: (left, right) => left === right,
     investigationRequestIdentity: request => request.id,
-    investigationNotice: text => { state.notice = text; }};
+    investigationNotice: text => { state.notice = text; },
+    requestsFromEvents: (events, origin) => {
+      const id = events[0]?.request_id;
+      return id === undefined ? [] : [{id: `request-${id}`, method: 'GET', path: `https://fixture.invalid/item-${id}`, status: 200, time: 1,
+        type: 'xhr', origin, tabId: '1', firstTimestamp: 1n, operation: 'authored_fixture', events, details: []}];
+    },
+    setImmediate};
   const instrument = `
     const search = trafficSearchRequests;
     trafficSearchRequests = (...args) => { stats.searches++; return search(...args); };
@@ -102,16 +114,28 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
     const scopes = renderRequestScopes;
     renderRequestScopes = (...args) => { stats.scopes++; return scopes(...args); };
   `;
+  const added = ['selectTrafficRow', 'loadTrafficRequest', 'rebuildTrafficRequests', 'renderIndexedRequests', 'trafficIndexActive', 'createTrafficIndex'];
+  const rebuild = appSource.includes('      function rebuildTrafficRequests(') ? part(appSource, '      function rebuildTrafficRequests(', '      function renderShellStatus(') : '';
   const api = runInNewContext(trafficSource + '\n' +
-    part(appSource, '      function requestDomain(', '      function requestTraceRoot(') + instrument +
-    ';({renderRequests, selectRequest, moveRequestSelection})', context);
+    part(appSource, '      function requestDomain(', '      function requestTraceRoot(') + rebuild + instrument +
+    `;({renderRequests, selectRequest, moveRequestSelection, remountTrafficRows, ${added.map(name => `${name}: typeof ${name} === 'function' ? ${name} : undefined`).join(', ')}})`, context);
   const rows = () => elements.requestRows.querySelectorAll('.request-row');
   return {state, elements, document, stats, clearStats, api, rows, nodes};
 }
 
 {
   const t = fixture(); t.api.renderRequests();
-  assert.equal(t.rows().length, 500); assert.equal(t.state.trafficSearchMatches.size, 625);
+  assert.equal(t.rows().length, 28, 'only the rows in view and the overscan are mounted');
+  assert.equal(t.state.trafficSearchMatches.size, 625);
+  assert.deepEqual([t.rows()[0].getAttribute('aria-posinset'), t.rows()[0].getAttribute('aria-setsize')], ['1', '625']);
+  assert.equal(t.elements.requestRows.children.at(-1).className, 'request-spacer', 'a spacer stands for the unmounted rows');
+  // Scrolling within the overscan mounts nothing; past it, the read block remounts without filtering or sorting again.
+  t.elements.requestRows.scrollTop = 4 * 24; t.clearStats(); t.api.remountTrafficRows(t.elements.requestRows);
+  assert.equal(t.stats.moves, 0);
+  t.elements.requestRows.scrollTop = 30 * 24; t.api.remountTrafficRows(t.elements.requestRows);
+  assert.deepEqual([Number(t.rows()[0].dataset.position), Number(t.rows().at(-1).dataset.position)], [22, 57]);
+  assert.equal(t.stats.searches + t.stats.sorts, 0);
+  t.elements.requestRows.scrollTop = 0; t.api.remountTrafficRows(t.elements.requestRows);
   const first = t.rows()[20], next = t.rows()[21], firstChildren = [...first.children];
   first.focus(); t.elements.requestRows.scrollTop = 360; t.elements.requestRows.scrollLeft = 11;
   t.clearStats(); first.click();
@@ -130,12 +154,42 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
   assert.equal(first.getAttribute('aria-selected'), 'false'); assert.equal(first.tabIndex, -1);
   assert.equal(next.getAttribute('aria-selected'), 'true'); assert.equal(next.tabIndex, 0);
   assert.equal(t.rows().filter(row => row.tabIndex === 0).length, 1);
-  for (const key of ['Home', 'End', 'ArrowUp']) {
+  const position = () => Number(t.document.activeElement.dataset.position);
+  for (const key of ['Home', 'ArrowDown', 'ArrowUp']) {
     const current = t.document.activeElement;
     t.api.moveRequestSelection({key, currentTarget: current, preventDefault() {}});
     assert.equal(t.document.activeElement.dataset.requestId, t.state.selectedRequestId);
   }
+  assert.equal(position(), 0);
   assert.equal(t.stats.searches, 0, 'Repeated navigation does not repeat the filter scan');
+  // End and Home reach the whole list, not the mounted block, which moves once to hold the row.
+  t.api.moveRequestSelection({key: 'End', currentTarget: t.document.activeElement, preventDefault() {}});
+  assert.equal(t.document.activeElement.dataset.requestId, t.state.selectedRequestId);
+  assert.equal(position(), t.state.trafficSearchMatches.size - 1);
+  assert.equal(t.stats.searches, 1);
+  t.api.moveRequestSelection({key: 'ArrowDown', currentTarget: t.document.activeElement, preventDefault() {}});
+  assert.equal(position(), t.state.trafficSearchMatches.size - 1, 'ArrowDown stops at the last request');
+  t.api.moveRequestSelection({key: 'Home', currentTarget: t.document.activeElement, preventDefault() {}});
+  assert.equal(t.document.activeElement.dataset.requestId, t.state.selectedRequestId);
+  assert.equal(position(), 0);
+  // A focused row scrolled out of the mounted rows leaves focus on the list, and takes it back once mounted again.
+  t.document.activeElement = t.rows()[20];
+  const focusedId = t.document.activeElement.dataset.requestId;
+  t.elements.requestRows.scrollTop = 450 * 24;
+  t.api.renderRequests();
+  assert(t.state.trafficRenderedView.start > 20);
+  assert.equal(t.document.activeElement, t.elements.requestRows);
+  assert.deepEqual([Number(t.rows()[0].dataset.position), t.rows().length], [450 - 8, 20 + 16]);
+  // The selected row is outside the read block, so the list continues from the first row in view.
+  t.api.moveRequestSelection({key: 'ArrowDown', currentTarget: t.elements.requestRows, preventDefault() {}});
+  assert.equal(position(), 451);
+  t.elements.requestRows.scrollTop = 450 * 24;
+  t.api.renderRequests();
+  t.document.activeElement = t.elements.requestRows;
+  t.elements.requestRows.dataset.focusId = focusedId;
+  t.elements.requestRows.scrollTop = 0;
+  t.api.renderRequests();
+  assert.equal(t.document.activeElement.dataset.requestId, focusedId);
   const offPage = [...t.state.trafficSearchMatches.keys()].find(id => !t.rows().some(row => row.dataset.requestId === id));
   t.api.selectRequest(offPage);
   assert.doesNotMatch(t.nodes.get('#request-window-status').textContent, /Selection outside filter/,
@@ -151,6 +205,210 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
   assert.equal(t.api.selectRequest(t.rows()[0].dataset.requestId, 'different-identity'), false);
   assert.equal(t.state.selectedRequestId, before, 'Exact identity refusal still precedes selection');
 }
+
+// The request index path: a real createTrafficIndex over scripted answers, the
+// production selection and load functions, and the shared row renderer.
+function indexFixture({windowCount = 6} = {}) {
+  const t = fixture(app, traffic, windowCount);
+  const {state, api} = t;
+  state.sessionMode = 'live'; state.requests.forEach(row => { row.origin = 'live'; }); state.nativeRequests = state.requests;
+  state.trafficDetailOpen = false; state.trafficAppliedAnswer = null; state.trafficSeenThrough = null;
+  const row = (index, records) => ({id: `request-${index}`, path: `https://fixture.invalid/item-${index}`, method: 'GET', status: 200, time: 1,
+    type: 'xhr', target_kind: 'url', failed: false, interrupted: false, tab_id: '1', tab_ids: ['1'], extension_id: null, operation: 'authored_fixture',
+    tab_link: null, initiator_frame: null, target: `/item-${index}`, host: 'fixture.invalid', url_truncated: false, target_length: 0, target_malformed: false,
+    first_time_ns: String(index + 1), last_time_ns: String(index + 2), transfer_size: 1, resource_size: 1, from_cache: false, from_service_worker: false,
+    mime_type: null, protocol: null, response_time_ns: null, error_code: 0, loader_observed: true, initiator: 'browser', main_frame: false,
+    browser_internal: false, ordinal: index, records, members: [{session_id: '1', process_id: 7, request_id: String(index + 1), records}],
+    first_offset: String(index * 100), end_offset: String((index + 1) * 100), root: null});
+  const document_ = rows => ({format: 'reb-request-index-v1', requests: rows, matching: rows.length, total: rows.length, through: rows.length, added: 0,
+    index: {epoch: 'epoch-1', complete: true, store_end: '10', indexed_end: '10', unindexed_records: '0', malformed_records: '0', request_limit: 100000},
+    sizes: {transferred: 0, resources: 0}, hidden_internal: 0, located: {}, facets: {tabs: [{tab_id: '1', count: rows.length, domains: ['fixture.invalid']}], domains: [{domain: 'fixture.invalid', count: rows.length}]},
+    timeline: {first_time_ns: '1', last_time_ns: '9', buckets: []}});
+  const pending = [], reads = [];
+  const held = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return {promise, resolve}; };
+  const answer = body => new Response(JSON.stringify(body), {headers: {ETag: '"a"'}});
+  let indexRows = [];
+  state.trafficIndex = api.createTrafficIndex({onChange: () => api.renderRequests(), fetcher: async (url, init) => {
+    reads.push(url);
+    if (url.startsWith('/api/requests?')) return answer(document_(indexRows));
+    const gate = held();
+    pending.push({url, signal: init.signal, gate});
+    return gate.promise;
+  }});
+  return {...t, row, setIndexRows: rows => { indexRows = rows; }, pending, reads, answer};
+}
+const quiet = async () => { for (let turn = 0; turn < 8; turn++) await new Promise(resolve => setImmediate(resolve)); };
+const eventsOf = (id, records) => Array.from({length: records}, (_, sequence) => ({session_id: '1', process_id: 7, sequence_number: String(sequence + 1), monotonic_time_ns: String(sequence + 1), request_id: id}));
+
+{
+  // Before the first index answer the newest window's rows serve, and the first read starts.
+  const t = indexFixture();
+  t.setIndexRows([]);
+  t.api.renderRequests();
+  assert(t.state.trafficIndex.answer() === null && t.rows().length > 0, 'Window rows serve while the index has not answered');
+  assert.match(t.nodes.get('#request-window-status').textContent, /newest window/);
+  assert(t.reads.some(url => url.startsWith('/api/requests?')), 'The window path starts the first index read');
+}
+{
+  // H1: a store read for row A does not retake the selection after row B was chosen.
+  const t = indexFixture({windowCount: 2});
+  t.state.requests = t.state.nativeRequests = t.state.nativeRequests.map(request => ({...request, events: [{}, {}], details: [], origin: 'live'}));
+  const whole = t.state.requests[1], partial = t.row(5, 9);
+  t.setIndexRows([t.row(1, 2), partial, t.row(0, 2)]);
+  t.api.renderRequests(); await quiet();
+  assert.equal(t.state.trafficIndex.row('request-5').indexRow.records, 9);
+  t.api.selectTrafficRow('request-5');
+  await quiet();
+  assert.equal(t.state.trafficLoadingId, 'request-5', 'A row the window does not hold whole is read from the store');
+  assert.equal(t.pending.length, 1, 'One read of the store is in flight');
+  const signal = t.pending[0].signal;
+  t.api.selectTrafficRow(whole.id);
+  assert.equal(t.state.selectedRequestId, whole.id, 'A row retained whole selects immediately');
+  assert(signal.aborted, 'Choosing another row aborts the in-flight store read');
+  assert.equal(t.state.trafficLoadController, null);
+  t.pending[0].gate.resolve(t.answer({events: eventsOf('5', 3), query: {limited: false, budget_exhausted: false, next_after: '9'}}));
+  await quiet();
+  assert.equal(t.state.selectedRequestId, whole.id, 'A late store answer does not select the older row');
+  assert(!t.state.requests.some(request => request.id === 'request-5'), 'A cancelled read adds no row');
+}
+{
+  // A store read that completes still selects its own row.
+  const t = indexFixture({windowCount: 1});
+  t.setIndexRows([t.row(5, 2)]);
+  t.api.renderRequests(); await quiet();
+  t.api.selectTrafficRow('request-5');
+  await quiet();
+  t.pending[0].gate.resolve(t.answer({events: eventsOf('5', 2), query: {limited: false, budget_exhausted: false, next_after: '9'}}));
+  await quiet();
+  assert.equal(t.state.selectedRequestId, 'request-5', 'A completed read selects its own row');
+  assert.equal(t.state.trafficLoadingId, null);
+  assert(t.state.trafficLoaded.has('request-5'), 'The store copy stays for the selection');
+  assert.equal(t.document.activeElement?.dataset?.requestId, 'request-5', 'With focus on nothing, the row takes focus');
+}
+{
+  // A store read finishing after the researcher moved to the filter box leaves focus there.
+  const t = indexFixture({windowCount: 1});
+  t.setIndexRows([t.row(5, 2)]);
+  t.api.renderRequests(); await quiet();
+  t.api.selectTrafficRow('request-5');
+  await quiet();
+  t.document.activeElement = t.elements.requestFilter;
+  t.pending[0].gate.resolve(t.answer({events: eventsOf('5', 2), query: {limited: false, budget_exhausted: false, next_after: '9'}}));
+  await quiet();
+  assert.equal(t.state.selectedRequestId, 'request-5', 'The late read still selects its row');
+  assert.equal(t.document.activeElement, t.elements.requestFilter, 'The late read does not take focus from the filter box');
+}
+{
+  // H2: a selected row retained whole stays selected once it leaves the newest window.
+  const t = indexFixture({windowCount: 3});
+  const selected = t.state.requests[0];
+  t.state.trafficIndex = undefined;
+  t.api.selectRequest(selected.id);
+  assert(t.state.trafficLoaded.has(selected.id), 'Selection pins the row');
+  t.state.nativeRequests = t.state.nativeRequests.filter(request => request.id !== selected.id);
+  t.api.rebuildTrafficRequests();
+  assert(t.state.requests.some(request => request.id === selected.id), 'The pinned row survives leaving the window');
+  assert.equal(t.state.selectedRequestId, selected.id);
+  // The pinned copy follows the window while the window still holds it.
+  const newer = {...t.state.requests[1], events: [{}, {}], details: []};
+  t.api.selectRequest(newer.id);
+  t.state.nativeRequests = t.state.nativeRequests.map(request => request.id === newer.id ? {...newer} : request);
+  t.api.rebuildTrafficRequests();
+  assert.equal(t.state.trafficLoaded.get(newer.id).events.length, 2, 'A later window copy with as many records replaces the pinned one');
+  // F9: without an index answer the list is state.requests itself, so an earlier selection does not stay listed.
+  const other = {...t.state.requests[0]};
+  t.api.selectRequest(other.id);
+  t.state.nativeRequests = t.state.nativeRequests.filter(request => request.id !== other.id && request.id !== newer.id);
+  t.api.rebuildTrafficRequests();
+  assert(!t.state.requests.some(request => request.id === newer.id), 'A row selected earlier leaves the list once the window left it');
+  assert(t.state.requests.some(request => request.id === other.id), 'The current selection stays pinned');
+  assert.deepEqual([...t.state.trafficLoaded.keys()], [other.id], 'Only the selection is pinned without an index');
+  // At most 32 rows stay, always including the selection.
+  for (let index = 0; index < 40; index++) t.state.trafficLoaded.set(`extra-${index}`, {id: `extra-${index}`, events: [], details: []});
+  t.api.selectRequest(other.id);
+  assert(t.state.trafficLoaded.size <= 32 && t.state.trafficLoaded.has(other.id), 'Pinning stays bounded and keeps the selection');
+}
+{
+  // M1: an empty state drops the block, so a resize cannot remount the old rows.
+  const t = fixture(app, traffic, 80);
+  t.state.trafficIndex = undefined;
+  t.api.renderRequests();
+  assert(t.elements.requestRows.trafficBlock, 'Rows mount a block');
+  const before = t.rows().length;
+  assert(before > 0);
+  t.elements.requestFilter.value = 'nothing-matches';
+  t.api.renderRequests();
+  assert.equal(t.rows().length, 0, 'The filter empties the list');
+  t.elements.requestRows.clientHeight = 4000;
+  t.api.remountTrafficRows(t.elements.requestRows);
+  assert.equal(t.rows().length, 0, 'A resize does not remount rows over the empty state');
+  assert.match(t.elements.requestRows.children[0].textContent, /No requests match/);
+}
+{
+  // The index read: pagination, retention of the last answer on failure, unsupported backends and detail paging.
+  const urls = [], changes = [];
+  const doc = () => ({format: 'reb-request-index-v1', requests: [], matching: 0, total: 0, through: 0, added: 0,
+    index: {epoch: 'e', complete: true}, facets: {tabs: [], domains: []}, located: {}, sizes: {transferred: 0, resources: 0}, timeline: {first_time_ns: null, last_time_ns: null, buckets: []}});
+  const t = fixture(app, traffic, 1);
+  const respond = (status, body) => new Response(body === undefined ? '' : JSON.stringify(body), {status, headers: {ETag: '"v"'}});
+  let script = [() => respond(200, doc())];
+  const index = t.api.createTrafficIndex({onChange: () => changes.push(index.answer()), fetcher: async (url, init) => {
+    urls.push({url, init}); const next = script.shift() ?? (() => { throw new Error('unexpected read'); });
+    return next(url, init);
+  }});
+  index.want({query: 'sort=capture', start: 0, origin: 'live', locate: ['a']});
+  await quiet();
+  assert(index.answer() && urls[0].url.includes('limit=500') && urls[0].url.includes('locate=a'), 'The first want reads one 500-row page');
+  assert.equal(urls[0].init.headers['If-None-Match'], undefined, 'A first read sends no validator');
+  script = [() => respond(200, doc())]; index.invalidate(); await quiet();
+  assert.match(urls[1].url, /since=0/, 'A refresh names what the last answer covered');
+  script = [() => respond(304)]; index.invalidate(); await quiet();
+  assert.equal(urls[2].init.headers['If-None-Match'], '"v"', 'A refresh of the same page revalidates');
+  assert(index.answer(), 'A 304 keeps the answer');
+  script = [() => respond(503)]; index.invalidate(); await quiet();
+  assert(index.answer() && /HTTP 503/.test(index.error()), 'A failed read keeps the last answer and states why');
+  script = [() => respond(200, {format: 'wrong'})]; index.invalidate(); await quiet();
+  assert(index.answer() && /malformed/.test(index.error()), 'A malformed answer keeps the last answer');
+  const beforeRetry = urls.length;
+  script = [() => respond(503)]; index.retry(); await quiet();
+  assert.equal(urls.length, beforeRetry + 1, 'A poll retries a failed read once and no more');
+  script = [() => respond(200, doc())]; index.retry(); await quiet();
+  assert.equal(index.error(), null, 'A retried read that answers clears the failure');
+  script = []; index.retry(); await quiet();
+  assert.equal(urls.length, beforeRetry + 2, 'A poll retries nothing when no read failed');
+  script = [() => respond(404)]; index.invalidate(); await quiet();
+  assert(/HTTP 404/.test(index.error()));
+  script = []; index.invalidate(); await quiet();
+  assert.equal(urls.length, 8, 'A workspace without the index is not asked again');
+  // Detail paging stops at the row's end, and a malformed page fails the read.
+  const detailReads = [];
+  const page = (events, next, limited) => respond(200, {events, query: {next_after: next, limited, budget_exhausted: false}});
+  const details = t.api.createTrafficIndex({fetcher: async url => {
+    detailReads.push(url); return detailReads.length === 1 ? page(eventsOf('1', 200), '50', true) : page(eventsOf('1', 200).map((event, i) => ({...event, sequence_number: String(i + 201)})), '60', false);
+  }});
+  const row = {first_offset: '10', end_offset: '100', members: [{session_id: '1', process_id: 7, request_id: '1', records: 400}]};
+  const {events, partial} = await details.events(row, new AbortController().signal);
+  assert.equal(events.length, 400, 'Every page of a member is read');
+  assert.equal(partial, false, 'A complete read is not partial');
+  assert.match(detailReads[1], /after=50/);
+  // Absence after a partial read is unknown: a limited member list, the page cap, a damaged line, a short read.
+  const readWith = async (pages, rowOverride = {}) => {
+    let calls = 0;
+    const reader = t.api.createTrafficIndex({fetcher: async () => respond(200, pages[Math.min(calls++, pages.length - 1)])});
+    return reader.events({first_offset: '0', end_offset: '1000000', members: [{session_id: '1', process_id: 7, request_id: '1', records: 400}], ...rowOverride}, new AbortController().signal);
+  };
+  const part = (query, count = 200) => ({events: eventsOf('1', count).map((event, i) => ({...event, sequence_number: String(i + calls())})), query});
+  let serial = 1000; function calls() { serial += 1000; return serial; }
+  assert.equal((await readWith([part({next_after: '1', limited: false, budget_exhausted: false}, 400)], {members_limited: true})).partial, true, 'A row with unlisted members is partial');
+  const full = {next_after: '2', limited: true, budget_exhausted: false};
+  const capped = await readWith(Array.from({length: 17}, () => part(full, 20)));
+  assert.equal(capped.partial, true, 'Stopping at the page cap with records unread is partial');
+  assert.equal((await readWith([part({next_after: '1', limited: false, budget_exhausted: false, malformed_lines: 1}, 400)])).partial, true, 'A damaged line is partial');
+  assert.equal((await readWith([part({next_after: '1', limited: false, budget_exhausted: false}, 300)])).partial, true, 'Fewer records than indexed is partial');
+  const broken = t.api.createTrafficIndex({fetcher: async () => respond(200, {events: 'no'})});
+  await assert.rejects(broken.events(row, new AbortController().signal), /malformed/);
+}
+console.log('PASS Traffic request index: a stale store read cannot override a newer selection, a selected row outlives the newest window within a bound, an empty state keeps old rows out, window rows serve until the first answer, the index pages, revalidates, keeps its last answer and stops asking a workspace without it (controller/DOM model, not rendered UI)');
 
 // Any snapshot/filter/window change requires normal full rendering. Ordinary
 // renderRequests() also always sees in-place authored test mutations.
@@ -178,7 +436,7 @@ for (const change of [
   assert.equal(t.stats.searches, 0); assert.equal(t.state.selectedRequestId, id);
   assert.match(t.nodes.get('#request-window-status').textContent, /Selection outside filter/);
   t.elements.requestFilter.value = ''; t.api.renderRequests();
-  assert.equal(t.rows().length, 500); assert.equal(t.state.selectedRequestId, id);
+  assert.equal(t.rows().length, 28); assert.equal(t.state.selectedRequestId, id);
   t.state.requests = t.state.requests.filter(row => row.id !== id); t.api.renderRequests();
   assert.equal(t.state.selectedRequestId, null, 'Eviction clears rather than reuses selection');
   t.state.requests = []; t.api.renderRequests(); assert.equal(t.rows().length, 0);
@@ -203,7 +461,7 @@ for (const change of [
   state.trafficRenderedView = {requests: oldRequests};
   api.useStandalonePreview(); assert.equal(state.trafficRenderedView, null); assert.equal(state.requests.length, 0);
 }
-console.log('PASS Traffic selection reuses rendered search/sort/window; no geometry reads, remounts or scroll writes; keyboard, focus, filters, exact-identity refusal, mutation refresh, partial/empty/evicted selection (controller/DOM model, not rendered UI)');
+console.log('PASS Traffic selection reuses rendered search/sort/window; only rows in view plus overscan mount with list positions for assistive technology; no geometry reads, remounts or scroll writes on selection; keyboard across unmounted rows, focus hand-off and return, filters, exact-identity refusal, mutation refresh, partial/empty/evicted selection (controller/DOM model, not rendered UI)');
 
 const baseline = process.argv.find(value => value.startsWith('--baseline-ref='))?.slice('--baseline-ref='.length);
 if (baseline) {
@@ -221,7 +479,7 @@ if (baseline) {
       p95_ms: +samples[Math.floor(samples.length * 0.95)].toFixed(3), work: {...t.stats}};
   }
   console.log(JSON.stringify({kind: 'Node controller/DOM-work benchmark, not rendered browser latency', node: process.version,
-    fixture: {retained: 5000, mounted: 500, search: 'URL / method / status literal', sort: 'name'},
+    fixture: {retained: 5000, mounted: '20-row view + 8 overscan', search: 'URL / method / status literal', sort: 'name'},
     baseline, before: measure(prior('apps/research-ui/app.js'), prior('apps/research-ui/traffic_view.js')),
     after: measure(app, traffic)}, null, 2));
 }

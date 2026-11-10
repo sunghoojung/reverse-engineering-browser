@@ -236,15 +236,46 @@ fn step(value: &Value, relation: &str, confidence: &str) -> Result<Value> {
         json!({"event":{"session_id":session,"process_id":pid,"sequence_number":sequence},"monotonic_time_ns":value["monotonic_time_ns"],"category":value["category"],"operation":value["type"],"frame_id":value["frame_id"],"artifact_id":value["artifact_id"],"request_id":value["request_id"],"relation":relation,"confidence":confidence,"value":text}),
     )
 }
-// Request target and body records are fixed binary layouts
-// (protocol/native-network-v2.md), not text. A step names the record instead
-// of decoding it, so no NUL or control byte reads as captured text; Traffic
-// decodes their fields. The Swift builder writes the same summary.
+// Request target, body, response body, header and cookie records are fixed
+// binary layouts (protocol/native-network-v2.md and v3), not text. A step names
+// the record instead of decoding it, so no NUL or control byte reads as captured
+// text; Traffic decodes their fields. The Swift builder writes the same summary.
 fn binary_record_summary(value: &Value, size: usize) -> Option<String> {
     let operation = value["type"].as_str()?;
-    (value["category"] == "network" && matches!(operation, "request_target" | "request_body")).then(
-        || format!("Binary {operation} record, {size} bytes, not shown as text; Traffic shows its fields"),
-    )
+    let network = value["category"] == "network"
+        && matches!(
+            operation,
+            "request_target"
+                | "request_body"
+                | "response_body"
+                | "request_headers"
+                | "response_headers"
+                | "cookie_list"
+                | "script_cookie"
+                | "request_initiator_stack"
+                | "script_identity"
+                | "navigation_initiator_stack"
+                | "navigation_initiator_link"
+                | "async_task_stack"
+                | "request_watch_match"
+        );
+    let observation = value["category"] == "runtime"
+        && matches!(
+            operation,
+            "listener_dispatch"
+                | "timer_observation"
+                | "csp_violation"
+                | "exception_observation"
+                | "dom_mutation"
+        );
+    let where_shown = if network {
+        "Traffic shows its fields"
+    } else {
+        "decoded on read"
+    };
+    (network || observation).then(|| {
+        format!("Binary {operation} record, {size} bytes, not shown as text; {where_shown}")
+    })
 }
 fn gap(reason: &str, after: usize, detail: &str) -> Value {
     json!({"reason":reason,"after_step":after,"detail":detail})

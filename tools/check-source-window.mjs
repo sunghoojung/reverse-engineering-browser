@@ -6,7 +6,8 @@ import {performance} from 'node:perf_hooks';
 
 export async function checkSourceWindowModel(root) {
   const model=runInNewContext((await readFile(join(root,'apps/research-ui/source_syntax.js'),'utf8'))+
-    ';({sourceDocumentIndex,sourceDocumentOffset,sourceDocumentPosition,sourceDocumentLine,sourceDocumentMatches,sourceDocumentWindow,sourceWindowMapping,sourceRepresentationLineMap,prettyPrintSource,sourceName,formatWasmHex,wasmHexByteLimit})', {URL});
+    ';({sourceDocumentIndex,sourceDocumentOffset,sourceDocumentPosition,sourceDocumentLine,sourceDocumentMatches,sourceDocumentWindow,sourceWindowMapping,prettyPrintSource,sourceName,formatWasmHex,wasmHexByteLimit,'+
+    'createSourceHighlighter,createSourceTokenizer,sourceSyntaxTokens,sourceHasLongLine,sourcePrettyByDefault,SOURCE_COLOR_SLICE_UNITS,SOURCE_DOCUMENT_LIMIT,SOURCE_PRETTY_INPUT_LIMIT,SOURCE_HIGHLIGHT_TOKEN_LIMIT})', {URL});
   const wasmLimit=model.wasmHexByteLimit();
   assert.equal(wasmLimit % 16, 0);
   assert(wasmLimit >= 990157, 'A retained ~990 KB module must format in full');
@@ -63,17 +64,105 @@ export async function checkSourceWindowModel(root) {
     assert(window.rows.reduce((sum,row)=>sum+row.text.length,0)<=528384);
     costs.push({name,codeUnits:source.length,indexMs:Math.round(indexedAt-before),searchMs:Math.round(searchedAt-indexedAt),windowMs:Math.round(performance.now()-searchedAt),anchors:indexed.anchors.length,rows:window.rows.length,matches:result.matches.length});
   }
-  const bounded=model.sourceDocumentIndex('a'.repeat(8*1024*1024)+'outside');assert.equal(bounded.complete,false);assert.equal(model.sourceDocumentMatches(bounded,'outside').matches.length,0);
-  const original='\ufeffconst 雪="😀";\r\n'+'\n'.repeat(20000)+'const late=1;';
-  const formatted=model.prettyPrintSource({kind:'javascript'},original);
-  if(!formatted.error) {
-    const complete=model.sourceRepresentationLineMap(original,original,null,formatted),formattedIndex=model.sourceDocumentIndex(formatted.text);
-    const mapping=model.sourceWindowMapping(original,original,null,formatted);
-    for(const line of [0,Math.min(1000,formattedIndex.lineCount-1),formattedIndex.lineCount-1]) {
-      const window=model.sourceDocumentWindow(formattedIndex,line),mapped=mapping(window.rows);
-      mapped.forEach((row,i)=>{assert.equal(row.originalLine,complete[window.rows[i].line].originalLine);assert.equal(row.originalColumn,complete[window.rows[i].line].originalColumn);});
-    }
-  }
-  console.log('PASS sparse retained-source index, complete 20,001-line Find, Unicode/CRLF/BOM, bounds, original mapping and minified late-column excerpts; measured model costs '+JSON.stringify(costs));
+  const bounded=model.sourceDocumentIndex('a'.repeat(model.SOURCE_DOCUMENT_LIMIT)+'outside');assert.equal(bounded.complete,false);assert.equal(model.sourceDocumentMatches(bounded,'outside').matches.length,0);
+  costs.push(...checkCheckpointedColors(model));
+  console.log('PASS sparse retained-source index, complete 20,001-line Find, Unicode/CRLF/BOM, bounds, minified late-column excerpts, checkpointed colors and formatted-line mapping on a 12 MiB one-line bundle; measured model costs '+JSON.stringify(costs));
   return costs;
+}
+
+// A deterministic one-line minified bundle: strings, templates, regular
+// expressions, comments, classes and arrows in every 4 Ki checkpoint span.
+export function minifiedBundle(units) {
+  const parts = [];
+  for (let n = 0, size = 0; size < units; n++) {
+    const id = n.toString(36);
+    const block = `var a${id}=function(e,t){if(!e)return null;for(var n=0,r=e.length;n<r;n++){t(e[n],n)}return{ok:!0,list:[1,2,3],re:/a${id}[\\]/]+/g,` +
+      `s:\`k\${e}-${id}\`,fn:async()=>{await fetch("/x?y=${id}"+n,{method:"POST",body:JSON.stringify({a:${n % 97}})})}}},b${id}=a${id}?.c??(d,e=>e*2);` +
+      `/*c${id}*/class C${id} extends B{m(p,q=1){return console.log(this.y,'\\'${id}')}};`;
+    parts.push(block); size += block.length;
+  }
+  return parts.join('').slice(0, units);
+}
+
+// Checkpointed windows must color exactly as one tokenizer run from the start.
+function checkCheckpointedColors(model) {
+  const javascript = {kind: 'javascript'};
+  const types = text => {
+    const tokenizer = model.createSourceTokenizer(javascript), result = new Array(text.length);
+    tokenizer.coloredTokens = -Infinity;
+    let offset = 0;
+    for (const line of text.split('\n')) {
+      let at = offset;
+      if (line) for (const token of model.sourceSyntaxTokens(line, tokenizer)) {result.fill(token.type, at, at + token.text.length); at += token.text.length;}
+      offset += line.length + 1;
+    }
+    return result;
+  };
+  const build = index => {
+    const highlighter = model.createSourceHighlighter(javascript, index);
+    let steps = 0, slowest = 0;
+    for (let done = false; !done; steps++) {const before = performance.now(); done = highlighter.advance(model.SOURCE_COLOR_SLICE_UNITS); slowest = Math.max(slowest, performance.now() - before);}
+    return {highlighter, steps, slowestStepMs: Math.round(slowest)};
+  };
+  const exact = (text, label) => {
+    const expected = types(text), index = model.sourceDocumentIndex(text), {highlighter} = build(index);
+    for (const [line, column] of [[0, 0], [0, 100000], [0, 250000], [Math.floor(index.lineCount / 2), 0], [Math.min(1500, index.lineCount - 1), 3], [index.lineCount - 1, 0]]) {
+      const window = model.sourceDocumentWindow(index, line, column), colors = highlighter.rows(window.rows);
+      window.rows.forEach((row, at) => {
+        assert.equal(colors.rows[at].map(token => token.text).join(''), row.text, `${label}: tokens cover the excerpt`);
+        let offset = row.offset + row.columnStart;
+        for (const token of colors.rows[at]) {
+          for (let unit = 0; unit < token.text.length; unit++) {
+            const want = expected[offset + unit];
+            assert(want === token.type || (token.type === 'plain' && /\s/.test(token.text[unit])), `${label}: ${token.type} at ${offset + unit}, expected ${want}`);
+          }
+          offset += token.text.length;
+        }
+      });
+    }
+  };
+  const sample = minifiedBundle(300000);
+  exact(sample, 'one-line excerpt');
+  exact(model.prettyPrintSource(javascript, sample).text, 'formatted');
+  assert(!model.createSourceHighlighter(javascript, model.sourceDocumentIndex(sample)).ready([{offset: 0, columnStart: 200000, fullLength: sample.length}]),
+    'A window beyond the checkpoints waits instead of coloring from a guessed state');
+
+  const bundle = minifiedBundle(12 * 1024 * 1024);
+  assert(model.sourceHasLongLine(bundle) && model.sourcePrettyByDefault(javascript) && !model.sourceHasLongLine('a\n'.repeat(1000)), 'A minified bundle opens pretty-printed');
+  let started = performance.now();
+  const original = model.sourceDocumentIndex(bundle), originalColors = build(original);
+  const originalMs = Math.round(performance.now() - started);
+  const id = /^var a([0-9a-z]+)=/.exec(bundle.slice(bundle.lastIndexOf('var a', bundle.lastIndexOf('var a') - 1)))[1], needle = `C${id} extends`;
+  const late = model.sourceDocumentMatches(original, needle).matches;
+  assert.equal(late.length, 1);
+  const lateWindow = model.sourceDocumentWindow(original, late[0].line, late[0].column), lateColors = originalColors.highlighter.rows(lateWindow.rows);
+  assert(lateWindow.rows[0].columnStart > 12000000 && ['regexp', 'type', 'inherited', 'function'].every(type => lateColors.rows[0].some(token => token.type === type)),
+    'A clipped late column keeps its colors');
+  started = performance.now();
+  const formatted = model.prettyPrintSource(javascript, bundle);
+  const formatMs = Math.round(performance.now() - started);
+  assert(!formatted.error && formatted.map, formatted.error);
+  started = performance.now();
+  const index = model.sourceDocumentIndex(formatted.text), {highlighter, steps, slowestStepMs} = build(index);
+  const formattedMs = Math.round(performance.now() - started);
+  const mapping = model.sourceWindowMapping(bundle, bundle, null, formatted);
+  let windowMs = 0, previousColumn = -1;
+  for (const line of [0, 1000, 2500, Math.floor(index.lineCount / 2), index.lineCount - 1]) {
+    started = performance.now();
+    const window = model.sourceDocumentWindow(index, line), colors = highlighter.rows(window.rows), mapped = mapping(window.rows);
+    windowMs = Math.max(windowMs, performance.now() - started);
+    assert(!colors.truncated && colors.rows.every((tokens, at) => !window.rows[at].text.trim() || tokens.some(token => token.type !== 'plain')), `Every row after line ${line + 1} is colored`);
+    const first = mapped.find(row => row.originalLine !== null);
+    assert.equal(first.originalLine, 0, 'Formatted rows map into the one original line');
+    assert(first.originalColumn > previousColumn, 'Formatted lines advance through the original');
+    previousColumn = first.originalColumn;
+    const row = window.rows.find(candidate => candidate.text.trim()), visible = row.offset + row.text.search(/\S/);
+    assert.equal(bundle[mapping.position(visible).column], formatted.text[visible], 'A formatted character names its original column');
+  }
+  started = performance.now();
+  const find = model.sourceDocumentMatches(index, needle);
+  const findMs = Math.round(performance.now() - started);
+  assert.equal(find.matches.length, 1);
+  return [{name: '12 MiB one-line bundle', codeUnits: bundle.length, originalCheckpointMs: originalMs, formatMs, formattedLines: index.lineCount,
+    formattedCheckpointMs: formattedMs, checkpointSteps: steps, slowestStepMs, windowMs: Math.round(windowMs), findMs}];
 }

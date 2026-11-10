@@ -7,13 +7,16 @@ use serde_json::Value;
 use std::{
     collections::HashMap,
     fs::{File, Metadata},
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     path::Path,
     time::Instant,
 };
 
-const MAX_BYTES: usize = 64 * 1024 * 1024;
-const MAX_RECORDS: usize = 100_000;
+// The largest manifest a live session reaches at default budgets, so that path
+// stays indexed: scripts/run-live-session.sh derives 262,144 artifacts and a
+// 256 MiB manifest from the 1 GiB store a content capture gets by default.
+const MAX_BYTES: usize = 256 * 1024 * 1024;
+const MAX_RECORDS: usize = 262_144;
 
 #[derive(PartialEq, Eq)]
 struct Stamp {
@@ -134,24 +137,30 @@ impl ArtifactLookupCache {
             drop(previous);
             return Ok(None);
         }
-        let mut bytes = vec![0; stamp.length as usize];
-        file.read_exact(&mut bytes)?;
+        // Reuse the validated prefix in place rather than rereading it into a
+        // second buffer: at the record cap two manifests would be 512 MiB.
+        let reuse = previous.filter(|old| {
+            old.stamp.same_file(&stamp)
+                && old.bytes.len() as u64 <= stamp.length
+                && (old.bytes.is_empty() || old.bytes.last() == Some(&b'\n'))
+        });
+        let (mut bytes, mut offsets) = match reuse {
+            Some(old) if prefix_matches(&mut file, &old.bytes, deadline)? => {
+                (old.bytes, old.offsets)
+            }
+            _ => (Vec::new(), HashMap::new()),
+        };
+        let mut position = bytes.len();
+        bytes.reserve_exact(stamp.length as usize - position);
+        bytes.resize(stamp.length as usize, 0);
+        file.seek(SeekFrom::Start(position as u64))?;
+        file.read_exact(&mut bytes[position..])?;
         #[cfg(test)]
         {
             self.read_bytes = bytes.len();
         }
         stamp.verify(&path, &file)?;
         check_deadline(deadline)?;
-        let mut offsets = HashMap::new();
-        let mut position = 0;
-        if let Some(old) = previous.filter(|old| {
-            old.stamp.same_file(&stamp)
-                && (old.bytes.is_empty() || old.bytes.last() == Some(&b'\n'))
-                && bytes.starts_with(&old.bytes)
-        }) {
-            position = old.bytes.len();
-            offsets = old.offsets;
-        }
         // Decide fallback before parsing: a large noncacheable manifest must not
         // validate its first 100k records twice or monopolize the cache mutex.
         let remaining = self.maximum_records.saturating_sub(offsets.len());
@@ -212,6 +221,22 @@ impl ArtifactLookupCache {
         });
         selected.map(Some).ok_or_else(not_found)
     }
+}
+/// Whether the file begins with exactly `expected`, read in fixed chunks.
+fn prefix_matches(file: &mut File, expected: &[u8], deadline: Instant) -> Result<bool> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut buffer = [0u8; 64 * 1024];
+    let mut position = 0;
+    while position < expected.len() {
+        check_deadline(deadline)?;
+        let size = (expected.len() - position).min(buffer.len());
+        file.read_exact(&mut buffer[..size])?;
+        if buffer[..size] != expected[position..position + size] {
+            return Ok(false);
+        }
+        position += size;
+    }
+    Ok(true)
 }
 fn parse(bytes: &[u8]) -> Result<Value> {
     let mut value = serde_json::from_slice(bytes)
@@ -351,6 +376,34 @@ mod tests {
             cache.parsed_records, 2,
             "unterminated tail is reparsed rather than reused"
         );
+    }
+
+    #[test]
+    fn a_default_session_stays_on_the_indexed_path() {
+        // scripts/run-live-session.sh at its default budgets: a 1 GiB store.
+        let store_bytes = 1024 * 1024 * 1024;
+        let artifacts = store_bytes / 4096;
+        let manifest_bytes = artifacts * 1024;
+        assert!(artifacts <= MAX_RECORDS, "{artifacts} rows");
+        assert!(manifest_bytes <= MAX_BYTES, "{manifest_bytes} bytes");
+    }
+
+    #[test]
+    fn a_manifest_exactly_at_the_record_cap_is_indexed() {
+        let (root, mut cache) = (
+            tempfile::tempdir().unwrap(),
+            ArtifactLookupCache {
+                maximum_records: 2,
+                ..Default::default()
+            },
+        );
+        let path = root.path().join("manifest.jsonl");
+        let body = [record(1), record(2)].concat();
+        fs::write(&path, &body).unwrap();
+        assert_eq!(cache.find(root.path(), "2").unwrap()["artifact_id"], "2");
+        assert_eq!(cache.parsed_records, 2, "both rows were indexed");
+        assert_eq!(cache.find(root.path(), "1").unwrap()["artifact_id"], "1");
+        assert_eq!(cache.parsed_records, 0, "the index answers without parsing");
     }
 
     #[test]

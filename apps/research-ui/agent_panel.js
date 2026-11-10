@@ -231,6 +231,8 @@
   const citeChecks = new Map();
   const heights = new Map();
   let framePending = false, frameTranscript = false, lastWindow = '';
+  // The mounted rows by id, with what each was drawn from (rowSignature).
+  const mountedRows = new Map();
   try {
     const remembered = localStorage.getItem('origin-trace.agent.provider');
     if (remembered === 'chatgpt' || remembered === 'claude') view.provider = remembered;
@@ -606,16 +608,34 @@
     investigationNotice(notice);
   }
 
-  function renderMarkdownInto(parent, text) {
-    for (const block of parseMarkdown(text)) {
-      if (block.type === 'paragraph') { const node = element('p', 'agent-para'); renderInlineTokens(node, block.inline); parent.append(node); }
-      else if (block.type === 'heading') { const node = element('p', 'agent-para agent-heading'); renderInlineTokens(node, block.inline); parent.append(node); }
-      else if (block.type === 'list') {
-        const list = element(block.ordered ? 'ol' : 'ul', 'agent-list');
-        for (const item of block.items) { const li = element('li'); renderInlineTokens(li, item); list.append(li); }
-        parent.append(list);
-      } else parent.append(codeBlock(block));
-    }
+  // One element per block, so a streamed reply can keep the blocks it already drew (mountRow).
+  function renderBlock(parent, block) {
+    if (block.type === 'paragraph') { const node = element('p', 'agent-para'); renderInlineTokens(node, block.inline); parent.append(node); }
+    else if (block.type === 'heading') { const node = element('p', 'agent-para agent-heading'); renderInlineTokens(node, block.inline); parent.append(node); }
+    else if (block.type === 'list') {
+      const list = element(block.ordered ? 'ol' : 'ul', 'agent-list');
+      for (const item of block.items) { const li = element('li'); renderInlineTokens(li, item); list.append(li); }
+      parent.append(list);
+    } else parent.append(codeBlock(block));
+  }
+
+  // Fenced code and tool JSON take the shared code view's lexer and colors
+  // (code_view.js). Every token is a text node, so model output stays inert.
+  function fenceSyntax(lang) {
+    const name = String(lang ?? '').toLowerCase();
+    if (/^(?:js|javascript|jsx|mjs|cjs)$/.test(name)) return codeViewSyntax('javascript');
+    if (name === 'json') return codeViewSyntax('json');
+    if (name === 'css') return {kind: 'plain', mime_type: 'text/css'};
+    if (/^(?:html|xml|svg)$/.test(name)) return {kind: 'plain', mime_type: 'text/html'};
+    return codeViewSyntax('text');
+  }
+
+  function codeText(className, text, syntax) {
+    return codeViewColor(element('pre', className), text, syntax);
+  }
+
+  function toolText(text) {
+    return codeText('agent-tool-pre', text, codeViewSyntax(/^\s*[[{]/.test(text) ? 'json' : 'text'));
   }
 
   function codeBlock(block) {
@@ -628,7 +648,7 @@
       copy.classList.add('copied');
     }, 'Copy code');
     header.append(copy);
-    const pre = element('pre', 'agent-code-body', block.text);
+    const pre = codeText('agent-code-body', block.text, fenceSyntax(block.lang));
     wrap.append(header, pre);
     return wrap;
   }
@@ -643,16 +663,15 @@
         for (const pin of row.pins) pins.append(element('span', 'agent-chip agent-chip-pinned', `pinned · ${pin.label} · ${formatBytes(pin.bytes)}${pin.truncated ? ' (cut)' : ''}`));
         node.append(pins);
       }
-    } else if (row.role === 'assistant') {
-      renderMarkdownInto(node, row.text);
     } else if (row.role === 'tool') {
       node.append(toolRow(row));
     } else if (row.role === 'approval') {
       node.append(approvalRow(row));
-    } else {
+    } else if (row.role !== 'assistant') {
       node.classList.toggle('agent-row-error', row.kind === 'error');
       node.textContent = row.text;
     }
+    // An assistant row's blocks are drawn by mountRow, which keeps them across streamed deltas.
     return node;
   }
 
@@ -660,6 +679,10 @@
     const detail = element('details', 'agent-tool');
     if (row.openTool) detail.open = true;
     detail.addEventListener('toggle', () => {
+      // Restoring an open row above queues a toggle too. Acting on it would
+      // append a second result and rebuild every frame, so a click in the log
+      // would land on a replaced node. Only a change from the saved state counts.
+      if (detail.open === Boolean(row.openTool)) return;
       row.openTool = detail.open;
       if (detail.open) detail.append(toolDetail(row));
       else detail.querySelector('.agent-tool-detail')?.remove();
@@ -682,9 +705,9 @@
 
   function toolDetail(row) {
     const area = element('div', 'agent-tool-detail');
-    area.append(element('div', 'agent-tool-label', 'Arguments'), element('pre', 'agent-tool-pre', row.arguments || '{}'));
+    area.append(element('div', 'agent-tool-label', 'Arguments'), toolText(row.arguments || '{}'));
     area.append(element('div', 'agent-tool-label', `Result sent to the provider${row.resultBytes ? ` · ${formatBytes(row.resultBytes)}` : ''}`));
-    area.append(element('pre', 'agent-tool-pre', row.result ?? (row.state === 'running' ? 'Running' : 'No result')));
+    area.append(toolText(row.result ?? (row.state === 'running' ? 'Running' : 'No result')));
     return area;
   }
 
@@ -699,7 +722,7 @@
   function approvalRow(row) {
     const card = element('div', 'agent-approval');
     card.append(element('div', 'agent-approval-title', `Allow ${row.name}?`));
-    card.append(element('pre', 'agent-tool-pre', row.arguments || '{}'));
+    card.append(toolText(row.arguments || '{}'));
     if (row.state === 'pending') {
       const actions = element('div', 'agent-approval-actions');
       const deny = button('agent-text-button', 'Deny', () => decide(row, false));
@@ -733,7 +756,7 @@
     const rows = transcript.rows();
     const stats = transcript.stats();
     const headNote = (stats.droppedRows || view.olderAvailable) ? olderBanner(stats) : null;
-    if (!rows.length) { lastWindow = ''; rowsHost.replaceChildren(); spacerTop.style.height = spacerBottom.style.height = '0'; return; }
+    if (!rows.length) { lastWindow = ''; mountedRows.clear(); rowsHost.replaceChildren(); spacerTop.style.height = spacerBottom.style.height = '0'; return; }
     const windowed = rows.length > WINDOW_THRESHOLD;
     const viewport = log.clientHeight || 600;
     const estimates = rows.map(row => heights.get(row.id) ?? ESTIMATED_ROW_HEIGHT);
@@ -757,8 +780,20 @@
     if (key !== lastWindow) {
       lastWindow = key;
       const nodes = headNote ? [headNote] : [];
-      for (let index = first; index <= last; index += 1) nodes.push(renderRow(rows[index]));
-      rowsHost.replaceChildren(...nodes);
+      const shown = new Set();
+      for (let index = first; index <= last; index += 1) {
+        nodes.push(mountRow(rows[index]));
+        shown.add(rows[index].id);
+      }
+      for (const id of mountedRows.keys()) if (!shown.has(id)) mountedRows.delete(id);
+      // Nodes already in place stay attached; only new or changed rows go in.
+      const wanted = new Set(nodes);
+      for (const child of [...rowsHost.children]) if (!wanted.has(child)) child.remove();
+      let at = rowsHost.firstChild;
+      for (const node of nodes) {
+        if (node === at) at = at.nextSibling;
+        else rowsHost.insertBefore(node, at);
+      }
     }
     spacerTop.style.height = windowed ? `${offsets[first]}px` : '0';
     spacerBottom.style.height = windowed ? `${Math.max(0, total - offsets[last] - estimates[last])}px` : '0';
@@ -768,6 +803,36 @@
     }
     // Code blocks and wrapped text can settle after this frame; follow once more.
     if (view.follow) { log.scrollTop = log.scrollHeight; requestAnimationFrame(() => { if (view.follow) log.scrollTop = log.scrollHeight; }); }
+  }
+
+  // Everything renderRow draws from. A row whose signature is unchanged keeps
+  // its node, so a streamed delta rebuilds only its own row: rebuilding every
+  // mounted row took about 100 ms a frame with 20 colored code blocks in view.
+  // Citation checks update mounted nodes in place (verify).
+  function rowSignature(row) {
+    return JSON.stringify([row.role, row.kind, row.text, row.name, row.arguments, row.state, row.result ?? null, row.resultBytes,
+      Boolean(row.openTool), row.callId, row.pins?.map(pin => [pin.label, pin.bytes, pin.truncated]) ?? null]);
+  }
+
+  function mountRow(row) {
+    const signature = rowSignature(row), kept = mountedRows.get(row.id);
+    if (kept?.signature === signature) return kept.node;
+    if (row.role !== 'assistant') {
+      const node = renderRow(row);
+      mountedRows.set(row.id, {signature, node});
+      return node;
+    }
+    // A streamed reply keeps its unchanged leading blocks and redraws from the
+    // first changed one: redrawing ten finished code blocks on every delta
+    // took about 60 ms a frame.
+    const node = kept?.blocks ? kept.node : renderRow(row);
+    const blocks = parseMarkdown(row.text), keys = blocks.map(block => JSON.stringify(block)), before = kept?.blocks ?? [];
+    let same = 0;
+    while (same < keys.length && keys[same] === before[same]) same += 1;
+    while (node.children.length > same) node.lastElementChild.remove();
+    for (const block of blocks.slice(same)) renderBlock(node, block);
+    mountedRows.set(row.id, {signature, node, blocks: keys});
+    return node;
   }
 
   function olderBanner(stats) {

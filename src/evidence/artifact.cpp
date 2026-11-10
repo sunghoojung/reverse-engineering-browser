@@ -16,7 +16,9 @@
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <system_error>
 #include <utility>
+#include <vector>
 
 namespace reb {
 namespace {
@@ -329,7 +331,8 @@ bool ParseManifestRecord(const std::string_view line,
         capture_origin != "webassembly_module" && capture_origin != "webassembly_instantiate" &&
         capture_origin != "canvas_to_data_url" && capture_origin != "runtime_typed_array" &&
         capture_origin != "runtime_allocating_script" && capture_origin != "native_wasm_guest" &&
-        capture_origin != "network_request" && capture_origin != "compiled_script") {
+        capture_origin != "network_request" && capture_origin != "request_stack" &&
+        capture_origin != "stack_script" && capture_origin != "compiled_script") {
       return false;
     }
     position = origin_end + std::string_view("\",\"kind\":\"").size();
@@ -344,12 +347,16 @@ bool ParseManifestRecord(const std::string_view line,
   const std::string_view kind = line.substr(position, kind_end - position);
   if (kind != "javascript" && kind != "wasm" && kind != "source_map" && kind != "response_body" &&
       kind != "canvas_data_url" && kind != "bytecode_buffer" && kind != "wasm_guest_adapter" &&
-      kind != "request_body") {
+      kind != "request_body" && kind != "request_target" && kind != "request_headers" &&
+      kind != "response_headers" && kind != "cookie_list" && kind != "stack") {
     return false;
   }
-  // A request body is created by its browser request_body record and has no
-  // renderer execution context.
-  if ((kind == "request_body") != (capture_origin == "network_request") ||
+  // Request content and header blocks are created by one browser network record
+  // and have no renderer execution context.
+  const bool network_request = kind == "request_body" || kind == "request_target" ||
+                               kind == "request_headers" || kind == "response_headers" ||
+                               kind == "cookie_list";
+  if (network_request != (capture_origin == "network_request") ||
       (capture_origin == "network_request" && (execution_context_id != 0 || !creator_event_id))) {
     return false;
   }
@@ -357,8 +364,11 @@ bool ParseManifestRecord(const std::string_view line,
        capture_origin != "network_response" && capture_origin != "network_request" &&
        execution_context_id == 0) ||
       ((capture_origin == "dynamic_javascript" || capture_origin == "runtime_allocating_script" ||
-        capture_origin == "compiled_script") &&
+        capture_origin == "stack_script" || capture_origin == "compiled_script") &&
        kind != "javascript") ||
+      ((kind == "stack") != (capture_origin == "request_stack")) ||
+      ((capture_origin == "request_stack" || capture_origin == "stack_script") &&
+       !creator_event_id) ||
       (capture_origin.starts_with("webassembly_") && kind != "wasm") ||
       (capture_origin == "canvas_to_data_url" && kind != "canvas_data_url") ||
       (capture_origin == "runtime_typed_array" && kind != "bytecode_buffer") ||
@@ -399,8 +409,7 @@ bool ParseManifestRecord(const std::string_view line,
   } else {
     return false;
   }
-  if (sensitive !=
-          (kind == "response_body" || kind == "canvas_data_url" || kind == "request_body") ||
+  if (sensitive != (kind == "response_body" || kind == "canvas_data_url" || network_request) ||
       !ConsumePrefix(line, position, ",\"content_path\":\"blobs/") ||
       line.substr(position, digest.size()) != digest) {
     return false;
@@ -451,9 +460,86 @@ bool TruncateManifest(const int directory, const std::uint64_t size) noexcept {
   return close(descriptor) == 0 && truncated;
 }
 
+// Request content, header blocks and cookie lists: sensitive network evidence
+// created by one browser network record (protocol/native-network-v2.md and v3).
+bool IsNetworkRequestArtifact(const ArtifactKind kind) noexcept {
+  return kind == ArtifactKind::kRequestBody || kind == ArtifactKind::kRequestTarget ||
+         kind == ArtifactKind::kRequestHeaders || kind == ArtifactKind::kResponseHeaders ||
+         kind == ArtifactKind::kCookieList;
+}
+
+std::string StreamFileName(const std::uint64_t artifact_id) {
+  return "artifact-" + std::to_string(artifact_id) + ".part";
+}
+
+// Whether `name` is a file StreamFileName produced.
+[[nodiscard]] bool IsStreamFileName(const std::string_view name) noexcept {
+  constexpr std::string_view kPrefix = "artifact-";
+  constexpr std::string_view kSuffix = ".part";
+  if (!name.starts_with(kPrefix) || !name.ends_with(kSuffix) ||
+      name.size() <= kPrefix.size() + kSuffix.size()) {
+    return false;
+  }
+  const std::string_view digits =
+      name.substr(kPrefix.size(), name.size() - kPrefix.size() - kSuffix.size());
+  return std::all_of(digits.begin(), digits.end(),
+                     [](const char value) { return value >= '0' && value <= '9'; });
+}
+
+// Unlinks the partial stream files a killed receiver left. The evidence guard
+// is exclusive, so none can belong to a live stream. They sit outside the
+// manifest and the byte limit, and a request or response body is sensitive, so
+// they must not outlive the session that wrote them.
+[[nodiscard]] bool RemoveAbandonedStreamFiles(const int directory, std::uint64_t& removed) {
+  const int iterator_descriptor = dup(directory);
+  DIR* const entries = iterator_descriptor < 0 ? nullptr : fdopendir(iterator_descriptor);
+  if (!entries) {
+    if (iterator_descriptor >= 0) {
+      close(iterator_descriptor);
+    }
+    return false;
+  }
+  rewinddir(entries);
+  std::vector<std::string> names;
+  bool valid = true;
+  while (true) {
+    errno = 0;
+    const auto* entry = readdir(entries);
+    if (!entry) {
+      valid = errno == 0;
+      break;
+    }
+    if (IsStreamFileName(entry->d_name)) {
+      names.emplace_back(entry->d_name);
+    }
+  }
+  rewinddir(entries);
+  closedir(entries);
+  for (const std::string& name : names) {
+    if (unlinkat(directory, name.c_str(), 0) != 0) {
+      valid = false;
+      break;
+    }
+    ++removed;
+  }
+  return valid;
+}
+
 }  // namespace
 
-bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
+bool IsValidArtifactHeader(const ArtifactHeader& stream_header) noexcept {
+  // A stream's open header has no size or digest yet, and a request body's
+  // creator record may follow in its end frame.
+  ArtifactHeader header = stream_header;
+  if (header.protocol_version == kArtifactStreamProtocolVersion) {
+    if (header.content_size != 0 || !IsZeroDigest(header.expected_sha256)) {
+      return false;
+    }
+    if (header.creator_event_id == 0 && header.kind == ArtifactKind::kRequestBody) {
+      header.creator_event_id = 1;
+    }
+    header.protocol_version = kArtifactProtocolVersion;
+  }
   if (header.magic != kArtifactMagic || header.protocol_version != kArtifactProtocolVersion ||
       header.header_size != kArtifactHeaderSize || header.session_id == 0 ||
       header.artifact_id == 0 || header.url_size == 0 || header.url_size > kMaxArtifactUrlBytes ||
@@ -469,20 +555,28 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
     return false;
   const bool sensitive = (header.flags & kArtifactFlagSensitive) != 0;
   if ((header.kind == ArtifactKind::kResponseBody || header.kind == ArtifactKind::kCanvasDataUrl ||
-       header.kind == ArtifactKind::kRequestBody) != sensitive) {
+       IsNetworkRequestArtifact(header.kind)) != sensitive) {
     return false;
   }
-  if ((header.kind == ArtifactKind::kRequestBody) !=
+  if (IsNetworkRequestArtifact(header.kind) !=
           (header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest) ||
       (header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest &&
        (header.execution_context_id != 0 || header.creator_event_id == 0))) {
+    return false;
+  }
+  if ((header.kind == ArtifactKind::kStack) !=
+          (header.capture_origin == ArtifactCaptureOrigin::kRequestStack) ||
+      ((header.capture_origin == ArtifactCaptureOrigin::kRequestStack ||
+        header.capture_origin == ArtifactCaptureOrigin::kStackScript) &&
+       header.creator_event_id == 0)) {
     return false;
   }
   const bool valid_kind =
       header.kind == ArtifactKind::kJavaScript || header.kind == ArtifactKind::kWasm ||
       header.kind == ArtifactKind::kSourceMap || header.kind == ArtifactKind::kResponseBody ||
       header.kind == ArtifactKind::kCanvasDataUrl || header.kind == ArtifactKind::kBytecodeBuffer ||
-      header.kind == ArtifactKind::kWasmGuestAdapter || header.kind == ArtifactKind::kRequestBody;
+      header.kind == ArtifactKind::kWasmGuestAdapter || IsNetworkRequestArtifact(header.kind) ||
+      header.kind == ArtifactKind::kStack;
   const bool valid_origin =
       header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
       header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
@@ -495,6 +589,8 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
       header.capture_origin == ArtifactCaptureOrigin::kRuntimeAllocatingScript ||
       header.capture_origin == ArtifactCaptureOrigin::kNativeWasmGuest ||
       header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest ||
+      header.capture_origin == ArtifactCaptureOrigin::kRequestStack ||
+      header.capture_origin == ArtifactCaptureOrigin::kStackScript ||
       header.capture_origin == ArtifactCaptureOrigin::kCompiledScript;
   const bool compatible_origin =
       header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest ||
@@ -503,7 +599,10 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
       (header.kind == ArtifactKind::kJavaScript &&
        (header.capture_origin == ArtifactCaptureOrigin::kDynamicJavaScript ||
         header.capture_origin == ArtifactCaptureOrigin::kRuntimeAllocatingScript ||
+        header.capture_origin == ArtifactCaptureOrigin::kStackScript ||
         header.capture_origin == ArtifactCaptureOrigin::kCompiledScript)) ||
+      (header.kind == ArtifactKind::kStack &&
+       header.capture_origin == ArtifactCaptureOrigin::kRequestStack) ||
       (header.kind == ArtifactKind::kWasm &&
        (header.capture_origin == ArtifactCaptureOrigin::kWebAssemblyCompile ||
         header.capture_origin == ArtifactCaptureOrigin::kWebAssemblyModule ||
@@ -542,6 +641,16 @@ const char* ArtifactKindName(const ArtifactKind kind) noexcept {
       return "wasm_guest_adapter";
     case ArtifactKind::kRequestBody:
       return "request_body";
+    case ArtifactKind::kRequestTarget:
+      return "request_target";
+    case ArtifactKind::kRequestHeaders:
+      return "request_headers";
+    case ArtifactKind::kResponseHeaders:
+      return "response_headers";
+    case ArtifactKind::kCookieList:
+      return "cookie_list";
+    case ArtifactKind::kStack:
+      return "stack";
     case ArtifactKind::kUnknown:
       return "unknown";
   }
@@ -572,6 +681,10 @@ const char* ArtifactCaptureOriginName(const ArtifactCaptureOrigin origin) noexce
       return "native_wasm_guest";
     case ArtifactCaptureOrigin::kNetworkRequest:
       return "network_request";
+    case ArtifactCaptureOrigin::kRequestStack:
+      return "request_stack";
+    case ArtifactCaptureOrigin::kStackScript:
+      return "stack_script";
     case ArtifactCaptureOrigin::kUnknown:
       return "unknown";
   }
@@ -602,6 +715,9 @@ ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
     throw std::runtime_error("Artifact store is busy or has an unsupported evidence guard");
   }
   const int directory = evidence_guard_.Directory();
+  if (!RemoveAbandonedStreamFiles(directory, removed_stream_files_)) {
+    throw std::runtime_error("Unable to remove partial artifact stream files");
+  }
   if (!blob_directory_.Open(directory, "blobs")) {
     throw std::runtime_error("Unable to open safe artifact blob directory");
   }
@@ -691,20 +807,67 @@ ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
   }
 }
 
+struct ArtifactReceiver::Stream final {
+  ArtifactHeader header;
+  std::string url;
+  std::string mime_type;
+  std::string temporary_name;
+  Sha256 sha256;
+  std::uint64_t size = 0;
+  // The open header deferred its creator to the end frame.
+  bool creator_pending = false;
+};
+
+ArtifactReceiver::~ArtifactReceiver() {
+  AbandonStreams();
+}
+
 ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   last_error_.clear();
   last_artifact_id_ = 0;
+  protocol_version_ = kArtifactProtocolVersion;
   stream_position_ = ArtifactStreamPosition::kUnsynchronized;
-  ArtifactHeader header{};
-  stream.read(reinterpret_cast<char*>(&header), static_cast<std::streamsize>(sizeof(header)));
+  // Both frame kinds start with magic, version and size; reading only those
+  // first never blocks a socket on bytes past a shorter frame.
+  std::array<char, 8> prefix{};
+  stream.read(prefix.data(), static_cast<std::streamsize>(prefix.size()));
   if (stream.gcount() == 0 && stream.eof()) {
     stream_position_ = ArtifactStreamPosition::kFrameBoundary;
     return ArtifactReceiveStatus::kEndOfStream;
   }
-  if (stream.gcount() != static_cast<std::streamsize>(sizeof(header))) {
+  if (stream.gcount() != static_cast<std::streamsize>(prefix.size())) {
+    return Reject(ArtifactReceiveStatus::kInvalid, "Truncated artifact header");
+  }
+  std::uint32_t magic = 0;
+  std::memcpy(&magic, prefix.data(), sizeof(magic));
+  if (magic == kArtifactStreamMagic) {
+    ArtifactStreamFrame frame;
+    std::memcpy(reinterpret_cast<char*>(&frame), prefix.data(), prefix.size());
+    stream.read(reinterpret_cast<char*>(&frame) + prefix.size(),
+                static_cast<std::streamsize>(sizeof(frame) - prefix.size()));
+    if (stream.gcount() != static_cast<std::streamsize>(sizeof(frame) - prefix.size())) {
+      return Reject(ArtifactReceiveStatus::kInvalid, "Truncated artifact stream frame");
+    }
+    protocol_version_ = kArtifactStreamProtocolVersion;
+    last_artifact_id_ = frame.artifact_id;
+    return ReceiveStreamFrame(stream, frame);
+  }
+  ArtifactHeader header{};
+  std::memcpy(reinterpret_cast<char*>(&header), prefix.data(), prefix.size());
+  stream.read(reinterpret_cast<char*>(&header) + prefix.size(),
+              static_cast<std::streamsize>(sizeof(header) - prefix.size()));
+  if (stream.gcount() != static_cast<std::streamsize>(sizeof(header) - prefix.size())) {
     return Reject(ArtifactReceiveStatus::kInvalid, "Truncated artifact header");
   }
   last_artifact_id_ = header.artifact_id;
+  if (header.protocol_version == kArtifactStreamProtocolVersion) {
+    protocol_version_ = kArtifactStreamProtocolVersion;
+  }
+  return ReceiveWhole(stream, header);
+}
+
+ArtifactReceiveStatus ArtifactReceiver::ReceiveWhole(std::istream& stream,
+                                                     const ArtifactHeader& header) {
   if (!IsValidArtifactHeader(header)) {
     return Reject(ArtifactReceiveStatus::kInvalid, "Invalid artifact header");
   }
@@ -712,6 +875,7 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
     return Reject(ArtifactReceiveStatus::kInvalid,
                   "Artifact session does not match the authenticated connection");
   }
+  const bool open = header.protocol_version == kArtifactStreamProtocolVersion;
   // The header is valid and bounds both metadata lengths, so the remaining
   // frame length is trusted from here: a rejection consumes it, keeping the
   // stream at a frame boundary.
@@ -721,12 +885,16 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
     return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kIoError,
                        "Artifact store stopped accepting after an unrecoverable manifest failure");
   }
-  if (artifact_ids_.size() >= limits_.max_artifacts) {
+  if (artifact_ids_.size() + streams_.size() >= limits_.max_artifacts) {
     return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kTooLarge,
                        "Artifact count exceeds its configured limit");
   }
+  if (open && streams_.size() >= kMaxOpenArtifactStreams) {
+    return RejectFrame(stream, metadata_size, 0, ArtifactReceiveStatus::kTooLarge,
+                       "Too many open artifact streams");
+  }
   if (header.content_size > limits_.max_artifact_bytes ||
-      header.content_size > limits_.max_store_bytes - stored_bytes_) {
+      header.content_size > limits_.max_store_bytes - stored_bytes_ - streaming_bytes_) {
     return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kTooLarge,
                        "Artifact exceeds a configured byte limit");
   }
@@ -735,7 +903,7 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
                        ArtifactReceiveStatus::kSensitiveCaptureDisabled,
                        "Sensitive content capture is disabled");
   }
-  if (artifact_ids_.contains(header.artifact_id)) {
+  if (artifact_ids_.contains(header.artifact_id) || streams_.contains(header.artifact_id)) {
     return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kConflict,
                        "Artifact identifier already exists");
   }
@@ -756,7 +924,7 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   }
 
   const int directory = evidence_guard_.Directory();
-  const std::string temporary_name = "artifact-" + std::to_string(header.artifact_id) + ".part";
+  const std::string temporary_name = StreamFileName(header.artifact_id);
   EvidenceFile temporary;
   temporary.Open(EvidenceGuard::OpenFile(directory, temporary_name, O_WRONLY | O_CREAT | O_EXCL),
                  true);
@@ -765,6 +933,24 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
                        "Unable to create safe temporary artifact file");
   }
   const auto remove_temporary = [&] { return unlinkat(directory, temporary_name.c_str(), 0) == 0; };
+  if (open) {
+    stream_position_ = ArtifactStreamPosition::kFrameBoundary;
+    temporary.close();
+    if (!temporary) {
+      remove_temporary();
+      return Reject(ArtifactReceiveStatus::kIoError, "Unable to create artifact stream file");
+    }
+    auto opened = std::make_unique<Stream>();
+    opened->header = header;
+    opened->header.protocol_version = kArtifactProtocolVersion;
+    opened->creator_pending =
+        header.creator_event_id == 0 && header.kind == ArtifactKind::kRequestBody;
+    opened->url = std::move(url);
+    opened->mime_type = std::move(mime_type);
+    opened->temporary_name = temporary_name;
+    streams_.emplace(header.artifact_id, std::move(opened));
+    return ArtifactReceiveStatus::kAccepted;
+  }
 
   Sha256 sha256;
   std::array<std::uint8_t, 64 * 1024> buffer{};
@@ -809,6 +995,199 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   if (!IsZeroDigest(header.expected_sha256) && digest != header.expected_sha256) {
     remove_temporary();
     return Reject(ArtifactReceiveStatus::kInvalid, "Artifact SHA-256 mismatch");
+  }
+  return Publish(header, url, mime_type, temporary_name, digest);
+}
+
+ArtifactReceiveStatus ArtifactReceiver::ReceiveStreamFrame(std::istream& stream,
+                                                           const ArtifactStreamFrame& frame) {
+  const bool data = frame.op == ArtifactStreamOp::kData;
+  const bool control = frame.op == ArtifactStreamOp::kCheckpoint ||
+                       frame.op == ArtifactStreamOp::kEnd || frame.op == ArtifactStreamOp::kAbort;
+  if (frame.protocol_version != kArtifactStreamProtocolVersion ||
+      frame.frame_size != kArtifactStreamFrameSize || frame.reserved0 != 0 ||
+      frame.session_id == 0 || frame.artifact_id == 0 || (!data && !control) ||
+      (data ? frame.data_size == 0 || frame.data_size > kMaxArtifactStreamChunkBytes
+            : frame.data_size != 0) ||
+      ((data || frame.op == ArtifactStreamOp::kAbort) &&
+       (frame.value != 0 || frame.content_size != 0 || !IsZeroDigest(frame.expected_sha256)))) {
+    return Reject(ArtifactReceiveStatus::kInvalid, "Invalid artifact stream frame");
+  }
+  if (limits_.expected_session_id != 0 && frame.session_id != limits_.expected_session_id) {
+    return Reject(ArtifactReceiveStatus::kInvalid,
+                  "Artifact stream does not match the authenticated connection");
+  }
+  // Every answer to a checkpoint names its snapshot, refusals included.
+  if (frame.op == ArtifactStreamOp::kCheckpoint) {
+    last_artifact_id_ = frame.value;
+  }
+  const auto found = streams_.find(frame.artifact_id);
+  if (found == streams_.end() || found->second->header.session_id != frame.session_id) {
+    return RejectFrame(stream, 0, frame.data_size, ArtifactReceiveStatus::kInvalid,
+                       "Unknown artifact stream");
+  }
+  Stream& open = *found->second;
+  if (store_state_ == StoreState::kFailed) {
+    DropStream(frame.artifact_id);
+    return RejectFrame(stream, 0, frame.data_size, ArtifactReceiveStatus::kIoError,
+                       "Artifact store stopped accepting after an unrecoverable manifest failure");
+  }
+  if (!data) {
+    stream_position_ = ArtifactStreamPosition::kFrameBoundary;
+    if (frame.op == ArtifactStreamOp::kAbort) {
+      DropStream(frame.artifact_id);
+      return ArtifactReceiveStatus::kAccepted;
+    }
+    return frame.op == ArtifactStreamOp::kCheckpoint ? Checkpoint(open, frame)
+                                                     : End(frame.artifact_id, frame);
+  }
+  if (frame.data_size >
+          limits_.max_artifact_bytes - std::min(limits_.max_artifact_bytes, open.size) ||
+      frame.data_size > limits_.max_store_bytes - stored_bytes_ - streaming_bytes_) {
+    DropStream(frame.artifact_id);
+    return RejectFrame(stream, 0, frame.data_size, ArtifactReceiveStatus::kTooLarge,
+                       "Artifact stream exceeds a configured byte limit");
+  }
+  std::array<std::uint8_t, kMaxArtifactStreamChunkBytes> buffer{};
+  stream.read(reinterpret_cast<char*>(buffer.data()),
+              static_cast<std::streamsize>(frame.data_size));
+  if (stream.gcount() != static_cast<std::streamsize>(frame.data_size)) {
+    DropStream(frame.artifact_id);
+    return Reject(ArtifactReceiveStatus::kInvalid, "Truncated artifact stream data");
+  }
+  stream_position_ = ArtifactStreamPosition::kFrameBoundary;
+  const int descriptor = EvidenceGuard::OpenFile(evidence_guard_.Directory(), open.temporary_name,
+                                                 O_WRONLY | O_APPEND);
+  std::size_t written = 0;
+  while (descriptor >= 0 && written < frame.data_size) {
+    const ssize_t count = write(descriptor, buffer.data() + written, frame.data_size - written);
+    if (count <= 0 && errno != EINTR) {
+      break;
+    }
+    written += count > 0 ? static_cast<std::size_t>(count) : 0;
+  }
+  if (descriptor < 0 || close(descriptor) != 0 || written != frame.data_size) {
+    DropStream(frame.artifact_id);
+    return Reject(ArtifactReceiveStatus::kIoError, "Unable to write artifact stream data");
+  }
+  open.sha256.Update(buffer.data(), frame.data_size);
+  open.size += frame.data_size;
+  streaming_bytes_ += frame.data_size;
+  return ArtifactReceiveStatus::kAccepted;
+}
+
+ArtifactReceiveStatus ArtifactReceiver::Checkpoint(Stream& open, const ArtifactStreamFrame& frame) {
+  const std::uint64_t snapshot_id = frame.value;
+  if (snapshot_id == 0 || open.creator_pending || frame.content_size != open.size) {
+    DropStream(frame.artifact_id);
+    return Reject(ArtifactReceiveStatus::kInvalid, "Invalid artifact stream checkpoint");
+  }
+  if (artifact_ids_.contains(snapshot_id) || streams_.contains(snapshot_id)) {
+    return Reject(ArtifactReceiveStatus::kConflict, "Artifact identifier already exists");
+  }
+  if (artifact_ids_.size() + streams_.size() >= limits_.max_artifacts ||
+      open.size > limits_.max_store_bytes - stored_bytes_ - streaming_bytes_) {
+    return Reject(ArtifactReceiveStatus::kTooLarge,
+                  "Artifact checkpoint exceeds a configured limit");
+  }
+  Sha256 prefix = open.sha256;
+  const std::array<std::uint8_t, 32> digest = prefix.Final();
+  if (!IsZeroDigest(frame.expected_sha256) && digest != frame.expected_sha256) {
+    DropStream(frame.artifact_id);
+    return Reject(ArtifactReceiveStatus::kInvalid, "Artifact checkpoint SHA-256 mismatch");
+  }
+  const int directory = evidence_guard_.Directory();
+  const std::string snapshot_name = StreamFileName(snapshot_id);
+  EvidenceFile source;
+  source.Open(EvidenceGuard::OpenFile(directory, open.temporary_name, O_RDONLY), false);
+  EvidenceFile copy;
+  copy.Open(EvidenceGuard::OpenFile(directory, snapshot_name, O_WRONLY | O_CREAT | O_EXCL), true);
+  bool copied = static_cast<bool>(source) && static_cast<bool>(copy);
+  std::array<char, 64 * 1024> buffer{};
+  for (std::uint64_t remaining = open.size; copied && remaining > 0;) {
+    const auto requested = static_cast<std::streamsize>(
+        std::min<std::uint64_t>(remaining, static_cast<std::uint64_t>(buffer.size())));
+    source.read(buffer.data(), requested);
+    copied = source.gcount() == requested;
+    copy.write(buffer.data(), requested);
+    copied = copied && static_cast<bool>(copy);
+    remaining -= static_cast<std::uint64_t>(requested);
+  }
+  copy.flush();
+  copied = copied && static_cast<bool>(copy) && fsync(copy.Descriptor()) == 0;
+  copy.close();
+  source.close();
+  if (!copied || !copy) {
+    static_cast<void>(unlinkat(directory, snapshot_name.c_str(), 0));
+    return Reject(ArtifactReceiveStatus::kIoError, "Unable to copy artifact checkpoint");
+  }
+  ArtifactHeader header = open.header;
+  header.artifact_id = snapshot_id;
+  header.content_size = open.size;
+  return Publish(header, open.url, open.mime_type, snapshot_name, digest);
+}
+
+ArtifactReceiveStatus ArtifactReceiver::End(const std::uint64_t artifact_id,
+                                            const ArtifactStreamFrame& frame) {
+  const auto found = streams_.find(artifact_id);
+  Stream& open = *found->second;
+  ArtifactHeader header = open.header;
+  header.content_size = open.size;
+  if (open.creator_pending) {
+    header.creator_event_id = frame.value;
+  }
+  const bool creator_valid = open.creator_pending ? frame.value != 0 : frame.value == 0;
+  const std::array<std::uint8_t, 32> digest = open.sha256.Final();
+  if (!creator_valid || frame.content_size != open.size || !IsValidArtifactHeader(header) ||
+      (!IsZeroDigest(frame.expected_sha256) && digest != frame.expected_sha256)) {
+    DropStream(artifact_id);
+    return Reject(ArtifactReceiveStatus::kInvalid, "Invalid artifact stream end");
+  }
+  const int directory = evidence_guard_.Directory();
+  const int descriptor = EvidenceGuard::OpenFile(directory, open.temporary_name, O_RDONLY);
+  const bool durable = descriptor >= 0 && fsync(descriptor) == 0;
+  if (descriptor >= 0) {
+    close(descriptor);
+  }
+  if (!durable) {
+    DropStream(artifact_id);
+    return Reject(ArtifactReceiveStatus::kIoError, "Unable to durably flush artifact stream");
+  }
+  const std::unique_ptr<Stream> ended = std::move(found->second);
+  streams_.erase(found);
+  streaming_bytes_ -= ended->size;
+  return Publish(header, ended->url, ended->mime_type, ended->temporary_name, digest);
+}
+
+void ArtifactReceiver::DropStream(const std::uint64_t artifact_id) noexcept {
+  const auto found = streams_.find(artifact_id);
+  if (found == streams_.end()) {
+    return;
+  }
+  static_cast<void>(
+      unlinkat(evidence_guard_.Directory(), found->second->temporary_name.c_str(), 0));
+  streaming_bytes_ -= found->second->size;
+  streams_.erase(found);
+}
+
+void ArtifactReceiver::AbandonStreams() noexcept {
+  while (!streams_.empty()) {
+    DropStream(streams_.begin()->first);
+    SaturatingAdd(stats_.streams_abandoned, 1);
+  }
+}
+
+ArtifactReceiveStatus ArtifactReceiver::Publish(const ArtifactHeader& header,
+                                                const std::string& url,
+                                                const std::string& mime_type,
+                                                const std::string& temporary_name,
+                                                const std::array<std::uint8_t, 32>& digest) {
+  const int directory = evidence_guard_.Directory();
+  const auto remove_temporary = [&] { return unlinkat(directory, temporary_name.c_str(), 0) == 0; };
+  if (store_state_ == StoreState::kFailed) {
+    remove_temporary();
+    return Reject(ArtifactReceiveStatus::kIoError,
+                  "Artifact store stopped accepting after an unrecoverable manifest failure");
   }
   const std::string digest_hex = DigestHex(digest);
   const std::string blob_name = digest_hex + ".bin";
@@ -930,6 +1309,18 @@ const std::string& ArtifactReceiver::LastError() const noexcept {
 
 ArtifactStreamPosition ArtifactReceiver::StreamPosition() const noexcept {
   return stream_position_;
+}
+
+std::uint16_t ArtifactReceiver::ProtocolVersion() const noexcept {
+  return protocol_version_;
+}
+
+std::size_t ArtifactReceiver::OpenStreams() const noexcept {
+  return streams_.size();
+}
+
+std::uint64_t ArtifactReceiver::RemovedStreamFiles() const noexcept {
+  return removed_stream_files_;
 }
 
 std::uint64_t ArtifactReceiver::RecoveredManifestBytes() const noexcept {

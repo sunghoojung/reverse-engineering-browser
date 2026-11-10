@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -70,6 +71,20 @@ class NativeProbeSession final {
   [[nodiscard]] std::uint64_t expires_at_monotonic_ns() const noexcept;
   [[nodiscard]] bool capture_canvas_images() const noexcept;
   [[nodiscard]] bool capture_request_content() const noexcept;
+  // --reb-capture-browser-internal: admit WebUI renderers and record internal
+  // schemes instead of counting them.
+  [[nodiscard]] bool capture_browser_internal() const noexcept;
+  // --reb-capture-extension-traffic: record extension worker traffic under its
+  // extension id instead of counting it.
+  [[nodiscard]] bool capture_extension_traffic() const noexcept;
+  // One more browser-internal renderer process this session does not admit.
+  void NoteWebUiRendererExcluded() noexcept;
+  // One more request the proxy counts instead of recording. UI sequence.
+  void NoteBrowserRequestExcluded(std::uint8_t exclusion_class) noexcept;
+  // Cumulative count of one exclusion class; protocol/native-network-v3.md.
+  void EmitExclusion(std::uint32_t excluded_process_id,
+                     std::uint8_t exclusion_class,
+                     std::uint64_t count) noexcept;
   [[nodiscard]] std::uint64_t NextBrowserSequence() noexcept;
   void Emit(const NativeProbeEvent& event) const noexcept;
 
@@ -98,6 +113,10 @@ class NativeProbeSession final {
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
   std::atomic<bool> capture_canvas_images_{false};
   std::atomic<bool> capture_request_content_{false};
+  std::atomic<bool> capture_browser_internal_{false};
+  std::atomic<bool> capture_extension_traffic_{false};
+  std::uint64_t webui_renderers_excluded_ = 0;
+  std::map<std::uint8_t, std::uint64_t> browser_requests_excluded_;
   std::atomic<std::uint64_t> next_browser_sequence_{1};
 };
 

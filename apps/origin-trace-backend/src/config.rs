@@ -46,6 +46,8 @@ pub struct Options {
     pub session_canvas_images: bool,
     #[arg(long, requires = "socket")]
     pub session_document_start: bool,
+    #[arg(long, requires = "socket")]
+    pub session_request_stacks: bool,
     #[arg(long)]
     pub decoder: Option<PathBuf>,
     #[arg(long)]
@@ -99,6 +101,9 @@ pub struct Options {
     pub demo_evidence: bool,
     #[arg(long)]
     pub endpoint_file: Option<PathBuf>,
+    /// Stop once this parent process is gone.
+    #[arg(long)]
+    pub owner_pid: Option<i32>,
     /// Publish this live session's canonical endpoint; idle/demo backends cannot own it.
     #[arg(long, requires = "socket")]
     pub active_endpoint_file: Option<PathBuf>,

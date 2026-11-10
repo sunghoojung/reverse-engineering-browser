@@ -37,6 +37,8 @@ final class StoredEventWindowCache {
   // Browser reasons are fixed producer identifiers, so 64 distinct pairs covers
   // every documented one. A further pair stays an unexplained queue-drop marker.
   static let maxNamedGaps = 64
+  // Damaged lines remembered between polls; past this a store is parsed again each poll.
+  static let maxRememberedDamaged = 65_536
 
   private struct Record {
     var start: UInt64
@@ -59,6 +61,8 @@ final class StoredEventWindowCache {
     var predecessor: UInt8?
     var bytes: [UInt8]
     var records: [Record]
+    // Start offsets of terminated lines skipped as unreadable.
+    var damaged: [UInt64] = []
 
     func overlaps(_ newer: Snapshot) -> Bool {
       guard device == newer.device, inode == newer.inode,
@@ -93,7 +97,7 @@ final class StoredEventWindowCache {
     do {
       guard var tail = try readTail(path) else {
         var records: [Record] = []
-        return try summarize(records: &records, start: 0, end: 0, bytes: [], limit: limit).window
+        return try summarize(records: &records, start: 0, end: 0, bytes: [], limit: limit, malformedLines: 0).window
       }
       let skip: Int
       if tail.start == 0 || tail.predecessor == 0x0a {
@@ -103,16 +107,19 @@ final class StoredEventWindowCache {
       } else {
         skip = tail.bytes.count
       }
-      if skip > Self.maxRecordBytes + 1 {
-        throw StoredEventWindowError("The evidence store contains an oversized event")
-      }
+      // A prefix longer than any record is the end of a damaged line.
+      var damagedLines = skip > Self.maxRecordBytes + 1 ? 1 : 0
       let first = tail.start + UInt64(skip)
       var parseFrom = first
       if var old = previous, old.overlaps(tail) {
         old.records.removeAll { $0.start < first || !$0.terminated }
         if let last = old.records.last { parseFrom = last.end }
         tail.records = old.records
+        // Lines past the resume point are read and counted again below.
+        tail.damaged = old.damaged.filter { $0 >= first && $0 < parseFrom }
       }
+      damagedLines += tail.damaged.count
+      var remember = true
       var position = Int(parseFrom - tail.start)
       while position < tail.bytes.count {
         let newline = tail.bytes[position...].firstIndex(of: 0x0a)
@@ -121,10 +128,22 @@ final class StoredEventWindowCache {
         let endIndex = position + length + (terminated ? 1 : 0)
         let line = tail.bytes[position..<(position + length)]
         if !line.allSatisfy(isAsciiWhitespace) {
-          if length > Self.maxRecordBytes {
-            throw StoredEventWindowError("The evidence store contains an oversized event")
+          // One torn or corrupted record must not fail every later poll of the store.
+          guard length <= Self.maxRecordBytes, let object = readableEvent(Data(line)) else {
+            // A tail still being written is neither damage nor a record.
+            if terminated || length > Self.maxRecordBytes {
+              damagedLines += 1
+              if terminated {
+                if tail.damaged.count < Self.maxRememberedDamaged {
+                  tail.damaged.append(tail.start + UInt64(position))
+                } else {
+                  remember = false
+                }
+              }
+            }
+            position = endIndex
+            continue
           }
-          let object = try parseEvent(Data(line))
           let gap = (object["type"] as? String) == "gap"
           tail.records.append(Record(
             start: tail.start + UInt64(position),
@@ -147,12 +166,13 @@ final class StoredEventWindowCache {
         start: first,
         end: tail.end,
         bytes: Array(tail.bytes[skip...]),
-        limit: limit
+        limit: limit,
+        malformedLines: damagedLines
       )
       for index in tail.records.indices where !summarized.retained[index] {
         tail.records[index].event = nil
       }
-      snapshot = tail
+      snapshot = remember ? tail : nil
       return summarized.window
     } catch {
       snapshot = nil
@@ -201,7 +221,8 @@ final class StoredEventWindowCache {
     start: UInt64,
     end: UInt64,
     bytes: [UInt8],
-    limit: Int
+    limit: Int,
+    malformedLines: Int
   ) throws -> (window: StoredEventWindow, retained: [Bool]) {
     let capped = min(max(limit, 0), Self.maxEvents)
     var sequenceGaps: UInt64 = 0
@@ -266,6 +287,7 @@ final class StoredEventWindowCache {
       "scan_limit": maximumBytes,
       "events_limited": records.count > capped,
       "network_events_limited": networkCount > capped,
+      "malformed_lines": malformedLines,
     ]
     return (
       StoredEventWindow(
@@ -288,6 +310,14 @@ private func parseEvent(_ data: Data) throws -> [String: Any] {
   guard let object = value as? [String: Any] else {
     throw StoredEventWindowError("The evidence store contains a malformed event")
   }
+  return object
+}
+
+// The event on one stored line, or nil for a line that cannot be one.
+private func readableEvent(_ data: Data) -> [String: Any]? {
+  guard let object = try? parseEvent(data), unsignedValue(object["session_id"]) != nil,
+    unsignedValue(object["process_id"]) != nil, unsignedValue(object["sequence_number"]) != nil
+  else { return nil }
   return object
 }
 
@@ -364,7 +394,10 @@ private func isNetwork(_ event: [String: Any]) -> Bool {
   guard event["category"] as? String == "network", let type = event["type"] as? String else { return false }
   return [
     "request_initiated", "request_started", "request_redirected", "response_started",
-    "response_completed", "request_completed", "request_failed",
+    "response_completed", "request_completed", "request_failed", "request_target", "request_body",
+    "capture_exclusion", "tab_set", "request_tab_link", "response_body", "request_headers",
+    "response_headers", "cookie_list", "request_initiator_stack", "request_watch_match",
+    "navigation_initiator_link", "request_extension_link",
   ].contains(type)
 }
 

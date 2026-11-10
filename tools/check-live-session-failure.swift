@@ -83,13 +83,16 @@ enum LiveSessionFailureChecks {
       LiveSessionCoordinator.captureDefaults(
         environment: mask.map { ["REB_CAPTURE_CATEGORY_MASK": $0] } ?? [:], captureNetworkContent: content)
     }
-    let names = ["REB_CAPTURE_CANVAS_IMAGES", "REB_CAPTURE_REQUEST_CONTENT", "REB_NATIVE_WASM_DISPATCH", "REB_NATIVE_WASM_CALL_INDIRECT"]
+    let names = [
+      "REB_CAPTURE_CANVAS_IMAGES", "REB_CAPTURE_REQUEST_CONTENT", "REB_NATIVE_WASM_DISPATCH",
+      "REB_NATIVE_WASM_CALL_INDIRECT", "REB_NATIVE_REQUEST_STACKS",
+    ]
     let defaultCases: [(String?, Bool, [String])] = [
-      (nil, true, ["1", "1", "1", "1"]), (nil, false, ["0", "0", "1", "1"]),
-      ("0x500", true, ["0", "1", "0", "0"]), ("0x300", true, ["0", "0", "0", "0"]),
-      ("768", true, ["0", "0", "0", "0"]), ("1025", true, ["1", "0", "0", "0"]),
-      ("0x7ff", true, ["1", "1", "1", "1"]), ("0xzz", true, ["0", "0", "0", "0"]),
-      (" 4095", true, ["0", "0", "0", "0"]),
+      (nil, true, ["1", "1", "1", "1", "1"]), (nil, false, ["0", "0", "1", "1", "1"]),
+      ("0x500", true, ["0", "1", "0", "0", "1"]), ("0x300", true, ["0", "0", "0", "0", "0"]),
+      ("768", true, ["0", "0", "0", "0", "0"]), ("1025", true, ["1", "0", "0", "0", "0"]),
+      ("0x7ff", true, ["1", "1", "1", "1", "1"]), ("0xzz", true, ["0", "0", "0", "0", "0"]),
+      (" 4095", true, ["0", "0", "0", "0", "0"]),
     ]
     for (mask, content, expected) in defaultCases {
       let environment = defaults(mask, content)

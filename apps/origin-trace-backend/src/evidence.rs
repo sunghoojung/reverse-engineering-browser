@@ -1,5 +1,5 @@
 use crate::{
-    error::{Error, Result},
+    error::{Code, Error, Result},
     validation,
 };
 use serde_json::{Value, json};
@@ -152,7 +152,8 @@ pub fn content(root: &Path, artifact: &Value, maximum: usize) -> Result<Vec<u8>>
     }
     let file = regular_file(&path)?;
     if file.metadata()?.len() != artifact["byte_size"].as_u64().unwrap_or(u64::MAX) {
-        return Err(Error::new(500, "Artifact content byte size is invalid"));
+        return Err(Error::new(500, "Artifact content byte size is invalid")
+            .with_code(Code::ArtifactIntegrity));
     }
     let mut bytes = Vec::new();
     file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
@@ -160,7 +161,9 @@ pub fn content(root: &Path, artifact: &Value, maximum: usize) -> Result<Vec<u8>>
         return Err(Error::bad("Artifact content exceeds its byte limit"));
     }
     if hex::encode(Sha256::digest(&bytes)) != artifact["sha256"].as_str().unwrap_or("") {
-        return Err(Error::new(500, "Artifact content hash is invalid"));
+        return Err(
+            Error::new(500, "Artifact content hash is invalid").with_code(Code::ArtifactIntegrity)
+        );
     }
     Ok(bytes)
 }
@@ -189,7 +192,8 @@ pub fn verified_range(
         .as_u64()
         .ok_or_else(|| Error::new(500, "Artifact content byte size is invalid"))?;
     if file.metadata()?.len() != expected {
-        return Err(Error::new(500, "Artifact content byte size is invalid"));
+        return Err(Error::new(500, "Artifact content byte size is invalid")
+            .with_code(Code::ArtifactIntegrity));
     }
     let started = std::time::Instant::now();
     let mut hash = Sha256::new();
@@ -220,14 +224,16 @@ pub fn verified_range(
             .checked_add(size)
             .ok_or_else(|| Error::new(500, "Artifact byte size overflow"))?;
         if position as u64 > expected {
-            return Err(Error::new(500, "Artifact changed during verification"));
+            return Err(Error::new(500, "Artifact changed during verification")
+                .with_code(Code::ArtifactIntegrity));
         }
     }
     if position as u64 != expected
         || file.metadata()?.len() != expected
         || hex::encode(hash.finalize()) != artifact["sha256"].as_str().unwrap_or("")
     {
-        return Err(Error::new(500, "Artifact content integrity is invalid"));
+        return Err(Error::new(500, "Artifact content integrity is invalid")
+            .with_code(Code::ArtifactIntegrity));
     }
     Ok(selected)
 }
@@ -332,6 +338,19 @@ pub(crate) fn regular_file(path: &Path) -> std::io::Result<File> {
     Ok(file)
 }
 
+fn is_network_request_artifact(artifact: &Value) -> bool {
+    matches!(
+        artifact["kind"].as_str(),
+        Some(
+            "request_body"
+                | "request_target"
+                | "request_headers"
+                | "response_headers"
+                | "cookie_list"
+        )
+    )
+}
+
 pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
     let valid = artifact["protocol_version"] == 1
         && [
@@ -353,6 +372,11 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             "bytecode_buffer",
             "wasm_guest_adapter",
             "request_body",
+            "request_target",
+            "request_headers",
+            "response_headers",
+            "cookie_list",
+            "stack",
         ]
         .contains(&artifact["kind"].as_str().unwrap_or(""))
         && artifact["url"].as_str().is_some_and(|s| !s.is_empty())
@@ -371,7 +395,15 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
         || artifact["sensitive"]
             != matches!(
                 artifact["kind"].as_str(),
-                Some("response_body" | "canvas_data_url" | "request_body")
+                Some(
+                    "response_body"
+                        | "canvas_data_url"
+                        | "request_body"
+                        | "request_target"
+                        | "request_headers"
+                        | "response_headers"
+                        | "cookie_list"
+                )
             )
     {
         return Err(Error::new(
@@ -394,6 +426,8 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
                 "runtime_allocating_script",
                 "native_wasm_guest",
                 "network_request",
+                "request_stack",
+                "stack_script",
                 "compiled_script",
             ]
             .contains(&origin)
@@ -412,9 +446,16 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
                 .any(|k| !canonical(&artifact[*k], 64, true))))
             || (matches!(
                 origin,
-                "dynamic_javascript" | "runtime_allocating_script" | "compiled_script"
-            )
-                && (artifact["kind"] != "javascript" || artifact["execution_context_id"] == "0"))
+                "dynamic_javascript"
+                    | "runtime_allocating_script"
+                    | "stack_script"
+                    | "compiled_script"
+            ) && (artifact["kind"] != "javascript" || artifact["execution_context_id"] == "0"))
+            // Request stack frames and the sources a stack named, native-network-v3.md.
+            || ((artifact["kind"] == "stack") != (origin == "request_stack"))
+            || (matches!(origin, "request_stack" | "stack_script")
+                && (artifact["execution_context_id"] == "0"
+                    || artifact["creator_event_id"] == "0"))
             || (origin.starts_with("webassembly_")
                 && (artifact["kind"] != "wasm" || artifact["execution_context_id"] == "0"))
             || (origin == "canvas_to_data_url"
@@ -423,8 +464,9 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             || (origin == "runtime_typed_array"
                 && (artifact["kind"] != "bytecode_buffer"
                     || artifact["execution_context_id"] == "0"))
-            // A request body is created by its browser request_body record.
-            || ((artifact["kind"] == "request_body") != (origin == "network_request"))
+            // Request content and header blocks are created by one browser
+            // network record (native-network-v2.md and v3).
+            || (is_network_request_artifact(artifact) != (origin == "network_request"))
             || (origin == "network_request"
                 && (artifact["execution_context_id"] != "0"
                     || artifact["creator_event_id"] == "0"))
@@ -435,7 +477,10 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             ));
         }
     } else {
-        if artifact["kind"] == "wasm_guest_adapter" || artifact["kind"] == "request_body" {
+        if artifact["kind"] == "wasm_guest_adapter"
+            || is_network_request_artifact(artifact)
+            || artifact["kind"] == "stack"
+        {
             return Err(Error::new(500, "Native artifact origin is missing"));
         }
         artifact["execution_context_id"] = json!("0");
@@ -476,17 +521,59 @@ fn find_artifact_with_deadline(
     max_bytes: u64,
     deadline: std::time::Instant,
 ) -> Result<Value> {
+    let mut selected = None;
+    scan_manifest(root, max_records, max_bytes, deadline, |value| {
+        if value["artifact_id"] == id {
+            selected = Some(value);
+        }
+    })?;
+    selected.ok_or_else(|| Error::new(404, "Artifact not found"))
+}
+/// The manifest records these events name by artifact ID, and any `also` selects.
+pub fn artifacts_named(
+    root: &Path,
+    events: &[Value],
+    also: impl Fn(&Value) -> bool,
+) -> Result<Vec<Value>> {
+    let named: BTreeSet<&str> = events
+        .iter()
+        .filter_map(|event| event["artifact_id"].as_str())
+        .filter(|id| *id != "0")
+        .collect();
+    select_artifacts(root, |artifact| {
+        artifact["artifact_id"]
+            .as_str()
+            .is_some_and(|id| named.contains(id))
+            || also(artifact)
+    })
+}
+/// Every validated manifest record `keep` selects, oldest first, from one complete scan.
+pub fn select_artifacts(root: &Path, keep: impl Fn(&Value) -> bool) -> Result<Vec<Value>> {
+    let mut selected = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    scan_manifest(root, usize::MAX, u64::MAX, deadline, |value| {
+        if keep(&value) {
+            selected.push(value);
+        }
+    })?;
+    Ok(selected)
+}
+/// Validates every manifest record and visits each; a missing manifest has none.
+fn scan_manifest(
+    root: &Path,
+    max_records: usize,
+    max_bytes: u64,
+    deadline: std::time::Instant,
+    mut visit: impl FnMut(Value),
+) -> Result<()> {
     use std::io::BufRead;
     let path = root.join("manifest.jsonl");
     let file = match regular_file(&path) {
         Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(Error::new(404, "Artifact not found"));
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
     };
     let mut reader = std::io::BufReader::new(file);
-    let mut selected = None;
     let mut seen = BTreeSet::new();
     let mut scanned = 0u64;
     let mut records = 0usize;
@@ -531,11 +618,9 @@ fn find_artifact_with_deadline(
                 "The artifact manifest contains a duplicate artifact ID",
             ));
         }
-        if value["artifact_id"] == id {
-            selected = Some(value);
-        }
+        visit(value);
     }
-    selected.ok_or_else(|| Error::new(404, "Artifact not found"))
+    Ok(())
 }
 
 /// Strict, cooperative stopped-store reads used only by metadata package export.
@@ -1236,6 +1321,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retained_bytes_that_changed_report_an_integrity_failure() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("blob.bin"), b"changed").unwrap();
+        let artifact = json!({"content_path": "blob.bin", "byte_size": 7,
+            "sha256": hex::encode(Sha256::digest(b"written"))});
+        let error = verified_range(root.path(), &artifact, 0, 7).unwrap_err();
+        assert_eq!(error.status, 500);
+        assert_eq!(error.reason.code, Code::ArtifactIntegrity);
+    }
+
+    #[test]
     fn request_body_artifact_is_sensitive_and_created_by_its_body_record() {
         let valid = json!({
             "protocol_version": 1,
@@ -1256,15 +1352,29 @@ mod tests {
             "content_path": "blobs/0000000000000000000000000000000000000000000000000000000000000000.bin"
         });
         assert!(validate_artifact(&mut valid.clone()).is_ok());
-        for (field, value) in [
-            ("sensitive", json!(false)),
-            ("capture_origin", json!("network_response")),
-            ("execution_context_id", json!("4")),
-            ("creator_event_id", json!("0")),
+        for kind in [
+            "request_body",
+            "request_target",
+            "request_headers",
+            "response_headers",
+            "cookie_list",
         ] {
-            let mut artifact = valid.clone();
-            artifact[field] = value;
-            assert!(validate_artifact(&mut artifact).is_err(), "{field}");
+            let mut base = valid.clone();
+            base["kind"] = json!(kind);
+            if kind == "request_target" {
+                base["url"] = json!("https://api.example.test");
+            }
+            assert!(validate_artifact(&mut base.clone()).is_ok(), "{kind}");
+            for (field, value) in [
+                ("sensitive", json!(false)),
+                ("capture_origin", json!("network_response")),
+                ("execution_context_id", json!("4")),
+                ("creator_event_id", json!("0")),
+            ] {
+                let mut artifact = base.clone();
+                artifact[field] = value;
+                assert!(validate_artifact(&mut artifact).is_err(), "{kind} {field}");
+            }
         }
         let mut other = valid.clone();
         other["kind"] = json!("javascript");

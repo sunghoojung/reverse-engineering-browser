@@ -1,0 +1,141 @@
+diff --git a/third_party/blink/renderer/core/loader/base_fetch_context.cc b/third_party/blink/renderer/core/loader/base_fetch_context.cc
+index 85af31d..351fcda 100644
+--- a/third_party/blink/renderer/core/loader/base_fetch_context.cc
++++ b/third_party/blink/renderer/core/loader/base_fetch_context.cc
+@@ -8,6 +8,7 @@
+ #include "services/network/public/cpp/connection_allowlist.h"
+ #include "services/network/public/cpp/features.h"
+ #include "services/network/public/cpp/request_mode.h"
++#include "third_party/blink/public/common/tokens/tokens.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/common/switches.h"
+ #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink.h"
+@@ -40,6 +41,27 @@
+ 
+ namespace blink {
+ 
++reb::NativeFetchOwner BaseFetchContext::GetNativeFetchOwner() const {
++  const ExecutionContext* const context = GetExecutionContext();
++  if (!context) {
++    return {};
++  }
++  const ExecutionContextToken token = context->GetExecutionContextToken();
++  const base::UnguessableToken& value = token.value();
++  reb::NativeLoaderKind kind = reb::NativeLoaderKind::kOtherContext;
++  if (token.Is<LocalFrameToken>()) {
++    kind = reb::NativeLoaderKind::kDocument;
++  } else if (token.Is<DedicatedWorkerToken>()) {
++    kind = reb::NativeLoaderKind::kDedicatedWorker;
++  } else if (token.Is<SharedWorkerToken>()) {
++    kind = reb::NativeLoaderKind::kSharedWorker;
++  } else if (token.Is<ServiceWorkerToken>()) {
++    kind = reb::NativeLoaderKind::kServiceWorker;
++  }
++  return {kind, reb::NativeContextFold(value.GetHighForSerialization(),
++                                       value.GetLowForSerialization())};
++}
++
+ std::optional<ResourceRequestBlockedReason> BaseFetchContext::CanRequest(
+     ResourceType type,
+     const ResourceRequest& resource_request,
+diff --git a/third_party/blink/renderer/core/loader/base_fetch_context.h b/third_party/blink/renderer/core/loader/base_fetch_context.h
+index 2db9e03..4d4e898 100644
+--- a/third_party/blink/renderer/core/loader/base_fetch_context.h
++++ b/third_party/blink/renderer/core/loader/base_fetch_context.h
+@@ -101,6 +101,8 @@ class CORE_EXPORT BaseFetchContext : public FetchContext {
+       const FetchInitiatorInfo& initiator_info,
+       bool scan_stack_for_ads) override;
+ 
++  reb::NativeFetchOwner GetNativeFetchOwner() const override;
++
+  protected:
+   BaseFetchContext(const DetachableResourceFetcherProperties& properties,
+                    DetachableConsoleLogger* logger)
+diff --git a/third_party/blink/renderer/platform/loader/fetch/fetch_context.h b/third_party/blink/renderer/platform/loader/fetch/fetch_context.h
+index 78ac21c..c0ac1c8 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/fetch_context.h
++++ b/third_party/blink/renderer/platform/loader/fetch/fetch_context.h
+@@ -37,6 +37,7 @@
+ #include "base/notimplemented.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/types/optional_ref.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_fetch_owner.h"
+ #include "components/subresource_filter/core/common/scoped_rule.h"
+ #include "third_party/blink/public/common/subresource_load_metrics.h"
+ #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink-forward.h"
+@@ -284,6 +285,10 @@ class PLATFORM_EXPORT FetchContext : public GarbageCollected<FetchContext> {
+ 
+   virtual String GetSVGCacheIdentifier() const { return String(); }
+ 
++  // The document or worker that owns fetches through this context; see
++  // protocol/native-network-v3.md.
++  virtual reb::NativeFetchOwner GetNativeFetchOwner() const { return {}; }
++
+  protected:
+   const Vector<KURL> empty_unused_preloads_;
+ };
+diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc b/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc
+index c5a4576..d0bf070 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc
+@@ -113,6 +113,13 @@ namespace blink {
+ 
+ namespace {
+ 
++// The fetch's own document or worker, for request_initiated records made on
++// this thread; see protocol/native-network-v3.md.
++reb::NativeFetchOwner NativeFetchOwnerOf(const FetchContext& context) {
++  return reb::NativeProbeSink::Get().IsCaptureArmed() ? context.GetNativeFetchOwner()
++                                                      : reb::NativeFetchOwner();
++}
++
+ reb::NativeRendererRequest RecordNativeDataUrlStart(
+     const ResourceRequestHead& request) {
+   if (!reb::NativeProbeSink::Get().IsCaptureArmed()) [[likely]] {
+@@ -1269,6 +1276,7 @@ void ResourceLoader::HandleError(const ResourceError& error) {
+ }
+ 
+ void ResourceLoader::RequestSynchronously() {
++  const reb::NativeFetchOwnerScope reb_owner(NativeFetchOwnerOf(Context()));
+   DCHECK(IsLoading());
+   DCHECK_EQ(resource_->GetResourceRequest().Priority(),
+             ResourceLoadPriority::kHighest);
+@@ -1353,6 +1361,7 @@ void ResourceLoader::RequestSynchronously() {
+ }
+ 
+ void ResourceLoader::RequestAsynchronously() {
++  const reb::NativeFetchOwnerScope reb_owner(NativeFetchOwnerOf(Context()));
+   if (resource_->Url().ProtocolIsData()) {
+     CHECK(!network_resource_request_);
+     CHECK(!loader_);
+diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/background_url_loader.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/background_url_loader.cc
+index f34b41a..2244a70 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/url_loader/background_url_loader.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/background_url_loader.cc
+@@ -16,6 +16,8 @@
+ #include "base/task/sequenced_task_runner.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/time/time.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_fetch_owner.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "services/network/public/cpp/resource_request.h"
+ #include "services/network/public/cpp/url_loader_completion_status.h"
+ #include "services/network/public/mojom/url_response_head.mojom.h"
+@@ -366,6 +368,17 @@ class BackgroundURLLoader::Context
+       throttles.push_back(
+           std::make_unique<MimeSniffingThrottle>(background_task_runner_));
+     }
++    // Background fetches belong to the assets' document.
++    reb::NativeFetchOwner reb_owner;
++    if (reb::NativeProbeSink::Get().IsCaptureArmed()) {
++      const base::UnguessableToken& frame =
++          cross_thread_background_resource_fetch_context_->GetLocalFrameToken()
++              .value();
++      reb_owner = {reb::NativeLoaderKind::kDocument,
++                   reb::NativeContextFold(frame.GetHighForSerialization(),
++                                          frame.GetLowForSerialization())};
++    }
++    const reb::NativeFetchOwnerScope reb_owner_scope(reb_owner);
+     request_id_ = resource_request_sender_->SendAsync(
+         std::move(request), background_task_runner_, tag, loader_options,
+         cors_exempt_header_list,

@@ -194,8 +194,10 @@ bool Authenticate(const int descriptor,
 
 bool SendAck(const int descriptor,
              const reb::ArtifactReceiveStatus status,
-             const std::uint64_t artifact_id) {
+             const std::uint64_t artifact_id,
+             const std::uint16_t protocol_version) {
   reb::ArtifactAck ack;
+  ack.protocol_version = protocol_version;
   ack.status = status;
   ack.artifact_id = artifact_id;
   std::string error;
@@ -219,7 +221,8 @@ bool ReceiveStream(std::istream& stream,
       return true;
     }
     if (acknowledgment_descriptor >= 0 &&
-        !SendAck(acknowledgment_descriptor, status, receiver.LastArtifactId())) {
+        !SendAck(acknowledgment_descriptor, status, receiver.LastArtifactId(),
+                 receiver.ProtocolVersion())) {
       return false;
     }
     if (status == reb::ArtifactReceiveStatus::kAccepted) {
@@ -281,6 +284,8 @@ bool ReceiveSocketConnections(const int listener,
     DescriptorStreamBuffer buffer(connection.get());
     std::istream stream(&buffer);
     const bool received = ReceiveStream(stream, receiver, connection.get());
+    // A reconnecting browser reports its open streams as lost.
+    receiver.AbandonStreams();
     if (!received) {
       std::cerr << "Artifact connection closed after an unsynchronized frame; waiting for "
                    "reconnect\n";
@@ -298,6 +303,7 @@ void PrintStats(const reb::ArtifactReceiver& receiver) {
             << " too_large=" << stats.too_large
             << " sensitive_rejected=" << stats.sensitive_rejected
             << " conflicts=" << stats.conflicts << " io_errors=" << stats.io_errors
+            << " streams_abandoned=" << stats.streams_abandoned
             << " stored_bytes=" << receiver.StoredBytes() << '\n';
 }
 
@@ -321,6 +327,10 @@ int main(const int argc, char* argv[]) {
     limits.allow_sensitive = options.allow_sensitive;
     reb::ArtifactReceiver receiver(options.store_path, limits);
     std::cerr << "Artifact store ready\n";
+    if (receiver.RemovedStreamFiles() != 0) {
+      std::cerr << "Artifact store: removed " << receiver.RemovedStreamFiles()
+                << " partial stream files left by an interrupted receiver\n";
+    }
     if (receiver.RecoveredManifestBytes() != 0) {
       std::cerr << "Artifact manifest: removed an unacknowledged final record of "
                 << receiver.RecoveredManifestBytes() << " bytes left by an interrupted append\n";
@@ -328,6 +338,7 @@ int main(const int argc, char* argv[]) {
     bool received = false;
     if (options.socket_path.empty()) {
       received = ReceiveStream(std::cin, receiver, -1);
+      receiver.AbandonStreams();
     } else {
       if (!InstallSignalHandlers()) {
         std::cerr << "Unable to install artifact receiver signal handlers: " << std::strerror(errno)

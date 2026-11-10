@@ -1,0 +1,220 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index 56496ac..43e408a 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -43,6 +43,7 @@
+ #include "base/location.h"
+ #include "base/memory/scoped_refptr.h"
+ #include "base/metrics/histogram_functions.h"
++#include "base/no_destructor.h"
+ #include "base/system/sys_info.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/task/thread_pool.h"
+@@ -50,6 +51,7 @@
+ #include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
+ #include "build/build_config.h"
+ #include "components/crash/core/common/crash_key.h"
+ #include "services/metrics/public/cpp/ukm_builders.h"
+@@ -122,6 +124,7 @@
+ #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+ #include "tools/v8_context_snapshot/buildflags.h"
++#include "v8/include/v8-native-stack.h"
+ #include "v8/include/v8-profiler.h"
+ #include "v8/include/v8.h"
+ 
+@@ -782,6 +785,146 @@ reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
+   return result;
+ }
+ 
++// Request initiator stacks, protocol/native-network-v3.md. V8 fills a buffer
++// owned here; the sink copies identities and never calls back into V8.
++std::array<v8::NativeStackFrame, reb::kNativeRequestStackFrameCapacity>&
++NativeStackFrames() {
++  static base::NoDestructor<
++      std::array<v8::NativeStackFrame, reb::kNativeRequestStackFrameCapacity>>
++      frames;
++  return *frames;
++}
++
++struct NativeRequestStackCall {
++  reb::NativeRequestStackWalk& walk;
++  v8::Isolate* isolate;
++};
++
++bool NativeStackScriptNeeded(void* data, int script_id) {
++  return script_id > 0 &&
++         static_cast<NativeRequestStackCall*>(data)->walk.ScriptNeeded(
++             static_cast<std::uint32_t>(script_id));
++}
++
++void NativeStackFramesReady(void* data, const v8::NativeStackCapture& capture) {
++  reb::NativeRequestStackWalk& walk =
++      static_cast<NativeRequestStackCall*>(data)->walk;
++  const base::span<reb::NativeStackFrame> out = walk.frames();
++  const auto& in = NativeStackFrames();
++  const auto copy = [&](const std::size_t from, const std::size_t count) {
++    for (std::size_t i = from; i < from + count && i < out.size(); ++i) {
++      out[i].kind = static_cast<std::uint8_t>(in[i].kind);
++      out[i].flags = in[i].flags;
++      out[i].combinator = in[i].combinator;
++      out[i].script_id = in[i].script_id;
++      out[i].position = in[i].position;
++      out[i].detail = in[i].detail;
++    }
++  };
++  copy(0, capture.recorded);
++  copy(capture.sync_capacity, capture.async_frames);
++  walk.FramesReady(capture.total_depth, capture.recorded, capture.omitted,
++                   capture.async_frames, capture.async_truncated);
++}
++
++std::string NativeStackUtf8(v8::Isolate* isolate, v8::Local<v8::String> text,
++                            const std::size_t limit) {
++  const std::size_t size = text->Utf8Length(isolate);
++  if (size == 0 || size > limit) {
++    return {};
++  }
++  std::string out(size, '\0');
++  const std::size_t written = text->WriteUtf8(
++      isolate, out.data(), out.size(),
++      v8::String::WriteFlags::kReplaceInvalidUtf8);
++  return written == size ? out : std::string();
++}
++
++void NativeStackScriptDescribed(void* data, const v8::NativeStackScript& script) {
++  auto& call = *static_cast<NativeRequestStackCall*>(data);
++  // A walk with no admitted record keeps nothing, so skip the UTF-8 conversion.
++  if (!call.walk.has_admitted_record()) {
++    return;
++  }
++  ExecutionContext* execution_context =
++      script.context.IsEmpty() ? nullptr : ToExecutionContext(script.context);
++  if (!execution_context || script.script_id <= 0) {
++    return;
++  }
++  reb::NativeStackScriptSource source;
++  source.script_id = static_cast<std::uint32_t>(script.script_id);
++  source.kind = script.is_wasm ? reb::NativeScriptIdentityKind::kWasm
++                               : reb::NativeScriptIdentityKind::kJavaScript;
++  source.is_eval = script.is_eval;
++  source.start_line = static_cast<std::uint32_t>(std::max(script.line_offset, 0));
++  source.start_column =
++      static_cast<std::uint32_t>(std::max(script.column_offset, 0));
++  source.execution_context_id = StableExecutionContextId(*execution_context);
++  // An inline or eval script has no name of its own; its document names it.
++  std::string url;
++  if (!script.name.IsEmpty() && script.name->IsString()) {
++    url = NativeStackUtf8(call.isolate, script.name.As<v8::String>(),
++                          reb::kNativeArtifactMaxUrlBytes);
++  }
++  if (url.empty()) {
++    url = execution_context->Url().GetString().Utf8();
++  }
++  source.url = url;
++  std::string text;
++  if (script.is_wasm) {
++    if (script.wire_bytes_size > reb::kNativeScriptIdentityMaxSourceBytes) {
++      source.too_large = true;
++      source.too_large_length = script.wire_bytes_size;
++    } else if (script.wire_bytes) {
++      // V8 keeps the module alive for this call.
++      const base::span<const std::uint8_t> bytes = UNSAFE_BUFFERS(
++          base::span(script.wire_bytes, script.wire_bytes_size));
++      source.bytes = bytes;
++    }
++  } else if (!script.source.IsEmpty()) {
++    const std::size_t size = script.source->Utf8Length(call.isolate);
++    if (size > reb::kNativeScriptIdentityMaxSourceBytes) {
++      source.too_large = true;
++      source.too_large_length = size;
++    } else {
++      text = NativeStackUtf8(call.isolate, script.source,
++                             reb::kNativeScriptIdentityMaxSourceBytes);
++      const base::span<const std::uint8_t> bytes = base::as_byte_span(text);
++      source.bytes = bytes;
++    }
++  }
++  call.walk.DescribeScript(source);
++}
++
++reb::NativeRequestStackWalkResult WalkNativeRequestStack(
++    reb::NativeRequestStackWalk& walk) {
++  if (!IsMainThread()) {
++    return reb::NativeRequestStackWalkResult::kUnsupportedThread;
++  }
++  v8::Isolate* const isolate = v8::Isolate::TryGetCurrent();
++  if (!isolate || !isolate->InContext()) {
++    return reb::NativeRequestStackWalkResult::kNoScript;
++  }
++  v8::HandleScope scope(isolate);
++  if (ExecutionContext* execution_context =
++          ToExecutionContext(isolate->GetCurrentContext())) {
++    walk.SetExecutionContext(StableExecutionContextId(*execution_context));
++  }
++  NativeRequestStackCall call{walk, isolate};
++  v8::NativeStackCapture capture;
++  capture.frames = NativeStackFrames().data();
++  capture.sync_capacity = reb::kNativeRequestStackSyncLimit;
++  capture.async_capacity = reb::kNativeRequestStackAsyncLimit;
++  v8::NativeStackCallbacks callbacks;
++  callbacks.data = &call;
++  callbacks.script_needed = NativeStackScriptNeeded;
++  callbacks.frames = NativeStackFramesReady;
++  callbacks.script = NativeStackScriptDescribed;
++  return v8::CaptureNativeStack(isolate, capture, callbacks)
++             ? reb::NativeRequestStackWalkResult::kWalked
++             : reb::NativeRequestStackWalkResult::kNoScript;
++}
++
+ std::uint8_t PollNativeWasmExecution() {
+   // No V8 handles and no document walk. The stack check calls this.
+   return static_cast<std::uint8_t>(
+@@ -2027,6 +2170,12 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+     isolate->SetJsInvocationCallbacks(js_invocation);
+     reb::NativeProbeSink::Get().SetNativeJsInvocationContextProvider(
+         CurrentJsInvocation);
++    // Installed only with --reb-request-stacks, so a request start without
++    // it costs the sink one atomic load.
++    if (v8::IsNativeStackCaptureEnabled()) {
++      NativeStackFrames();
++      reb::NativeRequestStackWalk::SetProvider(WalkNativeRequestStack);
++    }
+   }
+   // Every isolate, including workers. The worker br_table gap is recorded
+   // from the dispatch callback; this one names jitless and left-Liftoff.
+diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
+index b3efcb6..08de5bd 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
+@@ -27,7 +27,9 @@
+ #include "base/task/thread_pool.h"
+ #include "base/time/time.h"
+ #include "base/trace_event/trace_event.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
+ #include "build/build_config.h"
+ #include "net/base/load_flags.h"
+ #include "net/base/net_errors.h"
+@@ -283,6 +285,17 @@ int ResourceRequestSender::SendAsync(
+   // The JavaScript invocation that started this request, when one is
+   // current; see protocol/native-js-invocation-v1.md.
+   reb::NativeProbeSink::Get().RecordNativeJsInvocationRequest(request_id);
++  // The stack that started it; see protocol/native-network-v3.md.
++  reb::NativeRequestStackWalk::Record(request_id,
++                                      reb_request_.initiated_sequence);
++  // A Console request watch; see protocol/native-debugger-observation-v1.md.
++  if (reb_request_.initiated_sequence != 0 &&
++      reb::NativeDebuggerWatch::Armed(reb::kNativeWatchRequests)) {
++    reb::NativeDebuggerWatch::Request(request_id,
++                                      reb_request_.initiated_sequence,
++                                      request->method,
++                                      request->url.possibly_invalid_spec());
++  }
+   request_info_ = std::make_unique<PendingRequestInfo>(
+       std::move(client), request->destination, KURL(request->url),
+       std::move(resource_load_info_notifier_wrapper));

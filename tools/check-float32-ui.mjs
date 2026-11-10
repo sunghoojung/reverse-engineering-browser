@@ -215,10 +215,11 @@ async function checkFloat32HostLifecycle(root, fixture) {
   const edit=(side,name,value)=>{field(side,name).value=value;container.listeners.input({target:{matches:()=>true}});};
   const submit=async()=>{nodes.get('form').listeners.submit({preventDefault(){}});await until(()=>!snapshot().pending,'Panel submission did not settle');};
   const key=artifact=>JSON.stringify([artifact.session_id,artifact.artifact_id,artifact.sha256,artifact.byte_size]);
-  const artifact={session_id:'11',artifact_id:'7',sha256:fixture.result.input.sha256,byte_size:20,kind:'response_body'};
+  const artifact={session_id:'11',artifact_id:'7',sha256:fixture.result.input.sha256,byte_size:20,kind:'bytecode_buffer',sensitive:false};
   const second={...artifact,artifact_id:'8'};
   api.syncFloat32Panel();assert.equal(select.children.length,1);
   await update([artifact]);assert.equal(state.artifacts.length,1);assert.equal(select.children.length,2,'Ordinary host refresh must expose newly retained artifacts');assert.equal(analysisCalls,0);
+  await update([artifact,{...artifact,artifact_id:'30',sensitive:true},{session_id:'11',artifact_id:'31',sha256:artifact.sha256,byte_size:20,kind:'bytecode_buffer'}]);assert.equal(select.children.length,2,'A sensitive or unflagged artifact is not offered');await update([artifact]);
   for(const side of ['input','reference']){field(side,'frames').value='5';field(side,'input').value=fixture.request[side].source.words.join(' ');}
   nodes.get('#float32-reference-enabled').checked=true;panel.controller.invalidate();await submit();assert.equal(snapshot().status,'ready');
   const priorReport=snapshot().report,details=nodes.get('#float32-result').querySelector('.float32-identity'),rows=nodes.get('#float32-result').querySelector('.float32-rows');details.open=true;rows.scrollTop=19;document.activeElement=select;

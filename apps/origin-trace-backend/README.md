@@ -61,7 +61,9 @@ Endpoint files keep their one-line format. The backend holds an exclusive lock
 on the exact file it published until it exits, and publishers serialize on the
 directory, so retiring removes only that file, never a successor's at the same
 port. `reb-api mcp` refuses an endpoint file that no running backend holds as
-stale, which is what a killed backend leaves behind.
+stale, which is what a killed backend leaves behind. `--owner-pid` stops the
+backend, retiring its endpoint, once that parent process is gone; the app's
+private stored-evidence backend uses it.
 
 ## MCP agent workflow
 
@@ -73,9 +75,9 @@ names a tool the contract does not serve. Tool descriptions come from the
 OpenAPI operation descriptions in `protocol/openapi.json`.
 
 - `src/session_launch.rs` turns `start_live_session` options into launcher
-  switches. Request content, document-start permission, invocation sites and
-  digests are set only from named options; inherited switches are removed or
-  forced off. Saved sites come from the agent sessions' own store and are armed
+  switches. Request content and its byte budget, request stacks,
+  document-start permission, invocation sites and digests are set only from
+  named options; inherited switches are removed or forced off. Saved sites come from the agent sessions' own store and are armed
   from a private per-launch copy.
 - `src/native_console.rs` annotates every target with `frame`, and child
   frames with `top_relation` and `out_of_process`, derived from the listing,

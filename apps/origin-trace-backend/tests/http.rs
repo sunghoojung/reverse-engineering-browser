@@ -697,7 +697,10 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 48, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 56, "Review route coverage when the API changes");
+    assert!(ids.contains("get_request_headers"));
+    assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
+    assert!(ids.contains("get_xrefs"));
     assert!(
         ids.contains("get_js_invocation_sites")
             && ids.contains("resolve_js_invocation_site")
@@ -785,7 +788,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 48);
+    assert_eq!(operation_count, 56);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -1054,6 +1057,7 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
         "/api/native-console",
         "/api/live-wasm",
         "/api/events",
+        "/api/requests",
         "/api/artifacts",
         "/api/analysis/vm",
         "/api/analysis/vm/opcodes",
@@ -1074,6 +1078,8 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
     }
     for (path, route, status) in [
         ("/api/events?limit=oops", "/api/events", 400),
+        ("/api/requests?sort=bytes", "/api/requests", 400),
+        ("/api/requests?tab_id=0", "/api/requests", 400),
         ("/api/events?limit=1&limit=2", "/api/events", 400),
         ("/api/artifacts?limit=", "/api/artifacts", 400),
         (
@@ -1091,8 +1097,76 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
             "/api/request-signal-profile",
             400,
         ),
+        ("/api/request-headers", "/api/request-headers", 400),
+        (
+            "/api/request-headers?session_id=1&request_id=0",
+            "/api/request-headers",
+            400,
+        ),
+        (
+            "/api/request-headers?session_id=1&request_id=2&tab_id=3",
+            "/api/request-headers",
+            400,
+        ),
+        (
+            "/api/request-headers?session_id=1&request_id=2",
+            "/api/request-headers",
+            200,
+        ),
+        ("/api/request-cookies", "/api/request-cookies", 400),
+        (
+            "/api/request-cookies?session_id=1&request_id=2&name=a",
+            "/api/request-cookies",
+            400,
+        ),
+        (
+            "/api/request-cookies?session_id=1&request_id=2",
+            "/api/request-cookies",
+            200,
+        ),
+        (
+            "/api/cookie-provenance?session_id=1",
+            "/api/cookie-provenance",
+            400,
+        ),
+        (
+            "/api/cookie-provenance?session_id=0&name=sid",
+            "/api/cookie-provenance",
+            400,
+        ),
+        (
+            "/api/cookie-provenance?session_id=1&name=sid",
+            "/api/cookie-provenance",
+            200,
+        ),
         ("/api/wasm?artifact_id=missing", "/api/wasm", 400),
         ("/api/wasm?artifact_id=1&sections=exports", "/api/wasm", 400),
+        ("/api/request-stack?request_id=3", "/api/request-stack", 400),
+        (
+            "/api/request-stack?process_id=0&request_id=3",
+            "/api/request-stack",
+            400,
+        ),
+        (
+            "/api/request-stack?process_id=4&request_id=3",
+            "/api/request-stack",
+            200,
+        ),
+        (
+            "/api/request-stack?process_id=4&navigation_sequence=9",
+            "/api/request-stack",
+            200,
+        ),
+        (
+            "/api/request-stack?process_id=4&request_id=3&navigation_sequence=9",
+            "/api/request-stack",
+            400,
+        ),
+        (
+            "/api/request-stack?process_id=4&navigation_sequence=0",
+            "/api/request-stack",
+            400,
+        ),
         ("/api/xrefs?kind=request&session_id=oops", "/api/xrefs", 400),
         ("/api/xrefs?kind=guess&session_id=1", "/api/xrefs", 400),
         (
@@ -1199,8 +1273,9 @@ async fn openapi_action_envelopes_and_stored_failures_are_json_errors() {
         )
         .await;
     }
+    server.file("events.jsonl", b"not-json\n");
+    assert_contract_response(server.get("/api/events").await, "get", "/api/events", 200).await;
     for (file, route) in [
-        ("events.jsonl", "/api/events"),
         ("artifacts/manifest.jsonl", "/api/artifacts"),
         ("collection.json", "/api/api-collection"),
         ("analyst.json", "/api/local-analyst"),
@@ -1315,7 +1390,7 @@ fn event_response(events: &[Value], scan_end: usize, limited: bool) -> Value {
         "count": events.len(),
         "events": events,
         "network_events": events,
-        "event_window": {"scope":"store", "scan_start":"0", "scan_end":scan_end.to_string(), "scan_limit":67108864, "events_limited":limited, "network_events_limited":limited},
+        "event_window": {"scope":"store", "scan_start":"0", "scan_end":scan_end.to_string(), "scan_limit":67108864, "events_limited":limited, "network_events_limited":limited, "malformed_lines":0},
         "broker_connected": true,
         "capture_mode": "idle",
         "capture_state": "not_live",
@@ -1658,6 +1733,112 @@ async fn session_summary_counts_frames_and_explains_gaps() {
 }
 
 #[tokio::test]
+async fn session_summary_counts_every_capture_refusal_by_reason() {
+    let server = Server::start().await;
+    let binary = |sequence, kind: &str, edit: &dyn Fn(&mut [u8; 128])| {
+        let mut payload = [0u8; 128];
+        payload[0] = 1;
+        payload[2] = 128;
+        edit(&mut payload);
+        let mut event = window_event(sequence, "network", kind, "");
+        event["payload"] = json!(hex::encode(payload));
+        event["payload_size"] = json!(128);
+        event
+    };
+    let events = vec![
+        window_event(
+            1,
+            "artifact",
+            "artifact_capture_failed",
+            "active_memory_limit",
+        ),
+        window_event(
+            2,
+            "artifact",
+            "artifact_capture_failed",
+            "active_memory_limit",
+        ),
+        window_event(3, "artifact", "artifact_capture_failed", "body_too_large"),
+        window_event(4, "artifact", "artifact_capture_failed", "Not A Reason"),
+        binary(5, "request_body", &|p| p[5] = 10),
+        binary(6, "request_body", &|p| p[5] = 4),
+        binary(7, "request_target", &|p| {
+            p[0] = 2;
+            p[9] = 4;
+        }),
+        binary(8, "request_target", &|p| p[9] = 4),
+        binary(9, "response_body", &|p| p[4] = 12),
+        binary(10, "response_body", &|p| p[4] = 12),
+        binary(11, "response_body", &|p| p[4] = 1),
+    ];
+    server.file("events.jsonl", &jsonl(&events));
+    let response = server.get("/api/session/summary").await;
+    let bytes = assert_contract_response(response, "get", "/api/session/summary", 200).await;
+    let summary: Value = serde_json::from_slice(&bytes).unwrap();
+    let found = |code: &str, reason: &str| {
+        summary["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == code && check["reason"] == reason)
+            .map(|check| check["count"].as_str().unwrap().to_owned())
+    };
+    assert_eq!(
+        found("artifact_capture_failed", "active_memory_limit").as_deref(),
+        Some("2")
+    );
+    assert_eq!(
+        found("artifact_capture_failed", "body_too_large").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        found("artifact_capture_failed", "unrecognized").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        found(
+            "request_content_not_retained",
+            "not_captured_session_budget"
+        )
+        .as_deref(),
+        Some("1")
+    );
+    // A version 1 target has no retention byte, so it is not counted.
+    assert_eq!(
+        found(
+            "request_content_not_retained",
+            "not_retained_session_budget"
+        )
+        .as_deref(),
+        Some("1")
+    );
+    // Response body budget exhaustion is counted under its own category.
+    let response = summary["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["category"] == "response_body")
+        .unwrap();
+    assert_eq!(response["reason"], "not_captured_session_budget");
+    assert_eq!(response["count"], "2");
+    assert!(
+        response["message"]
+            .as_str()
+            .unwrap()
+            .contains("REB_RESPONSE_BODY_BUDGET_MIB")
+    );
+    assert_eq!(
+        summary["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|check| check["code"] == "request_content_not_retained")
+            .count(),
+        3
+    );
+}
+
+#[tokio::test]
 async fn event_waits_return_new_matches_or_time_out() {
     let server = Server::start().await;
     let events = vec![window_event(1, "wasm", "module_compiled", "")];
@@ -1784,14 +1965,22 @@ async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
     .await;
     server.file("events.jsonl", b"");
     assert_poll_response(&server, "/api/events", event_response(&[], 0, false)).await;
-    for bad in [b"not-json\n".to_vec(), b"[]\n".to_vec(), vec![b'x'; 4097]] {
-        server.file("events.jsonl", &bad);
-        assert_eq!(server.get("/api/events").await.status(), 500);
-    }
+    // One damaged line is skipped and counted, so it cannot fail every poll.
     let mut invalid = metadata_event(1);
     invalid["payload"] = json!("not-hex");
-    server.file("events.jsonl", &jsonl(&[invalid]));
-    assert_eq!(server.get("/api/events").await.status(), 500);
+    for bad in [
+        b"not-json\n".to_vec(),
+        b"[]\n".to_vec(),
+        vec![b'x'; 4097],
+        jsonl(&[invalid]),
+    ] {
+        server.file("events.jsonl", &bad);
+        let response = server.get("/api/events").await;
+        assert_eq!(response.status(), 200);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["count"], 0);
+        assert_eq!(body["event_window"]["malformed_lines"], 1);
+    }
     server.file("events.jsonl", &jsonl(&[metadata_event(2)]));
     assert_poll_response(
         &server,
@@ -5522,6 +5711,15 @@ fn snapshot(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Strin
     ) {
         for entry in std::fs::read_dir(path).unwrap() {
             let entry = entry.unwrap();
+            // The backend rewrites its derived request index on its own 30-second
+            // timer, so a slow run can see it appear with no request causing it.
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("events.jsonl.requests-v1")
+            {
+                continue;
+            }
             let path = entry.path();
             let key = path.strip_prefix(root).unwrap().to_path_buf();
             if entry.file_type().unwrap().is_dir() {
@@ -5854,6 +6052,11 @@ async fn capture_clear_requires_stopped_guards_for_every_output_before_any_trunc
                 b"retained bytes\n"
             );
         }
+        // Dropping the file alone can leave the lock held: a child that
+        // another test spawns while it is open keeps a copy of the
+        // descriptor until its exec, and the lock belongs to the shared open
+        // file description. Unlock it here, as frozen::Store does on drop.
+        assert_eq!(unsafe { libc::flock(guard.as_raw_fd(), libc::LOCK_UN) }, 0);
         drop(guard);
     }
     assert_eq!(clear().await.status(), 200);
@@ -6031,6 +6234,146 @@ fn put_source_facts_artifact(server: &Server, bytes: &[u8], kind: &str) -> Value
         format!("{artifact}\n").as_bytes(),
     );
     artifact
+}
+
+#[tokio::test]
+async fn source_format_lays_out_verified_javascript_with_whitespace_only_changes() {
+    let server = Server::start().await;
+    let route = "/api/source-format";
+    let source = "var a=function(e,t){if(!e)return null;return{ok:!0,list:[1,2,3]}};";
+    let artifact = put_source_facts_artifact(&server, source.as_bytes(), "javascript");
+    let path = "/api/source-format?session_id=11&artifact_id=7";
+    let bytes = assert_contract_response(server.get(path).await, "get", route, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["status"], "formatted");
+    assert_eq!(
+        result["text"],
+        "var a = function (e, t) {\n  if (!e) return null;\n  return { ok: !0, list: [1, 2, 3] }\n};\n"
+    );
+    assert_eq!(result["line_count"], 5);
+    assert_eq!(result["cached"], false);
+    assert_eq!(result["source"]["sha256"], artifact["sha256"]);
+    assert!(result["source"].get("content_path").is_none());
+    let window = format!("{path}&start_line=2&line_count=1");
+    let bytes = assert_contract_response(server.get(&window).await, "get", route, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["text"], "  if (!e) return null;");
+    assert_eq!(result["window"], json!({"start_line": 2, "line_count": 1}));
+    assert_eq!(result["cached"], true);
+    for query in [
+        "",
+        "?session_id=11",
+        "?session_id=11&artifact_id=7&start_line=1",
+        "?session_id=11&artifact_id=7&start_line=0&line_count=1",
+        "?session_id=11&artifact_id=7&start_line=1&line_count=10001",
+        "?session_id=11&artifact_id=7&start_line=6&line_count=1",
+        "?session_id=11&artifact_id=7&limit=1",
+    ] {
+        assert_contract_response(
+            server.get(&format!("{route}{query}")).await,
+            "get",
+            route,
+            400,
+        )
+        .await;
+    }
+    assert_contract_response(
+        server
+            .get("/api/source-format?session_id=12&artifact_id=7")
+            .await,
+        "get",
+        route,
+        404,
+    )
+    .await;
+    put_source_facts_artifact(&server, b"function(){", "javascript");
+    let bytes = assert_contract_response(server.get(path).await, "get", route, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["status"], "unavailable");
+    assert_eq!(result["reason"], "parse-failed");
+    assert!(result["text"].is_null());
+    put_source_facts_artifact(&server, b"{}", "source_map");
+    assert_contract_response(server.get(path).await, "get", route, 400).await;
+}
+
+fn put_body_artifact(server: &Server, bytes: &[u8], kind: &str, mime: &str) {
+    let hash = hex::encode(Sha256::digest(bytes));
+    let artifact = json!({
+        "protocol_version":1,"artifact_id":"7","session_id":"11","navigation_id":"0",
+        "frame_id":"17","parent_artifact_id":"0","creator_event_id":"19",
+        "execution_context_id":"0",
+        "capture_origin":if kind == "request_body" {"network_request"} else {"network_response"},
+        "kind":kind,"url":"https://api.example.test/collect","mime_type":mime,
+        "byte_size":bytes.len(),"sha256":hash,"sensitive":true,
+        "content_path":format!("blobs/{hash}.bin")
+    });
+    server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+}
+
+#[tokio::test]
+async fn source_format_lays_out_json_and_javascript_bodies_with_anchors() {
+    let server = Server::start().await;
+    let route = "/api/source-format";
+    let path = "/api/source-format?session_id=11&artifact_id=7";
+    let body = r#"{"sitekey":"k","list":[1,2,3],"nested":{"a":null}}"#;
+    put_body_artifact(&server, body.as_bytes(), "request_body", "application/json");
+    let bytes = assert_contract_response(server.get(path).await, "get", route, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["status"], "formatted");
+    assert_eq!(result["language"], "json");
+    assert_eq!(
+        result["text"],
+        r#"{ "sitekey": "k", "list": [1, 2, 3], "nested": { "a": null } }"#
+    );
+    assert_eq!(
+        result["anchors"],
+        json!({"lines": 1000, "source_utf16": [0]})
+    );
+    put_body_artifact(&server, b"[1,2]", "response_body", "text/plain");
+    assert_contract_response(server.get(path).await, "get", route, 400).await;
+    let named = format!("{path}&language=json");
+    let bytes = assert_contract_response(server.get(&named).await, "get", route, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["text"], "[1, 2]");
+    assert_contract_response(
+        server.get(&format!("{path}&language=css")).await,
+        "get",
+        route,
+        400,
+    )
+    .await;
+    let script = "function f(a){return a}\n".repeat(700);
+    put_body_artifact(
+        &server,
+        script.as_bytes(),
+        "response_body",
+        "application/javascript",
+    );
+    let bytes = assert_contract_response(server.get(path).await, "get", route, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["language"], "javascript");
+    let lines = result["line_count"].as_u64().unwrap();
+    assert!(lines > 1000);
+    let anchors = result["anchors"]["source_utf16"].as_array().unwrap();
+    assert_eq!(anchors.len() as u64, lines.div_ceil(1000));
+    let (second, third) = (
+        anchors[1].as_u64().unwrap() as usize,
+        anchors[2].as_u64().unwrap() as usize,
+    );
+    let window = format!("{path}&start_line=1001&line_count=1000");
+    let bytes = assert_contract_response(server.get(&window).await, "get", route, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    let strip = |value: &str| value.split_whitespace().collect::<String>();
+    assert_eq!(
+        strip(result["text"].as_str().unwrap()),
+        strip(&script[second..third])
+    );
+    put_source_facts_artifact(&server, b"[1]", "javascript");
+    assert_contract_response(server.get(&named).await, "get", route, 400).await;
 }
 
 #[cfg(unix)]
@@ -6798,8 +7141,7 @@ async fn float32_verified_artifact_rejects_corruption_stale_identity_missing_and
     const ROUTE: &str = "/api/float32/compare";
     let server = Server::start().await;
     let bytes = [0, 0, 128, 63, 0, 0, 0, 128, 1, 0, 192, 127, 0, 0, 128, 127];
-    let mut artifact = put_source_facts_artifact(&server, &bytes, "response_body");
-    artifact["sensitive"] = json!(true);
+    let mut artifact = put_source_facts_artifact(&server, &bytes, "bytecode_buffer");
     artifact["mime_type"] = json!("application/octet-stream");
     server.file(
         "artifacts/manifest.jsonl",
@@ -6879,7 +7221,24 @@ async fn float32_verified_artifact_rejects_corruption_stale_identity_missing_and
         "artifacts/manifest.jsonl",
         format!("{artifact}\n{artifact}\n").as_bytes(),
     );
-    assert_contract_response(server.action(ROUTE, request).await, "post", ROUTE, 500).await;
+    assert_contract_response(
+        server.action(ROUTE, request.clone()).await,
+        "post",
+        ROUTE,
+        500,
+    )
+    .await;
+    // The answer spells out input words, so a sensitive artifact is refused unread.
+    let mut sensitive = artifact.clone();
+    sensitive["kind"] = json!("response_body");
+    sensitive["sensitive"] = json!(true);
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{sensitive}\n").as_bytes(),
+    );
+    let refused =
+        assert_contract_response(server.action(ROUTE, request).await, "post", ROUTE, 400).await;
+    assert!(!String::from_utf8_lossy(&refused).contains("0000803f"));
 }
 
 const EVIDENCE_COMPARISON_ROUTE: &str = "/api/evidence/packages/compare";
@@ -7353,6 +7712,9 @@ async fn workspace_http_held_lease_rejects_without_wait_or_changes() {
             200,
             "Atomic reads stay available"
         );
+        // Another test's child can hold a copy of this descriptor until its
+        // exec, so dropping alone may leave the lease held for the next change.
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
         drop(lock);
         assert_eq!(
             server
@@ -8410,11 +8772,20 @@ impl FakeBroker {
     fn exit(&mut self) {
         self.listener = None;
         let _ = std::fs::remove_file(&self.socket);
-        self.guard = None;
+        self.release();
     }
     /// A killed broker releases its lock and leaves its socket behind.
     fn kill(&mut self) {
-        self.guard = None;
+        self.release();
+    }
+    /// A broker's exit frees its lock at once. In this shared test process,
+    /// another test's child can hold a copy of the descriptor until its exec,
+    /// so dropping the file alone can keep the capture reading as running.
+    fn release(&mut self) {
+        use std::os::fd::AsRawFd;
+        if let Some(guard) = self.guard.take() {
+            assert_eq!(unsafe { libc::flock(guard.as_raw_fd(), libc::LOCK_UN) }, 0);
+        }
     }
 }
 
@@ -9136,4 +9507,297 @@ async fn js_invocation_sites_real_worker_resolves_names_and_positions() {
         std::fs::read_to_string(&store).unwrap(),
         format!(r#"{{"sites":[{}],"version":1}}"#, named["site"])
     );
+}
+
+/// Twenty thousand requests outnumber the 5,000-event network window four to
+/// one. The request index still counts, filters, pages and locates each one,
+/// and get_events reads any row's records from its first offset.
+/// Capture keeps up to 256 frames per task segment; the contract must allow it.
+#[test]
+fn request_stack_contract_admits_a_full_256_frame_task_segment() {
+    let spec: Value = serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap();
+    let frame = json!({"index": 0, "kind": "javascript", "async": false, "script_id": 1, "position": 1,
+        "resolution": {"status": "unresolved", "reason": "script_identity_missing"}});
+    let stack = |frames: usize, recorded: usize| {
+        json!({"status": "recorded", "request": {"process_id": 1, "request_id": "2"},
+            "task_segments": [{"index": 0, "kind": "set_timeout", "state": "captured",
+                "recorded": recorded, "bounded": true, "digest": null,
+                "frames_retained": true, "frames": vec![frame.clone(); frames]}]})
+    };
+    let schema = json!({"$ref": "#/components/schemas/RequestStack"});
+    assert_schema(&spec, &schema, &stack(256, 256), "256-frame segment");
+    let validator = jsonschema::validator_for(&json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": "#/checked",
+        "checked": schema,
+        "components": spec["components"],
+    }))
+    .unwrap();
+    assert!(
+        !validator.is_valid(&stack(257, 256)),
+        "257 frames stays out of contract"
+    );
+    assert!(
+        !validator.is_valid(&stack(256, 257)),
+        "257 recorded stays out of contract"
+    );
+}
+
+#[tokio::test]
+async fn request_detail_routes_report_what_their_read_covered() {
+    let server = Server::start().await;
+    let spec = specification();
+    let event = |sequence: u64, request: u64, kind: &str, parent: u64, payload: &[u8]| {
+        json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),
+            "monotonic_time_ns":(1000 * sequence).to_string(),"navigation_id":"0","frame_id":"9","artifact_id":"0",
+            "parent_event_id":parent.to_string(),"request_id":request.to_string(),"process_id":7,"thread_id":1,"tab_id":1,
+            "category":"network","type":kind,"flags":0,"status_code":0,"error_code":0,"encoded_data_length":"0",
+            "decoded_body_length":"0","resource_type":0,"initiator_process_id":0,"initiator_request_id":0,
+            "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len(),"payload_truncated":false})
+    };
+    let mut headers = vec![0u8; 128];
+    headers[0] = 1;
+    headers[2] = 128;
+    headers[4] = 2;
+    headers[5] = 3;
+    headers[48] = 1;
+    let events = vec![
+        event(1, 17, "request_started", 0, b""),
+        event(2, 17, "request_headers", 1, &headers),
+        event(3, 18, "request_started", 0, b""),
+    ];
+    let mut store = jsonl(&events);
+    store.extend_from_slice(b"{\"protocol_version\":3,\"session\n");
+    server.file("events.jsonl", &store);
+    let read = async |path: &str, schema: &str| {
+        let document: Value = server.get(path).await.json().await.unwrap();
+        assert_schema(
+            &spec,
+            &json!({"$ref": format!("#/components/schemas/{schema}")}),
+            &document,
+            path,
+        );
+        document
+    };
+
+    let indexed = read(
+        "/api/request-headers?session_id=1&request_id=17",
+        "RequestHeaders",
+    )
+    .await;
+    assert_eq!(indexed["coverage"]["scope"], "request_range", "{indexed}");
+    assert_eq!(indexed["coverage"]["complete"], true);
+    assert_eq!(indexed["hops"][0]["request"][0]["state"], "empty");
+    // A damaged line past the request's bytes is outside this read.
+    assert_eq!(indexed["coverage"]["malformed_lines"], 0);
+
+    // A filtered read keeps going past the damaged line and says it did, so
+    // Traffic and the agent recipe still read this request's records.
+    let filtered = read(
+        "/api/events?session_id=1&request_id=17&category=network",
+        "Events",
+    )
+    .await;
+    assert_eq!(filtered["count"], 2, "{filtered}");
+    assert_eq!(filtered["query"]["malformed_lines"], 1, "{filtered}");
+
+    // No row names this request, and the whole small store was read.
+    let unknown = read(
+        "/api/request-cookies?session_id=1&request_id=99",
+        "RequestCookies",
+    )
+    .await;
+    assert_eq!(unknown["coverage"]["scope"], "store", "{unknown}");
+    assert_eq!(unknown["coverage"]["complete"], true);
+    assert_eq!(unknown["coverage"]["malformed_lines"], 1);
+
+    let provenance = read(
+        "/api/cookie-provenance?session_id=1&name=sid",
+        "CookieProvenance",
+    )
+    .await;
+    assert_eq!(provenance["coverage"]["scope"], "store", "{provenance}");
+
+    let stack = read(
+        "/api/request-stack?process_id=7&request_id=17",
+        "RequestStack",
+    )
+    .await;
+    assert_eq!(stack["status"], "not_recorded", "{stack}");
+    assert_eq!(stack["coverage"]["scope"], "request_range");
+}
+
+#[tokio::test]
+async fn request_index_reaches_every_request_of_a_large_session() {
+    let server = Server::start().await;
+    let mut lines = String::new();
+    let mut sequence = 0u64;
+    let mut push = |request: u64, kind: &str, payload: &str, extra: Value| {
+        sequence += 1;
+        let mut event = json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),
+            "monotonic_time_ns":(1000 * sequence).to_string(),"navigation_id":"0","frame_id":"9","artifact_id":"0",
+            "parent_event_id":"0","request_id":request.to_string(),"process_id":7,"thread_id":1,"tab_id":1 + request % 4,
+            "category":"network","type":kind,"flags":0,"status_code":0,"error_code":0,"encoded_data_length":"0",
+            "decoded_body_length":"0","resource_type":11,"initiator_process_id":0,"initiator_request_id":0,
+            "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len(),"payload_truncated":false});
+        for (key, value) in extra.as_object().unwrap() {
+            event[key] = value.clone();
+        }
+        lines.push_str(&event.to_string());
+        lines.push('\n');
+    };
+    for request in 1..=20_000u64 {
+        push(
+            request,
+            "request_started",
+            &format!("GET host{}.example.test", request % 10),
+            json!({}),
+        );
+        push(
+            request,
+            "request_completed",
+            "completed",
+            json!({"status_code": if request % 100 == 0 { 500 } else { 200 }}),
+        );
+    }
+    server.file("events.jsonl", lines.as_bytes());
+    let window: Value = server
+        .get("/api/events?limit=5000")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        window["network_events"].as_array().unwrap().len(),
+        5000,
+        "the polling window still holds 2,500 requests"
+    );
+    let first = server.get("/api/requests?limit=500").await;
+    let etag = first.headers().get("etag").unwrap().clone();
+    let first: Value = first.json().await.unwrap();
+    assert_eq!(
+        (first["total"].as_u64(), first["matching"].as_u64()),
+        (Some(20_000), Some(20_000))
+    );
+    assert_eq!(first["index"]["complete"], true);
+    assert_eq!(first["facets"]["tabs"].as_array().unwrap().len(), 4);
+    assert!(
+        !server.root.path().join("events.jsonl.requests-v1").exists(),
+        "a read writes no file"
+    );
+    let unchanged = server
+        .client
+        .get(format!("{}/api/requests?limit=500", server.url))
+        .header("if-none-match", etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unchanged.status(), 304);
+    let last: Value = server
+        .get("/api/requests?limit=500&offset=19500")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        (last["returned"].as_u64(), &last["next_offset"]),
+        (Some(500), &Value::Null)
+    );
+    assert_eq!(last["requests"][499]["ordinal"], 19_999);
+    let oldest = &first["requests"][0];
+    let id = url::form_urlencoded::byte_serialize(oldest["id"].as_str().unwrap().as_bytes())
+        .collect::<String>();
+    let located: Value = server
+        .get(&format!("/api/requests?order=desc&limit=1&locate={id}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(located["located"][oldest["id"].as_str().unwrap()], 19_999);
+    let failed: Value = server
+        .get("/api/requests?q=500&tab_id=1&limit=1")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        failed["matching"],
+        (1..=20_000u64)
+            .filter(|r| r % 100 == 0 && r % 4 == 0)
+            .count()
+    );
+    let member = &oldest["members"][0];
+    let detail: Value = server
+        .get(&format!(
+            "/api/events?session_id=1&process_id=7&request_id={}&category=network&after={}&limit={}",
+            member["request_id"].as_str().unwrap(),
+            oldest["first_offset"].as_str().unwrap(),
+            member["records"]
+        ))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let types = detail["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["type"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        types,
+        ["request_started", "request_completed"],
+        "the oldest request is read from its own offset"
+    );
+}
+
+/// A private backend started with `--owner-pid` stops, and retires its
+/// endpoint, once the process that started it is gone.
+#[cfg(unix)]
+#[test]
+fn owned_backend_stops_when_its_owner_exits() {
+    let root = tempfile::tempdir().unwrap();
+    let endpoint = root.path().join("endpoint");
+    let output = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(
+            r#"backend="$1"; shift
+"$backend" --owner-pid $$ "$@" >/dev/null 2>&1 &
+pid=$!
+i=0; while [ ! -s "$ENDPOINT" ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i + 1)); done
+[ -s "$ENDPOINT" ] && echo "$pid""#,
+        )
+        .arg("sh")
+        .arg(env!("CARGO_BIN_EXE_origin-trace-backend"))
+        .args(["--port", "0", "--endpoint-file"])
+        .arg(&endpoint)
+        .arg("--store")
+        .arg(root.path().join("events.jsonl"))
+        .arg("--artifacts")
+        .arg(root.path().join("artifacts"))
+        .arg("--api-collection")
+        .arg(root.path().join("collection.json"))
+        .arg("--local-analyst")
+        .arg(root.path().join("analyst.json"))
+        .env("ENDPOINT", &endpoint)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "the owned backend published no endpoint"
+    );
+    let pid: i32 = String::from_utf8(output.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the owned backend outlived its owner"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!endpoint.exists(), "the endpoint is retired on the way out");
 }

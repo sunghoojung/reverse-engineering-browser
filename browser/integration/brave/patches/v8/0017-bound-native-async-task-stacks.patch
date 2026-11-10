@@ -1,0 +1,52 @@
+diff --git a/include/v8-native-stack.h b/include/v8-native-stack.h
+index 6eac611..9f29470 100644
+--- a/include/v8-native-stack.h
++++ b/include/v8-native-stack.h
+@@ -46,6 +46,8 @@ struct NativeStackCapture {
+   NativeStackFrame* frames = nullptr;
+   uint32_t sync_capacity = 0;
+   uint32_t async_capacity = 0;
++  // Keep only the innermost sync_capacity frames and stop; sets sync_truncated.
++  bool innermost_only = false;
+   // Outputs. Synchronous frames are innermost first in frames[0, recorded);
+   // async frames are in chain order at frames[sync_capacity, +async_frames).
+   uint32_t total_depth = 0;
+@@ -53,6 +55,7 @@ struct NativeStackCapture {
+   uint32_t omitted = 0;
+   uint32_t async_frames = 0;
+   bool async_truncated = false;
++  bool sync_truncated = false;
+ };
+ 
+ // One script a recorded frame names, described at most once per capture.
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index ddc31ab..a296e08 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -1710,6 +1710,11 @@ class NativeStackBuilder {
+ 
+   bool Visit(FrameSummary& summary) {
+     if (!summary.is_subject_to_debugging()) return true;
++    if (capture_.innermost_only &&
++        capture_.total_depth == capture_.sync_capacity) {
++      capture_.sync_truncated = true;
++      return false;
++    }
+     v8::NativeStackFrame frame{};
+     if (summary.IsJavaScript()) {
+       const FrameSummary::JavaScriptFrameSummary& js = summary.AsJavaScript();
+@@ -1886,11 +1891,12 @@ bool CaptureNativeStack(Isolate* isolate, v8::NativeStackCapture& capture,
+ #endif  // V8_ENABLE_WEBASSEMBLY
+   capture.total_depth = capture.recorded = capture.omitted = 0;
+   capture.async_frames = 0;
+-  capture.async_truncated = false;
++  capture.async_truncated = capture.sync_truncated = false;
+   NativeStackBuilder builder(isolate, capture, callbacks);
+   VisitStack(isolate, &builder);
+   builder.Finish();
+-  if (v8_flags.async_stack_traces && capture.recorded > 0) {
++  if (v8_flags.async_stack_traces && capture.recorded > 0 &&
++      capture.async_capacity > 0) {
+     DirectHandle<JSPromise> promise;
+     if (TryGetCurrentTaskPromise(isolate).ToHandle(&promise)) {
+       CaptureAsyncStackTrace(isolate, promise, &builder);

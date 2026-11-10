@@ -11,7 +11,11 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
                  const std::vector<std::uint8_t>& js_dispatch_sites,
                  const std::vector<std::uint8_t>& js_invocation_sites,
                  bool js_invocation_digests,
-                 bool) override {
+                 bool capture_request_content,
+                 bool capture_browser_internal) override {
+    ++configured;
+    request_content = capture_request_content;
+    browser_internal = capture_browser_internal;
     configured_epoch = epoch;
     region = std::move(queue_region);
     js_sites = js_dispatch_sites;
@@ -20,15 +24,21 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
   }
   void SetWasmSampleBudget(const std::vector<std::uint8_t>&) override {}
   void ResetWasmSampleBudgets() override {}
-  void Disable() override {}
+  void Disable() override { ++disabled; }
   void NativeGuestModuleStatus(std::uint64_t epoch, std::uint64_t token, bool accepted) override {
     verdicts.push_back({epoch, token, accepted});
   }
+  void NativeStackArtifactRefused(std::uint64_t creator) override {
+    refused_stacks.push_back(creator);
+  }
+  std::vector<std::uint64_t> refused_stacks;
   struct Verdict {
     std::uint64_t epoch, token;
     bool accepted;
   };
   std::uint64_t configured_epoch = 0;
+  unsigned configured = 0, disabled = 0;
+  bool request_content = false, browser_internal = false;
   std::vector<Verdict> verdicts;
   base::UnsafeSharedMemoryRegion region;
   std::vector<std::uint8_t> js_sites;
@@ -379,6 +389,7 @@ void NativeProbeHostJsDispatchForwarding() {
   const auto invocation_record = reb::EncodeNativeJsInvocationSite(invocation_site);
   session.invocation_sites.assign(invocation_record.begin(), invocation_record.end());
   session.invocation_digests = true;
+  session.request_content = true;
   session.emitted = [](const NativeProbeEvent& event) { Emit(event); };
   Configure(kSession, kMask);
   events.clear();
@@ -395,6 +406,7 @@ void NativeProbeHostJsDispatchForwarding() {
         "Renderer configuration carries the session's JS dispatch site records");
   Check(client.invocation_sites == session.invocation_sites && client.invocation_digests,
         "Renderer configuration carries the invocation sites and the digest opt-in");
+  Check(client.request_content, "Renderer configuration carries the request-content gate");
 
   reb::NativeJsDispatchObservationPayload payload;
   payload.shape = 2;
@@ -460,4 +472,329 @@ void NativeProbeHostJsDispatchForwarding() {
   process.frames.clear();
   std::cout << "PASS production NativeProbeHost forwards JS dispatch site records and type 21 "
                "ring records with tab attribution\n";
+}
+
+// protocol/native-network-v3.md: queue exclusion counters become cumulative
+// reports, and a renderer granted WebUI bindings leaves with what it queued.
+// A stack artifact the browser refuses reaches the renderer that claimed it.
+void NativeProbeHostStackRefusal() {
+  auto& session = reb::NativeProbeSession::Get();
+  session.active = true;
+  session.id = kSession;
+  session.mask = kMask;
+  session.expires = 200;
+  session.emitted = [](const NativeProbeEvent& event) { Emit(event); };
+  Configure(kSession, kMask);
+  auto& transfers = NativeArtifactSocketClient::Get().transfers;
+  transfers.clear();
+  RecordingProbeClient client;
+  reb::NativeProbeHost host(session, 1);
+  host.BindClient({&client});
+  const auto capture = [&](const std::uint64_t creator) {
+    const std::vector<std::uint8_t> bytes{1, 2, 3};
+    host.CaptureGeneratedArtifact(
+        static_cast<std::uint16_t>(reb::NativeArtifactKind::kStack),
+        static_cast<std::uint16_t>(reb::NativeArtifactCaptureOrigin::kRequestStack), creator, 77,
+        kFrame, "reb-stack:sha256-00", mojo_base::BigBuffer(std::span<const std::uint8_t>(bytes)),
+        0, false, mojo_base::BigBuffer(std::span<const std::uint8_t>()), 0);
+  };
+  capture(900);
+  Check(transfers.size() == 1 && client.refused_stacks.empty(),
+        "An artifact in flight is unjudged");
+  NativeArtifactCaptureSink::TransferCompleted(transfers.begin()->first,
+                                               reb::NativeArtifactReceiveStatus::kAccepted);
+  Check(client.refused_stacks.empty(), "An accepted stack artifact sends no refusal");
+  transfers.clear();
+  capture(901);
+  NativeArtifactCaptureSink::TransferCompleted(transfers.begin()->first,
+                                               reb::NativeArtifactReceiveStatus::kIoError);
+  Check(client.refused_stacks == std::vector<std::uint64_t>{901},
+        "A stack artifact lost after queueing is reported to its renderer");
+  transfers.clear();
+  NativeArtifactSocketClient::Get().reject_next = true;
+  capture(902);
+  Check(client.refused_stacks.size() == 2 && client.refused_stacks.back() == 902,
+        "A stack artifact the queue refuses is reported to its renderer");
+  transfers.clear();
+  session.active = false;
+  session.emitted = {};
+  std::cout << "PASS production NativeProbeHost reports refused stack artifacts to the renderer\n";
+}
+
+void NativeProbeHostBrowserInternalScope() {
+  auto& session = reb::NativeProbeSession::Get();
+  session.active = true;
+  session.id = kSession;
+  session.mask = kMask;
+  session.expires = 200;
+  session.request_content = true;
+  session.exclusions.clear();
+  session.webui_excluded = 0;
+  session.emitted = [](const NativeProbeEvent& event) { Emit(event); };
+  Configure(kSession, kMask);
+  events.clear();
+  auto& security = *content::ChildProcessSecurityPolicy::GetInstance();
+  RecordingProbeClient client;
+  reb::NativeProbeHost host(session, 1);
+  host.BindClient({&client});
+  Check(client.configured == 1 && client.request_content && !client.browser_internal,
+        "Renderer configuration carries the request content and browser-internal gates");
+  auto mapping = client.region.Map();
+  auto* queue = static_cast<reb::NativeProbeQueue*>(mapping.memory());
+  queue->CountExclusion(reb::NativeSchemeClass::kChrome);
+  queue->CountExclusion(reb::NativeSchemeClass::kChrome);
+  queue->CountExclusion(reb::NativeSchemeClass::kDevTools);
+  queue->CountExclusion(reb::NativeSchemeClass::kHttps);
+  host.EventsAvailable();
+  host.EventsAvailable();
+  Check(session.exclusions.size() == 2 && session.exclusions[0].process == 123 &&
+            session.exclusions[0].exclusion_class == 16 && session.exclusions[0].count == 2 &&
+            session.exclusions[1].exclusion_class == 19 && session.exclusions[1].count == 1 &&
+            events.empty(),
+        "Each changed class is reported once with its cumulative count, without records");
+  queue->CountExclusion(reb::NativeSchemeClass::kChrome);
+  host.EventsAvailable();
+  Check(session.exclusions.size() == 3 && session.exclusions[2].count == 3,
+        "A later count supersedes the earlier report");
+
+  NativeProbeEvent record;
+  record.header.category = reb::NativeProbeCategory::kNetwork;
+  record.header.type = NativeProbeType::kRequestInitiated;
+  record.header.session_id = kSession;
+  record.header.process_id = 123;
+  record.header.sequence_number = 700;
+  record.header.monotonic_time_ns = 100;
+  Check(queue->TryPush(record), "Renderer ring admits a record before the WebUI grant");
+  security.webui.insert(1);
+  host.EventsAvailable();
+  Check(events.empty() && session.webui_excluded == 1 && client.disabled != 0,
+        "A renderer granted WebUI bindings is detached and its queued records are discarded");
+  host.BindClient({&client});
+  Check(client.configured == 1 && session.webui_excluded == 1,
+        "A detached WebUI renderer is never configured again and counts once");
+  security.webui.clear();
+
+  // chrome-untrusted: and devtools: renderers have no WebUI bindings; their
+  // process lock names the scheme.
+  security.locks[1] = "chrome-untrusted";
+  RecordingProbeClient untrusted;
+  reb::NativeProbeHost locked(session, 1);
+  locked.BindClient({&untrusted});
+  Check(untrusted.configured == 0 && session.webui_excluded == 2,
+        "A renderer locked to an internal scheme is never configured and counts once");
+  security.locks[1] = "https";
+  RecordingProbeClient web;
+  reb::NativeProbeHost site(session, 1);
+  site.BindClient({&web});
+  Check(web.configured == 1 && session.webui_excluded == 2,
+        "A renderer locked to a web site is admitted");
+  security.locks.clear();
+
+  session.browser_internal = true;
+  security.webui.insert(1);
+  RecordingProbeClient opted;
+  reb::NativeProbeHost admitted(session, 1);
+  admitted.BindClient({&opted});
+  Check(opted.configured == 1 && opted.browser_internal && session.webui_excluded == 2,
+        "--reb-capture-browser-internal keeps WebUI renderers");
+  security.webui.clear();
+  session.browser_internal = false;
+  session.active = false;
+  session.emitted = {};
+  std::cout << "PASS production NativeProbeHost reports cumulative exclusions and detaches "
+               "renderers granted WebUI bindings\n";
+}
+
+// protocol/native-network-v3.md "Request owners and tabs": the drain resolves
+// late document records through tombstones and links worker records to sets.
+void NativeProbeHostWorkerTabLinks() {
+  record_corpus = false;
+  auto& session = reb::NativeProbeSession::Get();
+  session.active = true;
+  session.id = kSession;
+  session.mask = kMask;
+  session.expires = 200;
+  session.exclusions.clear();
+  session.emitted = [](const NativeProbeEvent& event) { Emit(event); };
+  Configure(kSession, kMask);
+  auto& process = content::RenderProcessHost::Instance();
+  process.frames.clear();
+  RecordingProbeClient client;
+  reb::NativeProbeHost host(session, 1);
+  host.BindClient({&client});
+  auto mapping = client.region.Map();
+  auto* queue = static_cast<reb::NativeProbeQueue*>(mapping.memory());
+  auto& resolver = reb::NativeTabResolver::Get();
+  std::uint64_t sequence = 900;
+  const auto start = [&](reb::NativeLoaderKind kind, std::uint64_t context, std::uint64_t request) {
+    NativeProbeEvent record;
+    record.header.category = reb::NativeProbeCategory::kNetwork;
+    record.header.type = NativeProbeType::kRequestInitiated;
+    record.header.session_id = kSession;
+    record.header.process_id = 123;
+    record.header.thread_id = 4;
+    record.header.sequence_number = ++sequence;
+    record.header.monotonic_time_ns = 150;
+    record.header.request_id = request;
+    record.header.frame_id = context;
+    record.header.loader_kind = static_cast<std::uint8_t>(kind);
+    record.header.scheme_class = 2;
+    record.header.payload_size = 3;
+    record.inline_payload[0] = std::byte{'G'};
+    record.inline_payload[1] = std::byte{'E'};
+    record.inline_payload[2] = std::byte{'T'};
+    Check(queue->TryPush(record), "Renderer ring admits the request start");
+    events.clear();
+    host.EventsAvailable();
+  };
+  const auto valid = [](const NativeProbeEvent& event) {
+    return reb::IsValidEvent(std::bit_cast<reb::EventRecord>(event));
+  };
+  const auto link = [](const NativeProbeEvent& event) {
+    return std::pair{
+        static_cast<unsigned>(std::to_integer<std::uint8_t>(event.inline_payload[4])),
+        static_cast<unsigned>(std::to_integer<std::uint8_t>(event.inline_payload[16]))};
+  };
+
+  const reb::NativeToken128 frame{0x51, 0x52};
+  resolver.NoteFrame(1, frame, 11);
+  start(reb::NativeLoaderKind::kDocument, frame.fold(), 40);
+  Check(events.size() == 1 && events[0].header.tab_id == 11 && valid(events[0]),
+        "A document record drained after its frame is gone keeps the frame's tab");
+
+  const reb::NativeToken128 worker{0x61, 0x62}, nested{0x63, 0x64};
+  resolver.DedicatedWorkerCreated(worker, {}, 7, {});
+  resolver.DedicatedWorkerCreated(nested, {}, 0, worker);
+  start(reb::NativeLoaderKind::kDedicatedWorker, nested.fold(), 41);
+  Check(events.size() == 3 && events[0].header.tab_id == 7 &&
+            events[1].header.type == NativeProbeType::kTabSet && events[1].header.tab_id == 7 &&
+            events[2].header.type == NativeProbeType::kRequestTabLink &&
+            events[2].header.tab_id == 7 && events[2].header.initiator_process_id == 123 &&
+            events[2].header.initiator_request_id == 41 &&
+            events[2].header.parent_event_id == events[0].header.sequence_number &&
+            link(events[2]) == std::pair{1U, 1U} && std::ranges::all_of(events, valid),
+        "A nested dedicated worker links to its creator document through its parent");
+  start(reb::NativeLoaderKind::kDedicatedWorker, nested.fold(), 42);
+  Check(events.size() == 2 && events[1].header.type == NativeProbeType::kRequestTabLink,
+        "A set already sent in this session is named, not sent again");
+
+  const reb::NativeToken128 shared{0x71, 0x72};
+  resolver.SharedWorkerCreated(shared, {});
+  resolver.SharedWorkerClientAdded(shared, 1, 9);
+  resolver.SharedWorkerClientAdded(shared, 2, 7);
+  start(reb::NativeLoaderKind::kSharedWorker, shared.fold(), 43);
+  Check(events.size() == 3 && events[0].header.tab_id == 0 && events[2].header.tab_id == 0 &&
+            link(events[2]) == std::pair{2U, 2U} && events[1].header.tab_id == 7 &&
+            std::ranges::all_of(events, valid),
+        "A shared worker request links to every client tab");
+
+  resolver.ServiceWorkerStarted(5, {0x81, 0x82}, {}, "https://a.test/");
+  std::vector<std::uint32_t> many;
+  for (std::uint32_t tab = 100; tab < 130; ++tab) {
+    many.push_back(tab);
+    resolver.ServiceWorkerControlleeAdded(5, std::to_string(tab), std::vector<std::uint32_t>{tab});
+  }
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0x81, 0x82}.fold(), 44);
+  Check(events.size() == 4 && events[1].header.type == NativeProbeType::kTabSet &&
+            events[2].header.type == NativeProbeType::kTabSet &&
+            events[2].header.parent_event_id == events[1].header.sequence_number &&
+            events[2].header.tab_id == 126 && link(events[3]) == std::pair{3U, 30U} &&
+            std::ranges::all_of(events, valid),
+        "A service worker controlling 30 tabs sends a chained two-part set");
+  for (const std::uint32_t tab : many) {
+    resolver.ServiceWorkerControlleeRemoved(5, std::to_string(tab));
+  }
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0x81, 0x82}.fold(), 45);
+  Check(events.size() == 3 && events[0].header.tab_id == 129 &&
+            link(events[2]) == std::pair{4U, 1U} &&
+            (std::to_integer<std::uint8_t>(events[1].inline_payload[5]) & 1U) != 0 &&
+            std::ranges::all_of(events, valid),
+        "After the last client closes, requests link to that last client and say so");
+
+  const std::string extension_id(32, 'c');
+  resolver.ServiceWorkerStarted(6, {0x91, 0x92}, extension_id,
+                                "chrome-extension://" + extension_id + "/");
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0x91, 0x92}.fold(), 46);
+  Check(events.empty() && !session.exclusions.empty() && session.exclusions.back().process == 123 &&
+            session.exclusions.back().exclusion_class == 65 && session.exclusions.back().count == 1,
+        "An extension service worker request is counted, not recorded");
+  NativeProbeEvent completion;
+  completion.header.category = reb::NativeProbeCategory::kNetwork;
+  completion.header.type = NativeProbeType::kRequestCompleted;
+  completion.header.session_id = kSession;
+  completion.header.process_id = 123;
+  completion.header.sequence_number = ++sequence;
+  completion.header.monotonic_time_ns = 160;
+  completion.header.request_id = 46;
+  Check(queue->TryPush(completion), "Renderer ring admits the completion");
+  events.clear();
+  host.EventsAvailable();
+  Check(events.empty(), "Later records of an excluded request are dropped with it");
+
+  // --reb-capture-extension-traffic records it under the extension id.
+  session.extension_traffic = true;
+  const auto counted = session.exclusions.size();
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0x91, 0x92}.fold(), 48);
+  Check(events.size() == 2 && events[0].header.tab_id == 0 &&
+            events[1].header.type == NativeProbeType::kRequestExtensionLink &&
+            events[1].header.initiator_process_id == 123 &&
+            events[1].header.initiator_request_id == 48 &&
+            std::to_integer<char>(events[1].inline_payload[8]) == 'c' &&
+            std::to_integer<std::uint8_t>(events[1].inline_payload[4]) == 19 &&
+            session.exclusions.size() == counted && std::ranges::all_of(events, valid),
+        "An opted-in extension worker request is recorded with its extension link");
+  const reb::NativeToken128 extension_child{0x93, 0x94}, extension_parent{0x95, 0x96};
+  resolver.DedicatedWorkerCreated(extension_parent, extension_id, 0, {});
+  resolver.DedicatedWorkerCreated(extension_child, {}, 0, extension_parent);
+  start(reb::NativeLoaderKind::kDedicatedWorker, extension_child.fold(), 49);
+  Check(events.size() == 2 && events[1].header.type == NativeProbeType::kRequestExtensionLink &&
+            std::to_integer<char>(events[1].inline_payload[39]) == 'c',
+        "A nested worker of an extension worker carries its extension id");
+  resolver.SharedWorkerCreated(reb::NativeToken128{0x97, 0x98}, "not-an-extension-id");
+  start(reb::NativeLoaderKind::kSharedWorker, reb::NativeToken128{0x97, 0x98}.fold(), 50);
+  Check(events.empty() && session.exclusions.back().exclusion_class == 65,
+        "An extension origin without a valid id stays counted");
+  session.extension_traffic = false;
+
+  start(reb::NativeLoaderKind::kSharedWorker, reb::NativeToken128{0x99, 0x98}.fold(), 47);
+  Check(events.size() == 1 && events[0].header.tab_id == 0,
+        "A worker the browser never saw stays unresolved for the summary to report");
+
+  // Two tokens with one fold are never guessed between.
+  const reb::NativeToken128 first{1, 0x55}, second{2, (2ULL << 17) ^ (1ULL << 17) ^ 0x55};
+  Check(first.fold() == second.fold(), "Fixture tokens share a fold");
+  resolver.NoteFrame(3, first, 21);
+  resolver.NoteFrame(3, second, 22);
+  resolver.DedicatedWorkerCreated(first, {}, 21, {});
+  resolver.DedicatedWorkerCreated(second, {}, 22, {});
+  Check(resolver.FrameTab(3, first.fold()) == 0 &&
+            resolver.Resolve(reb::NativeLoaderKind::kDedicatedWorker, first.fold(), kSession)
+                    .status == reb::NativeTabResolution::Status::kUnresolved,
+        "A fold two tokens share resolves to no tab");
+  const reb::NativeToken128 lone{0xa1, 0xa2};
+  resolver.SharedWorkerCreated(lone, {});
+  resolver.SharedWorkerClientAdded(lone, 5, 31);
+  resolver.SharedWorkerClientRemoved(lone, 5);
+  const auto last = resolver.Resolve(reb::NativeLoaderKind::kSharedWorker, lone.fold(), kSession);
+  Check(last.status == reb::NativeTabResolution::Status::kLinked && last.last_clients &&
+            last.tabs.size() == 1 && last.tabs[0] == 31,
+        "A shared worker without clients links to its last client tab, marked as such");
+  const auto version = resolver.ResolveVersion(5, kSession);
+  Check(version.status == reb::NativeTabResolution::Status::kLinked && version.last_clients &&
+            version.owner_fold == reb::NativeToken128{0x81, 0x82}.fold() &&
+            version.kind == reb::NativeTabLinkKind::kServiceWorkerLastClients,
+        "A version's script fetch links to its clients and names the worker that ran");
+  for (std::uint64_t index = 0; index <= reb::NativeTabResolver::kFrameCapacity; ++index) {
+    resolver.NoteFrame(4, {0xf000 + index, index + 1}, 41);
+  }
+  Check(
+      resolver.FrameTab(4, reb::NativeToken128{0xf000, 1}.fold()) == 0 &&
+          resolver.FrameTab(4, reb::NativeToken128{0xf000 + reb::NativeTabResolver::kFrameCapacity,
+                                                   reb::NativeTabResolver::kFrameCapacity + 1}
+                                   .fold()) == 41,
+      "The frame registry is bounded and evicts its oldest entry");
+  session.active = false;
+  session.emitted = {};
+  std::cout << "PASS production NativeProbeHost links worker requests to tab sets and keeps "
+               "tombstoned frame tabs\n";
 }

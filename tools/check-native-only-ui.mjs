@@ -57,7 +57,7 @@ const ids = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1])
 for (const id of ['screen-memory', 'screen-experiments', 'debug-resume', 'watch-form', 'source-tab-page', 'source-hook-pivot',
   'collection-run', 'collection-create-context', 'captured-client-review', 'websocket-inspector', 'runtime-hook-traffic',
   'request-memory-pivot', 'open-api-catalog', 'api-catalog', 'passive-security', 'passive-security-open', 'traffic-capture-export',
-  'request-search-scope', 'request-search-status', 'inspector-tab-payload', 'inspector-tab-preview', 'inspector-tab-response',
+  'request-search-scope', 'request-search-status',
   'inspector-tab-compare', 'traffic-comparison', 'screen-field-provenance', 'decoder-field-origin', 'decoder-find-sources']) {
   assert(!ids.has(id), `${id} must be removed, not hidden`);
 }
@@ -103,7 +103,8 @@ await nextTurn();
 assert.deepEqual(context.removedReads, [], 'shipped UI must not read removed debugger/live-script state');
 
 const document = window.document;
-const removedFeature = /breakpoint|paused frame|call stack|step over|step into|websocket (?:message|inspector|connection)|websockets ·|cookie import|import cookies|element screenshot|screenshot markup|marker (?:execution|run|fuzz)|run marker|local override|runtime hook|hook pivot|live script|page scripts|find in memory|memory origin/i;
+// "Request call stack" is the native initiator stack (protocol/native-network-v3.md).
+const removedFeature = /breakpoint|paused frame|(?<!request )call stack|step over|step into|websocket (?:message|inspector|connection)|websockets ·|cookie import|import cookies|element screenshot|screenshot markup|marker (?:execution|run|fuzz)|run marker|local override|runtime hook|hook pivot|live script|page scripts|find in memory|memory origin/i;
 const reachable = node => [node.textContent, node.getAttribute('aria-label'), node.getAttribute('title')].filter(Boolean).join(' ');
 for (const id of ['screen-traffic', 'screen-sources', 'screen-vm', 'investigation-navigation']) {
   const screen = document.getElementById(id);
@@ -116,12 +117,15 @@ for (const id of ['screen-traffic', 'screen-sources', 'screen-vm', 'investigatio
 for (const button of document.querySelectorAll('nav button, .nav-button')) {
   assert(!removedFeature.test(reachable(button)), `navigation exposes a removed CDP feature: ${reachable(button)}`);
 }
-// Traffic offers only what native rows carry: no body/header tabs, Compare,
-// content search or field trace. Removed globals are absent, not stubbed.
+// Traffic offers only what native rows carry: Headers and Cookies from native
+// header and cookie records, Payload from the native target and request_body
+// records, Preview and Response from native response_body records and
+// artifacts (protocol/native-network-v3.md), no Compare, content search or
+// field trace. Removed globals are absent, not stubbed.
 assert.deepEqual([...document.querySelectorAll('#screen-traffic .inspector-tab')].map(tab => tab.dataset.inspectorTab),
-  ['general', 'initiator', 'timing', 'signals', 'evidence']);
+  ['general', 'headers', 'payload', 'preview', 'response', 'cookies', 'initiator', 'timing', 'signals', 'evidence']);
 for (const control of document.getElementById('screen-traffic').querySelectorAll('button, summary, [role="tab"], label, select, option')) {
-  assert(!/\bCompare\b|baseline|Include headers and bodies|\bPayload\b|\bPreview\b|Field trace/i.test(reachable(control)),
+  assert(!/\bCompare\b|baseline|Include headers and bodies|Field trace/i.test(reachable(control)),
     `Traffic exposes a CDP-only control: ${reachable(control).slice(0, 160)}`);
 }
 assert.equal(runInContext('typeof renderTrafficRows', context), 'function', 'self-test: shipped globals are visible');
@@ -132,12 +136,66 @@ for (const name of ['trafficExchange', 'renderTrafficComparison', 'openFieldProv
 runInContext(`state.requests = [{id: 'legacy', path: 'legacy.invalid', method: 'GET', status: 200, type: 'xhr', origin: 'live',
   hostOnly: true, tabId: '0', events: [], operation: 'request_completed', time: 1,
   exchange: {response: {state: 'available', text: 'cdp-body-needle', headers: [['x-cdp', 'cdp-header-needle']]}}}];
-  state.selectedRequestId = 'legacy'; state.trafficDetailOpen = true; state.inspectorTab = 'payload'; renderInspector();`, context);
+  state.selectedRequestId = 'legacy'; state.trafficDetailOpen = true; state.inspectorTab = 'compare'; renderInspector();`, context);
 assert.equal(runInContext('state.inspectorTab', context), 'general', 'unknown restored tabs fall back to General');
 const general = document.getElementById('exchange-inspector').textContent;
-assert.match(general, /headers and response bodies are not captured/);
+assert.match(general, /Response bodies are on the Response tab\./);
 assert.doesNotMatch(general, /cdp-body-needle|cdp-header-needle/);
+// Response and Preview read native records only, never a CDP exchange.
+for (const tab of ['response', 'preview']) {
+  runInContext(`state.inspectorTab = ${JSON.stringify(tab)}; renderInspector();`, context);
+  const panel = document.getElementById('response-inspector');
+  assert.equal(panel.hidden, false, `${tab} shows its panel`);
+  assert.equal(panel.getAttribute('aria-labelledby'), `inspector-tab-${tab}`);
+  assert.match(panel.textContent, /recorded no response for this request/);
+  assert.doesNotMatch(panel.textContent, /cdp-body-needle|cdp-header-needle/);
+}
+// The Headers tab reads native header records only, never a CDP exchange.
+runInContext(`state.inspectorTab = 'headers'; renderInspector();`, context);
+const headersPanel = document.getElementById('headers-inspector');
+assert.equal(headersPanel.hidden, false);
+assert.match(headersPanel.textContent, /This row has no native header record/);
+assert.doesNotMatch(headersPanel.textContent, /cdp-header-needle/);
+// The Cookies tab reads native cookie records only.
+runInContext(`state.inspectorTab = 'cookies'; renderInspector();`, context);
+const cookiesPanel = document.getElementById('cookies-inspector');
+assert.equal(cookiesPanel.hidden, false);
+assert.equal(headersPanel.hidden, true);
+assert.match(cookiesPanel.textContent, /This row has no native cookie record/);
+assert.doesNotMatch(cookiesPanel.textContent, /cdp-header-needle/);
+// Payload reads the native body record and target only, never a CDP exchange.
+runInContext(`state.inspectorTab = 'payload'; renderInspector();`, context);
+const payload = document.getElementById('payload-inspector');
+assert.equal(payload.hidden, false);
+assert.equal(document.getElementById('exchange-inspector').hidden, true);
+assert.match(payload.textContent, /No body record for this request/);
+assert.doesNotMatch(payload.textContent, /cdp-body-needle|cdp-header-needle/);
+runInContext(`state.inspectorTab = 'general'; renderInspector();`, context);
+assert.equal(payload.hidden, true);
+assert.equal(document.getElementById('response-inspector').hidden, true);
+assert.equal(headersPanel.hidden, true);
+assert.equal(cookiesPanel.hidden, true);
 assert.equal(runInContext("trafficSearchRequests(state.requests, 'cdp-body-needle').matches.size", context), 0);
+// One code view: Payload, Response, Native Console and Analyst share the Sources lexer, theme and layouts.
+for (const name of ['createCodeView', 'codeViewColor', 'createCodeLayouts', 'mountCodeEditor']) {
+  assert.equal(runInContext(`typeof ${name}`, context), 'function', `${name} ships`);
+}
+for (const [file, pattern] of [['traffic_payload.js', /createCodeView\(/], ['traffic_response.js', /createCodeView\(/],
+  ['native_console.js', /codeViewColor\(/], ['app.js', /mountCodeEditor\(/]]) {
+  assert(pattern.test(sources.find(([name]) => name === file)[1]), `${file} uses the shared code view`);
+}
+const analystContent = document.getElementById('analyst-content');
+assert.equal(analystContent.tagName, 'TEXTAREA', 'Analyst keeps editing in a textarea');
+assert(analystContent.parentElement.classList.contains('code-edit'));
+assert.equal(document.getElementById('analyst-content-colors').getAttribute('aria-hidden'), 'true', 'the colored mirror is not read twice');
+// Traffic mounts only the rows near the view of the list it reads.
+runInContext(`state.requests = Array.from({length: 300}, (_, index) => ({id: 'row-' + index, path: 'row-' + index + '.invalid', method: 'GET',
+  status: 200, type: 'xhr', origin: 'live', hostOnly: true, tabId: '0', events: [], operation: 'request_completed', time: 1}));
+  state.selectedRequestId = null; showScreen('traffic'); renderRequests();`, context);
+const mountedRows = document.querySelectorAll('#request-rows .request-row').length;
+const listedRows = Number(document.querySelector('#request-rows .request-row')?.getAttribute('aria-setsize') ?? 0);
+assert.equal(listedRows, 300);
+assert(mountedRows > 0 && mountedRows <= runInContext('TRAFFIC_ROW_UNMEASURED + 2 * TRAFFIC_ROW_OVERSCAN', context), `${mountedRows} of ${listedRows} rows mounted`);
 // Guest bytecode buffers are binary: hex view, never decoded text.
 assert.equal(runInContext("sourceHexArtifact({kind: 'bytecode_buffer'}) && sourceHexArtifact({kind: 'wasm'}) && !sourceHexArtifact({kind: 'wasm_guest_adapter'})", context), true);
 assert.equal(runInContext("sourceSyntaxLabel(sourceSyntaxLanguage({kind: 'bytecode_buffer', mime_type: 'application/octet-stream', url: 'fixture://guest'}))", context), 'Guest bytecode hex');
@@ -156,7 +214,7 @@ const shell = (mode, requestContent, canvasImages) => runInContext(`state.sessio
 shell('live', true, true);
 assert.equal(contentLabel.hidden, false);
 assert.equal(contentLabel.textContent, 'Content capture');
-assert.match(contentLabel.getAttribute('title'), /request paths, queries and bodies up to 256 KiB each and Canvas images/);
+assert.match(contentLabel.getAttribute('title'), /request paths, queries and bodies, and response bodies, up to 16 MiB each, request and response headers, cookies and Canvas images/);
 shell('live', false, true);
 assert.equal(contentLabel.hidden, false);
 assert.match(contentLabel.getAttribute('aria-label'), /^Content capture: Canvas images$/);
@@ -246,7 +304,7 @@ context.mapSourceValue = mapSource();
 runInContext(`var mapFixture = (() => {
   const make = tag => { const node = document.createElement(tag); document.body.append(node); return node; };
   const button = make('button'), root = make('section'), codeWrap = make('div'), viewKind = make('span'), toolbar = make('div');
-  button.classList.add('source-tool');
+  button.classList.add('source-tool'); viewKind.textContent = 'Original · truncated';
   root.hidden = true; let source = mapSourceValue; let revealed = [];
   const controller = createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource: () => source, identityOf: value => value ? value.artifact_id + ':' + value.sha256 : null,
     reveal: (value, offset, leave) => { revealed.push(offset); return offset > 2048 ? 'Past the hex view.' : (leave(), ''); }});
@@ -284,13 +342,18 @@ assert.match(mapText('.map-facts'), /≥ 7\.0 bits\/byte/, 'the threshold is sta
 assert.equal(mapRoot.querySelectorAll('img, b').length, 0, 'captured-derived text stays inert');
 assert.match(mapText('.map-notes'), /onerror/, 'notes are shown as text');
 assert.doesNotMatch(mapRoot.textContent, /packed|encrypted/i, 'the map draws no such conclusion');
+const mapViewKind = () => runInContext('mapFixture.viewKind.textContent', context);
+assert.equal(mapViewKind(), 'Whole-artifact map · original bytes', 'the status bar names the map while it shows');
 mapRoot.querySelector('.map-range').click();
 assert.equal(runInContext('mapFixture.controller.isOpen()', context), false, 'opening a reachable byte leaves the map');
+assert.equal(mapViewKind(), 'Original · truncated', 'closing the map restores the evidence state');
 assert.deepEqual([...runInContext('mapFixture.revealed', context)], [0], 'a range row opens its first byte');
 assert.equal(mapWrap.hidden, false, 'the code view returns');
 await openMap(() => new context.Response(JSON.stringify(context.mapReady), {status: 200, headers: {'content-type': 'application/json'}}));
-runInContext(`mapFixture.setSource({...mapSourceValue, artifact_id: '902'}); mapFixture.controller.sync();`, context);
+// A render for the new selection writes its own evidence state before the map retires.
+runInContext(`mapFixture.setSource({...mapSourceValue, artifact_id: '902'}); mapFixture.viewKind.textContent = 'Derived'; mapFixture.controller.sync();`, context);
 assert.equal(runInContext('mapFixture.controller.isOpen()', context), false, 'a new selection retires the map');
+assert.equal(mapViewKind(), 'Derived', 'the new selection keeps the evidence state its render wrote');
 assert.equal(mapRoot.hidden, true, 'the retired map is hidden');
 assert.equal(mapRoot.querySelector('.map-facts').children.length, 0, 'the retired summary is released');
 
@@ -330,4 +393,4 @@ assert.equal(graphFixture('codeWrap').hidden, false, 'the linear view returns wi
 assert.deepEqual(forbidden, [], 'startup/navigation must not attempt CDP transport');
 assert.deepEqual(asyncErrors, [], 'all asynchronous startup failures must be handled');
 release();
-console.log(`PASS native-only behavior: ${screens.length} screens rendered from shipped scripts without removed state reads or CDP controls; Traffic General-only, no exchange/search/compare, guest bytecode hex (offline DOM model; no rendered layout claimed)`);
+console.log(`PASS native-only behavior: ${screens.length} screens rendered from shipped scripts without removed state reads or CDP controls; Traffic General plus native Headers, Payload, Preview, Response and Cookies, no exchange/search/compare, one shared code view, mounted Traffic rows bounded by the view, guest bytecode hex (offline DOM model; no rendered layout claimed)`);

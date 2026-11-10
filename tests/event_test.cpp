@@ -163,11 +163,13 @@ bool CheckJsonReuse() {
   header.flags = std::numeric_limits<std::uint16_t>::max() - 1;
   header.initiator_request_id = std::numeric_limits<std::uint32_t>::max();
   header.initiator_process_id = std::numeric_limits<std::uint32_t>::max();
+  header.scheme_class = std::numeric_limits<std::uint8_t>::max();
   reb::WriteEventJson(event, output);
   if (output != reb::EventToJson(event) || output.size() > reb::kMaxEventJsonBytes ||
       output.capacity() != capacity || output.data() != storage || reb::IsValidEvent(event) ||
       !output.ends_with(expected_payload_suffix) ||
       output.find("\"payload_size\":4294967295,") == std::string::npos ||
+      output.find("\"scheme_class\":255,") == std::string::npos ||
       output.find("\"encoded_data_length\":\"-9223372036854775808\"") == std::string::npos) {
     std::cerr << "Event JSON budget, reuse, or malformed-input contract failed\n";
     return false;

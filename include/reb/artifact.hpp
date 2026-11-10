@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <istream>
+#include <map>
+#include <memory>
 #include <string>
 #include <type_traits>
 #include <unordered_set>
@@ -29,6 +31,13 @@ inline constexpr std::uint64_t kDefaultMaxManifestBytes = 64ULL * 1024ULL * 1024
 // per-artifact cap; a larger declared size than this and the configured
 // artifact limit cannot come from a supported sender, so it closes instead.
 inline constexpr std::uint64_t kMaxDiscardedArtifactBytes = 16ULL * 1024ULL * 1024ULL;
+// Version 2 streams an artifact: an open header, then stream frames
+// (docs/architecture/artifact-transfer-channel.md).
+inline constexpr std::uint16_t kArtifactStreamProtocolVersion = 2;
+inline constexpr std::uint32_t kArtifactStreamMagic = 0x53424552U;
+inline constexpr std::size_t kArtifactStreamFrameSize = 80;
+inline constexpr std::uint32_t kMaxArtifactStreamChunkBytes = 64U * 1024U;
+inline constexpr std::size_t kMaxOpenArtifactStreams = 128;
 
 enum class ArtifactKind : std::uint16_t {
   kUnknown = 0,
@@ -40,6 +49,12 @@ enum class ArtifactKind : std::uint16_t {
   kBytecodeBuffer = 6,
   kWasmGuestAdapter = 7,
   kRequestBody = 8,
+  kRequestTarget = 9,
+  kRequestHeaders = 10,
+  kResponseHeaders = 11,
+  kCookieList = 12,
+  // Request initiator stack frames, protocol/native-network-v3.md.
+  kStack = 13,
 };
 
 enum class ArtifactCaptureOrigin : std::uint16_t {
@@ -54,6 +69,9 @@ enum class ArtifactCaptureOrigin : std::uint16_t {
   kRuntimeAllocatingScript = 8,
   kNativeWasmGuest = 9,
   kNetworkRequest = 10,
+  kRequestStack = 12,
+  // A JavaScript source retained because a request stack named it.
+  kStackScript = 13,
   kCompiledScript = 14,
 };
 
@@ -88,6 +106,42 @@ static_assert(offsetof(ArtifactHeader, content_size) == 64);
 static_assert(offsetof(ArtifactHeader, expected_sha256) == 80);
 static_assert(offsetof(ArtifactHeader, execution_context_id) == 112);
 static_assert(offsetof(ArtifactHeader, capture_origin) == 120);
+
+enum class ArtifactStreamOp : std::uint16_t {
+  kData = 1,
+  // Publishes the bytes so far under a new artifact ID; the stream stays open.
+  kCheckpoint = 2,
+  kEnd = 3,
+  kAbort = 4,
+};
+
+struct ArtifactStreamFrame final {
+  std::uint32_t magic = kArtifactStreamMagic;
+  std::uint16_t protocol_version = kArtifactStreamProtocolVersion;
+  std::uint16_t frame_size = static_cast<std::uint16_t>(kArtifactStreamFrameSize);
+  ArtifactStreamOp op = ArtifactStreamOp::kData;
+  std::uint16_t reserved0 = 0;
+  std::uint32_t data_size = 0;
+  std::uint64_t session_id = 0;
+  std::uint64_t artifact_id = 0;
+  // kCheckpoint: the snapshot's artifact ID. kEnd: the creator record when the
+  // open header left it zero, else zero.
+  std::uint64_t value = 0;
+  // kCheckpoint and kEnd: every byte sent so far.
+  std::uint64_t content_size = 0;
+  std::array<std::uint8_t, 32> expected_sha256{};
+};
+
+static_assert(sizeof(ArtifactStreamFrame) == kArtifactStreamFrameSize);
+static_assert(std::is_standard_layout_v<ArtifactStreamFrame>);
+static_assert(std::is_trivially_copyable_v<ArtifactStreamFrame>);
+static_assert(offsetof(ArtifactStreamFrame, op) == 8);
+static_assert(offsetof(ArtifactStreamFrame, data_size) == 12);
+static_assert(offsetof(ArtifactStreamFrame, session_id) == 16);
+static_assert(offsetof(ArtifactStreamFrame, artifact_id) == 24);
+static_assert(offsetof(ArtifactStreamFrame, value) == 32);
+static_assert(offsetof(ArtifactStreamFrame, content_size) == 40);
+static_assert(offsetof(ArtifactStreamFrame, expected_sha256) == 48);
 
 enum class ArtifactReceiveStatus : std::uint32_t {
   kAccepted,
@@ -133,6 +187,8 @@ struct ArtifactReceiverStats final {
   std::uint64_t sensitive_rejected = 0;
   std::uint64_t conflicts = 0;
   std::uint64_t io_errors = 0;
+  // Streams still open when their connection closed.
+  std::uint64_t streams_abandoned = 0;
 };
 
 struct ArtifactReceiverLimits final {
@@ -148,10 +204,17 @@ class ArtifactReceiver final {
  public:
   ArtifactReceiver(std::filesystem::path store_directory, ArtifactReceiverLimits limits);
 
+  ~ArtifactReceiver();
   ArtifactReceiver(const ArtifactReceiver&) = delete;
   ArtifactReceiver& operator=(const ArtifactReceiver&) = delete;
 
+  // One whole frame, stream open header or stream frame. Its acknowledgment
+  // carries ProtocolVersion() and, for a checkpoint, the snapshot's ID.
   [[nodiscard]] ArtifactReceiveStatus ReceiveOne(std::istream& stream);
+  // Discards every open stream; a closed connection cannot finish them.
+  void AbandonStreams() noexcept;
+  [[nodiscard]] std::uint16_t ProtocolVersion() const noexcept;
+  [[nodiscard]] std::size_t OpenStreams() const noexcept;
   [[nodiscard]] ArtifactReceiverStats Stats() const noexcept;
   [[nodiscard]] std::uint64_t StoredBytes() const noexcept;
   [[nodiscard]] std::uint64_t LastArtifactId() const noexcept;
@@ -160,6 +223,8 @@ class ArtifactReceiver final {
   [[nodiscard]] ArtifactStreamPosition StreamPosition() const noexcept;
   // Bytes of an unacknowledged final manifest record that construction cut
   // away; nonzero only after an interrupted append.
+  // Partial stream files a killed receiver left, removed at startup.
+  [[nodiscard]] std::uint64_t RemovedStreamFiles() const noexcept;
   [[nodiscard]] std::uint64_t RecoveredManifestBytes() const noexcept;
 
  private:
@@ -167,7 +232,22 @@ class ArtifactReceiver final {
   // then hold an unacknowledged record, so bookkeeping no longer matches the
   // disk and every later frame is refused rather than appended after it.
   enum class StoreState : std::uint8_t { kConsistent, kFailed };
+  struct Stream;
 
+  [[nodiscard]] ArtifactReceiveStatus ReceiveWhole(std::istream& stream,
+                                                   const ArtifactHeader& header);
+  [[nodiscard]] ArtifactReceiveStatus ReceiveStreamFrame(std::istream& stream,
+                                                         const ArtifactStreamFrame& frame);
+  [[nodiscard]] ArtifactReceiveStatus Checkpoint(Stream& stream, const ArtifactStreamFrame& frame);
+  [[nodiscard]] ArtifactReceiveStatus End(std::uint64_t artifact_id,
+                                          const ArtifactStreamFrame& frame);
+  // Moves a durable temporary file into blobs/ and appends its manifest record.
+  [[nodiscard]] ArtifactReceiveStatus Publish(const ArtifactHeader& header,
+                                              const std::string& url,
+                                              const std::string& mime_type,
+                                              const std::string& temporary_name,
+                                              const std::array<std::uint8_t, 32>& digest);
+  void DropStream(std::uint64_t artifact_id) noexcept;
   [[nodiscard]] ArtifactReceiveStatus Reject(ArtifactReceiveStatus status, std::string message);
   [[nodiscard]] ArtifactReceiveStatus RejectFrame(std::istream& stream,
                                                   std::uint64_t unread_metadata,
@@ -185,6 +265,7 @@ class ArtifactReceiver final {
   // size, whatever the outcome of the frame that changed them.
   std::uint64_t stored_bytes_ = 0;
   std::uint64_t manifest_bytes_ = 0;
+  std::uint64_t removed_stream_files_ = 0;
   std::uint64_t recovered_manifest_bytes_ = 0;
   std::uint64_t last_artifact_id_ = 0;
   std::unordered_set<std::uint64_t> artifact_ids_;
@@ -192,6 +273,10 @@ class ArtifactReceiver final {
   std::string last_error_;
   ArtifactStreamPosition stream_position_ = ArtifactStreamPosition::kFrameBoundary;
   StoreState store_state_ = StoreState::kConsistent;
+  std::uint16_t protocol_version_ = kArtifactProtocolVersion;
+  std::map<std::uint64_t, std::unique_ptr<Stream>> streams_;
+  // Bytes in open streams, charged against the store limit before they publish.
+  std::uint64_t streaming_bytes_ = 0;
 };
 
 [[nodiscard]] bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept;

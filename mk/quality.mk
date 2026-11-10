@@ -22,7 +22,7 @@ define ignored-rust-test
 		{ echo "Expected exactly one passing ignored test: $(2)" >&2; exit 1; }
 endef
 
-check: native-wasm-golden-check native-js-golden-check network-request-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
+check: native-wasm-golden-check native-js-golden-check network-request-wire-check request-index-check request-stack-wire-check debugger-observation-wire-check network-scope-wire-check tab-link-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	$(call ignored-rust-test,--lib,owned_vm_debugger::tests::owned_vm_real_helper_control_and_independent_goldens,\
@@ -118,6 +118,10 @@ $(UI_STARTUP_DEPS): tools/ui-startup-deps/package-lock.json
 
 native-only-check: $(UI_STARTUP_DEPS)
 	node tools/check-native-only-ui.mjs
+	node tools/check-traffic-payload-ui.mjs
+	node tools/check-traffic-response-ui.mjs
+	node tools/check-traffic-headers-ui.mjs
+	node tools/check-traffic-cookies-ui.mjs
 	node tools/check-agent-panel.mjs
 	node tools/check-source-search.mjs
 	node tools/check-invocation-sites-ui.mjs
@@ -149,6 +153,36 @@ native-network-capture-check:
 .PHONY: network-request-wire-check
 network-request-wire-check: $(NETWORK_REQUEST_TEST)
 	REB_NETWORK_REQUEST_TEST="$(abspath $(NETWORK_REQUEST_TEST))" node tools/check-network-request-wire.mjs
+
+# C++ scheme class and capture_exclusion verdicts against the Python validator
+# and the shipped Traffic and summary models.
+.PHONY: network-scope-wire-check
+network-scope-wire-check: $(NETWORK_SCOPE_TEST)
+	REB_NETWORK_SCOPE_TEST="$(abspath $(NETWORK_SCOPE_TEST))" node tools/check-network-scope-wire.mjs
+
+# C++ loader kind, tab_set and request_tab_link verdicts against the Python
+# validator and the shipped Traffic tab model.
+.PHONY: tab-link-wire-check
+tab-link-wire-check: $(TAB_LINK_TEST)
+	REB_TAB_LINK_TEST="$(abspath $(TAB_LINK_TEST))" node tools/check-tab-link-wire.mjs
+
+.PHONY: request-stack-wire-check
+request-stack-wire-check: $(REQUEST_STACK_TEST) $(UI_STARTUP_DEPS)
+	REB_REQUEST_STACK_TEST="$(abspath $(REQUEST_STACK_TEST))" node tools/check-request-stack-wire.mjs
+
+.PHONY: debugger-observation-wire-check
+debugger-observation-wire-check: $(DEBUGGER_OBSERVATION_TEST)
+	REB_DEBUGGER_OBSERVATION_TEST="$(abspath $(DEBUGGER_OBSERVATION_TEST))" node tools/check-debugger-observation-wire.mjs
+
+# Request index rows, sort orders and search against the shipped Traffic model.
+.PHONY: request-index-check
+REQUEST_INDEX_GOLDEN := $(abspath $(BUILD_DIR)/request-index-golden.json)
+request-index-check:
+	mkdir -p "$(BUILD_DIR)"
+	rm -f "$(REQUEST_INDEX_GOLDEN)"
+	$(call ignored-rust-test,--lib,request_index::tests::request_index_ui_parity_golden,\
+		REB_REQUEST_INDEX_GOLDEN="$(REQUEST_INDEX_GOLDEN)")
+	REB_REQUEST_INDEX_GOLDEN="$(REQUEST_INDEX_GOLDEN)" node tools/check-request-index.mjs
 
 native-proxy-policy-check: $(NATIVE_PROXY_POLICY_TEST)
 	$(NATIVE_PROXY_POLICY_TEST)
@@ -282,6 +316,7 @@ javascript-check: capture-completeness-check
 	node tools/check-vm-compare-cli.mjs
 	node tools/check-python-client-project.mjs
 	node tools/check-native-console-document-start.mjs
+	node tools/check-source-format-ui.mjs
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only
 	node tools/check-evidence-names.mjs
 	node tools/check-origin-trace-launcher.mjs --cleanup-only

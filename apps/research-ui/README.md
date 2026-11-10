@@ -75,15 +75,15 @@ URLs, hosts and timing never substitute for it. Rows whose events carry no
 request ID stay visible but cannot open traces, signal profiles or Related VM
 candidates. Native network metadata retains the method, URL or host and
 lifecycle status only; the inspector states that headers and bodies were not
-captured instead of showing empty panes.
+captured instead of showing empty panes. Content capture sessions add header
+blocks and cookie lists, which the **Headers** and **Cookies** tabs show.
 
 Traffic selection updates only the mounted rows and selection summary when the
-retained snapshot, filters, ordering and page are unchanged. Keyboard navigation
+snapshot, filters, ordering and read block are unchanged. Keyboard navigation
 does not repeat search or sorting and does not rebuild rows or reset ledger
-scrolling. A changed snapshot, filter, page or explicit refresh still recomputes
-the whole bounded retained window. `node tools/check-traffic-selection-work.mjs` checks production
+scrolling. A changed snapshot, filter, block or explicit refresh renders again. `node tools/check-traffic-selection-work.mjs` checks production
 controller work and selection invariants. Add `--baseline-ref=<commit>` for a
-reproducible authored 5,000-record/500-row before-and-after Node benchmark. Those
+reproducible authored 5,000-record before-and-after Node benchmark. Those
 timings are not rendered browser or native-app latency; the Requests browser
 gate separately exercises actual row keyboard selection.
 
@@ -228,15 +228,15 @@ instead of listing nothing.
 
 The passive security report is an offline command for one saved exact-request
 API response (`tools/report-passive-security.mjs`, library
-`tools/passive-security.cjs`). Live native Traffic retains no headers or bodies,
+`tools/passive-security.cjs`). Live native Traffic retains no response bodies,
 so Origin Trace has no in-app report. See
 [Passive security report v1](../../docs/product/passive-security-report-v1.md)
 for the schema, rules, bounds and commands.
 
 ## Captured request exports
 
-Live native Traffic retains no request or response bodies, so Traffic has no
-capture actions. **Export…** in the Traffic toolbar converts a local
+Live native Traffic has no CDP exchange to replay, so Traffic has no capture
+actions. **Export…** in the Traffic toolbar converts a local
 introspection JSON file (`__schema` or `data.__schema`, up to 1 MiB) to GraphQL
 SDL; duplicate keys, invalid UTF-8, partial/error schemas and unsafe SDL
 literals are refused. Export never queries an introspection endpoint or sends a
@@ -273,7 +273,7 @@ for bounds, identity semantics and validation coverage.
 
 Name what you have understood, as in a disassembler: a request as "session token
 mint", a source as "obfuscated loader", a VM handler as `push_const`. Choose the
-pencil in the Traffic request header, **Rename** in the Sources toolbar or
+pencil in the Traffic request header, **Rename** in the Sources **More** menu or
 **Rename** in the VM Selected handler pane, or press F2 on the focused or selected
 request, source (tree row or tab) or handler (listing or Symbol Tree row). The
 inline editor saves on Enter, cancels on Escape or when focus leaves it, and an
@@ -394,7 +394,9 @@ before it becomes a link that opens the existing Traffic, Sources,
 Fingerprinting or VM row. An identifier that cannot be found stays plain text
 labeled *not verified*. Model output is rendered as text plus a small markdown
 subset (paragraphs, lists, code fences); HTML is never interpreted, and the
-model is told captured content is data, not instructions.
+model is told captured content is data, not instructions. JavaScript, JSON,
+CSS and HTML fences and tool JSON are colored by the shared code view's lexer,
+still as text.
 
 The transcript is written to
 `~/Library/Application Support/Origin Trace/agent-transcripts/`, user-only, one
@@ -403,8 +405,9 @@ shown when the agent is turned back on and are not resent to the model.
 
 The web view keeps 6 MiB of transcript rows and mounts only rows near the
 viewport once there are many; older rows leave with a visible label and **Load
-earlier** reads them back. `REB_AGENT_PROVIDER_BASE_URL` accepts only a loopback
-stand-in, for tests; it never redirects a real key.
+earlier** reads them back. An unchanged row keeps its node, and a streamed
+reply redraws only from its first changed block. `REB_AGENT_PROVIDER_BASE_URL`
+accepts only a loopback stand-in, for tests; it never redirects a real key.
 
 ### Checks
 
@@ -581,10 +584,10 @@ The failure dialog preserves the launcher's explicit browser/helper diagnosis
 when teardown writes later shell messages; the full session log path stays visible.
 **New Live Session…** in the application menu chooses the capture mode and
 Keychain storage. **Content (default)** sets `REB_CAPTURE_REQUEST_CONTENT=1`,
-which retains request paths, queries and request bodies up to 256 KiB each, and
+which retains request paths, queries and request bodies up to 16 MiB each, and
 retains Canvas images. While a live session has either turned on, the titlebar
 shows **Content capture** and its tooltip names which; a browser built before
-that capture ignores the switch, and each Traffic row and body still shows what
+that capture ignores the switch, and each Traffic row and Payload tab still shows what
 was actually captured. **Metadata only** is the
 opt-out: Traffic stays host-only and no Canvas image is kept. Every mode records
 each request body's length, type and SHA-256. In Content mode,
@@ -726,14 +729,40 @@ REB_CAPTURE_CANVAS_IMAGES=1 make live
 
 To retain request paths, queries and bounded request bodies with `make live`,
 run `REB_CAPTURE_REQUEST_CONTENT=1 make live`. Traffic then shows each request's
-captured path and query, and its General view shows the request body: capture
-state, content type, length, SHA-256, kind and the retained bytes as text.
-Without it, the General view still shows the body's length, type and digest and
-says that content capture was off. File, blob and stream bodies are named, not
-read; password form bodies keep neither bytes nor a digest. A body read that
-times out or gets an error status stays shown with its reason and is read again
-on the next refresh; a size or SHA-256 mismatch is kept with its reason and is
-not reread. Sources never lists or opens request bodies.
+captured path and query, and its Payload tab shows them parsed:
+
+- **Query String Parameters** from the captured target, decoded or as sent.
+- **Request Payload**, Parsed or Source. JSON is a tree whose containers open
+  100 children or ranges at a time, so any size stays responsive, and its
+  source is laid out by the backend Oxc formatter, or by the in-page one with
+  the reason when Oxc refuses it, in the shared code view. Until the layout
+  is ready, Source shows a Formatting… note rather than the body as sent.
+  Clicking a token shows its exact raw range. Form bodies are a name/value table and
+  multipart bodies list each part's name, filename, type and size, with the
+  boundary read from the first line. Other text is colored by its type. Binary
+  bytes are only shown as hex. Long sources render as they scroll, in blocks
+  of at most 200 rows and 64 KiB, and no more than 64 KiB of them a frame, so
+  a one-line body never lays out at once.
+- **Find**, **Copy value** and **Copy as JSON** act on the selected row, or on
+  the whole payload. Arrow keys move through, open and close tree rows.
+- **Capture details**, collapsed, holds the state, type, lengths, SHA-256,
+  kind and artifact ID. A body cut at the capture limit or a cut target is
+  noted at the top. Bodies are read 2 MiB at a time, and a body that parses
+  (JSON, form or multipart) reads on by itself until every byte is read, showing
+  how much is read instead of its unparsed prefix; other text uses **Show the
+  next 2 MiB**.
+
+Without content capture, Payload still shows the body's length, type and digest
+and says that content capture was off. File, blob and stream bodies are read
+in content sessions; one that could not be read whole says why. Password form
+bodies keep neither bytes nor a digest. A body read
+that times out or gets an error status keeps the last read copy and its reason
+and is read again on the next refresh; a size or SHA-256 mismatch, whether the
+bytes differ, the store reports `artifact_integrity`, or the request record's digest
+differs from the artifact's, shows no bytes and is not reread. A path and query past the 116-byte row prefix is loaded from
+its retained full target for General's Request URL and Copy URL, or General
+says why it was not retained. Sources never lists or opens request bodies or
+full targets.
 
 Canvas image capture is disabled by default because rendered output can contain
 page content. Enabled output stays in the local session artifact store, is
@@ -758,6 +787,16 @@ relative to that directory; both Analyst adapters pass its `analyst_runner_core.
 to the bundled native runner. `analyst_runner_node.js` remains available for the
 backend's supported Node fallback. The runners are not public UI routes.
 `OriginTrace.icns` and `run-live-session.sh` stay at the Resources root.
+
+The `reb://` workspace answers what only Rust implements (the request index,
+filtered `get_events` reads, request headers and cookies, cookie provenance,
+request stacks, the Oxc source layout and native debugger state) through the
+bundled `OriginTraceBackend`
+([`StoredEvidenceBackend.swift`](macos/StoredEvidenceBackend.swift)). The first
+such read starts it idle over the same stores on a loopback port only the app
+knows. It exits with the app (`--owner-pid`) and stops when a live workspace
+opens. The unfiltered event window stays in Swift and keeps the network record
+types the Rust window keeps.
 
 To package a new UI module, add its filename once to the explicit asset loop in
 [`build-research-app.sh`](../../scripts/build-research-app.sh). If it is served by
@@ -819,31 +858,86 @@ when the last capture arrived while another workspace was open and the backend
 has no newer events.
 
 Traffic uses a compact network ledger with visible resource-type filters and
-sortable Name, Status, Type, Method, and Time columns. **Capture order** restores
-the evidence order. The selected request opens General, Initiator, Timing,
+sortable columns (see [Traffic columns and filters](#traffic-columns-and-filters)).
+**Capture order** restores the evidence order. The selected request opens
+General, Headers, Payload, Preview, Response, Cookies, Initiator, Timing,
 Signals and Evidence beside the ledger above 1100 px, or below it in narrow
 windows. Both panes stay within the available workspace height; the request
 ledger and inspector body scroll independently. Captured-tab and domain filters
 share a compact row at narrow widths. Native capture records the method, host,
 status and lifecycle timing of each request, and the request body's length,
-type and SHA-256. Content capture sessions add the path and query and bounded
-request body bytes, which General shows as text. Request and response headers
-and response bodies are not captured, so Traffic has no header, response,
-preview, comparison or content-search views; General states that coverage.
+type and SHA-256. Initiator shows the request call stack natively recorded
+when the renderer started the request or a script navigation, innermost
+first with `await` separators, an omitted-frames marker, and each async task
+it came from (`setTimeout`, `Microtask` and so on) with the stack that
+scheduled it; a frame opens Sources at its position, and a request started
+with no script on the stack reads "Parser".
+Content capture sessions add the path and query and bounded request body
+bytes, which Payload parses, response bodies, and request and response header
+blocks ([native network v3](../../protocol/native-network-v3.md)). Response
+(`traffic_response.js`) shows a body's capture state, codings, lengths and
+digest, then its bytes in the shared code view with pretty print (the Oxc
+layout for JavaScript and JSON, else the in-page one with the reason), raw
+ranges of laid-out tokens, wrap, find, copy and hex, read 2 MiB at a time and
+rechecked by SHA-256. Preview reads every remaining range itself. Text that is
+not valid UTF-8 shows with replacement characters and a notice, and a cut,
+partial, aborted or cancelled body may end inside a character without reading
+as binary. Preview shows the
+same JSON tree as Payload, opening 100 children or ranges at a time, a raster image whose signature matches its bytes, or text;
+HTML and SVG stay source and are never rendered. Script and Wasm responses show
+their Sources artifact in any session. A request with no body record says why:
+metadata-only session, redirect, or never seen by the browser proxy (service
+worker, memory cache).
+`tools/check-traffic-response-ui.mjs` covers both tabs in a DOM model.
+**Headers** shows General (URL, method, status, remote address, referrer
+policy), then response and request headers per redirect hop, newest first.
+Each section collapses and has **Raw** and **Copy all**; each header has
+**Copy**. A hop the network stack never reported reads "Provisional headers
+are shown". Blocks load after a size and SHA-256 check and are inserted as
+text. **Cookies** shows each hop's Response cookies (every attribute and the
+reason a `Set-Cookie` was blocked) and Request cookies, with **Show filtered out
+request cookies** for excluded ones and their reasons. Columns sort, values
+truncate with the full value as a tooltip, and each row has **Copy**. A name
+opens its provenance: the responses that set it, the `document.cookie` and
+Cookie Store calls that used it with their script position (file, line and
+function from `get_cookie_provenance`, with **Show in Sources**, when the
+script's source was retained), and the requests that sent it, linked by value
+digest to the script write. Loaded requests are read first, then the store's
+answer adds what the newest retained records hold beyond them. An empty group
+reads "Not in the scanned range" unless that answer covered the whole session. Traffic has no
+comparison or content-search views; General states the capture coverage.
 Missing initiators and timing phases stay explicitly unavailable.
 Request signal profiles are owned by the exact selected session, request and root
 event. Late responses cannot replace a newer selection or refresh. Malformed or
 failed refreshes preserve only the last validated profile for that same identity
 and require a full response on retry; changed or ambiguous owners clear it.
-No cache, recording, throttling, or invented waterfall controls are implied.
+No cache, recording or throttling controls are implied, and the waterfall uses
+recorded timestamps only.
 The layout follows familiar [network inspection conventions](https://developer.chrome.com/docs/devtools/network/reference)
 while keeping Origin Trace's own controls and Rosé Pine Moon palette.
 
-The ledger mounts at most 500 fixed-height rows. Previous/Next page through the
-retained window without changing the evidence: the Rust native-event API returns separate newest general and network lifecycle
+Traffic lists every request of the session from the backend request index
+(`get_requests`, [request index v1](../../protocol/request-index-v1.md)). The
+ledger reads one 500-row page of the index around the view and mounts only
+the fixed-height rows in view plus 8 on each side, with spacers for the rest,
+so every request is reachable. Each row names its place in the whole list
+(`aria-posinset`, `aria-setsize`); Arrow keys, Home and End move the selection
+through rows that are not mounted yet, and a focused row scrolled away leaves
+focus on the list until it returns. Counts, the
+`N / M requests` footer, tab chips, domain options, filters and search cover the
+whole session. Newest requests come first; rows that arrive above a scrolled
+viewport do not move it or the selection. Selecting a row whose records are not
+all in the newest event window reads them with `get_events` from the row's first
+byte offset before the inspector opens; choosing another row cancels that read.
+The selected row stays selected after it leaves the newest window, and its
+retained body, full target and receiver refusal are read by artifact ID, so
+they do not depend on the catalog's first 50,000 records. While the index is still indexing a large
+store, or counts unreadable or over-limit records, the footer says so. Until it
+first answers, Traffic uses the newest network window and labels its counts that
+way; a later failed read keeps the last rows. A changed filter, type, tab or sort keeps the last rows and their scroll position until the new query answers; a failed read says so in the footer and is read again on the next poll. The Rust native-event API returns separate newest general and network lifecycle
 windows of up to 5,000 events each from at most the newest 64 MiB. Canvas/WebGL activity does not consume
-network slots within that byte budget. Traffic uses the network window, including
-redirect, failed, and response-completed outcomes. Notices distinguish a capped
+network slots within that byte budget. That network window, including
+redirect, failed, and response-completed outcomes, also supplies the inspector. Notices distinguish a capped
 window from the bounded tail and label summary counts by their actual scan scope.
 Sequence-gap counts are arrival-order high-water jumps, not a deduplicated count
 of still-missing IDs after late arrivals, and queue drops may overlap them.
@@ -876,12 +970,12 @@ The Swift stored-evidence reader uses the same newest-general and
 newest-network windows, 64 MiB tail, and summary scope as the Rust endpoint.
 A response that omits those fields is still labeled visible-window-only, and
 no whole-capture count is inferred for it. Filtering
-and sorting cover the whole retained window. Rows and capture-tab controls are
+and sorting cover the whole session through the index. Rows and capture-tab controls are
 reused across refreshes. New arrivals briefly accent the row edge once; pending
 requests use a steady label. Reduced-motion disables animation and transitions.
-Refresh preserves the reading anchor and keyboard focus and never follows the
-bottom automatically. **N new requests** explicitly jumps to the newest capture
-window. Selection survives filters and sorting; its absence from the filter is
+Refresh preserves the reading anchor and keyboard focus. **N new requests**
+counts rows that arrived while the table was scrolled away from the newest, and
+returns to them. Selection survives filters and sorting; its absence from the filter is
 labeled. An actually evicted selection reports that it left the retained window
 instead of silently selecting another request.
 
@@ -890,10 +984,6 @@ Home/End. Escape closes the inspector and returns focus to the ledger. The close
 button has the same behavior. A dismissed inspector stays closed across
 refreshes; selecting a request reopens it. Full URLs remain available in General
 and Copy URL, and host-only metadata never implies a captured path or query.
-
-Traffic search is a literal, case-insensitive match over the URL or host,
-method and status that native rows carry. Tab, domain, and resource filters
-scope it. Search never enables capture or fetches anything.
 
 Collection uses a saved-request library and a template editor; it never sends
 a request. Headers, Body, and Variables are keyboard-accessible request
@@ -983,6 +1073,62 @@ dispatch-mode diagnostics and prompt PNGs are retained in `build/native-close-qa
 and uploaded by CI. The `--contract-only` mode checks wiring, sheet/sudden-exit
 policy and trace assertions; it is not evidence of native lifecycle behavior.
 
+### Traffic columns and filters
+
+The columns are Name, Status, Type, Method, Initiator, Size, Time and Waterfall;
+Protocol is available from the header menu.
+
+- **Name** is the last path segment and the query, with the host as a muted
+  sublabel only when the path was captured. The full URL is the tooltip.
+- **Status** colors 3xx, 4xx and 5xx apart. Failed names its net error,
+  Pending has no response yet, and No loader means only the renderer recorded
+  the request. Once `response_started` arrives the row shows that HTTP code,
+  and until a terminal record follows, Time reads a dash and the tooltip says so.
+- **Type** comes from the resource type, then the response MIME type when the
+  resource type says only "other". Its tooltip has the MIME type.
+- **Initiator** names a script start's innermost frame as `file:line` when the
+  request index resolves it through retained source (tooltip: URL, column and
+  function), else Script or Parser from the initiator stack, Renderer without
+  one, Service worker or Browser.
+- **Size** is the terminal record's `encoded_data_length` (transferred) and
+  `decoded_body_length` (resource), or (disk cache) and (service worker) from
+  the response flags. A served row shows its resource size only when the column
+  is wide enough for both. Units are decimal; the tooltip has exact bytes.
+- **Waterfall** draws each request from its first to its last record, lighter
+  until `response_started`, over the matching requests or the selected range.
+  A bar at the end of the scale is pulled inside its cell at its 2 px minimum.
+
+Drag a column edge, or press Shift+Left or Shift+Right on a header, to resize it.
+Right-click the header, or press Shift+F10 on it, to show or hide columns. The
+layout is saved in local storage. A table too narrow for the chosen columns
+drops Protocol, Initiator, Method, Type, Waterfall, Size, Time and Status in
+that order; Name always stays. Every cell with text has a tooltip.
+
+The timing strip above the table counts request starts in 120 buckets. Drag
+across it to filter to that time range; with it focused, Right or Left Arrow
+selects or moves a bucket, Shift+Arrow grows or shrinks the range, and Escape
+or **Clear range** removes it. The footer reads `N / M requests · X transferred
+· Y resources` for the matching requests of the whole session.
+
+The filter box matches the method, URL or host and status as literal,
+case-insensitive text. `-text` excludes rows that contain it. `domain:` (with
+`*` wildcards), `method:`, `status-code:`, `larger-than:` (transferred bytes; `k`
+and `m` are 1,024 multiples) and `mime-type:` match exactly, and a leading `-`
+negates them. Beside the type chips, **Invert** shows what the filter text does
+not match, **Hide internal** hides rows whose recorded scheme class is
+browser-internal, or, recorded before scheme classes, rows only a renderer
+recorded for a single-label host (`chrome://resources`, `newtab`); the footer
+counts them and Sources shares the switch,
+**3rd-party** keeps requests whose site differs from their tab's latest
+top-level document, and **Failed** keeps failed requests. Sites are the last two
+host labels, or three after a short second level and a two-letter country code;
+there is no public suffix list. Tab and domain filters scope everything. The
+tab strip shows whole chips only: chips that do not fit are listed in the
+**+N tabs** menu after it, and the selected tab always stays in the strip. The
+request index applies the same rules to the whole session, and
+`make request-index-check` holds the two to one fixture. Filters never enable
+capture, fetch anything or change a row.
+
 ## Code ownership
 
 | Location | Responsibility |
@@ -991,14 +1137,27 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
 | `entropy_map.js`, `entropy_map.css` | Sources Map: the fixed-size canvas view, its segmented modes, summary and states; the only color tokens the map uses |
 | `invocation_sites.js` | Track calls: the saved invocation site pane, byte offsets of Sources positions and the titlebar tracking chip |
+| `request_stack.js` | Initiator tab: the native request or navigation call stack and task chain from `get_request_stack`, opening Sources at a frame, and the initiator chain |
 | `command_palette.js` | The ⌘ / Ctrl + K palette: provider registry, matching, ranking and caps, and its dialog controller; `app.js` supplies the built-in providers |
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
-| `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status/name search, the General coverage view, and the saved-capture export document |
+| `traffic_view.js` | Native request ledger rows, ordering, the read block and its mounted rows and URL/method/status/name search, the General coverage view, request body record wording, and the saved-capture export document |
+| `network_scope.js` | Counted browser-internal exclusions and the reversible browser-internal view filter |
+| `request_tabs.js` | Each Traffic row's tabs from tab sets and request tab links, tab page names and rows without a tab |
+| `traffic_headers.js` | The Headers tab: hops from native header records, checked block reads, Raw and copy |
+| `traffic_cookies.js` | The Cookies tab: checked cookie list reads, request and response tables, filtered-out cookies, sort, copy and name provenance |
+| `traffic_payload.js` | The Payload tab: query parameters, the parsed and source request body, find and copy, and Capture details |
+| `traffic_index.js` | The request index client: the read block's rows, totals and facets, and a selected row's records from the event store |
+| `traffic_filter.js` | The filter grammar, Invert, Hide internal, 3rd-party, Failed and the time range over the newest window, mirroring the request index |
+| `traffic_columns.js` | Column widths, hidden columns, the header menu, saved layout and fitting columns to the table width |
+| `traffic_overview.js` | The timing strip and its pointer and keyboard time-range selection |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
+| `source_tree.js` | The Sources navigator: frame, group, origin and folder model, hand-parsed non-special URLs, mounted-window rows, keyboard, type-ahead and filter; `app.js` supplies the catalog and the open path |
 | `xrefs_view.js`, `xrefs_view.css` | The cross-references dock: selection following, the paged and virtualized list, and links to existing rows; the projection is [`/api/xrefs`](../../protocol/http-api.md#cross-references) in `../origin-trace-backend/src/xrefs.rs` |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
+| `source_format.js` | The backend layout client (whole bodies and 1,000-line Sources pages) and its whitespace-only mapping to the displayed evidence |
+| `code_view.js` | The code view Payload, Response, Native Console, Analyst and the agent panel share: Sources colors, rows mounted near the view in blocks of at most 200 rows and 64 KiB, find marks, layouts with raw ranges and the colored textarea editor |
 | `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
 | `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `workspace_lease.rs` | Workspace contracts, explicit analyst execution, private durable replacement |
@@ -1013,7 +1172,11 @@ Live refresh and DOM updates belong in `app.js`.
 The native scheme handler and packaging script explicitly list shipped assets.
 
 Traffic shows every native request row independently; host, method and time
-never merge or hide rows. Sources reads retained artifact bytes only. A failed
+never merge rows. A row is hidden only by an explicit, counted, reversible
+filter: **Hide internal** in Traffic, shared with Sources' "Hide browser-internal",
+covers `chrome:`, `devtools:` and other internal schemes
+([native network v3](../../protocol/native-network-v3.md)), and the footer
+reports what capture excluded. Sources reads retained artifact bytes only. A failed
 refresh preserves the last valid catalog, and a detached pending load is
 cancelled and cannot restore obsolete source text. Artifact loads have a
 10-second deadline, including body reads; a timed-out load can be retried
@@ -1058,15 +1221,26 @@ events, and reads layout only through `probes.js`. At the default 1180×790
 window and the enforced 760×560 minimum it checks:
 
 - Traffic: retained rows, list scrolling to the last row, request selection and
-  the detail pane;
+  the detail pane; default and fitted columns, cell tooltips, Size and the
+  waterfall from recorded lengths and timestamps, the timing strip from the
+  keyboard and the column menu from Shift+F10; Payload's query, JSON tree from
+  the keyboard, source and Capture details;
 - Sources: a retained artifact rendered as literal text and scrolled to its end;
+  with a Wasm module open, narrowing from 1180×790 to 760×560 and back keeps the
+  toolbar commands on one uncovered row with no blank band;
 - Investigation navigation: Back appears after a screen change, Alt+Left returns
   to the selected request, and Forward reopens Sources;
 - VM: the opcode workspace for the guest artifact shows the native guest row
   with its wide instance identity, and the physical artifact never claims a
   guest PC;
-- native-only coverage: Traffic offers only General, Initiator, Timing, Signals
-  and Evidence with no content search or Compare; Export offers only local-file
+- native-only coverage: Traffic offers only General, Headers, Payload, Preview,
+  Response, Cookies, Initiator, Timing, Signals and Evidence with no content
+  search or Compare; a retained response body is inert colored text on
+  Response, pretty prints, and is a JSON tree on Preview, reached by arrow key;
+  Headers shows a content-session request's retained blocks, Raw view and
+  markup as text, and says why a metadata-only request has none; Cookies shows
+  its response and request cookies, a blocked cookie's reason, filtered-out
+  cookies on request and a name's provenance to its script write; Export offers only local-file
   SDL and says why; golden and hostile guest bytecode render as an inert hex
   view with an unclipped kind icon;
 - keyboard order and visible focus for 30 stops (Option+Tab when Full Keyboard
@@ -1096,7 +1270,19 @@ resource filters stay visible below search and wrap within narrow windows. Selec
 and below it on narrow windows. Session
 counts come from loaded requests, and sample evidence stays visibly labeled.
 Keep labels at least 10 px and reserve stronger color for selection, connection
-state, errors, and evidence confidence.
+state, errors, and evidence confidence. Sources file icons are the one chrome
+tint: JavaScript, WebAssembly, JSON, source map and HTML icons take their code
+color at low strength, while folders, origins and frames stay neutral. Code is the exception: Sources and the
+Native Console color code like the Rosé Pine Moon VS Code theme (Rosé Pine
+Dawn in light mode), with the colors and styles VS Code renders for each token
+(there, `JSON` is an italic variable and `stringify(` a plain function call), its
+six bracket pair colors, editor colors and Menlo 12/18 px; the Analyst editor, the Traffic Payload and Response
+code views, and the agent panel's fenced code and tool arguments and results
+take the same editor colors and font. Payload, Response, Native Console,
+Analyst and the agent panel use one code view (`code_view.js`) with the Sources lexer
+and theme; Analyst colors its text behind the textarea, which keeps editing. With macOS Increase Contrast, comments and
+keywords are brightened. `node tools/check-source-format-ui.mjs` (part of
+`make lint`) pins the token kinds and colors.
 
 Tool workspaces put the next action before implementation details. Decoder
 controls follow input, transformation, and result order; chain editing stays
@@ -1212,31 +1398,53 @@ correlation and exposes zero-count families instead of hiding coverage. The
 view never claims that an observed value was transmitted or that a particular
 fingerprinting vendor produced the activity.
 
-Sources navigation lists retained Captured artifacts.
-File rows reserve their remaining width for the filename, with full URLs in
-tooltips and source metadata in Details. Folder rows retain their item counts.
-The navigator initially expands branches to keep retained files directly visible.
-Click a branch, or press Enter/Space on it, to collapse or expand it. One tree row
-is in the Tab order; Up/Down move through visible rows, Right opens a branch or
-enters its first child, Left closes it or returns to its parent, and Home/End
-reach the first/last visible row. Modified arrows keep their browser/history
-meaning. Focus and the open document are separate: collapsing a selected file's
-ancestor leaves its editor, Find result and original-byte location unchanged and
-never reads source bytes or runs analysis. Ordinary catalog refresh keeps keyed
-rows, tree focus and scroll, returning a removed focused row to its closest
-surviving ancestor. Branch state is session-only; origins and full path
-segments have distinct identities.
+Sources navigation lists every retained Captured artifact (`source_tree.js`).
+The catalog is read forward from `get_artifacts` in 5,000-record pages; a
+one-record probe carries the ETag and a manifest that only grew is read from its
+last boundary. The first 50,000 records of every kind are read in manifest
+order, for Traffic, Evidence and packages; after them only the kinds this catalog
+alone supplies are read (`kind=`), so request records cannot push a script out.
+Loading stops at 100,000 sources with a notice. A stored session reads the same
+pages from the bundled backend. The tree reads
+**top**, then one row per frame, then the **Workers** (no frame),
+**Dynamic (eval / new Function)**, **WebAssembly** (modules compiled from bytes
+and their guest artifacts), **Extensions** (by extension ID) and **Browser
+internals** groups, then origins, folders and files. The frame seen first is
+listed first, other frames by name. A frame is named by its Console document URL
+when the Console listing has one, which also marks top-level documents, and
+otherwise by the origin of its first document artifact: a retained HTML response or an eval or Wasm artifact. A frame with neither reads `frame · <origin>` from its first source. Extension and
+`chrome://` hosts are read by hand because their URL origin is `null`; browser
+internals start collapsed. A folder chain with one folder child reads as one row
+(`a/b/c`). Files show their plain name, eval code `VM<id>` as in DevTools, with
+a mask icon tinted by type and the two-letter kind code kept as its text. The
+artifact ID is in the muted meta column, the tooltip and Details; same-named
+siblings add a muted query, session or frame suffix, or their artifact ID when nothing else differs. Extension names are not captured,
+so extensions show their ID.
 
-The navigator inspects at most 5,000 catalog records, retains 10,000 metadata
-nodes and renders at most 1,000 expanded rows. Collapsed descendants have no DOM
-rows. It rejects URLs above 4,096 characters and identities above 8,192
-characters, shortens directory structure after 16 levels, and visibly discloses
-these limits rather than implying omitted sources are absent. Selection markers
-are withheld when the catalog cap prevents verifying a unique source. Empty path
-segments remain distinct, explicitly labeled folders. Collapse branches
-or use **Open file** to reach later catalog choices. Deep indentation is bounded
-for narrow sidebars; full source URLs remain available in tooltips. These limits
-do not evict open source text, change captured evidence, or relink documents.
+Only rows near the viewport are mounted; the focused row stays mounted while
+scrolled away. One row is in the Tab order. Up/Down move through rows, Right
+opens a branch or enters its first child, Left closes it or returns to its
+parent, Home/End reach the first/last row, PageUp/PageDown move a viewport less one row, and typing a name moves to the next
+row that starts with it (repeat a letter to cycle). Modified arrows keep their
+browser/history meaning; Enter/Space keep native button activation. **Filter
+files** above the tree matches file names, URLs and artifact IDs and shows each
+match with its folders; Down enters the tree and Escape clears it. Expansion
+under a filter is separate, so clearing it restores the saved expansion.
+**Expand all** and **Collapse all** act on the current view. Expansion is kept
+for the app session. Focus and the open document are separate: collapsing a
+selected file's ancestor never reads source bytes or runs analysis. Catalog
+refresh keeps keyed rows, focus and the first visible row in place, returning a
+removed focused row to its closest surviving ancestor.
+
+The navigator holds at most 400,000 metadata nodes, counted before one-folder
+chains collapse, which 20,000 sources cannot exceed in any folder layout. It rejects URLs above 4,096
+characters and identities above 8,192 characters, shortens directory structure
+after 16 levels, and discloses each limit rather than implying omitted sources
+are absent. Selection markers are withheld when the catalog is capped, a source
+identity repeats, or an omitted record shares the selected ID. Empty path
+segments remain distinct, explicitly labeled folders. **Open file** lists the
+first 200 matches. These limits do not evict open source text, change captured
+evidence, or relink documents.
 Find searches the selected document's owned retained text, independently of
 which lines are mounted. It uses a case-insensitive single-line literal of at
 most 512 UTF-16 code units. Multiline pastes are refused before the browser can
@@ -1260,8 +1468,8 @@ Enter searches immediately. The command palette's **Search all sources** entry
 opens this view with its query and runs it; typing in the palette never reads
 artifact bytes.
 
-Each file is read once through `/api/artifacts/{artifact_id}/content` with the
-same 2 MiB limit, byte-size and SHA-256 checks as the Sources preview. A loaded
+Each file is read once through `/api/artifacts/{artifact_id}/content` with a
+2 MiB limit and the Sources preview's byte-size and SHA-256 checks. A loaded
 preview is reused without a request, and other text is kept in a separate cache
 of at most 8 Mi UTF-16 code units, so the next query does not refetch it; files
 that leave the catalog leave that cache. One search reads at most 32 MiB and
@@ -1285,17 +1493,20 @@ after the search is refused rather than reopened. `node tools/check-source-searc
 (part of `make check`) exercises the matcher, caps, cancellation, partial-result
 notes, reader checks and this open-and-Back path in the shipped scripts.
 
-The editor mounts at most 1,000 lines. Previous/Next and explicit local Line /
-Column controls reach other retained locations. The target line retains at most
-16,384 UTF-16 units (one additional unit may preserve a surrogate pair); other
-lines retain at most 512 each. Omitted-column markers sit outside source text.
-Find and original-byte links reveal an excerpt containing the requested absolute
-location, rather than increasing these limits. Later or clipped windows use a
-plain-text label because omitted prefixes cannot establish lexical coloring
-state. Captured bytes, line endings, BOMs and absolute runtime locations stay
-unchanged. The current document has one sparse line anchor per 128 lines, at
-most 65,537 anchors for the defensive 8 Mi UTF-16-unit inspection limit. Accepted
-preview and verified-original readers retain their existing smaller byte limits.
+The editor mounts at most 1,000 lines. A row above and below them reaches the
+previous and next 1,000 lines, and **Go to line** (Ctrl+G, or **More**) takes a
+line and column. The target line retains at most 16,384 UTF-16 units (one
+additional unit may preserve a surrogate pair); other lines retain at most 512
+each. Omitted-column markers sit outside source text. Find and original-byte
+links reveal an excerpt containing the requested absolute location, rather than
+increasing these limits. Colors resume from lexer checkpoints saved every 4 Ki
+UTF-16 units of the document, so later windows and clipped columns color exactly
+as a pass from the start would. Checkpoints extend in steps of 64 Ki units
+between tasks; a window they have not reached shows **coloring…** in plain text
+until they do, and its mounted rows are then colored in place rather than
+rebuilt. Captured bytes, line endings, BOMs and absolute runtime locations
+stay unchanged. The current document has one sparse line anchor per 128 lines,
+within a defensive 64 Mi UTF-16-unit inspection limit.
 Derived/Pretty mappings are projected only for mounted lines.
 
 Investigation history retains logical line/column windows with the exact source
@@ -1304,8 +1515,24 @@ version or intrinsic assumption cannot restore a stale representation window.
 Ordinary evidence refresh leaves Find and the current window in place; explicit
 original-source pivots choose their own retained location.
 
+The editor toolbar is one row: the URL, **Open file**, Find (Cmd+F), **Inspect**
+and **Graph** for a Wasm module, **Map** and **More**, which holds Go to line,
+Rename, Decode range, Facts, Track calls, Static cleanup and Details. The row
+never wraps at any width: the URL shortens first (its tooltip keeps it whole),
+then Find, and when the commands still do not fit, Map, Graph and Inspect move in
+that order to the top of More and return once there is room. Find's coverage
+sentence is its tooltip. The status bar shows the
+caret line and column, with the original location in a pretty-printed or derived
+view (`Line 1204, Column 5 (original 1:48213)`), the selection length, the
+evidence state (Original or Derived), the language and layout, the **{ }**
+toggle and the size. The position is never cut and its tooltip is the full text.
+When the bar is too narrow it drops whole items instead of squeezing them: the
+hash, then the toggle's label (leaving **{ }**), the language, the size, a
+selection's raw offsets, the evidence state, the selection length and a
+selection's raw range. Dropped parts of the position stay in its tooltip.
+
 The Sources sidebar starts closed. Details opens source metadata, JavaScript
-facts and static cleanup; the toggle remains available at narrow window sizes.
+facts and static cleanup; it remains available at narrow window sizes.
 Wasm modules and native guest bytecode buffers open as an inert hex view of
 their retained bytes (offset, hex and printable columns, labeled **WebAssembly
 hex** or **Guest bytecode hex**); bytecode is never decoded as text. Guest
@@ -1350,10 +1577,19 @@ Dispatch sites panel. Worker execution failures return a retryable API error and
 are never persisted or cached as an analysis. Workspace failures retain the last
 valid workspace and never remove detection findings.
 
-Traffic remains grouped by captured browser tab with an All tabs scope and a
-domain selector. Protocol v3 carries the stable top-level tab identifier; older
-evidence remains Unattributed. Evidence retains the original payload and trace
-actions; General, Initiator and Timing display only recorded observations.
+Traffic is grouped by browser tab with an All tabs scope and a domain
+selector. Each chip is named by its tab's newest main-frame page. A worker
+request linked to several tabs (`request_tabs.js`, from `tab_set` and
+`request_tab_link`) appears in each with a marker such as "Service worker · 2
+tabs"; All tabs counts it once. Extension traffic recorded with
+`REB_CAPTURE_EXTENSION_TRAFFIC=1` (`request_extension_link`) has one
+"Extension <id>" chip per extension. The request index joins the same links, so
+chips, the tab filter and the footer count cover the whole session. There is no
+Unattributed group: a row without an owner is a capture error, counted in the
+footer, whose button lists those rows.
+See [request owners and tabs](../../protocol/native-network-v3.md#request-owners-and-tabs).
+Evidence retains the original payload and trace actions; General, Initiator and
+Timing display only recorded observations.
 
 ## Deobfuscation engines
 
@@ -1377,14 +1613,31 @@ Unsupported behavior remains visibly unresolved even if no resource budget was
 reached; no safe rewrites is not a claim that source is unobfuscated. This is a
 separate ephemeral derived view, not a persisted replacement capture.
 
-The adjacent **{ }** control pretty prints JavaScript, JSON, CSS, and HTML using
-the detected source type. It can format either the original evidence or the
+The status-bar **{ }** toggle pretty prints JavaScript, JSON, CSS, and HTML using
+the detected source type. JavaScript, CSS and JSON with a line over 16 KiB open
+pretty-printed, shown as **Pretty-printed · Show original**; the choice either
+way is remembered per artifact for the session. The gutter numbers formatted
+lines; its tooltip names the original line and column. A complete JavaScript artifact is laid out by the
+backend's Oxc formatter (`get_source_format`, [Source format v1](../../protocol/source-format-v1.md)):
+Prettier's layout at 80 columns, with every token printed as captured. Sources
+reads it one 1,000-line page at a time; each page's anchor names its first
+original offset, so the editor maps every character back by walking that
+page against its slice of the evidence, and clicking a formatted token shows
+the exact raw range it came from. Each page's colors continue the original's
+lexer state where it starts. The page shown stays while the next is read, and
+Find searches the complete evidence text and opens the page that shows each
+match. While the first page is read the original stays on screen. If
+the source does not parse, the backend is unavailable, or the text is derived,
+truncated or another language, the in-page formatter is used: the status bar
+names the whitespace layout and the row above the code says why. It runs in a Web Worker (on the page, after one task, where
+workers are unavailable). It can format either the original evidence or the
 active deobfuscated representation, so an unchanged deobfuscation result does
 not leave a minified bundle on one line. Pretty printing changes only display
 whitespace, keeps source-line mappings back to the captured bytes, and never
-rewrites stored evidence. Input is capped at 2 MiB and formatted output at 4
-MiB, with 250,000 lexical tokens and 500,000 mapping segments as pathological
-input guards.
+rewrites stored evidence. Both layouts map back through one sync point per
+4 Ki formatted units rather than a segment per change. The in-page formatter
+streams its tokens, accepts the 16 MiB artifact cap and stops when its output
+exceeds three times that.
 **Details > Static cleanup** shows analysis, limits, omissions, and retry actions. The native app ships a Rust/Oxc worker for bounded static AST rewriting
 over captured artifacts. It needs no Python runtime. Building the app
 requires a current stable Rust toolchain (`rustup toolchain install stable`).
@@ -1434,8 +1687,8 @@ worker makes AST operations unavailable with an explicit error. Deob stays insid
 To follow calls of a page function such as `window.hsw` in the next capture,
 open its captured script in **Sources** and either type the name in the
 **Track function calls** pane of **Details** and press Return, or put the
-cursor in the function (click it, or use **Line**, **Column** and **Go**) and
-choose **Track calls** in the toolbar. The position must be in the original
+cursor in the function (click it, or use **Go to line**) and
+choose **Track calls** in **More**. The position must be in the original
 view, not a pretty-printed, derived or Wasm view. The backend resolves the
 exact artifact and saves one site; it never guesses. A name bound by several
 definitions, or by none, lists the candidates with their line, column and a
@@ -1585,7 +1838,7 @@ drag. Traffic saves wide column and narrow row splits separately. Sizes persist 
 proportions in the local `origin-trace.layout.v1` preference, independently of evidence and backend state.
 
 Minimum pane sizes keep controls and empty states usable. The Sources toolbar
-wraps within the editor; its narrow details overlay starts below those controls. Saved widths are suspended when the
+stays one row (a rename field wraps below it); its narrow details overlay starts below those controls. Saved widths are suspended when the
 responsive layout stacks panes or lacks enough space. Returning to a wide window restores them. Handles follow scrolling and
 are clipped to the active workspace. `pane_layout.js` owns the shared layout controller;
 no captured evidence is modified by resizing.
@@ -1759,16 +2012,19 @@ proof of ownership.
 Artifact catalog refreshes preserve an exact pending preview owner. Changing
 its session, hash or descriptor retires that read. Preview failures and deadlines
 show **Retry source**; they do not silently retry during refresh. Preview bodies
-reuse the Facts bounded streaming reader: 2 MiB raw artifact bytes and 33 MiB
-for an analyzer envelope, with at most 65,536 chunks. Artifact and analyzer
-deadlines are ten seconds, including body reads and SHA-256 work. Cancellation
+reuse the Facts bounded streaming reader in 2 MiB pages: a text preview reads
+the whole artifact up to the 16 MiB artifact cap, and a larger one keeps its first
+16 MiB, and a notice above the code states the limit in the pretty-printed and
+Original views. Binary previews read 2 MiB, and an analyzer
+envelope 33 MiB, with at most 65,536 chunks per page. Analyzer deadlines are ten
+seconds; a preview has five seconds plus five per page, including SHA-256 work. Cancellation
 retires ownership without waiting for a stalled producer's cleanup. Full artifact
 previews verify SHA-256 when WebCrypto is available; partial or lossy text is
 visibly a preview. Exact byte navigation still belongs to the existing Facts
 verified-original reader.
 
-The editor retains at most eight preview owners and 16 MiB of UTF-16 preview
-text across captured files. The selected owner is pinned; older preview
+The editor retains at most eight preview owners and 32 Mi UTF-16 units of
+preview text across captured files. The selected owner is pinned; older preview
 bytes can be evicted while their tab and immutable catalog metadata remain.
 **Retry source** or reopening the file loads it again. Closing a file cancels its
 preview/Deob reads and releases its preview, Deob and formatting cache entries.
@@ -1777,12 +2033,14 @@ empty/retry controls are removed when the editor becomes ready. Hidden UI
 closures cannot keep evicted preview or analysis payloads alive. This never
 deletes captured evidence. Canvas thumbnails and the existing bounded
 Facts/WASM inspectors retain their separate ownership contracts. WASM Hex formats
-every retained byte whose text fits in the 8 MiB editor index, about 1.6 MiB of
+every retained byte whose text fits in 8 Mi UTF-16 units, about 1.6 MiB of
 module bytes. A longer module keeps a labeled prefix, and Find covers that prefix.
 
 Deob retains at most eight documents, 16 MiB of original/derived UTF-16 text and
-250,000 map segments and 32 MiB of serialized response data in total. Formatting retains at most two documents, 12 MiB
-of input/output UTF-16 text and 500,000 segments. These are explicit text/entry
+250,000 map segments and 32 MiB of serialized response data in total. In-page
+formatting retains at most eight layouts and 64 Mi UTF-16 units of input and
+output text; Oxc layouts at most four (16 pages each in Sources, or one body of at most 4 MiB) and 64 Mi units. The newest layout is kept
+even when it alone exceeds its budget. These are explicit text/entry
 budgets, not JavaScript heap or process-RSS guarantees. The editor DOM and Facts'
 independently verified original also use memory; no duplicate history of source
 bytes is introduced.

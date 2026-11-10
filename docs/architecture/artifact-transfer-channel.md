@@ -77,7 +77,7 @@ size. Native tests assert that the two definitions remain ABI-identical.
 | 0 | 4 | `magic` | `0x41424552` |
 | 4 | 2 | `protocol_version` | `1` |
 | 6 | 2 | `header_size` | `128` |
-| 8 | 2 | `kind` | JavaScript, WASM, source map, response body, Canvas data URL, bytecode buffer, guest adapter, request body |
+| 8 | 2 | `kind` | JavaScript, WASM, source map, response body, Canvas data URL, bytecode buffer, guest adapter, request body, request target, request headers, response headers, cookie list, stack ([numbering](../../protocol/native-network-v3.md)) |
 | 10 | 2 | `flags` | bit 0 marks sensitive content |
 | 12 | 4 | `reserved0` | zero |
 | 16 | 48 | correlation IDs | six unsigned 64-bit values |
@@ -86,7 +86,7 @@ size. Native tests assert that the two definitions remain ABI-identical.
 | 76 | 4 | `mime_type_size` | 1 to 255 bytes |
 | 80 | 32 | expected SHA-256 | all zero if the sender omits preverification |
 | 112 | 8 | `execution_context_id` | stable renderer context ID, or zero when unavailable |
-| 120 | 2 | `capture_origin` | unknown, network response, dynamic JavaScript, WASM compile/module/instantiate, Canvas, runtime typed array or allocating script, native Wasm guest, network request |
+| 120 | 2 | `capture_origin` | unknown, network response, dynamic JavaScript, WASM compile/module/instantiate, Canvas, runtime typed array or allocating script, native Wasm guest, network request, request stack, stack script ([numbering](../../protocol/native-network-v3.md)) |
 | 122 | 2 | `reserved1` | zero |
 | 124 | 4 | `reserved2` | zero |
 
@@ -96,22 +96,74 @@ first frame. Unsupported versions, flags, enum values, nonzero reserved bytes,
 invalid printable UTF-8 metadata, truncated ranges, and digest mismatches fail
 closed.
 
-The receiver replies with a fixed 32-byte version-1 acknowledgment containing
-the artifact identifier and receive status. Accepted means the immutable blob
+The receiver replies with a fixed 32-byte acknowledgment containing the
+artifact identifier and receive status. Accepted means the immutable blob
 and manifest entry were committed. Brave emits success only after matching that
 acknowledgment to the queued artifact.
+
+## Streamed artifacts (version 2)
+
+Network bodies are streamed so the browser never holds a whole body: script and
+Wasm responses, response bodies and request bodies. Version 1 whole frames stay
+valid on the same connection for everything else.
+
+A stream starts with the 128-byte header above with `protocol_version` 2,
+followed by the URL and MIME type. Its `content_size` and expected digest are
+zero. A `request_body` stream may leave `creator_event_id` zero; its end frame
+then names the creator, because that record is emitted when the read ends.
+Every later frame is this fixed 80-byte header, followed by `data_size` bytes
+for a data frame:
+
+| Offset | Size | Field | Rule |
+| ---: | ---: | --- | --- |
+| 0 | 4 | `magic` | `0x53424552` |
+| 4 | 2 | `protocol_version` | `2` |
+| 6 | 2 | `frame_size` | `80` |
+| 8 | 2 | `op` | 1 data, 2 checkpoint, 3 end, 4 abort |
+| 10 | 2 | `reserved0` | zero |
+| 12 | 4 | `data_size` | 1 to 65,536 for data, else zero |
+| 16 | 8 | `session_id` | the authenticated session |
+| 24 | 8 | `artifact_id` | the open stream |
+| 32 | 8 | `value` | checkpoint: the snapshot's artifact ID; end: the deferred creator, else zero |
+| 40 | 8 | `content_size` | checkpoint and end: every byte sent so far |
+| 48 | 32 | expected SHA-256 | checkpoint and end: digest of those bytes, or zero |
+
+Streams of different artifacts interleave. The receiver appends data to the
+stream's temporary file and hashes it as it arrives. A checkpoint copies the
+bytes so far into a new blob and publishes it under the snapshot ID while the
+stream stays open; this is how a body that is still arriving (server-sent
+events, long polling) is retained as partial. An end checks the size and digest
+and publishes the stream like a whole frame. An abort discards it. The manifest
+record format does not change.
+
+Every frame is acknowledged with the same 32-byte record, `protocol_version` 2,
+naming the stream or, for a checkpoint, the snapshot. A refused data frame drops
+the stream; later frames for it are refused as unknown but consumed, so the
+connection stays at a frame boundary. A stream still open when its connection
+closes is abandoned and counted (`streams_abandoned`).
+
+The browser writer reports each artifact ID exactly once: a whole frame's ACK, a
+stream's end ACK or its first refusal, a checkpoint's ACK under the snapshot ID.
+An abort is silent. After a refusal the writer drops that stream's remaining
+frames. Losing the connection reports every open stream as `io_error`.
 
 ## Limits and backpressure
 
 Defaults are:
 
 - 16 MiB per artifact;
-- 32 MiB of active browser capture memory;
-- 16 queued artifacts and 32 MiB of queued browser content;
+- 32 MiB in-flight pool for response tees and request content. A stream holds
+  its pending data frame of at most 64 KiB plus frames the writer has not yet
+  sent; each frame returns its share when the writer drops it. The pool bounds
+  bytes in flight, not bodies, and a declared Content-Length reserves nothing;
+- 288 queued whole frames or stream openings, 4,096 queued data frames, and
+  32 MiB of queued browser content; end, abort and checkpoint frames always
+  queue so an admitted stream can be closed;
+- 128 open streams per receiver connection;
 - 256 MiB of immutable blobs per session store;
 - 8 KiB source URL;
 - 255-byte MIME type;
-- 64 KiB streaming copy and hashing chunk;
+- 64 KiB streaming copy, hashing and stream data chunk;
 - 2 MiB maximum UI content response and 20,000 rendered lines.
 
 Canvas data URLs use the 2 MiB UI limit as their capture limit so accepted
@@ -189,18 +241,21 @@ Project-wide authorization, capture, and privacy rules are in
 [`SAFETY.md`](../../SAFETY.md). This section describes the artifact channel's
 specific enforcement contract.
 
-Response bodies, request bodies and Canvas data URLs require both controls:
+Response bodies, request bodies, full request targets and Canvas data URLs
+require both controls:
 
-1. the frame kind is `response_body`, `request_body` or `canvas_data_url` and
-   its sensitive flag is set;
+1. the frame kind is `response_body`, `request_body`, `request_target` or
+   `canvas_data_url` and its sensitive flag is set;
 2. the receiver was started with `--allow-sensitive` for that authorized
    session.
 
-The default receiver rejects all three kinds. The live launcher enables the
+The default receiver rejects all four kinds. The live launcher enables the
 receiver policy only when `REB_CAPTURE_CANVAS_IMAGES=1` or
-`REB_CAPTURE_REQUEST_CONTENT=1` is set. A `request_body` artifact must use the
-`network_request` origin, name its `request_body` event as creator and carry no
-execution context; see [Native network v2](../../protocol/native-network-v2.md). JavaScript,
+`REB_CAPTURE_REQUEST_CONTENT=1` is set. A `request_body` or `request_target`
+artifact must use the `network_request` origin, name its creator record and
+carry no execution context; see [Native network v2](../../protocol/native-network-v2.md). A
+`response_body` artifact uses the `network_response` origin and is created by
+its `response_started` record. JavaScript,
 WASM, and source maps cannot be mislabeled as sensitive content. Credentials,
 cookies, and authorization headers are not artifact kinds and remain outside
 this channel.
@@ -214,7 +269,7 @@ decodes text or displays WASM as hex, and creates DOM text nodes. Captured HTML
 or JavaScript never enters an HTML parsing or execution sink.
 
 The Sources workspace follows a familiar source-browser organization: Captured
-navigator, origin and directory tree, editor tabs, line numbers, open-file and
+navigator with frame, group, origin and directory levels, editor tabs, line numbers, open-file and
 find shortcuts, a readable derived view, and a details side pane. It reads only
 the immutable artifact store; there is no live script catalog, debugger or
 runtime state. Wasm modules and native guest bytecode buffers display as an
@@ -223,9 +278,11 @@ inert hex view of their retained bytes.
 A response body becomes a stored JavaScript artifact only when the network tee
 classifies it as a script resource or a JavaScript MIME type. `application/wasm`
 and the compile, module, and instantiate hooks store Wasm, often under a
-synthetic `wasm://` URL, without copying the surrounding loader script. Fetch
-or XHR bodies with another MIME type, and generated source that misses the
-allocating-script hook, are absent from the manifest. `chrome://` script
+synthetic `wasm://` URL, without copying the surrounding loader script. In
+content sessions the same tee stores every other kept response as a sensitive
+`response_body` artifact ([native network v3](../../protocol/native-network-v3.md));
+otherwise those bodies, and generated source that misses the allocating-script
+hook, are absent from the manifest. `chrome://` script
 responses can still be stored; they are browser-UI noise, not a challenge
 loader. VM Lab's session-sources panel lists stored same-session artifacts and,
 only when that session is in the current live evidence window, joins CDP
@@ -237,6 +294,9 @@ artifact store and does not supply a guest position.
 - Partial header or metadata: reject as invalid and publish nothing.
 - Partial content: remove the temporary file and publish nothing.
 - SHA-256 mismatch: remove the temporary file and publish nothing.
+- Stream refused, aborted, mismatched at its end, or open when its connection
+  closes: remove its temporary file and publish nothing beyond any accepted
+  checkpoint.
 - Duplicate artifact ID: reject without changing the original manifest entry.
 - Authenticated session mismatch: reject the frame and close the connection.
 - Artifact count or manifest limit: reject before publishing a manifest entry.
@@ -258,3 +318,8 @@ artifact store and does not supply a guest position.
 `make e2e` exercises the deterministic artifact producer and receiver path,
 checks the manifest and analysis output, and validates the event store. The
 native build check and compile gate cover the receiver and producer binaries.
+`tests/artifact_test.cpp` covers interleaved streams, checkpoints, deferred
+creators, refusals at a frame boundary and abandonment.
+`make native-artifact-capture-check` replays the browser sinks' streams through
+the production receiver, drives the production receiver socket with version 2
+frames, and runs the production writer's stream reporting against it.

@@ -22,7 +22,8 @@ changing the surface result.
 
 While capture is active, renderer operations resolve the current Blink frame
 token only after the policy check. The browser-process host maps that token to
-its top-level tab, leaving worker and detached-frame events unattributed. A
+its top-level tab through live frames, then through `browser/native_tab_resolver.h`
+tombstones for frames already gone. A
 local Stop command closes the broker connection; the browser socket client
 detects that disconnect promptly and disables every renderer host and browser
 capture sink. No page script controls probe activation.
@@ -88,33 +89,100 @@ synthetic checks do not launch a browser, enable capture, or prove performance
 inside a built Brave application.
 
 Payload capture is limited to a bounded metadata prefix. Network request
-prefixes contain only the method and destination host. Fragments, credentials,
-authorization headers, and cookies are never captured. Every admitted request
+prefixes contain only the method and destination host. Fragments and URL
+credentials are never captured. Every admitted request
 also gets a `request_body` child record from `browser/native_network_capture_sink.cc`
 with the body's kind, length, normalized content type and a SHA-256 of
 in-memory bytes up to 4 MiB. Only with `--reb-capture-request-content` does the
 sink also emit `request_target` children (path and query, 116-byte prefix plus
-original length) for starts and redirects and hand at most 256 KiB of in-memory
-body bytes to `NativeArtifactCaptureSink::CaptureRequestBody` as a sensitive
-`request_body` artifact. File, blob and stream elements are never read, and
-password form posts keep neither bytes nor a digest. The wire and limits are in
-[Native network v2](../../../../../../protocol/native-network-v2.md).
+original length) for starts and redirects and hand longer targets and at most
+16 MiB of in-memory body bytes to `NativeArtifactCaptureSink::CaptureRequestContent`
+as sensitive `request_target` and `request_body` artifacts, copied and hashed
+off the UI sequence within a per-session byte budget. Brave patch
+`0019-tee-native-request-bodies` hands bodies with file, blob or stream parts to
+`browser/native_request_body_reader.cc`, which reads them on a background
+sequence (a stream part through a forwarding tee getter) and records them when
+the read ends. Password form posts keep neither bytes nor a digest. The wire
+and limits are in [Native network v2](../../../../../../protocol/native-network-v2.md)
+and [v3](../../../../../../protocol/native-network-v3.md#request-body-reads).
+Every network body streams to the receiver through
+`browser/native_artifact_stream.cc` in data frames of at most 64 KiB, so the
+in-flight pool bounds bytes in flight rather than bodies
+([artifact channel v2](../../../../../../docs/architecture/artifact-transfer-channel.md#streamed-artifacts-version-2)).
+
+Request records carry a scheme class (`common/native_network_scope.h`).
+Renderers count `chrome:`, `devtools:` and other internal-scheme requests in
+the shared queue instead of recording them, and the session does not admit
+WebUI renderer processes: WebUI bindings, or a process lock to an internal
+scheme (`browser/native_capture_scope.h`, Chromium patch
+`0035-expose-process-lock-scheme`). The proxy counts internal-scheme loads it
+sees and the requests WebUI renderers send through it. The browser reports
+all of them as `capture_exclusion` records unless
+`--reb-capture-browser-internal` is set. Chromium patch
+`0026-finish-renderer-answered-requests` keeps a `renderer/native_renderer_request.h`
+value in Blink's loader so `data:`, `blob:` and service-worker answers get a
+renderer completion. See
+[Native network v3](../../../../../../protocol/native-network-v3.md).
+
+Each request names the tab that caused it. Brave patch
+`0017-link-requests-to-tab-owners` records a factory's tab when it is created;
+Brave patch `0020-scope-native-proxy-factories` moves that decision to
+`browser/native_factory_scope.h`, which counts DevTools, extension-worker and
+WebUI factories instead of recording them, and records extension workers under
+their extension id with `--reb-capture-extension-traffic`. Frameless script
+factories read the owner content scopes around their creation through the
+`factory_owner_hook` component (Chromium patch
+`0036-name-frameless-script-fetch-owners`): a nested worker's ancestor
+document, a service worker's `register()` caller or the clients of the version
+it updates.
+Chromium patch `0027-record-renderer-fetch-owners` scopes the fetch's own
+document or worker (`renderer/native_fetch_owner.h`) around `SendAsync`, so
+`request_initiated` carries a loader kind and that owner. `browser/native_tab_registry.h`
+feeds `NativeTabResolver` from the dedicated, shared and service worker
+services; the drain links worker requests to `tab_set` records with one
+`request_tab_link` each. See
+[request owners and tabs](../../../../../../protocol/native-network-v3.md#request-owners-and-tabs).
+
+Content sessions also record header blocks
+([Native network v3](../../../../../../protocol/native-network-v3.md)): the
+provisional `ResourceRequest` headers at start, the response head's headers at
+every redirect and response, and, through `common/native_network_headers_hook.h`,
+the headers the network stack sent and 103 Early Hints. The proxy gives a
+request without a DevTools ID `reb-<request_id>` so the network service
+reports them (Brave patch `0018-capture-native-network-headers`), and Chromium
+patch `0025-forward-native-network-headers` forwards content's DevToolsObserver
+calls to the `network_headers_hook` component before DevTools dispatch. The
+same calls carry the sent and received cookie lists with each cookie's
+inclusion status; the sink records one `cookie_list` per hop and direction.
+Header blocks and cookie lists take shares of the same in-flight pool. In the
+renderer, `renderer/native_script_cookie_sink.h` records `document.cookie` and
+Cookie Store API calls from Chromium patch `0028-record-script-cookie-access`,
+enabled only by the content gate `NativeProbeClient::Configure` carries, with
+the innermost script frame from `renderer/native_script_position.h`; reads are
+aggregated per key.
 
 Large artifact bytes use the separate 128-byte framed contract and 32-byte
 acknowledgment in `common/native_artifact_header.h`. Only the browser-process
 bridge owns that receiver connection. JavaScript and WASM response bodies are
-copied by an asynchronous Mojo tee with a 16 MiB per-artifact limit and a 32
-MiB active capture budget. Compiled script source that no response body carries
-and WASM byte-buffer API inputs use a separate one-way Mojo submission with the
-same per-artifact cap; see
+streamed by an asynchronous Mojo tee with a 16 MiB per-artifact limit. Tees and
+request content share the 32 MiB in-flight pool in
+`common/native_artifact_memory_pool.h`, charged with each queued data frame and
+returned when the writer drops it. Compiled script source that no response body
+carries and WASM byte-buffer API inputs use a separate one-way Mojo submission
+with the same per-artifact cap; see
 [native compiled scripts](../../../../../../protocol/native-compiled-scripts-v1.md).
 The browser copies renderer-owned shared memory before validation and records
 the stable execution context plus exact capture origin. A dedicated writer
-thread drains a 16-artifact, 32 MiB queue to the authenticated artifact socket.
+thread drains a bounded 32 MiB queue to the authenticated artifact socket.
 Successful evidence is emitted only after receiver acknowledgment; every local
 or remote rejection becomes an `artifact_capture_failed` event. Artifact bytes
-do not enter the renderer event ring, and arbitrary response bodies still
-require explicit sensitive-capture authorization under
+do not enter the renderer event ring. Other response bodies need request
+content capture: `browser/native_response_body_capture.cc` takes them from the
+same tee, joins each to its loader completion, retains it as a sensitive
+`response_body` artifact deduplicated by SHA-256 within a per-session byte
+budget, and writes a `response_body` record (type 33) for every outcome, from
+`common/native_network_response_body.h`. See
+[Native network v3](../../../../../../protocol/native-network-v3.md) and
 [`SAFETY.md`](../../../../../../SAFETY.md).
 
 Bounded VM investigation metadata uses `NativeVmFindingPayload` from
@@ -186,6 +254,17 @@ carry a digest only under the session's opt-in. It reads the current
 invocation through a provider Blink installs, for Wasm `br_table` and
 `call_indirect` observations, guest invocation markers and loader requests.
 See the [contract](../../../../../../protocol/native-js-invocation-v1.md).
+
+Request initiator stacks (`request_initiator_stack` and `script_identity`,
+events 34 and 35) use `common/native_request_stack.h` for the records and
+`renderer/native_request_stack.{h,cc}` for the walk: Blink installs the
+provider only under `--reb-request-stacks`, the sink sends each new stack once
+as a `stack` artifact and each new script's source once. The same walk records
+script navigations (event 46) and async task scheduling stacks (event 48) with
+their task chain; `renderer/native_request_stack_blink.h` holds the Blink-side
+hooks and `common/native_navigation_initiator_hook.h` carries a navigation's
+renderer stack to the browser link (event 47). See the
+[contract](../../../../../../protocol/native-network-v3.md).
 
 Renderer code never writes files or sockets directly.
 

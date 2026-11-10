@@ -10,18 +10,28 @@
 #include <map>
 #include <memory>
 #include <new>
+#include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "brave/components/reverse_engineering_browser/browser/native_artifact_stream.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
+#include "brave/components/reverse_engineering_browser/common/native_artifact_memory_pool.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
+#include "network_headers_stub.h"
 #include "network_request_body_stub.h"
+#include "once_callback_stub.h"
+
+template <class T>
+using scoped_refptr = std::shared_ptr<T>;
 
 namespace base {
 template <class T>
@@ -34,6 +44,10 @@ class NoDestructor {
   alignas(T) std::array<std::byte, sizeof(T)> storage_;
 };
 using std::span;
+template <class Container>
+std::span<const std::uint8_t> as_byte_span(const Container& container) {
+  return {reinterpret_cast<const std::uint8_t*>(container.data()), container.size()};
+}
 inline std::int64_t test_now_ns = 100;
 inline unsigned test_clock_reads = 0;
 struct TestDelta {
@@ -70,11 +84,55 @@ template <class T>
 T* Unretained(T* value) {
   return value;
 }
-template <class Function, class Argument>
-auto BindOnce(Function function, Argument argument) {
-  return [function, argument]() mutable { function(argument); };
+
+// Bound arguments are moved into the call, so each result runs once.
+template <class Function, class... Bound>
+auto BindOnce(Function function, Bound... bound) {
+  return [function, ... bound = std::move(bound)](auto&&... rest) mutable -> decltype(auto) {
+    return std::invoke(function, std::move(bound)..., std::forward<decltype(rest)>(rest)...);
+  };
+}
+template <class Function, class... Bound>
+std::function<void(std::span<const std::uint8_t>)> BindRepeating(Function function,
+                                                                 Bound... bound) {
+  return [function, bound...](std::span<const std::uint8_t> chunk) {
+    std::invoke(function, bound..., chunk);
+  };
 }
 struct Location {};
+enum class TaskPriority { USER_VISIBLE };
+enum class TaskShutdownBehavior { SKIP_ON_SHUTDOWN };
+struct TaskTraits {
+  TaskTraits(TaskPriority, TaskShutdownBehavior) {}
+};
+// Holds background work until a test runs it, so the UI-sequence state between
+// admission and the reply is observable.
+struct ThreadPool {
+  template <class Task, class Reply>
+  static bool PostTaskAndReplyWithResult(const Location&,
+                                         const TaskTraits&,
+                                         Task task,
+                                         Reply reply) {
+    if (refuse) {
+      return false;
+    }
+    pending.emplace_back(
+        [task = std::move(task), reply = std::move(reply)]() mutable { reply(task()); });
+    return true;
+  }
+  static std::size_t RunPending() {
+    std::size_t count = 0;
+    while (!pending.empty()) {
+      auto task = std::move(pending.front());
+      pending.erase(pending.begin());
+      task();
+      ++count;
+    }
+    return count;
+  }
+  static inline bool refuse = false;
+  static inline std::vector<std::packaged_task<void()>> pending;
+};
 struct TimeDelta {
   std::int64_t ns = 0;
 };
@@ -94,13 +152,6 @@ struct SequencedTaskRunner {
   }
   std::vector<std::pair<std::int64_t, std::function<void()>>> tasks;
 };
-template <class Method, class Owner, class Context>
-auto BindOnce(Method method, Owner* owner, Context context) {
-  return [method, owner, context = std::move(context)](bool complete,
-                                                       std::vector<std::uint8_t> bytes) mutable {
-    (owner->*method)(std::move(context), complete, std::move(bytes));
-  };
-}
 }  // namespace base
 #define FROM_HERE ::base::Location()
 
@@ -142,6 +193,7 @@ class GURL {
   const std::string& spec() const { return value_; }
   bool is_valid() const { return !scheme_.empty(); }
   bool SchemeIs(std::string_view scheme) const { return scheme_ == scheme; }
+  std::string_view scheme() const { return scheme_; }
   std::string_view host() const { return host_; }
   std::string_view path() const { return path_; }
   bool has_query() const { return has_query_; }
@@ -153,8 +205,15 @@ class GURL {
   bool has_query_ = false;
 };
 namespace net {
-struct HttpResponseHeaders {
-  int response_code() const { return 200; }
+class HttpResponseHeaders {
+ public:
+  int code = 200;
+  std::optional<std::string> content_encoding;
+  int response_code() const { return code; }
+  std::optional<std::string> GetNormalizedHeader(std::string_view name) const {
+    return name == "Content-Encoding" ? content_encoding : std::nullopt;
+  }
+  bool EnumerateHeaderLines(std::size_t*, std::string*, std::string*) const { return false; }
 };
 struct RedirectInfo {
   std::string new_method = "GET";
@@ -167,8 +226,11 @@ struct ResourceRequest {
   bool originated_from_service_worker = false;
   std::string method = "GET";
   GURL url;
+  net::ReferrerPolicy referrer_policy = net::ReferrerPolicy::NEVER_CLEAR;
   net::HttpRequestHeaders headers;
+  net::HttpRequestHeaders cors_exempt_headers;
   std::shared_ptr<ResourceRequestBody> request_body;
+  std::optional<std::string> devtools_request_id;
 };
 struct URLLoaderCompletionStatus {
   int error_code = 0;
@@ -179,12 +241,15 @@ namespace mojom {
 class URLResponseHead {
  public:
   std::shared_ptr<net::HttpResponseHeaders> headers = std::make_shared<net::HttpResponseHeaders>();
+  net::IPEndPoint remote_endpoint;
+  bool emitted_extra_info = false;
   std::int64_t content_length = 0;
   std::int64_t encoded_data_length = 0;
   bool was_fetched_via_cache = false;
   bool was_fetched_via_service_worker = false;
   std::string mime_type = "text/javascript";
   std::string alpn_negotiated_protocol = "h2";
+  std::vector<int> client_side_content_decoding_types;
 };
 }  // namespace mojom
 }  // namespace network
@@ -208,11 +273,23 @@ class BigBuffer {
 };
 }  // namespace mojo_base
 namespace reb {
+enum class NativeArtifactTransferOp : std::uint8_t { kWhole, kOpen, kStream };
 struct NativeArtifactTransfer final {
+  NativeArtifactTransferOp op = NativeArtifactTransferOp::kWhole;
   NativeArtifactHeader header;
   std::string url;
   std::string mime_type;
   std::vector<std::uint8_t> content;
+  NativeArtifactStreamFrame frame;
+  NativeArtifactReservation reservation;
+  // Adapter only. A stream is assembled into one entry that reads like a
+  // whole transfer once ended, and keeps the producer's frames in order, with
+  // their pool shares, until they are delivered.
+  std::vector<std::unique_ptr<NativeArtifactTransfer>> frames;
+  std::size_t delivered = 0;
+  bool ended = false;
+  // A checkpoint's stream.
+  std::uint64_t stream_id = 0;
 };
 class NativeArtifactSocketClient {
  public:
@@ -222,47 +299,194 @@ class NativeArtifactSocketClient {
   }
   bool IsConnected() const { return connected; }
   bool Enqueue(std::unique_ptr<NativeArtifactTransfer> transfer) noexcept {
-    if (!connected || reject_next) {
+    const bool control = transfer->op == NativeArtifactTransferOp::kStream &&
+                         transfer->frame.op != NativeArtifactStreamOp::kData;
+    if (!connected || (reject_next && !control)) {
       reject_next = false;
       return false;
     }
-    const auto id = transfer->header.artifact_id;
-    transfers.emplace(id, std::move(transfer));
+    if (transfer->op == NativeArtifactTransferOp::kWhole) {
+      const auto id = transfer->header.artifact_id;
+      transfers.emplace(id, std::move(transfer));
+      return true;
+    }
+    if (transfer->op == NativeArtifactTransferOp::kOpen) {
+      auto entry = std::make_unique<NativeArtifactTransfer>();
+      entry->op = NativeArtifactTransferOp::kOpen;
+      entry->header = transfer->header;
+      entry->url = transfer->url;
+      entry->mime_type = transfer->mime_type;
+      const auto id = transfer->header.artifact_id;
+      entry->frames.push_back(std::move(transfer));
+      transfers[id] = std::move(entry);
+      return true;
+    }
+    const auto found = transfers.find(transfer->frame.artifact_id);
+    // A writer drops frames of a stream it no longer has.
+    if (found == transfers.end()) {
+      return true;
+    }
+    NativeArtifactTransfer& entry = *found->second;
+    switch (transfer->frame.op) {
+      case NativeArtifactStreamOp::kData:
+        entry.content.insert(entry.content.end(), transfer->content.begin(),
+                             transfer->content.end());
+        break;
+      case NativeArtifactStreamOp::kCheckpoint: {
+        auto snapshot = std::make_unique<NativeArtifactTransfer>();
+        snapshot->header = entry.header;
+        snapshot->header.protocol_version = kNativeArtifactProtocolVersion;
+        snapshot->header.artifact_id = transfer->frame.value;
+        snapshot->header.content_size = transfer->frame.content_size;
+        snapshot->header.expected_sha256 = transfer->frame.expected_sha256;
+        snapshot->url = entry.url;
+        snapshot->mime_type = entry.mime_type;
+        snapshot->content = entry.content;
+        snapshot->stream_id = found->first;
+        transfers[transfer->frame.value] = std::move(snapshot);
+        break;
+      }
+      case NativeArtifactStreamOp::kEnd:
+        entry.ended = true;
+        entry.header.protocol_version = kNativeArtifactProtocolVersion;
+        entry.header.content_size = transfer->frame.content_size;
+        entry.header.expected_sha256 = transfer->frame.expected_sha256;
+        if (transfer->frame.value != 0) {
+          entry.header.creator_event_id = transfer->frame.value;
+        }
+        break;
+      case NativeArtifactStreamOp::kAbort:
+        transfers.erase(found);
+        return true;
+    }
+    entry.frames.push_back(std::move(transfer));
     return true;
   }
   bool connected = true;
   bool reject_next = false;
   std::map<std::uint64_t, std::unique_ptr<NativeArtifactTransfer>> transfers;
 };
+enum class NativeArtifactBodyEnd : std::uint8_t { kSourceClosed, kSourceFailed, kTargetClosed };
+// Feeds the observer in forwarding-pipe-sized chunks, so the stream's
+// coalescing, size bound and pool bound run as they do behind the Mojo tee.
 class NativeArtifactBodyTee {
  public:
-  using Completion = std::packaged_task<void(bool, std::vector<std::uint8_t>)>;
-  template <class Callback>
+  using Completion = base::OnceCallback<void(NativeArtifactBodyEnd)>;
+  using Observer = std::function<void(std::span<const std::uint8_t>)>;
   static mojo::ScopedDataPipeConsumerHandle Create(mojo::ScopedDataPipeConsumerHandle body,
-                                                   std::size_t capture_limit,
-                                                   std::size_t reserve_size,
-                                                   Callback callback,
+                                                   Completion completion,
+                                                   Observer observer,
                                                    bool& started) {
-    if (unavailable) {
-      started = false;
-      return body;
+    started = !unavailable;
+    if (started) {
+      pending.emplace(body.id, Pending{std::move(completion), std::move(observer)});
     }
-    if (capture_limit != kNativeArtifactMaxContentBytes || reserve_size > capture_limit) {
-      throw std::runtime_error("Invalid tee admission bounds");
-    }
-    pending.emplace(body.id, Completion(std::move(callback)));
-    started = true;
     return body;
   }
-  static void Complete(int id, bool complete, std::vector<std::uint8_t> content) {
-    auto callback = std::move(pending.at(id));
-    pending.erase(id);
-    auto result = callback.get_future();
-    callback(complete, std::move(content));
-    result.get();
+  // Forwards part of a body without ending it.
+  static void Deliver(int id, std::span<const std::uint8_t> content) {
+    auto& entry = pending.at(id);
+    constexpr std::size_t kChunk = 64U * 1024U;
+    for (std::size_t offset = 0; offset < content.size(); offset += kChunk) {
+      entry.observer(content.subspan(offset, std::min(kChunk, content.size() - offset)));
+    }
   }
+  static void End(int id, NativeArtifactBodyEnd end) {
+    auto entry = std::move(pending.at(id));
+    pending.erase(id);
+    std::move(entry.completion).Run(end);
+  }
+  static void Complete(int id, bool complete, std::span<const std::uint8_t> content) {
+    Deliver(id, content);
+    End(id, complete ? NativeArtifactBodyEnd::kSourceClosed : NativeArtifactBodyEnd::kSourceFailed);
+  }
+  struct Pending {
+    Completion completion;
+    Observer observer;
+  };
   static inline bool unavailable = false;
-  static inline std::map<int, Completion> pending;
+  static inline std::map<int, Pending> pending;
+};
+// Scripted parts stand in for file reads, blob getters and the stream tee; the
+// real stream, budget allowance and sink outcome classification run.
+struct NativeRequestBodyReadResult final {
+  NativeArtifactStream stream;
+  enum class End : std::uint8_t {
+    kComplete,
+    kIncomplete,
+    kBudget,
+    kRefused
+  } end = End::kIncomplete;
+  std::uint64_t body_length = 0;
+};
+using NativeRequestBodyReadEnd = NativeRequestBodyReadResult::End;
+struct NativeBrowserRequestOwner;
+class NativeRequestBodyReader {
+ public:
+  using Done = base::OnceCallback<void(NativeRequestBodyReadResult)>;
+  static bool MayReadFiles(const network::ResourceRequestBody&,
+                           const NativeBrowserRequestOwner&) noexcept {
+    return !refuse_files;
+  }
+  static bool CanRead(const network::ResourceRequestBody& body) noexcept {
+    bool readable = false;
+    for (const auto& element : *body.elements()) {
+      if (element.TryAs<network::DataElementChunkedDataPipe>() && body.elements()->size() != 1) {
+        return false;
+      }
+      if (element.TryAs<network::DataElementFile>() ||
+          element.TryAs<network::DataElementDataPipe>() ||
+          element.TryAs<network::DataElementChunkedDataPipe>()) {
+        readable = true;
+      } else if (!element.TryAs<network::DataElementBytes>()) {
+        return false;
+      }
+    }
+    return readable;
+  }
+  static bool Start(network::ResourceRequestBody&,
+                    NativeArtifactStream stream,
+                    std::size_t allowance,
+                    Done done) {
+    if (refuse) {
+      return false;
+    }
+    reads.push_back({std::move(stream), allowance, std::move(done)});
+    return true;
+  }
+  // Feeds `bytes` as PartsReader does: aligned chunks, stopping at the
+  // allowance and at the 16 MiB cap, so the stream never sees a byte past the
+  // prefix. Ends the read with `end` and the parts' total length.
+  static void Finish(std::size_t index,
+                     std::span<const std::uint8_t> bytes,
+                     NativeRequestBodyReadEnd end,
+                     std::uint64_t body_length) {
+    Read& read = reads.at(index);
+    constexpr std::size_t kChunk = 64U * 1024U;
+    for (std::size_t offset = 0; offset < bytes.size() && read.stream.is_open() &&
+                                 read.stream.kept() < kNativeArtifactMaxContentBytes;
+         offset += kChunk) {
+      const auto chunk = bytes.subspan(offset, std::min(kChunk, bytes.size() - offset));
+      const auto keeps = std::min<std::uint64_t>(
+          chunk.size(), kNativeArtifactMaxContentBytes - read.stream.kept());
+      if (read.allowance < kNativeArtifactMaxContentBytes &&
+          read.stream.kept() + keeps > read.allowance) {
+        end = NativeRequestBodyReadEnd::kBudget;
+        break;
+      }
+      read.stream.Append(chunk);
+    }
+    std::move(read.done).Run(NativeRequestBodyReadResult{
+        .stream = std::move(read.stream), .end = end, .body_length = body_length});
+  }
+  struct Read {
+    NativeArtifactStream stream;
+    std::size_t allowance = 0;
+    Done done;
+  };
+  static inline bool refuse = false;
+  static inline bool refuse_files = false;
+  static inline std::vector<Read> reads;
 };
 class NativeProbeHost;
 // Session boundary seen by NativeProbeHost; the policy is set by each test.
@@ -279,11 +503,17 @@ class NativeProbeSession {
   std::uint64_t category_mask() const { return mask; }
   std::uint64_t expires_at_monotonic_ns() const { return expires; }
   bool capture_canvas_images() const { return canvas_images; }
-  bool capture_request_content() const { return request_content; }
   const std::string& guest_adapter_json() const { return adapter_json; }
   const std::vector<std::uint8_t>& js_dispatch_sites() const { return js_sites; }
   const std::vector<std::uint8_t>& js_invocation_sites() const { return invocation_sites; }
   bool js_invocation_digests() const { return invocation_digests; }
+  bool capture_request_content() const { return request_content; }
+  bool capture_browser_internal() const { return browser_internal; }
+  bool capture_extension_traffic() const { return extension_traffic; }
+  void NoteWebUiRendererExcluded() { ++webui_excluded; }
+  void EmitExclusion(std::uint32_t process, std::uint8_t exclusion_class, std::uint64_t count) {
+    exclusions.push_back({process, exclusion_class, count});
+  }
   const NativeWasmSampleBudgetPolicy& wasm_sample_budget() const { return wasm_budget; }
   void Emit(const NativeProbeEvent& event) const {
     if (emitted)
@@ -291,12 +521,22 @@ class NativeProbeSession {
   }
   void AddHost(NativeProbeHost&) {}
   void RemoveHost(NativeProbeHost&) {}
-  bool active = false, canvas_images = false, request_content = true;
+  bool active = false, canvas_images = false;
   std::uint64_t id = 0, mask = 0, expires = 0;
   std::string adapter_json;
   std::vector<std::uint8_t> js_sites;
   std::vector<std::uint8_t> invocation_sites;
   bool invocation_digests = false;
+  // Content capture by default, so script text no response body carried is
+  // accepted unless a test opts the session out.
+  bool request_content = true, browser_internal = false, extension_traffic = false;
+  unsigned webui_excluded = 0;
+  struct Exclusion {
+    std::uint32_t process;
+    std::uint8_t exclusion_class;
+    std::uint64_t count;
+  };
+  std::vector<Exclusion> exclusions;
   NativeWasmSampleBudgetPolicy wasm_budget{};
   std::function<void(const NativeProbeEvent&)> emitted;
 
@@ -409,11 +649,13 @@ class NativeProbeClient {
                          const std::vector<std::uint8_t>&,
                          const std::vector<std::uint8_t>&,
                          bool,
+                         bool,
                          bool) = 0;
   virtual void SetWasmSampleBudget(const std::vector<std::uint8_t>&) = 0;
   virtual void ResetWasmSampleBudgets() = 0;
   virtual void Disable() = 0;
   virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
+  virtual void NativeStackArtifactRefused(std::uint64_t) = 0;
 };
 class NativeProbeHost {
  public:
@@ -558,13 +800,29 @@ class WebContents {
     return &contents;
   }
   RenderFrameHost* GetPrimaryMainFrame() const { return main_; }
+  WebContents* GetOutermostWebContents() { return this; }
 
  private:
   RenderFrameHost* main_ = nullptr;
 };
 struct TestProcess {
   int pid = 0;
+  bool IsValid() const { return pid != 0; }
   int Pid() const { return pid; }
+};
+class ChildProcessSecurityPolicy {
+ public:
+  static ChildProcessSecurityPolicy* GetInstance() {
+    static ChildProcessSecurityPolicy policy;
+    return &policy;
+  }
+  bool HasWebUIBindings(int child_id) const { return webui.contains(child_id); }
+  std::string GetProcessLockScheme(int child_id) const {
+    const auto lock = locks.find(child_id);
+    return lock == locks.end() ? std::string() : lock->second;
+  }
+  std::set<int> webui;
+  std::map<int, std::string> locks;
 };
 class RenderProcessHost {
  public:

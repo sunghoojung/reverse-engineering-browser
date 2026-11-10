@@ -15,19 +15,23 @@ namespace reb {
 // Browser-side producer half of protocol/native-network-v2.md. The core mirror
 // in include/reb/network_request.hpp decodes and validates the same bytes.
 inline constexpr std::uint16_t kNativeRequestPayloadVersion = 1;
+// Version 2 adds the full-target retention byte; see native-network-v2.md.
+inline constexpr std::uint16_t kNativeRequestTargetPayloadVersion = 2;
 inline constexpr std::size_t kNativeRequestPayloadSize = 128;
 inline constexpr std::size_t kNativeRequestTargetPrefixBytes = 116;
+// url::kMaxURLChars at the pin.
+inline constexpr std::size_t kNativeRequestTargetMaxBytes = 2U * 1024U * 1024U;
 inline constexpr std::size_t kNativeRequestContentTypeBytes = 64;
-// Bytes copied into one request-body artifact. Larger bodies keep this prefix,
-// the original length and the full-body digest.
-inline constexpr std::size_t kNativeRequestBodyCaptureBytes = 256U * 1024U;
+// The artifact cap. Larger bodies keep this prefix and their original length.
+inline constexpr std::size_t kNativeRequestBodyCaptureBytes = 16U * 1024U * 1024U;
 // Bounds the synchronous UI-thread digest. Larger in-memory bodies are marked
-// instead of hashed.
+// instead of hashed; their artifact digest is computed off the UI thread.
 inline constexpr std::size_t kNativeRequestBodyDigestBytes = 4U * 1024U * 1024U;
-// Per session configuration, so request bodies cannot exhaust the receiver's
-// 4,096-artifact and 256 MiB store for JavaScript and Wasm.
-inline constexpr std::size_t kNativeRequestBodySessionCount = 1024;
-inline constexpr std::size_t kNativeRequestBodySessionBytes = 64U * 1024U * 1024U;
+// Unique body and full-target bytes per session (--reb-request-content-budget-bytes).
+inline constexpr std::uint64_t kNativeRequestContentDefaultBudgetBytes = 256ULL * 1024ULL * 1024ULL;
+inline constexpr std::uint64_t kNativeRequestContentMinBudgetBytes = 1ULL * 1024ULL * 1024ULL;
+inline constexpr std::uint64_t kNativeRequestContentMaxBudgetBytes =
+    4ULL * 1024ULL * 1024ULL * 1024ULL;
 
 enum class NativeRequestBodyKind : std::uint8_t {
   kNone = 0,
@@ -51,6 +55,8 @@ enum class NativeRequestBodyState : std::uint8_t {
   kNotCapturedUrl = 9,
   kNotCapturedSessionBudget = 10,
   kNotCapturedCredentialForm = 11,
+  // native-network-v3.md: a file, blob or stream part could not be read whole.
+  kNotCapturedReadIncomplete = 12,
 };
 
 inline constexpr std::uint8_t kNativeRequestBodyContentCapture = 1U << 0U;
@@ -59,6 +65,8 @@ inline constexpr std::uint8_t kNativeRequestBodyDigestSizeLimit = 1U << 2U;
 inline constexpr std::uint8_t kNativeRequestBodyLengthPartial = 1U << 3U;
 inline constexpr std::uint8_t kNativeRequestBodyContentTypePresent = 1U << 4U;
 inline constexpr std::uint8_t kNativeRequestBodyContentTypeOmitted = 1U << 5U;
+// The browser read the file, blob or stream parts (native-network-v3.md).
+inline constexpr std::uint8_t kNativeRequestBodyRead = 1U << 6U;
 
 enum class NativeRequestScheme : std::uint8_t {
   kOther = 0,
@@ -80,9 +88,20 @@ struct NativeRequestBodySummary final {
   std::array<char, kNativeRequestContentTypeBytes> content_type{};
 };
 
+// Where the bytes past the inline prefix went.
+enum class NativeRequestTargetRetention : std::uint8_t {
+  kComplete = 0,
+  kRetained = 1,
+  kNotRetainedArtifactUnavailable = 2,
+  kNotRetainedTransferRefused = 3,
+  kNotRetainedSessionBudget = 4,
+  kNotRetainedUrl = 5,
+};
+
 struct NativeRequestTarget final {
   std::uint32_t target_length = 0;
   NativeRequestScheme scheme = NativeRequestScheme::kOther;
+  NativeRequestTargetRetention retention = NativeRequestTargetRetention::kComplete;
   std::uint16_t port = 0;
   std::array<char, kNativeRequestTargetPrefixBytes> prefix{};
 };
@@ -172,10 +191,11 @@ EncodeNativeRequestBodyPayload(const NativeRequestBodySummary& value) noexcept {
 EncodeNativeRequestTargetPayload(const NativeRequestTarget& value) noexcept {
   using native_request_detail::Put;
   std::array<std::byte, kNativeRequestPayloadSize> out{};
-  Put(out, 0, kNativeRequestPayloadVersion, 2);
+  Put(out, 0, kNativeRequestTargetPayloadVersion, 2);
   Put(out, 2, kNativeRequestPayloadSize, 2);
   Put(out, 4, value.target_length, 4);
   Put(out, 8, static_cast<std::uint8_t>(value.scheme), 1);
+  Put(out, 9, static_cast<std::uint8_t>(value.retention), 1);
   Put(out, 10, value.port, 2);
   std::transform(value.prefix.begin(), value.prefix.end(), out.begin() + 12, [](const char c) {
     return static_cast<std::byte>(static_cast<unsigned char>(c));

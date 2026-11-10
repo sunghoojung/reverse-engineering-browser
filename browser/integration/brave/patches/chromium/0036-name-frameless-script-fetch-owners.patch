@@ -1,0 +1,98 @@
+diff --git a/content/browser/service_worker/service_worker_register_job.cc b/content/browser/service_worker/service_worker_register_job.cc
+index aafe4df..394de6a 100644
+--- a/content/browser/service_worker/service_worker_register_job.cc
++++ b/content/browser/service_worker/service_worker_register_job.cc
+@@ -6,6 +6,7 @@
+ 
+ #include <stdint.h>
+ 
++#include <optional>
+ #include <utility>
+ 
+ #include "base/functional/bind.h"
+@@ -17,6 +18,7 @@
+ #include "base/strings/stringprintf.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/time/time.h"
++#include "brave/components/reverse_engineering_browser/common/native_factory_owner_hook.h"
+ #include "content/browser/devtools/devtools_instrumentation.h"
+ #include "content/browser/devtools/devtools_throttle_handle.h"
+ #include "content/browser/devtools/service_worker_devtools_manager.h"
+@@ -51,6 +53,20 @@ namespace content {
+ 
+ typedef ServiceWorkerRegisterJobBase::RegistrationJobType RegistrationJobType;
+ 
++namespace {
++
++// The register() caller, else the clients of the version being updated.
++reb::NativeFactoryOwner NativeScriptOwner(const GlobalRenderFrameHostId& frame,
++                                          ServiceWorkerRegistration* registration) {
++  const ServiceWorkerVersion* const active =
++      registration ? registration->active_version() : nullptr;
++  return {frame.child_id.GetUnsafeValue(), frame.frame_routing_id,
++          active ? active->version_id()
++                 : blink::mojom::kInvalidServiceWorkerVersionId};
++}
++
++}  // namespace
++
+ ServiceWorkerRegisterJob::ServiceWorkerRegisterJob(
+     ServiceWorkerContextCore* context,
+     const GURL& script_url,
+@@ -557,6 +573,8 @@ void ServiceWorkerRegisterJob::StartScriptFetchForNewWorker(
+ 
+   // The network restrictions of the creator (e.g., frame) must be
+   // enforced for service worker script fetches.
++  std::optional<reb::ScopedNativeFactoryOwner> native_owner(
++      std::in_place, NativeScriptOwner(requesting_frame_id_, registration()));
+   scoped_refptr<network::SharedURLLoaderFactory> loader_factory =
+       context_->wrapper()->GetLoaderFactoryForMainScriptFetch(
+           version->scope(), version->version_id(),
+@@ -569,6 +587,7 @@ void ServiceWorkerRegisterJob::StartScriptFetchForNewWorker(
+                   LocalNetworkAccessRequestContext::kWorker),
+               creator_policy_container_policies_.document_isolation_policy),
+           creator_network_restrictions_id_);
++  native_owner.reset();
+ 
+   new_script_fetcher_ = std::make_unique<ServiceWorkerNewScriptFetcher>(
+       *context_, version, std::move(loader_factory),
+@@ -675,6 +694,8 @@ void ServiceWorkerRegisterJob::UpdateAndContinue() {
+ 
+   // The network restrictions of the creator (e.g., frame) must be
+   // enforced for service worker script fetches.
++  std::optional<reb::ScopedNativeFactoryOwner> native_owner(
++      std::in_place, NativeScriptOwner(requesting_frame_id_, registration()));
+   scoped_refptr<network::SharedURLLoaderFactory> loader_factory =
+       context_->wrapper()->GetLoaderFactoryForUpdateCheck(
+           scope_,
+@@ -687,6 +708,7 @@ void ServiceWorkerRegisterJob::UpdateAndContinue() {
+                   LocalNetworkAccessRequestContext::kWorker),
+               creator_policy_container_policies_.document_isolation_policy),
+           creator_network_restrictions_id_);
++  native_owner.reset();
+   if (!loader_factory) {
+     // We can't continue with update checking appropriately without
+     // |loader_factory|. Null |loader_factory| means that the storage partition
+diff --git a/content/browser/worker_host/worker_script_fetcher.cc b/content/browser/worker_host/worker_script_fetcher.cc
+index db5a606..e7b1cd7 100644
+--- a/content/browser/worker_host/worker_script_fetcher.cc
++++ b/content/browser/worker_host/worker_script_fetcher.cc
+@@ -9,6 +9,7 @@
+ #include "base/feature_list.h"
+ #include "base/functional/bind.h"
+ #include "base/task/single_thread_task_runner.h"
++#include "brave/components/reverse_engineering_browser/common/native_factory_owner_hook.h"
+ #include "content/browser/connection_allowlist_utils.h"
+ #include "content/browser/data_url_loader_factory.h"
+ #include "content/browser/devtools/devtools_agent_host_impl.h"
+@@ -514,6 +515,10 @@ void WorkerScriptFetcher::CreateScriptLoader(
+     bool bypass_redirect_checks = false;
+     // TODO(crbug.com/40139181): The UKM ID could be computed.
+     constexpr ukm::SourceIdObj source_id = ukm::kInvalidSourceIdObj;
++    // A nested worker's factory has no creator frame; name its ancestor.
++    const reb::ScopedNativeFactoryOwner native_owner(
++        {ancestor_render_frame_host.GetProcess()->GetDeprecatedID(),
++         ancestor_render_frame_host.GetRoutingID()});
+     url_loader_factory::CreateAndConnectToPendingReceiver(
+         factory_bundle_for_browser_info->pending_default_factory()
+             .InitWithNewPipeAndPassReceiver(),

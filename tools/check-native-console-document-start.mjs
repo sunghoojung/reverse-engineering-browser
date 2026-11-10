@@ -197,8 +197,8 @@ export async function checkNativeConsoleDocumentStart(root) {
     ResizeObserver: class { observe() {} }, MutationObserver: class { observe() {} }, CustomEvent: class {},
     navigator: {clipboard: {writeText: async () => {}}},
     createNativeConsoleCompletion: () => ({close() {}, keydown() { return false; }}),
-    createSourceTokenizer: () => ({}), SOURCE_HIGHLIGHT_TOKEN_LIMIT: 8192,
-    sourceSyntaxTokens: text => [{type: 'plain', text}], sourcePrettyTokens: () => [], fetch,
+    codeViewColor: (node, text) => { node.append(document.createTextNode(text)); return node; },
+    sourcePrettyTokens: () => [], fetch,
   };
   runInNewContext(source.replace(/\}\)\(\);\s*$/, 'globalThis.testConsole = {initialize, documentStart};})();'), context);
   const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };

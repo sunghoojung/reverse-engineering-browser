@@ -4,9 +4,10 @@
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // Portable stand-ins for the pinned Chromium request-header and upload-body
-// types the native network sink reads (net::HttpRequestHeaders::GetHeaderView,
-// network::DataElement::TryAs/As, ResourceRequestBody::elements and
-// contains_sensitive_info). Used only by the overlay harnesses under tools/.
+// types the native network sink reads (net::HttpRequestHeaders::GetHeaderView
+// and GetHeaderVector, network::DataElement::TryAs/As,
+// ResourceRequestBody::elements and contains_sensitive_info). Used only by the
+// overlay harnesses under tools/.
 #ifndef REB_TOOLS_NATIVE_TEST_SUPPORT_NETWORK_REQUEST_BODY_STUB_H_
 #define REB_TOOLS_NATIVE_TEST_SUPPORT_NETWORK_REQUEST_BODY_STUB_H_
 
@@ -23,9 +24,14 @@
 namespace net {
 class HttpRequestHeaders {
  public:
+  struct HeaderKeyValuePair {
+    std::string key;
+    std::string value;
+  };
+  using HeaderVector = std::vector<HeaderKeyValuePair>;
   static constexpr char kContentType[] = "Content-Type";
   void SetHeader(std::string name, std::string value) {
-    headers_.emplace_back(std::move(name), std::move(value));
+    headers_.push_back({std::move(name), std::move(value)});
   }
   std::optional<std::string_view> GetHeaderView(std::string_view key) const {
     for (const auto& [name, value] : headers_) {
@@ -37,9 +43,10 @@ class HttpRequestHeaders {
     }
     return std::nullopt;
   }
+  const HeaderVector& GetHeaderVector() const { return headers_; }
 
  private:
-  std::vector<std::pair<std::string, std::string>> headers_;
+  HeaderVector headers_;
 };
 }  // namespace net
 

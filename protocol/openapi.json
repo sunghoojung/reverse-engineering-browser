@@ -47,7 +47,7 @@
         "start"
       ],
       "title": "Start a live capture session",
-      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. Every option is off unless named and none is inherited from the environment. document_start permits document-start Console scripts (arming is a separate Console action). Sensitive capture needs confirm_sensitive_capture: canvas_images, request_content (request paths, queries and bodies) and js_invocation_digests. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm sample budgets and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session.",
+      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. Every option is off unless named and none is inherited from the environment. document_start permits document-start Console scripts (arming is a separate Console action). request_stacks records the call stack that started each renderer request (get_request_stack). request_content_budget_mib (1 to 4096, default 256) sets how much unique request content is kept. Sensitive capture needs confirm_sensitive_capture: canvas_images, request_content (request paths, queries and bodies, request and response headers including Cookie, Set-Cookie and Authorization, each request's cookies, and response bodies) and js_invocation_digests. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm sample budgets and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session.",
       "input": {
         "$ref": "#/components/schemas/LiveSessionStart"
       },
@@ -258,7 +258,7 @@
       "get": {
         "operationId": "get_session_summary",
         "summary": "Summarize what this capture recorded",
-        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget or Wasm compiled without a stored module. Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
+        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget, Wasm compiled without a stored module, each artifact capture failure reason, or request bodies and full targets a content session did not retain (budget, pool, channel or kind) with counts, counted browser-internal exclusions, and requests without a browser tab. Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
         "tags": [
           "health"
         ],
@@ -1267,6 +1267,410 @@
         }
       }
     },
+    "/api/request-headers": {
+      "get": {
+        "operationId": "get_request_headers",
+        "summary": "get request headers",
+        "description": "Header blocks of one native request per redirect hop (protocol/native-network-v3.md), from the bytes the request index names for that request, or the newest 64 MiB of events when it names none, reading at most 1024 of its records; coverage says what was read. Recorded only in sessions that retain request content. Each block gives its source (browser: provisional, before the network stack; network: as sent; early_hints: a 103), state, header count, byte length, SHA-256, and its referrer policy or status and remote endpoint. Retained blocks are read after a size and SHA-256 check and parsed into ordered headers. Values of Authorization, Proxy-Authorization, Cookie, Set-Cookie and any header whose name contains a credential root (token, secret, passw, csrf, xsrf, cookie, bearer, signature, credential, sessionid, authoriz and similar), has the whole word auth, session, jwt, otp or pwd, or has a word ending in key, except Sec-WebSocket-Key, Idempotency-Key and Public-Key-Pins are withheld as value_withheld with their byte length: like request bodies they stay in the binary artifact. Withholding goes by name, so another value, such as a Location query, is returned as captured. A hop is provisional when it has only browser request blocks.",
+        "tags": [
+          "request-headers"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestHeaders"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "ETag unchanged; no response body.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "description": "Session of the request.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": true,
+            "description": "Browser request ID of the request records.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "Exact server ETag from a previous response.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/request-cookies": {
+      "get": {
+        "operationId": "get_request_cookies",
+        "summary": "get request cookies",
+        "description": "Cookie lists of one native request per redirect hop (\"Cookies\" in protocol/native-network-v3.md), from the bytes the request index names for that request, or the newest 64 MiB of events when it names none, reading at most 1024 of its records; coverage says what was read. Recorded only in sessions that retain request content. Each hop has the cookies the network service sent with the request, including excluded ones, and the Set-Cookie cookies it received, each with state, counts, byte length and SHA-256. Retained lists are read after a size and SHA-256 check: every cookie has its name, domain, path, expiry, size, HttpOnly, Secure, SameSite, effective SameSite, partition key, priority, source scheme and port, and its exclusion and warning reasons. Values are withheld as value_withheld with their byte length and SHA-256, and a received line as line_withheld with its length: like credential headers they stay in the binary artifact.",
+        "tags": [
+          "request-cookies"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestCookies"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "ETag unchanged; no response body.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "description": "Session of the request.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": true,
+            "description": "Browser request ID of the request records.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "Exact server ETag from a previous response.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/cookie-provenance": {
+      "get": {
+        "operationId": "get_cookie_provenance",
+        "summary": "get cookie provenance",
+        "description": "What touched one cookie name in the newest part of a session (\"Cookies\" in protocol/native-network-v3.md): the newest 5000 network records within the last 64 MiB of events and at most 256 distinct retained cookie lists. coverage.complete is false when older records were not read, so an absent entry is unknown: the responses that set it, with attributes and block reasons; the document.cookie and Cookie Store API calls that wrote or read it, with frame, count, script frame and stack digest; and the requests that sent it. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256. A script record keeps 24 name bytes, so a longer name matches by length and prefix.",
+        "tags": [
+          "request-cookies"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CookieProvenance"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "ETag unchanged; no response body.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "description": "Session of the cookie records.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": true,
+            "description": "Cookie name, exact bytes, at most 4096.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "Exact server ETag from a previous response.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/request-signal-profile": {
       "get": {
         "operationId": "get_request_signal_profile",
@@ -1431,11 +1835,135 @@
         }
       }
     },
+    "/api/request-stack": {
+      "get": {
+        "operationId": "get_request_stack",
+        "summary": "Read the JavaScript and Wasm call stack that started one renderer request or script navigation",
+        "description": "Newest request_initiator_stack record (34) inside the bytes the request index names for one renderer request (or the newest 64 MiB of events when it names none), named by the renderer's process_id and request_id as its request_initiated record carries them, or with navigation_sequence the navigation_initiator_stack record (46) a browser navigation_initiator_link (47) names, with every recorded frame innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact of any capture origin (network, stack_script, compiled_script or dynamic_javascript), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Await frames follow the synchronous ones. A version 2 record adds task_segments, nearest first: each async task (timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or observer) with the stack that scheduled it, resolved from its async_task_stack (48) artifact, and microtask hops linked through task attribution. task_chain_cut says an earlier caller was not recorded; MessagePort and worker messages are not shown. status is not_recorded when the read covered the request's indexed bytes or the whole store and found no stack record, and outside_scan when it did not reach all of them; coverage says what was read. A frame keeps reason script_identity_outside_scan when its identity was not found and not every identity was read. See protocol/native-network-v3.md.",
+        "tags": [
+          "events"
+        ],
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "process_id",
+            "in": "query",
+            "required": true,
+            "description": "Renderer process of the request_initiated record.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": false,
+            "description": "Renderer request ID of the request_initiated record. Required unless navigation_sequence is given.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "navigation_sequence",
+            "in": "query",
+            "required": false,
+            "description": "Sequence of the renderer's navigation_initiator_stack, as a navigation_initiator_link payload names it with the renderer process_id. Excludes request_id.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "description": "Restricts the lookup to one session.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          }
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads stored evidence and verified artifact bytes. No browser mutation is requested by this handler. Evidence tails are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/request_stack.rs",
+              "symbol": "document"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "responses": {
+          "200": {
+            "description": "The resolved stack, or a not_recorded or malformed status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestStack"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/events": {
       "get": {
         "operationId": "get_events",
         "summary": "Read native events, optionally filtered and paged",
-        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; select one request with request_id. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. A sample refused by a function, module, call-site, or the 16-record stream budget is wasm_dispatch_overflow (28) or wasm_indirect_overflow (29): a compact identity, not a full observation. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0.  wasm_dispatch_overflow and wasm_indirect_overflow include wasm_overflow beside that hex. status decoded names kind identity or omitted. An identity names ring_index, function_index, and module_byte_offset, plus selector and arm_count, or table_index, slot, and resolution. An omitted record names omitted_count and no site. status invalid carries no fields. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
+        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; response_body (33), in those sessions only, says whether each response body was retained, partial, refused or never observed, names its response_body artifact and joins its response_started parent; select one request with request_id. request_headers (30) and response_headers (31) summarize each header block in those sessions; read them with get_request_headers. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. A sample refused by a function, module, call-site, or the 16-record stream budget is wasm_dispatch_overflow (28) or wasm_indirect_overflow (29): a compact identity, not a full observation. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0.  wasm_dispatch_overflow and wasm_indirect_overflow include wasm_overflow beside that hex. status decoded names kind identity or omitted. An identity names ring_index, function_index, and module_byte_offset, plus selector and arm_count, or table_index, slot, and resolution. An omitted record names omitted_count and no site. status invalid carries no fields. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
         "tags": [
           "events"
         ],
@@ -1527,7 +2055,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, script_compiled, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, navigation_initiator_stack, navigation_initiator_link, async_task_stack, request_extension_link, script_compiled, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -1686,6 +2214,342 @@
         }
       }
     },
+    "/api/requests": {
+      "get": {
+        "operationId": "get_requests",
+        "summary": "Page through every network request of the session",
+        "description": "One row per request of the whole session, from an index the backend folds incrementally from the event store and keeps beside it (protocol/request-index-v1.md), so counts, filters and search cover every request, not the newest event window. A row is a Traffic row: method, path (URL path and query only when the session retained request content, else the host), status, type, time, tab, domain and the root event that get_origin_trace takes. Default order is capture order, oldest first. Page with offset and limit; pass a previous answer's through to keep paging the same requests, and since to count rows added after it. total and matching are exact for the indexed bytes; index.complete is false while a large store is still being indexed, and index counts unreadable records and requests past the request limit. Read one request's records with get_events: for each member pass its session_id, process_id and request_id with category=network, after=first_offset and limit set to that member's records. Each row also carries the recorded transfer and resource sizes, MIME type, protocol, initiator class and response time; the answer adds the matching sizes, hidden_internal and a 120-bucket start timeline. Unknown parameters are rejected. Use a small limit, such as 50, through MCP.",
+        "tags": [
+          "events"
+        ],
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Rows to return, clamped to 1..500.",
+            "schema": {
+              "type": "integer",
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Position of the first row in the filtered, sorted list.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "Only requests indexed before this count. A previous answer's through keeps later pages to the same requests; their fields stay live, so while capture runs a sort or filter on a changing field (status, size, type) can move rows across pages. Capture order does not move.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Adds added: the matching requests indexed at or after this count.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "description": "Sort key. size is the transferred size, start the first record's time, initiator and protocol their labels. Rows that tie, and rows without a value, keep capture order; rows without a value sort last.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "capture",
+                "name",
+                "status",
+                "type",
+                "method",
+                "time",
+                "size",
+                "initiator",
+                "start",
+                "protocol"
+              ],
+              "default": "capture"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "description": "asc or desc.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Traffic filter text, case-insensitive. Words match method, path and status; -word excludes them. domain:host (* is a wildcard), method:, status-code:, larger-than:N (k and m are 1,024 multiples, of the transferred size) and mime-type: match exactly, and a leading - negates them.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "tab_id",
+            "in": "query",
+            "required": false,
+            "description": "Requests of one browser tab, extension:<id> for the extension traffic one extension made, or unattributed for requests without an owner.",
+            "schema": {
+              "type": "string",
+              "pattern": "^(unattributed|[1-9][0-9]{0,9}|extension:[a-p]{32})$"
+            }
+          },
+          {
+            "name": "domain",
+            "in": "query",
+            "required": false,
+            "description": "Requests whose domain, as listed in facets.domains, is exactly this.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "Requests of one Traffic resource type.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "xhr",
+                "doc",
+                "css",
+                "js",
+                "font",
+                "img",
+                "media",
+                "socket",
+                "wasm",
+                "other"
+              ]
+            }
+          },
+          {
+            "name": "named",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated session:process:sequence root events, at most 64, that match q as well: researcher names live in the UI, not the index.",
+            "schema": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          },
+          {
+            "name": "locate",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated row IDs, at most 4. located gives each one's position in this filtered, sorted list, or null.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "failed",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps only failed requests.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "invert",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps the requests the q filter does not match; without q it has no effect.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "hide_internal",
+            "in": "query",
+            "required": false,
+            "description": "1 hides browser-internal requests (browser_internal) and counts them in hidden_internal.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "third_party",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps requests whose site differs from their tab's latest top-level document at their start. Sites are the last two host labels, or three after a short second level and a two-letter country code; there is no public suffix list.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "from_ns",
+            "in": "query",
+            "required": false,
+            "description": "Keeps requests whose last record is at or after this monotonic time.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "to_ns",
+            "in": "query",
+            "required": false,
+            "description": "Keeps requests whose first record is at or before this monotonic time.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "Exact server ETag from a previous response.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Requests"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, duplicate or unknown query parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "ETag unchanged; no response body.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Folds at most 64 MiB of new records per call into the in-memory index and writes no file: the backend keeps the private sidecar beside the event store itself, every 30 seconds and at shutdown. Stored events are never changed. No browser mutation is requested.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/request_index.rs",
+              "symbol": "respond"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/events/wait": {
       "get": {
         "operationId": "wait_for_events",
@@ -1723,7 +2587,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, script_compiled, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, navigation_initiator_stack, navigation_initiator_link, async_task_stack, request_extension_link, script_compiled, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -1928,7 +2792,7 @@
       "get": {
         "operationId": "get_artifacts",
         "summary": "List stored artifacts, optionally filtered and paged",
-        "description": "Lists retained script, Wasm and other artifact records with their sha256, size, frame and session. Without filters it returns the newest records. With any filter or cursor it scans the manifest from the cursor and adds a query object with next_before and next_after cursors. Filters combine with AND. Bytes come from get_artifact_content, which the MCP projection does not inline; inspect_wasm describes a Wasm module, and resolve_js_invocation_site names a function in a javascript artifact. request_body artifacts are sensitive and exist only when the session retains request content. Unknown parameters are rejected.",
+        "description": "Lists retained script, Wasm and other artifact records with their sha256, size, frame and session. Without filters it returns the newest records. With any filter or cursor it scans the manifest from the cursor and adds a query object with next_before and next_after cursors. Filters combine with AND. Bytes come from get_artifact_content, which the MCP projection does not inline; inspect_wasm describes a Wasm module, and resolve_js_invocation_site names a function in a javascript artifact. request_body and response_body artifacts are sensitive and exist only when the session retains request content; a response_body record names the artifact for its response. Unknown parameters are rejected.",
         "tags": [
           "artifacts"
         ],
@@ -2020,7 +2884,7 @@
             "name": "kind",
             "in": "query",
             "required": false,
-            "description": "Comma-separated artifact kinds: javascript, wasm, source_map, response_body, request_body, canvas_data_url, bytecode_buffer, wasm_guest_adapter. request_body exists only in sessions that retain request content.",
+            "description": "Comma-separated artifact kinds: javascript, wasm, source_map, response_body, request_body, request_target, canvas_data_url, bytecode_buffer, wasm_guest_adapter. request_body, request_target and response_body exist only in sessions that retain request content.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -3871,6 +4735,185 @@
         }
       }
     },
+    "/api/native-debugger": {
+      "get": {
+        "operationId": "get_native_debugger",
+        "summary": "Read Phase 1 threads, watch rules and observations, and the pausing debugger state",
+        "description": "Phase 1 is served: threads lists Console documents and recorded workers, watch is what the renderer confirmed armed through the Console watch command, and observations are the newest decoded records; wait on them with wait_for_events. availability unsupported with reason browser_debugger_unsupported means no Brave build serves the pausing debugger; that is not an empty breakpoint list, and no frames, scopes or values are invented. policy proposed_pending_approval means docs/product/native-debugger-v1.md has not been approved into SAFETY.md.",
+        "tags": [
+          "native-debugger"
+        ],
+        "responses": {
+          "200": {
+            "description": "Debugger state, or an explicit unsupported reason.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeDebuggerState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unexpected query.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/native_debugger.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [
+            "Unsupported is not an idle debugger: nothing is attached and no page is paused by this backend."
+          ],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state only. The pausing debugger is a proposal behind --reb-native-debugger, off by default; see docs/product/native-debugger-v1.md.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/native_debugger.rs",
+              "symbol": "state"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/native-debugger/actions": {
+      "post": {
+        "operationId": "native_debugger_action",
+        "summary": "Set breakpoints, pause on exceptions, step, resume, or evaluate on a paused frame",
+        "description": "Every action names one selected live document (target_id) and its document_epoch; navigation makes the epoch stale. A pause holds a lease of at most 60 seconds that resumes the page visibly when it expires. Paused values are bounded, ephemeral and never added to evidence. Commands are never retried. Until a Brave build serves the debugger the response is 503 and nothing is sent.",
+        "tags": [
+          "native-debugger"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeDebuggerAction"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "Invalid or unconfirmed input. Nothing was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The request body deadline was exceeded. Nothing was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local failure before a command was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No Brave build serves the native debugger. Nothing was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-max-body-bytes": 65536,
+        "x-source": "apps/origin-trace-backend/src/native_debugger.rs",
+        "x-reb-execution": {
+          "kind": "action-dependent",
+          "effects": null,
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Resolve the exact request action and combine its prerequisites with these common operation guards. No action inherits a default effect classification.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::post"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/native-console": {
       "get": {
         "operationId": "get_native_console",
@@ -5016,6 +6059,208 @@
         }
       }
     },
+    "/api/source-format": {
+      "get": {
+        "operationId": "get_source_format",
+        "summary": "Get a Prettier-style layout of one JavaScript artifact or JavaScript or JSON body",
+        "description": "Requires exact session_id and artifact_id for an immutable JavaScript artifact, or a request_body or response_body artifact whose MIME type (or the optional language) is JavaScript or JSON, of at most 16 MiB that passes size, SHA256 and strict UTF-8 checks. JSON is laid out as one parenthesized expression whose parentheses are removed. A contained Oxc worker lays the tokens out at 80 columns with 2-space indentation; every token and comment is printed as its original source slice and only whitespace between them changes, so mapping is whitespace-only: removing ECMAScript whitespace from text and from the original yields identical strings. The worker re-lexes its output and the service repeats the whitespace check before returning or caching (by SHA-256) a result. Source that does not parse, layouts over four times the source size, fidelity failures and the memory ceiling are a successful unavailable result with a reason, never a fallback layout. Optional start_line and line_count return one window of formatted lines; line_count always reports the whole layout, and anchors name the original UTF-16 offset of every 1000th formatted line so a window of whole anchor blocks maps exactly without the rest of the layout. Through MCP this operation returns JavaScript artifacts only: a request_body or response_body is refused, and only the local Origin Trace UI reads its layout.",
+        "tags": [
+          "source-format"
+        ],
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "description": "Exact captured artifact identity; no fallback selection.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": true,
+            "description": "Exact captured artifact identity; no fallback selection.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "start_line",
+            "in": "query",
+            "required": false,
+            "description": "Optional first formatted line, counted from 1. Requires line_count and must not exceed the layout's line_count.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "line_count",
+            "in": "query",
+            "required": false,
+            "description": "Optional number of formatted lines from start_line, at most 10000. Requires start_line.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "language",
+            "in": "query",
+            "required": false,
+            "description": "Optional language of a request or response body, overriding its MIME type. A JavaScript artifact accepts only javascript.",
+            "schema": {
+              "enum": [
+                "javascript",
+                "json"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceFormat"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Requested record not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Bounded worker timed out.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local artifact, evidence-store, or worker I/O failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "JavaScript formatter worker terminated or returned an invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required worker unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis",
+            "process-launch"
+          ],
+          "state_dependent_effects": [
+            {
+              "effects": [
+                "process-stop"
+              ],
+              "when": "The contained JavaScript formatter worker process group is cleaned up on completion or failure."
+            }
+          ],
+          "uncertainties": [
+            "The layout follows a subset of Prettier's rules; it never adds, removes or rewrites tokens, so semicolons, quotes and parentheses stay as captured."
+          ],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "exact-source",
+              "condition": "Exact session_id and artifact_id select one verified immutable UTF-8 JavaScript artifact, or JavaScript or JSON request or response body, of at most 16 MiB."
+            },
+            {
+              "id": "formatter-worker",
+              "condition": "The backend executable must start its contained formatter worker; one formatter runs at a time and later requests wait for it."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Read-only display layout of retained local evidence. Body layouts carry the body's sensitive text, as get_artifact_content does, so the MCP projection refuses them. No runtime execution, browser control, model call, network request or artifact mutation. Results are cached in memory by SHA-256 and language.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/source_format.rs",
+              "symbol": "load"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/source_format.rs",
+              "symbol": "SourceFormat::format"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/float32/compare": {
       "post": {
         "operationId": "compare_float32",
@@ -5048,7 +6293,7 @@
             }
           },
           "400": {
-            "description": "Invalid framing, JSON, version, duplicate/unknown members, input encoding, complete layout, detail window or caller tolerance. No input values are echoed.",
+            "description": "Invalid framing, JSON, version, duplicate/unknown members, input encoding, complete layout, detail window, caller tolerance or an artifact not marked non-sensitive. No input values are echoed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7537,6 +8782,1053 @@
           }
         },
         "x-source": "protocol/origin-trace-document-v1.schema.json"
+      },
+      "DetailCoverage": {
+        "title": "What a per-request detail read covered",
+        "description": "scan_start and scan_end are the byte range read; store_end is the file length when the read started.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scope",
+          "complete",
+          "scan_start",
+          "scan_end",
+          "store_end",
+          "limited",
+          "budget_exhausted",
+          "malformed_lines",
+          "unterminated_tail_bytes"
+        ],
+        "properties": {
+          "scope": {
+            "enum": [
+              "request_range",
+              "store",
+              "bounded_range"
+            ],
+            "description": "request_range: the bytes the request index names for this request answered the question, read to the end or to the newest record asked for. store: the whole store was read. bounded_range: only part was read, so a record outside it is unknown, not absent."
+          },
+          "complete": {
+            "type": "boolean",
+            "description": "Absence in this answer is a fact: the read covered its whole scope, or found the one newest record it was asked for."
+          },
+          "scan_start": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "scan_end": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "store_end": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "limited": {
+            "type": "boolean",
+            "description": "The record limit stopped the read before its scope ended."
+          },
+          "budget_exhausted": {
+            "type": "boolean",
+            "description": "The 64 MiB scan budget stopped the read before its scope ended."
+          },
+          "malformed_lines": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Lines in the read that were not valid events; they are counted and skipped."
+          },
+          "unterminated_tail_bytes": {
+            "$ref": "#/components/schemas/Uint64String",
+            "description": "Bytes after the store's last newline when a read covered the store: a record still being written, or torn when the writer stopped. They are not part of any answer. Zero for a per-request range."
+          }
+        }
+      },
+      "RequestStack": {
+        "title": "Request initiator stack",
+        "type": "object",
+        "required": [
+          "status",
+          "request"
+        ],
+        "properties": {
+          "index_behind": {
+            "type": "boolean",
+            "description": "With outside_scan: the request index had not reached the end of the store, so a later read can name this request's bytes. False means another read would scan the same range."
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/DetailCoverage"
+          },
+          "status": {
+            "enum": [
+              "recorded",
+              "not_recorded",
+              "outside_scan",
+              "malformed"
+            ],
+            "description": "not_recorded: the read covered the request's bytes or the whole store and found no stack. outside_scan: the read did not reach all of them, so the stack may exist; see coverage."
+          },
+          "request": {
+            "type": "object"
+          },
+          "state": {
+            "enum": [
+              "captured",
+              "no_script",
+              "unsupported_thread",
+              "not_retained_artifact_unavailable",
+              "not_retained_budget"
+            ]
+          },
+          "total_depth": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "recorded": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "omitted": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "omitted_after_index": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "async_frames": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "async_segments": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "async_truncated": {
+            "type": "boolean"
+          },
+          "async_callers_not_shown": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "wasm_frames": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "frames_retained": {
+            "type": "boolean"
+          },
+          "frames": {
+            "type": "array",
+            "maxItems": 1056,
+            "items": {
+              "$ref": "#/components/schemas/RequestStackFrame"
+            }
+          },
+          "task_chain_cut": {
+            "type": "boolean",
+            "description": "Version 2: the task chain stops at a caller that was not recorded."
+          },
+          "task_chain_truncated": {
+            "type": "boolean",
+            "description": "The task chain reached 32 segments and continues."
+          },
+          "task_segments": {
+            "type": "array",
+            "maxItems": 32,
+            "description": "Version 2 task chain, nearest first.",
+            "items": {
+              "type": "object",
+              "required": [
+                "index",
+                "kind",
+                "state",
+                "frames_retained",
+                "frames"
+              ],
+              "properties": {
+                "index": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "kind": {
+                  "enum": [
+                    "set_timeout",
+                    "set_interval",
+                    "request_animation_frame",
+                    "request_idle_callback",
+                    "post_message",
+                    "xhr_send",
+                    "post_task",
+                    "event",
+                    "microtask"
+                  ]
+                },
+                "state": {
+                  "enum": [
+                    "captured",
+                    "not_retained_artifact_unavailable",
+                    "not_retained_budget",
+                    "not_recorded"
+                  ]
+                },
+                "recorded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 256
+                },
+                "bounded": {
+                  "type": "boolean",
+                  "description": "The scheduling walk stopped at 256 frames."
+                },
+                "digest": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "frames_retained": {
+                  "type": "boolean"
+                },
+                "frames": {
+                  "type": "array",
+                  "maxItems": 256,
+                  "items": {
+                    "$ref": "#/components/schemas/RequestStackFrame"
+                  }
+                }
+              }
+            }
+          },
+          "navigation": {
+            "type": "object",
+            "description": "Navigation stacks only.",
+            "required": [
+              "kind",
+              "target_frame_id"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "location",
+                  "form_submission",
+                  "window_open",
+                  "other_script"
+                ]
+              },
+              "target_frame_id": {
+                "$ref": "#/components/schemas/NonzeroUint64String"
+              }
+            }
+          }
+        }
+      },
+      "RequestStackResolution": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "enum": [
+              "resolved",
+              "unresolved",
+              "builtin"
+            ]
+          },
+          "reason": {
+            "enum": [
+              "script_identity_missing",
+              "script_identity_outside_scan",
+              "source_unavailable",
+              "source_not_retained",
+              "source_artifact_missing",
+              "source_artifact_unreadable",
+              "source_not_utf8",
+              "position_outside_source"
+            ]
+          },
+          "artifact_id": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "url": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "column": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "artifact_line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "artifact_column": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "function_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "RequestHeaders": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "session_id",
+          "request_id",
+          "hops",
+          "malformed_records",
+          "unattached_records",
+          "coverage"
+        ],
+        "properties": {
+          "coverage": {
+            "$ref": "#/components/schemas/DetailCoverage"
+          },
+          "session_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "request_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "hops": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "hop",
+                "provisional",
+                "request",
+                "response"
+              ],
+              "properties": {
+                "hop": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "provisional": {
+                  "type": "boolean",
+                  "description": "Only browser request blocks: headers before the network stack added Cookie, Host and the rest."
+                },
+                "request": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RequestHeaderBlock"
+                  }
+                },
+                "response": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RequestHeaderBlock"
+                  }
+                }
+              }
+            }
+          },
+          "malformed_records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          "unattached_records": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "RequestHeaderBlock": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequence_number",
+          "parent_event_id",
+          "source",
+          "state",
+          "header_count",
+          "block_bytes",
+          "sha256",
+          "artifact_id",
+          "unattributed_blocks"
+        ],
+        "properties": {
+          "sequence_number": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "parent_event_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "browser",
+              "network",
+              "early_hints"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "captured",
+              "captured_shared",
+              "empty",
+              "not_captured_block_limit",
+              "not_captured_artifact_unavailable",
+              "not_captured_transfer_refused",
+              "not_captured_session_budget",
+              "not_captured_url"
+            ]
+          },
+          "header_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "block_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "artifact_id": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "unattributed_blocks": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "Network blocks of requests no longer tracked, so far in this configuration."
+          },
+          "referrer_policy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status_code": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 999
+          },
+          "remote_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 48
+          },
+          "remote_port": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "artifact": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "missing",
+              "mismatch",
+              "malformed",
+              "unreadable"
+            ],
+            "description": "Present for retained states."
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequestHeader"
+            }
+          }
+        }
+      },
+      "RequestHeader": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "value_withheld": {
+            "const": true
+          },
+          "value_bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "value"
+            ]
+          },
+          {
+            "required": [
+              "value_withheld",
+              "value_bytes"
+            ]
+          }
+        ]
+      },
+      "RequestCookies": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "session_id",
+          "request_id",
+          "hops",
+          "malformed_records",
+          "unattached_records",
+          "coverage"
+        ],
+        "properties": {
+          "coverage": {
+            "$ref": "#/components/schemas/DetailCoverage"
+          },
+          "session_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "request_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "hops": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "hop",
+                "sent",
+                "received"
+              ],
+              "properties": {
+                "hop": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "sent": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RequestCookieList"
+                  }
+                },
+                "received": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RequestCookieList"
+                  }
+                }
+              }
+            }
+          },
+          "malformed_records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          "unattached_records": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "RequestCookieList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequence_number",
+          "parent_event_id",
+          "state",
+          "cookie_count",
+          "blocked_count",
+          "list_bytes",
+          "sha256",
+          "artifact_id",
+          "unattributed_lists"
+        ],
+        "properties": {
+          "sequence_number": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "parent_event_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "captured",
+              "captured_shared",
+              "empty",
+              "not_captured_block_limit",
+              "not_captured_artifact_unavailable",
+              "not_captured_transfer_refused",
+              "not_captured_session_budget",
+              "not_captured_url"
+            ]
+          },
+          "cookie_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "blocked_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "list_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "artifact_id": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "unattributed_lists": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "Received lists of requests no longer tracked or without a raw request, so far in this configuration."
+          },
+          "artifact": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "missing",
+              "mismatch",
+              "malformed",
+              "unreadable"
+            ],
+            "description": "Present for retained lists."
+          },
+          "cookies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequestCookie"
+            }
+          }
+        }
+      },
+      "RequestCookie": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "parsed",
+          "blocked",
+          "exclusion_reasons",
+          "warning_reasons"
+        ],
+        "properties": {
+          "parsed": {
+            "type": "boolean",
+            "description": "False for a received line that failed to parse; it has only its reasons and line length."
+          },
+          "blocked": {
+            "type": "boolean"
+          },
+          "exclusion_reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "warning_reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "line_withheld": {
+            "const": true
+          },
+          "line_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "value_withheld": {
+            "const": true
+          },
+          "value_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "value_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "domain": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "expires_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Milliseconds since the Unix epoch; null for a session cookie."
+          },
+          "http_only": {
+            "type": "boolean"
+          },
+          "secure": {
+            "type": "boolean"
+          },
+          "same_site": {
+            "type": "string",
+            "enum": [
+              "Unspecified",
+              "None",
+              "Lax",
+              "Strict"
+            ]
+          },
+          "effective_same_site": {
+            "type": "string",
+            "enum": [
+              "None",
+              "Lax",
+              "Strict",
+              "Lax-allowing-unsafe",
+              "Undefined"
+            ]
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "Low",
+              "Medium",
+              "High"
+            ]
+          },
+          "partition_key": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "top_level_site",
+                  "cross_site_ancestor"
+                ],
+                "properties": {
+                  "top_level_site": {
+                    "type": "string"
+                  },
+                  "cross_site_ancestor": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            ]
+          },
+          "domain_cookie": {
+            "type": "boolean"
+          },
+          "source_scheme": {
+            "type": "string",
+            "enum": [
+              "unset",
+              "non_secure",
+              "secure"
+            ]
+          },
+          "source_port": {
+            "type": "integer",
+            "minimum": -2147483648,
+            "maximum": 2147483647
+          },
+          "request_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "hop": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "sequence_number": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "monotonic_time_ns": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "written_by_script": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "process_id",
+                "sequence_number"
+              ],
+              "properties": {
+                "process_id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "sequence_number": {
+                  "$ref": "#/components/schemas/NonzeroUint64String"
+                }
+              }
+            }
+          }
+        }
+      },
+      "CookieProvenance": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "session_id",
+          "name",
+          "set_by",
+          "script",
+          "sent_with",
+          "lists_read",
+          "lists_unread",
+          "stacks_unresolved",
+          "malformed_records",
+          "coverage"
+        ],
+        "properties": {
+          "coverage": {
+            "$ref": "#/components/schemas/DetailCoverage"
+          },
+          "session_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "name": {
+            "type": "string"
+          },
+          "set_by": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequestCookie"
+            }
+          },
+          "script": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScriptCookieAccess"
+            }
+          },
+          "sent_with": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequestCookie"
+            }
+          },
+          "lists_read": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 256
+          },
+          "lists_unread": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Distinct retained lists past the 256 read."
+          },
+          "stacks_unresolved": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Script calls not resolved to source because 64 distinct positions already were."
+          },
+          "malformed_records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          }
+        }
+      },
+      "ScriptCookieAccess": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequence_number",
+          "process_id",
+          "frame_id",
+          "tab_id",
+          "monotonic_time_ns",
+          "api",
+          "count",
+          "name_prefix_only",
+          "value_bytes",
+          "value_sha256",
+          "string_bytes",
+          "table_full",
+          "script_frame",
+          "stack_digest",
+          "stack"
+        ],
+        "properties": {
+          "sequence_number": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "process_id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "frame_id": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "tab_id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "monotonic_time_ns": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "api": {
+            "type": "string",
+            "enum": [
+              "document.cookie set",
+              "document.cookie get",
+              "cookieStore.set",
+              "cookieStore.get",
+              "cookieStore.getAll",
+              "cookieStore.delete"
+            ]
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "1 for a write; for a read, the reads since this key's previous record."
+          },
+          "name_prefix_only": {
+            "type": "boolean",
+            "description": "The name is longer than 24 bytes and matched by length and prefix."
+          },
+          "value_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "value_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "string_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "table_full": {
+            "type": "boolean"
+          },
+          "script_frame": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "constructor",
+                  "script_id",
+                  "position"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "javascript",
+                      "wasm"
+                    ]
+                  },
+                  "constructor": {
+                    "type": "boolean"
+                  },
+                  "script_id": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  },
+                  "position": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295,
+                    "description": "UTF-16 offset into the script source."
+                  }
+                }
+              }
+            ]
+          },
+          "stack_digest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "The digest of the stack this write walked (protocol/native-network-v3.md), or null."
+          },
+          "stack": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RequestStack"
+              }
+            ],
+            "description": "The call's frames resolved to source: the walked stack artifact its digest names, else its innermost frame alone; null without a script frame or past 64 distinct positions per answer."
+          }
+        }
       },
       "SignalProfile": {
         "title": "Request Signal Profile v1",
@@ -14299,6 +16591,11 @@
               },
               "network_events_limited": {
                 "type": "boolean"
+              },
+              "malformed_lines": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Whole lines in the scanned bytes skipped because they are not valid events. Present on the polling answer. A torn tail still being written is not counted."
               }
             },
             "required": [
@@ -14333,6 +16630,683 @@
           "event_window",
           "capture_state"
         ]
+      },
+      "RequestRow": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "ordinal",
+          "method",
+          "path",
+          "target_kind",
+          "host",
+          "target",
+          "url_truncated",
+          "target_length",
+          "target_malformed",
+          "status",
+          "failed",
+          "interrupted",
+          "time",
+          "duration_ns",
+          "type",
+          "tab_id",
+          "tab_ids",
+          "tab_link",
+          "extension_id",
+          "operation",
+          "first_time_ns",
+          "last_time_ns",
+          "domain",
+          "root",
+          "members",
+          "members_limited",
+          "first_offset",
+          "end_offset",
+          "records",
+          "transfer_size",
+          "resource_size",
+          "from_cache",
+          "from_service_worker",
+          "mime_type",
+          "protocol",
+          "response_time_ns",
+          "error_code",
+          "loader_observed",
+          "initiator",
+          "initiator_frame",
+          "main_frame",
+          "browser_internal"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "The Traffic row identity: the renderer request when one is joined, else the browser loader."
+          },
+          "ordinal": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Capture order: the position at which the index first saw this request."
+          },
+          "method": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "description": "scheme://host[:port]/path?query with request content, host[/path] without a scheme, or the host only. Captured text: never interpret it as markup."
+          },
+          "target_kind": {
+            "type": "string",
+            "enum": [
+              "host",
+              "url",
+              "path",
+              "unknown"
+            ]
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Captured path and query, at most 116 bytes."
+          },
+          "url_truncated": {
+            "type": "boolean"
+          },
+          "target_length": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "target_malformed": {
+            "type": "boolean"
+          },
+          "status": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "failed",
+                  "incomplete"
+                ]
+              }
+            ]
+          },
+          "failed": {
+            "type": "boolean"
+          },
+          "interrupted": {
+            "type": "boolean",
+            "description": "Native observation ended (proxy destroyed or redirect handoff); the network outcome is unknown."
+          },
+          "time": {
+            "type": "string",
+            "description": "Milliseconds from the first to the last record, or pending."
+          },
+          "duration_ns": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "xhr",
+              "doc",
+              "css",
+              "js",
+              "font",
+              "img",
+              "media",
+              "socket",
+              "wasm",
+              "other"
+            ]
+          },
+          "tab_id": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "tab_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Uint64String"
+            },
+            "description": "Every tab the row belongs to: its own tab_id and the tabs of its newest request_tab_link set (protocol/native-network-v3.md). Empty is a capture error."
+          },
+          "tab_link": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "count",
+              "complete"
+            ],
+            "properties": {
+              "kind": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4,
+                "description": "request_tab_link kind: 1 dedicated worker, 2 shared worker clients, 3 service worker clients, 4 service worker last clients."
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "complete": {
+                "type": "boolean",
+                "description": "Every tab_set part of the linked set was indexed."
+              }
+            },
+            "description": "The newest request_tab_link naming this row, or null."
+          },
+          "extension_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[a-p]{32}$",
+            "description": "The extension a request_extension_link names: extension traffic recorded with REB_CAPTURE_EXTENSION_TRAFFIC=1 (protocol/native-network-v3.md), else null."
+          },
+          "operation": {
+            "type": "string"
+          },
+          "first_time_ns": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "last_time_ns": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "domain": {
+            "type": "string"
+          },
+          "root": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "session_id",
+                  "process_id",
+                  "sequence_number",
+                  "request_id"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "session_id": {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  "process_id": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  },
+                  "sequence_number": {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  "request_id": {
+                    "$ref": "#/components/schemas/Uint64String"
+                  }
+                }
+              }
+            ],
+            "description": "request_started, else request_initiated, else the first record with a request ID."
+          },
+          "members": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "required": [
+                "session_id",
+                "process_id",
+                "request_id",
+                "records"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "session_id": {
+                  "$ref": "#/components/schemas/Uint64String"
+                },
+                "process_id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "request_id": {
+                  "$ref": "#/components/schemas/Uint64String"
+                },
+                "records": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "description": "Each session, process and request ID whose records form this row, with its record count."
+          },
+          "members_limited": {
+            "type": "boolean"
+          },
+          "first_offset": {
+            "$ref": "#/components/schemas/Uint64String",
+            "description": "Record boundary of the row's first record: get_events after."
+          },
+          "end_offset": {
+            "$ref": "#/components/schemas/Uint64String",
+            "description": "Boundary after its last record."
+          },
+          "records": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "transfer_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "The last completion or failure record's encoded_data_length: bytes received over the network, headers included."
+          },
+          "resource_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "The same record's decoded_body_length."
+          },
+          "from_cache": {
+            "type": "boolean",
+            "description": "A response_started record says the response came from the HTTP cache."
+          },
+          "from_service_worker": {
+            "type": "boolean",
+            "description": "A response_started record says a service worker served the response."
+          },
+          "mime_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The response MIME type, lowercase, without parameters."
+          },
+          "protocol": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The negotiated ALPN protocol, such as h2."
+          },
+          "response_time_ns": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The first response_started record's time."
+          },
+          "error_code": {
+            "type": "integer",
+            "description": "The last non-zero net error code, else 0."
+          },
+          "loader_observed": {
+            "type": "boolean",
+            "description": "A browser loader record joined the request; false when only the renderer recorded it."
+          },
+          "initiator": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "script",
+              "parser",
+              "renderer",
+              "worker",
+              "browser",
+              null
+            ],
+            "description": "Who started the request: script or the parser in a renderer (from its request_initiator_stack), script that started a navigation (a navigation_initiator_link), a renderer without a stack record, a service worker, or the browser process; null without a versioned record."
+          },
+          "initiator_frame": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RequestStackResolution"
+              }
+            ],
+            "description": "The innermost frame of the request_initiator_stack that names this row, resolved like get_request_stack; null without a walked stack, or for a frame past the 64 resolved per answer."
+          },
+          "main_frame": {
+            "type": "boolean",
+            "description": "A request_started record names a top-level document."
+          },
+          "browser_internal": {
+            "type": "boolean",
+            "description": "Its scheme class is browser-internal (protocol/native-network-v3.md); recorded before scheme classes, only the renderer recorded it and it names a single-label host other than localhost, as WebUI loads do."
+          }
+        }
+      },
+      "Requests": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "format",
+          "total",
+          "matching",
+          "through",
+          "offset",
+          "limit",
+          "returned",
+          "next_offset",
+          "previous_offset",
+          "failed",
+          "facets",
+          "index",
+          "sizes",
+          "hidden_internal",
+          "timeline",
+          "query",
+          "requests"
+        ],
+        "properties": {
+          "format": {
+            "const": "reb-request-index-v1"
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Requests indexed in this session."
+          },
+          "matching": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Requests of the snapshot that pass the filters and search."
+          },
+          "through": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The snapshot: requests indexed before this count."
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "returned": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "next_offset": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "previous_offset": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "added": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "With since: matching requests indexed at or after it."
+          },
+          "located": {
+            "type": "object",
+            "additionalProperties": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "failed": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Failed requests in the snapshot, before filters."
+          },
+          "sizes": {
+            "type": "object",
+            "required": [
+              "transferred",
+              "resources"
+            ],
+            "additionalProperties": false,
+            "description": "Sums over the matching requests of transfer_size and resource_size; a request without one adds nothing.",
+            "properties": {
+              "transferred": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "resources": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "hidden_internal": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "With hide_internal: browser-internal requests that every other filter admitted."
+          },
+          "timeline": {
+            "type": "object",
+            "required": [
+              "first_time_ns",
+              "last_time_ns",
+              "buckets"
+            ],
+            "additionalProperties": false,
+            "description": "Request starts of every request the filters admit before the time range, in 120 equal buckets from the first start to the last record.",
+            "properties": {
+              "first_time_ns": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "last_time_ns": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "buckets": {
+                "type": "array",
+                "minItems": 120,
+                "maxItems": 120,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "facets": {
+            "type": "object",
+            "required": [
+              "tabs",
+              "domains",
+              "domains_truncated"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "tabs": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "tab_id",
+                    "count",
+                    "first_time_ns",
+                    "domains",
+                    "domains_truncated"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "tab_id": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,9}|extension:[a-p]{32})$",
+                      "description": "A tab id, extension:<id> for one extension's traffic, or 0 for requests without an owner."
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "first_time_ns": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "domains": {
+                      "type": "array",
+                      "maxItems": 8,
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "domains_truncated": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              },
+              "domains": {
+                "type": "array",
+                "description": "Domains within the tab_id filter, with counts; at most 512 plus the domain filter.",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "domain",
+                    "count"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "domain": {
+                      "type": "string"
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "domains_truncated": {
+                "type": "boolean"
+              }
+            }
+          },
+          "index": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "epoch",
+              "indexed_end",
+              "store_end",
+              "complete",
+              "malformed_records",
+              "unindexed_records",
+              "request_limit",
+              "reopened",
+              "persisted",
+              "persist_error"
+            ],
+            "properties": {
+              "epoch": {
+                "type": "string",
+                "description": "Changes when the store is cleared or replaced and the index is rebuilt."
+              },
+              "indexed_end": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "store_end": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "complete": {
+                "type": "boolean"
+              },
+              "malformed_records": {
+                "$ref": "#/components/schemas/Uint64String",
+                "description": "Network records the index could not read."
+              },
+              "unindexed_records": {
+                "$ref": "#/components/schemas/Uint64String",
+                "description": "Records of requests past request_limit."
+              },
+              "request_limit": {
+                "type": "integer"
+              },
+              "reopened": {
+                "type": "boolean",
+                "description": "The index was read from its sidecar, not rebuilt."
+              },
+              "persisted": {
+                "type": "boolean"
+              },
+              "persist_error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "query": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "requests": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/components/schemas/RequestRow"
+            }
+          }
+        }
       },
       "Artifact": {
         "type": "object",
@@ -14375,7 +17349,12 @@
               "canvas_data_url",
               "bytecode_buffer",
               "wasm_guest_adapter",
-              "request_body"
+              "request_body",
+              "request_target",
+              "request_headers",
+              "response_headers",
+              "cookie_list",
+              "stack"
             ]
           },
           "url": {
@@ -18459,6 +21438,1203 @@
           }
         ]
       },
+      "NativeDebuggerState": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "contract_version",
+          "availability",
+          "reason",
+          "experiment_flag",
+          "policy",
+          "detectable",
+          "lease_limit_ms",
+          "lease",
+          "paused",
+          "breakpoints",
+          "threads",
+          "watch",
+          "observations",
+          "observations_malformed"
+        ],
+        "properties": {
+          "contract_version": {
+            "const": 1
+          },
+          "availability": {
+            "enum": [
+              "unsupported",
+              "available"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "browser_debugger_unsupported",
+              null
+            ]
+          },
+          "experiment_flag": {
+            "const": "--reb-native-debugger"
+          },
+          "policy": {
+            "enum": [
+              "proposed_pending_approval",
+              "approved"
+            ]
+          },
+          "detectable": {
+            "const": true
+          },
+          "lease_limit_ms": {
+            "const": 60000
+          },
+          "lease": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "lease_id",
+                  "expires_in_ms"
+                ],
+                "properties": {
+                  "lease_id": {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]{0,19}$"
+                  },
+                  "expires_in_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 60000
+                  }
+                }
+              }
+            ]
+          },
+          "paused": {
+            "type": "boolean"
+          },
+          "breakpoints": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object"
+            }
+          },
+          "threads": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "console",
+              "frames",
+              "workers"
+            ],
+            "description": "Console documents (frames, including out-of-process frames) and the workers whose requests the renderer recorded. Not a pausable thread list.",
+            "properties": {
+              "console": {
+                "type": "string",
+                "maxLength": 32
+              },
+              "frames": {
+                "type": "array",
+                "maxItems": 256,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "target_id",
+                    "label",
+                    "origin",
+                    "frame",
+                    "out_of_process"
+                  ],
+                  "properties": {
+                    "target_id": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    },
+                    "label": {
+                      "type": "string",
+                      "x-max-utf8-bytes": 256
+                    },
+                    "origin": {
+                      "type": "string",
+                      "x-max-utf8-bytes": 512
+                    },
+                    "frame": {
+                      "enum": [
+                        "top",
+                        "child"
+                      ]
+                    },
+                    "out_of_process": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              },
+              "workers": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "session_id",
+                    "process_id",
+                    "context_id",
+                    "last_sequence",
+                    "requests"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "dedicated_worker",
+                        "shared_worker",
+                        "service_worker"
+                      ]
+                    },
+                    "session_id": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    },
+                    "process_id": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "context_id": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    },
+                    "last_sequence": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    },
+                    "requests": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 2048
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "watch": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "state",
+              "armed"
+            ],
+            "description": "Rules the renderer last confirmed armed through the Console watch command. busy means a Console action holds the session; read again.",
+            "properties": {
+              "state": {
+                "enum": [
+                  "none",
+                  "armed",
+                  "busy"
+                ]
+              },
+              "armed": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "session_id",
+                      "target_id",
+                      "rules"
+                    ],
+                    "properties": {
+                      "session_id": {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]{0,19})$"
+                      },
+                      "target_id": {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]{0,19})$"
+                      },
+                      "rules": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "observations": {
+            "type": "array",
+            "maxItems": 32,
+            "description": "The newest Phase 1 records, decoded; the same records get_events and wait_for_events return with hex payloads. Identities, kinds, positions and names only.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "type",
+                "session_id",
+                "process_id",
+                "frame_id",
+                "sequence_number",
+                "parent_event_id",
+                "request_id",
+                "monotonic_time_ns",
+                "stack",
+                "detail"
+              ],
+              "properties": {
+                "type": {
+                  "enum": [
+                    "request_watch_match",
+                    "listener_dispatch",
+                    "timer_observation",
+                    "csp_violation",
+                    "exception_observation",
+                    "dom_mutation"
+                  ]
+                },
+                "session_id": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "process_id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "frame_id": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "sequence_number": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "parent_event_id": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "request_id": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "monotonic_time_ns": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "stack": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "state",
+                    "total_depth",
+                    "recorded",
+                    "async_frames",
+                    "digest",
+                    "innermost"
+                  ],
+                  "properties": {
+                    "state": {
+                      "enum": [
+                        "captured",
+                        "no_script",
+                        "unsupported_thread",
+                        "not_retained_artifact_unavailable",
+                        "not_retained_budget"
+                      ]
+                    },
+                    "total_depth": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "recorded": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "async_frames": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "digest": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "innermost": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "kind",
+                            "script_id",
+                            "position",
+                            "detail"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 2
+                            },
+                            "script_id": {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            "position": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "detail": {
+                              "type": "integer",
+                              "minimum": 0
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                "detail": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "rule": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 15
+                    },
+                    "method_matched": {
+                      "type": "boolean"
+                    },
+                    "target": {
+                      "enum": [
+                        "element",
+                        "document",
+                        "window",
+                        "node",
+                        "other"
+                      ]
+                    },
+                    "node_type": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 65535
+                    },
+                    "listener": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "script_id",
+                            "position",
+                            "function_start"
+                          ],
+                          "properties": {
+                            "script_id": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 4294967295
+                            },
+                            "position": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            },
+                            "function_start": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "callback": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "script_id",
+                            "position",
+                            "function_start"
+                          ],
+                          "properties": {
+                            "script_id": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 4294967295
+                            },
+                            "position": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            },
+                            "function_start": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "site": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "script_id",
+                            "position",
+                            "function_start"
+                          ],
+                          "properties": {
+                            "script_id": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 4294967295
+                            },
+                            "position": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            },
+                            "function_start": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "event_type": {
+                      "type": "string",
+                      "pattern": "^[!-~]{1,27}$"
+                    },
+                    "phase": {
+                      "enum": [
+                        "scheduled",
+                        "fired"
+                      ]
+                    },
+                    "kind": {
+                      "enum": [
+                        "timeout",
+                        "interval",
+                        "uncaught",
+                        "caught",
+                        "unhandled_rejection",
+                        "attribute",
+                        "subtree",
+                        "removal"
+                      ]
+                    },
+                    "string_callback": {
+                      "type": "boolean"
+                    },
+                    "timer_id": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "delay_ms": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "directive": {
+                      "type": "string",
+                      "maxLength": 32
+                    },
+                    "directive_value": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 255
+                    },
+                    "disposition": {
+                      "enum": [
+                        "enforce",
+                        "report"
+                      ]
+                    },
+                    "blocked_host": {
+                      "type": "string",
+                      "pattern": "^[!-~]{0,45}$"
+                    },
+                    "node_slot": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 3
+                    },
+                    "attribute": {
+                      "type": "string",
+                      "pattern": "^[!-~]{0,32}$"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "observations_malformed": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32,
+            "description": "Newest records the core rules refuse; counted, never shown."
+          }
+        }
+      },
+      "NativeDebuggerAction": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "script_id",
+              "line",
+              "column",
+              "confirm_pause"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "set_breakpoint"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "script_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295
+              },
+              "line": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295
+              },
+              "column": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "condition": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 1024
+              },
+              "log_message": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 1024
+              },
+              "confirm_pause": {
+                "const": true
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirm_pause",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "A line, conditional (condition) or logpoint (log_message, never pauses) breakpoint. A pause starts the lease.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "breakpoint_id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "remove_breakpoint"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "breakpoint_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Removes one breakpoint this connection set.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "mode",
+              "confirm_pause"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "pause_on_exceptions"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "uncaught",
+                  "all"
+                ]
+              },
+              "confirm_pause": {
+                "const": true
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirm_pause",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "none never pauses; uncaught and all pause at the throw and start the lease.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "lease_id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "resume"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "lease_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Ends the pause and its lease.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "lease_id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "step_over"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "lease_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "One step, then a new pause under the same lease.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "lease_id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "step_into"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "lease_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "One step into a call, then a new pause under the same lease.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "lease_id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "step_out"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "lease_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Runs to the caller, then a new pause under the same lease.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "lease_id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "release_lease"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "lease_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Resumes the page now and reports it, as an expired lease does.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "lease_id",
+              "call_frame_index",
+              "expression"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "evaluate_on_frame"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "lease_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "call_frame_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1055
+              },
+              "expression": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 8192
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "code-execution",
+                "live-target-mutation"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Watch and Console on a paused frame. The result is bounded, ephemeral text and is never added to evidence.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "document_epoch",
+              "lease_id",
+              "object_id",
+              "offset"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "get_properties"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "document_epoch": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "lease_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "object_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1048576
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "One page of a scope or object's properties; expand further pages by offset. Values are ephemeral.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger.rs",
+                  "symbol": "action"
+                }
+              ]
+            }
+          }
+        ]
+      },
       "NativeConsoleRuntimeCommand": {
         "oneOf": [
           {
@@ -18575,6 +22751,116 @@
                   "clear",
                   "last",
                   "traffic"
+                ]
+              }
+            },
+            "required": [
+              "operation"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Arms non-pausing observation rules on the selected document, replacing any earlier set; protocol/native-debugger-observation-v1.md. Records arrive through get_events and wait_for_events. Nothing pauses and no value is read.",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "enum": [
+                  "watch"
+                ]
+              },
+              "rules": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "requests": {
+                    "type": "array",
+                    "maxItems": 8,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "url_contains": {
+                          "type": "string",
+                          "minLength": 1,
+                          "x-max-utf8-bytes": 256
+                        },
+                        "method": {
+                          "type": "string",
+                          "pattern": "^[A-Z]{1,16}$"
+                        }
+                      },
+                      "required": [
+                        "url_contains"
+                      ]
+                    }
+                  },
+                  "events": {
+                    "type": "array",
+                    "maxItems": 16,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[!-~]{1,27}$"
+                    }
+                  },
+                  "timers": {
+                    "type": "boolean"
+                  },
+                  "csp": {
+                    "type": "boolean"
+                  },
+                  "exceptions": {
+                    "type": "string",
+                    "enum": [
+                      "off",
+                      "uncaught",
+                      "all"
+                    ]
+                  },
+                  "dom": {
+                    "type": "array",
+                    "maxItems": 4,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "handle": {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]{0,19}$"
+                        },
+                        "attributes": {
+                          "type": "boolean"
+                        },
+                        "subtree": {
+                          "type": "boolean"
+                        },
+                        "removal": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "handle"
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "required": [
+              "operation",
+              "rules"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Disarms every observation rule of the selected document.",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "enum": [
+                  "unwatch"
                 ]
               }
             },
@@ -19481,6 +23767,7 @@
               "source",
               "request_content",
               "canvas_images",
+              "request_stacks",
               "document_start",
               "js_invocation"
             ],
@@ -19495,10 +23782,14 @@
               },
               "request_content": {
                 "type": "boolean",
-                "description": "Request paths, queries and bodies are retained (request_target events, request_body artifacts)."
+                "description": "Request paths, queries, headers and bodies, and response bodies, are retained (request_target, request_headers, response_headers and response_body events, request_body, header and response_body artifacts)."
               },
               "canvas_images": {
                 "type": "boolean"
+              },
+              "request_stacks": {
+                "type": "boolean",
+                "description": "Brave walks request initiator stacks and retains their stack and stack_script artifacts (--reb-request-stacks)."
               },
               "document_start": {
                 "type": "string",
@@ -19558,9 +23849,10 @@
           "application_failed",
           "idle_backend",
           "native_capture_unavailable",
-          "debugger_unavailable"
+          "debugger_unavailable",
+          "artifact_integrity"
         ],
-        "description": "Stable bounded application reason. invalid_request/state_conflict/protocol_error are coarse classifications; precise reasons are only supplied by migrated source paths. application_failed does not imply rollback or no side effects. A command-exchange timeout or lost/malformed reply uses command_outcome_unknown, not a confirmed-no-op claim. This can include interrupted queued or partial writes and does not prove a send completed."
+        "description": "Stable bounded application reason. artifact_integrity means retained bytes no longer match the size or SHA-256 in their manifest record, so reading them again cannot help. invalid_request/state_conflict/protocol_error are coarse classifications; precise reasons are only supplied by migrated source paths. application_failed does not imply rollback or no side effects. A command-exchange timeout or lost/malformed reply uses command_outcome_unknown, not a confirmed-no-op claim. This can include interrupted queued or partial writes and does not prove a send completed."
       },
       "ErrorDetails": {
         "type": "object",
@@ -20427,6 +24719,26 @@
               "wasm_execution_outcome",
               "wasm_dispatch_overflow",
               "wasm_indirect_overflow",
+              "request_headers",
+              "response_headers",
+              "cookie_list",
+              "response_body",
+              "request_initiator_stack",
+              "script_identity",
+              "capture_exclusion",
+              "tab_set",
+              "request_tab_link",
+              "script_cookie",
+              "request_watch_match",
+              "listener_dispatch",
+              "timer_observation",
+              "csp_violation",
+              "exception_observation",
+              "dom_mutation",
+              "navigation_initiator_stack",
+              "navigation_initiator_link",
+              "async_task_stack",
+              "request_extension_link",
               "script_compiled"
             ]
           },
@@ -20628,6 +24940,8 @@
               "canvas_to_data_url",
               "native_wasm_guest",
               "network_request",
+              "request_stack",
+              "stack_script",
               "compiled_script"
             ]
           },
@@ -20641,7 +24955,12 @@
               "canvas_data_url",
               "bytecode_buffer",
               "wasm_guest_adapter",
-              "request_body"
+              "request_body",
+              "request_target",
+              "request_headers",
+              "response_headers",
+              "cookie_list",
+              "stack"
             ]
           },
           "byte_size": {
@@ -22229,6 +26548,184 @@
             }
           }
         ]
+      },
+      "SourceFormat": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "source",
+          "status",
+          "reason",
+          "detail",
+          "language",
+          "engine",
+          "layout",
+          "mapping",
+          "line_count",
+          "window",
+          "anchors",
+          "text",
+          "cached",
+          "limits"
+        ],
+        "properties": {
+          "schema": {
+            "const": "source-format-v1"
+          },
+          "source": {
+            "type": "object",
+            "description": "Public identity of the verified artifact, as in Artifact without content_path."
+          },
+          "status": {
+            "enum": [
+              "formatted",
+              "unavailable"
+            ]
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "enum": [
+                  "parse-failed",
+                  "output-limit",
+                  "fidelity-check-failed",
+                  "memory-limit",
+                  "nesting-limit"
+                ]
+              }
+            ]
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "language": {
+            "enum": [
+              "javascript",
+              "json"
+            ]
+          },
+          "engine": {
+            "type": "string"
+          },
+          "layout": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "print_width",
+              "indent"
+            ],
+            "properties": {
+              "print_width": {
+                "const": 80
+              },
+              "indent": {
+                "const": 2
+              }
+            }
+          },
+          "mapping": {
+            "const": "whitespace-only",
+            "description": "Only ECMAScript WhiteSpace and LineTerminator characters differ from the original source."
+          },
+          "line_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "window": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "start_line",
+                  "line_count"
+                ],
+                "properties": {
+                  "start_line": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "line_count": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            ]
+          },
+          "anchors": {
+            "description": "Null when unavailable. source_utf16[k] is the UTF-16 offset in the original of the first non-whitespace character at or after formatted line k * lines + 1, or the original's UTF-16 length when none follows; there is one entry per started block of lines.",
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "lines",
+                  "source_utf16"
+                ],
+                "properties": {
+                  "lines": {
+                    "const": 1000
+                  },
+                  "source_utf16": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The formatted text, or the requested window of it. Null when unavailable."
+          },
+          "cached": {
+            "type": "boolean"
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "max_source_bytes",
+              "max_output_ratio",
+              "max_window_lines"
+            ],
+            "properties": {
+              "max_source_bytes": {
+                "const": 16777216
+              },
+              "max_output_ratio": {
+                "const": 4
+              },
+              "max_window_lines": {
+                "const": 10000
+              }
+            }
+          }
+        }
       },
       "JavaScriptSourceTarget": {
         "oneOf": [
@@ -26812,6 +31309,7 @@
           "next_before",
           "limited",
           "budget_exhausted",
+          "malformed_lines",
           "filters"
         ],
         "properties": {
@@ -26857,6 +31355,11 @@
           "budget_exhausted": {
             "type": "boolean",
             "description": "The page stopped at the 64 MiB scan budget. Continue with a cursor."
+          },
+          "malformed_lines": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Lines in this read that were not valid events. They are counted and skipped, so a record among them is unknown, not absent."
           },
           "filters": {
             "type": "object",
@@ -27081,7 +31584,9 @@
           "events",
           "artifacts",
           "checks",
-          "capture_state"
+          "capture_state",
+          "exclusions",
+          "request_tabs"
         ],
         "properties": {
           "protocol_version": {
@@ -27343,6 +31848,98 @@
               }
             }
           },
+          "request_tabs": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Whether each request row of the scanned events has a browser tab (protocol/native-network-v3.md). Rows join records as Traffic does; a row is linked when a record has a tab or a request_tab_link or request_extension_link names it. An unlinked row is a capture error, reported by the network_tab_unresolved check. Read one with get_events process_id and request_id.",
+            "required": [
+              "rows",
+              "extension_rows",
+              "unresolved",
+              "unresolved_requests",
+              "unresolved_omitted",
+              "untracked_records"
+            ],
+            "properties": {
+              "rows": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "extension_rows": {
+                "$ref": "#/components/schemas/Uint64String",
+                "description": "Rows a request_extension_link names: extension traffic recorded with REB_CAPTURE_EXTENSION_TRAFFIC=1."
+              },
+              "unresolved": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "unresolved_requests": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "process_id",
+                    "request_id"
+                  ],
+                  "properties": {
+                    "process_id": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "request_id": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    }
+                  }
+                }
+              },
+              "unresolved_omitted": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "untracked_records": {
+                "$ref": "#/components/schemas/Uint64String"
+              }
+            }
+          },
+          "exclusions": {
+            "type": "array",
+            "description": "Evidence the capture counted instead of recording, by class, from capture_exclusion records (protocol/native-network-v3.md). Requests are chrome, chrome_untrusted, brave, devtools and chrome_search scheme loads, webui_request requests WebUI renderers sent through the browser proxy, extension_worker requests of extension workers and devtools_load requests of the DevTools factory; webui_renderer counts renderer processes with WebUI bindings or a WebUI process lock that were not admitted. These are named exclusions, never gaps or drops. Empty when nothing was excluded or REB_CAPTURE_BROWSER_INTERNAL=1 recorded browser-internal loads.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "class",
+                "unit",
+                "count"
+              ],
+              "properties": {
+                "class": {
+                  "type": "string",
+                  "enum": [
+                    "chrome",
+                    "chrome_untrusted",
+                    "brave",
+                    "devtools",
+                    "chrome_search",
+                    "webui_renderer",
+                    "extension_worker",
+                    "devtools_load",
+                    "webui_request"
+                  ]
+                },
+                "unit": {
+                  "type": "string",
+                  "enum": [
+                    "requests",
+                    "renderer_processes"
+                  ]
+                },
+                "count": {
+                  "$ref": "#/components/schemas/Uint64String"
+                }
+              }
+            }
+          },
           "artifacts": {
             "type": "object",
             "additionalProperties": false,
@@ -27457,9 +32054,13 @@
                     "no_events",
                     "wasm_without_artifacts",
                     "artifact_capture_failed",
+                    "request_content_not_retained",
                     "queue_drops",
                     "sequence_gaps",
                     "named_gap",
+                    "browser_internal_excluded",
+                    "no_tab_traffic_excluded",
+                    "network_tab_unresolved",
                     "bounded_scope"
                   ]
                 },
@@ -27467,7 +32068,8 @@
                   "type": "string",
                   "enum": [
                     "info",
-                    "warning"
+                    "warning",
+                    "error"
                   ]
                 },
                 "message": {
@@ -28357,7 +32959,18 @@
           "request_content": {
             "type": "boolean",
             "default": false,
-            "description": "Retain request paths, queries and bodies (at most 256 KiB each, 1,024 bodies or 64 MiB per session) as request_target events and request_body artifacts. Sensitive capture: requires confirm_sensitive_capture and category bits 256 and 1024. Off, Network capture still records each body's length, type and digest."
+            "description": "Retain request paths, queries and bodies (at most 16 MiB each, 256 MiB of unique content per session unless request_content_budget_mib) as request_target events, request_target artifacts for targets past the 116-byte prefix, and request_body artifacts, plus response bodies (at most 16 MiB each, 512 MiB of unique content per session; element images, audio, video and fonts are skipped) as response_body events and artifacts, and request and response headers (at most 64 MiB of blocks per session) as request_headers and response_headers events and artifacts. Sensitive capture: requires confirm_sensitive_capture and category bits 256 and 1024. Off, Network capture still records each body's length, type and digest."
+          },
+          "request_content_budget_mib": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096,
+            "description": "MiB of unique request bodies and full targets this content session retains, default 256. Identical bytes are stored once; a request past the budget keeps its length, type and digest and names the refusal. Requires request_content."
+          },
+          "request_stacks": {
+            "type": "boolean",
+            "default": false,
+            "description": "Record the JavaScript and Wasm call stack that started each renderer request (request_initiator_stack events and stack artifacts, read with get_request_stack). Frames are identities, not values. Needs category bits 256 and 1024 and a Brave that defines --reb-request-stacks; a Brave without it refuses the start."
           },
           "document_start": {
             "type": "boolean",
@@ -29218,6 +33831,71 @@
           "message": {
             "type": "string",
             "maxLength": 512
+          }
+        }
+      },
+      "RequestStackFrame": {
+        "type": "object",
+        "required": [
+          "index",
+          "kind",
+          "async",
+          "script_id",
+          "resolution"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "kind": {
+            "enum": [
+              "javascript",
+              "wasm",
+              "await",
+              "promise_all",
+              "promise_all_settled",
+              "promise_any"
+            ]
+          },
+          "async": {
+            "type": "boolean"
+          },
+          "script_id": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "position": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "function_position": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "function_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "module_offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "promise_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "constructor": {
+            "type": "boolean"
+          },
+          "top_level": {
+            "type": "boolean"
+          },
+          "eval": {
+            "type": "boolean"
+          },
+          "resolution": {
+            "$ref": "#/components/schemas/RequestStackResolution"
           }
         }
       }

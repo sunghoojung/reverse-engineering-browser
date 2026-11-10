@@ -282,7 +282,7 @@ function fakeDocument() {
   const document = {activeElement: null, created: [], readyState: 'loading', listeners: new Map(), hasFocus: () => true};
   class Node {
     constructor(tag) {
-      this.tagName = tag.toUpperCase(); this.children = []; this.parentElement = null; this.dataset = {}; this.attributes = {}; this.listeners = new Map();
+      this.tagName = tag.toUpperCase(); this.children = []; this.parentElement = null; this.dataset = {}; this.style = {}; this.attributes = {}; this.listeners = new Map();
       this.hidden = false; this.disabled = false; this.readOnly = false; this.value = ''; this.text = ''; this.className = ''; document.created.push(this);
     }
     set innerHTML(_) {throw new Error('Names must never be parsed as HTML.');}
@@ -300,7 +300,11 @@ function fakeDocument() {
       return event;
     }
     contains(node) {return node === this || this.children.some(child => child.contains?.(node));}
-    get classList() {return {add: name => {this.className = `${this.className} ${name}`.trim();}, remove: name => {this.className = this.className.split(/\s+/).filter(value => value !== name).join(' ');}};}
+    get classList() {
+      const add = name => {this.className = `${this.className} ${name}`.trim();};
+      const remove = name => {this.className = this.className.split(/\s+/).filter(value => value !== name).join(' ');};
+      return {add, remove, toggle: (name, on) => on ? add(name) : remove(name)};
+    }
     replaceChildren(...nodes) {this.text = ''; for (const child of this.children) child.parentElement = null; this.children = []; this.append(...nodes);}
     insertBefore(node, reference) {node.remove(); node.parentElement = this; const at = reference ? this.children.indexOf(reference) : -1; if (at < 0) this.children.push(node); else this.children.splice(at, 0, node);}
     get lastElementChild() {return this.children.at(-1) ?? null;}
@@ -482,7 +486,7 @@ export async function checkNamesApp(root) {
     function renderRequests() {} function updateSelectionSummary() {} function renderSourceTree() {} function renderSourceTabs() {}
     function textElement(tag, className, value) {const element = document.createElement(tag); if (className) element.className = className; element.textContent = String(value); return element;}
     function selectedSource() {return state.artifacts.find(item => item.artifact_id === state.selectedArtifactId) ?? null;}
-    function sourceDisplayName(source) {return 'loader.js · artifact ' + source.artifact_id;}
+    function sourceDisplayName() {return 'loader.js';}
     function capturedSources() {return state.artifacts;}
     function selectRequest(id) {record('selectRequest', id); state.selectedRequestId = id;}
     function focusRequestRow(id) {record('focusRequestRow', id);}
@@ -564,7 +568,7 @@ export async function checkNamesApp(root) {
   const [named, plain] = container.children;
   const cell = named.querySelector('.request-name');
   assert.deepEqual(cell.children.map(child => child.className), ['researcher-name', 'request-resource', 'request-host']);
-  assert.deepEqual(cell.children.map(child => child.textContent), [hostile, '/mint', 'collector.example.test']);
+  assert.deepEqual(cell.children.map(child => child.textContent), [hostile, 'mint', 'collector.example.test']);
   assert.match(named.getAttribute('aria-label'), /^<img .*\(researcher name\)\. Demo evidence request: POST https:\/\/collector\.example\.test\/mint/);
   assert.deepEqual(plain.querySelector('.request-name').children.map(child => child.className), ['request-resource', 'request-host']);
   assert(!document.created.some(value => value.tagName === 'IMG'));

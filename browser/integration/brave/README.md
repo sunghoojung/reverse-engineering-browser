@@ -247,10 +247,20 @@ Native network records keep the v1 host-only start payload. Each admitted
 request also gets a `request_body` summary record (length, normalized content
 type, SHA-256, kind and capture state). When `--reb-capture-request-content` is
 explicitly present, the browser also records the raw path and query as
-`request_target` children and retains at most 256 KiB of in-memory body bytes
-per request through the artifact channel. The change lives entirely in the
-overlay sink; the existing proxy hooks already pass the full `ResourceRequest`.
-See [Native network v2](../../../protocol/native-network-v2.md).
+`request_target` children, retains targets past their 116-byte prefix and at
+most 16 MiB of body bytes per request through the artifact channel, within a
+per-session byte budget. Patch `0019` hands bodies with file, blob or stream
+parts to the overlay reader, which reads them off the UI sequence; a stream
+part's getter is replaced by one that forwards every byte unchanged. See
+[Native network v2](../../../protocol/native-network-v2.md) and
+[v3](../../../protocol/native-network-v3.md#request-body-reads). Content
+sessions also record request and response header blocks per hop
+([Native network v3](../../../protocol/native-network-v3.md)): patch `0018`
+names each admitted request for the network service's raw header notifications
+and keeps the network's response headers before Brave's rewrite, and Chromium
+patch `0025` forwards those notifications, with their sent and received cookie
+lists, to the overlay. Chromium patch `0028` records `document.cookie` and
+Cookie Store API calls in the renderer for the same sessions.
 Renderer events use a bounded shared-memory queue with Mojo lifecycle control
 and coalesced wake-ups. The browser process
 authenticates to the event broker with a session identifier and a mode-0600
@@ -288,7 +298,8 @@ capture policy.
 When the Artifact category is authorized, the browser process recognizes
 JavaScript and WebAssembly responses, preserves the observed source URL
 (including credentials, queries and fragments) in local artifact metadata, and
-asynchronously tees at most 16 MiB per response. The original response pipe remains the page's source of bytes. A
+asynchronously tees at most 16 MiB per response, holding only the bytes it has
+within a shared 32 MiB in-flight pool. The original response pipe remains the page's source of bytes. A
 separate queue permits at most 16 pending artifacts and 32 MiB of queued
 content, then transfers frames over an authenticated user-only socket. Brave
 emits `artifact_captured` only after a durable receiver acknowledgment and
@@ -440,6 +451,30 @@ backups and real index entries; do not hand-edit the generated checkout. The
 runtime buffer callback obtains its isolate from Blink's execution context,
 which is supported at the pinned V8 revision; a missing context emits the
 existing omission reason.
+
+## Request initiator stacks
+
+`REB_NATIVE_REQUEST_STACKS=1`, or `--js-flags=--reb-request-stacks`, records
+the JavaScript and Wasm stack and `await` chain each document request started
+from. The packaged app turns it on when Network and Artifact are captured.
+`patches/v8/0015-capture-native-request-stacks.patch` adds the walker and
+`patches/chromium/0029-record-request-initiator-stacks.patch` the Blink
+provider, the loader call and the Console request watch hook. Chromium `0034`
+records script navigations and async task callers through
+`renderer/native_request_stack_blink.h`: the async task probes, task
+attribution at top-level callbacks, `BeginNavigation`, form scheduling and the
+browser navigation link; V8 `0017` bounds scheduling-time walks to 256 frames.
+See [Native network v3](../../../protocol/native-network-v3.md).
+
+## Debugger observations
+
+The Console `watch` command arms the Phase 1 hooks for one document.
+Chromium `0030` to `0032` add the listener, timer, CSP, rejection and DOM
+mutation call sites through `renderer/native_debugger_observation_blink.h`;
+`0033` lists window listeners for the Console; V8 `0016` adds the throw
+observer the Console installs only while exceptions are watched. Each hook
+costs one relaxed load while disarmed. See
+[native debugger observation v1](../../../protocol/native-debugger-observation-v1.md).
 
 ## Native Wasm dispatch (opt-in)
 

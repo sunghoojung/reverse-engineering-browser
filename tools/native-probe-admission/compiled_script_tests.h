@@ -51,7 +51,10 @@ void ConfigureCompiledScripts(bool capture_sources) {
   compiled_sources.clear();
   refuse_compiled_events = false;
   sink.SetEmitters(&CaptureCompiledEvent, &CaptureCompiledSource, 42,
-                   reb::kAllNativeProbeCategoryMask, kForever, false, nullptr, capture_sources);
+                   reb::kAllNativeProbeCategoryMask, kForever, false, nullptr,
+                   {.capture_request_content = capture_sources,
+                    .capture_browser_internal = false,
+                    .exclusion_counter = nullptr});
 }
 std::vector<std::uint8_t> ScriptBytes(std::uint8_t seed, std::size_t size = 32) {
   std::vector<std::uint8_t> bytes(size, 'x');
@@ -244,7 +247,10 @@ void CompiledScriptDisabledRecordsNothing() {
   // Without the Artifact category nothing is recorded either.
   sink.SetEmitters(&CaptureCompiledEvent, &CaptureCompiledSource, 42,
                    reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kVm), kForever, false,
-                   nullptr, true);
+                   nullptr,
+                   {.capture_request_content = true,
+                    .capture_browser_internal = false,
+                    .exclusion_counter = nullptr});
   sink.RecordCompiledScript(CompiledScript(NativeCompiledScriptKind::kEval, 91, source));
   assert(compiled_events.empty() && compiled_sources.empty());
 }

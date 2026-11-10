@@ -7,7 +7,9 @@ use crate::{
     artifact_query::{self, MANIFEST_RECORD_BYTES},
     error::Result,
     event_query::{self, Cursor, EVENT_RECORD_BYTES, SCAN_BYTES, Tally},
-    event_window, session_context,
+    event_window,
+    request_tabs::RequestTabs,
+    session_context,
 };
 use serde_json::{Value, json};
 use std::{
@@ -20,6 +22,7 @@ const TRACKED_FRAMES: usize = 4096;
 const FRAME_TYPES: usize = 8;
 const SESSIONS: usize = 16;
 const ARTIFACTS: usize = 32;
+const REFUSAL_REASONS: usize = 32;
 
 /// Live state the backend knows outside the stores.
 pub struct CaptureState<'a> {
@@ -144,6 +147,145 @@ impl EventCounts {
     }
 }
 
+/// Every capture refusal by its native reason: artifact_capture_failed
+/// payloads, and request content a content session did not retain.
+#[derive(Default)]
+struct Refusals {
+    failures: BTreeMap<String, u64>,
+    content: BTreeMap<(&'static str, &'static str), u64>,
+}
+impl Refusals {
+    fn record(&mut self, event: &Value) {
+        let payload = || {
+            event["payload"]
+                .as_str()
+                .and_then(|text| hex::decode(text).ok())
+        };
+        match (event["category"].as_str(), event["type"].as_str()) {
+            (_, Some("artifact_capture_failed")) => {
+                let reason = payload()
+                    .filter(|bytes| {
+                        !bytes.is_empty()
+                            && bytes.len() <= 64
+                            && bytes
+                                .iter()
+                                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+                    })
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .unwrap_or_else(|| "unrecognized".into());
+                let key = if self.failures.len() < REFUSAL_REASONS
+                    || self.failures.contains_key(&reason)
+                {
+                    reason
+                } else {
+                    "other".into()
+                };
+                *self.failures.entry(key).or_default() += 1;
+            }
+            (Some("network"), Some("request_body")) => {
+                if let Some(reason) = payload()
+                    .filter(|b| b.len() == 128)
+                    .and_then(|b| body_refusal(b[5]))
+                {
+                    *self.content.entry(("request_body", reason)).or_default() += 1;
+                }
+            }
+            (Some("network"), Some("request_target")) => {
+                if let Some(reason) = payload()
+                    .filter(|b| b.len() == 128 && b[0] == 2)
+                    .and_then(|b| target_refusal(b[9]))
+                {
+                    *self.content.entry(("request_target", reason)).or_default() += 1;
+                }
+            }
+            (Some("network"), Some("response_body")) => {
+                if let Some(reason) = payload()
+                    .filter(|b| b.len() == 128 && b[0] == 1)
+                    .and_then(|b| response_refusal(b[4]))
+                {
+                    *self.content.entry(("response_body", reason)).or_default() += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// request_body states that keep less than the whole body (native-network-v2.md).
+fn body_refusal(state: u8) -> Option<&'static str> {
+    Some(match state {
+        5 => "captured_truncated",
+        6 => "not_captured_body_kind",
+        7 => "not_captured_artifact_unavailable",
+        8 => "not_captured_transfer_refused",
+        9 => "not_captured_url",
+        10 => "not_captured_session_budget",
+        11 => "not_captured_credential_form",
+        12 => "not_captured_read_incomplete",
+        _ => return None,
+    })
+}
+
+/// Version 2 request_target retention states that did not retain the full target.
+fn target_refusal(retention: u8) -> Option<&'static str> {
+    Some(match retention {
+        2 => "not_retained_artifact_unavailable",
+        3 => "not_retained_transfer_refused",
+        4 => "not_retained_session_budget",
+        5 => "not_retained_url",
+        _ => return None,
+    })
+}
+
+/// response_body states a capture limit or policy caused (native-network-v3.md).
+fn response_refusal(state: u8) -> Option<&'static str> {
+    Some(match state {
+        2 => "captured_truncated",
+        9 => "not_captured_type",
+        10 => "not_captured_artifact_unavailable",
+        11 => "not_captured_transfer_refused",
+        12 => "not_captured_session_budget",
+        _ => return None,
+    })
+}
+
+fn content_meaning(category: &str, reason: &str, count: u64) -> String {
+    let what = match category {
+        "request_body" => "request bodies",
+        "response_body" => "response bodies",
+        _ => "full request targets",
+    };
+    let why = match reason {
+        "captured_truncated" => "were longer than 16 MiB, so only their first 16 MiB is retained",
+        "not_captured_type" => {
+            "were images, audio, video or fonts that page elements load, which are kept only with REB_CAPTURE_RESPONSE_MEDIA=1"
+        }
+        "not_captured_session_budget" if category == "response_body" => {
+            "arrived after the session's response body byte budget was used. Start a new session, or raise REB_RESPONSE_BODY_BUDGET_MIB"
+        }
+        "not_captured_body_kind" => {
+            "had a part the browser does not read, so they are described but not read"
+        }
+        "not_captured_read_incomplete" => {
+            "had a file, blob or stream part that changed, failed or was cancelled before it was read whole"
+        }
+        "not_captured_credential_form" => {
+            "were password form posts, which keep neither bytes nor a digest"
+        }
+        "not_captured_url" | "not_retained_url" => {
+            "had no HTTP(S) or WebSocket origin, or exceeded Chromium's URL limit"
+        }
+        "not_captured_session_budget" | "not_retained_session_budget" => {
+            "arrived after the session's request-content byte budget was used. Start a new session, or raise REB_REQUEST_CONTENT_BUDGET_MIB"
+        }
+        "not_captured_artifact_unavailable" | "not_retained_artifact_unavailable" => {
+            "had no artifact channel: the Artifact category was off or the receiver was disconnected"
+        }
+        _ => "were refused by the bounded in-flight memory pool or artifact queue",
+    };
+    format!("{count} {what} {why}.")
+}
+
 #[derive(Default)]
 struct ArtifactCounts {
     total: u64,
@@ -178,6 +320,59 @@ impl ArtifactCounts {
     }
 }
 
+/// Browser-internal evidence the capture counted instead of recording
+/// (protocol/native-network-v3.md). Each record is one producer's cumulative
+/// count for one class, so the newest count per producer is summed.
+#[derive(Default)]
+struct Exclusions(BTreeMap<(u64, u64, u8), u64>);
+impl Exclusions {
+    fn record(&mut self, event: &Value) {
+        if event["category"] != "network" || event["type"] != "capture_exclusion" {
+            return;
+        }
+        let Some(payload) = event["payload"].as_str().and_then(|p| hex::decode(p).ok()) else {
+            return;
+        };
+        if payload.len() != 16 || payload[..4] != [1, 0, 16, 0] || payload[5..8] != [0, 0, 0] {
+            return;
+        }
+        let count = u64::from_le_bytes(payload[8..16].try_into().unwrap());
+        if exclusion_class(payload[4]).is_none() || count == 0 {
+            return;
+        }
+        let key = (
+            event_window::unsigned(&event["session_id"]).unwrap_or(0),
+            event["initiator_process_id"].as_u64().unwrap_or(0),
+            payload[4],
+        );
+        let newest = self.0.entry(key).or_default();
+        *newest = (*newest).max(count);
+    }
+    fn totals(&self) -> BTreeMap<u8, u64> {
+        let mut totals = BTreeMap::new();
+        for ((_, _, class), count) in &self.0 {
+            let total: &mut u64 = totals.entry(*class).or_default();
+            *total = total.saturating_add(*count);
+        }
+        totals
+    }
+}
+
+fn exclusion_class(code: u8) -> Option<(&'static str, &'static str)> {
+    Some(match code {
+        16 => ("chrome", "requests"),
+        17 => ("chrome_untrusted", "requests"),
+        18 => ("brave", "requests"),
+        19 => ("devtools", "requests"),
+        20 => ("chrome_search", "requests"),
+        64 => ("webui_renderer", "renderer_processes"),
+        65 => ("extension_worker", "requests"),
+        66 => ("devtools_load", "requests"),
+        67 => ("webui_request", "requests"),
+        _ => return None,
+    })
+}
+
 fn check(code: &str, severity: &str, message: impl Into<String>) -> Value {
     json!({"code": code, "severity": severity, "message": message.into()})
 }
@@ -208,6 +403,9 @@ fn gap_meaning(reason: &str) -> &'static str {
 
 pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result<Value> {
     let mut events = EventCounts::default();
+    let mut exclusions = Exclusions::default();
+    let mut request_tabs = RequestTabs::default();
+    let mut refusals = Refusals::default();
     let mut tally = Tally::default();
     let event_page = event_query::read_page(
         store,
@@ -221,6 +419,9 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
             validate_event(&event)?;
             tally.record(&event)?;
             events.record(&event);
+            exclusions.record(&event);
+            request_tabs.record(&event);
+            refusals.record(&event);
             Ok(None)
         },
     )?;
@@ -285,13 +486,26 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
             ),
         ));
     }
-    let failed = events.count("artifact_capture_failed");
-    if failed > 0 {
-        checks.push(check(
+    for (reason, count) in &refusals.failures {
+        let mut item = check(
             "artifact_capture_failed",
             "warning",
-            format!("{failed} artifact captures failed; those bodies are not stored."),
-        ));
+            format!("{count} artifact captures failed ({reason}); those bytes are not stored."),
+        );
+        item["reason"] = json!(reason);
+        item["count"] = json!(count.to_string());
+        checks.push(item);
+    }
+    for ((category, reason), count) in &refusals.content {
+        let mut item = check(
+            "request_content_not_retained",
+            "warning",
+            content_meaning(category, reason, *count),
+        );
+        item["category"] = json!(category);
+        item["reason"] = json!(reason);
+        item["count"] = json!(count.to_string());
+        checks.push(item);
     }
     let (drops, _) = tally.queue_drops();
     let named: u64 = tally.named_gaps().iter().map(|gap| gap.count).sum();
@@ -320,6 +534,72 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         item["count"] = json!(gap.count.to_string());
         checks.push(item);
     }
+    let unresolved = request_tabs.unresolved();
+    if unresolved > 0 {
+        let mut item = check(
+            "network_tab_unresolved",
+            "error",
+            format!(
+                "{unresolved} requests have no tab. This is a capture bug, not a property of the page; request_tabs lists them by process and request id for get_events."
+            ),
+        );
+        item["count"] = json!(unresolved.to_string());
+        checks.insert(0, item);
+    }
+    let excluded = exclusions.totals();
+    let no_tab: u64 = [65, 66]
+        .iter()
+        .filter_map(|class| excluded.get(class))
+        .fold(0, |sum, count| sum.saturating_add(*count));
+    if no_tab > 0 {
+        let mut item = check(
+            "no_tab_traffic_excluded",
+            "info",
+            format!(
+                "{no_tab} requests no tab caused were not recorded (extension workers {}, DevTools loads {}). These are named exclusions, not gaps.",
+                excluded.get(&65).copied().unwrap_or(0),
+                excluded.get(&66).copied().unwrap_or(0)
+            ),
+        );
+        item["count"] = json!(no_tab.to_string());
+        checks.push(item);
+    }
+    // Internal-scheme loads and the requests WebUI renderers sent through the proxy.
+    let internal_request = |class: u8| class < 64 || class == 67;
+    let requests: u64 = excluded
+        .iter()
+        .filter(|(class, _)| internal_request(**class))
+        .fold(0, |sum, (_, count)| sum.saturating_add(*count));
+    let renderers = excluded.get(&64).copied().unwrap_or(0);
+    if requests > 0 || renderers > 0 {
+        let by_class = excluded
+            .iter()
+            .filter(|(class, _)| internal_request(**class))
+            .map(|(class, count)| format!("{} {count}", exclusion_class(*class).unwrap().0))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut parts = Vec::new();
+        if requests > 0 {
+            parts.push(format!(
+                "{requests} browser-internal requests were not recorded ({by_class})"
+            ));
+        }
+        if renderers > 0 {
+            parts.push(format!(
+                "{renderers} WebUI renderer processes were not admitted"
+            ));
+        }
+        let mut item = check(
+            "browser_internal_excluded",
+            "info",
+            format!(
+                "{}. These are named exclusions, not gaps; set REB_CAPTURE_BROWSER_INTERNAL=1 to record them.",
+                parts.join("; ")
+            ),
+        );
+        item["count"] = json!(requests.to_string());
+        checks.push(item);
+    }
     if event_page.exhausted {
         checks.push(check(
             "bounded_scope",
@@ -337,6 +617,11 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         "artifact_receiver_configured": state.artifact_receiver_configured,
         "artifact_receiver_connected": state.artifact_receiver_connected,
         "events": events.document(&event_page, &tally),
+        "request_tabs": request_tabs.document(),
+        "exclusions": excluded.iter().map(|(class, count)| {
+            let (name, unit) = exclusion_class(*class).unwrap();
+            json!({"class": name, "unit": unit, "count": count.to_string()})
+        }).collect::<Vec<_>>(),
         "artifacts": {
             "scope": artifact_page.scope(),
             "budget_exhausted": artifact_page.exhausted,
@@ -439,6 +724,97 @@ mod tests {
             assert!(!meaning.contains("dropped"), "{reason}: {meaning}");
         }
         assert!(gap_meaning("native_wasm_dispatch_budget_incomplete").contains("budget"));
+    }
+
+    fn exclusion(sequence: u64, producer: u32, class: u8, count: u64) -> Value {
+        let mut payload = vec![1, 0, 16, 0, class, 0, 0, 0];
+        payload.extend(count.to_le_bytes());
+        let mut event = event(sequence, "network", "capture_exclusion", 0, "");
+        event["payload"] = json!(hex::encode(&payload));
+        event["payload_size"] = json!(16);
+        event["initiator_process_id"] = json!(producer);
+        event["frame_id"] = json!("0");
+        event["tab_id"] = json!(0);
+        event
+    }
+
+    #[test]
+    fn browser_internal_exclusions_are_named_counts_not_gaps() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("events.jsonl");
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let mut lines = [
+            exclusion(1, 40, 16, 3),
+            exclusion(2, 40, 16, 5),
+            exclusion(3, 41, 16, 2),
+            exclusion(4, 41, 19, 1),
+            exclusion(5, 0, 64, 1),
+            exclusion(6, 0, 64, 2),
+            exclusion(8, 41, 65, 2),
+            exclusion(9, 0, 66, 1),
+            exclusion(11, 0, 67, 3),
+        ]
+        .map(|event| event.to_string())
+        .to_vec();
+        let mut orphan = event(10, "network", "request_started", 0, "GET example.test");
+        orphan["tab_id"] = json!(0);
+        orphan["request_id"] = json!("77");
+        orphan["browser_context_id_high"] = json!("3");
+        orphan["browser_context_id_low"] = json!("4");
+        lines.push(orphan.to_string());
+        let mut dirty = exclusion(7, 42, 16, 9);
+        let mut bytes = hex::decode(dirty["payload"].as_str().unwrap()).unwrap();
+        bytes[5] = 1;
+        dirty["payload"] = json!(hex::encode(bytes));
+        lines.push(dirty.to_string());
+        std::fs::write(&store, lines.join("\n") + "\n").unwrap();
+        let state = CaptureState {
+            instance_id: "1:2",
+            capture_mode: "live",
+            broker_connected: true,
+            capture_stopped: false,
+            artifact_receiver_configured: false,
+            artifact_receiver_connected: false,
+        };
+        let summary = build(&store, &artifacts, &state).unwrap();
+        assert_eq!(
+            summary["exclusions"],
+            json!([
+                {"class": "chrome", "unit": "requests", "count": "7"},
+                {"class": "devtools", "unit": "requests", "count": "1"},
+                {"class": "webui_renderer", "unit": "renderer_processes", "count": "2"},
+                {"class": "extension_worker", "unit": "requests", "count": "2"},
+                {"class": "devtools_load", "unit": "requests", "count": "1"},
+                {"class": "webui_request", "unit": "requests", "count": "3"},
+            ])
+        );
+        let checks = summary["checks"].as_array().unwrap();
+        assert_eq!(checks[0]["code"], "network_tab_unresolved");
+        assert_eq!(checks[0]["severity"], "error");
+        assert_eq!(
+            summary["request_tabs"]["unresolved_requests"],
+            json!([{"process_id": 7, "request_id": "77"}])
+        );
+        let no_tab = checks
+            .iter()
+            .find(|check| check["code"] == "no_tab_traffic_excluded")
+            .unwrap();
+        assert_eq!(no_tab["count"], "3");
+        assert_eq!(summary["events"]["sequence_gaps"], "0");
+        let checks = summary["checks"].as_array().unwrap();
+        assert!(checks.iter().all(|check| check["code"] != "named_gap"));
+        let excluded = checks
+            .iter()
+            .find(|check| check["code"] == "browser_internal_excluded")
+            .unwrap();
+        assert_eq!(excluded["severity"], "info");
+        assert_eq!(excluded["count"], "11");
+        let message = excluded["message"].as_str().unwrap();
+        assert!(message.contains(
+            "11 browser-internal requests were not recorded (chrome 7, devtools 1, webui_request 3)"
+        ));
+        assert!(message.contains("2 WebUI renderer processes were not admitted"));
     }
 
     #[test]

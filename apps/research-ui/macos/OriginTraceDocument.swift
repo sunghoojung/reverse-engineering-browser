@@ -350,18 +350,31 @@ enum OriginTraceDocumentBuilder {
     ]
   }
 
-  // Request target and body records are fixed binary layouts
-  // (protocol/native-network-v2.md), not text. A step names the record instead
+  // Request target, body, response body, header and cookie records are fixed
+  // binary layouts (protocol/native-network-v2.md and v3), not text. A step names the record instead
   // of decoding it, so no NUL or control byte reads as captured text; Traffic
   // decodes their fields. Mirrors binary_record_summary in
   // apps/origin-trace-backend/src/origin_trace.rs.
   private static func binaryRecordSummary(
     category: String, operation: String, event: [String: Any]
   ) -> String? {
-    guard category == "network", ["request_target", "request_body"].contains(operation),
+    let network = [
+      "request_target", "request_body", "response_body", "request_headers", "response_headers",
+      "cookie_list", "script_cookie", "request_initiator_stack", "script_identity",
+      "navigation_initiator_stack", "navigation_initiator_link", "async_task_stack",
+      "request_watch_match",
+    ]
+    let observation = [
+      "listener_dispatch", "timer_observation", "csp_violation", "exception_observation",
+      "dom_mutation",
+    ]
+    let isNetwork = category == "network" && network.contains(operation)
+    guard
+      isNetwork || (category == "runtime" && observation.contains(operation)),
       let payload = event["payload"] as? String
     else { return nil }
-    return "Binary \(operation) record, \(payload.count / 2) bytes, not shown as text; Traffic shows its fields"
+    let whereShown = isNetwork ? "Traffic shows its fields" : "decoded on read"
+    return "Binary \(operation) record, \(payload.count / 2) bytes, not shown as text; \(whereShown)"
   }
 
   // Exactly one surviving candidate, or none. Two adjacent records are a tie

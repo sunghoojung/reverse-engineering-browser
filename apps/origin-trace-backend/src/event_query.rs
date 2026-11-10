@@ -101,6 +101,143 @@ impl Page {
     }
 }
 
+/// The bytes that hold one indexed request's records
+/// (`RequestIndex::member_range`). `indexed` is false while the index has not
+/// reached the end of the store, when later records may lie past `end`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordRange {
+    pub first: u64,
+    pub end: u64,
+    pub indexed: bool,
+}
+
+/// What a per-request detail read covered. A record outside it is unknown,
+/// not absent, so a route reports this beside any empty answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Coverage {
+    scope: &'static str,
+    complete: bool,
+    scan_start: u64,
+    scan_end: u64,
+    store_end: u64,
+    limited: bool,
+    budget_exhausted: bool,
+    malformed_lines: u64,
+    unterminated_tail_bytes: u64,
+}
+impl Coverage {
+    /// Absence in the answer is a fact: the read covered its whole scope, or
+    /// stopped because it found the one newest record it was asked for.
+    pub fn complete(&self) -> bool {
+        self.complete
+    }
+    pub fn to_json(self) -> Value {
+        json!({
+            "scope": self.scope,
+            "complete": self.complete,
+            "scan_start": self.scan_start.to_string(),
+            "scan_end": self.scan_end.to_string(),
+            "store_end": self.store_end.to_string(),
+            "limited": self.limited,
+            "budget_exhausted": self.budget_exhausted,
+            "malformed_lines": self.malformed_lines,
+            "unterminated_tail_bytes": self.unterminated_tail_bytes.to_string(),
+        })
+    }
+}
+
+/// The records of one detail read and what that read covered.
+pub struct Detail {
+    pub records: Vec<Value>,
+    pub coverage: Coverage,
+}
+
+fn coverage(
+    page: &Page,
+    range: Option<RecordRange>,
+    found_newest: bool,
+    malformed_lines: u64,
+) -> Coverage {
+    // The newest record of a request's bytes is the whole answer about them.
+    let covered = match range {
+        Some(range) => {
+            range.indexed
+                && (found_newest || (page.scan_start <= range.first && page.scan_end >= range.end))
+        }
+        // A Tail read starts at the last newline. Bytes after it are a record
+        // still being written, or torn when the writer stopped, not unread ones.
+        None => page.scan_start == 0,
+    };
+    Coverage {
+        scope: match (covered, range) {
+            (false, _) => "bounded_range",
+            (true, Some(_)) => "request_range",
+            (true, None) => "store",
+        },
+        complete: covered || found_newest,
+        scan_start: page.scan_start,
+        scan_end: page.scan_end,
+        store_end: page.store_end,
+        limited: page.limited && !covered && !found_newest,
+        budget_exhausted: page.exhausted && !covered && !found_newest,
+        malformed_lines,
+        unterminated_tail_bytes: if range.is_none() {
+            page.store_end - page.scan_end
+        } else {
+            0
+        },
+    }
+}
+
+fn read_detail(
+    store: &Path,
+    range: Option<RecordRange>,
+    limit: usize,
+    filter: &EventFilter,
+    budget: u64,
+    newest: bool,
+) -> Result<Detail> {
+    let cursor = match (range, newest) {
+        // When the budget holds the whole range the newest read is exact.
+        (Some(range), true) if range.end - range.first <= budget => Cursor::Before(range.end),
+        // A longer range would be read backward from the wrong end: a record
+        // written once at a request's start would sit past the budget, and the
+        // read would fail after using the whole budget. Reading forward finds
+        // it in the request's first bytes and stops there.
+        (Some(range), _) => Cursor::After(range.first),
+        (None, _) => Cursor::Tail,
+    };
+    let budget = range.map_or(budget, |range| budget.min(range.end - range.first));
+    let (page, malformed) = read_tolerant(store, cursor, limit, budget, filter)?;
+    let coverage = coverage(&page, range, newest && !page.records.is_empty(), malformed);
+    Ok(Detail {
+        records: page.records,
+        coverage,
+    })
+}
+
+/// Records of one request, oldest first: its indexed byte range when the index
+/// names one, else the newest bytes of the store within the scan budget.
+pub fn read_request_records(
+    store: &Path,
+    range: Option<RecordRange>,
+    limit: usize,
+    filter: &EventFilter,
+) -> Result<Detail> {
+    read_detail(store, range, limit, filter, SCAN_BYTES, false)
+}
+
+/// The newest matching record, from the request's range when the index names
+/// one. A range longer than the scan budget is read forward instead, which is
+/// exact for a record the request writes once.
+pub fn read_newest_record(
+    store: &Path,
+    range: Option<RecordRange>,
+    filter: &EventFilter,
+) -> Result<Detail> {
+    read_detail(store, range, 1, filter, SCAN_BYTES, true)
+}
+
 /// Gap accounting with the same rules as the polling window, applied to the
 /// records a filtered read actually scanned.
 #[derive(Default)]
@@ -109,6 +246,7 @@ pub struct Tally {
     queue_drops: u64,
     queue_drops_saturated: bool,
     named_gaps: Vec<NamedGap>,
+    malformed_lines: u64,
 }
 impl Tally {
     pub fn record(&mut self, event: &Value) -> Result<()> {
@@ -150,6 +288,10 @@ impl Tally {
             }
         }
         Ok(())
+    }
+    /// Lines this read skipped because they were not valid events.
+    pub fn malformed_lines(&self) -> u64 {
+        self.malformed_lines
     }
     pub fn named_gaps(&self) -> &[NamedGap] {
         &self.named_gaps
@@ -220,6 +362,14 @@ pub struct EventFilter {
     until_ns: Option<u64>,
 }
 impl EventFilter {
+    /// Exact type and identifier selection for an internal lookup.
+    pub fn exact(types: &[&str], ids: Vec<(&'static str, u64)>) -> Self {
+        Self {
+            types: types.iter().map(|t| (*t).to_owned()).collect(),
+            ids,
+            ..Self::default()
+        }
+    }
     pub fn matches(&self, event: &Value) -> bool {
         let named = |names: &[String], value: &Value| {
             names.is_empty()
@@ -537,18 +687,73 @@ fn backward(
     Ok((end, false))
 }
 
-/// Parses and validates one stored event, counts it, and returns it when the
-/// filter selects it.
+/// A damaged line is not bounded by the record size. This keeps its read
+/// bounded while still counting a torn or corrupted line of any likely size.
+pub const DAMAGED_LINE_BYTES: usize = 1024 * 1024;
+
+/// The event on one stored line, or `None` for a line that cannot be one.
+fn stored_event(line: &[u8]) -> Option<Value> {
+    (line.len() <= EVENT_RECORD_BYTES)
+        .then(|| serde_json::from_slice::<Value>(line).ok())
+        .flatten()
+        .filter(|event| validate_event(event).is_ok())
+}
+
+/// Parses, validates and tallies one stored event and returns it when the
+/// filter selects it. A line that cannot be read is counted and skipped, as the
+/// request index does, so a torn record cannot fail a whole filtered read.
 pub fn event_visitor<'a>(
     filter: &'a EventFilter,
     tally: &'a mut Tally,
 ) -> impl FnMut(&[u8]) -> Result<Option<Value>> + 'a {
     move |line| {
-        let event: Value = serde_json::from_slice(line).map_err(|_| event_window::malformed())?;
-        validate_event(&event)?;
-        tally.record(&event)?;
-        Ok(filter.matches(&event).then_some(event))
+        let event = stored_event(line).filter(|event| tally.record(event).is_ok());
+        Ok(match event {
+            Some(event) => filter.matches(&event).then_some(event),
+            None => {
+                tally.malformed_lines += 1;
+                None
+            }
+        })
     }
+}
+
+/// Parses and validates one stored event without failing the read: a line that
+/// is unreadable or invalid is counted and skipped, as the request index does.
+fn tolerant_visitor<'a>(
+    filter: &'a EventFilter,
+    malformed: &'a mut u64,
+) -> impl FnMut(&[u8]) -> Result<Option<Value>> + 'a {
+    move |line| {
+        let event = stored_event(line);
+        Ok(match event {
+            Some(event) => filter.matches(&event).then_some(event),
+            None => {
+                *malformed += 1;
+                None
+            }
+        })
+    }
+}
+
+/// One page that reads past damaged lines and counts them.
+pub fn read_tolerant(
+    path: &Path,
+    cursor: Cursor,
+    limit: usize,
+    budget: u64,
+    filter: &EventFilter,
+) -> Result<(Page, u64)> {
+    let mut malformed = 0;
+    let page = read_page(
+        path,
+        cursor,
+        limit,
+        budget,
+        DAMAGED_LINE_BYTES,
+        tolerant_visitor(filter, &mut malformed),
+    )?;
+    Ok((page, malformed))
 }
 
 /// A filtered event page in the `Events` document shape. The polling-only
@@ -567,6 +772,7 @@ pub fn events_document(
     };
     let mut query = page.paging(direction, limit);
     query["filters"] = filter.echo();
+    query["malformed_lines"] = json!(tally.malformed_lines());
     let mut document = json!({
         "count": page.records.len(),
         "event_window": {
@@ -808,6 +1014,34 @@ mod tests {
     }
 
     #[test]
+    fn a_damaged_line_is_counted_and_read_past() {
+        let events: Vec<_> = (1..=3).map(|n| event(n, "api_call", 1)).collect();
+        let (_root, path, ends) = store(&events);
+        let mut bytes = fs::read(&path).unwrap();
+        // A torn line inside the store, then the rest of the capture after it.
+        bytes.splice(
+            ends[0] as usize..ends[0] as usize,
+            *b"{\"protocol_version\":3,\"sess\n",
+        );
+        fs::write(&path, &bytes).unwrap();
+        let filter = EventFilter::default();
+        let mut tally = Tally::default();
+        let page = read_page(
+            &path,
+            Cursor::After(0),
+            10,
+            SCAN_BYTES,
+            DAMAGED_LINE_BYTES,
+            event_visitor(&filter, &mut tally),
+        )
+        .unwrap();
+        assert_eq!(sequences(&page), vec![1, 2, 3]);
+        assert_eq!(tally.malformed_lines(), 1);
+        let document = events_document(&page, &tally, &filter, Cursor::After(0), 10);
+        assert_eq!(document["query"]["malformed_lines"], 1);
+    }
+
+    #[test]
     fn tally_counts_named_gaps_drops_and_sequence_holes_in_scope() {
         let mut events: Vec<_> = [1, 2, 5].iter().map(|n| event(*n, "api_call", 1)).collect();
         let mut gap = event(6, "gap", 1);
@@ -834,6 +1068,150 @@ mod tests {
         assert_eq!(tally.sequence_gaps(), (2, false));
         assert_eq!(tally.queue_drops(), (1, false));
         assert_eq!(tally.named_gaps()[0].reason, "native_guest_sample_limit");
+    }
+
+    #[test]
+    fn detail_reads_report_what_they_covered() {
+        let events: Vec<_> = (1..=6).map(|n| event(n, "api_call", 1)).collect();
+        let (_root, path, ends) = store(&events);
+        let filter = EventFilter {
+            ids: vec![("session_id", 1)],
+            ..Default::default()
+        };
+        let range = RecordRange {
+            first: ends[1],
+            end: ends[3],
+            indexed: true,
+        };
+        let budget = SCAN_BYTES;
+        let read = |range, limit, budget, newest| {
+            read_detail(&path, range, limit, &filter, budget, newest).unwrap()
+        };
+
+        let inside = read(Some(range), 100, budget, false);
+        assert_eq!(inside.records.len(), 2);
+        assert_eq!(inside.coverage.scope, "request_range");
+        assert!(inside.coverage.complete);
+        assert!(!inside.coverage.limited && !inside.coverage.budget_exhausted);
+        assert_eq!(inside.coverage.scan_start, ends[1]);
+        assert_eq!(inside.coverage.scan_end, ends[3]);
+
+        // The byte budget ends the read inside the range.
+        let short = read(Some(range), 100, ends[0], false);
+        assert_eq!(short.coverage.scope, "bounded_range");
+        assert!(!short.coverage.complete && short.coverage.budget_exhausted);
+
+        // The record limit ends the read inside the range.
+        let limited = read(Some(range), 1, budget, false);
+        assert_eq!(limited.coverage.scope, "bounded_range");
+        assert!(!limited.coverage.complete && limited.coverage.limited);
+
+        // An index still catching up cannot prove the range ended.
+        let lagging = RecordRange {
+            indexed: false,
+            ..range
+        };
+        let behind = read(Some(lagging), 100, budget, false);
+        assert_eq!(behind.coverage.scope, "bounded_range");
+        assert!(!behind.coverage.complete);
+
+        let whole = read(None, 100, budget, false);
+        assert_eq!(whole.coverage.scope, "store");
+        assert!(whole.coverage.complete);
+        let tail = read(None, 100, ends[0] * 2 + 1, false);
+        assert_eq!(tail.records.len(), 2);
+        assert_eq!(tail.coverage.scope, "bounded_range");
+        assert!(tail.coverage.budget_exhausted && !tail.coverage.complete);
+
+        // Newest reads stop on a match, and only then is the stop the answer.
+        let newest = read(Some(range), 1, budget, true);
+        assert_eq!(sequences_of(&newest.records), vec![4]);
+        assert!(newest.coverage.complete && !newest.coverage.limited);
+        let none_filter = EventFilter {
+            ids: vec![("session_id", 2)],
+            ..Default::default()
+        };
+        let empty = read_detail(&path, Some(range), 1, &none_filter, budget, true).unwrap();
+        assert!(empty.records.is_empty());
+        assert_eq!(empty.coverage.scope, "request_range");
+        assert!(empty.coverage.complete);
+        let missed = read_detail(&path, None, 1, &none_filter, ends[0], true).unwrap();
+        assert_eq!(missed.coverage.scope, "bounded_range");
+        assert!(!missed.coverage.complete && missed.coverage.budget_exhausted);
+
+        // A range longer than the budget is read from its start, so the record
+        // a long-lived request wrote first is found, without reading the rest.
+        let long_range = RecordRange {
+            first: 0,
+            end: ends[5],
+            indexed: true,
+        };
+        let first_record = read(Some(long_range), 1, ends[0], true);
+        assert_eq!(sequences_of(&first_record.records), vec![1]);
+        assert!(first_record.coverage.complete);
+        assert_eq!(first_record.coverage.scan_start, 0);
+        assert_eq!(first_record.coverage.scan_end, ends[0]);
+        let beyond_budget =
+            read_detail(&path, Some(long_range), 1, &none_filter, ends[0], true).unwrap();
+        assert!(beyond_budget.records.is_empty());
+        assert_eq!(beyond_budget.coverage.scope, "bounded_range");
+        assert!(!beyond_budget.coverage.complete && beyond_budget.coverage.budget_exhausted);
+    }
+
+    fn sequences_of(records: &[Value]) -> Vec<u64> {
+        records
+            .iter()
+            .map(|event| event_window::unsigned(&event["sequence_number"]).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn detail_reads_count_damaged_lines_and_keep_going() {
+        let mut bytes = Vec::new();
+        for (index, line) in [
+            serde_json::to_vec(&event(1, "api_call", 1)).unwrap(),
+            b"{\"protocol_version\":3,\"session".to_vec(),
+            b"{\"protocol_version\":99}".to_vec(),
+            vec![b'x'; EVENT_RECORD_BYTES + 1],
+            serde_json::to_vec(&event(2, "api_call", 1)).unwrap(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(index < 5);
+            bytes.extend(line);
+            bytes.push(b'\n');
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events.jsonl");
+        fs::write(&path, &bytes).unwrap();
+        let filter = EventFilter::default();
+        let read = read_request_records(&path, None, 100, &filter).unwrap();
+        assert_eq!(sequences_of(&read.records), vec![1, 2]);
+        assert_eq!(read.coverage.malformed_lines, 3);
+        assert_eq!(read.coverage.scope, "store");
+        assert!(read.coverage.complete);
+        assert_eq!(read.coverage.to_json()["malformed_lines"], 3);
+    }
+
+    #[test]
+    fn an_unterminated_final_line_does_not_make_a_whole_read_partial() {
+        let events: Vec<_> = (1..=3).map(|n| event(n, "api_call", 1)).collect();
+        let (_root, path, ends) = store(&events);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.extend_from_slice(br#"{"protocol_version":3,"session"#);
+        fs::write(&path, &bytes).unwrap();
+        let filter = EventFilter::default();
+        let read = read_detail(&path, None, 100, &filter, SCAN_BYTES, false).unwrap();
+        assert_eq!(read.records.len(), 3);
+        assert!(read.coverage.complete(), "{:?}", read.coverage);
+        assert_eq!(read.coverage.scope, "store");
+        assert_eq!(read.coverage.scan_end, ends[2]);
+        let document = read.coverage.to_json();
+        assert_eq!(
+            document["unterminated_tail_bytes"],
+            (bytes.len() as u64 - ends[2]).to_string()
+        );
     }
 
     #[test]

@@ -106,6 +106,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let decoderService: NativeDecoderService
   private let brokerSocketURL: URL?
   private let storedEvents = StoredEventWindowCache()
+  private let storedBackend: StoredEvidenceBackend
   private let demoEvidenceEnabled: Bool
   private let analystRunnerLock = NSLock()
   private var activeAnalystProcess: Process?
@@ -124,6 +125,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     analystRunnerCoreURL: URL,
     decoderExecutableURL: URL,
     brokerSocketURL: URL?,
+    storedBackend: StoredEvidenceBackend,
     demoEvidenceEnabled: Bool
   ) {
     self.indexURL = indexURL
@@ -139,7 +141,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     deobfuscationService = NativeDeobfuscationService(executableURL: decoderExecutableURL.deletingLastPathComponent().appendingPathComponent("OriginTraceDeobfuscator"))
     wasmService = NativeWasmService(executableURL: decoderExecutableURL.deletingLastPathComponent().appendingPathComponent("OriginTraceWasmInspector"))
     self.brokerSocketURL = brokerSocketURL
+    self.storedBackend = storedBackend
     self.demoEvidenceEnabled = demoEvidenceEnabled
+  }
+
+  func stopStoredBackend() {
+    storedBackend.stop()
   }
 
   deinit {
@@ -159,6 +166,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       sendError("Invalid application URL", status: 400, to: urlSchemeTask)
       return
     }
+    if StoredEvidenceBackend.serves(urlSchemeTask.request) {
+      storedBackend.forward(urlSchemeTask.request) { body, status, contentType, headers in
+        self.send(body, contentType: contentType, status: status, headers: headers, to: urlSchemeTask)
+      }
+      return
+    }
 
     do {
       let response: (Data, String, Int, [String: String])
@@ -170,7 +183,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(String(requestURL.path.dropFirst()))),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/pane_layout.js", "/app.js", "/agent_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/source_search.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/invocation_sites.js", "/entropy_map.js", "/traffic_view.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/native_console_completion.js", "/native_console.js", "/block_graph.js", "/block_graph_layout.js":
+      case "/block_graph.js", "/block_graph_layout.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/invocation_sites.js", "/entropy_map.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/native_console_completion.js", "/native_console.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -1780,8 +1793,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       CFGetTypeID(protocolVersion) != CFBooleanGetTypeID(),
       protocolVersion.stringValue == "1",
       let kind = artifact["kind"] as? String,
-      Set(["javascript", "wasm", "source_map", "response_body", "canvas_data_url", "request_body"])
-        .contains(kind),
+      Set([
+        "javascript", "wasm", "source_map", "response_body", "canvas_data_url", "request_body",
+        "request_target",
+        "request_headers", "response_headers", "cookie_list", "stack",
+      ]).contains(kind),
       let url = artifact["url"] as? String,
       !url.isEmpty,
       let mimeType = artifact["mime_type"] as? String,
@@ -1793,7 +1809,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       let sha256 = artifact["sha256"] as? String,
       sha256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
       let sensitive = artifact["sensitive"] as? Bool,
-      sensitive == ["response_body", "canvas_data_url", "request_body"].contains(kind),
+      sensitive
+        == [
+          "response_body", "canvas_data_url", "request_body", "request_target", "request_headers",
+          "response_headers", "cookie_list",
+        ].contains(kind),
       artifact["content_path"] as? String == "blobs/\(sha256).bin"
     else {
       return false
@@ -1812,10 +1832,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     guard identifiersValid else { return false }
     let hasExecutionContext = artifact["execution_context_id"] != nil
     let hasCaptureOrigin = artifact["capture_origin"] != nil
-    // A request body exists only as the native network v2 artifact that its
-    // browser request_body record created; validate_artifact in evidence.rs
-    // applies the same rules.
-    guard hasExecutionContext == hasCaptureOrigin, hasCaptureOrigin || kind != "request_body" else {
+    // Request content, header blocks and cookie lists exist only as the native
+    // network v2 and v3 artifacts their browser network record created;
+    // validate_artifact in evidence.rs applies the same rules.
+    let networkRequest = [
+      "request_body", "request_target", "request_headers", "response_headers", "cookie_list",
+    ].contains(kind)
+    guard hasExecutionContext == hasCaptureOrigin, hasCaptureOrigin || !networkRequest else {
       return false
     }
     if hasExecutionContext {
@@ -1827,12 +1850,16 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         Set([
           "unknown", "network_response", "dynamic_javascript", "webassembly_compile",
           "webassembly_module", "webassembly_instantiate",
-          "canvas_to_data_url", "network_request",
+          "canvas_to_data_url", "network_request", "request_stack", "stack_script",
+          "compiled_script",
         ]).contains(captureOrigin),
-        (kind == "request_body") == (captureOrigin == "network_request"),
+        networkRequest == (captureOrigin == "network_request"),
+        (kind == "stack") == (captureOrigin == "request_stack"),
+        captureOrigin != "stack_script" || (kind == "javascript" && executionContextID != "0"),
         captureOrigin != "network_request"
           || (executionContextID == "0" && artifact["creator_event_id"] as? String != "0"),
         captureOrigin != "dynamic_javascript" || (kind == "javascript" && executionContextID != "0"),
+        captureOrigin != "compiled_script" || (kind == "javascript" && executionContextID != "0"),
         !captureOrigin.hasPrefix("webassembly_") || (kind == "wasm" && executionContextID != "0")
       else {
         return false
@@ -2721,6 +2748,15 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let analystRunnerCoreURL = researchUIURL.appendingPathComponent("analyst_runner_core.js")
     let decoderExecutableURL = Bundle.main.bundleURL
       .appendingPathComponent("Contents/MacOS/OriginTraceDecoder")
+    let storedBackend = StoredEvidenceBackend(
+      executableURL: Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/OriginTraceBackend"),
+      arguments: [
+        "--store", eventStoreURL.path, "--trace-store", traceStoreURL.path,
+        "--signal-store", signalStoreURL.path, "--artifacts", artifactStoreURL.path,
+        "--api-collection", apiCollectionStoreURL.path, "--local-analyst", localAnalystStoreURL.path,
+        "--js-invocation-site-store", InvocationSiteSet.storeURL(
+          environment: ProcessInfo.processInfo.environment, applicationSupport: originTraceSupportURL()).path,
+      ])
     let handler = LocalContentHandler(
       indexURL: indexURL,
       eventStoreURL: eventStoreURL,
@@ -2733,6 +2769,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       analystRunnerCoreURL: analystRunnerCoreURL,
       decoderExecutableURL: decoderExecutableURL,
       brokerSocketURL: configuredBrokerSocket(),
+      storedBackend: storedBackend,
       demoEvidenceEnabled: CommandLine.arguments.contains("--demo-evidence")
     )
     contentHandler = handler
@@ -2901,6 +2938,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     agentBridge?.navigationWillStart()
     closeSmoke?.willTerminate()
     liveSessionCoordinator.stop()
+    contentHandler?.stopStoredBackend()
   }
 
   private let customBraveBundleIdentifier = "com.brave.Browser.development"
@@ -2926,7 +2964,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let modeLabel = NSTextField(labelWithString: "Capture mode")
     modeLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
     let privacyLabel = NSTextField(wrappingLabelWithString:
-      "Content mode, the default, retains request paths, queries and request bodies up to 256 KiB each, and Canvas images. Metadata mode keeps request hosts and each request body's length, type and SHA-256, without Canvas images. Neither mode captures headers. Artifacts keep raw source URLs locally; only an explicitly exported redacted copy is altered."
+      "Content mode, the default, retains request paths, queries and bodies and response bodies up to 16 MiB each, request and response headers, cookies, and Canvas images. Metadata mode keeps request hosts and each request body's length, type and SHA-256, without headers, cookies or Canvas images. Artifacts keep raw source URLs locally; only an explicitly exported redacted copy is altered."
     )
     privacyLabel.textColor = .secondaryLabelColor
     privacyLabel.maximumNumberOfLines = 0
@@ -3048,6 +3086,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     clientProjectExport?.prepareForLoad(url)
     agentBridge?.prepareForLoad(url)
     webView?.load(URLRequest(url: url))
+    if url.scheme != "reb" { contentHandler?.stopStoredBackend() }
   }
 
   private var readyLiveWorkspaceURL: URL? {

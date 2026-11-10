@@ -76,7 +76,7 @@ low-level startup limits. The mask is decimal or `0x` hexadecimal, from 1 to
 packaged app reads the same grammar when it chooses its content defaults.
 
 `REB_CAPTURE_REQUEST_CONTENT=1 make live` retains request paths, queries and
-request bodies up to 256 KiB for that one session; without it Traffic rows stay
+request bodies up to 16 MiB for that one session; without it Traffic rows stay
 host-only while still recording each body's length, type and SHA-256 (see
 [Native network v2](../../protocol/native-network-v2.md)).
 
@@ -104,8 +104,9 @@ make ui
 Open `http://127.0.0.1:7319`. The dependency-free local server reads the same
 JSONL evidence store written by the native broker. The network workspace groups
 lifecycle events by request and first scopes them by browser tab, then by domain.
-Protocol v3 records the stable top-level tab identifier; protocol v2 evidence
-remains visible as Unattributed. The workspace provides request filters plus Headers, Payload,
+Protocol v3 links every request to the tab that caused it, including worker
+requests in several tabs; a request without a tab is reported as a capture
+error. The workspace provides request filters plus Headers, Payload,
 Preview, Response, Initiator, Timing, and Signals inspectors. The first-class
 Fingerprinting workspace presents Canvas, WebGL, Web Audio, device and layout,
 Permissions, Storage, WebRTC, and Runtime activity. Its surface overview shows event

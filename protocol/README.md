@@ -22,6 +22,9 @@ defined the getProperties-only host import map.
 [JavaScript Source Facts v1](javascript-source-facts-v1.md) defines exact-artifact
 lexical binding/effect analysis, original-byte ranges and explicit unknown coverage.
 
+[Source format v1](source-format-v1.md) defines the Prettier-style JavaScript
+layout that changes only whitespace, its fidelity checks and limits.
+
 [Native Console v2](native-console-v2.md) defines the opt-in mutable console,
 its disposable browser ownership, wire layouts, and limits.
 
@@ -106,8 +109,24 @@ cookies, and bodies require a separate visibly enabled sensitive-capture mode.
 types 22 `request_body` (always, with Network: body length, normalized content
 type, SHA-256, kind and capture state) and 23 `request_target` (only with
 request content capture: path and query), both exact children of a lifecycle
-record, plus the sensitive `request_body` artifact kind for at most 256 KiB of
-body bytes. Fragments, credentials, headers and cookies are still not recorded.
+record, plus the sensitive `request_body` and `request_target` artifact kinds
+for body bytes up to 16 MiB and full targets. Fragments and URL credentials are still not recorded.
+[Native network v3](native-network-v3.md) adds the envelope's `scheme_class`
+byte on request records, type 36 `capture_exclusion` for counted
+browser-internal exclusions, and renderer completions for requests the browser
+proxy never sees. It also adds the `loader_kind` byte, type 37 `tab_set` and
+type 38 `request_tab_link`, which link every request to the tab that caused it,
+and type 50 `request_extension_link` for extension traffic recorded by opt-in.
+In content sessions it adds type 33 `response_body`, the child of
+`response_started` that names a sensitive `response_body` artifact or says why
+none exists; types 30 `request_headers` and 31 `response_headers` and their
+sensitive header block artifacts, one per hop and source; type 32
+`cookie_list` (sent and received cookies per hop with inclusion status, and
+the sensitive `cookie_list` artifact); and type 39 `script_cookie`
+(`document.cookie` and Cookie Store API calls).
+[Request index v1](request-index-v1.md) defines the backend's one-row-per-request
+index of a whole session, its private sidecar beside the store and
+`GET /api/requests`, which Traffic pages instead of the newest network window.
 
 Renderer-to-browser delivery uses exact 320-byte `EventRecord` objects in a
 bounded shared-memory queue. Mojo carries session lifecycle and coalesced
@@ -401,6 +420,26 @@ use the names.
 | 27 | `wasm_execution_outcome` | `include/reb/wasm_dispatch.hpp` | [native Wasm execution outcomes](native-wasm-dispatch-v1.md#execution-outcomes) |
 | 28 | `wasm_dispatch_overflow` | `include/reb/wasm_dispatch.hpp` | [native Wasm overflow identities](native-wasm-dispatch-v1.md#overflow-identities) |
 | 29 | `wasm_indirect_overflow` | `include/reb/wasm_dispatch.hpp` | [native Wasm overflow identities](native-wasm-dispatch-v1.md#overflow-identities) |
+| 30 | `request_headers` | `include/reb/network_headers.hpp` | [native network v3](native-network-v3.md#records) |
+| 31 | `response_headers` | `include/reb/network_headers.hpp` | [native network v3](native-network-v3.md#records) |
+| 32 | `cookie_list` | `include/reb/network_cookies.hpp` | [native network v3](native-network-v3.md#network-cookie-lists) |
+| 33 | `response_body` | `include/reb/network_response_body.hpp` | [native network v3](native-network-v3.md#response_body-type-33) |
+| 34 | `request_initiator_stack` | `include/reb/request_stack.hpp` | [native network v3](native-network-v3.md#request-initiator-stacks) |
+| 35 | `script_identity` | `include/reb/request_stack.hpp` | [native network v3](native-network-v3.md#script_identity-type-35) |
+| 36 | `capture_exclusion` | `include/reb/network_scope.hpp` | [native network v3](native-network-v3.md#capture_exclusion-type-36) |
+| 37 | `tab_set` | `include/reb/tab_link.hpp` | [native network v3](native-network-v3.md#tab_set-type-37) |
+| 38 | `request_tab_link` | `include/reb/tab_link.hpp` | [native network v3](native-network-v3.md#request_tab_link-type-38) |
+| 39 | `script_cookie` | `include/reb/network_cookies.hpp` | [native network v3](native-network-v3.md#script-cookie-access) |
+| 40 | `request_watch_match` | `include/reb/debugger_observation.hpp` | [native debugger observation v1](native-debugger-observation-v1.md) |
+| 41 | `listener_dispatch` | `include/reb/debugger_observation.hpp` | [native debugger observation v1](native-debugger-observation-v1.md) |
+| 42 | `timer_observation` | `include/reb/debugger_observation.hpp` | [native debugger observation v1](native-debugger-observation-v1.md) |
+| 43 | `csp_violation` | `include/reb/debugger_observation.hpp` | [native debugger observation v1](native-debugger-observation-v1.md) |
+| 44 | `exception_observation` | `include/reb/debugger_observation.hpp` | [native debugger observation v1](native-debugger-observation-v1.md) |
+| 45 | `dom_mutation` | `include/reb/debugger_observation.hpp` | [native debugger observation v1](native-debugger-observation-v1.md) |
+| 46 | `navigation_initiator_stack` | `include/reb/request_stack.hpp` | [native network v3](native-network-v3.md#navigation_initiator_stack-type-46) |
+| 47 | `navigation_initiator_link` | `include/reb/request_stack.hpp` | [native network v3](native-network-v3.md#navigation_initiator_link-type-47) |
+| 48 | `async_task_stack` | `include/reb/request_stack.hpp` | [native network v3](native-network-v3.md#async_task_stack-type-48) |
+| 50 | `request_extension_link` | `include/reb/tab_link.hpp` | [native network v3](native-network-v3.md#request_extension_link-type-50) |
 | 51 | `script_compiled` | `include/reb/compiled_script.hpp` | [native compiled scripts](native-compiled-scripts-v1.md) |
 
 `wasm_indirect_observation` payloads are version 2 and `wasm_guest_invocation`

@@ -81,9 +81,28 @@ bool ReadAll(const int descriptor, base::span<std::uint8_t> bytes) {
   return true;
 }
 
-bool IsValidAck(const NativeArtifactAck& ack, const std::uint64_t artifact_id) noexcept {
-  return ack.magic == kNativeArtifactAckMagic &&
-         ack.protocol_version == kNativeArtifactProtocolVersion &&
+bool IsStreamFrame(const NativeArtifactTransfer& transfer) noexcept {
+  return transfer.op == NativeArtifactTransferOp::kStream;
+}
+
+// The ID the receiver's ACK names: a checkpoint's snapshot, else the stream or artifact.
+std::uint64_t AckId(const NativeArtifactTransfer& transfer) noexcept {
+  if (!IsStreamFrame(transfer)) {
+    return transfer.header.artifact_id;
+  }
+  return transfer.frame.op == NativeArtifactStreamOp::kCheckpoint ? transfer.frame.value
+                                                                  : transfer.frame.artifact_id;
+}
+
+std::uint16_t AckVersion(const NativeArtifactTransfer& transfer) noexcept {
+  return transfer.op == NativeArtifactTransferOp::kWhole ? kNativeArtifactProtocolVersion
+                                                         : kNativeArtifactStreamProtocolVersion;
+}
+
+bool IsValidAck(const NativeArtifactAck& ack,
+                const std::uint64_t artifact_id,
+                const std::uint16_t protocol_version) noexcept {
+  return ack.magic == kNativeArtifactAckMagic && ack.protocol_version == protocol_version &&
          ack.ack_size == kNativeArtifactAckSize && ack.reserved0 == 0 &&
          ack.artifact_id == artifact_id &&
          std::ranges::all_of(ack.reserved1,
@@ -105,12 +124,13 @@ bool PeerClosed(const int descriptor) noexcept {
 // close while the body is still being written. That acknowledgment is then
 // already buffered here and carries the real status.
 void ReadBufferedAck(const int descriptor,
-                     const std::uint64_t artifact_id,
+                     const NativeArtifactTransfer& transfer,
                      NativeArtifactReceiveStatus& status) {
   pollfd connection{descriptor, static_cast<short>(POLLIN), 0};
   NativeArtifactAck ack;
   if (poll(&connection, 1, 0) > 0 && (connection.revents & POLLIN) != 0 &&
-      ReadAll(descriptor, base::byte_span_from_ref(ack)) && IsValidAck(ack, artifact_id)) {
+      ReadAll(descriptor, base::byte_span_from_ref(ack)) &&
+      IsValidAck(ack, AckId(transfer), AckVersion(transfer))) {
     status = ack.status;
   }
 }
@@ -126,16 +146,20 @@ TransferOutcome SendTransfer(const int descriptor,
                              const NativeArtifactTransfer& transfer,
                              NativeArtifactReceiveStatus& status) {
   status = NativeArtifactReceiveStatus::kIoError;
-  if (!SendAll(descriptor, base::byte_span_from_ref(transfer.header)) ||
-      !SendAll(descriptor, base::as_byte_span(transfer.url)) ||
-      !SendAll(descriptor, base::as_byte_span(transfer.mime_type)) ||
-      !SendAll(descriptor, base::as_byte_span(transfer.content))) {
-    ReadBufferedAck(descriptor, transfer.header.artifact_id, status);
+  const bool sent = IsStreamFrame(transfer)
+                        ? SendAll(descriptor, base::byte_span_from_ref(transfer.frame)) &&
+                              SendAll(descriptor, base::as_byte_span(transfer.content))
+                        : SendAll(descriptor, base::byte_span_from_ref(transfer.header)) &&
+                              SendAll(descriptor, base::as_byte_span(transfer.url)) &&
+                              SendAll(descriptor, base::as_byte_span(transfer.mime_type)) &&
+                              SendAll(descriptor, base::as_byte_span(transfer.content));
+  if (!sent) {
+    ReadBufferedAck(descriptor, transfer, status);
     return TransferOutcome::kConnectionLost;
   }
   NativeArtifactAck ack;
   if (!ReadAll(descriptor, base::byte_span_from_ref(ack)) ||
-      !IsValidAck(ack, transfer.header.artifact_id)) {
+      !IsValidAck(ack, AckId(transfer), AckVersion(transfer))) {
     return TransferOutcome::kConnectionLost;
   }
   // A rejection is acknowledged after the receiver consumed the whole frame,
@@ -215,12 +239,22 @@ bool NativeArtifactSocketClient::Enqueue(
     return false;
   }
   const std::size_t transfer_size = TransferSize(*transfer);
+  const bool stream_frame = IsStreamFrame(*transfer);
+  const bool data = stream_frame && transfer->frame.op == NativeArtifactStreamOp::kData;
   base::AutoLock lock(lock_);
-  if (!AcceptsTransfers(state_.load(std::memory_order_relaxed)) ||
-      !CanQueueNativeArtifact(queue_.size(), queued_bytes_, transfer_size)) {
+  if (!AcceptsTransfers(state_.load(std::memory_order_relaxed))) {
+    return false;
+  }
+  // End, abort and checkpoint frames always fit, so an admitted stream can
+  // always be closed.
+  if (data ? queued_stream_frames_ >= kNativeArtifactMaxQueuedStreamFrames ||
+                 !CanQueueNativeArtifact(0, queued_bytes_, transfer_size)
+           : !stream_frame && !CanQueueNativeArtifact(queue_.size() - queued_stream_frames_,
+                                                      queued_bytes_, transfer_size)) {
     return false;
   }
   queued_bytes_ += transfer_size;
+  queued_stream_frames_ += stream_frame ? 1U : 0U;
   queue_.push_back(std::move(transfer));
   wakeup_.Signal();
   return true;
@@ -328,26 +362,86 @@ void NativeArtifactSocketClient::Run() {
       transfer = std::move(queue_.front());
       queue_.pop_front();
       queued_bytes_ -= TransferSize(*transfer);
+      queued_stream_frames_ -= IsStreamFrame(*transfer) ? 1U : 0U;
       descriptor = socket_descriptor_;
     }
 
     if (PeerClosed(descriptor)) {
+      LoseOpenStreams(NativeArtifactReceiveStatus::kIoError);
       if (!Reconnect()) {
-        Report(transfer->header.artifact_id, NativeArtifactReceiveStatus::kIoError);
+        ReportUnsent(*transfer, NativeArtifactReceiveStatus::kIoError);
         LoseChannel();
         return;
       }
       base::AutoLock lock(lock_);
       descriptor = socket_descriptor_;
     }
-    NativeArtifactReceiveStatus status = NativeArtifactReceiveStatus::kIoError;
-    const TransferOutcome outcome = SendTransfer(descriptor, *transfer, status);
-    Report(transfer->header.artifact_id, status);
-    if (outcome == TransferOutcome::kConnectionLost && !Reconnect()) {
-      LoseChannel();
-      return;
+    if (!Send(descriptor, *transfer)) {
+      LoseOpenStreams(NativeArtifactReceiveStatus::kIoError);
+      if (!Reconnect()) {
+        LoseChannel();
+        return;
+      }
     }
   }
+}
+
+bool NativeArtifactSocketClient::Send(const int descriptor,
+                                      const NativeArtifactTransfer& transfer) {
+  using Op = NativeArtifactStreamOp;
+  const bool stream_frame = IsStreamFrame(transfer);
+  const std::uint64_t stream_id =
+      stream_frame ? transfer.frame.artifact_id : transfer.header.artifact_id;
+  if (stream_frame && !open_streams_.contains(stream_id)) {
+    // The stream was refused or lost, and reported then.
+    ReportUnsent(transfer, NativeArtifactReceiveStatus::kIoError);
+    return true;
+  }
+  NativeArtifactReceiveStatus status = NativeArtifactReceiveStatus::kIoError;
+  const bool acknowledged =
+      SendTransfer(descriptor, transfer, status) == TransferOutcome::kAcknowledged;
+  const bool accepted = acknowledged && status == NativeArtifactReceiveStatus::kAccepted;
+  if (!stream_frame) {
+    if (transfer.op == NativeArtifactTransferOp::kOpen && accepted) {
+      open_streams_.insert(stream_id);
+    } else {
+      Report(stream_id, status);
+    }
+    return acknowledged;
+  }
+  switch (transfer.frame.op) {
+    case Op::kCheckpoint:
+      Report(transfer.frame.value, status);
+      break;
+    case Op::kData:
+    case Op::kEnd:
+      // A lost connection reports its open streams instead.
+      if (acknowledged && (!accepted || transfer.frame.op == Op::kEnd)) {
+        open_streams_.erase(stream_id);
+        Report(stream_id, status);
+      }
+      break;
+    case Op::kAbort:
+      open_streams_.erase(stream_id);
+      break;
+  }
+  return acknowledged;
+}
+
+void NativeArtifactSocketClient::ReportUnsent(const NativeArtifactTransfer& transfer,
+                                              const NativeArtifactReceiveStatus status) {
+  if (!IsStreamFrame(transfer)) {
+    Report(transfer.header.artifact_id, status);
+  } else if (transfer.frame.op == NativeArtifactStreamOp::kCheckpoint) {
+    Report(transfer.frame.value, status);
+  }
+}
+
+void NativeArtifactSocketClient::LoseOpenStreams(const NativeArtifactReceiveStatus status) {
+  for (const std::uint64_t stream_id : open_streams_) {
+    Report(stream_id, status);
+  }
+  open_streams_.clear();
 }
 
 void NativeArtifactSocketClient::Report(const std::uint64_t artifact_id,
@@ -363,9 +457,11 @@ void NativeArtifactSocketClient::DisconnectPending(const NativeArtifactReceiveSt
     base::AutoLock lock(lock_);
     pending.swap(queue_);
     queued_bytes_ = 0;
+    queued_stream_frames_ = 0;
   }
+  LoseOpenStreams(status);
   for (const auto& transfer : pending) {
-    Report(transfer->header.artifact_id, status);
+    ReportUnsent(*transfer, status);
   }
 }
 
@@ -456,6 +552,12 @@ bool NativeArtifactSocketClient::Reconnect() {
 void NativeArtifactSocketClient::LoseChannel() {}
 void NativeArtifactSocketClient::Run() {}
 void NativeArtifactSocketClient::Report(std::uint64_t, NativeArtifactReceiveStatus) {}
+bool NativeArtifactSocketClient::Send(int, const NativeArtifactTransfer&) {
+  return false;
+}
+void NativeArtifactSocketClient::ReportUnsent(const NativeArtifactTransfer&,
+                                              NativeArtifactReceiveStatus) {}
+void NativeArtifactSocketClient::LoseOpenStreams(NativeArtifactReceiveStatus) {}
 void NativeArtifactSocketClient::DisconnectPending(NativeArtifactReceiveStatus) {}
 void NativeArtifactSocketClient::JoinWriter() {}
 void NativeArtifactSocketClient::FinishStop() {}

@@ -148,6 +148,12 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
       guard (body["generation"] as? NSNumber)?.intValue == siteGeneration else {
         throw SessionPanelRefusal("The saved functions changed; review the list again.")
       }
+      // Sources or another app run may have rewritten the file since it was
+      // read; never write over a list the page did not see.
+      guard InvocationSiteSet.load(siteStoreURL) == sites else {
+        reloadSites()
+        throw SessionPanelRefusal("The saved functions changed; review the list again.")
+      }
       guard case .saved(var saved) = sites else {
         if op == "clearSites", case .unreadable = sites {
           save([])
@@ -156,7 +162,9 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
         throw SessionPanelRefusal("There are no saved functions to change.")
       }
       if op == "removeSite" {
-        guard let index = (body["index"] as? NSNumber)?.intValue, saved.indices.contains(index) else {
+        guard let number = body["index"] as? NSNumber, number.doubleValue == Double(number.intValue),
+          case let index = number.intValue, saved.indices.contains(index)
+        else {
           throw SessionPanelRefusal("That saved function is no longer listed.")
         }
         saved.remove(at: index)

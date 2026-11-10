@@ -282,8 +282,11 @@
     const arrived = shown !== panel;
     if (arrived) focusKey = null;
     else if (inside && active !== root && active.dataset?.focusKey) focusKey = active.dataset.focusKey;
+    // A redraw of the same state keeps where the researcher scrolled to.
+    const scrolled = arrived ? 0 : root.querySelector('.session-panel-body')?.scrollTop ?? 0;
     const builders = {choose: chooseContent, starting: startingContent, failed: failedContent};
     root.replaceChildren(...(builders[panel] ?? startingContent)(state));
+    if (scrolled) root.querySelector('.session-panel-body').scrollTop = scrolled;
     root.dataset.state = panel;
     root.setAttribute('aria-busy', String(view.busy || panel === 'starting'));
     for (const control of root.querySelectorAll('button, input')) control.disabled = view.busy;

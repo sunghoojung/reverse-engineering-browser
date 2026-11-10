@@ -525,8 +525,8 @@ The native app keeps what the page must not hold:
   API, plus `--allow-sensitive-capture` only when that box was ticked. Below
   Full access its environment is only `LANG` and `LC_ALL`; at Full access it
   also gets `HOME`, `USER`, `LOGNAME`, `TMPDIR`, a fixed `PATH`, and the app's
-  `REB_BRAVE_BINARY` and `REB_LIVE_SESSION_ROOT` when set, which starting a
-  live session needs. It runs only while the agent is on. It stops when the switch turns off, when the session or document
+  `REB_BRAVE_BINARY`, `REB_LIVE_SESSION_ROOT` and `REB_OPEN_COMMAND` when set,
+  which starting a live session needs. It runs only while the agent is on. It stops when the switch turns off, when the session or document
   changes, when the dock closes with no turn running, or after five idle minutes
   with the dock open; the next tool call starts it again. At Ask for actions
   native refuses any action call that did not come with Allow once.

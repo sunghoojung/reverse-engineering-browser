@@ -321,8 +321,10 @@ enum AgentCoreChecks {
     check(arguments(.full, sensitive: true).last == "--allow-sensitive-capture", "Full access with the sensitive option")
     check(!arguments(.auto, sensitive: true).contains("--allow-sensitive-capture"), "the sensitive option means nothing below Full access")
     let environment = AgentSession.Configuration(provider: .claude, model: "m", apiExecutable: api, apiBaseURL: base, permission: .full,
-      transcriptDirectory: folder, appEnvironment: ["HOME": "/Users/x", "SECRET": "no", "REB_LIVE_SESSION_ROOT": "/tmp/s"]).mcpEnvironment
-    check(environment["HOME"] == "/Users/x" && environment["REB_LIVE_SESSION_ROOT"] == "/tmp/s" && environment["SECRET"] == nil,
+      transcriptDirectory: folder, appEnvironment: ["HOME": "/Users/x", "SECRET": "no", "REB_LIVE_SESSION_ROOT": "/tmp/s",
+        "REB_OPEN_COMMAND": "/usr/bin/true"]).mcpEnvironment
+    check(environment["HOME"] == "/Users/x" && environment["REB_LIVE_SESSION_ROOT"] == "/tmp/s" && environment["SECRET"] == nil
+      && environment["REB_OPEN_COMMAND"] == "/usr/bin/true",
       "a Full access tool server gets only what starting a session needs")
     check(AgentSession.Configuration(provider: .claude, model: "m", apiExecutable: api, apiBaseURL: base, permission: .ask,
       transcriptDirectory: folder, appEnvironment: ["HOME": "/Users/x"]).mcpEnvironment == ["LANG": "C", "LC_ALL": "C"],

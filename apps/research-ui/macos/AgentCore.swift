@@ -741,13 +741,14 @@ final class AgentSession {
 
     // A tool server below Full access needs nothing from the app. A Full
     // access one starts the session launcher, which needs a home folder and a
-    // shell path; a researcher's REB_BRAVE_BINARY and REB_LIVE_SESSION_ROOT
-    // choose the browser and where sessions live. Nothing else is passed.
+    // shell path; a researcher's REB_BRAVE_BINARY, REB_LIVE_SESSION_ROOT and
+    // REB_OPEN_COMMAND choose the browser, where sessions live and how their
+    // viewer window opens, as they do for make live. Nothing else is passed.
     var mcpEnvironment: [String: String] {
       var environment = ["LANG": "C", "LC_ALL": "C"]
       guard permission == .full else { return environment }
       environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
-      for name in ["HOME", "USER", "LOGNAME", "TMPDIR", "REB_BRAVE_BINARY", "REB_LIVE_SESSION_ROOT"] {
+      for name in ["HOME", "USER", "LOGNAME", "TMPDIR", "REB_BRAVE_BINARY", "REB_LIVE_SESSION_ROOT", "REB_OPEN_COMMAND"] {
         if let value = appEnvironment[name], !value.isEmpty { environment[name] = value }
       }
       if environment["HOME"] == nil { environment["HOME"] = NSHomeDirectory() }

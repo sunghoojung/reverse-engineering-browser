@@ -251,7 +251,8 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
   // SetEmitter restores the unrestricted policy. Publish this session's copy.
   NativeArtifactCaptureSink::Get().SetWasmSampleBudgetPolicy(wasm_sample_budget_);
   for (NativeProbeHost* const host : hosts_) {
-    host->Configure(session_id, category_mask, expires_at_monotonic_ns, capture_canvas_images);
+    host->Configure(session_id, category_mask, expires_at_monotonic_ns, capture_canvas_images,
+                    capture_request_content_.load());
   }
   return true;
 }

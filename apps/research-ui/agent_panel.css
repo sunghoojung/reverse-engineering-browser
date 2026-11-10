@@ -45,9 +45,9 @@
 @keyframes agent-pop { from { opacity: 0; transform: translateY(2px); } }
 
 /* ---- Header ---- */
-.agent-head { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; height: 40px; padding: 0 6px 0 14px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
-.agent-title { flex: 0 0 auto; margin: 0 6px 0 0; font: 600 13px/1 var(--sans); color: var(--text); }
-.agent-status { flex: 0 1 auto; min-width: 0; display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px 0 8px;
+.agent-head { flex: 0 0 auto; display: flex; align-items: center; gap: 2px; height: 40px; padding: 0 5px 0 14px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+.agent-title { flex: 0 0 auto; margin: 0 8px 0 0; font: 600 13px/1 var(--sans); color: var(--text); }
+.agent-status { flex: 0 1 auto; min-width: 0; display: inline-flex; align-items: center; gap: 6px; height: 22px; margin-right: 4px; padding: 0 8px 0 7px;
   border-radius: 11px; background: var(--agent-raised); color: var(--muted); font: 11.5px/1 var(--sans); }
 .agent-status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-status-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
@@ -56,7 +56,7 @@
 .agent-status[data-tone="busy"] .agent-status-dot { background: var(--amber); animation: agent-pulse 1.2s ease-in-out infinite; }
 .agent-status[data-tone="error"] { color: var(--red); }
 .agent-status[data-tone="error"] .agent-status-dot { background: var(--red); }
-.agent-icon-button { flex: 0 0 auto; width: 28px; height: 28px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--muted); }
+.agent-icon-button { flex: 0 0 auto; width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--muted); }
 .agent-icon-button:hover:not(:disabled), .agent-icon-button[aria-expanded="true"] { color: var(--text); background: var(--agent-hover); }
 .agent-icon-button:disabled { color: var(--faint); opacity: 0.45; cursor: default; }
 

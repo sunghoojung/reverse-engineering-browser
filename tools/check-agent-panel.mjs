@@ -202,8 +202,8 @@ export async function checkAgentPanel() {
   assert.equal(enable.sessionKey, '100:200');
   assert.equal(enable.model, 'claude-opus-5-5', 'the model chosen in the setup card is the one enabled');
   assert.equal(dockState(), 'ready');
-  assert.equal(byId('agent-status').textContent, 'Claude Opus 5.5 · Local stand-in', 'the chip names the model and how it is paid for');
-  assert.match(byId('agent-model').textContent, /Claude Opus 5\.5 · Local stand-in/);
+  assert.equal(byId('agent-status').textContent, 'Claude Opus 5.5 · Stand-in', 'the chip names the model and how it is paid for');
+  assert.match(byId('agent-model').textContent, /Claude Opus 5\.5 · Stand-in/);
   assert.equal(byId('agent-composer').hidden, false);
 
   // The empty state offers suggestions that fill the composer and never send.

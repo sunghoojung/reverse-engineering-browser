@@ -264,7 +264,6 @@
     error: '<circle cx="10" cy="10" r="6.5"/><path d="M10 6.8v3.8M10 13.3h.01"/>',
     denied: '<circle cx="10" cy="10" r="6.5"/><path d="m5.6 14.4 8.8-8.8"/>',
     shield: '<path d="M10 3.2 4.8 5.1v4.3c0 3.3 2.2 5.9 5.2 7.2 3-1.3 5.2-3.9 5.2-7.2V5.1z"/>',
-    pin: '<path d="M12.5 3.5 16.5 7.5M11 5l4 4-3 1.5-2.5 2.5.5 2.5-6-6 2.5.5L9 7.5z"/><path d="m7 13-3.5 3.5"/>',
   };
   function icon(name, extra = '') {
     const node = element('span', `agent-icon${extra ? ` ${extra}` : ''}`);
@@ -452,7 +451,7 @@
     return raw;
   }
   function modeLabel(id, auth) {
-    if (auth === 'key') return standInApplies(id, auth) ? 'Local stand-in' : 'API key';
+    if (auth === 'key') return standInApplies(id, auth) ? 'Stand-in' : 'API key';
     if (id === 'chatgpt') return subscriptionOf(id).standIn ? 'Stand-in sign-in' : 'ChatGPT plan';
     return planText(id) || 'Subscription';
   }

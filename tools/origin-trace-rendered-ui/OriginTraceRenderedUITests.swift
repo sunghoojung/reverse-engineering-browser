@@ -2530,7 +2530,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await ui.screenshot("agent-badge-full")
     try await ui.click("#agent-more")
     try await ui.waitUntil("!document.getElementById('agent-menu').hidden && !document.getElementById('agent-lower-read-only').hidden", "the lower choices did not show")
-    try await agentLayoutIsClean(ui, "lower menu")
+    // The menu is a popover over the log, so only its own text is checked.
+    let menuClipped = try await ui.value("__rebUiProbe.clippedText('#agent-menu')") as? [String] ?? ["no probe result"]
+    XCTAssertEqual(menuClipped, [], "the lower choices fit in the menu")
     try await ui.screenshot("agent-menu-lower")
     try await ui.click("#agent-lower-read-only")
     try await ui.waitUntil("__rebUiProbe.text('#agent-permission') === 'Read only' && __rebUiProbe.text('#agent-log').includes('Permission lowered to Read only')", timeout: 15, "lowering did not apply")

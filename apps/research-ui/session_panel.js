@@ -76,7 +76,9 @@
       const reply = await ask(op, body);
       if (reply && reply.panel) receive(reply, {keepNotice: true});
     } catch (error) {
-      view.notice = {kind: 'error', text: `Origin Trace did not accept this: ${error?.message || error}. Choose New Live Session… in the Origin Trace menu to start again.`};
+      // Native refusals are whole sentences; a lost bridge says it did not answer.
+      const reason = String(error?.message || error || '').trim() || 'Origin Trace did not answer.';
+      view.notice = {kind: 'error', text: `${/[.!?]$/.test(reason) ? reason : `${reason}.`} New Live Session… in the Origin Trace menu offers the choices again.`};
     } finally {
       view.busy = false;
       render();

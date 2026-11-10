@@ -16,6 +16,10 @@
   // Below this every row stays mounted, which is cheaper than measuring them.
   const WINDOW_THRESHOLD = 80;
   const OVERSCAN_PIXELS = 900;
+  // A focused row this close to the window stays mounted with the rows between.
+  // Farther away, focus moves to the log instead, so one focused row (a
+  // request waiting for a decision) never keeps the whole log mounted.
+  const FOCUS_KEEP_ROWS = 40;
   const ESTIMATED_ROW_HEIGHT = 84;
   // A pin holds what a selection realistically is: a function, a request body.
   // A pin matches the projection's inline limit; a turn holds a few of them.
@@ -1447,7 +1451,9 @@
       const focused = document.activeElement?.closest?.('.agent-row')?.dataset.rowId;
       if (focused) {
         const index = rows.findIndex(row => row.id === focused);
-        if (index >= 0) { first = Math.min(first, index); last = Math.max(last, index); }
+        // A focused row that left the byte budget is gone too; its focus goes to the log.
+        if (index >= 0 && index >= first - FOCUS_KEEP_ROWS && index <= last + FOCUS_KEEP_ROWS) { first = Math.min(first, index); last = Math.max(last, index); }
+        else log.focus({preventScroll: true});
       }
     }
     const key = `${first}:${last}:${rows.length}:${rows.slice(first, last + 1).map(row => row.text?.length ?? 0).join(',')}:${stats.droppedRows}:${view.olderAvailable}`;

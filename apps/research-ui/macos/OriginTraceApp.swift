@@ -1851,6 +1851,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           "unknown", "network_response", "dynamic_javascript", "webassembly_compile",
           "webassembly_module", "webassembly_instantiate",
           "canvas_to_data_url", "network_request", "request_stack", "stack_script",
+          "compiled_script",
         ]).contains(captureOrigin),
         networkRequest == (captureOrigin == "network_request"),
         (kind == "stack") == (captureOrigin == "request_stack"),
@@ -1858,6 +1859,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         captureOrigin != "network_request"
           || (executionContextID == "0" && artifact["creator_event_id"] as? String != "0"),
         captureOrigin != "dynamic_javascript" || (kind == "javascript" && executionContextID != "0"),
+        captureOrigin != "compiled_script" || (kind == "javascript" && executionContextID != "0"),
         !captureOrigin.hasPrefix("webassembly_") || (kind == "wasm" && executionContextID != "0")
       else {
         return false

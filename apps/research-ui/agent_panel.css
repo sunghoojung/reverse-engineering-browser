@@ -137,6 +137,15 @@
 .agent-text-button { height: 22px; padding: 0 8px; border: 1px solid transparent; background: transparent; color: var(--muted); font: 11px var(--sans); border-radius: 3px; }
 .agent-text-button:hover { color: var(--text); background: var(--panel-3); }
 .agent-hint { margin: 0; color: var(--faint); font: 10px/1.4 var(--sans); overflow-wrap: anywhere; }
+/* The payment line: the researcher's own key or their own subscription, and
+ * what that needs next. Its status text cuts with an ellipsis; the title holds
+ * all of it. */
+.agent-account { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.agent-account[hidden] { display: none; }
+.agent-account-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 11px var(--sans); }
+.agent-account-text.agent-account-ready { color: var(--muted); }
+.agent-account .agent-key { height: 20px; padding: 0 8px; font-weight: 500; }
+.agent-segment-button[hidden] { display: none; }
 
 @media (min-width: 1001px) and (max-width: 1520px) {
   /* The Traffic split needs more than the width left beside the dock. */

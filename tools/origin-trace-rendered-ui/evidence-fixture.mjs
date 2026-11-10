@@ -89,6 +89,22 @@ async function artifact(root, fields, bytes) {
     byte_size: bytes.length, sha256: hash, content_path: `blobs/${hash}.bin`};
 }
 
+// A flattened dispatcher: a loop around a br_table with one block per arm, each
+// arm branching back to the loop. Built here so the fixture needs no wat tool.
+function dispatcherWasm(arms) {
+  const leb = n => { const out = []; do { let b = n & 127; n >>>= 7; out.push(n ? b | 128 : b); } while (n); return out; };
+  const section = (id, data) => [id, ...leb(data.length), ...data];
+  const body = [1, 1, 0x7f, 0x03, 0x40, 0x02, 0x40];
+  for (let index = 0; index < arms; index += 1) body.push(0x02, 0x40);
+  body.push(0x20, 0, 0x0e, ...leb(arms));
+  for (let index = 0; index < arms; index += 1) body.push(...leb(index));
+  body.push(...leb(arms));
+  for (let index = 0; index < arms; index += 1) body.push(0x0b, 0x41, ...leb(index & 63), 0x21, 0, 0x0c, ...leb(arms - index));
+  body.push(0x0b, 0x41, 0, 0x0f, 0x0b, 0x41, 1, 0x0b);
+  return Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, ...section(1, [1, 0x60, 1, 0x7f, 1, 0x7f]), ...section(3, [1, 0]),
+    ...section(7, [1, 8, ...Buffer.from('dispatch'), 0, 0]), ...section(10, [1, ...leb(body.length), ...body])]);
+}
+
 function jsonLines(text) {
   return text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
 }
@@ -409,6 +425,9 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const mapped = await artifact(artifacts, {artifact_id: '312', session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'network_response', kind: 'wasm', execution_context_id: '0', mime_type: 'application/wasm', url: 'https://fixture.invalid/map-module.wasm'},
   mapFixtureModule());
+  const graphWasm = await artifact(artifacts, {artifact_id: '340', session_id: '1', navigation_id: '100', frame_id: '200',
+    capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: 'fixture://graph-dispatcher.wasm'},
+  dispatcherWasm(32));
   const guest = await goldenEvidence(artifacts, guestStore);
   const physical = await goldenEvidence(artifacts, dispatchStore);
   assert(guest.events.some(event => event.type === 'wasm_guest_dispatch'), 'guest golden store holds a guest sample');
@@ -417,7 +436,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   // static arm label, and an inner interpreter linked to its outer handler.
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, ...withBodies.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, ...withBodies.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   const vm = demoEvents.find(event => event.category === 'vm');
   assert(vm, 'demo store must contain a native vm event');

@@ -310,6 +310,15 @@ never chooses between different sessions. Missing exact matches remain `empty`,
 without falling back to another session or event. Session selection participates
 in the ETag. The v1 response shape, stored evidence and capture policy are unchanged.
 
+## WASM function list and block graph
+
+`get_wasm_functions` and `get_wasm_function_graph` project
+`GET /api/wasm/functions` and `GET /api/wasm/graph`. Both are read-only and
+bounded by byte budgets; a partial status names what was cut. See
+[WASM inspection](wasm-inspection-v1.md#function-index-and-block-graph). The
+graph is declared static flow for one function at a time. Edge kinds are never
+inferred from execution, and `complete` is always false.
+
 ## Compact session context
 
 `GET /api/session/context` (`get_session_context`) is the compact first read for

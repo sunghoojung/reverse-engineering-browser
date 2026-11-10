@@ -332,7 +332,7 @@ bool ParseManifestRecord(const std::string_view line,
         capture_origin != "canvas_to_data_url" && capture_origin != "runtime_typed_array" &&
         capture_origin != "runtime_allocating_script" && capture_origin != "native_wasm_guest" &&
         capture_origin != "network_request" && capture_origin != "request_stack" &&
-        capture_origin != "stack_script") {
+        capture_origin != "stack_script" && capture_origin != "compiled_script") {
       return false;
     }
     position = origin_end + std::string_view("\",\"kind\":\"").size();
@@ -364,7 +364,7 @@ bool ParseManifestRecord(const std::string_view line,
        capture_origin != "network_response" && capture_origin != "network_request" &&
        execution_context_id == 0) ||
       ((capture_origin == "dynamic_javascript" || capture_origin == "runtime_allocating_script" ||
-        capture_origin == "stack_script") &&
+        capture_origin == "stack_script" || capture_origin == "compiled_script") &&
        kind != "javascript") ||
       ((kind == "stack") != (capture_origin == "request_stack")) ||
       ((capture_origin == "request_stack" || capture_origin == "stack_script") &&
@@ -590,7 +590,8 @@ bool IsValidArtifactHeader(const ArtifactHeader& stream_header) noexcept {
       header.capture_origin == ArtifactCaptureOrigin::kNativeWasmGuest ||
       header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest ||
       header.capture_origin == ArtifactCaptureOrigin::kRequestStack ||
-      header.capture_origin == ArtifactCaptureOrigin::kStackScript;
+      header.capture_origin == ArtifactCaptureOrigin::kStackScript ||
+      header.capture_origin == ArtifactCaptureOrigin::kCompiledScript;
   const bool compatible_origin =
       header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest ||
       header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
@@ -598,7 +599,8 @@ bool IsValidArtifactHeader(const ArtifactHeader& stream_header) noexcept {
       (header.kind == ArtifactKind::kJavaScript &&
        (header.capture_origin == ArtifactCaptureOrigin::kDynamicJavaScript ||
         header.capture_origin == ArtifactCaptureOrigin::kRuntimeAllocatingScript ||
-        header.capture_origin == ArtifactCaptureOrigin::kStackScript)) ||
+        header.capture_origin == ArtifactCaptureOrigin::kStackScript ||
+        header.capture_origin == ArtifactCaptureOrigin::kCompiledScript)) ||
       (header.kind == ArtifactKind::kStack &&
        header.capture_origin == ArtifactCaptureOrigin::kRequestStack) ||
       (header.kind == ArtifactKind::kWasm &&
@@ -673,6 +675,8 @@ const char* ArtifactCaptureOriginName(const ArtifactCaptureOrigin origin) noexce
       return "runtime_typed_array";
     case ArtifactCaptureOrigin::kRuntimeAllocatingScript:
       return "runtime_allocating_script";
+    case ArtifactCaptureOrigin::kCompiledScript:
+      return "compiled_script";
     case ArtifactCaptureOrigin::kNativeWasmGuest:
       return "native_wasm_guest";
     case ArtifactCaptureOrigin::kNetworkRequest:

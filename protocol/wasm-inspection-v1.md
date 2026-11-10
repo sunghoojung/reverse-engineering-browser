@@ -132,6 +132,35 @@ The Origin Trace UI requests whole-module inspection and renders `status` and
 `omissions`, so a filtered document would be shown as partial with its requested
 sections named. It does not send `sections` today.
 
+## Function index and block graph
+
+`GET /api/wasm/functions?artifact_id=<id>` returns `wasm-function-index-v1`: each
+defined function's index, byte range and type index, and names from the name
+section, then exports. It reads section framing and decodes no instruction.
+`GET /api/wasm/graph?artifact_id=<id>&function=<index>` returns
+`wasm-block-graph-v1` for one defined function, using the same decoder and the
+same `reb://app` helper path as inspection (`origin-trace-wasm --functions` and
+`--graph-function N`). The OpenAPI schema defines both documents. Any other query
+parameter is refused, and an imported or undefined index returns 404. A function
+is decoded only when requested; nothing retains a whole-module graph.
+
+A block's `flags` carry `entry`, `reachable` (a declared path from the entry, not
+observed execution), `exit`, `trap`, and `rows_cut`. `edges` are
+`[from, to, kind, label]`, where `to` is null for an unresolved target: a tail
+call, a throw, or a label past the frames that decoded. Kinds are `fallthrough`,
+`branch`, `taken`, `not_taken`, `table` (br_table arms with the same target, as
+a compact case list), `table_default`, `exception`, and `unresolved`. `rows`
+are newline-terminated `offset mnemonic operands` text, and a run of identical
+block openers is one row with a count, so `row_count` can be below
+`instruction_count`. `complete` is always false.
+
+Budgets are byte budgets chosen from real artifacts: the 64 MiB input limit
+(above the artifact receiver's default 16 MiB limit), the 7,654,321-byte body
+limit web engines enforce, 16 MiB of row text, 32 MiB of structure, a four-second
+decode deadline. Anything cut sets `status` to `partial` and is named in
+`omissions`; structure is kept before row text, and an edge leaving the retained
+prefix stays labeled.
+
 Sources opens captured WASM in Hex. Inspect switches to the derived listing;
 Hex returns to original evidence. Enabled offset buttons reveal the matching
 hex row when that byte was formatted. Hex formatting covers every retained byte

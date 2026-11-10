@@ -72,6 +72,7 @@ enum class ArtifactCaptureOrigin : std::uint16_t {
   kRequestStack = 12,
   // A JavaScript source retained because a request stack named it.
   kStackScript = 13,
+  kCompiledScript = 14,
 };
 
 struct ArtifactHeader final {

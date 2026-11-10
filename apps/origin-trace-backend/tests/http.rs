@@ -697,7 +697,7 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 54, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 56, "Review route coverage when the API changes");
     assert!(ids.contains("get_request_headers"));
     assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
     assert!(ids.contains("get_xrefs"));
@@ -788,7 +788,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 54);
+    assert_eq!(operation_count, 56);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -3725,6 +3725,83 @@ async fn artifact_map_route_is_read_only_versioned_and_covers_the_whole_artifact
         .await
         .unwrap();
     assert_eq!(map["facts"]["source"], "javascript_lexer");
+}
+
+#[tokio::test]
+async fn wasm_graph_routes_are_bounded_read_only_and_refuse_bad_input() {
+    let server = Server::start().await;
+    let bytes = wat::parse_str(
+        r#"(module (import "env" "f" (func)) (func (export "run") (param i32) (result i32)
+            local.get 0 if (result i32) i32.const 1 else i32.const 2 end))"#,
+    )
+    .unwrap();
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/module.wasm","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+    server.file(&format!("artifacts/blobs/{hash}.bin"), &bytes);
+    let index: Value = server
+        .get("/api/wasm/functions?artifact_id=1")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(index["schema"], "wasm-function-index-v1");
+    assert_eq!(index["imported_functions"], 1);
+    assert_eq!(index["functions"][0][0], 1);
+    let graph: Value = server
+        .get("/api/wasm/graph?artifact_id=1&function=1")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(graph["schema"], "wasm-block-graph-v1");
+    assert_eq!(graph["complete"], false);
+    assert_eq!(graph["evidence"], "declared_static");
+    assert_eq!(graph["block_count"], 4);
+    for (path, expected) in [
+        ("/api/wasm/graph?artifact_id=1", 400),
+        ("/api/wasm/graph?artifact_id=1&function=abc", 400),
+        ("/api/wasm/graph?artifact_id=1&function=1&extra=1", 400),
+        ("/api/wasm/functions?artifact_id=1&function=1", 400),
+        ("/api/wasm/graph?artifact_id=1&function=0", 404),
+        ("/api/wasm/graph?artifact_id=1&function=9", 404),
+        ("/api/wasm/graph?artifact_id=2&function=1", 404),
+    ] {
+        let response = server.get(path).await;
+        assert_eq!(response.status().as_u16(), expected, "{path}");
+        let body: Value = response.json().await.unwrap();
+        assert!(body["error"].is_string(), "{path}: {body}");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_origin-trace-wasm"))
+        .arg("--artifacts")
+        .arg(server.root.path().join("artifacts"))
+        .args(["--artifact-id", "1", "--graph-function", "1"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        graph
+    );
+    // A body whose final end became a nop is malformed, and the route says so.
+    let mut bad = bytes.clone();
+    let position = bad
+        .windows(2)
+        .position(|window| window == [0x0b, 0x0b])
+        .unwrap();
+    bad[position + 1] = 0x01;
+    let hash = hex::encode(Sha256::digest(&bad));
+    let artifact = json!({"protocol_version":1,"artifact_id":"3","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/bad.wasm","mime_type":"application/wasm","byte_size":bad.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+    server.file(&format!("artifacts/blobs/{hash}.bin"), &bad);
+    let response = server.get("/api/wasm/graph?artifact_id=3&function=1").await;
+    assert_eq!(response.status().as_u16(), 422);
 }
 
 #[tokio::test]

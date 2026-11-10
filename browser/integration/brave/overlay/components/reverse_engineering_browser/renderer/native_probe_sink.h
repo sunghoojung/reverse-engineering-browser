@@ -19,6 +19,7 @@
 #include "base/memory/raw_ptr.h"
 #include "base/no_destructor.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
+#include "brave/components/reverse_engineering_browser/common/native_compiled_script.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_dispatch.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_invocation.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
@@ -199,6 +200,11 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
     CaptureGeneratedArtifact(kind, capture_origin, 0, execution_context_id, frame_id, source_url,
                              content);
   }
+  // False once this thread has recorded the script in this configuration, so
+  // an eval compilation cache hit costs one lookup and no string conversion.
+  [[nodiscard]] bool CompiledScriptNeedsRecord(std::uint64_t execution_context_id,
+                                               std::uint32_t script_id) const noexcept;
+  void RecordCompiledScript(const NativeCompiledScript& script) noexcept;
   void ConfigureNativeWasmGuest(std::shared_ptr<const NativeWasmGuestAdapter> adapter,
                                 NativeGuestCaptureEmitter capture,
                                 NativeGuestHostEmitter host) noexcept;
@@ -477,10 +483,13 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                        std::string_view reason,
                        std::uint64_t generation) noexcept;
 
-  std::uint64_t RecordRuntimeBufferEvent(NativeProbeType type,
-                                         std::uint64_t frame_id,
-                                         std::string_view reason,
-                                         std::uint64_t generation) noexcept;
+  [[nodiscard]] bool ReserveCompiledScriptSource(std::uint64_t bytes) noexcept;
+  std::uint64_t RecordRuntimeBufferEvent(
+      NativeProbeType type,
+      std::uint64_t frame_id,
+      std::string_view reason,
+      std::uint64_t generation,
+      NativeProbeCategory category = NativeProbeCategory::kVm) noexcept;
 
   [[nodiscard]] std::uint64_t RecordSurfaceOperation(
       NativeProbeCategory category,
@@ -751,9 +760,13 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint64_t> category_mask_{0};
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
   std::atomic<bool> capture_canvas_images_{false};
+  // The session's --reb-capture-request-content opt-in. It also decides
+  // whether compiled script source no response body carries is retained.
   std::atomic<bool> capture_request_content_{false};
   std::atomic<bool> capture_browser_internal_{false};
   std::atomic<NativeProbeExclusionCounter> exclusion_counter_{nullptr};
+  // Source bytes queued in this configuration, across every thread.
+  std::atomic<std::uint64_t> compiled_script_source_bytes_{0};
   // Monotonic generation claims are never reset: an old capture cannot spend
   // or release a replacement configuration's snapshot quota.
   std::array<std::atomic<std::uint64_t>, kRuntimeTypedArrayMaxSnapshots>

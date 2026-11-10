@@ -167,8 +167,10 @@ bridge owns that receiver connection. JavaScript and WASM response bodies are
 streamed by an asynchronous Mojo tee with a 16 MiB per-artifact limit. Tees and
 request content share the 32 MiB in-flight pool in
 `common/native_artifact_memory_pool.h`, charged with each queued data frame and
-returned when the writer drops it. Accepted dynamic JavaScript and WASM byte-buffer API
-inputs use a separate one-way Mojo submission with the same per-artifact cap.
+returned when the writer drops it. Compiled script source that no response body
+carries and WASM byte-buffer API inputs use a separate one-way Mojo submission
+with the same per-artifact cap; see
+[native compiled scripts](../../../../../../protocol/native-compiled-scripts-v1.md).
 The browser copies renderer-owned shared memory before validation and records
 the stable execution context plus exact capture origin. A dedicated writer
 thread drains a bounded 32 MiB queue to the authenticated artifact socket.

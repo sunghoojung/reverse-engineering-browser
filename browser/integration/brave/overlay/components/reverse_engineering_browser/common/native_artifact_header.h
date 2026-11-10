@@ -62,6 +62,7 @@ enum class NativeArtifactCaptureOrigin : std::uint16_t {
   kNetworkRequest = 10,
   kRequestStack = 12,
   kStackScript = 13,
+  kCompiledScript = 14,
 };
 
 // Transient views: emitters must copy before returning. The script identity is

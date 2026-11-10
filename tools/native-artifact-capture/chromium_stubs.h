@@ -527,7 +527,9 @@ class NativeProbeSession {
   std::vector<std::uint8_t> js_sites;
   std::vector<std::uint8_t> invocation_sites;
   bool invocation_digests = false;
-  bool request_content = false, browser_internal = false, extension_traffic = false;
+  // Content capture by default, so script text no response body carried is
+  // accepted unless a test opts the session out.
+  bool request_content = true, browser_internal = false, extension_traffic = false;
   unsigned webui_excluded = 0;
   struct Exclusion {
     std::uint32_t process;

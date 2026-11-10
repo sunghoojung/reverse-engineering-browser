@@ -596,7 +596,8 @@
             "navigation_initiator_stack",
             "navigation_initiator_link",
             "async_task_stack",
-            "request_extension_link"
+            "request_extension_link",
+            "script_compiled"
           ]
         },
         "status_code": {
@@ -798,7 +799,8 @@
             "native_wasm_guest",
             "network_request",
             "request_stack",
-            "stack_script"
+            "stack_script",
+            "compiled_script"
           ]
         },
         "kind": {

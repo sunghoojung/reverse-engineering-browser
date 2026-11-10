@@ -468,7 +468,6 @@ void NativeProbeHostJsDispatchForwarding() {
   session.js_sites.clear();
   session.invocation_sites.clear();
   session.invocation_digests = false;
-  session.request_content = false;
   session.emitted = {};
   process.frames.clear();
   std::cout << "PASS production NativeProbeHost forwards JS dispatch site records and type 21 "
@@ -600,7 +599,6 @@ void NativeProbeHostBrowserInternalScope() {
         "--reb-capture-browser-internal keeps WebUI renderers");
   security.webui.clear();
   session.browser_internal = false;
-  session.request_content = false;
   session.active = false;
   session.emitted = {};
   std::cout << "PASS production NativeProbeHost reports cumulative exclusions and detaches "

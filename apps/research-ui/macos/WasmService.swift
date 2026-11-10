@@ -8,6 +8,7 @@ final class NativeWasmService {
   private let lock = NSLock()
   private let mapLock = NSLock()
   private var activeMap: Process?
+  private let graphQueue = DispatchSemaphore(value: 1)
   init(executableURL: URL) { self.executableURL = executableURL }
 
   // At most one map helper runs. A newer selection retires the older read
@@ -79,6 +80,31 @@ final class NativeWasmService {
   func inspect(root: URL, artifactID: String) throws -> Data {
     guard lock.try() else { throw NativeDecoderError(status: 409, message: "WASM inspector is busy; retry when the current inspection finishes") }
     defer { lock.unlock() }
+    return try run(
+      arguments: ["--artifacts", root.path, "--artifact-id", artifactID],
+      outputLimit: 8 * 1024 * 1024,
+      schema: "wasm-inspection-v1",
+      artifactID: artifactID,
+      timeout: "WASM inspection exceeded five seconds; original bytes are preserved")
+  }
+
+  /// A graph helper is short-lived, so a stale one waits its turn instead of
+  /// failing the selection that replaced it. Documents pass through unparsed:
+  /// a large function must never build a JSON tree in this process.
+  func graphDocument(root: URL, artifactID: String, extraArguments: [String], schema: String) throws -> Data {
+    guard graphQueue.wait(timeout: .now() + 10) == .success else {
+      throw NativeDecoderError(status: 409, message: "The WASM graph helper is busy; retry when the current request finishes")
+    }
+    defer { graphQueue.signal() }
+    return try run(
+      arguments: ["--artifacts", root.path, "--artifact-id", artifactID] + extraArguments,
+      outputLimit: 64 * 1024 * 1024,
+      schema: schema,
+      artifactID: artifactID,
+      timeout: "WASM graph decoding exceeded five seconds; original bytes are preserved")
+  }
+
+  private func run(arguments: [String], outputLimit: Int, schema: String, artifactID: String, timeout timeoutMessage: String) throws -> Data {
     guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
       throw NativeDecoderError(status: 503, message: "The packaged WASM inspector is unavailable")
     }
@@ -92,7 +118,7 @@ final class NativeWasmService {
     defer { try? output.close() }
     let process = Process()
     process.executableURL = executableURL
-    process.arguments = ["--artifacts", root.path, "--artifact-id", artifactID]
+    process.arguments = arguments
     process.standardInput = FileHandle.nullDevice
     process.standardOutput = output
     process.standardError = FileHandle.nullDevice
@@ -106,19 +132,26 @@ final class NativeWasmService {
         kill(process.processIdentifier, SIGKILL)
         process.waitUntilExit()
       }
-      throw NativeDecoderError(status: 408, message: "WASM inspection exceeded five seconds; original bytes are preserved")
+      throw NativeDecoderError(status: 408, message: timeoutMessage)
     }
     let file = try FileHandle(forReadingFrom: outputURL)
     defer { try? file.close() }
-    let bytes = try file.read(upToCount: 8 * 1024 * 1024 + 1) ?? Data()
-    guard process.terminationStatus == 0, bytes.count <= 8 * 1024 * 1024,
-      let result = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else {
+    let bytes = try file.read(upToCount: outputLimit + 1) ?? Data()
+    guard process.terminationStatus == 0, bytes.count <= outputLimit else {
+      throw NativeDecoderError(status: 502, message: "WASM inspector returned an invalid response")
+    }
+    // A graph document starts with its schema and reaches the page unparsed.
+    // Errors are short objects and fall through to the JSON path below.
+    if schema != "wasm-inspection-v1", bytes.starts(with: Data("{\"schema\":\"\(schema)\"".utf8)) {
+      return bytes
+    }
+    guard let result = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else {
       throw NativeDecoderError(status: 502, message: "WASM inspector returned an invalid response")
     }
     if let error = result["error"] as? String {
       throw NativeDecoderError(status: result["status"] as? Int ?? 500, message: error)
     }
-    guard result["schema"] as? String == "wasm-inspection-v1", result["artifact_id"] as? String == artifactID else {
+    guard result["schema"] as? String == schema, result["artifact_id"] as? String == artifactID else {
       throw NativeDecoderError(status: 502, message: "WASM inspector returned an invalid document")
     }
     return bytes

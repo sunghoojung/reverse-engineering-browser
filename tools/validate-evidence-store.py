@@ -138,6 +138,7 @@ EVENT_TYPES = {
     "wasm_indirect_observation",
     "wasm_dispatch_overflow",
     "wasm_indirect_overflow",
+    "script_compiled",
 }
 # protocol/native-network-v3.md, shared with include/reb/network_scope.hpp.
 SCHEME_CLASSES = {*range(0, 9), 15, *range(16, 21)}
@@ -738,6 +739,45 @@ def wasm_context_invalid(payload: bytes, version: int, new_version: int, offset:
             or not valid_invocation_context(state, invocation))
 
 
+def valid_script_compiled(event: dict, payload: bytes) -> bool:
+    if (
+        event["protocol_version"] != 3
+        or event["category"] != "artifact"
+        or event["flags"] != 0
+        or event["payload_truncated"]
+        or any(event[key] != "0" for key in ("artifact_id", "parent_event_id", "request_id"))
+        or any(event[key] == "0" for key in ("session_id", "sequence_number", "monotonic_time_ns"))
+        or not 1 <= event["process_id"] <= 0xFFFFFFFF
+        or not 1 <= event["thread_id"] <= 0xFFFFFFFF
+        or len(payload) != 128
+        or int.from_bytes(payload[0:2], "little") != 1
+        or int.from_bytes(payload[2:4], "little") != 128
+    ):
+        return False
+    kind, retention = payload[4], payload[5]
+    creator, position = int.from_bytes(payload[20:24], "little"), int.from_bytes(payload[72:76], "little")
+    length = int.from_bytes(payload[32:40], "little")
+    digest_is_zero = not any(payload[40:72])
+    limit = 16 * 1024 * 1024
+    if retention == 6:
+        source_valid = length > limit and digest_is_zero
+    elif retention == 7:
+        source_valid = digest_is_zero
+    else:
+        source_valid = 1 <= length <= limit and not digest_is_zero
+    return (
+        1 <= kind <= 5
+        and 1 <= retention <= 7
+        and source_valid
+        and int.from_bytes(payload[8:12], "little") != 0
+        and int.from_bytes(payload[24:32], "little") != 0
+        and (kind >= 4 or (creator == 0 and position == 0))
+        and (creator != 0 or position == 0)
+        and not any(payload[6:8])
+        and not any(payload[76:])
+    )
+
+
 def valid_wasm_overflow(event: dict, payload: bytes, indirect: bool) -> bool:
     size = 40 if indirect else 32
     if (
@@ -1017,6 +1057,8 @@ def validate_event(event: object, line_number: int) -> None:
             or any(payload[36:])
         ):
             raise ValueError(f"line {line_number}: native Wasm execution outcome is invalid")
+    if event["type"] == "script_compiled" and not valid_script_compiled(event, payload):
+        raise ValueError(f"line {line_number}: script_compiled record is invalid")
     if event["type"] in ("wasm_dispatch_overflow", "wasm_indirect_overflow") and not valid_wasm_overflow(
         event, payload, event["type"] == "wasm_indirect_overflow"
     ):

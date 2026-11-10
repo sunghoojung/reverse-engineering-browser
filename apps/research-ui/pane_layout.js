@@ -7,6 +7,7 @@ function initializePaneLayout() {
     { id: 'traffic', parent: '.traffic-grid', panes: ['.request-pane', '.detail-pane'], axis: 'y', minimum: [220, 220], label: 'Traffic list and inspector' },
     { id: 'traffic-columns', parent: '.traffic-grid', panes: ['.request-pane', '.detail-pane'], axis: 'x', minimum: [380, 360], label: 'Traffic list and inspector' },
     { id: 'sources', parent: '#screen-sources', panes: ['.sources-navigator', '.sources-editor'], axis: 'x', minimum: [140, 320], label: 'Source navigator and editor' },
+    { id: 'source-graph', parent: '#source-view-split', panes: ['#source-graph-host', '#source-code-wrap'], axis: 'y', minimum: [180, 72], label: 'block graph and linear view' },
     { id: 'decoder', parent: '.decoder-grid', panes: ['.decoder-column:first-child', '.decoder-column:last-child'], axis: 'x', minimum: [340, 300], label: 'Decoder pipeline and output' }
   ];
   let saved = {};

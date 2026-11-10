@@ -160,7 +160,9 @@ macro_rules! operator_names {
 }
 wasmparser::for_each_operator!(operator_names);
 
-fn instruction(op: &Operator<'_>) -> String {
+/// The dotted mnemonic for an operator. The linear listing and the block graph
+/// share one spelling so a row can be matched between the two views.
+pub(crate) fn mnemonic(op: &Operator<'_>) -> String {
     let name = operator_name(op).trim_start_matches("visit_");
     let mut mnemonic = if let Some((prefix, suffix)) = name.split_once('_') {
         if [
@@ -182,6 +184,11 @@ fn instruction(op: &Operator<'_>) -> String {
     {
         mnemonic.replace_range(index..index + 1, ".");
     }
+    mnemonic
+}
+
+fn instruction(op: &Operator<'_>) -> String {
+    let mnemonic = mnemonic(op);
     if let Operator::BrTable { targets } = op {
         // Large branch tables keep exact instruction ranges and a bounded preview.
         let labels = targets

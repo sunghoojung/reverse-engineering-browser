@@ -125,6 +125,11 @@ deob-benchmark: deob-worker-build
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
 	python3 tools/run-deobfuscation-benchmark.py
 
+# Opt-in: needs REB_BRAVE_BINARY set to a Brave built from this tree.
+.PHONY: compiled-script-capture-check
+compiled-script-capture-check: origin-trace-backend
+	python3 tools/check-compiled-script-capture.py --reb-api apps/origin-trace-backend/target/debug/reb-api
+
 .PHONY: native-request-identity-check
 native-request-identity-check: broker
 	python3 tools/check-native-request-identity.py --broker $(BROKER_BINARY)

@@ -1642,6 +1642,53 @@ for examples, locality checks, and known gaps. The CLI does not start or control
 an installed native app session, and the native custom-scheme interface is not
 itself an HTTP server.
 
+## Basic-block graphs
+
+**Graph** on a captured WASM artifact draws one function at a time as basic
+blocks, above the linear disassembly and hex. The graph takes about two thirds
+of the height; drag the divider between them like the other pane splits, or
+use **Linear** to hide the linear pane. The text view's line window and search
+notice are hidden while Graph is active. A graph opens at actual size, centered
+on the entry block (or the whole graph when it fits), and **Fit** or `0` shows
+all of it. Below the zoom where rows are readable, cards keep a screen-size
+label and an overview cue says rows are hidden. The footer is one line: the
+limits, then the edge legend, which folds behind **Key** in a narrow pane. Selecting a block with the pointer or Enter scrolls the disassembly or hex
+to its offset. **Graph** in Static bytecode draws the same view for a decoded
+image. Declared flow and an imported **Observed path** are separate layers,
+never one graph: the observed layer's cards are retained steps, and a sequence
+gap is a card with no edge on either side.
+
+The header gives the name, block count, instruction count and `declared` (or
+`observed`). Each block shows its first byte offset as `loc_<hex>`, an
+instruction-count badge and rows of offset, mnemonic and operands. A run of
+identical `block` openers is one row with a count; the badge still counts every
+instruction. Edge kind is never color alone: taken is solid, false is dashed,
+table arms are dotted with their case numbers, exception edges are long-dashed,
+and an unresolved target is a labeled stub that adds no block. The footer keeps
+the limits on screen: declared reachability is not observed execution, and a
+complete drawing is not a proof. Nothing here sets `cfg.complete`.
+
+Keyboard: arrows move to the nearest block in that direction, `[` and `]` step
+in byte order, Home returns to the entry, Enter shows the block in the
+disassembly and hex, `+`, `-` and `0` zoom and fit, and Shift+arrows pan.
+
+The layout is a small project-authored pass in `block_graph_layout.js`, run in
+a Web Worker. It uses dominator regions: each subtree is entered once, so it
+lays out alone and only its members' sizes reach its parent. A layer of one
+continues the spine, a wider layer becomes side-by-side boxes and wraps into a
+grid past six, and arms with no way out stack on the spine. Edges leaving a box
+share a bottom port, and every back edge to a loop shares one rail. That is why a
+flattened dispatcher reads as a grid rather than a hairball. It follows the
+region idea from Triskel without linking it: this app has no C++ link into its
+web UI or backend, and no new dependency was needed.
+
+Memory: one function is decoded on demand, layout runs in a worker that is
+terminated when a job finishes or is replaced, and laid-out graphs stay in a
+16 MiB least-recently-used cache that is cleared when the view closes, the
+artifact changes or the screen leaves. The canvas is one bounded backing store
+that does not grow with graph size, and only visible cards and edges are drawn.
+A byte budget cuts row text before structure and labels what it cut.
+
 ## Pane sizes
 
 Drag the shared borders in Traffic, Sources navigator, and Tools Decoder to

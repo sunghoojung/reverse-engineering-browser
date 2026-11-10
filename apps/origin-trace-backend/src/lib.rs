@@ -54,6 +54,7 @@ pub mod vm_pack;
 mod vm_reachability;
 mod vm_request_links;
 pub mod wasm;
+pub mod wasm_graph;
 mod worker;
 mod workspace;
 mod workspace_lease;

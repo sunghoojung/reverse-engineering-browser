@@ -1,4 +1,12 @@
 // Browser instrumentation is native-only. This viewer never attaches a debugger.
+const sourceGraphPanel = createSourceGraphPanel({
+  host: document.querySelector('#source-graph-host'),
+  editor: document.querySelector('#source-graph-host').closest('.sources-editor'),
+  button: document.querySelector('#source-graph'),
+  // Graph and Map are alternative views of one artifact; opening Map closes Graph.
+  closeOn: document.querySelector('#source-map'),
+  revealOffset: offset => revealGraphByteOffset(offset)
+});
 const sourceFactsPanel = createSourceFactsPanel({
   getSource: selectedSource, onNavigate: revealSourceFactRange,
   openSidebar() { state.sourceSidebarOpen = true; renderSourceSidebar(); }
@@ -7092,6 +7100,21 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.sourceWindowLine.max = String(index.lineCount);
       }
 
+      /** Keeps the graph's disassembly or hex pane on a block's offset without taking focus. */
+      function revealGraphByteOffset(offset) {
+        const view = state.sourceEditorView?.view;
+        const rows = view?.wasmRows;
+        let line = Math.floor(offset / 16);
+        if (rows) {
+          const exact = rows.findIndex(row => row.byte_offset === offset);
+          line = exact >= 0 ? exact : rows.findLastIndex(row => row.byte_offset !== null && row.byte_offset <= offset);
+          if (line < 0) return;
+        }
+        moveSourceWindow(line);
+        const row = elements.sourceCode.querySelector(`[data-local-line="${line}"]`);
+        if (row) { row.scrollIntoView({block: 'center'}); row.setAttribute('data-graph-reveal', 'true'); }
+      }
+
       function moveSourceWindow(line, column = 0) {
         const editor = state.sourceEditorView, source = selectedSource();
         const bounds = editor && sourceDocumentLine(editor.index, line), paged = Boolean(editor?.view.formatted?.paged);
@@ -7402,6 +7425,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       function renderSources() {
         const source = selectedSource();
+        if (typeof sourceGraphPanel !== 'undefined') sourceGraphPanel.sync(source);
         sourceFactsPanel.sync(source);
         syncInvestigationRange(source);
         const view = source?.content !== undefined ? sourceDisplayView(source) : null;
@@ -8443,6 +8467,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       function showScreen(name, trigger = null) {
+        if (typeof sourceGraphPanel !== 'undefined') sourceGraphPanel.setScreenVisible(name === 'sources');
         const screenName = name === 'backtraces' ? 'backtrace' : name;
         if (!document.getElementById(`screen-${screenName}`)) return;
         investigationBeforeScreen(screenName);

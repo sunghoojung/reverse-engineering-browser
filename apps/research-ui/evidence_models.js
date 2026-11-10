@@ -33,7 +33,7 @@
           'request_completed', 'request_failed', 'vm_finding',
           'vm_dispatch_sample', 'wasm_dispatch_observation', 'wasm_guest_dispatch', 'wasm_guest_invocation',
           'wasm_indirect_observation', 'wasm_execution_outcome', 'js_dispatch_observation', 'js_invocation_start', 'js_invocation_settle',
-          'js_invocation_request', 'wasm_dispatch_overflow', 'wasm_indirect_overflow',
+          'js_invocation_request', 'wasm_dispatch_overflow', 'wasm_indirect_overflow', 'script_compiled',
           'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target', 'response_body',
           'request_headers', 'response_headers', 'cookie_list', 'script_cookie', 'request_initiator_stack',
           'script_identity', 'capture_exclusion', 'tab_set', 'request_tab_link', 'navigation_initiator_stack',
@@ -95,7 +95,8 @@
         'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
         'webassembly_module', 'webassembly_instantiate', 'canvas_to_data_url',
         'runtime_typed_array',
-        'runtime_allocating_script', 'native_wasm_guest', 'network_request', 'request_stack', 'stack_script'
+        'runtime_allocating_script', 'native_wasm_guest', 'network_request', 'request_stack', 'stack_script',
+        'compiled_script'
       ]);
       const canvasReplayProperties = new Set([
         'fillStyle', 'strokeStyle', 'font', 'textBaseline', 'textAlign',
@@ -1159,7 +1160,8 @@
         if (Object.hasOwn(artifact, 'execution_context_id')) {
           if (!isCanonicalInteger(artifact.execution_context_id, 0n, uint64Max) ||
             !artifactCaptureOrigins.has(artifact.capture_origin) ||
-            (['dynamic_javascript', 'runtime_allocating_script', 'stack_script'].includes(artifact.capture_origin) &&
+            (['dynamic_javascript', 'runtime_allocating_script', 'stack_script', 'compiled_script']
+              .includes(artifact.capture_origin) &&
               (artifact.kind !== 'javascript' || artifact.execution_context_id === '0')) ||
             ((artifact.kind === 'stack') !== (artifact.capture_origin === 'request_stack')) ||
             (artifact.capture_origin.startsWith('webassembly_') &&

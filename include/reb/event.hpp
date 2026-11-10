@@ -103,6 +103,8 @@ enum class EventType : std::uint16_t {
   kAsyncTaskStack = 48,
   // Extension traffic recorded by opt-in; see protocol/native-network-v3.md.
   kRequestExtensionLink = 50,
+  // One successful V8 compile. See protocol/native-compiled-scripts-v1.md.
+  kScriptCompiled = 51,
 };
 
 enum class EventFlag : std::uint16_t {

@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="app.css">
     <link rel="stylesheet" href="xrefs_view.css">
     <link rel="stylesheet" href="entropy_map.css">
+    <link rel="stylesheet" href="block_graph.css">
   </head>
   <body>
     <div class="app">
@@ -275,6 +276,7 @@
                 <button id="source-quick-open" class="source-tool" type="button">Open file</button>
                 <input id="source-search" class="source-search" type="search" maxlength="512" placeholder="Find" aria-label="Find in source" aria-keyshortcuts="Meta+F Control+F" aria-describedby="source-search-status" title="Find retained text; Enter for next, Shift+Enter for previous (single-line literal, first 1000 matches)" />
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
+                <button id="source-graph" class="source-tool" type="button" aria-label="Show basic-block graph" aria-pressed="false" hidden>Graph</button>
                 <button id="source-map" class="source-tool" type="button" aria-label="Show artifact map" aria-pressed="false" hidden>Map</button>
                 <details id="source-more" class="source-more">
                   <summary class="source-tool" title="More source actions">More</summary>
@@ -298,11 +300,14 @@
                 <div id="source-name-host" class="evidence-name-host"></div>
                 <p id="source-limit-notice" class="source-limit-notice" role="status" hidden></p>
               </div>
+              <div id="source-view-split" class="source-view-split">
+              <div id="source-graph-host" class="block-graph" hidden></div>
               <div id="source-code-wrap" class="source-code-wrap" tabindex="0">
                 <button id="source-window-previous" class="source-window-edge" type="button" aria-label="Previous source lines" hidden></button>
                 <div id="source-code-empty" class="source-empty">Select a JavaScript file, WASM module, source map, or approved response body.</div>
                 <code id="source-code" class="source-code" aria-label="Source content" hidden></code>
                 <button id="source-window-next" class="source-window-edge" type="button" aria-label="Next source lines" hidden></button>
+              </div>
               </div>
               <section id="source-map-view" class="source-map-view" aria-label="Artifact map" hidden></section>
               <div class="source-editor-status">
@@ -854,6 +859,9 @@
     <script src="captured_export_formats.js"></script>
     <script src="vm_debugger.js"></script>
     <script src="vm_static.js"></script>
+    <!-- Loaded here as well so the page and the Worker share one script; it does work only inside the Worker. -->
+    <script src="block_graph_layout.js"></script>
+    <script src="block_graph.js"></script>
     <script src="vm_static_view.js"></script>
     <script src="vm_contextual.js"></script>
     <script src="vm_contextual_evidence.js"></script>

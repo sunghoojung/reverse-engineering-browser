@@ -428,6 +428,7 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
                 "network_request",
                 "request_stack",
                 "stack_script",
+                "compiled_script",
             ]
             .contains(&origin)
             || (artifact["kind"] == "wasm_guest_adapter" && origin != "native_wasm_guest")
@@ -445,7 +446,10 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
                 .any(|k| !canonical(&artifact[*k], 64, true))))
             || (matches!(
                 origin,
-                "dynamic_javascript" | "runtime_allocating_script" | "stack_script"
+                "dynamic_javascript"
+                    | "runtime_allocating_script"
+                    | "stack_script"
+                    | "compiled_script"
             ) && (artifact["kind"] != "javascript" || artifact["execution_context_id"] == "0"))
             // Request stack frames and the sources a stack named, native-network-v3.md.
             || ((artifact["kind"] == "stack") != (origin == "request_stack"))

@@ -479,8 +479,10 @@ fn identities<'a>(
                     != Some(network_request || matches!(kind, "response_body" | "canvas_data_url"))
                     || (network_request != (origin == "network_request"))
                     || (value["execution_context_id"].is_null() && origin != "unknown")
-                    || (matches!(origin, "dynamic_javascript" | "stack_script")
-                        && (kind != "javascript" || context.is_none_or(|id| id == 0)))
+                    || (matches!(
+                        origin,
+                        "dynamic_javascript" | "stack_script" | "compiled_script"
+                    ) && (kind != "javascript" || context.is_none_or(|id| id == 0)))
                     || ((kind == "stack") != (origin == "request_stack"))
                     || (origin == "request_stack" && context.is_none_or(|id| id == 0))
                     || (origin.starts_with("webassembly_")
@@ -1760,6 +1762,7 @@ mod tests {
             "csp_violation",
             "exception_observation",
             "dom_mutation",
+            "script_compiled",
         ] {
             let mut event: Value = serde_json::from_slice(first).unwrap();
             event["type"] = json!(kind);

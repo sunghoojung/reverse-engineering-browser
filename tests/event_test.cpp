@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -5,9 +6,88 @@
 #include <limits>
 #include <string>
 
+#include "reb/compiled_script.hpp"
 #include "reb/event.hpp"
 
 namespace {
+
+reb::EventRecord ScriptCompiledRecord(const reb::CompiledScriptPayload& payload) {
+  reb::EventRecord event =
+      reb::MakeEvent(reb::EventCategory::kArtifact, reb::EventType::kScriptCompiled, 1, 2, 3);
+  event.header.process_id = 4;
+  event.header.thread_id = 5;
+  event.header.payload_size = 128;
+  const auto bytes = reb::EncodeCompiledScriptPayload(payload);
+  std::copy(bytes.begin(), bytes.end(), event.inline_payload.begin());
+  return event;
+}
+
+reb::CompiledScriptPayload QueuedEvalPayload() {
+  reb::CompiledScriptPayload payload;
+  payload.kind = static_cast<std::uint8_t>(reb::CompiledScriptKind::kEval);
+  payload.retention = static_cast<std::uint8_t>(reb::CompiledScriptRetention::kQueued);
+  payload.script_id = 9;
+  payload.creator_script_id = 4;
+  payload.creator_position = 120;
+  payload.execution_context_id = 77;
+  payload.source_length = 32;
+  payload.source_sha256[0] = std::byte{1};
+  return payload;
+}
+
+bool CheckScriptCompiledValidation() {
+  const auto accepted = [](const reb::CompiledScriptPayload& payload) {
+    return reb::IsValidEvent(ScriptCompiledRecord(payload));
+  };
+  auto payload = QueuedEvalPayload();
+  bool ok = accepted(payload);
+  // A worker script has no frame, and that is not malformed.
+  ok = ok && ScriptCompiledRecord(payload).header.frame_id == 0;
+
+  const auto refused = [&](auto mutate) {
+    auto bad = QueuedEvalPayload();
+    mutate(bad);
+    return !accepted(bad);
+  };
+  ok = ok && refused([](auto& p) { p.script_id = 0; });
+  ok = ok && refused([](auto& p) { p.execution_context_id = 0; });
+  ok = ok && refused([](auto& p) { p.kind = 6; });
+  ok = ok && refused([](auto& p) { p.retention = 0; });
+  ok = ok && refused([](auto& p) { p.retention = 8; });
+  ok = ok && refused([](auto& p) { p.protocol_version = 2; });
+  ok = ok && refused([](auto& p) { p.reserved[0] = std::byte{1}; });
+  ok = ok && refused([](auto& p) { p.source_sha256 = {}; });
+  ok = ok && refused([](auto& p) { p.source_length = 0; });
+  ok = ok && refused([](auto& p) { p.source_length = reb::kCompiledScriptMaxSourceBytes + 1; });
+  // Only generated code has a creator, and a position needs a creator.
+  ok = ok && refused([](auto& p) { p.kind = 1; });
+  ok = ok && refused([](auto& p) { p.creator_script_id = 0; });
+
+  auto too_large = QueuedEvalPayload();
+  too_large.retention = static_cast<std::uint8_t>(reb::CompiledScriptRetention::kTooLarge);
+  too_large.source_length = reb::kCompiledScriptMaxSourceBytes + 1;
+  too_large.source_sha256 = {};
+  ok = ok && accepted(too_large);
+  too_large.source_length = reb::kCompiledScriptMaxSourceBytes;
+  ok = ok && !accepted(too_large);
+
+  auto unavailable = QueuedEvalPayload();
+  unavailable.retention = static_cast<std::uint8_t>(reb::CompiledScriptRetention::kUnavailable);
+  unavailable.source_sha256 = {};
+  ok = ok && accepted(unavailable);
+
+  reb::EventRecord with_artifact = ScriptCompiledRecord(payload);
+  with_artifact.header.artifact_id = 1;
+  ok = ok && !reb::IsValidEvent(with_artifact);
+
+  reb::CompiledScriptPayload decoded;
+  const auto bytes = reb::EncodeCompiledScriptPayload(payload);
+  ok = ok && reb::DecodeCompiledScriptPayload(bytes, decoded) && decoded.creator_script_id == 4 &&
+       decoded.creator_position == 120 && decoded.execution_context_id == 77;
+  if (!ok)
+    std::cerr << "script_compiled validation rejected or accepted the wrong record\n";
+  return ok;
+}
 
 bool CheckJsonReuse() {
   reb::EventRecord event =
@@ -115,5 +195,5 @@ int main() {
     std::cerr << "VM dispatch event type contract failed\n";
     return 1;
   }
-  return CheckJsonReuse() ? 0 : 1;
+  return CheckJsonReuse() && CheckScriptCompiledValidation() ? 0 : 1;
 }

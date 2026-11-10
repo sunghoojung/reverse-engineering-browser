@@ -351,6 +351,40 @@ runInContext(`mapFixture.setSource({...mapSourceValue, artifact_id: '902'}); map
 assert.equal(runInContext('mapFixture.controller.isOpen()', context), false, 'a new selection retires the map');
 assert.equal(mapRoot.hidden, true, 'the retired map is hidden');
 assert.equal(mapRoot.querySelector('.map-facts').children.length, 0, 'the retired summary is released');
+
+// Sources Graph: Inspect, Graph and Map sit together, and Graph and Map exclude each other.
+assert.match(html, /id="source-wasm"[^>]*>Inspect<\/button>\s*<button id="source-graph"[^>]*>Graph<\/button>\s*<button id="source-map"/, 'Inspect, Graph and Map are adjacent in that order');
+for (const [path, assets] of [['scripts/build-research-app.sh', ['block_graph.js', 'block_graph_layout.js', 'block_graph.css']], ['apps/origin-trace-backend/src/app.rs', ['"block_graph.js"', '"block_graph_layout.js"', '"block_graph.css"']],
+  ['apps/research-ui/macos/OriginTraceApp.swift', ['/block_graph.js', '/block_graph_layout.js', '/block_graph.css']]]) {
+  const text = await readFile(join(root, path), 'utf8');
+  for (const asset of assets) assert(text.includes(asset), `${path} ships ${asset}`);
+}
+runInContext(`var graphFixture = (() => {
+  const make = (tag, parent = document.body) => { const node = document.createElement(tag); parent.append(node); return node; };
+  const toolbar = make('div'), editor = make('div'), split = make('div', editor), host = make('div', split), codeWrap = make('div', split);
+  const graphButton = make('button', toolbar), mapButton = make('button', toolbar), mapRoot = make('section', editor), viewKind = make('span');
+  graphButton.classList.add('source-tool'); mapButton.classList.add('source-tool'); mapRoot.hidden = true;
+  const source = {artifact_id: '903', sha256: 'b'.repeat(64), byte_size: 64, source_type: 'artifact', kind: 'wasm'};
+  const graph = createSourceGraphPanel({host, editor, button: graphButton, closeOn: mapButton, revealOffset() {}});
+  const map = createEntropyMap({button: mapButton, root: mapRoot, codeWrap, viewKind, toolbar, getSource: () => source,
+    identityOf: value => value ? value.artifact_id + ':' + value.sha256 : null, reveal: () => ''});
+  graph.sync(source);
+  return {graph, map, graphButton, mapButton, host, codeWrap, editor};
+})();`, context);
+runInContext(`fetch = () => new Promise(() => {});`, context);
+const graphFixture = name => runInContext(`graphFixture.${name}`, context);
+graphFixture('graphButton').click();
+assert.equal(runInContext('graphFixture.graph.isOpen()', context), true, 'Graph opens on a captured WASM artifact');
+assert.equal(graphFixture('editor').getAttribute('data-graph'), 'true');
+graphFixture('mapButton').click();
+assert.equal(runInContext('graphFixture.map.isOpen()', context), true, 'Map opens');
+assert.equal(runInContext('graphFixture.graph.isOpen()', context), false, 'opening Map closes Graph');
+assert.equal(graphFixture('host').hidden, true, 'the closed graph is hidden and released');
+assert.equal(graphFixture('codeWrap').hidden, true, 'Map replaces the linear view under the closed graph');
+graphFixture('graphButton').click();
+assert.equal(runInContext('graphFixture.graph.isOpen()', context), true, 'Graph opens again');
+assert.equal(runInContext('graphFixture.map.isOpen()', context), false, 'opening Graph closes Map');
+assert.equal(graphFixture('codeWrap').hidden, false, 'the linear view returns with the graph');
 assert.deepEqual(forbidden, [], 'startup/navigation must not attempt CDP transport');
 assert.deepEqual(asyncErrors, [], 'all asynchronous startup failures must be handled');
 release();

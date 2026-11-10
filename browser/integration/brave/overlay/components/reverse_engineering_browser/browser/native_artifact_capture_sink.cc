@@ -1520,8 +1520,20 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
                "canvas_image_capture_disabled", result_category);
     return 0;
   }
-  // Inline source can embed per-user data, so the same applies to a script a
-  // stack names: a Metadata only session keeps its frames and digest, not its text.
+  const bool is_page_script_source =
+      kind == NativeArtifactKind::kJavaScript &&
+      (capture_origin == NativeArtifactCaptureOrigin::kDynamicJavaScript ||
+       capture_origin == NativeArtifactCaptureOrigin::kCompiledScript);
+  // This text is page content no response body carried. The session's opt-in
+  // decides, not the renderer's view of its configuration.
+  if (is_page_script_source && !NativeProbeSession::Get().capture_request_content()) {
+    EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
+               "script_source_capture_disabled", result_category);
+    return 0;
+  }
+  // Inline source can embed per-user data, so a script a stack names follows
+  // the same opt-in: a Metadata only session keeps its frames and digest, not
+  // its text.
   if (kind == NativeArtifactKind::kJavaScript &&
       capture_origin == NativeArtifactCaptureOrigin::kStackScript &&
       !NativeProbeSession::Get().capture_request_content()) {
@@ -1536,8 +1548,7 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
         ((kind == NativeArtifactKind::kWasmGuestAdapter ||
           kind == NativeArtifactKind::kBytecodeBuffer) &&
          capture_origin == NativeArtifactCaptureOrigin::kNativeWasmGuest))) ||
-      (kind == NativeArtifactKind::kJavaScript &&
-       capture_origin == NativeArtifactCaptureOrigin::kDynamicJavaScript) ||
+      is_page_script_source ||
       // Request initiator stacks, protocol/native-network-v3.md.
       (((kind == NativeArtifactKind::kStack &&
          capture_origin == NativeArtifactCaptureOrigin::kRequestStack) ||

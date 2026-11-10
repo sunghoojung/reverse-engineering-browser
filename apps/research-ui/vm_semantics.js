@@ -494,7 +494,7 @@ function mountVmSemantics(root) {
     const step = adjacent(direction); if (step) chooseRow(step.sequence, true);
   });
   invalidatePair();
-  return {clear,selector,input,hypothesis,notice,details,map,validation,comparisonInput,comparisonSelector,comparisonView,compare,clearComparison,changesOnly,stateView,occurrences,previous,next,validationView,listingBody,listingStatus,listingPager,filter,clearFilter,stateButtons,contextButtons,panelButtons,go,changeLayout,openContext,closeContext,setPanel,focusSelectedRow,setExecutionView,viewButtons,context,inspector,navigator};
+  return {getObservedPath:()=>pathReport,clear,selector,input,hypothesis,notice,details,map,validation,comparisonInput,comparisonSelector,comparisonView,compare,clearComparison,changesOnly,stateView,occurrences,previous,next,validationView,listingBody,listingStatus,listingPager,filter,clearFilter,stateButtons,contextButtons,panelButtons,go,changeLayout,openContext,closeContext,setPanel,focusSelectedRow,setExecutionView,viewButtons,context,inspector,navigator};
 }
 // Keep both workspaces mounted: switching modes never rebuilds a finding or a trace.
 const vmExecutionWorkspace=typeof document==='undefined'?null:(()=>{
@@ -504,7 +504,7 @@ const vmExecutionWorkspace=typeof document==='undefined'?null:(()=>{
   const ownedButton=document.querySelector('#vm-show-owned'),ownedRoot=document.querySelector('#vm-owned-debugger'),controls=document.querySelector('#vm-owned-controls');
   const navigationEntry=document.querySelector('#nav-vm-workspace');
   const staticButton=document.querySelector('#vm-show-static'),staticRoot=document.querySelector('#vm-static-workspace');
-  const staticAnalysis=staticRoot&&typeof mountVmStatic==='function'?mountVmStatic(staticRoot):null;
+  const staticAnalysis=staticRoot&&typeof mountVmStatic==='function'?mountVmStatic(staticRoot,{getObservedPath:()=>execution.getObservedPath()}):null;
   const contextualButton=document.querySelector('#vm-show-contextual'),contextualRoot=document.querySelector('#vm-contextual-workspace');
   const contextualAnalysis=contextualRoot&&typeof mountVmContextual==='function'?mountVmContextual(contextualRoot):null;
   const packsButton=document.querySelector('#vm-show-packs'),packsRoot=document.querySelector('#vm-packs-workspace');
@@ -516,6 +516,7 @@ const vmExecutionWorkspace=typeof document==='undefined'?null:(()=>{
     root.hidden=mode!=='execution';if(findings)findings.hidden=mode!=='findings';
     if(ownedRoot)ownedRoot.hidden=mode!=='owned';
     if(staticRoot)staticRoot.hidden=mode!=='static';
+    if(mode!=='static'||!screenVisible)staticAnalysis?.blockGraph?.close();
     if(contextualRoot)contextualRoot.hidden=mode!=='contextual';
     if(packsRoot)packsRoot.hidden=mode!=='packs';
     if(ledgerRoot)ledgerRoot.hidden=mode!=='ledger';

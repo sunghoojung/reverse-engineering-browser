@@ -1,4 +1,5 @@
 #include "reb/event.hpp"
+#include "reb/compiled_script.hpp"
 #include "reb/debugger_observation.hpp"
 #include "reb/js_dispatch.hpp"
 #include "reb/js_invocation.hpp"
@@ -104,6 +105,7 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kNavigationInitiatorStack:
     case EventType::kNavigationInitiatorLink:
     case EventType::kAsyncTaskStack:
+    case EventType::kScriptCompiled:
       return true;
     case EventType::kUnknown:
       return false;
@@ -230,6 +232,8 @@ bool IsValidEvent(const EventRecord& event) noexcept {
     return false;
   if (event.header.type == EventType::kRequestExtensionLink &&
       !IsValidRequestExtensionLinkEvent(event))
+    return false;
+  if (event.header.type == EventType::kScriptCompiled && !IsValidScriptCompiled(event))
     return false;
   if (!IsKnownSchemeClass(event.header.scheme_class) ||
       (event.header.scheme_class != 0 && !CarriesSchemeClass(event.header)) ||
@@ -464,6 +468,8 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "navigation_initiator_link";
     case EventType::kAsyncTaskStack:
       return "async_task_stack";
+    case EventType::kScriptCompiled:
+      return "script_compiled";
     case EventType::kUnknown:
       return "unknown";
   }

@@ -280,7 +280,8 @@ class NativeProbeSession {
   std::uint64_t NextBrowserSequence() { return next_++; }
   // This pipeline carries no Canvas images.
   bool capture_canvas_images() const { return false; }
-  // Nor stack script source, which needs the content capture opt-in.
+  // Nor stack script or compiled script source, which need the content
+  // capture opt-in.
   bool capture_request_content() const { return false; }
 
  private:

@@ -159,6 +159,7 @@ xcrun swiftc -parse-as-library \
 
 xcrun swiftc -parse-as-library \
   "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${repo_root}/tools/check-agent-core.swift" \
+  "${repo_root}/tools/check-agent-subscriptions.swift" "${repo_root}/tools/agent-cli-stand-in.swift" \
   -o "${repo_root}/build/check-agent-core"
 "${repo_root}/build/check-agent-core" "${repo_root}/apps/origin-trace-backend/target/release/reb-api"
 

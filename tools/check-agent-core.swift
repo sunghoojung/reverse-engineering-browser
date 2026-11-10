@@ -4,7 +4,9 @@ import Foundation
 // Compiled with the production native core. The agent loop is LangGraph in the
 // web view (tools/check-agent-runtime.mjs runs it); this checks what native
 // keeps: the restricted provider proxy, key handling, the real `reb-api mcp`
-// tool server and its gates, and the user-only transcript.
+// tool server and its gates, and the user-only transcript. The subscription
+// paths (CLI drivers and ChatGPT sign-in) are tools/check-agent-subscriptions.swift,
+// and the same binary plays the stand-in CLIs (tools/agent-cli-stand-in.swift).
 
 final class StandIn: @unchecked Sendable {
   struct Received { let path: String; let headers: [String: String]; let body: [String: Any] }
@@ -124,6 +126,7 @@ final class Collected: @unchecked Sendable {
 @main
 enum AgentCoreChecks {
   @MainActor static func main() async {
+    AgentCLIStandIn.runIfRequested()
     let arguments = CommandLine.arguments
     precondition(arguments.count == 2, "usage: check-agent-core <reb-api>")
     let api = URL(fileURLWithPath: arguments[1])
@@ -248,6 +251,8 @@ enum AgentCoreChecks {
     check(!(approved["text"] as? String ?? "").contains("needs Allow once"), "Allow once runs that one call")
     actions.disable()
 
+    await AgentSubscriptionChecks.run(api: api, endpoint: URL(string: endpoint)!, root: root)
+
     backendProcess.terminate()
     backendProcess.waitUntilExit()
     print("PASS agent native: fixed-endpoint proxy, native key, dropped page credentials, redacted errors, cancel, real reb-api gates and user-only transcript")
@@ -268,7 +273,8 @@ enum AgentCoreChecks {
       ("https://evil.example/v1/messages", "POST"), ("http://api.anthropic.com/v1/messages", "POST"),
       ("https://api.anthropic.com:8443/v1/messages", "POST"), ("https://user:pass@api.anthropic.com/v1/messages", "POST"),
       ("https://api.anthropic.com.evil.example/v1/messages", "POST"), ("https://api.openai.com/v1/messages", "POST"),
-      ("https://127.0.0.1/v1/messages", "POST"), ("not a url", "POST"),
+      ("https://127.0.0.1/v1/messages", "POST"), ("not a url", "POST"), ("https:///v1/responses", "POST"),
+      ("https://api.x.ai/v1/responses", "POST"),
     ] {
       check(AgentProviderRoute.resolve(url, method: method, standIn: nil) == nil, "refused: \(method) \(url)")
     }

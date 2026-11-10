@@ -1929,7 +1929,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#agent-input")
       try await ui.type("What loaded?")
       try await ui.key(36, "\r")
-      try await ui.waitUntil("__rebUiProbe.count('.agent-cite') === 1", timeout: 20, "the answer and its citation did not arrive")
+      try await ui.waitUntil(answered("What loaded?"), timeout: 20, "the answer and its citation did not arrive")
       let log = try await ui.value("__rebUiProbe.text('#agent-log')") as? String ?? ""
       XCTAssert(log.contains("get_artifacts"), "the tool call is visible: \(log)")
       XCTAssert(log.contains("not verified"), "the invented citation stays labeled: \(log)")
@@ -1980,25 +1980,47 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("document.getElementById('agent-dock').hidden", "the dock did not close")
       _ = try memorySample(ui, "closed-after-\(size.name)")
     }
-    // Both themes, at the default size.
+    // Both themes, at the default size. The saved theme goes back to dark even
+    // when a step fails, so later tests start from the theme they expect.
     try await ui.resize(width: windowSizes[0].width, height: windowSizes[0].height)
     try await ui.reload()
     try await ui.click("#theme-toggle")
-    try await ui.click("#agent-toggle")
-    try await ui.click(".agent-switch")
-    try await ui.waitUntil("__rebUiProbe.count('#agent-consent-accept') === 1", "the consent step did not show")
-    try await ui.screenshot("agent-consent-light")
-    try await ui.click("#agent-consent-accept")
-    try await ui.waitUntil(on, timeout: 20, "the agent did not turn on")
-    try await ui.click("#agent-input")
-    try await ui.type("Again")
-    try await ui.key(36, "\r")
-    try await ui.waitUntil("__rebUiProbe.count('.agent-cite') === 1", timeout: 20, "the light theme answer did not arrive")
-    try await agentLayoutIsClean(ui, "light")
-    try await ui.screenshot("agent-conversation-light")
-    try await ui.click(".agent-switch")
-    try await ui.click("#agent-close")
-    try await ui.click("#theme-toggle")
+    do {
+      try await ui.waitUntil("document.documentElement.dataset.theme === 'light'", "the light theme did not apply")
+      try await ui.click("#agent-toggle")
+      try await ui.click(".agent-switch")
+      try await ui.waitUntil("__rebUiProbe.count('#agent-consent-accept') === 1", "the consent step did not show")
+      try await ui.screenshot("agent-consent-light")
+      try await ui.click("#agent-consent-accept")
+      try await ui.waitUntil(on, timeout: 20, "the agent did not turn on")
+      try await ui.click("#agent-input")
+      try await ui.type("Again")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil(answered("Again"), timeout: 20, "the light theme answer did not arrive")
+      try await agentLayoutIsClean(ui, "light")
+      try await ui.screenshot("agent-conversation-light")
+      try await ui.click(".agent-switch")
+      try await ui.click("#agent-close")
+    } catch {
+      try? await restoreDarkTheme(ui)
+      throw error
+    }
+    try await restoreDarkTheme(ui)
+  }
+
+  // Earlier rows of this session come back after a reload, citations included,
+  // so an answer is the cited row after the latest matching question.
+  private func answered(_ question: String) -> String {
+    "(() => { const rows = [...document.querySelectorAll('#agent-log .agent-row')]; " +
+      "const asked = rows.findLastIndex(row => row.classList.contains('agent-row-user') && row.textContent.includes(\(String(reflecting: question)))); " +
+      "return asked >= 0 && rows.slice(asked + 1).some(row => row.querySelector('.agent-cite')); })()"
+  }
+
+  @MainActor
+  private func restoreDarkTheme(_ ui: Harness) async throws {
+    _ = try await ui.webView.callAsyncJavaScript(
+      "if (document.documentElement.dataset.theme === 'light') document.querySelector('#theme-toggle').click(); return true;", contentWorld: .page)
+    try await ui.waitUntil("document.documentElement.dataset.theme === 'dark'", "the dark theme did not come back")
   }
 
   // A web content process that stops leaves an empty window. The app reloads

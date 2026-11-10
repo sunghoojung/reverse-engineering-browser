@@ -736,7 +736,9 @@ captured path and query, and its Payload tab shows them parsed:
   shows its exact raw range. Form bodies are a name/value table and
   multipart bodies list each part's name, filename, type and size, with the
   boundary read from the first line. Other text is colored by its type. Binary
-  bytes are only shown as hex. Long sources render in blocks as they scroll.
+  bytes are only shown as hex. Long sources render as they scroll, in blocks
+  of at most 200 rows and 64 KiB, and no more than 64 KiB of them a frame, so
+  a one-line body never lays out at once.
 - **Find**, **Copy value** and **Copy as JSON** act on the selected row, or on
   the whole payload. Arrow keys move through, open and close tree rows.
 - **Capture details**, collapsed, holds the state, type, lengths, SHA-256,
@@ -1151,7 +1153,7 @@ capture, fetch anything or change a row.
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
 | `source_format.js` | The backend layout client (whole bodies and 1,000-line Sources pages) and its whitespace-only mapping to the displayed evidence |
-| `code_view.js` | The code view Payload, Response, Native Console and Analyst share: Sources colors, lazily mounted rows, find marks, layouts with raw ranges and the colored textarea editor |
+| `code_view.js` | The code view Payload, Response, Native Console and Analyst share: Sources colors, rows mounted near the view in blocks of at most 200 rows and 64 KiB, find marks, layouts with raw ranges and the colored textarea editor |
 | `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
 | `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `workspace_lease.rs` | Workspace contracts, explicit analyst execution, private durable replacement |

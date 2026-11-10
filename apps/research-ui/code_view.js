@@ -1,6 +1,10 @@
 // The code view Payload, Response, Native Console and Analyst share with Sources; captured text only ever becomes text nodes.
 const CODE_VIEW_ROW_UNITS = 4096;
 const CODE_VIEW_BLOCK_ROWS = 200;
+// A block, and what one frame mounts, is also bounded by characters: 200 rows of
+// a one-line body are 800 Ki characters, which WebKit took over half a second
+// to style and lay out in one task.
+const CODE_VIEW_BLOCK_CHARACTERS = 64 * 1024;
 const CODE_VIEW_ROW_HEIGHT = 18;
 const CODE_VIEW_LAYOUT_CHARACTERS = 32 * 1024 * 1024;
 
@@ -136,9 +140,26 @@ function createCodeView({text, rows = codeViewRows(text), syntax, label, classNa
   box.setAttribute('aria-label', label);
   box.tabIndex = 0;
   const blocks = [], mounted = [], plain = new Set();
+  // Each block's first row and character count; a block ends at 200 rows or 64 Ki characters.
+  const starts = [], sizes = [];
+  for (let row = 0, count = 0; row < rows.length; row += 1, count += 1) {
+    const length = rows[row].text.length;
+    if (!count || count === CODE_VIEW_BLOCK_ROWS || sizes.at(-1) + length > CODE_VIEW_BLOCK_CHARACTERS) {
+      starts.push(row);
+      sizes.push(0);
+      count = 0;
+    }
+    sizes[sizes.length - 1] += length;
+  }
+  const excerptsOf = block => rows.slice(starts[block], starts[block + 1] ?? rows.length);
+  const blockOf = row => {
+    let low = 0, high = starts.length - 1;
+    while (low < high) {const middle = (low + high + 1) >> 1; if (starts[middle] <= row) low = middle; else high = middle - 1;}
+    return low;
+  };
   let pumping = false, disposed = false;
   const paint = (block, node) => {
-    const from = block * CODE_VIEW_BLOCK_ROWS, excerpts = rows.slice(from, from + CODE_VIEW_BLOCK_ROWS);
+    const from = starts[block], excerpts = excerptsOf(block);
     if (!highlighter.ready(excerpts)) highlighter.advance(SOURCE_COLOR_SYNC_UNITS);
     const colors = highlighter.rows(excerpts);
     if (!colors) plain.add(block); else plain.delete(block);
@@ -152,38 +173,67 @@ function createCodeView({text, rows = codeViewRows(text), syntax, label, classNa
     }));
     if (plain.size && !pumping) pump();
   };
-  // Lexer checkpoints extend between tasks; blocks shown plain recolor once they are reached.
+  // Lexer checkpoints extend between tasks; blocks shown plain recolor once they
+  // are reached, at most 64 Ki characters of them a task.
   const pump = () => {
     pumping = true;
     setTimeout(() => {
       if (disposed) return;
       highlighter.advance(SOURCE_COLOR_SLICE_UNITS);
+      let budget = CODE_VIEW_BLOCK_CHARACTERS;
       for (const block of [...plain]) {
-        const from = block * CODE_VIEW_BLOCK_ROWS;
-        if (highlighter.ready(rows.slice(from, from + CODE_VIEW_BLOCK_ROWS))) paint(block, blocks[block]);
+        if (budget <= 0) break;
+        if (!highlighter.ready(excerptsOf(block))) continue;
+        budget -= sizes[block];
+        paint(block, blocks[block]);
       }
-      if (plain.size && !highlighter.done()) pump(); else pumping = false;
+      if (plain.size && (budget <= 0 || !highlighter.done())) pump(); else pumping = false;
     }, 0);
   };
   const fill = block => {
     const node = blocks[block];
-    if (!node || node.dataset.filled) return;
+    if (!node || node.dataset.filled) return false;
     node.dataset.filled = 'true';
     observer?.unobserve(node);
     node.style.removeProperty('height');
     paint(block, node);
+    return true;
+  };
+  // Blocks that come near the view mount in order, at most 64 Ki characters a
+  // frame, so a view of long unwrapped rows never lays out several blocks at once.
+  const near = new Set();
+  let framed = false;
+  const mountNear = () => {
+    framed = false;
+    if (disposed) return;
+    let budget = CODE_VIEW_BLOCK_CHARACTERS;
+    for (const block of [...near].sort((a, b) => a - b)) {
+      if (budget <= 0) break;
+      near.delete(block);
+      if (fill(block)) budget -= sizes[block];
+    }
+    if (near.size) nextFrame();
+  };
+  const nextFrame = () => {
+    if (framed) return;
+    framed = true;
+    (typeof requestAnimationFrame === 'function' ? requestAnimationFrame : setTimeout)(mountNear);
   };
   const observer = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
-    for (const entry of entries) if (entry.isIntersecting) fill(Number(entry.target.dataset.block));
+    for (const entry of entries) {
+      const block = Number(entry.target.dataset.block);
+      if (entry.isIntersecting) near.add(block); else near.delete(block);
+    }
+    if (near.size) nextFrame();
   }, {root: box, rootMargin: '600px 0px'}) : null;
-  for (let block = 0; block * CODE_VIEW_BLOCK_ROWS < rows.length; block += 1) {
+  starts.forEach((from, block) => {
     const node = codeViewNode('div', 'code-view-block');
     node.dataset.block = String(block);
-    node.style.height = `${Math.min(CODE_VIEW_BLOCK_ROWS, rows.length - block * CODE_VIEW_BLOCK_ROWS) * CODE_VIEW_ROW_HEIGHT}px`;
+    node.style.height = `${((starts[block + 1] ?? rows.length) - from) * CODE_VIEW_ROW_HEIGHT}px`;
     box.append(node);
     blocks.push(node);
     observer?.observe(node);
-  }
+  });
   fill(0);
   let rawIndex = null;
   box.addEventListener('click', event => {
@@ -203,9 +253,8 @@ function createCodeView({text, rows = codeViewRows(text), syntax, label, classNa
   });
   return {
     box,
-    rows: rows.map(row => row.text),
     reveal(row) {
-      fill(Math.floor(row / CODE_VIEW_BLOCK_ROWS));
+      fill(blockOf(row));
       return mounted[row] ?? null;
     },
     dispose() {

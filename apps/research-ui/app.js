@@ -35,11 +35,12 @@ const entropyMap = createEntropyMap({
 });
 // The Sources status bar never cuts the cursor position, which has the full
 // text as its tooltip. When the items do not fit, it drops in turn the hash,
-// the pretty-print label (leaving "{ }"), the language, the size, the view
-// kind and the selection length; each keeps its tooltip. Only a position wider
-// than the whole bar is shortened. The observers refit after any text,
-// visibility or width change.
-const SOURCE_STATUS_DROPS = ['hash', 'pretty', 'language', 'size', 'kind', 'selection', 'position'];
+// the pretty-print label (leaving "{ }"), the language, the size, a
+// selection's raw offsets, the view kind, the selection length and a
+// selection's raw range; each keeps its tooltip, and the position's tooltip
+// keeps its dropped parts. Only a position wider than the whole bar is
+// shortened. The observers refit after any text, visibility or width change.
+const SOURCE_STATUS_DROPS = ['hash', 'pretty', 'language', 'size', 'offsets', 'kind', 'selection', 'raw', 'position'];
 function fitSourceStatus() {
   const position = elements.sourcePosition, bar = position?.parentElement;
   if (!bar) return;
@@ -9121,15 +9122,15 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           openSourceGoto();
         }
       });
-      // The raw range of formatted text, or '' when this view has none.
-      function sourceRawRangeText(editor, start, end) {
+      // The raw range of formatted text as its two status-bar parts, or null when this view has none.
+      function sourceRawRangeParts(editor, start, end) {
         const view = editor?.view;
-        if (!view?.formatted || view.derived) return '';
+        if (!view?.formatted || view.derived) return null;
         const local = sourceWhitespaceRange(view.formatted.map, view.formatted.sourceInput ?? view.active, view.formatted.text, start, end);
-        if (!local) return '';
+        if (!local) return null;
         const base = view.formatted.base ?? 0, range = {start: local.start + base, end: local.end + base};
         const original = editor.originalIndex ??= sourceDocumentIndex(view.active), from = sourceDocumentPosition(original, range.start), to = sourceDocumentPosition(original, range.end);
-        return from && to ? ` · raw ${from.line + 1}:${from.column + 1}–${to.line + 1}:${to.column + 1} (offsets ${range.start}–${range.end})` : '';
+        return from && to ? {raw: ` · raw ${from.line + 1}:${from.column + 1}–${to.line + 1}:${to.column + 1}`, offsets: ` (offsets ${range.start}–${range.end})`} : null;
       }
       // The status bar follows the caret and the selection in the mounted source text.
       function syncSourceSelection() {
@@ -9151,8 +9152,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.sourceSelection.textContent = length ? `${length} selected` : '';
         if (focus) {
           const start = anchor.offset <= focus.offset ? anchor : focus;
-          const raw = length ? sourceRawRangeText(editor, start.offset, start.offset + length) : '';
-          elements.sourcePosition.textContent = raw ? `Line ${start.line + 1}, Column ${start.column + 1}${raw}` : sourcePositionText(editor, focus.line, focus.column);
+          const raw = length ? sourceRawRangeParts(editor, start.offset, start.offset + length) : null;
+          // Separate parts, so a narrow status bar can move the offsets, then the
+          // raw range, into the position's tooltip instead of cutting the text.
+          if (raw) {
+            elements.sourcePosition.replaceChildren(`Line ${start.line + 1}, Column ${start.column + 1}`,
+              textElement('span', 'source-position-raw', raw.raw), textElement('span', 'source-position-offsets', raw.offsets));
+          } else elements.sourcePosition.textContent = sourcePositionText(editor, focus.line, focus.column);
         }
       }
       let sourceSelectionFrame = 0;

@@ -1526,8 +1526,9 @@ view (`Line 1204, Column 5 (original 1:48213)`), the selection length, the
 evidence state (Original or Derived), the language and layout, the **{ }**
 toggle and the size. The position is never cut and its tooltip is the full text.
 When the bar is too narrow it drops whole items instead of squeezing them: the
-hash, then the toggle's label (leaving **{ }**), the language, the size, the
-evidence state and the selection length.
+hash, then the toggle's label (leaving **{ }**), the language, the size, a
+selection's raw offsets, the evidence state, the selection length and a
+selection's raw range. Dropped parts of the position stay in its tooltip.
 
 The Sources sidebar starts closed. Details opens source metadata, JavaScript
 facts and static cleanup; it remains available at narrow window sizes.

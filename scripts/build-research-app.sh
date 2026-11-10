@@ -34,6 +34,8 @@ decoder_service_source="${repo_root}/apps/research-ui/macos/DecoderService.swift
 decoder_binary="${repo_root}/build/reb-decoder"
 deobfuscation_service_source="${repo_root}/apps/research-ui/macos/DeobfuscationService.swift"
 wasm_service_source="${repo_root}/apps/research-ui/macos/WasmService.swift"
+agent_core_source="${repo_root}/apps/research-ui/macos/AgentCore.swift"
+agent_bridge_source="${repo_root}/apps/research-ui/macos/AgentBridge.swift"
 cargo build --locked --release --manifest-path "${repo_root}/apps/deobfuscator-worker/Cargo.toml"
 deobfuscation_binary="${repo_root}/apps/deobfuscator-worker/target/release/reb-deobfuscator-worker"
 icon_source="${repo_root}/apps/research-ui/macos/assets/origin-trace-icon.png"
@@ -73,9 +75,18 @@ if application.is_dir():
 PY
 mkdir -p "${research_ui_resources}"
 # One explicit packaged copy serves both the native scheme and live HTTP UI.
-for asset in index.html app.css block_graph.css block_graph.js block_graph_layout.js entropy_map.css entropy_map.js command_palette.js app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_format.js code_view.js source_facts.js source_search.js source_tree.js traffic_view.js traffic_payload.js traffic_index.js traffic_filter.js traffic_columns.js traffic_overview.js network_scope.js request_tabs.js traffic_response.js traffic_headers.js traffic_cookies.js captured_client.js captured_export_formats.js vm_debugger.js vm_static.js vm_static_view.js vm_contextual.js vm_contextual_evidence.js vm_contextual_view.js vm_analysis_packs.js vm_opcode_ledger.js vm_opcode_ledger_view.js vm_semantics.js pane_layout.js native_console_completion.js native_console.js investigation_navigation.js investigation_notebook.js evidence_names.js invocation_sites.js request_stack.js app.js vm_program_workspace.js xrefs_view.js xrefs_view.css analyst_runner_core.js analyst_runner_node.js; do
+for asset in index.html app.css block_graph.css block_graph.js block_graph_layout.js entropy_map.css entropy_map.js command_palette.js app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_format.js code_view.js source_facts.js source_search.js source_tree.js traffic_view.js traffic_payload.js traffic_index.js traffic_filter.js traffic_columns.js traffic_overview.js network_scope.js request_tabs.js traffic_response.js traffic_headers.js traffic_cookies.js captured_client.js captured_export_formats.js vm_debugger.js vm_static.js vm_static_view.js vm_contextual.js vm_contextual_evidence.js vm_contextual_view.js vm_analysis_packs.js vm_opcode_ledger.js vm_opcode_ledger_view.js vm_semantics.js pane_layout.js native_console_completion.js native_console.js investigation_navigation.js investigation_notebook.js evidence_names.js invocation_sites.js request_stack.js app.js agent_panel.js agent_panel.css vm_program_workspace.js xrefs_view.js xrefs_view.css analyst_runner_core.js analyst_runner_node.js; do
   cp "${repo_root}/apps/research-ui/${asset}" "${research_ui_resources}/${asset}"
 done
+# The agent dock's LangGraph loop: one browser bundle per provider, built from
+# the lockfile and loaded from these resources only when the agent is turned on.
+"${repo_root}/scripts/build-agent-runtime.sh" "${repo_root}/build/agent-runtime"
+for provider in claude chatgpt; do
+  cp "${repo_root}/build/agent-runtime/agent_runtime_${provider}.js" "${research_ui_resources}/agent_runtime_${provider}.js"
+done
+cp "${repo_root}/build/agent-runtime/agent_runtime.LICENSES.txt" "${resources_path}/AgentRuntimeLicenses.txt"
+node "${repo_root}/tools/check-agent-runtime.mjs" \
+  "${research_ui_resources}/agent_runtime_claude.js" "${research_ui_resources}/agent_runtime_chatgpt.js"
 cargo build --locked --release --manifest-path "${repo_root}/apps/origin-trace-backend/Cargo.toml"
 cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-backend" "${macos_path}/OriginTraceBackend"
 cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-vm" "${macos_path}/OriginTraceVMAnalyzer"
@@ -144,6 +155,11 @@ xcrun swiftc -parse-as-library \
   -o "${repo_root}/build/check-live-session-failure"
 "${repo_root}/build/check-live-session-failure"
 
+xcrun swiftc -parse-as-library \
+  "${agent_core_source}" "${repo_root}/tools/check-agent-core.swift" \
+  -o "${repo_root}/build/check-agent-core"
+"${repo_root}/build/check-agent-core" "${repo_root}/apps/origin-trace-backend/target/release/reb-api"
+
 node "${repo_root}/tools/check-captured-client-project.mjs"
 xcrun swiftc -parse-as-library -framework Cocoa -framework WebKit \
   "${client_project_export_source}" "${repo_root}/tools/check-client-project-export.swift" \
@@ -165,7 +181,8 @@ xcrun swiftc \
   -parse-as-library \
   -framework Cocoa \
   -framework WebKit \
-  "${swift_source}" "${stored_event_window_source}" "${stored_evidence_backend_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
+  -framework Security \
+  "${swift_source}" "${stored_event_window_source}" "${stored_evidence_backend_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${agent_core_source}" "${agent_bridge_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
   -o "${macos_path}/OriginTrace"
 
 "${macos_path}/OriginTrace" --check-native-ui-url

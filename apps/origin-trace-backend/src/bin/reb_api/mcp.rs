@@ -313,6 +313,7 @@ fn open_world(spec: &Value, definition: &Value) -> bool {
 pub struct Admission {
     pub allow_effects: bool,
     pub allow_session_start: bool,
+    pub omit_content: bool,
 }
 
 pub const START_TOOL: &str = "start_live_session";
@@ -680,6 +681,41 @@ fn compact_len(value: &Value) -> usize {
         .unwrap_or(usize::MAX)
 }
 
+/// The omissions of a structural summary, applied to a document of any size.
+/// Every row and identifier stays, so an in-app agent can still cite evidence,
+/// but source, bytecode, bodies and long strings never reach its provider. A
+/// small response is otherwise inlined whole.
+fn omit_content_fields(value: &Value, key: Option<&str>, string_chars: usize) -> Value {
+    if key.is_some_and(omitted_content_key) {
+        return content_omission(value);
+    }
+    match value {
+        Value::String(text)
+            if key.is_some_and(omitted_string_key) || !short_string(text, string_chars) =>
+        {
+            string_omission(text)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| omit_content_fields(item, key, string_chars))
+                .collect(),
+        ),
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(name, child)| {
+                    (
+                        name.clone(),
+                        omit_content_fields(child, Some(name), string_chars),
+                    )
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 fn structural_summary(bytes: &[u8], limit: usize, string_chars: usize, value: &Value) -> Value {
     let digest = sha256_hex(bytes);
     for document in [
@@ -866,6 +902,7 @@ struct Connection<'a> {
     allow_session_start: bool,
     timeout: f64,
     expected_instance: Option<&'a str>,
+    omit_content: bool,
 }
 
 async fn call_tool(
@@ -879,6 +916,7 @@ async fn call_tool(
         allow_effects,
         timeout,
         expected_instance,
+        omit_content,
         ..
     } = connection;
     let projection = match projection(spec) {
@@ -1021,6 +1059,14 @@ async fn call_tool(
             completed.bytes = serde_json::to_vec(&value).expect("session context JSON");
         }
     }
+    if omit_content
+        && completed.status == 200
+        && !completed.unreadable
+        && let Ok(value) = serde_json::from_slice::<Value>(&completed.bytes)
+    {
+        let omitted = omit_content_fields(&value, None, projection.summary_string_chars);
+        completed.bytes = serde_json::to_vec(&omitted).expect("omitted content JSON");
+    }
     project_completed(
         spec,
         completed.status,
@@ -1101,6 +1147,7 @@ async fn dispatch(
                 spec,
                 ops,
                 Admission {
+                    omit_content: false,
                     allow_effects,
                     allow_session_start: connection.allow_session_start,
                 },
@@ -1323,13 +1370,18 @@ pub async fn serve(
     let Admission {
         allow_effects,
         allow_session_start,
+        omit_content,
     } = admission;
     let projection = projection(spec)?;
     let listed = listed_tools(spec, ops, admission)?;
     let gated = session_operations(spec);
     // True while the bound session is one this connection started.
     let mut started_here = false;
-    for tool in &listed {
+    // Each compiled schema costs several megabytes, so this eager check peaked
+    // near 360 MB. The in-app agent starts this server on demand and needs that
+    // to stay small: every call still compiles and enforces its own schema, and
+    // the test suite compiles every listed schema.
+    for tool in listed.iter().filter(|_| !omit_content) {
         jsonschema::validator_for(&tool["inputSchema"]).map_err(|error| {
             format!(
                 "OpenAPI MCP input schema for {} did not compile: {error}",
@@ -1444,6 +1496,7 @@ pub async fn serve(
                         allow_session_start,
                         timeout,
                         expected_instance: None,
+                        omit_content,
                     },
                     &mut initialized,
                     &message,
@@ -1525,6 +1578,7 @@ pub async fn serve(
                 allow_session_start,
                 timeout,
                 expected_instance: endpoint_guard.instance_id.as_deref(),
+                omit_content,
             },
             &mut initialized,
             &message,
@@ -1685,6 +1739,7 @@ mod tests {
             allow_session_start: false,
             timeout: 1.0,
             expected_instance: None,
+            omit_content: false,
         }
     }
 
@@ -1860,6 +1915,7 @@ mod tests {
                     allow_session_start: false,
                     timeout: 2.0,
                     expected_instance: None,
+                    omit_content: false,
                 },
                 &json!({"name": "get_source_format", "arguments": arguments}),
             )
@@ -2119,6 +2175,31 @@ mod tests {
         assert!(text.contains("No request was sent"), "{text}");
         assert!(text.contains("Unknown argument: extra."), "{text}");
         assert!(!text.contains("SENTINEL_VALUE_9f3a"), "{text}");
+    }
+
+    #[test]
+    fn omit_content_keeps_rows_and_identifiers_and_drops_captured_content() {
+        let document = json!({
+            "events": [
+                {"session_id": "7", "process_id": "9", "sequence_number": "41", "type": "request_started", "url": "https://owned.example/a"},
+                {"session_id": "7", "process_id": "9", "sequence_number": "42", "type": "request_finished", "body": "SECRET_BODY"}
+            ],
+            "artifact": {"artifact_id": "3", "byte_size": 12, "text": "SECRET_TEXT", "disassembly": ["SECRET_ASM"], "bytecode": {"bytes": 1}},
+            "long_note": "x".repeat(400),
+            "kept_value": 7
+        });
+        let result = super::omit_content_fields(&document, None, 160);
+        assert_eq!(result["events"].as_array().unwrap().len(), 2);
+        assert_eq!(result["events"][0]["sequence_number"], "41");
+        assert_eq!(result["events"][0]["url"], "https://owned.example/a");
+        assert_eq!(result["events"][1]["body"]["omitted"], "string");
+        assert_eq!(result["artifact"]["artifact_id"], "3");
+        assert_eq!(result["artifact"]["text"]["bytes"], 11);
+        assert_eq!(result["artifact"]["disassembly"]["omitted"], "content");
+        assert_eq!(result["artifact"]["bytecode"]["omitted"], "content");
+        assert_eq!(result["long_note"]["omitted"], "string");
+        assert_eq!(result["kept_value"], 7);
+        assert!(!result.to_string().contains("SECRET"));
     }
 
     #[test]

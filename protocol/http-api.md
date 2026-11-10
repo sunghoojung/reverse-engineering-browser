@@ -137,6 +137,11 @@ Grok Bot, and T3 Code settings are in the
 [local coding-agent guide](../docs/development/local-coding-agents.md).
 
 The default tool list is the read-only projection used by `list --json`.
+`--omit-content` applies the structural summary's omissions to every response,
+whatever its size: rows and identifiers stay, while source, bytecode, disassembly,
+bodies and long strings do not. Origin Trace's in-app agent always starts the
+server this way, because its tool results go to a model provider.
+
 `--allow-effects` also lists the other operations. The flag does not authorize
 a target, redact a response, or permit sending captured data to a model
 provider. Binary success bodies are refused before a request, because the

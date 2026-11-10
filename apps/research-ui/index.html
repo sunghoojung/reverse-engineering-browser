@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="entropy_map.css">
     <link rel="stylesheet" href="block_graph.css">
     <link rel="stylesheet" href="agent_panel.css">
+    <link rel="stylesheet" href="session_panel.css">
   </head>
   <body>
     <div class="app">
@@ -735,6 +736,7 @@
         </main>
         <aside id="xrefs-dock" class="xrefs-dock" aria-label="Cross-references" hidden></aside>
         <aside id="agent-dock" class="agent-dock" aria-label="Agent" hidden></aside>
+        <section id="session-panel" class="session-panel" role="dialog" aria-modal="false" aria-labelledby="session-panel-title" hidden></section>
         <section id="native-console-panel" class="native-console-panel" aria-label="Native JavaScript console" hidden>
           <header class="native-console-head">
             <strong class="native-console-title">Console</strong>
@@ -887,6 +889,7 @@
 
     <script src="app.js"></script>
     <script src="agent_panel.js"></script>
+    <script src="session_panel.js"></script>
     <script src="vm_program_workspace.js"></script>
     <script src="xrefs_view.js"></script>
   </body>

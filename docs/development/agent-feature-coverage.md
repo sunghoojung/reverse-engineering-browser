@@ -77,10 +77,10 @@ Every option is off unless the start names it, and none is inherited.
 | Browser tabs and request owners | `get_requests` `tab_id`; `get_events` | R | Covered |
 | Timing strip (request starts over time) and its range filter | `get_requests` (`since`, start times in rows) | R | Covered; the chart itself is drawn by the page |
 | General tab | `get_requests`, `get_events` per member | R | Covered |
-| Headers tab | `get_request_headers` | R | Covered; credential header values are withheld at every level |
+| Headers tab | `get_request_headers` | R | Covered; credential header values are withheld at every level, and the text reads never return header blocks |
 | Payload tab (request body) | `get_artifact_text` on the `request_body` artifact | F | Added (before: binary only, refused by MCP) |
 | Preview and Response tabs (response body) | `get_artifact_text` on the `response_body` artifact; `get_source_format` for JSON and JavaScript bodies | F | Added; Preview's rendered image or page is drawn by the page and stays there |
-| Cookies tab and cookie provenance | `get_request_cookies`, `get_cookie_provenance` | R | Covered; cookie values are withheld at every level |
+| Cookies tab and cookie provenance | `get_request_cookies`, `get_cookie_provenance` | R | Covered; cookie values are withheld at every level, and the text reads never return cookie lists |
 | Initiator tab (call stack) | `get_request_stack` | R | Covered |
 | Timing tab | `get_events` for the request's records | R | Covered |
 | Signals tab | `get_request_signal_profile` | R | Covered |

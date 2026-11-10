@@ -19,6 +19,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Header blocks and cookie lists hold `Cookie`, `Set-Cookie`, `Authorization`
+/// and cookie values, which `get_request_headers` and `get_request_cookies`
+/// withhold by name. Text pages and search never return them, so those values
+/// stay withheld at every permission level, Full access included.
+pub const WITHHELD_KINDS: [&str; 3] = ["request_headers", "response_headers", "cookie_list"];
+
+fn withheld(artifact: &Value) -> bool {
+    artifact["kind"]
+        .as_str()
+        .is_some_and(|kind| WITHHELD_KINDS.contains(&kind))
+}
+
 /// The largest page in source bytes, before the escaped-size budget applies.
 pub const UTF8_PAGE_BYTES: usize = 65_536;
 /// Hex doubles each byte, so this keeps hex text at 64 KiB.
@@ -151,6 +163,11 @@ pub fn page(
         .as_u64()
         .ok_or_else(|| Error::new(500, "Artifact content byte size is invalid"))?
         as usize;
+    if withheld(artifact) {
+        return Err(Error::bad(
+            "Header blocks and cookie lists are not returned as text. Read them with get_request_headers or get_request_cookies, which withhold credential and cookie values.",
+        ));
+    }
     if offset > total {
         return Err(Error::bad("offset exceeds the artifact byte size"));
     }
@@ -293,8 +310,10 @@ fn lossy(bytes: &[u8]) -> String {
 pub fn search(root: &Path, request: &SearchRequest) -> Result<Value> {
     let started = Instant::now();
     let fold = !request.match_case;
+    // Header blocks and cookie lists are never searched, so a match can
+    // never show a credential or cookie value.
     let selected = evidence::select_artifacts(root, |artifact| {
-        request.filter.matches(&evidence::public_artifact(artifact))
+        !withheld(artifact) && request.filter.matches(&evidence::public_artifact(artifact))
     })?;
     let wanted = request.offset.saturating_add(request.limit);
     let mut matches = Vec::new();

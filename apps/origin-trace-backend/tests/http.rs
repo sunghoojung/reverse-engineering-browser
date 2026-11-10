@@ -9817,11 +9817,17 @@ async fn artifact_text_pages_search_and_wasm_row_windows_follow_the_contract() {
         ("1", "javascript", script.as_bytes().to_vec()),
         ("2", "request_body", body.clone()),
         ("3", "wasm", module.clone()),
+        // Header blocks hold credential values that stay withheld at every level.
+        (
+            "6",
+            "request_headers",
+            b"cookie: sid=token-SECRET-COOKIE\r\n".to_vec(),
+        ),
     ] {
         let hash = hex::encode(Sha256::digest(&bytes));
-        let record = json!({"protocol_version":1,"artifact_id":id,"session_id":"4","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":kind,"url":format!("https://example.test/{id}"),"mime_type":"text/plain","byte_size":bytes.len(),"sha256":hash,"sensitive":kind == "request_body","content_path":format!("blobs/{hash}.bin")});
+        let record = json!({"protocol_version":1,"artifact_id":id,"session_id":"4","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":kind,"url":format!("https://example.test/{id}"),"mime_type":"text/plain","byte_size":bytes.len(),"sha256":hash,"sensitive":kind == "request_body" || kind == "request_headers","content_path":format!("blobs/{hash}.bin")});
         let mut record = record;
-        if kind == "request_body" {
+        if kind == "request_body" || kind == "request_headers" {
             // One browser network record creates a body (native-network-v2.md).
             record["capture_origin"] = json!("network_request");
             record["execution_context_id"] = json!("0");
@@ -9887,6 +9893,14 @@ async fn artifact_text_pages_search_and_wasm_row_windows_follow_the_contract() {
         404,
     )
     .await;
+    let refused = server.get("/api/artifacts/6/text").await;
+    let refused =
+        assert_contract_response(refused, "get", "/api/artifacts/{artifact_id}/text", 400).await;
+    let refused = String::from_utf8_lossy(&refused);
+    assert!(
+        refused.contains("get_request_headers") && !refused.contains("SECRET-COOKIE"),
+        "{refused}"
+    );
     let binary: Value = serde_json::from_slice(
         &assert_contract_response(
             server.get("/api/artifacts/2/text").await,
@@ -9935,6 +9949,12 @@ async fn artifact_text_pages_search_and_wasm_row_windows_follow_the_contract() {
     assert_eq!(paged["matches"].as_array().unwrap().len(), 1);
     assert_eq!(paged["next_offset"], 2);
     assert_eq!(paged["matches"][0]["line"], 2);
+    let cookies = search("q=SECRET-COOKIE").await;
+    assert!(
+        cookies["matches"].as_array().unwrap().is_empty(),
+        "header blocks are never searched"
+    );
+    assert_eq!(cookies["coverage"]["artifacts_selected"], 3);
     for query in [
         "q=",
         "q=a%0Ab",

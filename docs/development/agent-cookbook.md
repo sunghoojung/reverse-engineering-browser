@@ -479,7 +479,9 @@ bytecode buffers and binary bodies. Request and response bodies are
 named in its `get_events` records. For readable JavaScript, page
 `get_source_format {"session_id": "1", "artifact_id": "41", "start_line": 1,
 "line_count": 400}` instead, which at Full access also lays out JSON and
-JavaScript bodies. `replacements` counts bytes that were not UTF-8.
+JavaScript bodies. `replacements` counts bytes that were not UTF-8. Header blocks and cookie
+lists are refused: read them with `get_request_headers` and
+`get_request_cookies`, which withhold credential and cookie values.
 
 ## 22. Find text across every retained file
 

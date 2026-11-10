@@ -64,6 +64,45 @@ if (typeof MutationObserver === 'function' && elements.sourcePosition?.parentEle
   new MutationObserver(fitSourceStatus).observe(bar, {subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['hidden']});
   if (typeof ResizeObserver === 'function') new ResizeObserver(fitSourceStatus).observe(bar);
 }
+// The Sources commands stay on one row at every width. The URL and then Find
+// shrink (app.css); when the row still overflows, Map, then Graph, then
+// Inspect move to the top of More, and return in reverse order once they fit.
+// A wrapped second row is not an option: WebKit does not re-measure the
+// toolbar's auto grid row when a width change alters its line count, so the
+// code view would cover that row. The menu is left alone while it is open.
+const SOURCE_TOOLBAR_OVERFLOW = ['source-wasm', 'source-graph', 'source-map'];
+let sourceToolbarObserver = null;
+function fitSourceToolbar() {
+  const row = document.querySelector('#source-editor-controls'), more = elements.sourceMore, first = elements.sourceGoto;
+  if (!row || !more || !first || more.open || !row.clientWidth) return;
+  const tools = SOURCE_TOOLBAR_OVERFLOW.map(id => document.getElementById(id));
+  const fits = () => row.scrollWidth <= row.clientWidth + 1;
+  // Level n keeps the first tools.length - n tools in the row, in their order.
+  const set = level => tools.forEach((tool, index) => {
+    const inRow = index < tools.length - level;
+    if ((tool.parentElement === row) === inRow) return;
+    const focused = tool === document.activeElement;
+    if (inRow) more.before(tool);
+    else (tools.slice(index + 1).find(next => next.parentElement !== row) ?? first).before(tool);
+    if (focused) more.querySelector('summary').focus({preventScroll: true});
+  });
+  let level = tools.filter(tool => tool.parentElement !== row).length;
+  while (level > 0) {
+    set(level - 1);
+    if (!fits()) { set(level); break; }
+    level -= 1;
+  }
+  while (!fits() && level < tools.length) set(++level);
+  // The trial moves above are this function's own; they must not call it again.
+  sourceToolbarObserver?.takeRecords();
+}
+if (typeof MutationObserver === 'function' && document.querySelector('#source-editor-controls')) {
+  const row = document.querySelector('#source-editor-controls');
+  sourceToolbarObserver = new MutationObserver(fitSourceToolbar);
+  sourceToolbarObserver.observe(row, {subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['hidden']});
+  if (typeof ResizeObserver === 'function') new ResizeObserver(fitSourceToolbar).observe(row);
+  elements.sourceMore?.addEventListener('toggle', fitSourceToolbar);
+}
 const sourceTreeView = createSourceTree({
   tree: elements.sourceTree, filter: document.querySelector('#source-tree-filter'),
   expand: document.querySelector('#source-tree-expand'), collapse: document.querySelector('#source-tree-collapse'),

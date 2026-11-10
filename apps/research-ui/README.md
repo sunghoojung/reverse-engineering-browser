@@ -1226,6 +1226,8 @@ window and the enforced 760×560 minimum it checks:
   keyboard and the column menu from Shift+F10; Payload's query, JSON tree from
   the keyboard, source and Capture details;
 - Sources: a retained artifact rendered as literal text and scrolled to its end;
+  with a Wasm module open, narrowing from 1180×790 to 760×560 and back keeps the
+  toolbar commands on one uncovered row with no blank band;
 - Investigation navigation: Back appears after a screen change, Alt+Left returns
   to the selected request, and Forward reopens Sources;
 - VM: the opcode workspace for the guest artifact shows the native guest row
@@ -1512,9 +1514,13 @@ version or intrinsic assumption cannot restore a stale representation window.
 Ordinary evidence refresh leaves Find and the current window in place; explicit
 original-source pivots choose their own retained location.
 
-The editor toolbar is one row: the URL, **Open file**, Find (Cmd+F) and **More**,
-which holds Go to line, Rename, Decode range, Facts, Track calls, Static cleanup
-and Details. Find's coverage sentence is its tooltip. The status bar shows the
+The editor toolbar is one row: the URL, **Open file**, Find (Cmd+F), **Inspect**
+and **Graph** for a Wasm module, **Map** and **More**, which holds Go to line,
+Rename, Decode range, Facts, Track calls, Static cleanup and Details. The row
+never wraps at any width: the URL shortens first (its tooltip keeps it whole),
+then Find, and when the commands still do not fit, Map, Graph and Inspect move in
+that order to the top of More and return once there is room. Find's coverage
+sentence is its tooltip. The status bar shows the
 caret line and column, with the original location in a pretty-printed or derived
 view (`Line 1204, Column 5 (original 1:48213)`), the selection length, the
 evidence state (Original or Derived), the language and layout, the **{ }**

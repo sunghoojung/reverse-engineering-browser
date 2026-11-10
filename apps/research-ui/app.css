@@ -1231,6 +1231,16 @@ var(--panel);
         border-bottom: 1px solid var(--line);
         background: var(--panel-2);
       }
+      /* The commands are one row at every width (fitSourceToolbar in app.js);
+         only the rename field and the limit notice add rows below it. */
+      .source-editor-controls {
+        flex: 1 0 100%;
+        min-width: 0;
+        display: flex;
+        flex-wrap: nowrap;
+        align-items: center;
+        gap: 4px;
+      }
       .source-location {
         min-width: 0;
         margin-right: auto;
@@ -4316,11 +4326,12 @@ input[type="file"]:hover::file-selector-button { background: var(--panel-3); }
 
 /* Commands are set in the interface face; mono is kept for evidence values:
    the URL, Find text, line and column numbers and the displayed window. */
-/* The URL yields its width (with an ellipsis) before the commands wrap. */
-#screen-sources .source-location { flex: 1 1 160px; padding-right: 8px; }
+/* The commands never wrap. The URL yields its width first (with an ellipsis
+   and its tooltip), then Find; past that, Map, Graph and Inspect move into More. */
+#screen-sources .source-location { flex: 1 1 0; min-width: 48px; padding-right: 8px; }
 #screen-sources .source-tool { min-width: 24px; padding: 0 8px; border-radius: 4px; font: 400 11px var(--sans); }
 #screen-sources .source-tool[aria-pressed="true"] { border-color: var(--line); background: var(--accent-soft); color: var(--text); }
-#screen-sources .source-search { height: 24px; border-radius: 4px; }
+#screen-sources .source-search { flex: 0 1 150px; min-width: 112px; height: 24px; border-radius: 4px; }
 #screen-sources .source-window input { width: 72px; height: 24px; padding: 0 4px 0 8px; }
 #screen-sources .source-empty { padding: 24px; }
 

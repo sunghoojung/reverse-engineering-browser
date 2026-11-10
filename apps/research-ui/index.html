@@ -274,6 +274,7 @@
             <section class="sources-editor" aria-label="Source editor">
               <div id="source-editor-tabs" class="source-editor-tabs" role="tablist" aria-label="Open source files"></div>
               <div class="source-editor-toolbar">
+                <div id="source-editor-controls" class="source-editor-controls">
                 <span id="source-location" class="source-location">Select a captured artifact</span>
                 <button id="source-quick-open" class="source-tool" type="button">Open file</button>
                 <input id="source-search" class="source-search" type="search" maxlength="512" placeholder="Find" aria-label="Find in source" aria-keyshortcuts="Meta+F Control+F" aria-describedby="source-search-status" title="Find retained text; Enter for next, Shift+Enter for previous (single-line literal, first 1000 matches)" />
@@ -292,6 +293,7 @@
                     <button id="source-sidebar-toggle" class="source-tool" type="button" aria-controls="source-sidebar" aria-expanded="false">Details</button>
                   </div>
                 </details>
+                </div>
                 <form id="source-window" class="source-window" aria-label="Go to line" hidden>
                   <span id="source-window-label"></span>
                   <label>Line <input id="source-window-line" type="number" min="1" step="1" value="1" aria-label="Local source line" /></label>

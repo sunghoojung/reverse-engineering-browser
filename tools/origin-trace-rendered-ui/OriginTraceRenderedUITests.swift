@@ -2575,4 +2575,36 @@ final class OriginTraceRenderedUITests: XCTestCase {
       print("RENDERED_UI_MAP_RSS \(size.name) idle_kb=\(idleRSS) open_kb=\(openRSS) released_kb=\(webContentResidentKilobytes(ui)) side=\(side)")
     }
   }
+
+  // Narrowing the window with a Wasm module open keeps Inspect, Graph, Map and
+  // More on one toolbar row that the code view never covers; widening it back
+  // leaves no blank band. The toolbar's grid row once kept its old height after
+  // a width change, so a wrapped second row slid under the code.
+  @MainActor
+  func test24bSourcesToolbarAfterResize() async throws {
+    let ui = try await prepare(windowSizes[0])
+    try await show(ui, "sources")
+    try await ui.click("#source-tree [role=treeitem]", containing: "map-module")
+    try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('00000000')", "the fixture module did not open as hex")
+    let measure = """
+      (() => {
+        const bar = document.querySelector('.source-editor-toolbar'), menu = document.querySelector('.source-more-menu');
+        const top = bar.getBoundingClientRect().top;
+        const rows = [...bar.querySelectorAll(':scope > *')].filter(c => c.getClientRects().length && getComputedStyle(c).position !== 'absolute');
+        const tools = ['#source-wasm', '#source-graph', '#source-map', '#source-more'].map(s => document.querySelector(s)).filter(t => !menu.contains(t));
+        return {height: bar.getBoundingClientRect().height, content: Math.max(...rows.map(c => c.getBoundingClientRect().bottom)) - top,
+          rowTops: new Set(tools.map(t => Math.round(t.getBoundingClientRect().top))).size};
+      })()
+      """
+    for (step, size) in [("narrowed", windowSizes[1]), ("widened", windowSizes[0])] {
+      try await ui.resize(width: size.width, height: size.height)
+      let toolbar = try await ui.json(measure)
+      XCTAssertEqual(toolbar["rowTops"] as? Int, 1, "\(step): the toolbar commands share one row: \(toolbar)")
+      // The row holds its content and 4 px of padding plus the 1 px border, nothing more.
+      let spare = (toolbar["height"] as? Double ?? 0) - (toolbar["content"] as? Double ?? 0)
+      XCTAssertEqual(spare, 5, accuracy: 2, "\(step): the toolbar row matches its content: \(toolbar)")
+      try await assertLayout(ui, "#screen-sources", "\(step) sources toolbar with a Wasm module")
+      try await ui.screenshot("sources-toolbar-wasm-\(step)")
+    }
+  }
 }

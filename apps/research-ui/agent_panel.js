@@ -230,12 +230,12 @@
     open: false, native: false, status: null, surfaceError: '', provider: 'claude', models: {}, model: {},
     auth: {claude: 'key', chatgpt: 'key', grok: 'subscription'}, subs: {}, checking: {}, signingIn: false,
     phase: 'off', running: false, sessionKey: null, consenting: false, effects: false, turning: false, follow: true,
-    usage: null, olderBefore: null, olderAvailable: false, pins: [], selectionKey: '', copied: null,
+    usage: null, olderBefore: null, olderAvailable: false, pins: [], selectionKey: '', copied: null, setupNotice: '',
   };
   const transcript = createTranscriptModel();
   const citeChecks = new Map();
   const heights = new Map();
-  let framePending = false, frameTranscript = false, lastWindow = '';
+  let framePending = false, frameTranscript = false, lastWindow = '', approvalFocus = null;
   // The mounted rows by id, with what each was drawn from (rowSignature).
   const mountedRows = new Map();
   try {
@@ -245,32 +245,90 @@
     for (const [id] of PROVIDERS) if (auth?.[id] === 'key' || auth?.[id] === 'subscription') view.auth[id] = auth[id];
   } catch { /* Preferences are optional. */ }
 
+  // Icons are fixed markup from this file. Captured and model text never
+  // reaches innerHTML; it is always a text node.
+  const ICONS = {
+    agent: '<path d="M4 4h12v9H9l-4 3v-3H4zM7 8h6"/>',
+    compose: '<path d="M9 4.5H5.5a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V11"/><path d="m13.6 3.9 2.5 2.5-6 6H7.6V9.9z"/>',
+    more: '<path d="M5 10h.01M10 10h.01M15 10h.01" stroke-width="2.6"/>',
+    close: '<path d="m5.5 5.5 9 9M14.5 5.5l-9 9"/>',
+    chevron: '<path d="m6.5 8 3.5 3.5L13.5 8"/>',
+    caret: '<path d="m8 6 4 4-4 4"/>',
+    send: '<path d="M10 15.5v-11M5.5 9 10 4.5 14.5 9"/>',
+    stop: '<rect x="6" y="6" width="8" height="8" rx="1.5" fill="currentColor" stroke="none"/>',
+    check: '<path d="m5 10.5 3.2 3.2L15 7"/>',
+    error: '<circle cx="10" cy="10" r="6.5"/><path d="M10 6.8v3.8M10 13.3h.01"/>',
+    denied: '<circle cx="10" cy="10" r="6.5"/><path d="m5.6 14.4 8.8-8.8"/>',
+    shield: '<path d="M10 3.2 4.8 5.1v4.3c0 3.3 2.2 5.9 5.2 7.2 3-1.3 5.2-3.9 5.2-7.2V5.1z"/>',
+    pin: '<path d="M12.5 3.5 16.5 7.5M11 5l4 4-3 1.5-2.5 2.5.5 2.5-6-6 2.5.5L9 7.5z"/><path d="m7 13-3.5 3.5"/>',
+  };
+  function icon(name, extra = '') {
+    const node = element('span', `agent-icon${extra ? ` ${extra}` : ''}`);
+    node.setAttribute('aria-hidden', 'true');
+    node.innerHTML = `<svg viewBox="0 0 20 20">${ICONS[name]}</svg>`;
+    return node;
+  }
+  function iconButton(id, name, label, onClick) {
+    const node = button('agent-icon-button', '', onClick, label);
+    if (id) node.id = id;
+    node.title = label;
+    node.append(icon(name));
+    return node;
+  }
+
   dock.replaceChildren();
+  // One quiet row: the title, what is running, and three icon buttons.
   const head = element('header', 'agent-head');
-  const headTitle = element('strong', 'agent-title', 'Agent');
-  const headStats = element('span', 'agent-stats');
-  headStats.id = 'agent-stats';
-  const info = element('details', 'agent-info');
-  const infoSummary = element('summary', '', 'Info');
-  infoSummary.setAttribute('aria-label', 'What the agent sends and its keys');
-  const infoBody = element('div', 'agent-popover');
-  info.append(infoSummary, infoBody);
-  const switchLabel = element('label', 'agent-switch');
-  const switchInput = element('input');
-  switchInput.type = 'checkbox';
-  switchInput.id = 'agent-switch';
-  switchInput.setAttribute('role', 'switch');
-  switchInput.setAttribute('aria-label', 'Turn the agent on');
-  switchLabel.append(switchInput, element('span', 'agent-switch-track'), element('span', 'agent-switch-text', 'Off'));
-  const close = button('agent-close', '', () => setOpen(false), 'Close agent panel');
-  close.id = 'agent-close';
+  const headTitle = element('h2', 'agent-title', 'Agent');
+  const chip = element('span', 'agent-status');
+  chip.id = 'agent-status';
+  chip.setAttribute('role', 'status');
+  const chipText = element('span', 'agent-status-text');
+  chip.append(element('span', 'agent-status-dot'), chipText);
+  const newButton = iconButton('agent-new', 'compose', 'New conversation', () => restartConversation());
+  const moreButton = iconButton('agent-more', 'more', 'More', () => toggleMenu());
+  moreButton.setAttribute('aria-haspopup', 'menu');
+  moreButton.setAttribute('aria-expanded', 'false');
+  moreButton.setAttribute('aria-controls', 'agent-menu');
+  const close = iconButton('agent-close', 'close', 'Close agent panel', () => setOpen(false));
   close.title = 'Close (⌘ / Ctrl + Shift + A)';
-  close.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg>';
-  head.append(headTitle, headStats, info, switchLabel, close);
+  head.append(headTitle, chip, element('span', 'agent-spacer'), newButton, moreButton, close);
+
+  const menu = element('div', 'agent-menu');
+  menu.id = 'agent-menu';
+  menu.hidden = true;
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', 'Agent');
+  const menuMeta = element('div', 'agent-menu-meta');
+  menuMeta.setAttribute('role', 'presentation');
+  const menuItem = (id, text, onClick) => {
+    const node = button('agent-menu-item', text, onClick);
+    node.id = id;
+    node.tabIndex = -1;
+    node.setAttribute('role', 'menuitem');
+    return node;
+  };
+  const menuInfo = menuItem('agent-menu-info', 'What leaves this Mac', () => openSheet('info'));
+  const menuModel = menuItem('agent-menu-model', 'Change provider or model', () => { closeMenu(false); openPicker(modelButton); });
+  const menuClear = menuItem('agent-menu-clear', 'Clear transcript…', () => openSheet('clear'));
+  const menuSeparator = element('div', 'agent-menu-separator');
+  menuSeparator.setAttribute('role', 'separator');
+  const menuOff = menuItem('agent-turn-off', 'Turn off', () => { closeMenu(false); turnOff().then(() => focusDefault()); });
+  menuOff.classList.add('agent-menu-danger');
+  menu.append(menuMeta, menuInfo, menuModel, menuClear, menuSeparator, menuOff);
+
+  // Info and the clear confirmation open here, over the top of the body.
+  const sheet = element('div', 'agent-sheet');
+  sheet.id = 'agent-sheet';
+  sheet.hidden = true;
+  sheet.tabIndex = -1;
+  sheet.setAttribute('aria-labelledby', 'agent-sheet-title');
 
   const body = element('div', 'agent-body');
   const surface = element('div', 'agent-surface');
   surface.id = 'agent-surface';
+  // Holds focus while the status loads, then hands it to the first real control.
+  surface.tabIndex = -1;
   const log = element('div', 'agent-log');
   log.id = 'agent-log';
   log.tabIndex = 0;
@@ -280,8 +338,10 @@
   log.append(spacerTop, rowsHost, spacerBottom);
   body.append(surface, log);
 
+  // One card: attached context, the question, and a bar with the model and Send.
   const composer = element('div', 'agent-composer');
   composer.id = 'agent-composer';
+  const composerCard = element('div', 'agent-composer-card');
   const chips = element('div', 'agent-chips');
   chips.id = 'agent-chips';
   const input = element('textarea', 'agent-input');
@@ -289,46 +349,30 @@
   input.rows = 1;
   input.placeholder = 'Ask about this session';
   input.setAttribute('aria-label', 'Message the agent');
-  const controls = element('div', 'agent-controls');
-  const providerGroup = element('div', 'agent-segment');
-  providerGroup.setAttribute('role', 'group');
-  providerGroup.setAttribute('aria-label', 'Provider');
-  const providerButtons = {};
-  for (const kind of PROVIDERS) {
-    providerButtons[kind[0]] = button('agent-segment-button', kind[1], () => chooseProvider(kind[0]));
-    providerButtons[kind[0]].dataset.provider = kind[0];
-    providerGroup.append(providerButtons[kind[0]]);
-  }
-  const modelSelect = element('select', 'agent-model');
-  modelSelect.id = 'agent-model';
-  modelSelect.setAttribute('aria-label', 'Model');
-  modelSelect.addEventListener('change', () => { view.model[modelKey()] = modelSelect.value; });
-  const send = button('agent-send', 'Send', onSend);
+  input.setAttribute('aria-describedby', 'agent-input-hint');
+  const inputHint = element('span', '', 'Return sends. Shift+Return adds a line.');
+  inputHint.id = 'agent-input-hint';
+  inputHint.hidden = true;
+  const bar = element('div', 'agent-composer-bar');
+  const modelButton = button('agent-model-button', '', () => togglePicker(modelButton));
+  modelButton.id = 'agent-model';
+  modelButton.setAttribute('aria-haspopup', 'menu');
+  modelButton.setAttribute('aria-expanded', 'false');
+  modelButton.setAttribute('aria-controls', 'agent-picker');
+  const modelLabel = element('span', 'agent-model-label');
+  modelButton.append(modelLabel, icon('chevron', 'agent-model-chevron'));
+  const send = button('agent-send-button', '', onSend, 'Send');
   send.id = 'agent-send';
-  controls.append(providerGroup, modelSelect, element('span', 'agent-spacer'), send);
-  // How this provider is paid for: the researcher's own key, or their own
-  // subscription, with what that needs next.
-  const account = element('div', 'agent-account');
-  account.id = 'agent-account';
-  const authGroup = element('div', 'agent-segment');
-  authGroup.setAttribute('role', 'group');
-  authGroup.setAttribute('aria-label', 'Pay with');
-  const authButtons = {
-    key: button('agent-segment-button', 'API key', () => chooseAuth('key')),
-    subscription: button('agent-segment-button', 'Subscription', () => chooseAuth('subscription')),
-  };
-  for (const [mode, node] of Object.entries(authButtons)) { node.dataset.auth = mode; authGroup.append(node); }
-  const accountText = element('span', 'agent-account-text');
-  accountText.id = 'agent-account-text';
-  const keyButton = button('agent-key', 'Add key', addKey);
-  keyButton.id = 'agent-key';
-  const accountAction = button('agent-key', '', () => accountActions[accountAction.dataset.action]?.());
-  accountAction.id = 'agent-account-action';
-  account.append(authGroup, accountText, keyButton, accountAction);
-  const hint = element('p', 'agent-hint');
-  hint.id = 'agent-hint';
-  composer.append(chips, input, controls, account, hint);
-  dock.append(head, body, composer);
+  bar.append(modelButton, element('span', 'agent-spacer'), send);
+  composerCard.append(chips, input, bar);
+  composer.append(composerCard, inputHint);
+
+  const picker = element('div', 'agent-picker');
+  picker.id = 'agent-picker';
+  picker.hidden = true;
+  picker.setAttribute('role', 'menu');
+  picker.setAttribute('aria-label', 'Provider and model');
+  dock.append(head, menu, sheet, body, composer, picker);
 
   function bridgeFailure(error) {
     return String(error?.message ?? error ?? 'The agent could not complete that.').replace(/^Error:\s*/, '');
@@ -339,19 +383,20 @@
   const authFor = (id = view.provider) => providerInfo(id)?.supportsKey === false ? 'subscription' : view.auth[id] ?? 'key';
   const loopFor = (id = view.provider, auth = authFor(id)) => auth === 'subscription' && id !== 'chatgpt' ? 'cli' : 'langgraph';
   const modelKey = (id = view.provider) => `${id}:${authFor(id)}`;
+  const modesOf = provider => provider?.supportsKey === false ? ['subscription'] : ['key', 'subscription'];
   const CLI_NAMES = {claude: 'Claude CLI', grok: 'Grok CLI'};
   const CLI_LOGIN = {claude: 'Run claude auth login in Terminal, then check again.', grok: 'Run grok login in Terminal, then check again.'};
   const subscriptionOf = id => view.subs[id] ?? providerInfo(id)?.subscription ?? {};
   // A loopback stand-in replaces only the graph's provider endpoint. A CLI
   // still talks to its own vendor, so its disclosure never says "stand-in".
-  const standInApplies = (id = view.provider) => Boolean(view.status?.standIn) && loopFor(id) === 'langgraph';
+  const standInApplies = (id = view.provider, auth = authFor(id)) => Boolean(view.status?.standIn) && loopFor(id, auth) === 'langgraph';
 
-  // What the selected provider and payment need before the agent can turn on.
-  function credential(id = view.provider) {
+  // What a provider and payment need before the agent can turn on.
+  function credential(id = view.provider, auth = authFor(id)) {
     const provider = providerInfo(id);
     if (!provider) return {ready: false, text: ''};
-    if (authFor(id) === 'key') {
-      return provider.hasKey ? {ready: true, text: standInApplies(id) ? 'Local stand-in provider' : 'Key in your Keychain'}
+    if (auth === 'key') {
+      return provider.hasKey ? {ready: true, text: standInApplies(id, auth) ? 'Local stand-in provider' : 'Key in your Keychain'}
         : {ready: false, text: `No ${provider.label} key yet`, action: 'addKey'};
     }
     const sub = subscriptionOf(id);
@@ -367,7 +412,72 @@
       return {ready: true, text: `${plan}, through your ${CLI_NAMES[id]}`};
     }
     if (sub.signedIn === false) return {ready: false, text: sub.reason ? `${sub.reason} ${CLI_LOGIN[id]}` : CLI_LOGIN[id], action: 'check'};
-    return {ready: false, text: `Checks the ${CLI_NAMES[id]} on this Mac.`, action: 'check'};
+    return {ready: false, text: `Select it to check your ${CLI_NAMES[id]} sign-in.`, action: 'check'};
+  }
+
+  // A few words for a provider card or a picker row; credential().text is the full line.
+  function credentialBadge(id, auth = authFor(id)) {
+    const state = credential(id, auth);
+    const sub = subscriptionOf(id);
+    if (state.ready) {
+      if (auth === 'key') return {tone: 'ready', text: standInApplies(id, auth) ? 'Stand-in' : 'Key saved'};
+      return {tone: 'ready', text: id === 'chatgpt' ? 'Signed in' : planText(id) || 'Signed in'};
+    }
+    if (auth === 'subscription' && view.checking[id]) return {tone: 'busy', text: 'Checking'};
+    if (state.action === 'addKey') return {tone: 'todo', text: 'Add key'};
+    if (state.action === 'signIn') return {tone: 'todo', text: 'Sign in'};
+    if (state.action === 'cancelSignIn') return {tone: 'busy', text: 'Signing in'};
+    if (sub.available === false) return {tone: 'todo', text: 'Not installed'};
+    if (sub.signedIn === false) return {tone: 'todo', text: 'Signed out'};
+    return {tone: 'idle', text: 'Not checked'};
+  }
+
+  const titleCase = word => String(word).replace(/^./, letter => letter.toUpperCase());
+  const planText = id => (subscriptionOf(id).plan ? `${titleCase(subscriptionOf(id).plan)} plan` : '');
+  // Model ids as a person reads them: claude-opus-5-5 is Claude Opus 5.5 and
+  // gpt-6-astra is GPT-6 Astra. Anything else stays as the provider named it.
+  function modelName(model, id = view.provider) {
+    const raw = String(model ?? '');
+    if (!raw || raw === 'default') return '';
+    const claude = /^claude-([a-z]+)-(\d+)-(\d+)(?:-\d{8})?$/.exec(raw);
+    if (claude) return `Claude ${titleCase(claude[1])} ${claude[2]}.${claude[3]}`;
+    const gpt = /^gpt-(\d[\w.]*)((?:-[a-z0-9]+)*)$/i.exec(raw);
+    if (gpt) return `GPT-${gpt[1]}${gpt[2].split('-').filter(Boolean).map(part => ` ${titleCase(part)}`).join('')}`;
+    if (/^grok-[\w.-]+$/i.test(raw)) return raw.split('-').map(titleCase).join(' ');
+    if (/^[a-z]+$/.test(raw)) return `${providerInfo(id)?.label ?? ''} ${titleCase(raw)}`.trim();
+    return raw;
+  }
+  function modeLabel(id, auth) {
+    if (auth === 'key') return standInApplies(id, auth) ? 'Local stand-in' : 'API key';
+    if (id === 'chatgpt') return subscriptionOf(id).standIn ? 'Stand-in sign-in' : 'ChatGPT plan';
+    return planText(id) || 'Subscription';
+  }
+  function selectedModel(id = view.provider, auth = authFor(id)) {
+    const provider = providerInfo(id);
+    const fallback = auth === 'subscription' ? provider?.subscriptionModel ?? provider?.defaultModel : provider?.defaultModel;
+    return view.model[`${id}:${auth}`] ?? fallback ?? view.models[`${id}:${auth}`]?.[0] ?? '';
+  }
+  const modelsFor = (id, auth) => (view.models[`${id}:${auth}`] ?? [selectedModel(id, auth)]).filter(Boolean);
+  // What is running, or what turning on would start.
+  function activeChoice() {
+    const engine = view.status?.engine;
+    if (view.phase !== 'off' && engine?.provider) {
+      return {provider: engine.provider, auth: engine.auth ?? authFor(engine.provider), model: engine.model ?? ''};
+    }
+    return {provider: view.provider, auth: authFor(), model: selectedModel()};
+  }
+  function choiceLabel(choice = activeChoice()) {
+    const name = modelName(choice.model, choice.provider) || providerInfo(choice.provider)?.label || 'Agent';
+    return `${name} · ${modeLabel(choice.provider, choice.auth)}`;
+  }
+  const count = (value, noun) => `${value.toLocaleString('en-US')} ${noun}${value === 1 ? '' : 's'}`;
+  // Tool and token counts live here, in the menu and the chip's tooltip.
+  function statusDetail() {
+    const choice = activeChoice(), engine = view.status?.engine;
+    const parts = [providerInfo(choice.provider)?.label, choice.model || 'default model', modeLabel(choice.provider, choice.auth)];
+    if (view.phase !== 'off') parts.push(count(engine?.tools?.length ?? 0, 'tool'), engine?.effects ? 'actions ask each time' : 'read only');
+    if (view.usage) parts.push(`last turn ${count(view.usage.input, 'token')} in, ${count(view.usage.output, 'token')} out`);
+    return parts.filter(Boolean).join(' · ');
   }
 
   function disclosureText() {
@@ -383,149 +493,558 @@
     return `Your question, excerpts you pin and every tool result go to ${vendor} under your plan, through the ${CLI_NAMES[view.provider]} installed and signed in on this Mac. This is your own local use of your own CLI login, which stays with the CLI. The CLI runs its own agent loop with only the reb-api tools; every action still needs Allow once.${kept} ${structural}`;
   }
 
-  function renderHead() {
-    const on = view.phase !== 'off';
-    switchInput.checked = on;
-    switchInput.setAttribute('aria-checked', String(on));
-    switchLabel.querySelector('.agent-switch-text').textContent = view.turning ? 'Starting' : on ? 'On' : 'Off';
-    const tools = view.status?.engine?.tools?.length ?? 0;
-    const provider = providerInfo();
-    const engine = view.status?.engine;
-    const parts = [];
-    if (on && view.phase !== 'stopped') parts.push(`${provider?.label ?? ''} · ${tools} tools`);
-    const working = engine?.loop === 'cli' ? engine?.cliRunning : engine?.childRunning;
-    if (view.phase === 'stopped') parts.push('Disconnected');
-    else if (on && !working && !view.running && view.phase === 'ready') parts.push('Idle');
-    if (view.running) parts.push('Working');
-    headStats.textContent = parts.join(' · ');
+  // One line for the setup state. The full disclosure is the consent step and Info.
+  function shortDisclosure() {
+    const vendor = providerInfo()?.vendor ?? 'the provider';
+    if (standInApplies()) return 'Local stand-in provider. Nothing leaves this Mac.';
+    if (authFor() === 'key') return `Once on, your question, pins and tool results go to ${vendor}.`;
+    if (view.provider === 'chatgpt') return `Once on, your question, pins and tool results go to ${vendor} under your ChatGPT plan.`;
+    return `Once on, your question, pins and tool results go to ${vendor} through your ${CLI_NAMES[view.provider]}.`;
   }
 
-  function renderInfo() {
-    infoBody.replaceChildren();
+  const focusedIn = node => { const active = document.activeElement; return Boolean(active && active !== document.body && node.contains(active)); };
+  // Rebuilt regions find the control that had focus again by its key.
+  function restoreFocus(container, key) {
+    if (key === undefined || key === null) return false;
+    const target = [...container.querySelectorAll('[data-focus-key]')].find(node => node.dataset.focusKey === key);
+    target?.focus();
+    return Boolean(target);
+  }
+  const focusKeyIn = node => (focusedIn(node) ? document.activeElement.dataset?.focusKey ?? '' : undefined);
+
+  function dockState() {
+    if (!view.native || view.status?.available === false) return 'unavailable';
+    if (!view.status) return 'loading';
+    if (view.consenting) return 'consent';
+    if (view.turning) return 'starting';
+    if (view.phase === 'off') return 'off';
+    if (view.phase === 'stopped') return 'stopped';
+    return view.running ? 'running' : 'ready';
+  }
+
+  function renderHead() {
+    const state = dockState();
+    dock.dataset.state = state;
+    const usable = state !== 'unavailable' && state !== 'loading';
+    chip.hidden = !usable;
+    const tone = {starting: 'busy', running: 'busy', ready: 'ready', stopped: 'error'}[state] ?? 'off';
+    chip.dataset.tone = tone;
+    chipText.textContent = state === 'starting' ? 'Starting…' : state === 'stopped' ? 'Disconnected' : tone === 'off' ? 'Off' : choiceLabel();
+    // The pulsing dot shows a running turn; the tooltip says it in words.
+    chip.title = usable ? `${state === 'running' ? 'Working. ' : ''}${statusDetail()}` : '';
+    newButton.hidden = moreButton.hidden = !usable;
+    newButton.disabled = view.phase === 'off' || view.running || view.turning || !transcript.rows().length;
+  }
+
+  /* ---- Menus and popovers. Arrow keys move, Escape closes, Tab leaves. ---- */
+
+  const menuItems = container => [...container.querySelectorAll('[role^="menuitem"]')].filter(node => !node.hidden && !node.disabled);
+  function menuKeys(container, close) {
+    container.addEventListener('keydown', event => {
+      const items = menuItems(container);
+      const at = items.indexOf(document.activeElement);
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        const step = event.key === 'ArrowDown' ? 1 : -1;
+        items[at < 0 ? (step > 0 ? 0 : items.length - 1) : (at + step + items.length) % items.length]?.focus();
+      } else if (event.key === 'Home' || event.key === 'End') {
+        event.preventDefault();
+        items[event.key === 'Home' ? 0 : items.length - 1]?.focus();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        close(true);
+      } else if (event.key === 'Tab') close(true);
+    });
+  }
+
+  let outsideWatched = false;
+  function onOutside(event) {
+    const target = event.target;
+    if (!menu.hidden && !menu.contains(target) && !moreButton.contains(target)) closeMenu(false);
+    if (!picker.hidden && !picker.contains(target) && !pickerAnchor?.contains(target)) closePicker(false);
+    if (sheetKind && !sheet.contains(target) && !menu.contains(target) && !moreButton.contains(target)) closeSheet(false);
+  }
+  // A pointer listener exists only while something is open.
+  function watchOutside() {
+    const want = view.open && (!menu.hidden || !picker.hidden || Boolean(sheetKind));
+    if (want === outsideWatched) return;
+    outsideWatched = want;
+    document[want ? 'addEventListener' : 'removeEventListener']('pointerdown', onOutside, true);
+  }
+
+  function openMenu() {
+    closePicker(false);
+    closeSheet(false);
+    menu.hidden = false;
+    moreButton.setAttribute('aria-expanded', 'true');
+    renderMenu();
+    menuItems(menu)[0]?.focus();
+    watchOutside();
+  }
+  function closeMenu(focus = true) {
+    if (menu.hidden) return;
+    menu.hidden = true;
+    moreButton.setAttribute('aria-expanded', 'false');
+    if (focus) moreButton.focus();
+    watchOutside();
+  }
+  const toggleMenu = () => (menu.hidden ? openMenu() : closeMenu());
+  menuKeys(menu, closeMenu);
+
+  function renderMenu() {
+    if (menu.hidden) return;
+    const on = view.phase !== 'off';
+    menuMeta.textContent = statusDetail();
+    menuModel.hidden = menuClear.hidden = menuOff.hidden = menuSeparator.hidden = !on;
+    menuModel.disabled = menuClear.disabled = view.running || view.turning;
+    menuOff.disabled = view.turning;
+  }
+
+  let sheetKind = null, sheetKey = '';
+  function openSheet(kind) {
+    closeMenu(false);
+    closePicker(false);
+    sheetKind = kind;
+    sheetKey = '';
+    sheet.hidden = false;
+    sheet.setAttribute('role', kind === 'clear' ? 'alertdialog' : 'dialog');
+    renderSheet();
+    (sheet.querySelector('[data-autofocus]') ?? sheet).focus();
+    watchOutside();
+  }
+  function closeSheet(focus = true) {
+    if (!sheetKind) return;
+    sheetKind = null;
+    sheetKey = '';
+    sheet.hidden = true;
+    sheet.replaceChildren();
+    if (focus) moreButton.focus();
+    watchOutside();
+  }
+  sheet.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeSheet();
+  });
+
+  function renderSheet() {
+    if (!sheetKind) return;
+    const key = JSON.stringify([sheetKind, view.provider, view.auth, view.phase, view.status?.providers, view.status?.engine, view.subs, view.usage, view.running, view.turning]);
+    if (key === sheetKey) return;
+    sheetKey = key;
+    const focusKey = focusKeyIn(sheet);
+    sheet.replaceChildren(...(sheetKind === 'clear' ? clearSheet() : infoSheet()));
+    restoreFocus(sheet, focusKey);
+  }
+
+  function sheetHead(title) {
+    const top = element('div', 'agent-sheet-head');
+    const heading = element('h3', 'agent-sheet-title', title);
+    heading.id = 'agent-sheet-title';
+    const shut = iconButton('', 'close', 'Close', () => closeSheet());
+    shut.dataset.focusKey = 'close';
+    shut.dataset.autofocus = 'true';
+    top.append(heading, shut);
+    return top;
+  }
+
+  function infoSheet() {
     const row = (key, value) => {
-      const line = element('div', 'agent-popover-row');
-      line.append(element('span', 'agent-popover-key', key), element('span', 'agent-popover-value', value));
+      const line = element('div', 'agent-sheet-row');
+      line.append(element('span', 'agent-sheet-key', key), element('span', 'agent-sheet-value', value));
       return line;
     };
     const provider = providerInfo();
     const auth = authFor();
-    infoBody.append(element('p', 'agent-popover-note', disclosureText()));
-    infoBody.append(row('Provider', standInApplies() ? `${provider?.label ?? ''}, local stand-in` : provider?.vendor ?? 'Unknown'));
-    if (auth === 'key') infoBody.append(row('Key', provider?.hasKey ? 'Stored in Keychain' : 'Not set'));
-    else if (view.provider === 'chatgpt') infoBody.append(row('Account', subscriptionOf('chatgpt').signedIn ? 'ChatGPT token in Keychain' : 'Not signed in'));
-    else infoBody.append(row('Account', `Your ${CLI_NAMES[view.provider]} login, kept by the CLI`));
-    infoBody.append(row('Loop', loopFor() === 'cli' ? `The ${CLI_NAMES[view.provider]}'s own loop` : 'LangGraph in this window'));
-    infoBody.append(row('Tools', view.status?.engine?.effects ? 'Read and actions (ask each time)' : 'Read only'));
-    infoBody.append(row('Transcript', 'Local, user-only, not part of the evidence'));
+    const rows = element('div', 'agent-sheet-rows');
+    rows.append(row('Provider', standInApplies() ? `${provider?.label ?? ''}, local stand-in` : provider?.vendor ?? 'Unknown'));
+    if (auth === 'key') rows.append(row('Key', provider?.hasKey ? 'Stored in Keychain' : 'Not set'));
+    else if (view.provider === 'chatgpt') rows.append(row('Account', subscriptionOf('chatgpt').signedIn ? 'ChatGPT token in Keychain' : 'Not signed in'));
+    else rows.append(row('Account', `Your ${CLI_NAMES[view.provider]} login, kept by the CLI`));
+    rows.append(row('Loop', loopFor() === 'cli' ? `The ${CLI_NAMES[view.provider]}'s own loop` : 'LangGraph in this window'));
+    rows.append(row('Tools', view.status?.engine?.effects ? 'Read and actions (ask each time)' : 'Read only'));
+    if (view.phase !== 'off') rows.append(row('Listed', count(view.status?.engine?.tools?.length ?? 0, 'tool')));
+    if (view.usage) rows.append(row('Last turn', `${count(view.usage.input, 'token')} in, ${count(view.usage.output, 'token')} out`));
+    rows.append(row('Transcript', 'Local, user-only, not part of the evidence'));
+    const nodes = [sheetHead('What leaves this Mac'), element('p', 'agent-sheet-text', disclosureText()), rows];
+    const actions = element('div', 'agent-sheet-actions');
     if (auth === 'key' && provider?.hasKey && !standInApplies()) {
-      infoBody.append(button('agent-text-button', `Remove ${provider.label} key`, removeKey));
+      const remove = button('agent-button', `Remove ${provider.label} key`, removeKey);
+      remove.dataset.focusKey = 'remove-key';
+      actions.append(remove);
     }
     if (auth === 'subscription' && view.provider === 'chatgpt' && subscriptionOf('chatgpt').signedIn && !subscriptionOf('chatgpt').standIn) {
-      infoBody.append(button('agent-text-button', 'Sign out of ChatGPT', signOut));
+      const out = button('agent-button', 'Sign out of ChatGPT', signOut);
+      out.dataset.focusKey = 'sign-out';
+      actions.append(out);
     }
+    if (actions.childElementCount) nodes.push(actions);
+    return nodes;
   }
 
-  function renderSurface() {
-    const message = surfaceState();
-    surface.replaceChildren();
-    surface.hidden = !message;
-    log.hidden = Boolean(message);
-    if (!message) return;
-    if (message.title) surface.append(element('strong', 'agent-surface-title', message.title));
-    if (message.text) surface.append(element('p', 'agent-surface-text', message.text));
-    if (message.node) surface.append(message.node);
+  function clearSheet() {
+    const actions = element('div', 'agent-sheet-actions');
+    const cancel = button('agent-button', 'Cancel', () => closeSheet());
+    cancel.dataset.focusKey = 'cancel';
+    const confirm = button('agent-button agent-button-danger', 'Clear transcript', async () => {
+      closeSheet(false);
+      await restartConversation({clear: true});
+      focusDefault();
+    });
+    confirm.id = 'agent-clear-confirm';
+    confirm.disabled = view.running || view.turning;
+    actions.append(cancel, confirm);
+    const nodes = [sheetHead('Clear this transcript?'),
+      element('p', 'agent-sheet-text', 'This deletes the local record of this session\'s conversation and starts a new one. The model starts fresh; the evidence is not changed.'), actions];
+    nodes[0].querySelector('button').removeAttribute('data-autofocus');
+    cancel.dataset.autofocus = 'true';
+    return nodes;
   }
+
+  /* ---- Centered states: setup, consent, empty and messages ---- */
 
   function surfaceState() {
-    if (!view.native) return {title: 'Available in the macOS app', text: 'The agent runs in the native app, which holds your key and the local tool server. Open this workspace in Origin Trace.'};
-    if (!view.status) return {title: 'Loading', text: ''};
+    if (!view.native) return {kind: 'message', title: 'Available in the macOS app', text: 'The agent runs in the native app, which holds your key and the local tool server. Open this workspace in Origin Trace.'};
+    if (!view.status) return {kind: 'loading'};
     if (view.status.available === false) {
       return view.status.reason === 'offline-workspace'
-        ? {title: 'Needs a live or opened session', text: 'The agent reads evidence through a session\'s local API. This offline workspace has none. Start a live capture to use it.'}
-        : {title: 'Tool server missing', text: 'This build has no OriginTraceAPI helper. Rebuild the app with make app-build.'};
+        ? {kind: 'message', title: 'Needs a live or opened session', text: 'The agent reads evidence through a session\'s local API. This offline workspace has none. Start a live capture to use it.'}
+        : {kind: 'message', title: 'Tool server missing', text: 'This build has no OriginTraceAPI helper. Rebuild the app with make app-build.'};
     }
-    if (view.consenting) return consentSurface();
-    if (view.phase === 'off' && !transcript.rows().length) {
-      return {title: 'The agent is off', text: 'Turn it on for this session to ask about the evidence. Nothing is sent until you do.'};
+    if (view.consenting) return {kind: 'consent'};
+    if (view.phase === 'off') return {kind: 'setup'};
+    if (transcript.rows().length) return null;
+    if (view.phase === 'stopped') return {kind: 'message', tone: 'error', title: 'Disconnected', text: view.surfaceError || 'The local tool server stopped. Ask again to restart it.'};
+    return {kind: 'empty'};
+  }
+
+  let surfaceKey = '';
+  function renderSurface() {
+    const state = surfaceState();
+    surface.hidden = !state;
+    log.hidden = Boolean(state);
+    if (!state) { if (surfaceKey) { surfaceKey = ''; surface.replaceChildren(); } return; }
+    // Everything a state is drawn from, so a selection change in the
+    // workspace never rebuilds the controls under the pointer or the focus.
+    const key = JSON.stringify([state, view.provider, view.auth, view.status?.standIn, view.status?.providers, view.subs, view.checking,
+      view.signingIn, view.model, view.models[modelKey()], view.setupNotice, view.turning, view.olderAvailable]);
+    if (key === surfaceKey) return;
+    surfaceKey = key;
+    const focusKey = focusKeyIn(surface);
+    // Focus the panel placed itself moves on to the next decision; focus the
+    // researcher placed stays on the same control.
+    const placed = document.activeElement === surface || (autoFocused && document.activeElement === autoFocused);
+    const builders = {setup: setupSurface, consent: consentSurface, empty: emptySurface, loading: loadingSurface, message: messageSurface};
+    surface.replaceChildren(builders[state.kind](state));
+    if (placed || (!restoreFocus(surface, focusKey) && focusKey !== undefined)) focusDefault();
+  }
+
+  function welcome(className, name, title, text) {
+    const node = element('div', `agent-center ${className}`);
+    node.append(icon(name, 'agent-center-icon'), element('h3', 'agent-center-title', title));
+    if (text) node.append(element('p', 'agent-center-text', text));
+    return node;
+  }
+
+  function loadingSurface() {
+    const node = element('div', 'agent-center agent-loading');
+    node.append(element('span', 'agent-spinner'), element('span', 'agent-center-text', 'Loading'));
+    return node;
+  }
+
+  function messageSurface(state) {
+    const node = welcome('agent-message', state.tone === 'error' ? 'error' : 'agent', state.title, state.text);
+    if (state.tone) node.dataset.tone = state.tone;
+    return node;
+  }
+
+  function badgeNode({tone, text}) {
+    const node = element('span', 'agent-badge');
+    node.dataset.tone = tone;
+    node.append(tone === 'busy' ? element('span', 'agent-spinner') : element('span', 'agent-badge-dot'), element('span', '', text));
+    return node;
+  }
+
+  // Off: each provider with what it needs, then one way to turn on.
+  function setupSurface() {
+    const node = welcome('agent-setup', 'agent', 'The agent is off', 'Turn it on for this session to ask about the evidence. Nothing is sent until you do.');
+    const list = element('div', 'agent-providers');
+    list.setAttribute('role', 'group');
+    list.setAttribute('aria-label', 'Provider');
+    for (const provider of view.status?.providers ?? []) list.append(providerCard(provider));
+    node.append(list);
+    if (view.setupNotice) {
+      const note = element('p', `agent-setup-note${view.setupNotice.kind === 'error' ? ' agent-setup-error' : ''}`, view.setupNotice.text);
+      note.setAttribute('role', view.setupNotice.kind === 'error' ? 'alert' : 'status');
+      node.append(note);
     }
-    if (view.phase === 'stopped' && !transcript.rows().length) {
-      return {title: 'Disconnected', text: view.surfaceError || 'The local tool server stopped. Ask again to restart it.'};
+    const turnOn = button('agent-button agent-button-primary agent-turn-on', 'Turn on for this session', requestConsent);
+    turnOn.id = 'agent-turn-on';
+    turnOn.dataset.focusKey = 'turn-on';
+    turnOn.disabled = !credential().ready || view.turning;
+    turnOn.setAttribute('aria-describedby', 'agent-account-text');
+    node.append(turnOn, element('p', 'agent-leaves', shortDisclosure()));
+    return node;
+  }
+
+  function providerCard(provider) {
+    const id = provider.id, selected = id === view.provider, auth = authFor(id), state = credential(id, auth);
+    const card = element('div', `agent-provider${selected ? ' agent-provider-selected' : ''}`);
+    const pick = button('agent-provider-pick', '', () => chooseProvider(id));
+    pick.dataset.provider = id;
+    pick.dataset.focusKey = `provider:${id}`;
+    pick.setAttribute('aria-pressed', String(selected));
+    const badge = credentialBadge(id, auth);
+    pick.append(element('span', 'agent-provider-name', provider.label), badgeNode(badge.tone === 'ready' ? {tone: 'ready', text: 'Ready'} : badge));
+    const status = element('p', 'agent-provider-status', state.text);
+    card.append(pick, status);
+    // The rest of the card selects it too; only its own controls do something else.
+    card.addEventListener('click', event => { if (!event.target.closest('button')) chooseProvider(id); });
+    if (!selected) return card;
+    card.id = 'agent-account';
+    status.id = 'agent-account-text';
+    const controls = element('div', 'agent-provider-controls');
+    if (modesOf(provider).length > 1) {
+      const segment = element('div', 'agent-segment');
+      segment.setAttribute('role', 'group');
+      segment.setAttribute('aria-label', 'Pay with');
+      for (const mode of modesOf(provider)) {
+        const node = button('agent-segment-button', mode === 'key' ? 'API key' : 'Subscription', () => chooseAuth(mode));
+        node.dataset.auth = mode;
+        node.dataset.focusKey = `auth:${mode}`;
+        node.setAttribute('aria-pressed', String(mode === auth));
+        segment.append(node);
+      }
+      controls.append(segment);
+    } else {
+      // One way to pay is stated, not offered as a choice.
+      controls.append(element('span', 'agent-mode-only', 'Subscription only'));
     }
-    if (view.phase !== 'off' && !transcript.rows().length) {
-      return {title: 'Ask about this session', text: 'Select a request, script or VM row to attach it. Pin what the model should read.'};
+    controls.append(element('span', 'agent-spacer'));
+    const labels = {addKey: `Add ${provider.label} key`, signIn: 'Sign in', cancelSignIn: 'Cancel', check: 'Check again'};
+    if (labels[state.action]) {
+      const action = button('agent-button', labels[state.action], () => accountActions[state.action]());
+      action.id = 'agent-account-action';
+      action.dataset.action = state.action;
+      action.dataset.focusKey = 'account-action';
+      controls.append(action);
+    } else if (state.ready) {
+      const choose = button('agent-model-button', '', () => togglePicker(choose, {modelsOnly: true}));
+      choose.id = 'agent-setup-model';
+      choose.dataset.focusKey = 'setup-model';
+      choose.setAttribute('aria-haspopup', 'menu');
+      choose.setAttribute('aria-expanded', 'false');
+      const name = modelName(selectedModel(), id) || 'Default';
+      choose.setAttribute('aria-label', `Model: ${name}`);
+      choose.title = selectedModel() || 'The default model';
+      choose.append(element('span', 'agent-model-label', name), icon('chevron', 'agent-model-chevron'));
+      controls.append(choose);
     }
-    return null;
+    card.append(controls);
+    return card;
   }
 
   function consentSurface() {
-    const node = element('div', 'agent-consent');
+    const node = welcome('agent-consent', 'shield', 'Before you turn this on');
+    node.append(element('p', 'agent-consent-target', choiceLabel()));
     node.append(element('p', 'agent-consent-text', disclosureText()));
     const effectsLabel = element('label', 'agent-check');
     const effects = element('input');
     effects.type = 'checkbox';
     effects.id = 'agent-effects';
+    effects.dataset.focusKey = 'effects';
     effects.checked = view.effects;
     effects.addEventListener('change', () => { view.effects = effects.checked; });
     effectsLabel.append(effects, element('span', '', 'Let the agent request actions. Each one needs Allow once.'));
     const actions = element('div', 'agent-consent-actions');
-    const accept = button('agent-send', 'Turn on for this session', confirmConsent);
+    const cancel = button('agent-button', 'Cancel', () => { view.consenting = false; render(); focusDefault(); });
+    cancel.dataset.focusKey = 'cancel';
+    const accept = button('agent-button agent-button-primary', 'Turn on for this session', confirmConsent);
     accept.id = 'agent-consent-accept';
-    actions.append(button('agent-text-button', 'Cancel', () => { view.consenting = false; render(); }), accept);
+    accept.dataset.focusKey = 'accept';
+    actions.append(cancel, accept);
     node.append(effectsLabel, actions);
-    return {title: 'Before you turn this on', node};
+    return node;
   }
 
-  function renderAccount(on) {
-    const provider = providerInfo();
-    const auth = authFor();
-    account.hidden = !provider;
-    if (!provider) return;
-    authButtons.key.hidden = provider.supportsKey === false;
-    for (const [mode, node] of Object.entries(authButtons)) {
-      node.setAttribute('aria-pressed', String(mode === auth));
-      node.disabled = on;
+  const SUGGESTIONS = ['Summarize this session', 'What scripts ran first?', 'Which hosts did it contact?', 'Explain the selected row'];
+  // A suggestion fills the composer; the researcher still sends it.
+  function useSuggestion(text) {
+    input.value = text;
+    input.dispatchEvent(new Event('input'));
+    input.focus();
+    input.setSelectionRange?.(text.length, text.length);
+  }
+
+  function emptySurface() {
+    const node = welcome('agent-empty', 'agent', 'Ask about this session', 'Select a request, script or VM row to attach it. Pin what the model should read.');
+    const list = element('div', 'agent-suggestions');
+    for (const text of SUGGESTIONS) {
+      const suggestion = button('agent-suggestion', text, () => useSuggestion(text));
+      suggestion.dataset.focusKey = `suggest:${text}`;
+      list.append(suggestion);
     }
-    const state = credential();
-    accountText.textContent = state.text;
-    accountText.title = state.text;
-    accountText.classList.toggle('agent-account-ready', Boolean(state.ready));
-    keyButton.hidden = on || state.action !== 'addKey';
-    keyButton.textContent = `Add ${provider.label} key`;
-    const labels = {signIn: 'Sign in', cancelSignIn: 'Cancel', check: 'Check again'};
-    accountAction.hidden = on || !labels[state.action];
-    accountAction.dataset.action = state.action ?? '';
-    accountAction.textContent = labels[state.action] ?? '';
+    node.append(list);
+    if (view.olderAvailable) {
+      const older = button('agent-button agent-older-button', 'Show earlier rows', loadOlder);
+      older.dataset.focusKey = 'older';
+      node.append(older);
+    }
+    return node;
+  }
+
+  /* ---- Provider and model picker ---- */
+
+  let pickerAnchor = null, pickerKey = '', pickerModelsOnly = false;
+  function openPicker(anchor, {modelsOnly = false} = {}) {
+    if (!view.status?.providers?.length || !anchor) return;
+    closeMenu(false);
+    closeSheet(false);
+    pickerAnchor = anchor;
+    pickerModelsOnly = modelsOnly;
+    pickerKey = '';
+    picker.hidden = false;
+    anchor.setAttribute('aria-expanded', 'true');
+    renderPicker();
+    (picker.querySelector('[data-model][aria-checked="true"]') ?? picker.querySelector('[aria-checked="true"]') ?? menuItems(picker)[0])?.focus();
+    watchOutside();
+  }
+  function closePicker(focus = true) {
+    if (picker.hidden) return;
+    picker.hidden = true;
+    pickerKey = '';
+    const anchor = pickerAnchor;
+    pickerAnchor = null;
+    anchor?.setAttribute('aria-expanded', 'false');
+    if (focus) { if (anchor?.isConnected) anchor.focus(); else focusDefault(); }
+    watchOutside();
+  }
+  const togglePicker = (anchor, options) => (picker.hidden ? openPicker(anchor, options) : closePicker());
+  menuKeys(picker, closePicker);
+
+  // On: the current choice is checked, and any other one turns the agent
+  // off and asks again, as switching it off by hand does.
+  const isCurrent = (id, mode) => { const choice = activeChoice(); return choice.provider === id && choice.auth === mode; };
+
+  function pickerItem(className, checked, onPick) {
+    const node = element('button', `agent-picker-item ${className}`);
+    node.type = 'button';
+    node.tabIndex = -1;
+    node.setAttribute('role', 'menuitemradio');
+    node.setAttribute('aria-checked', String(checked));
+    node.append(icon('check', 'agent-picker-check'));
+    node.addEventListener('click', onPick);
+    return node;
+  }
+
+  function renderPicker() {
+    if (picker.hidden) return;
+    const on = view.phase !== 'off';
+    const key = JSON.stringify([pickerModelsOnly, on, activeChoice(), view.status?.providers, view.subs, view.checking, view.models, view.model, view.signingIn, view.running]);
+    if (key !== pickerKey) {
+      pickerKey = key;
+      const focusKey = focusKeyIn(picker);
+      picker.replaceChildren();
+      if (on) {
+        const note = element('p', 'agent-picker-note', 'Choosing another turns the agent off and asks again.');
+        note.setAttribute('role', 'presentation');
+        picker.append(note);
+      }
+      const choice = activeChoice();
+      for (const provider of view.status?.providers ?? []) {
+        if (pickerModelsOnly && provider.id !== choice.provider) continue;
+        const group = element('div', 'agent-picker-group');
+        group.setAttribute('role', 'group');
+        group.setAttribute('aria-label', provider.label);
+        const heading = element('div', 'agent-picker-heading', provider.label);
+        heading.setAttribute('role', 'presentation');
+        group.append(heading);
+        for (const mode of modesOf(provider)) {
+          if (pickerModelsOnly && mode !== choice.auth) continue;
+          const current = isCurrent(provider.id, mode);
+          if (!pickerModelsOnly) {
+            const item = pickerItem('agent-picker-mode', current, () => pickMode(provider.id, mode));
+            item.dataset.pick = `${provider.id}:${mode}`;
+            item.dataset.focusKey = `pick:${provider.id}:${mode}`;
+            item.disabled = on && view.running;
+            item.append(element('span', 'agent-picker-label', mode === 'key' ? 'API key' : 'Subscription'), badgeNode(credentialBadge(provider.id, mode)));
+            group.append(item);
+          }
+          if (!current || !credential(provider.id, mode).ready) continue;
+          for (const model of modelsFor(provider.id, mode)) {
+            const item = pickerItem('agent-picker-model', model === choice.model, () => pickModel(model));
+            item.dataset.model = model;
+            item.dataset.focusKey = `model:${model}`;
+            item.disabled = on && view.running;
+            const name = modelName(model, provider.id);
+            item.append(element('span', 'agent-picker-label', name || 'Default model'), element('span', 'agent-picker-id', model));
+            group.append(item);
+          }
+        }
+        picker.append(group);
+      }
+      restoreFocus(picker, focusKey);
+    }
+    positionPicker();
+  }
+
+  // Inside the dock, on whichever side of its button has more room.
+  function positionPicker() {
+    if (picker.hidden || !pickerAnchor?.isConnected) return;
+    const host = dock.getBoundingClientRect(), anchor = pickerAnchor.getBoundingClientRect();
+    const margin = 8, width = Math.min(300, host.width - 2 * margin);
+    picker.style.width = `${width}px`;
+    picker.style.left = `${Math.max(margin, Math.min(anchor.left - host.left, host.width - width - margin))}px`;
+    const above = anchor.top - host.top - margin - 6, below = host.bottom - anchor.bottom - margin - 6;
+    if (above > below) {
+      picker.style.top = '';
+      picker.style.bottom = `${host.bottom - anchor.top + 6}px`;
+      picker.style.maxHeight = `${Math.max(120, above)}px`;
+    } else {
+      picker.style.bottom = '';
+      picker.style.top = `${anchor.bottom - host.top + 6}px`;
+      picker.style.maxHeight = `${Math.max(120, below)}px`;
+    }
+  }
+
+  function pickMode(id, mode) {
+    if (view.phase !== 'off') { if (!isCurrent(id, mode)) switchTo(id, mode); return; }
+    setChoice(id, mode);
+  }
+
+  function pickModel(model) {
+    if (view.phase !== 'off') {
+      const choice = activeChoice();
+      if (model === choice.model) closePicker();
+      else switchTo(choice.provider, choice.auth, model);
+      return;
+    }
+    view.model[modelKey()] = model;
+    closePicker();
+    render();
   }
 
   function renderComposer() {
     const on = view.phase !== 'off';
-    const provider = providerInfo();
-    composer.hidden = !view.native || view.status?.available === false || view.consenting;
-    for (const [id, node] of Object.entries(providerButtons)) {
-      node.setAttribute('aria-pressed', String(id === view.provider));
-      node.disabled = on;
+    composer.hidden = !view.native || !view.status || view.status.available === false || view.consenting || !on;
+    const label = choiceLabel();
+    modelLabel.textContent = label;
+    modelButton.setAttribute('aria-label', `Provider and model: ${label}`);
+    modelButton.title = statusDetail();
+    modelButton.disabled = view.turning;
+    const mode = view.running ? 'stop' : 'send';
+    if (send.dataset.mode !== mode) {
+      send.dataset.mode = mode;
+      send.replaceChildren(icon(mode));
+      send.setAttribute('aria-label', view.running ? 'Stop' : 'Send');
+      send.title = view.running ? 'Stop' : 'Send (Return)';
     }
-    renderAccount(on);
-    const fallback = authFor() === 'subscription' ? provider?.subscriptionModel ?? provider?.defaultModel : provider?.defaultModel;
-    const list = view.models[modelKey()] ?? [fallback ?? ''];
-    const selected = view.model[modelKey()] ?? fallback ?? list[0] ?? '';
-    if (modelSelect.dataset.options !== list.join('|')) {
-      modelSelect.replaceChildren(...list.filter(Boolean).map(id => { const option = element('option', '', id); option.value = id; return option; }));
-      modelSelect.dataset.options = list.join('|');
-    }
-    modelSelect.value = selected;
-    modelSelect.disabled = on;
-    send.textContent = view.running ? 'Stop' : 'Send';
     send.classList.toggle('agent-send-stop', view.running);
     send.disabled = !on || (!view.running && !input.value.trim());
     // A stopped tool server restarts on the next question.
     input.disabled = !on;
-    input.placeholder = on ? 'Ask about this session' : 'Turn the agent on to ask';
-    const pinNote = view.pins.length ? `${view.pins.length} pin${view.pins.length === 1 ? '' : 's'} attached. ` : '';
-    const via = loopFor() === 'cli' ? ` through the ${CLI_NAMES[view.provider]}` : '';
-    hint.textContent = standInApplies()
-      ? `${pinNote}Local stand-in provider. Nothing leaves this Mac.`
-      : `↵ send · ⇧↵ new line · ${pinNote}question, pins and tool results go to ${provider?.vendor ?? 'the provider'}${via}`;
     renderChips();
   }
 
@@ -549,32 +1068,45 @@
     return null;
   }
 
+  let chipsKey = '';
   function renderChips() {
-    chips.replaceChildren();
     const selection = currentSelection();
     view.selection = selection;
+    const canPin = view.phase !== 'off' && view.phase !== 'stopped';
+    const pinnable = Boolean(selection || pinnableText());
+    // Workspace activity re-renders on every selection change; the chips are
+    // rebuilt only when what they show changes, so focus stays on them.
+    const key = JSON.stringify([selection, canPin, pinnable, view.pins.map(entry => [entry.label, entry.bytes, entry.truncated])]);
+    if (key === chipsKey) return;
+    chipsKey = key;
+    const focusKey = focusKeyIn(chips);
+    chips.replaceChildren();
     if (selection) {
       const chip = element('span', 'agent-chip');
       chip.title = selection.identifiers;
       chip.append(element('span', 'agent-chip-kind', selection.kind), element('span', 'agent-chip-label', selection.label || selection.key));
       chips.append(chip);
     }
-    const canPin = view.phase !== 'off' && view.phase !== 'stopped';
-    if (selection || pinnableText()) {
+    if (pinnable) {
       const pin = button('agent-pin', 'Pin', onPin, 'Pin the selection or excerpt into this turn');
       pin.id = 'agent-pin';
+      pin.dataset.focusKey = 'pin';
       pin.disabled = !canPin;
       chips.append(pin);
     }
-    for (const entry of view.pins) {
+    view.pins.forEach((entry, index) => {
       const chip = element('span', 'agent-chip agent-chip-pinned');
       chip.append(element('span', 'agent-chip-kind', 'pinned'), element('span', 'agent-chip-label',
         `${entry.label} · ${formatBytes(entry.bytes)}${entry.truncated ? ' (cut)' : ''}`));
       chip.title = entry.truncated ? `First ${formatBytes(entry.bytes)} of ${formatBytes(entry.totalBytes)}; the rest is not sent.` : entry.label;
-      chip.append(button('agent-chip-remove', '×', () => { view.pins.splice(view.pins.indexOf(entry), 1); renderComposer(); }, `Remove pin ${entry.label}`));
+      const remove = button('agent-chip-remove', '', () => { view.pins.splice(view.pins.indexOf(entry), 1); renderComposer(); input.focus(); }, `Remove pin ${entry.label}`);
+      remove.dataset.focusKey = `remove:${index}`;
+      remove.append(icon('close'));
+      chip.append(remove);
       chips.append(chip);
-    }
+    });
     chips.hidden = !chips.childElementCount;
+    restoreFocus(chips, focusKey);
   }
 
   function pinnableText() {
@@ -605,7 +1137,14 @@
     input.focus();
   }
 
+  // While the agent is off there is no conversation to add a row to: the
+  // setup state shows the line instead, beside the provider it is about.
   function appendNotice(text, kind = 'info') {
+    if (view.phase === 'off' && !runtime) {
+      view.setupNotice = {text, kind};
+      render();
+      return;
+    }
     transcript.add({id: rowId('n'), role: 'notice', text, kind});
     if (view.follow) log.scrollTop = 0;
     render();
@@ -754,7 +1293,7 @@
     const node = element('div', `agent-row agent-row-${row.role}`);
     node.dataset.rowId = row.id;
     if (row.role === 'user') {
-      node.append(element('div', 'agent-user-text', row.text));
+      node.append(element('div', 'agent-user-bubble', row.text));
       if (row.pins?.length) {
         const pins = element('div', 'agent-row-pins');
         for (const pin of row.pins) pins.append(element('span', 'agent-chip agent-chip-pinned', `pinned · ${pin.label} · ${formatBytes(pin.bytes)}${pin.truncated ? ' (cut)' : ''}`));
@@ -766,45 +1305,67 @@
       node.append(approvalRow(row));
     } else if (row.role !== 'assistant') {
       node.classList.toggle('agent-row-error', row.kind === 'error');
-      node.textContent = row.text;
+      const box = element('div', 'agent-notice');
+      if (row.kind === 'error') box.append(icon('error', 'agent-notice-icon'));
+      box.append(element('span', 'agent-notice-text', row.text));
+      node.append(box);
     }
     // An assistant row's blocks are drawn by mountRow, which keeps them across streamed deltas.
     return node;
   }
 
+  const domId = (prefix, value) => `${prefix}-${String(value).replace(/[^\w-]/g, '_').slice(0, 80)}`;
+  const TOOL_STATES = {running: 'Running', done: 'Done', error: 'Failed', denied: 'Denied', refused: 'Refused'};
+
+  // One line per call: state, tool, arguments and result size. The full
+  // arguments and result stay one click or key press away and are drawn only
+  // while open, so a long log keeps no hidden result nodes.
   function toolRow(row) {
-    const detail = element('details', 'agent-tool');
-    if (row.openTool) detail.open = true;
-    detail.addEventListener('toggle', () => {
-      // Restoring an open row above queues a toggle too. Acting on it would
-      // append a second result and rebuild every frame, so a click in the log
-      // would land on a replaced node. Only a change from the saved state counts.
-      if (detail.open === Boolean(row.openTool)) return;
-      row.openTool = detail.open;
-      if (detail.open) detail.append(toolDetail(row));
-      else detail.querySelector('.agent-tool-detail')?.remove();
-      // Rows were measured closed. Force a fresh window on the next frame.
-      heights.delete(row.id);
-      scheduleTranscript(true);
-    });
-    const summary = element('summary', 'agent-tool-summary');
-    summary.append(element('span', 'agent-tool-name', row.name));
+    const wrap = element('div', `agent-tool agent-tool-${row.state}`);
+    const detailId = domId('agent-tool', row.id);
+    const summary = element('button', 'agent-tool-summary');
+    summary.type = 'button';
+    summary.dataset.focusKey = 'summary';
+    summary.setAttribute('aria-expanded', String(Boolean(row.openTool)));
+    summary.setAttribute('aria-controls', detailId);
+    const mark = row.state === 'running' ? element('span', 'agent-tool-mark agent-spinner')
+      : icon({done: 'check', error: 'error'}[row.state] ?? 'denied', 'agent-tool-mark');
+    summary.append(mark, element('span', 'agent-tool-name', row.name));
     const args = compactArguments(row.arguments);
     if (args) summary.append(element('span', 'agent-tool-args', args));
     const size = row.resultBytes ? formatBytes(row.resultBytes) : '';
-    const state = {running: 'Running', done: size || 'Done', error: `Failed${size ? ` · ${size}` : ''}`, denied: 'Denied', refused: 'Refused'}[row.state] ?? row.state;
-    const status = element('span', `agent-tool-state agent-tool-state-${row.state}`, state);
-    summary.append(status);
-    detail.append(summary);
-    if (detail.open) detail.append(toolDetail(row));
-    return detail;
+    const state = row.state === 'done' ? size || 'Done' : row.state === 'error' && size ? `Failed · ${size}` : TOOL_STATES[row.state] ?? row.state;
+    summary.append(element('span', `agent-tool-state agent-tool-state-${row.state}`, state), icon('caret', 'agent-tool-caret'));
+    summary.title = `${TOOL_STATES[row.state] ?? row.state}. ${row.openTool ? 'Hide' : 'Show'} the arguments and the result sent to the provider.`;
+    summary.addEventListener('click', () => {
+      row.openTool = !row.openTool;
+      summary.setAttribute('aria-expanded', String(row.openTool));
+      summary.title = `${TOOL_STATES[row.state] ?? row.state}. ${row.openTool ? 'Hide' : 'Show'} the arguments and the result sent to the provider.`;
+      if (row.openTool) wrap.append(toolDetail(row, detailId));
+      else wrap.querySelector('.agent-tool-detail')?.remove();
+      // This node already shows the new state, so the next frame keeps it
+      // (and the focus on it) instead of drawing the row again.
+      const kept = mountedRows.get(row.id);
+      if (kept) kept.signature = rowSignature(row);
+      heights.delete(row.id);
+      scheduleTranscript(true);
+    });
+    wrap.append(summary);
+    if (row.openTool) wrap.append(toolDetail(row, detailId));
+    return wrap;
   }
 
-  function toolDetail(row) {
+  function toolDetail(row, id) {
     const area = element('div', 'agent-tool-detail');
+    area.id = id;
     area.append(element('div', 'agent-tool-label', 'Arguments'), toolText(row.arguments || '{}'));
     area.append(element('div', 'agent-tool-label', `Result sent to the provider${row.resultBytes ? ` · ${formatBytes(row.resultBytes)}` : ''}`));
-    area.append(toolText(row.result ?? (row.state === 'running' ? 'Running' : 'No result')));
+    const result = toolText(row.result ?? (row.state === 'running' ? 'Running' : 'No result'));
+    // The block is bounded and scrolls; it takes focus so keys can scroll it.
+    result.tabIndex = 0;
+    result.setAttribute('role', 'region');
+    result.setAttribute('aria-label', `Result of ${row.name}`);
+    area.append(result);
     return area;
   }
 
@@ -817,18 +1378,34 @@
   }
 
   function approvalRow(row) {
-    const card = element('div', 'agent-approval');
-    card.append(element('div', 'agent-approval-title', `Allow ${row.name}?`));
+    const card = element('div', `agent-approval agent-approval-${row.state}`);
+    const titleId = domId('agent-approval', row.callId);
+    card.setAttribute('role', 'group');
+    card.setAttribute('aria-labelledby', titleId);
+    const top = element('div', 'agent-approval-head');
+    const title = element('div', 'agent-approval-title', `Allow ${row.name}?`);
+    title.id = titleId;
+    top.append(icon('shield', 'agent-approval-icon'), title);
+    card.append(top);
+    if (row.state === 'pending') {
+      card.tabIndex = -1;
+      card.dataset.focusKey = 'card';
+      card.append(element('p', 'agent-approval-text', 'The agent asks to run this action once. Read-only calls run without asking.'));
+    }
     card.append(toolText(row.arguments || '{}'));
     if (row.state === 'pending') {
       const actions = element('div', 'agent-approval-actions');
-      const deny = button('agent-text-button', 'Deny', () => decide(row, false));
-      const allow = button('agent-send', 'Allow once', () => decide(row, true));
+      const deny = button('agent-button', 'Deny', () => decide(row, false));
+      deny.dataset.focusKey = 'deny';
+      const allow = button('agent-button agent-button-approve', 'Allow once', () => decide(row, true));
       allow.dataset.approve = row.callId;
+      allow.dataset.focusKey = 'allow';
       actions.append(deny, allow);
       card.append(actions);
     } else {
-      card.append(element('div', 'agent-approval-state', row.state === 'allowed' ? 'Allowed once' : 'Denied'));
+      const decided = element('div', 'agent-approval-state');
+      decided.append(icon(row.state === 'allowed' ? 'check' : 'denied'), element('span', '', row.state === 'allowed' ? 'Allowed once' : 'Denied'));
+      card.append(decided);
     }
     return card;
   }
@@ -891,6 +1468,19 @@
         if (node === at) at = at.nextSibling;
         else rowsHost.insertBefore(node, at);
       }
+      // A row redrawn while it held focus gives it to the same control, or to
+      // the composer when that control is gone (a decided approval).
+      for (const {node, key: focusKey} of refocus.splice(0)) {
+        if (!restoreFocus(node, focusKey)) (input.disabled ? log : input).focus({preventScroll: true});
+      }
+    }
+    refocus.length = 0;
+    // A new approval takes focus unless the researcher is working elsewhere.
+    if (approvalFocus) {
+      const card = [...rowsHost.querySelectorAll('[data-row-id]')].find(node => node.dataset.rowId === approvalFocus)?.querySelector('.agent-approval');
+      const active = document.activeElement;
+      if (card && (!active || active === document.body || dock.contains(active))) card.focus();
+      if (card) approvalFocus = null;
     }
     spacerTop.style.height = windowed ? `${offsets[first]}px` : '0';
     spacerBottom.style.height = windowed ? `${Math.max(0, total - offsets[last] - estimates[last])}px` : '0';
@@ -911,11 +1501,14 @@
       Boolean(row.openTool), row.callId, row.pins?.map(pin => [pin.label, pin.bytes, pin.truncated]) ?? null]);
   }
 
+  const refocus = [];
   function mountRow(row) {
     const signature = rowSignature(row), kept = mountedRows.get(row.id);
     if (kept?.signature === signature) return kept.node;
     if (row.role !== 'assistant') {
       const node = renderRow(row);
+      const focusKey = kept ? focusKeyIn(kept.node) : undefined;
+      if (focusKey !== undefined) refocus.push({node, key: focusKey});
       mountedRows.set(row.id, {signature, node});
       return node;
     }
@@ -936,14 +1529,17 @@
     const banner = element('div', 'agent-row agent-older');
     const text = stats.droppedRows ? `${stats.droppedRows} earlier row${stats.droppedRows === 1 ? '' : 's'} left this view to stay under ${formatBytes(stats.budget)}.` : 'Earlier rows are in the local transcript.';
     banner.append(element('span', '', text), view.olderAvailable || stats.droppedRows
-      ? button('agent-text-button', 'Load earlier', loadOlder) : element('span'));
+      ? button('agent-button agent-button-small', 'Load earlier', loadOlder) : element('span'));
     return banner;
   }
 
   async function loadOlder() {
     const response = await call('transcript', {before: view.olderBefore ?? undefined}).catch(() => null);
     if (!response) return;
+    const empty = !transcript.rows().length;
     ingestRows(response.rows ?? []);
+    // After a new conversation the model has none of these rows; say so as turning on does.
+    if (empty && response.rows?.length) transcript.add({id: rowId('n'), role: 'notice', text: 'Earlier rows from this session. They are shown here and not resent to the model.'});
     view.olderBefore = response.before;
     view.olderAvailable = response.before !== null && response.before !== undefined;
     scheduleTranscript(true);
@@ -966,9 +1562,11 @@
 
   function render() {
     renderHead();
-    renderInfo();
+    renderMenu();
+    renderSheet();
     renderSurface();
     renderComposer();
+    renderPicker();
     if (frameTranscript) { frameTranscript = false; renderTranscript(); }
   }
 
@@ -979,11 +1577,12 @@
   });
   input.addEventListener('input', () => {
     input.style.height = 'auto';
-    input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
+    input.style.height = `${Math.min(input.scrollHeight, 168)}px`;
     send.disabled = view.phase === 'off' || (!view.running && !input.value.trim());
   });
   input.addEventListener('keydown', event => {
-    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); onSend(); }
+    // Return sends; while a turn runs it does nothing, so a stray Return never stops it.
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (!view.running) onSend(); }
   });
 
   function selectionContext() {
@@ -1117,23 +1716,26 @@
     handleRuntimeEvent(event);
   }
 
-  function chooseProvider(id) {
+  // The provider and payment turning on would use. A CLI is asked whether it
+  // is signed in only when its subscription is chosen.
+  function setChoice(id, mode) {
     if (view.phase !== 'off') return;
-    view.provider = id;
-    try { localStorage.setItem('origin-trace.agent.provider', id); } catch { /* Optional. */ }
+    if (view.provider !== id) {
+      view.provider = id;
+      view.setupNotice = '';
+      try { localStorage.setItem('origin-trace.agent.provider', id); } catch { /* Optional. */ }
+    }
+    if (mode && providerInfo(id)?.supportsKey !== false && view.auth[id] !== mode) {
+      view.auth[id] = mode;
+      view.setupNotice = '';
+      try { localStorage.setItem('origin-trace.agent.auth', JSON.stringify(view.auth)); } catch { /* Optional. */ }
+    }
     if (authFor(id) === 'subscription' && loopFor(id) === 'cli' && subscriptionOf(id).signedIn === undefined) checkSubscription(id);
     if (credential(id).ready) refreshModels();
     render();
   }
-
-  function chooseAuth(mode) {
-    if (view.phase !== 'off' || providerInfo()?.supportsKey === false) return;
-    view.auth[view.provider] = mode;
-    try { localStorage.setItem('origin-trace.agent.auth', JSON.stringify(view.auth)); } catch { /* Optional. */ }
-    if (mode === 'subscription' && loopFor() === 'cli' && subscriptionOf(view.provider).signedIn === undefined) checkSubscription();
-    if (credential().ready) refreshModels();
-    render();
-  }
+  const chooseProvider = id => setChoice(id);
+  const chooseAuth = mode => setChoice(view.provider, mode);
 
   const accountActions = {
     signIn: async () => {
@@ -1170,7 +1772,7 @@
       await refreshStatus();
       await refreshModels();
     } catch (error) { appendNotice(bridgeFailure(error), 'error'); }
-    keyButton.focus();
+    focusDefault();
   }
 
   async function removeKey() {
@@ -1179,43 +1781,44 @@
     catch (error) { appendNotice(bridgeFailure(error), 'error'); }
   }
 
-  switchInput.addEventListener('change', async () => {
-    if (switchInput.checked) {
-      switchInput.checked = false;
-      if (view.phase !== 'off' || view.turning) return;
-      if (!view.status?.available) return;
-      const state = credential();
-      if (!state.ready) { appendNotice(state.text || 'This provider is not ready yet.', 'error'); return; }
-      view.consenting = true;
-      render();
-      document.getElementById('agent-consent-accept')?.focus();
+  // Turning on always passes the disclosure for the selected provider and payment.
+  function requestConsent() {
+    if (view.phase !== 'off' || view.turning || !view.status?.available) return;
+    const state = credential();
+    if (!state.ready) { view.setupNotice = {text: state.text || 'This provider is not ready yet.', kind: 'error'}; render(); return; }
+    view.setupNotice = '';
+    view.consenting = true;
+    render();
+    document.getElementById('agent-consent-accept')?.focus();
+  }
+
+  // Enables native for one session and builds the loop that drives it.
+  async function startAgent({provider, auth, model, effects, key}) {
+    view.sessionKey = key;
+    const result = await call('enable', {provider, auth, model, effects, sessionKey: key});
+    if ((result.engine?.loop ?? loopFor(provider, auth)) === 'cli') {
+      runtime = createCliRuntime();
     } else {
-      await turnOff();
+      let api;
+      try { api = await loadRuntime(provider); }
+      catch (error) { view.status = await call('disable'); syncEngine(view.status.engine); throw error; }
+      runtime = api.createAgentRuntime({
+        bridge: {call, onFetchEvent: listener => { fetchListener = listener; }},
+        provider, model: result.engine?.model ?? model, tools: result.tools ?? [], emit: handleRuntimeEvent,
+      });
     }
-  });
+    view.status = result;
+    syncEngine(result.engine);
+  }
 
   async function confirmConsent() {
     view.consenting = false;
     view.turning = true;
+    view.setupNotice = '';
     render();
     try {
       const key = await sessionKey();
-      view.sessionKey = key;
-      const auth = authFor();
-      const result = await call('enable', {provider: view.provider, auth, model: view.model[modelKey()] ?? '', effects: view.effects, sessionKey: key});
-      if ((result.engine?.loop ?? loopFor()) === 'cli') {
-        runtime = createCliRuntime();
-      } else {
-        let api;
-        try { api = await loadRuntime(view.provider); }
-        catch (error) { view.status = await call('disable'); syncEngine(view.status.engine); throw error; }
-        runtime = api.createAgentRuntime({
-          bridge: {call, onFetchEvent: listener => { fetchListener = listener; }},
-          provider: view.provider, model: result.engine?.model ?? view.model[modelKey()], tools: result.tools ?? [], emit: handleRuntimeEvent,
-        });
-      }
-      view.status = result;
-      syncEngine(result.engine);
+      await startAgent({provider: view.provider, auth: authFor(), model: view.model[modelKey()] ?? '', effects: view.effects, key});
       const page = await call('transcript', {});
       view.olderBefore = page.before ?? null;
       view.olderAvailable = view.olderBefore !== null;
@@ -1232,7 +1835,62 @@
       view.turning = false;
       scheduleTranscript(true);
       render();
+      focusDefault();
     }
+  }
+
+  // A new conversation is the same session, provider, model and permission
+  // the researcher already agreed to, started again with an empty history.
+  // Earlier rows stay in the local transcript unless it is cleared.
+  async function restartConversation({clear = false} = {}) {
+    if (view.phase === 'off' || view.running || view.turning) return;
+    const engine = view.status?.engine ?? {};
+    const choice = {provider: engine.provider ?? view.provider, auth: engine.auth ?? authFor(), model: engine.model ?? '', effects: Boolean(engine.effects)};
+    const had = transcript.rows().length > 0 || view.olderAvailable;
+    view.turning = true;
+    render();
+    try {
+      const key = await sessionKey();
+      if (key !== view.sessionKey) {
+        // Consent was for that session; a different one asks again.
+        view.turning = false;
+        await turnOff();
+        appendNotice('The capture session changed. Turn the agent on again for this one.');
+        return;
+      }
+      if (clear) await call('clearTranscript');
+      runtime?.dispose();
+      runtime = null;
+      fetchListener = null;
+      await startAgent({...choice, key});
+      transcript.clear();
+      heights.clear();
+      citeChecks.clear();
+      lastWindow = '';
+      view.pins = [];
+      view.usage = null;
+      view.olderBefore = null;
+      view.olderAvailable = !clear && had;
+      await call('panel', {visible: true});
+    } catch (error) {
+      appendNotice(bridgeFailure(error), 'error');
+    } finally {
+      view.turning = false;
+      scheduleTranscript(true);
+      render();
+    }
+  }
+
+  // Choosing another provider, payment or model while on is the same as
+  // switching off by hand, choosing, and turning on again behind the disclosure.
+  async function switchTo(id, mode, model) {
+    if (view.running || view.turning) return;
+    closePicker(false);
+    await turnOff();
+    setChoice(id, mode);
+    if (model) view.model[modelKey(id)] = model;
+    if (credential().ready) requestConsent();
+    focusDefault();
   }
 
   async function turnOff() {
@@ -1244,12 +1902,33 @@
     catch (error) { appendNotice(bridgeFailure(error), 'error'); }
     view.consenting = false;
     view.pins = [];
+    view.olderAvailable = false;
     transcript.clear();
     heights.clear();
     citeChecks.clear();
     lastWindow = '';
+    closeMenu(false);
+    closePicker(false);
+    closeSheet(false);
     render();
     scheduleTranscript(true);
+  }
+
+  // Where focus goes when a state appears: the composer when on, otherwise the
+  // next decision in the centered state.
+  let autoFocused = null;
+  function focusDefault() {
+    if (!view.open) return;
+    const turnOn = document.getElementById('agent-turn-on');
+    const target = !composer.hidden && !input.disabled ? input
+      : document.getElementById('agent-consent-accept')
+      ?? (turnOn && !turnOn.disabled ? turnOn : null)
+      ?? document.getElementById('agent-account-action')
+      ?? surface.querySelector('[data-provider][aria-pressed="true"]')
+      ?? surface.querySelector('button')
+      ?? close;
+    target.focus();
+    autoFocused = target;
   }
 
   async function onSend() {
@@ -1310,6 +1989,7 @@
     }
     if (event.type === 'approval') {
       transcript.add({id: `approval-${event.callId}`, role: 'approval', callId: event.callId, name: event.name, arguments: event.arguments, state: 'pending'});
+      approvalFocus = `approval-${event.callId}`;
       view.follow = true;
       scheduleTranscript(true);
       return;
@@ -1366,8 +2046,11 @@
       if (view.native) { call('panel', {visible: true}).catch(() => {}); refreshStatus(); }
       frameTranscript = true;
       render();
-      (input.disabled ? switchInput : input).focus();
+      if (!composer.hidden && !input.disabled) input.focus(); else if (view.status) focusDefault(); else surface.focus();
     } else {
+      closeMenu(false);
+      closePicker(false);
+      closeSheet(false);
       editorWidthWatch.disconnect();
       otherDock.disconnect();
       requestAnimationFrame(recomputeEditorRows);

@@ -2357,11 +2357,34 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let consent = try await ui.value("__rebUiProbe.text('#agent-surface')") as? String ?? ""
       XCTAssert(consent.contains("tool result"), "the disclosure names tool results: \(consent)")
       XCTAssert(consent.contains("URLs, hosts"), "the disclosure says results can include URLs and hosts: \(consent)")
+      // Four levels, lowest first, with Read only chosen and no warning.
+      let levels = try await ui.value("[...document.querySelectorAll('input[name=\"agent-permission\"]')].map(radio => radio.value + (radio.checked ? '*' : '')).join(',')") as? String
+      XCTAssertEqual(levels, "read-only*,ask,auto,full", "four levels with Read only chosen")
+      let noWarning = try await ui.value("__rebUiProbe.count('#agent-permission-warning')") as? Int
+      XCTAssertEqual(noWarning, 0, "Read only needs no warning")
       try await agentLayoutIsClean(ui, "consent")
       try await ui.screenshot("agent-consent-\(size.name)")
+      // Auto-approve warns; Full access lists what more leaves the Mac and
+      // offers the separate sensitive capture box.
+      try await ui.click("#agent-level-auto")
+      try await ui.waitUntil("__rebUiProbe.count('#agent-permission-warning') === 1 && __rebUiProbe.count('#agent-sensitive') === 0", "the Auto-approve warning did not show")
+      try await agentLayoutIsClean(ui, "consent auto")
+      try await ui.screenshot("agent-consent-auto-\(size.name)")
+      try await ui.click("#agent-level-full")
+      try await ui.waitUntil("__rebUiProbe.count('#agent-sensitive') === 1", "the Full access warning did not show")
+      let fullWarning = try await ui.value("__rebUiProbe.text('#agent-permission-warning')") as? String ?? ""
+      for item in ["JavaScript and other source text", "Request and response bodies", "Also allow sensitive capture options"] {
+        XCTAssert(fullWarning.contains(item), "Full access names \(item): \(fullWarning)")
+      }
+      try await agentLayoutIsClean(ui, "consent full")
+      try await ui.screenshot("agent-consent-full-\(size.name)")
+      try await ui.click("#agent-level-read-only")
+      try await ui.waitUntil("__rebUiProbe.count('#agent-permission-warning') === 0", "Read only did not take the warning away")
       try await ui.click("#agent-consent-accept")
       // Earlier rows from this session replace the empty state after a window change.
       try await ui.waitUntil("\(on) && __rebUiProbe.count('#agent-consent-accept') === 0", timeout: 20, "the agent did not turn on")
+      let badge = try await ui.value("!document.getElementById('agent-permission').hidden && __rebUiProbe.text('#agent-permission')") as? String
+      XCTAssertEqual(badge, "Read only", "the header names the running level")
       try await ui.settle()
       _ = try memorySample(ui, "on-idle-\(size.name)")
       try await ui.screenshot("agent-empty-\(size.name)")
@@ -2477,6 +2500,45 @@ final class OriginTraceRenderedUITests: XCTestCase {
       throw error
     }
     try await restoreDarkTheme(ui)
+    // Full access: native asks in a sheet, the header says Full access, and
+    // More lowers it at once without turning the agent off.
+    try await ui.reload()
+    try await ui.click("#agent-toggle")
+    try await ui.waitUntil("__rebUiProbe.count('#agent-turn-on') === 1 && !document.getElementById('agent-turn-on').disabled", "the setup state did not show")
+    try await ui.click("#agent-turn-on")
+    try await ui.waitUntil("__rebUiProbe.count('#agent-consent-accept') === 1", "the consent step did not show")
+    try await ui.click("#agent-level-full")
+    try await ui.waitUntil("__rebUiProbe.count('#agent-sensitive') === 1", "the Full access warning did not show")
+    try await ui.click("#agent-consent-accept")
+    do {
+      try await waitFor("the Full access sheet") { ui.window.attachedSheet.flatMap { button($0, "Turn On Full Access") } != nil }
+      let sheet = try XCTUnwrap(ui.window.attachedSheet)
+      let words = texts(sheet).joined(separator: " ")
+      XCTAssert(words.contains("Turn on the agent with Full access?") && words.contains("request and response bodies")
+        && words.contains("stay off"), "the native sheet says what Full access sends: \(words)")
+      try await Task.sleep(nanoseconds: 1_500_000_000)
+      try ui.screenshot(window: sheet, "agent-full-access-confirm")
+      try XCTUnwrap(button(sheet, "Turn On Full Access")).performClick(nil)
+    } catch {
+      if let sheet = ui.window.attachedSheet { button(sheet, "Cancel")?.performClick(nil) }
+      throw error
+    }
+    try await ui.waitUntil("\(on) && __rebUiProbe.text('#agent-permission') === 'Full access'", timeout: 20, "Full access did not turn on")
+    let fullTools = try await ui.value("webkit.messageHandlers.rebAgent.postMessage({op: 'status'}).then(status => [status.engine.permission, status.tools.some(tool => tool.name === 'get_artifact_text')].join(','))") as? String
+    XCTAssertEqual(fullTools, "full,true", "native runs Full access with the content reads")
+    try await agentLayoutIsClean(ui, "full access")
+    try await ui.screenshot("agent-badge-full")
+    try await ui.click("#agent-more")
+    try await ui.waitUntil("!document.getElementById('agent-menu').hidden && !document.getElementById('agent-lower-read-only').hidden", "the lower choices did not show")
+    try await agentLayoutIsClean(ui, "lower menu")
+    try await ui.screenshot("agent-menu-lower")
+    try await ui.click("#agent-lower-read-only")
+    try await ui.waitUntil("__rebUiProbe.text('#agent-permission') === 'Read only' && __rebUiProbe.text('#agent-log').includes('Permission lowered to Read only')", timeout: 15, "lowering did not apply")
+    let lowered = try await ui.value("webkit.messageHandlers.rebAgent.postMessage({op: 'status'}).then(status => [status.engine.phase, status.engine.permission, status.tools.some(tool => tool.name === 'get_artifact_text')].join(','))") as? String
+    XCTAssertEqual(lowered, "ready,read-only,false", "native lowered the level and kept the agent on")
+    try await ui.screenshot("agent-badge-lowered")
+    try await agentTurnOff(ui)
+    try await ui.click("#agent-close")
     // A Claude subscription turn through the real bridge, the stand-in claude
     // CLI and the packaged tool server, then a full stop of the CLI.
     try await ui.reload()

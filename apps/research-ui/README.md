@@ -328,8 +328,7 @@ chip's tooltip.
   Return does nothing. The empty state offers suggestions that fill the
   composer without sending.
 - **New conversation** enables the same provider, model, permission level and
-  session again with an empty history, without asking again for a level native
-  already confirmed. Earlier rows stay in the local
+  session again with an empty history. Earlier rows stay in the local
   transcript (**Show earlier rows**) unless **Clear transcript** deleted them.
 - A tool call is one collapsed line with its state, arguments and result size.
   Click it or press Return or Space to see the arguments and the full result
@@ -358,15 +357,18 @@ is never offered: Full access reads bytes as text pages instead.
 
 - The default is Read only. The page remembers the last choice across launches
   only up to Ask for actions.
-- Choosing Auto-approve or Full access shows a plain-language warning in
-  consent. Full access lists exactly what more leaves the Mac and offers a
-  separate **Also allow sensitive capture options** box, off by default and
-  never remembered, without which the agent's own sessions cannot name
-  `request_content`, `response_media`, `canvas_images` or
-  `js_invocation_digests`.
-- Native asks once more in a sheet before Auto-approve or Full access turns on
-  (`AgentBridge.confirmPermission`), so a page bug cannot raise the level.
-  Cancel there turns nothing on.
+- Consent is the only confirmation. It lists the levels with the chosen one's
+  line of text, then one box with what leaves the Mac. For Auto-approve and
+  Full access that box is the plain-language warning; for Full access it lists
+  exactly what more leaves the Mac and offers a separate **Also allow
+  sensitive capture options** box, off by default and never remembered,
+  without which the agent's own sessions cannot name `request_content`,
+  `response_media`, `canvas_images` or `js_invocation_digests`. The primary
+  button names the level (**Turn on Full access**). At the normal window size
+  the box and the button are in view together; at a short window, choosing a
+  level scrolls them in.
+- Native accepts only a known level, and the sensitive choice only with Full
+  access (`AgentPermission.requested`), before it touches the running agent.
 - **Lower to** applies at once and keeps the conversation: native filters the
   tools, the next tool call is decided at the lower level, the tool server
   restarts at it, and the graph's next model call gets the lower prompt. A CLI
@@ -517,9 +519,9 @@ The native app keeps what the page must not hold:
   chunks on SSE event boundaries, so token streaming works. An error body is
   bounded and scrubbed of anything shaped like a key. This is a transport for
   the two chat models, not a general proxy.
-- **The permission level**, set only by enabling (behind the native sheet for
-  Auto-approve and Full access) and by lowering. `AgentToolGate` decides every
-  tool call by it for the LangGraph loop and both CLI drivers.
+- **The permission level**, set only by enabling from consent and by
+  lowering. `AgentToolGate` decides every tool call by it for the LangGraph
+  loop and both CLI drivers.
 - **The tool server.** One `reb-api mcp --permission <level>` child (the
   packaged `OriginTraceAPI`) with `--base-url` set to this workspace's loopback
   API, plus `--allow-sensitive-capture` only when that box was ticked. Below
@@ -543,7 +545,7 @@ full results are visible in the transcript. Below Full access the level
 includes `--omit-content`, which makes every response structural: rows and
 identifiers stay, while source, bytecode, disassembly, bodies, and long
 strings do not. Those leave only when pinned. At Full access they leave
-whenever the agent reads them, as the disclosure and the native sheet say. The
+whenever the agent reads them, as the consent box says. The
 ChatGPT path stores nothing at OpenAI (`store: false`, with encrypted reasoning
 replayed from local history). Pins are bounded to 128 KiB each and 512 KiB per
 turn, and a cut pin says so.

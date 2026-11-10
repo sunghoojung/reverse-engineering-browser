@@ -420,6 +420,7 @@ final class AgentCLITurn {
   var outputTokens = 0
   var tools: [String: (name: String, arguments: String, readOnly: Bool, running: Bool)] = [:]
   var approvals: [String: (name: String, arguments: String, respond: (Bool) -> Void)] = [:]
+  var denied = 0
   init(id: String) { self.id = id }
 }
 
@@ -701,6 +702,7 @@ class AgentCLIDriver {
   func decide(callId: String, allow: Bool) -> Bool {
     guard let turn, let approval = turn.approvals.removeValue(forKey: callId) else { return false }
     approval.respond(allow)
+    if !allow { turn.denied += 1 }
     if allow {
       toolStarted(callId, name: approval.name, arguments: approval.arguments, readOnly: false)
     } else {
@@ -902,6 +904,11 @@ final class AgentGrokDriver: AgentCLIDriver {
   private var pending: [Int: (Result<[String: Any], AgentFailure>) -> Void] = [:]
   private var sessionId: String?
   private var promptId: Int?
+  // session/new answers before the tool server has connected; a first prompt
+  // sent then finds no reb-api tools.
+  private var toolsReady: Bool?
+  private var toolsWaiter: CheckedContinuation<Void, Never>?
+  private var toolsWait = 0
 
   override func rebToolName(_ cliName: String) -> String? {
     cliName.hasPrefix("reb__") && cliName.count > 5 ? String(cliName.dropFirst(5)) : nil
@@ -1034,6 +1041,23 @@ final class AgentGrokDriver: AgentCLIDriver {
       throw AgentFailure(message: "The Grok CLI did not open a session.")
     }
     sessionId = id
+    if toolsReady == nil {
+      toolsWait += 1
+      let wait = toolsWait
+      await withCheckedContinuation { continuation in
+        toolsWaiter = continuation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+          MainActor.assumeIsolated { if self?.toolsWait == wait { self?.toolsSettled(nil) } }
+        }
+      }
+    }
+    guard toolsReady != false else { throw AgentFailure(message: "The reb-api tool server did not start inside the Grok CLI.") }
+  }
+
+  private func toolsSettled(_ ready: Bool?) {
+    if let ready, toolsReady == nil { toolsReady = ready }
+    toolsWaiter?.resume()
+    toolsWaiter = nil
   }
 
   override func deliver(_ text: String) throws {
@@ -1074,6 +1098,8 @@ final class AgentGrokDriver: AgentCLIDriver {
     let waiting = pending
     pending.removeAll()
     sessionId = nil
+    toolsReady = nil
+    toolsSettled(nil)
     // The turn's own ending is decided by whoever stopped the CLI.
     for (id, callback) in waiting where id != promptId {
       callback(.failure(AgentFailure(message: "The Grok CLI stopped.")))
@@ -1130,6 +1156,11 @@ final class AgentGrokDriver: AgentCLIDriver {
         let message = "Grok loaded MCP servers from your settings (\(names.prefix(4).joined(separator: ", "))), so it was stopped."
         if turn != nil { abort(message) } else { terminate(); error(message) }
       }
+    case "x.ai/mcp_initialized":
+      toolsSettled(true)
+    case "x.ai/mcp/server_status" where params["name"] as? String == "reb":
+      if params["status"] as? String == "ready" { toolsSettled(true) }
+      else if params["status"] as? String == "failed" { toolsSettled(false) }
     case "x.ai/session_notification":
       let update = params["update"] as? [String: Any] ?? [:]
       if update["sessionUpdate"] as? String == "turn_completed", let usage = update["usage"] as? [String: Any], let turn {
@@ -1191,6 +1222,8 @@ final class AgentGrokDriver: AgentCLIDriver {
       endTurn(error: "The Grok CLI ended the turn with an error: \(failure.message.prefix(600))")
     case .success(let result):
       switch result["stopReason"] as? String {
+      // Grok ends the whole turn when a call is rejected; that is not a Stop.
+      case "cancelled" where (turn?.denied ?? 0) > 0: endTurn(notice: "Grok ended this turn after the denied call.")
       case "cancelled": endTurn(stopped: true)
       case "refusal": endTurn(notice: "The provider declined this request.")
       case "max_tokens", "max_turn_requests": endTurn(notice: "The Grok CLI stopped this turn at its own limit.")

@@ -238,6 +238,7 @@ enum AgentCLIStandIn {
         emit(["jsonrpc": "2.0", "method": "_x.ai/mcp/servers_updated",
           "params": ["mcpServers": leak ? [["name": "user-server"]] : [] as [[String: Any]]]])
         emit(["jsonrpc": "2.0", "id": id, "result": ["sessionId": "session-1"]])
+        emit(["jsonrpc": "2.0", "method": "_x.ai/mcp_initialized", "params": ["sessionId": "session-1", "mcpToolCount": 2]])
       case "session/prompt":
         let text = (params["prompt"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined()
         let scenario = ["builtin", "foreign-permission", "action", "hold"].first { text.contains("SCENARIO:\($0)") } ?? "read"

@@ -1803,7 +1803,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await show(ui, "sources")
       try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"\(expected.minifiedArtifactId)\"]")
       let settled = "!/Formatting|coloring/.test(document.querySelector('#source-pretty').innerText + document.querySelector('#source-language').innerText)"
-      try await ui.waitUntil("document.querySelector('#source-pretty').innerText.includes('Pretty-printed') && \(settled)", timeout: 30,
+      // A narrow status bar shows only "{ }", so read the toggle's pressed state.
+      try await ui.waitUntil("document.querySelector('#source-pretty').getAttribute('aria-pressed') === 'true' && \(settled)", timeout: 30,
         "\(size.name): the one-line source map did not open pretty-printed")
       let first = try await ui.json(
         """
@@ -2235,7 +2236,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     for size in windowSizes {
       let ui = try await prepare(size)
       try await show(ui, "sources")
-      try await ui.click("#source-tree [role=treeitem]", containing: "artifact 340")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"340\"]")
       try await ui.waitUntil("!document.querySelector('#source-graph').hidden", "Graph is offered for a captured WASM artifact")
       try await ui.click("#source-graph")
       try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '').includes('blocks')", timeout: 30, "the block graph did not finish laying out")

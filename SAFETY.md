@@ -312,9 +312,13 @@ it.
   access returns whatever that page can read, such as `document.cookie`. The
   agent's own sessions can name request content, response media, canvas images
   or invocation value digests only when the researcher also ticks a separate
-  sensitive-capture box, off by default and never remembered. The native app
-  confirms Auto-approve actions and Full access in its own sheet, decides every
-  tool call by the running level for every provider and CLI, remembers no level
+  sensitive-capture box, off by default and never remembered. Consent in the
+  agent dock turns a level on: it shows what leaves the machine for that
+  level, with the warning for Auto-approve actions and Full access, beside a
+  button that names the level, and there is no other confirmation. The native
+  app accepts only a known level, and the sensitive-capture choice only with
+  Full access, then holds the level and enforces it: it decides every tool
+  call by the running level for every provider and CLI, remembers no level
   above Ask for actions across launches, and lowers the level at once from the
   dock menu; raising it goes back through consent. No level authorizes a
   target, widens session scope or exempts the agent from this policy.
@@ -355,7 +359,7 @@ of the data-handling policy:
 | Agent-started sessions get request content, document-start permission, invocation sites and digests only when the start request names them, never inherited | [`session_launch.rs`](apps/origin-trace-backend/src/session_launch.rs) |
 | JavaScript invocation value digests opt-in | `scripts/run-live-session.sh`, the overlay's `native_probe_session.cc`, and the renderer sink, which refuses a digest without it |
 | App-started digest default and agent-session exclusion | `LiveSessionCoordinator.captureDefaults` (Content mode with saved sites only, explicit value wins) and `session_launch.rs` (agent sessions remove an inherited site file and digest switch, and arm only named sites from a private copy) |
-| In-app agent permission level and per-call decision for the LangGraph and CLI loops | `AgentToolGate` in [`AgentCore.swift`](apps/research-ui/macos/AgentCore.swift), the native confirmation in [`AgentBridge.swift`](apps/research-ui/macos/AgentBridge.swift) |
+| In-app agent permission level and per-call decision for the LangGraph and CLI loops | `AgentPermission.requested` (the level and sensitive choice consent sends) and `AgentToolGate` in [`AgentCore.swift`](apps/research-ui/macos/AgentCore.swift), held by `enable` and changed only by `lowerPermission` in [`AgentBridge.swift`](apps/research-ui/macos/AgentBridge.swift) |
 | Tool server content, effect and sensitive-capture gates (`--permission`, `--allow-content`, `--allow-sensitive-capture`) | [`mcp.rs`](apps/origin-trace-backend/src/bin/reb_api/mcp.rs) |
 | Header blocks and cookie lists never returned by the text reads or search, at any level | `WITHHELD_KINDS` in [`artifact_text.rs`](apps/origin-trace-backend/src/artifact_text.rs) |
 | Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |

@@ -7193,9 +7193,18 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       // A displayed location, with its original one when the view is a layout or derived text.
+      // A layout prints every token as captured, so a caret after its line's last
+      // visible character, or on an empty line, sits just after the previous one.
       function sourcePositionText(editor, line, column) {
-        const start = sourceDocumentOffset(editor.index, line);
-        const original = start === null ? null : editor.mappingContext?.position(start + column, start + (sourceDocumentLine(editor.index, line)?.length ?? 0));
+        const start = sourceDocumentOffset(editor.index, line), map = editor.mappingContext?.position;
+        let original = start === null || !map ? null : map(start + column, start + (sourceDocumentLine(editor.index, line)?.length ?? 0));
+        if (!original && start !== null && map && editor.view.formatted?.map && !editor.view.derived) {
+          const text = editor.index.text;
+          let at = Math.min(start + column, text.length) - 1;
+          while (at >= 0 && sourceFormatSpace(text.charCodeAt(at))) at--;
+          const previous = at < 0 ? null : map(at, at + 1);
+          if (previous) original = {line: previous.line, column: previous.column + 1};
+        }
         return `Line ${line + 1}, Column ${column + 1}${original ? ` (original ${original.line + 1}:${original.column + 1})` : ''}`;
       }
 

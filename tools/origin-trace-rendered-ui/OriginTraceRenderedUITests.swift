@@ -2299,9 +2299,19 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   @MainActor
+  private func agentTurnOff(_ ui: Harness) async throws {
+    try await ui.click("#agent-more")
+    try await ui.waitUntil("!document.getElementById('agent-menu').hidden", "the agent menu did not open")
+    try await ui.click("#agent-turn-off")
+  }
+
+  @MainActor
   private func agentLayoutIsClean(_ ui: Harness, _ state: String) async throws {
     let issues = try await ui.value("__rebUiProbe.clippedText('#agent-dock')") as? [String] ?? ["no probe result"]
     XCTAssertEqual(issues, [], "\(state): clipped text in the agent dock")
+    // No control in the dock is cut off, covered or overlapping another.
+    let layout = try await ui.json("__rebUiProbe.layoutIssues('#agent-dock')")
+    XCTAssertEqual(layout["issues"] as? [String] ?? ["no probe result"], [], "\(state): agent dock layout")
     let box = try await ui.json("__rebUiProbe.box('#agent-dock')")
     let width = (box["width"] as? Double) ?? 0
     XCTAssert(width >= 280, "\(state): the dock is too narrow: \(box)")
@@ -2309,14 +2319,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
   // The dock's whole path through the packaged app: closed by default, explicit
   // consent, a turn through a local stand-in provider and the real tool server,
-  // inert model text, a verified citation that opens Sources, and a full stop.
+  // inert model text, collapsed tool results and the model picker by keyboard,
+  // a verified citation that opens Sources, and a full stop.
   // It runs first: later tests load pages the app did not load itself, and the
   // agent bridge, like client-project export, answers only the app's document.
   @MainActor
   func test0AgentPanel() async throws {
     let ui = try Harness()
     try await ui.waitForInitialLoad()
-    let on = "document.querySelector('#agent-switch').checked"
+    let on = "['ready', 'running', 'stopped'].includes(document.getElementById('agent-dock').dataset.state)"
     for size in windowSizes {
       try await ui.resize(width: size.width, height: size.height)
       try await ui.reload()
@@ -2331,7 +2342,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       // Grok is subscription only; without its CLI the account line says so.
       try await ui.click("[data-provider=\"grok\"]")
       try await ui.waitUntil("__rebUiProbe.text('#agent-account-text').includes('Install the Grok CLI')", "the Grok account line did not show")
-      let grokLine = try await ui.value("document.querySelector('[data-auth=\"key\"]').hidden") as? Bool
+      let grokLine = try await ui.value("document.querySelector('[data-auth=\"key\"]') === null") as? Bool
       XCTAssertEqual(grokLine, true, "Grok offers no API key path")
       // The whole instruction is readable: the line wraps instead of cutting.
       let grokTextFits = try await ui.value("(() => { const node = document.querySelector('#agent-account-text'); const box = node.getBoundingClientRect(); return node.scrollWidth <= node.clientWidth && box.right <= document.querySelector('#agent-account').getBoundingClientRect().right + 0.5 && getComputedStyle(node).textOverflow !== 'ellipsis'; })()") as? Bool
@@ -2341,7 +2352,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("[data-provider=\"claude\"]")
       try await ui.waitUntil("__rebUiProbe.text('#agent-account-text').length > 0 && document.querySelector('[data-provider=\"claude\"]').getAttribute('aria-pressed') === 'true'", "Claude was not selected again")
       // Consent before anything starts.
-      try await ui.click(".agent-switch")
+      try await ui.click("#agent-turn-on")
       try await ui.waitUntil("__rebUiProbe.count('#agent-consent-accept') === 1", "the consent step did not show")
       let consent = try await ui.value("__rebUiProbe.text('#agent-surface')") as? String ?? ""
       XCTAssert(consent.contains("tool result"), "the disclosure names tool results: \(consent)")
@@ -2370,22 +2381,44 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertEqual(inert["injectedElements"] as? Int, 0, "model output must not create elements: \(inert)")
       try await agentLayoutIsClean(ui, "conversation")
       try await ui.screenshot("agent-conversation-\(size.name)")
-      // Every result the provider received is open for inspection.
-      try await ui.click(".agent-tool summary")
-      try await ui.waitUntil("__rebUiProbe.count('.agent-tool-detail') === 1", "the tool result did not open")
+      // Every result the provider received is one key press away, collapsed
+      // to a single line until then.
+      let collapsed = try await ui.value("document.querySelector('.agent-tool-summary').getAttribute('aria-expanded') === 'false' && __rebUiProbe.exists('.agent-tool-detail') === 0") as? Bool
+      XCTAssertEqual(collapsed, true, "tool results start collapsed")
+      _ = try await ui.value("(document.querySelector('.agent-tool-summary').focus(), 1)")
+      try await ui.key(49, " ")
+      try await ui.waitUntil("__rebUiProbe.count('.agent-tool-detail') === 1 && document.activeElement === document.querySelector('.agent-tool-summary')", "Space did not open the tool result")
       // An open result is drawn once and stays mounted. A log rebuilt every
       // frame drops the next click in it, as the citation click below did.
       try await ui.settle()
       let steady = try await ui.value("(async () => { const row = document.querySelector('.agent-tool'); await new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); setTimeout(done, 500); }); return document.querySelector('.agent-tool') === row && __rebUiProbe.count('.agent-tool-detail') === 1; })()") as? Bool
       XCTAssertEqual(steady, true, "an open tool result must not be rebuilt each frame")
+      try await agentLayoutIsClean(ui, "tool result")
       try await ui.screenshot("agent-tool-result-\(size.name)")
-      try await ui.click(".agent-tool summary")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("__rebUiProbe.exists('.agent-tool-detail') === 0", "Return did not close the tool result")
+      // The model picker opens, moves and closes from the keyboard.
+      _ = try await ui.value("(document.getElementById('agent-model').focus(), 1)")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("!document.getElementById('agent-picker').hidden && document.getElementById('agent-picker').contains(document.activeElement)", "Return did not open the model picker")
+      let firstItem = try await ui.value("document.activeElement.dataset.focusKey") as? String
+      try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
+      let movedItem = try await ui.value("document.activeElement.dataset.focusKey") as? String
+      XCTAssertNotEqual(firstItem, movedItem, "Down moves through the picker")
+      let pickerClipped = try await ui.value("__rebUiProbe.clippedText('#agent-picker')") as? [String] ?? ["no probe result"]
+      XCTAssertEqual(pickerClipped, [], "the model picker fits at \(size.name)")
+      try await ui.screenshot("agent-picker-\(size.name)")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.getElementById('agent-picker').hidden && document.activeElement.id === 'agent-model'", "Escape did not close the picker back to its button")
       // A verified citation opens the existing row.
       try await ui.click(".agent-cite")
       try await ui.waitUntil("!document.getElementById('screen-sources').hidden", timeout: 10, "the citation did not open Sources")
-      // An action waits on an explicit decision.
+      // An action waits on an explicit decision, and the request takes focus
+      // when the researcher is in the dock.
+      try await ui.click("#agent-input")
       _ = try await ui.webView.callAsyncJavaScript(#"__rebAgentEvent({type:'approval',turnId:'t',callId:'rendered',name:'capture_action',arguments:'{"action":"pause"}'}); return true;"#, contentWorld: .page)
       try await ui.waitUntil("__rebUiProbe.count('[data-approve]') === 1", "the approval row did not show")
+      try await ui.waitUntil("document.activeElement?.classList.contains('agent-approval')", "the approval did not take focus")
       let approval = try await ui.value("__rebUiProbe.text('.agent-approval')") as? String ?? ""
       XCTAssert(approval.contains("Allow once") && !approval.contains("Always"), "only Allow once and Deny are offered: \(approval)")
       try await agentLayoutIsClean(ui, "approval")
@@ -2407,8 +2440,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       _ = try memorySample(ui, "long-conversation-\(size.name)")
       try await agentLayoutIsClean(ui, "long conversation")
       try await ui.screenshot("agent-long-\(size.name)")
-      // The switch is a full stop.
-      try await ui.click(".agent-switch")
+      // Turn off, in the header menu, is a full stop.
+      try await agentTurnOff(ui)
       try await ui.waitUntil("!\(on) && __rebUiProbe.text('#agent-surface').includes('The agent is off')", timeout: 15, "the agent did not turn off")
       let stopped = try await ui.value("webkit.messageHandlers.rebAgent.postMessage({op: 'status'}).then(status => status.engine.childRunning)") as? Bool
       XCTAssertEqual(stopped, false, "turning off stops the tool server")
@@ -2424,7 +2457,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
     do {
       try await ui.waitUntil("document.documentElement.dataset.theme === 'light'", "the light theme did not apply")
       try await ui.click("#agent-toggle")
-      try await ui.click(".agent-switch")
+      try await ui.waitUntil("__rebUiProbe.count('#agent-turn-on') === 1 && !document.getElementById('agent-turn-on').disabled", "the setup state did not show")
+      try await ui.screenshot("agent-off-light")
+      try await ui.click("#agent-turn-on")
       try await ui.waitUntil("__rebUiProbe.count('#agent-consent-accept') === 1", "the consent step did not show")
       try await ui.screenshot("agent-consent-light")
       try await ui.click("#agent-consent-accept")
@@ -2435,7 +2470,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil(settled("Again"), timeout: 20, "the light theme answer did not settle")
       try await agentLayoutIsClean(ui, "light")
       try await ui.screenshot("agent-conversation-light")
-      try await ui.click(".agent-switch")
+      try await agentTurnOff(ui)
       try await ui.click("#agent-close")
     } catch {
       try? await restoreDarkTheme(ui)
@@ -2452,7 +2487,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       "the Claude CLI did not report its sign-in")
     try await agentLayoutIsClean(ui, "claude subscription")
     try await ui.screenshot("agent-claude-subscription")
-    try await ui.click(".agent-switch")
+    try await ui.click("#agent-turn-on")
     try await ui.waitUntil("__rebUiProbe.count('#agent-consent-accept') === 1", "the subscription consent did not show")
     let disclosure = try await ui.value("__rebUiProbe.text('#agent-surface')") as? String ?? ""
     XCTAssert(disclosure.contains("Claude CLI installed and signed in on this Mac") && disclosure.contains("own local use"),
@@ -2465,12 +2500,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
     // "Looking at the session." and get_session_summary come only from the stand-in CLI.
     try await ui.waitUntil("__rebUiProbe.text('#agent-log').includes('Looking at the session.') " +
       "&& [...document.querySelectorAll('.agent-tool-summary')].some(row => row.textContent.includes('get_session_summary') && row.querySelector('.agent-tool-state-done')) " +
-      "&& document.getElementById('agent-send').textContent === 'Send'", timeout: 30, "the CLI turn did not finish")
+      "&& document.getElementById('agent-send').getAttribute('aria-label') === 'Send'", timeout: 30, "the CLI turn did not finish")
     let cliLog = try await ui.value("__rebUiProbe.text('#agent-log')") as? String ?? ""
     XCTAssert(cliLog.contains("get_session_summary"), "the CLI's tool call is visible: \(cliLog)")
     try await agentLayoutIsClean(ui, "claude subscription turn")
     try await ui.screenshot("agent-claude-cli-turn")
-    try await ui.click(".agent-switch")
+    try await agentTurnOff(ui)
     try await ui.waitUntil("!\(on)", timeout: 15, "the subscription agent did not turn off")
     let cliStopped = try await ui.value("webkit.messageHandlers.rebAgent.postMessage({op: 'status'}).then(status => status.engine.cliRunning)") as? Bool
     XCTAssertEqual(cliStopped, false, "turning off ends the CLI")

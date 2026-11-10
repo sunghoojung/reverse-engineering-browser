@@ -301,15 +301,43 @@ concurrency.
 ## In-app agent
 
 The **Agent** dock (the button at the titlebar's right edge, or ⌘⇧A) puts Claude, ChatGPT or Grok
-beside the evidence. It is closed by default, and the switch in its header is
-off by default. Turning it on is an explicit action for the current session,
-behind a disclosure, and stops completely when it is switched off.
+beside the evidence. It is closed by default, and the agent in it is off by
+default. Turning it on is an explicit action for the current session, behind a
+disclosure, and stops completely when it is turned off.
+
+The header is one row: **Agent**, a status chip with the running model and how
+it is paid for (for example *Claude Opus 5.5 · API key*, or *Off*), and icon
+buttons for **New conversation**, a menu and close. The menu holds **What
+leaves this Mac** (the disclosure and the account details), **Change provider
+or model**, **Clear transcript** (behind a confirmation) and **Turn off**; tool
+and token counts are in the menu and the chip's tooltip.
+
+- **Off**: a centered setup with one card per provider and its real readiness
+  (a stored key, a ChatGPT sign-in, or what the CLI reported), the card's own
+  **Add key**, **Sign in** or **Check again**, and **Turn on for this
+  session**. A CLI is asked about its sign-in only when its card is chosen.
+- **Consent**: what leaves the machine for the chosen provider and payment, and
+  the **Let the agent request actions** option, before anything starts.
+- **On**: the conversation, with the composer card at the bottom. Its model
+  button opens a picker grouped by provider; choosing another provider, payment
+  or model turns the agent off and asks again, as doing it by hand does. Return
+  sends and Shift+Return adds a line; during a turn Send becomes Stop and
+  Return does nothing. The empty state offers suggestions that fill the
+  composer without sending.
+- **New conversation** enables the same provider, model, permission and
+  session again with an empty history. Earlier rows stay in the local
+  transcript (**Show earlier rows**) unless **Clear transcript** deleted them.
+- A tool call is one collapsed line with its state, arguments and result size.
+  Click it or press Return or Space to see the arguments and the full result
+  sent to the provider in a bounded, scrollable block; the block is drawn only
+  while open. An action request is an amber card with **Deny** and **Allow
+  once**, focused when it appears while the researcher is in the dock.
 
 ### Keys and subscriptions
 
-The line under the provider picker chooses how each provider is paid for:
-**API key** (the researcher's own key in the Keychain) or **Subscription**
-(the researcher's own plan). Grok has only the subscription.
+The chosen provider card chooses how that provider is paid for: **API key**
+(the researcher's own key in the Keychain) or **Subscription** (the
+researcher's own plan). Grok has only the subscription.
 
 | Provider | Subscription path | Loop | Where the login lives |
 | --- | --- | --- | --- |
@@ -508,10 +536,14 @@ accepts only a loopback stand-in, for tests; it never redirects a real key.
   ChatGPT sign-in against a loopback issuer that checks PKCE, state and nonce,
   and covers renewal, refusal, a forged issuer and sign out.
 - `node tools/check-agent-panel.mjs` (`make native-only-check`) checks the dock's
-  states, safe rendering, citations and budgets in a DOM model, the
-  subscription states, the CLI rows and decisions, and that the CLIs get the
-  graph's system prompt.
-- `test0AgentPanel` drives the packaged app.
+  states, safe rendering, citations and budgets in a DOM model, collapsed tool
+  results, the menu, Info and picker, a new conversation, the subscription
+  states, the CLI rows and decisions, and that the CLIs get the graph's system
+  prompt.
+- `test0AgentPanel` drives the packaged app at both window sizes and in the
+  light theme: no clipped or overlapping control in the dock, tool results
+  opened and closed with Space and Return, the model picker with Return, Down
+  and Escape, and the approval taking focus.
 
 ## Native console
 

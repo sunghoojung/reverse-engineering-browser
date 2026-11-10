@@ -112,7 +112,7 @@ try {
     '--endpoint-file', endpointFile, '--store', stores.store, '--trace-store', stores.traceStore,
     '--signal-store', stores.signalStore, '--artifacts', stores.artifacts, '--api-collection', stores.apiCollection,
     '--local-analyst', stores.localAnalyst, '--decoder', join(host, 'Contents/MacOS/OriginTraceDecoder'),
-    // Sources and the app's start dialog share one saved site set here, as
+    // Sources and the app's start panel share one saved site set here, as
     // they share Application Support in a real app run.
     '--js-invocation-site-store', stores.invocationSites],
   {cwd: temporary, stdio: ['ignore', 'pipe', 'pipe']});
@@ -192,6 +192,7 @@ fetch("/getcaptcha");
   assert.equal(failure.status, 503);
   assert.match((await failure.json()).error, /analysis-worker-failed: spawn \(1 omitted artifacts\)/);
 
+  const missingBrave = join(temporary, 'no-brave', 'Brave Browser Development.app', 'Contents', 'MacOS', 'Brave Browser Development');
   const derived = join(root, 'build/rendered-ui-derived');
   log += await run('xcodebuild', ['build-for-testing', '-project', join(harness, 'OriginTraceRenderedUITests.xcodeproj'),
     '-scheme', 'OriginTraceRenderedUITests', '-destination', destination, '-derivedDataPath', derived],
@@ -215,6 +216,9 @@ fetch("/getcaptcha");
     EnvironmentVariables: {
       ...(maximumHeight === undefined ? {} : {REB_RENDERED_UI_MAX_HEIGHT: maximumHeight}),
       REB_DISABLE_AUTOMATIC_LIVE_SESSION: '1',
+      // An explicit Brave that does not exist: Start in the start panel fails
+      // at once and nothing launches, whatever Brave this machine has.
+      REB_BRAVE_BINARY: missingBrave,
       REB_JS_INVOCATION_SITE_STORE: stores.invocationSites,
       REB_AGENT_PROVIDER_BASE_URL: agentProviderURL,
       REB_AGENT_TRANSCRIPT_DIR: join(temporary, 'agent-transcripts'),
@@ -242,15 +246,40 @@ fetch("/getcaptcha");
   target.TestingEnvironmentVariables = {...target.TestingEnvironmentVariables,
     DYLD_INSERT_LIBRARIES: '__PLATFORMS__/MacOSX.platform/Developer/usr/lib/libXCTestBundleInject.dylib',
     XCInjectBundleInto: executable};
+  // The launch pass opens the app as a researcher does, which the harness
+  // page's --ui-url would prevent, so it runs alone in its own host launch.
+  const launchTest = 'testLaunchOpensStartPanel';
+  const launchDescription = JSON.parse(JSON.stringify(description));
   if (only) target.OnlyTestIdentifiers = [`OriginTraceRenderedUITests/${only}`];
+  else target.SkipTestIdentifiers = [`OriginTraceRenderedUITests/${launchTest}`];
   const hosted = join(products, 'hosted-origin-trace.xctestrun');
   await writeFile(hosted, '');
   execFileSync('plutil', ['-convert', 'xml1', '-o', hosted, '-'], {input: JSON.stringify(description)});
+  const launchTarget = launchDescription.OriginTraceRenderedUITests;
+  // No --ui-url and no explicit evidence-store argument, so the app takes its
+  // automatic live-session path; the stores come from the environment, as a
+  // researcher's overrides would, and the saved site set starts empty.
+  launchTarget.CommandLineArguments = ['--api-collection', stores.apiCollection, '--local-analyst', stores.localAnalyst];
+  launchTarget.EnvironmentVariables = {...launchTarget.EnvironmentVariables,
+    REB_DISABLE_AUTOMATIC_LIVE_SESSION: '0', REB_RENDERED_UI_LAUNCH: '1',
+    REB_EVENT_STORE: stores.store, REB_ORIGIN_TRACE_STORE: stores.traceStore, REB_REQUEST_SIGNAL_STORE: stores.signalStore,
+    REB_ARTIFACT_STORE: stores.artifacts, REB_JS_INVOCATION_SITE_STORE: join(temporary, 'launch-sites', 'js-invocation-sites-v1.json')};
+  launchTarget.OnlyTestIdentifiers = [`OriginTraceRenderedUITests/${launchTest}`];
+  const hostedLaunch = join(products, 'hosted-origin-trace-launch.xctestrun');
+  await writeFile(hostedLaunch, '');
+  execFileSync('plutil', ['-convert', 'xml1', '-o', hostedLaunch, '-'], {input: JSON.stringify(launchDescription)});
 
-  const result = join(report, 'rendered-ui.xcresult');
+  const passes = [
+    ...(only === launchTest ? [] : [{xctestrun: hosted, result: join(report, 'rendered-ui.xcresult'), label: 'Rendered UI acceptance'}]),
+    ...(!only || only === launchTest ? [{xctestrun: hostedLaunch, result: join(report, 'rendered-ui-launch.xcresult'), label: 'Rendered UI launch'}] : []),
+  ];
   try {
-    log += await run('xcodebuild', ['test-without-building', '-xctestrun', hosted, '-destination', destination,
-      '-resultBundlePath', result, '-parallel-testing-enabled', 'NO'], {timeout: 900000, label: 'Rendered UI acceptance'});
+    for (const pass of passes) {
+      // Each pass starts its own host; never let one still running take the reopen.
+      try { execFileSync('pkill', ['-f', join(temporary, 'Origin Trace.app/Contents/MacOS/')]); } catch {}
+      log += await run('xcodebuild', ['test-without-building', '-xctestrun', pass.xctestrun, '-destination', destination,
+        '-resultBundlePath', pass.result, '-parallel-testing-enabled', 'NO'], {timeout: 900000, label: pass.label});
+    }
   } catch (error) {
     log += error.output ?? '';
     throw error;

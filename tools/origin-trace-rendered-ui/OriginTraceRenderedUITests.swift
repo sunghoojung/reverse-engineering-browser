@@ -55,6 +55,17 @@ final class Harness {
     try await waitUntil("document.hasFocus()", timeout: 10, "WebKit did not receive native window focus")
   }
 
+  // Opens this same running app again through Launch Services, as a Dock
+  // click or a second open does, which delivers the application reopen event.
+  func reopen() async throws {
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.activates = true
+    configuration.addsToRecentItems = false
+    configuration.createsNewApplicationInstance = false
+    _ = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration)
+    try await settle()
+  }
+
   // The app starts loading --ui-url before the injected bundle runs.
   func waitForInitialLoad() async throws {
     let deadline = Date().addingTimeInterval(30)
@@ -1852,11 +1863,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
-  // The start dialog lists what the capture about to start will track, says
+  // The start panel lists what the capture about to start will track, says
   // digests follow the mode, and removes a site. It is opened from the New
   // Live Session menu item, as a researcher opens it, and left offline.
   @MainActor
-  func test19StartDialogListsSavedFunctions() async throws {
+  func test19StartPanelListsSavedFunctions() async throws {
     let ui = try await prepare(windowSizes[0])
     let harnessURL = try XCTUnwrap(ui.webView.url)
     let expected = try Expectations.load()
@@ -1872,50 +1883,35 @@ final class OriginTraceRenderedUITests: XCTestCase {
         .then(response => response.status)
       """)
     let seeded = try await savedSiteCount(ui)
-    XCTAssertEqual(seeded, 2, "two sites are saved before the dialog opens")
-    let item = NSApp.mainMenu?.items.compactMap(\.submenu).flatMap(\.items).first { $0.action == Selector(("newLiveSession:")) }
-    let menu = try XCTUnwrap(item?.menu, "the New Live Session menu item")
-    let index = menu.index(of: try XCTUnwrap(item))
-    // The menu action runs its modal from the run loop, outside this task.
-    RunLoop.main.add(Timer(timeInterval: 0, repeats: false) { _ in menu.performActionForItem(at: index) }, forMode: .default)
-    let backstop = Timer(timeInterval: 60, repeats: false) { _ in if NSApp.modalWindow != nil { NSApp.abortModal() } }
-    RunLoop.main.add(backstop, forMode: .modalPanel)
-    defer { backstop.invalidate() }
-    func views(_ root: NSView) -> [NSView] { [root] + root.subviews.flatMap(views) }
-    let deadline = Date().addingTimeInterval(20)
-    while NSApp.modalWindow == nil, Date() < deadline { try await Task.sleep(nanoseconds: 100_000_000) }
+    XCTAssertEqual(seeded, 2, "two sites are saved before the panel opens")
     do {
-      let panel = try XCTUnwrap(NSApp.modalWindow, "the start dialog did not open")
-      let texts = { views(panel.contentView!).compactMap { ($0 as? NSTextField)?.stringValue } }
-      XCTAssertTrue(texts().contains("Tracking 2 functions"), "the dialog counts the saved functions: \(texts())")
-      XCTAssertTrue(texts().contains("window.hsw"), "the dialog names each saved function")
-      XCTAssertTrue(texts().contains { $0.contains("Content mode also records settled-value digests") }, "Content mode names its digests")
-      XCTAssertTrue(texts().contains("https://hcaptcha.test/glue.js"), "each site names its script")
-      // An alert grows into place and resizes when a row is removed.
-      try await Task.sleep(nanoseconds: 1_500_000_000)
-      try ui.screenshot(window: panel, "start-dialog-tracking")
-      let popup = try XCTUnwrap(views(panel.contentView!).compactMap { $0 as? NSPopUpButton }.first)
-      popup.selectItem(at: 1)
-      _ = popup.sendAction(popup.action, to: popup.target)
-      XCTAssertTrue(texts().contains { $0.contains("Metadata mode records no settled-value digests") }, "Metadata mode records no digests: \(texts())")
-      let remove = try XCTUnwrap(views(panel.contentView!).compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "Remove window.hsw" })
-      remove.performClick(nil)
-      XCTAssertTrue(texts().contains("Tracking 1 function"), "Remove updates the count: \(texts())")
-      XCTAssertFalse(texts().contains("window.hsw"), "the removed site is gone")
+      try await openStartPanel(ui)
+      var text = try await panelText(ui)
+      XCTAssertTrue(text.contains("Tracking 2 functions"), "the panel counts the saved functions: \(text)")
+      XCTAssertTrue(text.contains("window.hsw"), "the panel names each saved function")
+      XCTAssertTrue(text.contains("Content mode also records settled-value digests"), "Content mode names its digests")
+      XCTAssertTrue(text.contains("https://hcaptcha.test/glue.js"), "each site names its script")
+      try await assertLayout(ui, "#session-panel", "start panel with saved functions")
+      try await assertInert(ui, "start panel with saved functions")
+      try await ui.screenshot("start-panel-tracking")
+      try await ui.click("#session-panel .session-panel-mode[data-mode='metadata']")
+      text = try await panelText(ui)
+      XCTAssertTrue(text.contains("Metadata mode records no settled-value digests"), "Metadata mode records no digests: \(text)")
+      try await ui.click("#session-panel button[aria-label=\"Remove window.hsw\"]")
+      try await ui.waitUntil("document.querySelector('#session-panel').innerText.includes('Tracking 1 function')", "Remove updates the count")
+      text = try await panelText(ui)
+      XCTAssertFalse(text.contains("window.hsw"), "the removed site is gone: \(text)")
+      XCTAssertTrue(text.contains("Metadata mode records no settled-value digests"), "Remove keeps the chosen mode: \(text)")
       let file = try String(contentsOfFile: expected.invocationSiteStore, encoding: .utf8)
       let sites = (try JSONSerialization.jsonObject(with: Data(file.utf8)) as? [String: Any])?["sites"] as? [Any]
       XCTAssertEqual(sites?.count, 1, "Remove rewrites the saved site file at once")
-      try await Task.sleep(nanoseconds: 1_500_000_000)
-      try ui.screenshot(window: panel, "start-dialog-tracking-removed")
-      popup.selectItem(at: 0)
-      _ = popup.sendAction(popup.action, to: popup.target)
-      let offline = try XCTUnwrap(views(panel.contentView!).compactMap { $0 as? NSButton }.first { $0.title == "Continue Offline" })
-      offline.performClick(nil)
-      let closed = Date().addingTimeInterval(10)
-      while NSApp.modalWindow != nil, Date() < closed { try await Task.sleep(nanoseconds: 100_000_000) }
-      XCTAssertNil(NSApp.modalWindow, "Continue Offline closed the dialog")
+      try await assertLayout(ui, "#session-panel", "start panel after Remove")
+      try await ui.screenshot("start-panel-tracking-removed")
+      try await ui.click("#session-panel .session-panel-mode[data-mode='content']")
+      try await ui.click("#session-panel-offline")
+      try await ui.waitUntil("document.querySelector('#session-panel').hidden", "Continue Offline closes the panel")
     } catch {
-      if NSApp.modalWindow != nil { NSApp.abortModal() }
+      try? await returnToHarness(ui, harnessURL)
       throw error
     }
     // New Live Session loaded the offline workspace; return to the harness.
@@ -1923,7 +1919,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await ui.waitForInitialLoad()
     try await ui.reload()
     let remaining = try await savedSiteCount(ui)
-    XCTAssertEqual(remaining, 1, "the backend reads the set the dialog wrote")
+    XCTAssertEqual(remaining, 1, "the backend reads the set the panel wrote")
     try await clearSavedSites(ui)
   }
 
@@ -2116,39 +2112,52 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await returnToHarness(ui, harnessURL)
   }
 
-  // Chooses New Live Session, then Continue Offline, as a researcher opens the
-  // bundled workspace. The close guard trusts only a document the app loaded
-  // itself; earlier tests return to the harness page directly, which then
-  // cannot answer, so that question is answered deliberately.
   @MainActor
-  private func openOfflineWorkspace(_ ui: Harness) async throws {
+  private func panelText(_ ui: Harness) async throws -> String {
+    try await ui.value("document.querySelector('#session-panel')?.innerText ?? ''") as? String ?? ""
+  }
+
+  // Chooses New Live Session, as a researcher does, and waits for the start
+  // panel in the bundled workspace. The close guard trusts only a document
+  // the app loaded itself; earlier tests return to the harness page directly,
+  // which then cannot answer, so that question is answered deliberately.
+  @MainActor
+  private func openStartPanel(_ ui: Harness) async throws {
+    // New Live Session always loads the bundled workspace again, so wait for
+    // a document other than this one.
+    _ = try? await ui.webView.callAsyncJavaScript("window.__rebOutgoingDocument = true; return true;", contentWorld: .page)
     let backstop = try chooseMenuItem("newLiveSession:")
     defer { backstop.invalidate() }
-    do {
-      try await waitFor("the start dialog or an unsaved-work question") {
-        NSApp.modalWindow != nil || ui.window.attachedSheet.flatMap { button($0, "Start New Session") }?.isEnabled == true
-      }
-      if NSApp.modalWindow == nil, let sheet = ui.window.attachedSheet {
+    let ready = "window.__rebOutgoingDocument === undefined && location.protocol === 'reb:' && document.readyState === 'complete' "
+      + "&& typeof state === 'object' && state.apiCollectionLoaded && document.querySelector('#session-panel')?.dataset.state === 'choose'"
+    let deadline = Date().addingTimeInterval(30)
+    var answered = false
+    while (try? await ui.value(ready)) as? Bool != true {
+      if !answered, let sheet = ui.window.attachedSheet, let start = button(sheet, "Start New Session"), start.isEnabled {
         XCTAssertTrue(texts(sheet).contains("Couldn’t check for unsaved work"), "\(texts(sheet))")
-        try XCTUnwrap(button(sheet, "Start New Session")).performClick(nil)
-        try await waitFor("the start dialog") { NSApp.modalWindow != nil }
+        start.performClick(nil)
+        answered = true
       }
-      let panel = try XCTUnwrap(NSApp.modalWindow)
-      XCTAssertTrue(texts(panel).contains("Start a live research session"), "\(texts(panel))")
-      try XCTUnwrap(button(panel, "Continue Offline")).performClick(nil)
-      try await waitFor("the start dialog to close", timeout: 10) { NSApp.modalWindow == nil }
-    } catch {
-      if let sheet = ui.window.attachedSheet { button(sheet, "Stay")?.performClick(nil) }
-      if NSApp.modalWindow != nil { NSApp.abortModal() }
-      throw error
+      guard Date() < deadline else {
+        if let sheet = ui.window.attachedSheet { button(sheet, "Stay")?.performClick(nil) }
+        throw HarnessError("the start panel did not open in the bundled workspace")
+      }
+      try await Task.sleep(nanoseconds: 100_000_000)
     }
-    try await ui.waitUntil("location.protocol === 'reb:' && document.readyState === 'complete' && typeof state === 'object' && state.apiCollectionLoaded",
-      timeout: 30, "the bundled workspace did not load")
+    try await ui.settle()
+  }
+
+  // Opens the bundled workspace through New Live Session and Continue Offline.
+  @MainActor
+  private func openOfflineWorkspace(_ ui: Harness) async throws {
+    try await openStartPanel(ui)
+    try await ui.click("#session-panel-offline")
+    try await ui.waitUntil("document.querySelector('#session-panel').hidden", "Continue Offline did not close the start panel")
   }
 
   // New Live Session replaces the window's document. An unsaved API Collection
   // edit must be asked about first, Stay must keep the edit, the page and any
-  // session, and a clean document must go straight to the start dialog.
+  // session, and a clean document must go straight to the start panel.
   @MainActor
   func test22NewLiveSessionAsksAboutUnsavedWork() async throws {
     let ui = try Harness()
@@ -2173,14 +2182,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
     let backstop = try chooseMenuItem("newLiveSession:")
     do {
       try await waitFor("the unsaved-work decision") {
-        NSApp.modalWindow != nil || ui.window.attachedSheet.flatMap { button($0, "Start New Session") }?.isEnabled == true
+        ui.window.attachedSheet.flatMap { button($0, "Start New Session") }?.isEnabled == true || ui.webView.url != workspaceURL
       }
-      if let panel = NSApp.modalWindow {
-        throw HarnessError("New Live Session opened \(texts(panel).first ?? "its dialog") over unsaved work without asking")
+      guard ui.webView.url == workspaceURL else {
+        throw HarnessError("New Live Session replaced the page over unsaved work without asking")
       }
       let sheet = try XCTUnwrap(ui.window.attachedSheet)
       XCTAssertTrue(texts(sheet).contains("Start a new live session with unsaved or unconfirmed changes?"), "\(texts(sheet))")
-      XCTAssertNil(NSApp.modalWindow, "the start dialog waits for the decision")
+      let waiting = try await ui.value("document.querySelector('#session-panel').hidden")
+      XCTAssertEqual(waiting as? Bool, true, "the start panel waits for the decision")
       let stay = try XCTUnwrap(button(sheet, "Stay"))
       XCTAssertTrue(sheet.defaultButtonCell === (stay.cell as? NSButtonCell), "Stay is the Return default")
       XCTAssertEqual(button(sheet, "Start New Session")?.keyEquivalent, "", "the destructive choice has no key equivalent")
@@ -2189,14 +2199,14 @@ final class OriginTraceRenderedUITests: XCTestCase {
       stay.performClick(nil)
       try await waitFor("Stay dismissal") { ui.window.attachedSheet == nil }
       try await Task.sleep(nanoseconds: 1_000_000_000)
-      XCTAssertNil(NSApp.modalWindow, "Stay does not open the start dialog")
+      let closed = try await ui.value("document.querySelector('#session-panel').hidden")
+      XCTAssertEqual(closed as? Bool, true, "Stay does not open the start panel")
       XCTAssertEqual(ui.webView.url, workspaceURL, "Stay keeps the page")
       let kept = try await ui.value("state.collectionFolderDirty === true && elements.collectionFolderVariables.value.includes('unsaved_rendered_check')")
       XCTAssertEqual(kept as? Bool, true, "Stay keeps the unsaved edit")
       try await ui.screenshot("new-session-stay-keeps-edit")
     } catch {
       if let sheet = ui.window.attachedSheet { button(sheet, "Stay")?.performClick(nil) }
-      if NSApp.modalWindow != nil { NSApp.abortModal() }
       backstop.invalidate()
       try? await returnToHarness(ui, harnessURL)
       throw error
@@ -2204,7 +2214,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     backstop.invalidate()
     let clean = try await ui.value("(() => { elements.collectionDiscardFolder.click(); return hasUnsavedWork(); })()")
     XCTAssertEqual(clean as? Bool, false, "discarding the edit leaves no unsaved work")
-    // A clean document the app loaded goes straight to the start dialog.
+    // A clean document the app loaded goes straight to the start panel.
     try await openOfflineWorkspace(ui)
     try await returnToHarness(ui, harnessURL)
   }
@@ -2763,5 +2773,180 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertLayout(ui, "#screen-sources", "\(step) sources toolbar with a Wasm module")
       try await ui.screenshot("sources-toolbar-wasm-\(step)")
     }
+  }
+
+  // The panel sits inside the workspace beside the sidebar and under the
+  // titlebar, with nothing clipped, its actions in view and its focus shown.
+  @MainActor
+  private func assertStartPanelFits(_ ui: Harness, _ context: String) async throws {
+    try await assertLayout(ui, "#session-panel", context)
+    let geometry = try await ui.json("""
+      (() => { const box = selector => document.querySelector(selector).getBoundingClientRect().toJSON();
+        return {panel: box('#session-panel'), workspace: box('#workspace'), titlebar: box('.titlebar'), sidebar: box('#sidebar')}; })()
+      """)
+    print("RENDERED_UI_START_PANEL \(context) \(geometry)")
+    let panel = geometry["panel"] as? [String: Double] ?? [:]
+    let workspace = geometry["workspace"] as? [String: Double] ?? [:]
+    XCTAssertGreaterThanOrEqual(panel["left"] ?? -1, (workspace["left"] ?? 0) - 1, "\(context): the panel stays in the workspace: \(geometry)")
+    XCTAssertLessThanOrEqual(panel["right"] ?? .infinity, (workspace["right"] ?? 0) + 1, "\(context): \(geometry)")
+    XCTAssertGreaterThanOrEqual(panel["top"] ?? -1, (geometry["titlebar"] as? [String: Double])?["bottom"] ?? 0, "\(context): under the titlebar: \(geometry)")
+    XCTAssertLessThanOrEqual(panel["bottom"] ?? .infinity, (workspace["bottom"] ?? 0) + 1, "\(context): \(geometry)")
+    XCTAssertGreaterThanOrEqual(panel["left"] ?? -1, (geometry["sidebar"] as? [String: Double])?["right"] ?? 0, "\(context): clear of the sidebar: \(geometry)")
+    for selector in ["#session-panel .session-panel-title", "#session-panel .session-panel-action-row"] {
+      let exists = try await ui.value("Boolean(document.querySelector(\(String(reflecting: selector))))") as? Bool
+      if exists == true { try await assertFullyVisible(ui, selector, "\(context) \(selector)") }
+    }
+  }
+
+  // The start panel through a whole decision at both window sizes. The harness
+  // names a REB_BRAVE_BINARY that does not exist, so Start fails at once and
+  // nothing launches. The panel must fit, reach every control by keyboard with
+  // visible focus, start with the mode and Keychain choice made by keyboard,
+  // come back as a failure with Retry focused and that same choice, fail
+  // afresh on Retry, and leave the offline workspace on Continue Offline.
+  @MainActor
+  func test27StartPanelStartRetryAndKeyboard() async throws {
+    let ui = try Harness()
+    try await ui.waitForInitialLoad()
+    let harnessURL = try XCTUnwrap(ui.webView.url)
+    let focus = { try await ui.json("__rebUiProbe.focusState()") }
+    // Normal turns Metadata and the Keychain on; narrow, opened with that
+    // choice remembered for the run, turns both back.
+    let plans: [(size: (name: String, width: CGFloat, height: CGFloat), from: String, to: String, arrow: UInt16, keychain: Bool)] = [
+      (windowSizes[0], "content", "metadata", 125, true), (windowSizes[1], "metadata", "content", 126, false),
+    ]
+    do {
+      for plan in plans {
+        let name = plan.size.name
+        try await ui.resize(width: plan.size.width, height: plan.size.height)
+        try await openStartPanel(ui)
+        try await ui.activate()
+        let opened = try await ui.json(
+          "({mode: document.querySelector('#session-panel input[name=\"session-panel-mode\"]:checked')?.value, keychain: document.querySelector('#session-panel-keychain').checked})")
+        XCTAssertEqual(opened["mode"] as? String, plan.from, "\(name): the panel opens with this run's last mode: \(opened)")
+        XCTAssertEqual(opened["keychain"] as? Bool, !plan.keychain, "\(name): and its last Keychain choice: \(opened)")
+        let initial = try await focus()
+        XCTAssertEqual(initial["id"] as? String, "session-panel-start", "\(name): Start Session is focused, as the alert's default was: \(initial)")
+        try await assertStartPanelFits(ui, "\(name) start panel")
+        try await ui.screenshot("start-panel-\(name)")
+
+        // Shift+Tab walks back through every control to the chosen mode.
+        var stops: [String] = []
+        for _ in 0..<8 {
+          try await ui.tab(shift: true)
+          let stop = try await focus()
+          stops.append(stop["id"] as? String ?? "\(stop["element"] ?? "?")")
+          XCTAssertEqual(stop["focusVisible"] as? Bool, true, "\(name): \(stop)")
+          XCTAssertNotEqual(stop["indicator"] as? String, "none", "\(name): \(stop)")
+          XCTAssertEqual(stop["inViewport"] as? Bool, true, "\(name): \(stop)")
+          if stops.last?.hasPrefix("session-panel-mode-") == true { break }
+        }
+        print("RENDERED_UI_START_PANEL_FOCUS \(name) \(stops)")
+        XCTAssertEqual(stops, ["session-panel-offline", "session-panel-keychain", "session-panel-mode-\(plan.from)"],
+          "\(name): the panel's controls in reverse order")
+        try await ui.screenshot("start-panel-focus-\(name)")
+        // Arrow keys choose within the mode group; Space toggles the Keychain.
+        try await ui.key(plan.arrow, plan.arrow == 125 ? "\u{F701}" : "\u{F700}")
+        let moved = try await ui.json(
+          "({focus: document.activeElement?.id, text: document.querySelector('#session-panel').innerText})")
+        XCTAssertEqual(moved["focus"] as? String, "session-panel-mode-\(plan.to)", "\(name): the arrow moved the choice: \(moved)")
+        try await ui.tab()
+        try await ui.key(49, " ")
+        let toggled = try await ui.value("document.querySelector('#session-panel-keychain').checked") as? Bool
+        XCTAssertEqual(toggled, plan.keychain, "\(name): Space toggles the Keychain choice")
+        try await ui.tab()
+        try await ui.tab()
+        let start = try await focus()
+        XCTAssertEqual(start["id"] as? String, "session-panel-start", "\(name): Tab returns to Start Session: \(start)")
+        try await ui.screenshot("start-panel-chosen-\(name)")
+
+        // Return starts; the named Brave does not exist, so the start fails.
+        try await ui.key(36, "\r")
+        try await ui.waitUntil("document.querySelector('#session-panel')?.dataset.state === 'failed'", "\(name): Start did not report its failure")
+        let failure = try await panelText(ui)
+        let chosen = "\(plan.to == "metadata" ? "Metadata only" : "Content (default)"), macOS Keychain \(plan.keychain ? "on" : "off")."
+        XCTAssertTrue(failure.contains("Live session unavailable"), "\(name): \(failure)")
+        XCTAssertTrue(failure.contains("REB_BRAVE_BINARY names"), "\(name): the failure names the cause: \(failure)")
+        XCTAssertTrue(failure.contains("Retry starts a new session with the same choices: \(chosen)"),
+          "\(name): native started with the choice made in the panel: \(failure)")
+        let retryFocus = try await focus()
+        XCTAssertEqual(retryFocus["id"] as? String, "session-panel-retry", "\(name): Retry is focused: \(retryFocus)")
+        try await assertStartPanelFits(ui, "\(name) start failure")
+        try await ui.screenshot("start-panel-failure-\(name)")
+
+        // Return on Retry starts again and reports a fresh failure.
+        _ = try await ui.value("(document.querySelector('#session-panel-failure').dataset.earlier = 'true', true)")
+        try await ui.key(36, "\r")
+        try await ui.waitUntil(
+          "document.querySelector('#session-panel')?.dataset.state === 'failed' && document.querySelector('#session-panel-failure')?.dataset.earlier === undefined",
+          "\(name): Retry did not start again")
+        let retried = try await panelText(ui)
+        XCTAssertTrue(retried.contains("Retry starts a new session with the same choices: \(chosen)"), "\(name): Retry keeps the choice: \(retried)")
+        let again = try await focus()
+        XCTAssertEqual(again["id"] as? String, "session-panel-retry", "\(name): Retry is focused again: \(again)")
+
+        try await ui.click("#session-panel-offline")
+        try await ui.waitUntil("document.querySelector('#session-panel').hidden", "\(name): Continue Offline did not close the panel")
+        let after = try await ui.json("({protocol: location.protocol, focus: __rebUiProbe.focusState().element})")
+        XCTAssertEqual(after["protocol"] as? String, "reb:", "\(name): the offline workspace stays: \(after)")
+        XCTAssertNotEqual(after["focus"] as? String, "body", "\(name): focus returns to the workspace: \(after)")
+        try await ui.screenshot("start-panel-offline-\(name)")
+      }
+    } catch {
+      try? await returnToHarness(ui, harnessURL)
+      throw error
+    }
+    try await returnToHarness(ui, harnessURL)
+  }
+
+  // Runs only in the driver's launch pass, where the app starts as a
+  // researcher opens it: no --ui-url, automatic live sessions on, synthetic
+  // stores and a REB_BRAVE_BINARY that does not exist. The window must open on
+  // the bundled workspace with the start panel, a reopen must not start a
+  // session behind it, Start must reach the native start, and after Continue
+  // Offline a reopen must offer nothing for the rest of the run.
+  @MainActor
+  func testLaunchOpensStartPanel() async throws {
+    guard ProcessInfo.processInfo.environment["REB_RENDERED_UI_LAUNCH"] == "1" else {
+      throw XCTSkip("Runs in the driver's launch pass, where the app starts without --ui-url")
+    }
+    let ui = try Harness()
+    let choosing = "location.protocol === 'reb:' && document.readyState === 'complete' && typeof state === 'object' "
+      + "&& document.querySelector('#session-panel')?.dataset.state === 'choose'"
+    try await ui.waitUntil(choosing, timeout: 30, "launch did not open the start panel in the bundled workspace")
+    let workspaceURL = ui.webView.url
+    try await ui.activate()
+    for size in windowSizes {
+      try await ui.resize(width: size.width, height: size.height)
+      let text = try await panelText(ui)
+      for phrase in ["Start a live research session", "Content (default)", "Metadata only", "Use macOS Keychain for browser credential storage",
+        "Tracking no functions", "Start Session", "Continue Offline"] {
+        XCTAssertTrue(text.contains(phrase), "\(size.name): the launch panel offers \(phrase): \(text)")
+      }
+      let shown = try await ui.json("({traffic: !document.querySelector('#screen-traffic').hidden, focus: document.activeElement?.id})")
+      XCTAssertEqual(shown["traffic"] as? Bool, true, "\(size.name): the workspace is open beside the panel: \(shown)")
+      XCTAssertEqual(shown["focus"] as? String, "session-panel-start", "\(size.name): \(shown)")
+      try await assertStartPanelFits(ui, "\(size.name) launch panel")
+      try await ui.screenshot("launch-start-panel-\(size.name)")
+    }
+    // A start would fail at once on the missing Brave and show that failure.
+    try await ui.reopen()
+    try await Task.sleep(nanoseconds: 2_000_000_000)
+    let reopened = try await ui.json("({state: document.querySelector('#session-panel')?.dataset.state, url: location.href})")
+    XCTAssertEqual(reopened["state"] as? String, "choose", "a reopen while the panel is open starts nothing behind it: \(reopened)")
+    XCTAssertEqual(ui.webView.url, workspaceURL, "a reopen keeps the document")
+
+    try await ui.click("#session-panel-start")
+    try await ui.waitUntil("document.querySelector('#session-panel')?.dataset.state === 'failed'", "Start from launch did not reach the native start")
+    let failure = try await panelText(ui)
+    XCTAssertTrue(failure.contains("REB_BRAVE_BINARY names"), failure)
+    try await ui.screenshot("launch-start-failure")
+    try await ui.click("#session-panel-offline")
+    try await ui.waitUntil("document.querySelector('#session-panel').hidden", "Continue Offline did not close the panel")
+    try await ui.reopen()
+    try await Task.sleep(nanoseconds: 2_000_000_000)
+    let offline = try await ui.value("document.querySelector('#session-panel').hidden") as? Bool
+    XCTAssertEqual(offline, true, "after Continue Offline a reopen offers nothing for the run")
+    try await ui.screenshot("launch-offline-after-reopen")
   }
 }

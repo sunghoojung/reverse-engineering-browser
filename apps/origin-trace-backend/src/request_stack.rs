@@ -1385,6 +1385,139 @@ mod tests {
         assert_eq!(unknown["coverage"]["budget_exhausted"], true);
     }
 
+    /// Compiled script capture (protocol/native-compiled-scripts-v1.md) keeps
+    /// inline text as `compiled_script` and eval text as `dynamic_javascript`.
+    /// They hash the same UTF-8 source as the script identity, so a stored
+    /// frame resolves to them when the walk kept no `stack_script` copy.
+    #[test]
+    fn stored_frames_resolve_to_compiled_script_sources() {
+        use std::io::Write;
+        let inline = "function send() {\n  return fetch('/a');\n}\nsend();\n";
+        let evaled = "send()";
+        let wrapped = "function wrap() { return send(); }\n";
+        let frames = vec![
+            frame(
+                1,
+                7,
+                inline.find("fetch").unwrap() as u32,
+                inline.find("() {").unwrap() as u32,
+            ),
+            frame(1, 8, 0, 0),
+            frame(
+                1,
+                9,
+                wrapped.find("send").unwrap() as u32,
+                wrapped.find("() {").unwrap() as u32,
+            ),
+        ];
+        let stack = artifact_bytes(3, &frames, 0);
+        let mut record = record_bytes(1, 3, 3, 0, Sha256::digest(&stack).into());
+        record[64..80].copy_from_slice(&frames[0]);
+
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("events.jsonl");
+        let mut events = std::fs::File::create(&store).unwrap();
+        for (sequence, request, kind, payload) in [
+            // Not retained by the walk (budget), eval and not retained, retained.
+            (
+                1,
+                0,
+                "script_identity",
+                identity_bytes(1, 0x10, 7, 4, 0, inline.as_bytes()),
+            ),
+            (
+                2,
+                0,
+                "script_identity",
+                identity_bytes(1, 0x11, 8, 0, 0, evaled.as_bytes()),
+            ),
+            (
+                3,
+                0,
+                "script_identity",
+                identity_bytes(1, 0x02, 9, 0, 0, wrapped.as_bytes()),
+            ),
+            (4, 5, "request_initiated", Vec::new()),
+            (5, 5, "request_initiator_stack", record),
+        ] {
+            let event = json!({"protocol_version":3,"session_id":"9",
+                "sequence_number":sequence.to_string(),"monotonic_time_ns":sequence.to_string(),
+                "navigation_id":"0","frame_id":"1","artifact_id":"0","parent_event_id":"0",
+                "request_id":request.to_string(),"process_id":42,"thread_id":1,"tab_id":0,
+                "category":"network","type":kind,"flags":0,"status_code":0,"error_code":0,
+                "encoded_data_length":"0","decoded_body_length":"0","resource_type":0,
+                "initiator_process_id":0,"initiator_request_id":0,"payload_encoding":"hex",
+                "payload":hex::encode(&payload),"payload_size":payload.len(),"payload_truncated":false});
+            writeln!(events, "{event}").unwrap();
+        }
+
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
+        let mut manifest = String::new();
+        for (id, kind, origin, creator, bytes) in [
+            ("1", "stack", "request_stack", "5", stack.as_slice()),
+            (
+                "2",
+                "javascript",
+                "compiled_script",
+                "21",
+                inline.as_bytes(),
+            ),
+            (
+                "3",
+                "javascript",
+                "dynamic_javascript",
+                "22",
+                evaled.as_bytes(),
+            ),
+            ("4", "javascript", "stack_script", "5", wrapped.as_bytes()),
+            (
+                "5",
+                "javascript",
+                "compiled_script",
+                "23",
+                wrapped.as_bytes(),
+            ),
+        ] {
+            let sha = hex::encode(Sha256::digest(bytes));
+            std::fs::write(artifacts.join(format!("blobs/{sha}.bin")), bytes).unwrap();
+            let mime = if kind == "stack" {
+                "application/x-reb-stack"
+            } else {
+                "text/javascript"
+            };
+            let entry = json!({"protocol_version":1,"artifact_id":id,"session_id":"9",
+                "navigation_id":"0","frame_id":"1","parent_artifact_id":"0","creator_event_id":creator,
+                "execution_context_id":"99","capture_origin":origin,"kind":kind,
+                "url":format!("https://app.example.test/{id}.js"),"mime_type":mime,
+                "byte_size":bytes.len(),"sha256":sha,"sensitive":false,
+                "content_path":format!("blobs/{sha}.bin")});
+            manifest.push_str(&format!("{entry}\n"));
+        }
+        std::fs::write(artifacts.join("manifest.jsonl"), manifest).unwrap();
+
+        let index = Mutex::new(RequestIndex::new(&store));
+        caught_up(&index);
+        let doc = document(&store, &artifacts, &index, Some(9), 42, 5).unwrap();
+        assert_eq!(doc["frames_retained"], true, "{doc}");
+        let f = &doc["frames"];
+        let inline_frame = &f[0]["resolution"];
+        assert_eq!(inline_frame["status"], "resolved", "{doc}");
+        assert_eq!(inline_frame["artifact_id"], "2");
+        assert_eq!(inline_frame["function_name"], "send");
+        assert_eq!(inline_frame["artifact_line"], 2);
+        assert_eq!(
+            inline_frame["line"], 6,
+            "the document line adds the start line"
+        );
+        assert_eq!(f[1]["eval"], true);
+        assert_eq!(f[1]["resolution"]["status"], "resolved", "{doc}");
+        assert_eq!(f[1]["resolution"]["artifact_id"], "3");
+        // The same bytes under two origins: the newest is shown.
+        assert_eq!(f[2]["resolution"]["artifact_id"], "5", "{doc}");
+        assert_eq!(f[2]["resolution"]["function_name"], "wrap");
+    }
+
     #[test]
     fn an_identity_outside_the_scan_is_not_reported_as_missing() {
         let identity = identity_bytes(1, 0x02, 7, 1, 1, b"x");

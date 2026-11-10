@@ -1325,12 +1325,15 @@ not reach them all; `coverage` says what was read:
   record, then by SHA-256 to a retained `javascript` artifact, to one-based line
   and column (UTF-16 columns, the identity record's start line and column
   added on the script's first line), and to the enclosing function name read
-  at the function start position. `eval` and `new Function` frames resolve the
-  same way, to the `stack_script` artifact retained during the walk. A
-  `dynamic_javascript` artifact exists only when the page's CSP or Trusted Types
-  makes Blink check `eval` (#446), so resolution never depends on one. A Metadata
-  only session retains no script source, so those frames report
-  `source_not_retained`.
+  at the function start position. The join ignores capture origin: the identity
+  and every retained source hash the same UTF-8 text V8 compiled, so a network
+  response body, the `stack_script` artifact retained during the walk, and the
+  [compiled script](native-compiled-scripts-v1.md) artifacts (`compiled_script`
+  for inline, inserted and `blob:` scripts, `dynamic_javascript` for `eval` and
+  `new Function` text) all resolve the frame. When several hold the same bytes,
+  the session's newest is shown. `eval` and `new Function` frames resolve the
+  same way. A Metadata only session retains no source that no response body
+  carried, so those frames report `source_not_retained`.
 - A Wasm frame resolves to its function index, and to its name when the
   retained module has a name section.
 - A frame that does not resolve keeps its raw identity and a reason. Nothing is
@@ -1370,7 +1373,8 @@ repeated stacks, table eviction, budgets and script identity.
 `make request-stack-wire-check` compares the C++ verdicts with the Python
 validator and the Initiator decoder and renders the Initiator panel in a DOM
 model. The backend's `request_stack` tests resolve inline, `eval`, Wasm and
-`await` frames and refuse to guess unresolved ones.
+`await` frames, resolve stored frames whose only source is a compiled script
+artifact, and refuse to guess unresolved ones.
 
 ### Acceptance
 
@@ -1384,8 +1388,9 @@ Still required before declaring this browser-ready:
 4. Frames into an inline script, an `eval` script and a network script resolve
    to file, line and column. A `fetch` from a Wasm import shows Wasm frames.
    An `await` chain shows its async frames. Run the `eval` case on a page with
-   no CSP, where no `dynamic_javascript` artifact exists, and in a Metadata only
-   session, where the frame reports `source_not_retained`.
+   no CSP, in a content session, where the frame resolves to `stack_script` or
+   compiled `dynamic_javascript` text, and in a Metadata only session, where it
+   reports `source_not_retained`.
 5. Repeated requests from one call site send their stack once.
 6. Measure added time per request at p50 and p99 on a request-heavy page before
    keeping the packaged default on.

@@ -7053,8 +7053,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const at = placed[state.sourceSearchIndex];
         if (!at) {
           if (reveal) {
-            state.sourcePagedFind = {identity: editor.identity, query};
-            moveSourceWindow(sourceFormatBlock(page.anchors, match.offset) * page.stride);
+            // Typing stays in Find. A page read earlier mounts at once, and
+            // that render resumes this search, which places and marks the match.
+            state.sourcePagedFind = {identity: editor.identity, query, index: state.sourceSearchIndex};
+            moveSourceWindow(sourceFormatBlock(page.anchors, match.offset) * page.stride, 0, {focus: false});
+            if (!state.sourcePagedFind) return;
           }
           elements.sourcePosition.textContent = `${count} · original ${match.line + 1}:${match.column + 1} · reading its part of the layout…`;
           return;
@@ -7119,11 +7122,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (row) { row.scrollIntoView({block: 'center'}); row.setAttribute('data-graph-reveal', 'true'); }
       }
 
-      function moveSourceWindow(line, column = 0) {
+      // Go to line and the pane controls move focus to the code; that move is
+      // the researcher's own and drops a Find still waiting for its page. Find
+      // passes focus: false so typing stays in its field.
+      function moveSourceWindow(line, column = 0, {focus = true} = {}) {
         const editor = state.sourceEditorView, source = selectedSource();
         const bounds = editor && sourceDocumentLine(editor.index, line), paged = Boolean(editor?.view.formatted?.paged);
         if (!editor || editor.identity !== sourceIdentity(source) || !Number.isSafeInteger(line) || line < 0 || line >= editor.index.lineCount ||
             !Number.isSafeInteger(column) || column < 0 || column > (bounds?.length ?? (paged ? Infinity : 0))) return false;
+        const find = focus ? null : state.sourcePagedFind;
+        if (focus) state.sourcePagedFind = null;
         if (!bounds) {
           // Another page of a large layout; the editor moves once it is read,
           // and that render (applySourceSearch) writes the position. A page
@@ -7134,11 +7142,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             elements.sourcePosition.textContent = `Line ${line + 1} · reading this part of the layout…`;
             return true;
           }
+          // That render resumed a pending Find, which placed and marked its match.
+          if (find && !state.sourcePagedFind) return true;
         } else renderSourceContent(source, editor.view, {line, column, search: false});
         applySourceSearch(false, 0, {reveal: false});
         elements.sourcePosition.textContent = sourcePositionText(state.sourceEditorView, line, column);
         const row = elements.sourceCode.querySelector(`[data-local-line="${line}"]`);
-        revealSourceColumn(row, column, true);
+        revealSourceColumn(row, column, focus);
         return true;
       }
 
@@ -7422,7 +7432,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const find = state.sourcePagedFind;
           if (find?.identity === identity && page && view.pageLoadingLine == null) {
             state.sourcePagedFind = null;
-            if (elements.sourceSearch.value === find.query) applySourceSearch(false, 0);
+            // A new page is a new document, which reset the match index; Find resumes at its own match.
+            if (elements.sourceSearch.value === find.query) { state.sourceSearchIndex = find.index ?? 0; applySourceSearch(false, 0); }
           } else if (target.search !== false) applySourceSearch(false, 0, {reveal: false});
         }
       }

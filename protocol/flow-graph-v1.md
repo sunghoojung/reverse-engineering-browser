@@ -124,21 +124,27 @@ next request reads again.
 
 ## UI
 
-Backtraces **Flow graph** draws the answer on one canvas, like a disassembler's
-graph. Each realm is a cluster titled by its script origin, realm, frame and
-process; realms that call into each other sit together, callers first. Rows
-are call depth. A card is one function: name, kind tag (`js`, `eval`, `wasm`,
-`chain`), stack count and location, then one row per edge it starts (call
-site, mnemonic, callee, what the edge crosses, its count). A sink is a row of
-each function whose stacks reached it rather than a card, unless no edge
-reaches it. Frame boundaries, task kinds, JS and Wasm transitions and calls
-into eval are written on their rows and colour their edges, never colour
+Backtraces **Flow graph** draws the answer on one canvas, read top to bottom
+like a disassembler's CFG. Each realm (context) is a full-width band titled by
+its script origin, realm, frame and process, and the bands are stacked in call
+order: a realm that calls or posts into another sits above it, so an iframe
+sits below its parent, and a call between realms runs down across the band
+boundary. Inside a band, rows are call depth. A card is one function: a header
+tinted by its kind with its name, the number of distinct paths through it and
+its kind (`js`, `eval`, `wasm`, `chain`), then its location and one row per
+edge it starts (call site, mnemonic, callee, what the edge crosses, its
+count). A sink is a row of each function whose stacks reached it rather than a
+card, unless no edge reaches it. Edges are coloured by kind: `call`, `await`
+and `task`, a crossing (`crosses` not empty), and `request`, `navigation` and
+`cookie_write`; `omitted` is dotted. Frame boundaries, task kinds, JS and Wasm
+transitions and calls into eval are also written on their rows, never colour
 alone. Pass-through frames inside one realm fold into a chain card. Selecting
-a card lights every stack through it; choosing a request lights its own stack
-and the row that made it. Each realm is laid out by Triskel through
-`POST /api/graph-layout` when the backend serves it and Triskel's drawing is not
-much wider than the layered one; the layout is presentation only and never
-changes this document. See the
+a card lights every path through it; choosing a request lights its own paths
+and the row that made it, and dims the rest. Each realm is laid out by
+Triskel through `POST /api/graph-layout` when the backend serves it and
+Triskel's drawing is not much wider than the layered one; the layout is
+presentation only and never changes this document. The view is also the Flow
+workspace's Graph pane. See the
 [Research UI README](../apps/research-ui/README.md#flow-graph).
 
 ## Validation

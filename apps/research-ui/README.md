@@ -2056,28 +2056,37 @@ graph ([flow graph v1](../../protocol/flow-graph-v1.md)): request, navigation,
 async scheduling and walked cookie-write stacks, folded so that each distinct
 stack and each retained source is read once. It is observed evidence only; a
 call that never reached a recorded request, navigation, task or cookie write is
-not drawn, and the status bar says so.
+not drawn, and the status bar says so. The same view is the Graph pane of the
+Flow workspace, through the API under [Workspace API](#workspace-api).
 
 ### Reading the graph
 
-The view reads like a disassembler's graph.
-- **Realms:** each realm is a cluster. All clusters start on one line, and each
-  is titled on a plate that follows the left edge of the view across a wide
-  cluster. The title names the scripts' origin, the realm (execution context),
-  the frame its stacks were recorded in and the process. Realms that call into
-  each other sit together, callers first; an unrelated out-of-process frame
-  comes after.
-- **Rows of the graph:** they are call depth, callers above callees.
-- **Card header:** each card is one function. The header gives its name, a kind
-  tag (`js`, `eval`, `wasm` or `chain`) and a badge with the number of stack
-  records that passed through it.
-- **Location line:** under a rule, the card gives `file:line:column`, `VM<id>`
-  for eval code, or `func <index> · module.wasm`.
+The view reads top to bottom like a disassembler's CFG: tall and narrow, with
+a tall minimap.
+- **Realms:** each realm is a full-width band, and the bands are stacked in
+  call order. A realm that calls or posts into another sits above it, so an
+  iframe sits below its parent; an unrelated out-of-process frame comes after
+  the group it is not part of. A call between realms runs down across the band
+  boundary.
+- **Band label:** each band has a faint tint of its own and names its realm
+  in a top corner: the scripts' origin, the realm (execution context), the
+  frame its stacks were recorded in and the process. The label takes the
+  corner no edge crosses, the right one when both are clear, so it never sits
+  on the spine. It stays pinned under the heading while its band is in view,
+  and stops short of the minimap.
+- **Rows of the graph:** inside a band they are call depth, callers above
+  callees. A band entered from another starts at its own top row.
+- **Card header:** each card is one function. The header is tinted by the
+  card's kind and gives its name, a boxed badge with the number of distinct
+  stacks that passed through it, and the kind as a pill (`JS`, `EVAL`, `WASM`,
+  `REQUEST`, `NAV`, `COOKIE` or `CHAIN`).
+- **Location line:** under the header, the card gives `file:line:column`,
+  `VM<id>` for eval code, or `func <index> · module.wasm`.
 - **Call rows:** one row per call the function made, in source order, the way
   a block lists its instructions. Each row has:
   - the call site: `line:column`, or `+0x<offset>` in a Wasm module;
   - a mnemonic: `call`, `await`, `postMessage`, `setTimeout`, `rAF`, `request`,
-    `navigate` or `cookie`;
+    `navigate` or `cookie`, in its edge's colour;
   - the callee;
   - a note saying what the call crosses: `→ frame.test`, `JS → Wasm`,
     `Wasm → JS`, `into eval` or `via microtask`;
@@ -2093,25 +2102,63 @@ The view reads like a disassembler's graph.
 
 ### Colour and edges
 
-A row's mnemonic and note take its edge's colour:
-- neutral for a plain call;
-- gold (amber in the light theme) for an await or a posted task;
-- rose (red in light) for a call across a frame, between JavaScript and Wasm
-  or into eval;
-- a fourth colour for requests, navigations and cookie writes.
+Colour says what a thing is. Every colour is a custom property in
+`flow_graph.css` that aliases an `app.css` token: Rosé Pine Moon in the dark
+theme, Dawn and the light app palette in the light one.
 
-Every text colour clears 4.5:1 on the card in both themes. The light theme
-draws white cards on the Dawn canvas.
+| What | Dark | Light |
+| --- | --- | --- |
+| JavaScript card | foam | Dawn foam tint, pine text |
+| Wasm card | iris | Dawn iris tint, code text |
+| eval card | gold | Dawn gold tint, amber text |
+| Request or navigation card | rose | Dawn rose tint, green text |
+| Cookie write card | love | Dawn love tint, red text |
+| Chain card | faint, muted text | faint, muted text |
+| Call edge and `call` | foam | Dawn foam edge, pine text |
+| Await or task edge | gold | amber |
+| Crossing edge: a frame change, JavaScript to Wasm or back, a call into eval | love | Dawn love edge, red text |
+| Request, navigation or cookie edge | rose | green |
+| Frames omitted | faint, dotted | faint, dotted |
 
-Edges leave the caller's bottom and enter the callee's top in rounded
-orthogonal runs, the same shape Triskel's waypoints take. Each edge is
-outlined against the canvas, and line width follows how many records walked
-it. A call that skips rows runs straight down between the cards it passes, and
-a back edge runs up the cluster's right gutter. A call into another realm runs
-down the gap beside its cluster and enters its callee from above that card's
-row, or from above the cluster for a first-row callee, so it never crosses a
-realm title. **Key** in the status bar explains the edges, the row colours, the
-card marks and the limits.
+- **Hue and ink:** each kind has a hue (`--flow-js` and so on) for its header
+  tint, outline, pill and minimap block, and an ink (`--flow-js-ink`) for text
+  in that colour. Each edge family has a stroke (`--flow-edge-call`) and a row
+  ink (`--flow-ink-call`). Tint strengths are plain numbers
+  (`--flow-tint-head` and so on) that the canvas reads as alpha.
+- **Contrast:** every ink, and the name, badge and muted text, clears 4.5:1 on
+  the card, on its tinted header, on its pill and on a selected or marked row
+  in both themes. A hue that would not, such as Moon's pine or Dawn's gold,
+  never sets text. `tools/check-flow-graph-ui.mjs` resolves the tokens through
+  `app.css` and checks every pair.
+- **Line style:** every v1 edge is observed, so it is solid; only an omitted
+  run of frames is dotted. Colour is never the only carrier: a crossing, a task
+  kind and a request are written on their rows too.
+- **Lit stack:** when a request or a card is selected, the stacks it lights
+  glow, with a heavier stroke and a soft shadow of their colour, and their
+  cards keep full colour. Cards and edges off them are dimmed: a dimmed card
+  keeps its place, its fill fades toward its band, its tint and outline fade,
+  and its text turns muted, still at 4.5:1. A match of Find is never dimmed.
+  With nothing selected, nothing is dimmed.
+- **Selected card:** a 2 px outline, a soft ring and a glow in its kind's
+  colour. The selected row has a band and a bar in that colour.
+
+**Routes:**
+- Edges leave the caller's bottom and enter the callee's top in orthogonal
+  runs with rounded corners, the same shape Triskel's waypoints take. Each edge
+  is outlined against the canvas, and its width follows how many records
+  walked it.
+- A call that skips rows runs straight down between the cards it passes. A
+  back edge inside a band runs up the band's right gutter.
+- A call into a later band drops straight down when no card is in its way,
+  turning once in the gap above the callee's band. Otherwise it runs along the
+  gap under the caller's row to the nearer side gutter, which is outside every
+  band's cards, down the gutter, and into the callee from the gap above its
+  band or above its row.
+- A call back up into an earlier band runs up the right gutter.
+- No run crosses a card.
+
+**Key** in the status bar explains the edges, the row colours, the kinds, the
+card marks, the bands and the limits. It scrolls when the window is short.
 
 ### Folding, selection and the request journey
 
@@ -2122,8 +2169,7 @@ group. Space, Enter or **Expand chain** opens one chain, and **Fold chain** on
 a member closes it again.
 
 Selecting a card lights every stack through it and marks the rows those stacks
-took. Other cards keep their fill and outline, and only their text fades, so
-the graph keeps its shape.
+took.
 
 **Requests:**
 - The **Request** list opens on a placeholder. Requests to the same target
@@ -2137,7 +2183,7 @@ the graph keeps its shape.
 
 **Hover and menu:**
 - Hovering a card, a row or an edge shows its facts beside the card: kind,
-  location, realm, call sites, records, and what it crosses.
+  location, realm, call sites, distinct stacks, records, and what it crosses.
 - Right-click, the context menu key or Shift+F10 opens the menu, with each
   item's key.
 - On a row, the menu offers **Follow call** and **Copy call site**.
@@ -2151,7 +2197,7 @@ the graph keeps its shape.
 - every caller and callee, with the boundary and the call sites;
 - the requests the function made.
 
-With nothing selected it lists the realms (each jumps to its cluster), the
+With nothing selected it lists the realms (each jumps to its band), the
 crossings, what was not decoded, and what stacks cannot contain.
 
 **Find** matches names, files, hosts and requested hosts. It says `1 of 3`,
@@ -2161,8 +2207,8 @@ steps with Enter, Shift+Enter or its arrows, and never dims a match.
 - The status bar names the selection and the evidence: records, the crossings
   by kind, the layout engine, and any budget or deadline that cut the graph.
 - Copy feedback is a toast, so a refresh-failure warning stays until Retry.
-- A refresh keeps the selection, the expanded chains and the view wherever the
-  same functions are still in the graph.
+- A refresh keeps the selection, the expanded chains, the mark and the view
+  wherever the same functions are still in the graph.
 - An empty graph offers **Refresh** and asks again when the view reopens.
 
 ### Keyboard and zoom
@@ -2170,7 +2216,9 @@ steps with Enter, Shift+Enter or its arrows, and never dims a match.
 **Keyboard:**
 - Arrows move to the nearest card.
 - J and K step through the selected card's calls.
-- Enter follows the chosen call, or opens the function or chain.
+- Enter follows the chosen call. On the card itself it opens the function in
+  Sources or expands a chain; a Wasm card goes to the host's `onFollow` when
+  there is one.
 - Backspace or Alt+Left goes back.
 - U goes to the caller that reached the card most often.
 - O opens the function in Sources.
@@ -2187,19 +2235,68 @@ steps with Enter, Shift+Enter or its arrows, and never dims a match.
 The canvas announces this list through `aria-describedby`.
 
 **Zoom:**
-- A graph of up to 60 cards opens fitted. A larger one opens fitted when its
-  rows stay legible, else at reading size on the top of the busiest realm.
+- The first view fits the whole graph when its rows stay legible. A taller or
+  wider graph opens at reading size at the top of its first band, with the
+  whole width in view when it fits, else centred on the busiest entry of that
+  band. It never opens as an unreadable overview; the minimap is the overview.
 - Rows show from 85% zoom.
-- Below that, cards sketch their rows, coloured where a row crosses, waits or
-  sends, and paint their names at screen size, tinted for eval and Wasm.
-- Below 20% they are boxes with a strip of their kind's colour, and plain
-  calls become hairlines.
-- The minimap takes the graph's shape. It hides while the whole graph is in
-  view, in a short canvas and below 520 px.
+- Below that, cards sketch their rows in their rows' colours and paint their
+  names at screen size, and band names sit on plates.
+- Below 20% they are boxes filled with their kind's colour, and plain calls
+  become hairlines.
+- The minimap takes the graph's shape: a tall graph gets a tall column (up to
+  440 px, or 55% of the canvas) with bands, cards in their kinds' colours,
+  edges in theirs and the view box; a wide one a short strip. Its width
+  follows the canvas, from 72 to 170 px. It hides while the whole graph is in
+  view, in a short canvas and below 380 px, so a workspace pane keeps it.
 - Centring a card keeps it clear of the minimap and of a Details sheet.
 - In a canvas narrower than 860 px the tools drop under the heading. In a
   narrow window Details is a sheet over the bottom 40% of the canvas, and the
   Backtraces subtitle gives way.
+
+### Workspace API
+
+The Flow workspace hosts this view as its Graph pane. `createFlowGraphPanel`
+takes, besides `host`, `open`, `available` and `fetchGraph`:
+- `onSelect(info | null)`, called whenever the selected card, its chosen row
+  or the lit request changes, and with `null` when the selection clears. A
+  change to the same card and row is not reported twice.
+- `onFollow(info)`, called on Enter or a double-click on a Wasm card. Without
+  it a Wasm card opens in Sources, as before. Enter on a call row still
+  follows the call.
+
+`info` is:
+
+| Field | Value |
+| --- | --- |
+| `key` | `flowGraphNodeKey(node)`; for a chain card, its first member's key |
+| `kind` | `javascript`, `eval`, `wasm`, `chain`, `request`, `navigation` or `cookie_write` |
+| `name` | the card's name |
+| `location` | the full location (URL, line and column, or the module URL and function), or `null` for a chain or an unresolved frame |
+| `process_id` | the realm's process, from the node's context (nodes do not carry it) |
+| `execution_context_id` | the realm's execution context, from the context, or `null` for an unidentified realm |
+| `url` | the script or module URL, or `null` |
+| `artifact_id` | the script or module artifact, or `null` |
+| `function_index` | the Wasm function index, or `null` |
+| `row` | the chosen row as `{index, site, op, target}`, or `null`; `site` is the text the row shows, such as `8:3` or `+0x2f` |
+| `request` | the lit request as `{process, request}` while its stack is the highlight, else `null` |
+
+The panel returns, besides `show`, `hide`, `highlightRequest`, `focus`,
+`isVisible` and `snapshot`:
+- `select(key, {reveal = true} = {})` selects the card that holds `key`, any
+  member's key for a chain, and centres it unless `reveal` is false. It
+  returns whether the card is in the graph. Asked before the graph is drawn,
+  it returns `false` and selects the key once the graph lands.
+- `selection()` returns the current `info`, or `null`.
+- `resize()` re-measures the stage after the host changed its size, such as
+  when a pane opens, closes or is dragged.
+- `setMark(mark | null)` marks the card a timeline sample points to, apart
+  from the selection: `mark` is `{artifact_id, function_index, offset}`. The
+  Wasm card with that module artifact and function index gets a dashed ring in
+  the mark colour, and its row whose call site is at module offset `offset`, if
+  it shows one, gets the mark's band. IDs may be numbers or strings; `offset`
+  may be `null`. It returns whether a card took the mark; `null` clears it.
+  The mark survives a refresh and shows on the minimap.
 
 ### Layout
 
@@ -2207,15 +2304,23 @@ Layout runs in `flow_graph_layout.js` as a Web Worker, or on the main thread
 when a shell cannot start one, on card sizes measured from their text.
 
 **Layered layout:**
-- Cycles are broken by a depth-first walk.
-- Layers are longest paths, with roots pulled down to their first callee.
-- A realm holds at most five cards per layer, more in a large realm so it stays
-  near square; the rest move down, leaves first.
+- Bands are ordered callers first over the calls between realms: realms that
+  call into each other sit together, the busiest connected group first; a
+  cycle between realms takes the best ranked one first, and a call back up
+  into an earlier band is a back edge.
+- Inside each band, cycles are broken by a depth-first walk over the realm's
+  own calls, and layers are longest paths, with roots pulled down to their
+  first callee. A call from another realm never pushes a card down.
+- A band holds at most five cards per layer, more in a large band so it stays
+  near square; the rest move down, leaves first. A busy session grows tall,
+  not wide.
 - An edge longer than one layer gets a waypoint in every layer it passes, up to
   200,000.
-- Each realm and layer is ordered by its neighbours' mean position over
+- Each band and layer is ordered by its neighbours' mean position over
   alternating sweeps, then placed by a weighted isotonic fit that keeps a single
   chain of calls straight.
+- All bands share one width. Each band is shifted sideways inside it so the
+  calls between bands run as straight as the cards allow.
 
 **Triskel:** when the backend serves `POST /api/graph-layout`, each realm of 2
 to 2,000 cards is then sent to
@@ -2225,14 +2330,16 @@ draw it more than 1.6 times wider than the layered layout and over 1,400 px,
 or more than 1.6 times taller and over 1,600 px taller.
 Triskel does not stack a wide fan of calls, and a call tree's breadth would
 otherwise run off to the side. The layered layout also stays when Triskel's
-answer is missing, too large or the wrong shape. The status bar says `Triskel
-layout`, or how many realms it took, and hovering it gives each other realm's
-reason.
+answer is missing, too large or the wrong shape. Either way the bands keep the
+layered order and are stacked, aligned and routed between the same way. The
+status bar says `Triskel layout`, or how many realms it took, and hovering it
+gives each other realm's reason.
 
 Six thousand cards lay out in well under a second. The canvas is one bounded
-backing store, and only visible clusters, cards and edges are drawn. A refresh
-failure keeps the last graph under a banner. The `reb://` stored-evidence
-window has no flow graph route and says so.
+backing store, and only visible bands, cards and edges are drawn; cards drop
+their lift shadow when more than 160 are in view, and the lit stack drops its
+glow past 600 edges. A refresh failure keeps the last graph under a banner.
+The `reb://` stored-evidence window has no flow graph route and says so.
 
 ## Pane sizes
 

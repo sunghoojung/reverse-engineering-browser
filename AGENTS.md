@@ -58,9 +58,16 @@ listed only with `--allow-session-start`, which requires `--allow-effects`.
 command.
 Effectful tools stay hidden unless `--allow-effects` is set. That flag is not
 authorization, redaction, or permission to send captured data to a model.
+`--permission read-only|ask|auto|full` names one of the in-app agent's four
+levels in place of the individual flags, as `x-reb-mcp.permission` maps them.
 Binary responses are refused before a request. JSON larger than the inline
-limit returns a structural summary. It does not inline source, bytecode, or
-request bodies.
+limit returns a structural summary, which omits source, bytecode and bodies.
+Below the inline limit, `--omit-content` (implied by `read-only`, `ask` and
+`auto`) omits them from every result. Only `--allow-content` (implied by
+`full`) lists the content reads and returns source, bytecode, disassembly and
+request and response bodies, in bounded pages, so that captured content goes
+to the client's model provider. Header blocks and cookie lists are never
+returned as text.
 
 ## Repository ownership
 

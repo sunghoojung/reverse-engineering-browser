@@ -15,8 +15,10 @@ import Foundation
 // - The only tools are reb-api tools. Each CLI starts with built-in tools,
 //   user settings, hooks, memory and the researcher's own MCP servers removed,
 //   and with one `reb-api mcp` server using the same gates as the graph's.
-//   Every tool call still asks here first: a structural read runs, an action
-//   waits for Allow once or Deny in the panel, and anything else is refused.
+//   Every tool call still asks here first, and AgentToolGate decides it by
+//   the native permission level: what the level runs, runs; at Ask for
+//   actions an action waits for Allow once or Deny in the panel; anything
+//   else is refused.
 //   A built-in tool or a foreign server that appears anyway ends the CLI.
 // - The child's lifetime. Each CLI runs in its own process group, only while
 //   the agent is on and a conversation is open. Stop, switching off, a
@@ -438,8 +440,10 @@ class AgentCLIDriver {
   let provider: AgentProviderKind
   let executable: URL
   let workingDirectory: URL
-  let configuration: AgentSession.Configuration
-  let tools: [AgentToolDefinition]
+  private(set) var configuration: AgentSession.Configuration
+  private(set) var tools: [AgentToolDefinition]
+  // The next question carries a lowered level to a CLI that keeps running.
+  private var permissionNote: String?
   let listedToolNames: [String]
   let baseEnvironment: [String: String]
   let emit: ([String: Any]) -> Void
@@ -492,10 +496,16 @@ class AgentCLIDriver {
     idleWork?.cancel()
     do {
       if process == nil {
+        permissionNote = nil
         try await launch()
         guard turn === current else { return }
       }
-      try deliver(text)
+      if let note = permissionNote {
+        permissionNote = nil
+        try deliver("\(note)\n\n\(text)")
+      } else {
+        try deliver(text)
+      }
     } catch {
       guard turn === current else { return }
       abort(agentRedactedError(error.localizedDescription))
@@ -591,6 +601,36 @@ class AgentCLIDriver {
     endTurn(error: message)
   }
 
+  // A lowered level applies to the very next call: waiting decisions it no
+  // longer allows are denied, and below Full access a running CLI is ended,
+  // because its own tool server was started at Full access and returns
+  // content. The next question starts it again at the lower level.
+  func lower(to level: AgentPermission) {
+    guard level < configuration.permission else { return }
+    let wasFull = configuration.permission == .full
+    configuration.permission = level
+    if level != .full { configuration.sensitiveCapture = false }
+    tools = tools.filter { AgentToolGate.lists($0.name, readOnly: $0.readOnly, level: level) }
+    if let turn {
+      for (callId, approval) in turn.approvals {
+        let readOnly = tools.first { $0.name == approval.name }?.readOnly ?? false
+        if case .refuse = AgentToolGate.decide(approval.name, readOnly: readOnly, arguments: [:], level: level, sensitive: false) {
+          _ = decide(callId: callId, allow: false)
+        }
+      }
+    }
+    if wasFull && process != nil {
+      if turn != nil {
+        cancel()
+      } else {
+        terminate()
+      }
+      notice("The \(cliName) was ended so its tool server restarts at \(level.label). The next question starts a new conversation.")
+    } else if process != nil {
+      permissionNote = agentPermissionChangeNote(level)
+    }
+  }
+
   private func armIdle() {
     idleWork?.cancel()
     guard process != nil, turn == nil else { return }
@@ -681,16 +721,20 @@ class AgentCLIDriver {
       endTurn(notice: "Stopped after \(Self.toolRoundLimit) rounds of tool calls.")
       return
     }
-    guard let tool = tools.first(where: { $0.name == name }) else {
-      let text = "This tool is not available to the agent. No request was sent."
+    let decision = tools.first(where: { $0.name == name }).map {
+      AgentToolGate.decide(name, readOnly: $0.readOnly, arguments: input as? [String: Any] ?? [:],
+        level: configuration.permission, sensitive: configuration.sensitive)
+    } ?? .refuse("This tool is not available at \(configuration.permission.label). No request was sent.")
+    if case .refuse(let text) = decision {
       respond(false, text)
       finishText()
       toolClosed(callId, name: name, arguments: arguments, state: "refused", text: text)
       return
     }
-    if tool.readOnly {
+    if decision == .run {
+      let readOnly = tools.first { $0.name == name }?.readOnly ?? false
       respond(true, nil)
-      toolStarted(callId, name: name, arguments: arguments, readOnly: true)
+      toolStarted(callId, name: name, arguments: arguments, readOnly: readOnly)
       return
     }
     finishText()
@@ -750,14 +794,14 @@ final class AgentClaudeDriver: AgentCLIDriver {
   override func launchArguments() throws -> [String] {
     let server: [String: Any] = [
       "type": "stdio", "command": configuration.apiExecutable.path, "args": configuration.mcpArguments,
-      "env": ["LANG": "C", "LC_ALL": "C"],
+      "env": configuration.mcpEnvironment,
     ]
     let mcp = String(decoding: try JSONSerialization.data(withJSONObject: ["mcpServers": ["reb": server]]), as: UTF8.self)
     var arguments = [
       "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
       "--permission-prompt-tool", "stdio", "--permission-mode", "default", "--strict-mcp-config", "--mcp-config", mcp,
       "--tools", "", "--setting-sources", "", "--settings", #"{"disableAllHooks":true}"#, "--disable-slash-commands",
-      "--no-session-persistence", "--system-prompt", agentSystemPrompt,
+      "--no-session-persistence", "--system-prompt", agentSystemPrompt(configuration.permission, sensitive: configuration.sensitive),
     ]
     if !configuration.model.isEmpty && configuration.model != "default" { arguments += ["--model", configuration.model] }
     // Tools the graph would not list are hidden from the model, not just refused.
@@ -929,7 +973,7 @@ final class AgentGrokDriver: AgentCLIDriver {
   }
 
   // An agent profile with only the two MCP tools and the shared system prompt.
-  nonisolated static func profile() -> String {
+  nonisolated static func profile(_ level: AgentPermission, sensitive: Bool) -> String {
     """
     ---
     name: origin-trace-agent
@@ -942,7 +986,7 @@ final class AgentGrokDriver: AgentCLIDriver {
       - use_tool
     ---
 
-    \(agentSystemPrompt)
+    \(agentSystemPrompt(level, sensitive: sensitive))
 
     The reb-api tools are reached through search_tool and use_tool. Their names start with reb__.
 
@@ -957,7 +1001,7 @@ final class AgentGrokDriver: AgentCLIDriver {
     let manager = FileManager.default
     try manager.createDirectory(at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true,
       attributes: [.posixPermissions: 0o700])
-    try Data(Self.profile().utf8).write(to: profileURL, options: .atomic)
+    try Data(Self.profile(configuration.permission, sensitive: configuration.sensitive).utf8).write(to: profileURL, options: .atomic)
     var stubs = Self.stubbedNames(in: (try? String(contentsOf: configURL, encoding: .utf8)) ?? "")
     try Self.writeStubs(stubs, to: configURL)
     var report = try await inspect()
@@ -1034,7 +1078,7 @@ final class AgentGrokDriver: AgentCLIDriver {
     }
     let server: [String: Any] = [
       "name": "reb", "command": configuration.apiExecutable.path, "args": configuration.mcpArguments,
-      "env": [["name": "LANG", "value": "C"], ["name": "LC_ALL", "value": "C"]],
+      "env": configuration.mcpEnvironment.sorted { $0.key < $1.key }.map { ["name": $0.key, "value": $0.value] },
     ]
     let session = try await request("session/new", ["cwd": workingDirectory.path, "mcpServers": [server]], timeout: 90)
     guard let id = session["sessionId"] as? String, !id.isEmpty else {

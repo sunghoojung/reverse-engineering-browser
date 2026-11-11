@@ -123,7 +123,33 @@ run_launcher --print-config claude --allow-effects --allow-session-start
 assert_status 0
 grep -q -F -- '"--allow-session-start"' "$out" || fail "config lacks session start: $(cat "$out")"
 assert_stderr_has 'authorized target'
+# --permission is forwarded as one level; full also starts without a file.
+run_launcher --permission full --allow-sensitive-capture
+assert_status 0
+grep -q -F -- "mcp --endpoint-file ${canonical} --permission full --allow-sensitive-capture --require-live" "$log" || fail "permission was not forwarded: $(cat "$log")"
+run_launcher --permission ask
+assert_status 2
+assert_log_absent
+run_launcher --print-config codex --permission full
+assert_status 0
+grep -q -F -- '"--permission", "full"' "$out" || fail "config lacks the permission level: $(cat "$out")"
+assert_stderr_has 'go to the model provider'
 mv "${canonical}.saved" "$canonical"
+run_launcher --permission ask --allow-effects
+assert_status 2
+assert_log_absent
+assert_stderr_has 'replaces --allow-effects'
+run_launcher --permission auto --allow-sensitive-capture
+assert_status 2
+assert_log_absent
+assert_stderr_has 'needs --permission full'
+run_launcher --permission everything
+assert_status 2
+assert_log_absent
+run_launcher --print-config cursor --permission auto
+assert_status 0
+grep -q -F -- '"--permission","auto"' "$out" || fail "cursor config lacks the level: $(cat "$out")"
+assert_stderr_has 'may run without asking'
 
 run_launcher --sessions-root "$root"
 assert_status 2

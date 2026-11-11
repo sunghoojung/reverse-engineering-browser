@@ -697,7 +697,7 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 56, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 58, "Review route coverage when the API changes");
     assert!(ids.contains("get_request_headers"));
     assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
     assert!(ids.contains("get_xrefs"));
@@ -788,7 +788,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 56);
+    assert_eq!(operation_count, 58);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -9800,4 +9800,227 @@ i=0; while [ ! -s "$ENDPOINT" ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i + 1)); 
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(!endpoint.exists(), "the endpoint is retired on the way out");
+}
+#[tokio::test]
+async fn artifact_text_pages_search_and_wasm_row_windows_follow_the_contract() {
+    let server = Server::start().await;
+    // A script whose multi-byte characters straddle page boundaries, a body,
+    // and a Wasm module, each verified against its manifest digest.
+    let script = format!("{}é\nconst Token = 'token';\n// TOKEN\n", "a".repeat(9));
+    let body = b"{\"token\":\"abc\"}\x01\x02".to_vec();
+    let module = wat::parse_str(
+        "(module (func (export \"f\") (result i32) i32.const 1 i32.const 2 i32.add))",
+    )
+    .unwrap();
+    let mut manifest = String::new();
+    for (id, kind, bytes) in [
+        ("1", "javascript", script.as_bytes().to_vec()),
+        ("2", "request_body", body.clone()),
+        ("3", "wasm", module.clone()),
+        // Header blocks hold credential values that stay withheld at every level.
+        (
+            "6",
+            "request_headers",
+            b"cookie: sid=token-SECRET-COOKIE\r\n".to_vec(),
+        ),
+    ] {
+        let hash = hex::encode(Sha256::digest(&bytes));
+        let record = json!({"protocol_version":1,"artifact_id":id,"session_id":"4","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":kind,"url":format!("https://example.test/{id}"),"mime_type":"text/plain","byte_size":bytes.len(),"sha256":hash,"sensitive":kind == "request_body" || kind == "request_headers","content_path":format!("blobs/{hash}.bin")});
+        let mut record = record;
+        if kind == "request_body" || kind == "request_headers" {
+            // One browser network record creates a body (native-network-v2.md).
+            record["capture_origin"] = json!("network_request");
+            record["execution_context_id"] = json!("0");
+            record["creator_event_id"] = json!("5");
+        }
+        manifest.push_str(&format!("{record}\n"));
+        server.file(&format!("artifacts/blobs/{hash}.bin"), &bytes);
+    }
+    server.file("artifacts/manifest.jsonl", manifest.as_bytes());
+    let text = |query: &'static str| {
+        let server = &server;
+        async move {
+            let response = server.get(&format!("/api/artifacts/1/text?{query}")).await;
+            assert_contract_response(response, "get", "/api/artifacts/{artifact_id}/text", 200)
+                .await
+        }
+    };
+    let whole: Value = serde_json::from_slice(&text("").await).unwrap();
+    assert_eq!(whole["text"], script);
+    assert_eq!(whole["complete"], true);
+    assert!(whole["next_offset"].is_null());
+    assert_eq!(whole["artifact"]["kind"], "javascript");
+    // Ten bytes end inside "é": the page finishes the character, and the next
+    // page starts after it, so no byte is shown twice or lost.
+    let first: Value = serde_json::from_slice(&text("length=10").await).unwrap();
+    assert_eq!(first["text"], format!("{}é", "a".repeat(9)));
+    assert_eq!(first["next_offset"], 11);
+    assert_eq!(first["complete"], false);
+    let inside: Value = serde_json::from_slice(&text("offset=10&length=4").await).unwrap();
+    assert_eq!(
+        inside["offset"], 11,
+        "a page that starts inside a character begins at the next"
+    );
+    assert_eq!(inside["text"], "\ncon");
+    let hexed: Value = serde_json::from_slice(&text("encoding=hex&length=2").await).unwrap();
+    assert_eq!(
+        (hexed["text"].as_str(), hexed["length"].as_u64()),
+        (Some("6161"), Some(2))
+    );
+    let encoded: Value = serde_json::from_slice(&text("encoding=base64&length=3").await).unwrap();
+    assert_eq!(encoded["text"], "YWFh");
+    let end: Value = serde_json::from_slice(&text("offset=36").await).unwrap();
+    assert!(end["next_offset"].is_null());
+    for query in [
+        "encoding=utf16",
+        "offset=999",
+        "length=0",
+        "unknown=1",
+        "offset=1&offset=2",
+    ] {
+        assert_contract_response(
+            server.get(&format!("/api/artifacts/1/text?{query}")).await,
+            "get",
+            "/api/artifacts/{artifact_id}/text",
+            400,
+        )
+        .await;
+    }
+    assert_contract_response(
+        server.get("/api/artifacts/9/text").await,
+        "get",
+        "/api/artifacts/{artifact_id}/text",
+        404,
+    )
+    .await;
+    let refused = server.get("/api/artifacts/6/text").await;
+    let refused =
+        assert_contract_response(refused, "get", "/api/artifacts/{artifact_id}/text", 400).await;
+    let refused = String::from_utf8_lossy(&refused);
+    assert!(
+        refused.contains("get_request_headers") && !refused.contains("SECRET-COOKIE"),
+        "{refused}"
+    );
+    let binary: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.get("/api/artifacts/2/text").await,
+            "get",
+            "/api/artifacts/{artifact_id}/text",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(binary["text"], "{\"token\":\"abc\"}\u{1}\u{2}");
+
+    let search = |query: &'static str| {
+        let server = &server;
+        async move {
+            let response = server.get(&format!("/api/artifacts/search?{query}")).await;
+            let bytes =
+                assert_contract_response(response, "get", "/api/artifacts/search", 200).await;
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        }
+    };
+    let folded = search("q=token&kind=javascript").await;
+    let found = folded["matches"].as_array().unwrap();
+    assert_eq!(found.len(), 3, "ASCII case folds by default");
+    assert_eq!(
+        (found[0]["line"].as_u64(), found[0]["column"].as_u64()),
+        (Some(2), Some(7))
+    );
+    assert_eq!(found[0]["match"], "Token");
+    assert_eq!(found[0]["before"], "const ");
+    assert_eq!(found[0]["after"], " = 'token';");
+    assert_eq!(folded["coverage"]["complete"], true);
+    let exact = search("q=token&match_case=true").await;
+    let ids = exact["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["artifact_id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        ["1", "2"],
+        "case kept, every kind searched, oldest first"
+    );
+    let paged = search("q=token&limit=1&offset=1").await;
+    assert_eq!(paged["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(paged["next_offset"], 2);
+    assert_eq!(paged["matches"][0]["line"], 2);
+    let cookies = search("q=SECRET-COOKIE").await;
+    assert!(
+        cookies["matches"].as_array().unwrap().is_empty(),
+        "header blocks are never searched"
+    );
+    assert_eq!(cookies["coverage"]["artifacts_selected"], 3);
+    for query in [
+        "q=",
+        "q=a%0Ab",
+        "q=a&match_case=yes",
+        "q=a&after=1",
+        "match_case=true",
+    ] {
+        assert_contract_response(
+            server.get(&format!("/api/artifacts/search?{query}")).await,
+            "get",
+            "/api/artifacts/search",
+            400,
+        )
+        .await;
+    }
+
+    let spec = specification();
+    let all: Value = server
+        .get("/api/wasm?artifact_id=3")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let total = all["rows"].as_array().unwrap().len();
+    assert!(total > 3 && all.get("row_window").is_none());
+    let mut rows = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page: Value = server
+            .get(&format!(
+                "/api/wasm?artifact_id=3&row_offset={offset}&row_limit=2"
+            ))
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_schema(
+            &spec,
+            &spec["components"]["schemas"]["WasmInspection"],
+            &page,
+            "row window",
+        );
+        assert_eq!(page["row_window"]["total_rows"], total);
+        rows.extend(page["rows"].as_array().unwrap().clone());
+        match page["row_window"]["next_offset"].as_u64() {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    assert_eq!(
+        Value::Array(rows),
+        all["rows"],
+        "windows cover every row once"
+    );
+    for query in [
+        "row_limit=0",
+        "row_limit=2049",
+        &format!("row_offset={}", total + 1),
+    ] {
+        assert_eq!(
+            server
+                .get(&format!("/api/wasm?artifact_id=3&{query}"))
+                .await
+                .status(),
+            400,
+            "{query}"
+        );
+    }
 }

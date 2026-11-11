@@ -171,6 +171,13 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
       if try await confirmRemoveKey(kind) { AgentKeychain.delete(kind) }
       return status()
     case "enable": return try await enable(body)
+    case "lowerPermission":
+      guard let raw = body["permission"] as? String, let level = AgentPermission(rawValue: raw) else {
+        throw AgentFailure(message: "Unknown permission level.")
+      }
+      try engine.lower(to: level)
+      cli?.lower(to: level)
+      return status()
     case "disable":
       proxy.cancelAll()
       stopCLI()
@@ -307,6 +314,9 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
         throw AgentFailure(message: "The \(AgentCLILocator.name(kind)) command was not found on this Mac.")
       }
     }
+    // Consent in the dock chose this level. Native checks it before anything
+    // changes, then holds it: only lowerPermission changes it afterwards.
+    let (permission, sensitive) = try AgentPermission.requested(by: body)
     if engine.isOn { proxy.cancelAll(); stopCLI(); engine.disable() }
     let requested = (body["model"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? kind.defaultModel(mode)
     guard requested.range(of: "^[A-Za-z0-9._:\\[\\]-]{1,80}$", options: .regularExpression) != nil else {
@@ -314,7 +324,8 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
     }
     let configuration = AgentSession.Configuration(
       provider: kind, auth: mode, model: requested, apiExecutable: apiExecutable, apiBaseURL: apiBaseURL,
-      allowEffects: body["effects"] as? Bool == true, transcriptDirectory: transcriptDirectory)
+      permission: permission, sensitiveCapture: sensitive, transcriptDirectory: transcriptDirectory,
+      appEnvironment: environment)
     let directory = executable == nil ? nil : try AgentCLILocator.workingDirectory(kind, root: cliRoot)
     sessionKey = rawKey
     try await engine.enable(configuration, sessionKey: rawKey.replacingOccurrences(of: ":", with: "-"))

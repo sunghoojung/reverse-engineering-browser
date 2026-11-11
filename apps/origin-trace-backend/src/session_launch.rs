@@ -47,6 +47,10 @@ pub struct StartOptions {
     pub request_content: bool,
     /// MiB of unique request bodies and targets a content session retains.
     pub request_content_budget_mib: Option<u32>,
+    /// MiB of unique response bodies a content session retains (default 512).
+    pub response_body_budget_mib: Option<u32>,
+    /// Also retain images, audio, video and fonts that page elements load.
+    pub response_media: bool,
     /// Record the JavaScript and Wasm stack that started each renderer request.
     pub request_stacks: bool,
     /// Permit document-start Console scripts in this capture browser. Arming
@@ -149,6 +153,10 @@ impl StartOptions {
             request_content_budget_mib: value["request_content_budget_mib"]
                 .as_u64()
                 .map(|n| n.min(u64::from(u32::MAX)) as u32),
+            response_body_budget_mib: value["response_body_budget_mib"]
+                .as_u64()
+                .map(|n| n.min(u64::from(u32::MAX)) as u32),
+            response_media: flag("response_media"),
             request_stacks: flag("request_stacks"),
             document_start: flag("document_start"),
             js_invocation_sites: path("js_invocation_sites"),
@@ -266,6 +274,19 @@ impl StartOptions {
                 return Err("request_content_budget_mib must be from 1 to 4096".into());
             }
         }
+        // Response bodies are kept only by content sessions, so both options
+        // shape request_content and mean nothing without it.
+        if let Some(budget) = self.response_body_budget_mib {
+            if !self.request_content {
+                return Err("response_body_budget_mib requires request_content".into());
+            }
+            if !(1..=16384).contains(&budget) {
+                return Err("response_body_budget_mib must be from 1 to 16384".into());
+            }
+        }
+        if self.response_media && !self.request_content {
+            return Err("response_media requires request_content".into());
+        }
         if self.js_invocation_sites.is_some() && self.js_invocation_saved_sites {
             return Err("Name js_invocation_sites or js_invocation_saved_sites, not both".into());
         }
@@ -335,6 +356,8 @@ impl StartOptions {
             "canvas_images": self.canvas_images,
             "request_content": self.request_content,
             "request_content_budget_mib": self.request_content.then(|| self.request_content_budget_mib.unwrap_or(256)),
+            "response_body_budget_mib": self.request_content.then(|| self.response_body_budget_mib.unwrap_or(512)),
+            "response_media": self.response_media,
             "request_stacks": self.request_stacks,
             "document_start": self.document_start,
             "js_invocation_saved_sites": self.js_invocation_saved_sites,
@@ -562,6 +585,8 @@ fn with_option_names(cause: &str) -> String {
             "REB_REQUEST_CONTENT_BUDGET_MIB",
             "request_content_budget_mib",
         ),
+        ("REB_RESPONSE_BODY_BUDGET_MIB", "response_body_budget_mib"),
+        ("REB_CAPTURE_RESPONSE_MEDIA", "response_media"),
         ("REB_NATIVE_REQUEST_STACKS", "request_stacks"),
         ("REB_CONSOLE_DOCUMENT_START", "document_start"),
         (
@@ -901,6 +926,14 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
     if let Some(budget) = options.request_content_budget_mib {
         command.env("REB_REQUEST_CONTENT_BUDGET_MIB", budget.to_string());
     }
+    if let Some(budget) = options.response_body_budget_mib {
+        command.env("REB_RESPONSE_BODY_BUDGET_MIB", budget.to_string());
+    }
+    // Inherited media capture was removed above; only a named option sets it.
+    command.env(
+        "REB_CAPTURE_RESPONSE_MEDIA",
+        if options.response_media { "1" } else { "0" },
+    );
     if let Some(path) = &options.guest_adapter {
         command.env("REB_NATIVE_WASM_GUEST_ADAPTER", path);
     }
@@ -1086,6 +1119,18 @@ mod tests {
                 "from 1 to 4096",
             ),
             (
+                json!({"response_body_budget_mib":64}),
+                "response_body_budget_mib requires request_content",
+            ),
+            (
+                json!({"request_content":true,"confirm_sensitive_capture":true,"response_body_budget_mib":16385}),
+                "from 1 to 16384",
+            ),
+            (
+                json!({"response_media":true}),
+                "response_media requires request_content",
+            ),
+            (
                 json!({"request_stacks":true,"category_mask":256}),
                 "request_stacks needs Network and Artifact",
             ),
@@ -1144,7 +1189,15 @@ mod tests {
         assert_eq!(effective["category_mask"], 4095);
         assert_eq!(effective["timeout_seconds"], 180);
         assert!(effective["request_content_budget_mib"].is_null());
+        assert!(effective["response_body_budget_mib"].is_null());
+        assert_eq!(effective["response_media"], false);
         assert!(effective.get("url").is_none());
+        let bodies = StartOptions::from_json(&json!({
+            "request_content":true,"confirm_sensitive_capture":true,"response_media":true
+        }));
+        assert!(bodies.validate().is_ok());
+        assert_eq!(bodies.effective()["response_body_budget_mib"], 512);
+        assert_eq!(bodies.effective()["response_media"], true);
         // Every switch an agent can name is shown, off unless named.
         for key in [
             "request_content",

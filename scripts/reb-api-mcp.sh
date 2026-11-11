@@ -21,6 +21,8 @@ sessions_root=""
 base_url=""
 allow_effects=0
 allow_session_start=0
+permission=""
+allow_sensitive_capture=0
 require_live=0
 timeout=""
 mode="serve"
@@ -78,10 +80,23 @@ lists start_live_session and starts even when no live endpoint exists yet. A
 session started through it becomes that connection's endpoint; any other
 endpoint change still retires the connection.
 
+--permission read-only|ask|auto|full is one ordered level in place of those
+flags, with the same meaning as the Origin Trace agent's setting. read-only,
+ask and auto omit captured content from results; ask and auto also list
+effectful tools (your client decides whether it asks before each); full adds
+live session start and the content reads, so captured source and bodies go to
+the model provider. Sensitive capture under full also needs
+--allow-sensitive-capture. None of these is authorization.
+
 Options:
   --allow-effects       Advertise effectful operations. Not authorization.
   --allow-session-start Also let the agent start live capture sessions.
                         Requires --allow-effects. Not authorization.
+  --permission LEVEL    read-only, ask, auto or full, in place of the flags
+                        above. Not authorization.
+  --allow-sensitive-capture
+                        With --permission full, let session starts name
+                        sensitive capture options. Not authorization.
   --require-live        Refuse idle capture or a disconnected native capture broker.
                         get_session_context remains readable after startup until
                         the endpoint file or backend instance changes.
@@ -333,6 +348,12 @@ build_mcp_args() {
   else
     mcp_exec_args+=(--base-url "$selection_value")
   fi
+  if [[ -n "$permission" ]]; then
+    mcp_exec_args+=(--permission "$permission")
+  fi
+  if [[ "$allow_sensitive_capture" == 1 ]]; then
+    mcp_exec_args+=(--allow-sensitive-capture)
+  fi
   if [[ "$allow_effects" == 1 ]]; then
     mcp_exec_args+=(--allow-effects)
   fi
@@ -350,7 +371,7 @@ build_mcp_args() {
 # Before an agent starts its first session there may be no endpoint file yet.
 # Only that absence is accepted; a present file is still checked.
 endpoint_optional() {
-  [[ "$allow_session_start" == 1 && "$selection_kind" == file && ! -e "$selection_value" ]]
+  [[ ("$allow_session_start" == 1 || "$permission" == full) && "$selection_kind" == file && ! -e "$selection_value" ]]
 }
 
 serve_mcp() {
@@ -378,6 +399,18 @@ health_check() {
 }
 
 effects_note() {
+  case "$permission" in
+  read-only) printf 'Permission read-only: structural reads only; captured content is omitted. Not authorization.\n' >&2; return ;;
+  ask) printf 'Permission ask: effectful tools are listed; keep your client asking before each call. Captured content is omitted. Not authorization.\n' >&2; return ;;
+  auto) printf 'Permission auto: effectful tools are listed and may run without asking if your client allows it. Captured content is omitted. Not authorization.\n' >&2; return ;;
+  full)
+    printf 'Permission full: effects, live session start and content reads; captured source and bodies go to the model provider. Start sessions only for an authorized target. Not authorization.\n' >&2
+    if [[ "$allow_sensitive_capture" == 1 ]]; then
+      printf 'Sensitive capture options are allowed for sessions this connection starts.\n' >&2
+    fi
+    return
+    ;;
+  esac
   if [[ "$allow_effects" == 1 ]]; then
     printf 'Write-capable tool list. --allow-effects is not authorization, capture redaction, or permission to send captured data to a model provider.\n' >&2
     if [[ "$allow_session_start" == 1 ]]; then
@@ -589,6 +622,19 @@ parse_args() {
       allow_session_start=1
       shift
       ;;
+    --permission)
+      [[ $# -ge 2 ]] || die "--permission needs a level: read-only, ask, auto or full."
+      [[ -z "$permission" ]] || die "Pass --permission once."
+      case "$2" in
+      read-only | ask | auto | full) permission=$2 ;;
+      *) die "--permission must be read-only, ask, auto or full." ;;
+      esac
+      shift 2
+      ;;
+    --allow-sensitive-capture)
+      allow_sensitive_capture=1
+      shift
+      ;;
     --timeout)
       [[ $# -ge 2 ]] || die "--timeout needs a number of seconds."
       [[ -z "$timeout" ]] || die "Pass --timeout once."
@@ -635,6 +681,12 @@ main() {
   parse_args "$@"
   if [[ "$allow_session_start" == 1 && "$allow_effects" != 1 ]]; then
     die "--allow-session-start requires --allow-effects. No server was started."
+  fi
+  if [[ -n "$permission" && ("$allow_effects" == 1 || "$allow_session_start" == 1) ]]; then
+    die "--permission replaces --allow-effects and --allow-session-start; pass one or the other. No server was started."
+  fi
+  if [[ "$allow_sensitive_capture" == 1 && "$permission" != full ]]; then
+    die "--allow-sensitive-capture needs --permission full. No server was started."
   fi
   case "$mode" in
   list) run_list ;;

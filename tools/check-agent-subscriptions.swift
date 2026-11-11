@@ -371,6 +371,12 @@ enum AgentSubscriptionChecks {
     func ended(_ turn: String) -> Bool { !of("turnEnd", turn: turn).isEmpty }
   }
 
+  final class Answer: @unchecked Sendable {
+    var allow: Bool?
+    var message: String?
+    func set(_ allow: Bool, _ message: String?) { self.allow = allow; self.message = message }
+  }
+
   static func checkCLIs(api: URL, endpoint: URL, root: URL) async {
     let me = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
     let cliRoot = root.appendingPathComponent("agent-cli", isDirectory: true)
@@ -379,9 +385,9 @@ enum AgentSubscriptionChecks {
     environment["ANTHROPIC_BASE_URL"] = "https://evil.example"
     environment["XAI_API_KEY"] = "xai-must-not-pass-0000"
     environment["GROK_OAUTH2_REFERRER"] = "t3code"
-    let configuration = { (provider: AgentProviderKind, effects: Bool) in
+    let configuration = { (provider: AgentProviderKind, level: AgentPermission) in
       AgentSession.Configuration(provider: provider, auth: .subscription, model: provider == .grok ? "grok-test" : "claude-test",
-        apiExecutable: api, apiBaseURL: endpoint, allowEffects: effects, transcriptDirectory: root.appendingPathComponent("cli-transcripts"))
+        apiExecutable: api, apiBaseURL: endpoint, permission: level, transcriptDirectory: root.appendingPathComponent("cli-transcripts"))
     }
 
     for provider in [AgentProviderKind.claude, .grok] {
@@ -403,14 +409,15 @@ enum AgentSubscriptionChecks {
           "Grok: models come from grok models")
       }
 
-      for effects in [false, true] {
+      for level in [AgentPermission.readOnly, .ask, .auto, .full] {
+        let tag = level.rawValue
         let events = Rows()
         let session = AgentSession(emit: { _ in })
         session.setPanelVisible(true)
-        try! await session.enable(configuration(provider, effects), sessionKey: "cli-\(provider.rawValue)-\(effects)")
+        try! await session.enable(configuration(provider, level), sessionKey: "cli-\(provider.rawValue)-\(tag)")
         check(!session.childIsRunning, "\(label): native lists the tools, then leaves the tool server to the CLI")
         let type: AgentCLIDriver.Type = provider == .grok ? AgentGrokDriver.self : AgentClaudeDriver.self
-        let driver = type.init(provider: provider, executable: me, workingDirectory: directory, configuration: configuration(provider, effects),
+        let driver = type.init(provider: provider, executable: me, workingDirectory: directory, configuration: configuration(provider, level),
           tools: session.tools, listedToolNames: session.listedToolNames, environment: environment, emit: { events.all.append($0) })
         check(!driver.isRunning, "\(label): enabling starts no CLI")
         if provider == .grok {
@@ -418,19 +425,19 @@ enum AgentSubscriptionChecks {
         }
 
         // A structural read runs without asking, through the real tool server.
-        try! await driver.send(turnId: "r\(effects)", text: "What loaded? SCENARIO:read")
-        await waitFor("\(label) read turn") { events.ended("r\(effects)") }
-        let tools = events.of("tool", turn: "r\(effects)")
+        try! await driver.send(turnId: "r\(tag)", text: "What loaded? SCENARIO:read")
+        await waitFor("\(label) read turn") { events.ended("r\(tag)") }
+        let tools = events.of("tool", turn: "r\(tag)")
         check(tools.map { $0["state"] as? String ?? "" } == ["running", "done"], "\(label): the read is shown running, then done: \(tools)")
         check(tools.last?["name"] as? String == "get_session_summary", "\(label): the tool row names the reb-api tool")
         let result = tools.last?["result"] as? String ?? ""
         check(result.contains("session") && !result.contains("SECRET_SOURCE_BODY"), "\(label): the real tool server answered without content")
         check(events.of("approval").isEmpty, "\(label): a structural read does not ask")
-        let text = events.of("text", turn: "r\(effects)").map { $0["delta"] as? String ?? "" }.joined()
+        let text = events.of("text", turn: "r\(tag)").map { $0["delta"] as? String ?? "" }.joined()
         check(text.contains("Answer [cite session=9 artifact=5]."), "\(label): model text streams to the panel: \(text)")
-        check(!events.of("assistantDone", turn: "r\(effects)").isEmpty, "\(label): finished text is reported for the transcript")
+        check(!events.of("assistantDone", turn: "r\(tag)").isEmpty, "\(label): finished text is reported for the transcript")
         check(events.all.allSatisfy { $0["cli"] as? Bool == true }, "\(label): every row is marked as coming from the CLI")
-        let end = events.of("turnEnd", turn: "r\(effects)").last ?? [:]
+        let end = events.of("turnEnd", turn: "r\(tag)").last ?? [:]
         check((end["inputTokens"] as? Int ?? 0) > 0 && (end["outputTokens"] as? Int ?? 0) > 0, "\(label): usage is reported")
         check(driver.isRunning, "\(label): the CLI keeps the conversation between turns")
 
@@ -449,15 +456,19 @@ enum AgentSubscriptionChecks {
           let pair = { (flag: String) in arguments.firstIndex(of: flag).map { arguments[$0 + 1] } }
           check(pair("--tools") == "" && pair("--setting-sources") == "" && pair("--permission-prompt-tool") == "stdio",
             "Claude: no built-in tools, no settings sources, permission prompts come here")
-          check(pair("--system-prompt") == agentSystemPrompt && pair("--model") == "claude-test", "Claude: the shared prompt and model")
+          check(pair("--system-prompt") == agentSystemPrompt(level) && pair("--model") == "claude-test", "Claude: the shared prompt for \(tag) and model")
           let hidden = pair("--disallowed-tools") ?? ""
           check(hidden.contains("mcp__reb__get_artifact_content") && !hidden.contains("mcp__reb__get_events"),
             "Claude: tools the agent may not use are hidden from the model")
+          check(hidden.contains("mcp__reb__get_health") == (level != .full), "Claude: local store paths are listed only with Full access")
           let mcp = (try? JSONSerialization.jsonObject(with: Data((pair("--mcp-config") ?? "").utf8))) as? [String: Any]
           let servers = mcp?["mcpServers"] as? [String: Any] ?? [:]
           let rebArguments = (servers["reb"] as? [String: Any])?["args"] as? [String] ?? []
-          check(Array(servers.keys) == ["reb"] && rebArguments.contains("--omit-content")
-            && rebArguments.contains("--allow-effects") == effects, "Claude: one reb-api server with the graph's gates")
+          check(Array(servers.keys) == ["reb"] && rebArguments.firstIndex(of: "--permission").map { rebArguments[$0 + 1] } == tag
+            && !rebArguments.contains("--allow-effects") && !rebArguments.contains("--allow-sensitive-capture"),
+            "Claude: one reb-api server at the same --permission level as the graph: \(rebArguments)")
+          let serverEnvironment = (servers["reb"] as? [String: Any])?["env"] as? [String: String] ?? [:]
+          check((serverEnvironment["HOME"] != nil) == (level == .full), "Claude: only a Full access tool server gets a home folder")
         } else {
           for flag in ["--disable-web-search", "--no-subagents", "--no-leader", "stdio"] { check(arguments.contains(flag), "Grok: \(flag)") }
           check(arguments.firstIndex(of: "--permission-mode").map { arguments[$0 + 1] } == "default", "Grok: it asks before every tool")
@@ -468,30 +479,36 @@ enum AgentSubscriptionChecks {
             "Grok: the researcher's own MCP server is replaced by a disabled stub")
           let profile = (try? String(contentsOf: directory.appendingPathComponent("origin-trace-agent.md"), encoding: .utf8)) ?? ""
           check(profile.contains("tools:\n  - search_tool\n  - use_tool\n---") && profile.contains("agents_md: false")
-            && profile.contains(agentSystemPrompt), "Grok: the agent profile allows only the two MCP tools")
+            && profile.contains(agentSystemPrompt(level)), "Grok: the agent profile allows only the two MCP tools, with the \(tag) prompt")
         }
 
-        // An action asks, Deny refuses it, Allow once runs it. Only with effects.
-        try! await driver.send(turnId: "a\(effects)", text: "Pause capture SCENARIO:action")
-        if effects {
-          await waitFor("\(label) approval") { !events.of("approval", turn: "a\(effects)").isEmpty || events.ended("a\(effects)") }
-          let approval = events.of("approval", turn: "a\(effects)").first ?? [:]
+        // At Ask for actions an action asks, Deny refuses it and Allow once
+        // runs it. From Auto-approve up it runs at once; read only refuses it.
+        try! await driver.send(turnId: "a\(tag)", text: "Pause capture SCENARIO:action")
+        if level >= .auto {
+          await waitFor("\(label) automatic action") { events.ended("a\(tag)") }
+          check(events.of("approval", turn: "a\(tag)").isEmpty, "\(label): \(tag) runs an action without asking")
+          let ran = events.of("tool", turn: "a\(tag)").map { $0["state"] as? String ?? "" }
+          check(ran.first == "running" && ran.count == 2 && ran.last != "refused", "\(label): the action ran and is shown with its result: \(ran)")
+        } else if level == .ask {
+          await waitFor("\(label) approval") { !events.of("approval", turn: "a\(tag)").isEmpty || events.ended("a\(tag)") }
+          let approval = events.of("approval", turn: "a\(tag)").first ?? [:]
           check(approval["name"] as? String == "capture_action", "\(label): an action waits for a decision")
           check(!driver.decide(callId: "unknown", allow: true), "\(label): an unknown decision is ignored")
           check(driver.decide(callId: approval["callId"] as? String ?? "", allow: false), "\(label): Deny answers the waiting call")
-          await waitFor("\(label) denied turn") { events.ended("a\(effects)") }
-          check(events.of("tool", turn: "a\(effects)").last?["state"] as? String == "denied", "\(label): a denied action is shown denied")
-          try! await driver.send(turnId: "b\(effects)", text: "Pause capture SCENARIO:action")
-          await waitFor("\(label) second approval") { !events.of("approval", turn: "b\(effects)").isEmpty }
-          let second = events.of("approval", turn: "b\(effects)").first ?? [:]
+          await waitFor("\(label) denied turn") { events.ended("a\(tag)") }
+          check(events.of("tool", turn: "a\(tag)").last?["state"] as? String == "denied", "\(label): a denied action is shown denied")
+          try! await driver.send(turnId: "b\(tag)", text: "Pause capture SCENARIO:action")
+          await waitFor("\(label) second approval") { !events.of("approval", turn: "b\(tag)").isEmpty }
+          let second = events.of("approval", turn: "b\(tag)").first ?? [:]
           _ = driver.decide(callId: second["callId"] as? String ?? "", allow: true)
-          await waitFor("\(label) allowed turn") { events.ended("b\(effects)") }
-          let ran = events.of("tool", turn: "b\(effects)").map { $0["state"] as? String ?? "" }
+          await waitFor("\(label) allowed turn") { events.ended("b\(tag)") }
+          let ran = events.of("tool", turn: "b\(tag)").map { $0["state"] as? String ?? "" }
           check(ran.first == "running" && ran.count == 2, "\(label): Allow once runs that call: \(ran)")
         } else {
-          await waitFor("\(label) refused action") { events.ended("a\(effects)") }
-          check(events.of("approval", turn: "a\(effects)").isEmpty, "\(label): with actions off nothing asks")
-          check(events.of("tool", turn: "a\(effects)").last?["state"] as? String == "refused", "\(label): an unlisted action is refused")
+          await waitFor("\(label) refused action") { events.ended("a\(tag)") }
+          check(events.of("approval", turn: "a\(tag)").isEmpty, "\(label): read only asks nothing")
+          check(events.of("tool", turn: "a\(tag)").last?["state"] as? String == "refused", "\(label): an unlisted action is refused")
         }
         let decisions = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         let answered = decisions.filter { $0.hasPrefix(provider == .claude ? "stand-in-decision" : "stand-in-outcome") }.compactMap {
@@ -500,7 +517,7 @@ enum AgentSubscriptionChecks {
         check(!answered.contains { json($0).contains("always") }, "\(label): no call is ever answered with a standing grant")
 
         // Stop kills the CLI and everything it started, even outside its group.
-        try! await driver.send(turnId: "h\(effects)", text: "Long one SCENARIO:hold")
+        try! await driver.send(turnId: "h\(tag)", text: "Long one SCENARIO:hold")
         let helpers = directory.appendingPathComponent("stand-in-helpers")
         try? FileManager.default.removeItem(at: helpers)
         await waitFor("\(label) helpers") { FileManager.default.fileExists(atPath: helpers.path) }
@@ -508,20 +525,20 @@ enum AgentSubscriptionChecks {
         let cliPid = driver.process?.pid ?? 0
         check(pids.count == 2 && pids.allSatisfy(alive), "\(label): the stand-in started two helpers")
         driver.cancel()
-        check(events.of("turnEnd", turn: "h\(effects)").last?["stopped"] as? Bool == true, "\(label): Stop ends the turn as stopped")
+        check(events.of("turnEnd", turn: "h\(tag)").last?["stopped"] as? Bool == true, "\(label): Stop ends the turn as stopped")
         check(!driver.isRunning, "\(label): Stop ends the CLI")
         await waitFor("\(label) process group gone", timeout: 5) { !alive(cliPid) && !pids.contains(where: alive) }
 
         // The next question starts a new conversation and says so.
-        try! await driver.send(turnId: "n\(effects)", text: "Again SCENARIO:read")
-        await waitFor("\(label) restart") { events.ended("n\(effects)") }
-        check(events.of("notice", turn: "n\(effects)").contains { ($0["text"] as? String ?? "").contains("new \(label) CLI conversation") },
+        try! await driver.send(turnId: "n\(tag)", text: "Again SCENARIO:read")
+        await waitFor("\(label) restart") { events.ended("n\(tag)") }
+        check(events.of("notice", turn: "n\(tag)").contains { ($0["text"] as? String ?? "").contains("new \(label) CLI conversation") },
           "\(label): a restarted CLI says the conversation is new")
 
         // A built-in tool or a foreign permission ends the CLI.
         let foreign = provider == .claude ? ["foreign", "init-foreign", "api-key"] : ["builtin", "foreign-permission"]
         for scenario in foreign {
-          let id = "\(scenario)-\(effects)"
+          let id = "\(scenario)-\(tag)"
           try! await driver.send(turnId: id, text: "Try SCENARIO:\(scenario)")
           await waitFor("\(label) \(scenario)") { events.ended(id) }
           let message = events.of("error", turn: id).last?["message"] as? String ?? ""
@@ -529,29 +546,57 @@ enum AgentSubscriptionChecks {
           check(!driver.isRunning, "\(label): \(scenario) leaves no CLI running")
         }
         if provider == .claude {
-          try! await driver.send(turnId: "m\(effects)", text: "Noise SCENARIO:malformed")
-          await waitFor("Claude malformed") { events.ended("m\(effects)") }
-          check(events.of("error", turn: "m\(effects)").contains { ($0["message"] as? String ?? "").contains("could not read") },
+          try! await driver.send(turnId: "m\(tag)", text: "Noise SCENARIO:malformed")
+          await waitFor("Claude malformed") { events.ended("m\(tag)") }
+          check(events.of("error", turn: "m\(tag)").contains { ($0["message"] as? String ?? "").contains("could not read") },
             "Claude: unreadable output is a visible error row")
-          check(events.of("error", turn: "m\(effects)").count == 1 && driver.isRunning, "Claude: and the turn still completes")
+          check(events.of("error", turn: "m\(tag)").count == 1 && driver.isRunning, "Claude: and the turn still completes")
         } else {
           FileManager.default.createFile(atPath: directory.appendingPathComponent("stand-in-leak").path, contents: Data())
-          try! await driver.send(turnId: "l\(effects)", text: "Again SCENARIO:read")
-          await waitFor("Grok leak") { events.ended("l\(effects)") }
-          check((events.of("error", turn: "l\(effects)").last?["message"] as? String ?? "").contains("MCP servers from your settings"),
+          try! await driver.send(turnId: "l\(tag)", text: "Again SCENARIO:read")
+          await waitFor("Grok leak") { events.ended("l\(tag)") }
+          check((events.of("error", turn: "l\(tag)").last?["message"] as? String ?? "").contains("MCP servers from your settings"),
             "Grok: a server merged from the researcher's settings stops the CLI")
           try? FileManager.default.removeItem(at: directory.appendingPathComponent("stand-in-leak"))
           FileManager.default.createFile(atPath: directory.appendingPathComponent("stand-in-sticky").path, contents: Data())
-          try! await driver.send(turnId: "s\(effects)", text: "Again SCENARIO:read")
-          await waitFor("Grok sticky") { events.ended("s\(effects)") }
-          check((events.of("error", turn: "s\(effects)").last?["message"] as? String ?? "").contains("was not started"),
+          try! await driver.send(turnId: "s\(tag)", text: "Again SCENARIO:read")
+          await waitFor("Grok sticky") { events.ended("s\(tag)") }
+          check((events.of("error", turn: "s\(tag)").last?["message"] as? String ?? "").contains("was not started"),
             "Grok: a server the stub cannot turn off keeps Grok from starting")
           try? FileManager.default.removeItem(at: directory.appendingPathComponent("stand-in-sticky"))
+        }
+        if level == .full {
+          // A sensitive start is refused natively, whatever the CLI asks for.
+          driver.turn = AgentCLITurn(id: "sensitive-\(tag)")
+          let refusal = Answer()
+          driver.permission(callId: "s1", cliName: provider == .claude ? "mcp__reb__start_live_session" : "reb__start_live_session",
+            input: ["request_content": true, "confirm_sensitive_capture": true]) { allow, message in refusal.set(allow, message) }
+          check(refusal.allow == false && (refusal.message ?? "").contains("were not allowed"), "\(label): sensitive capture needs its own consent")
+          driver.endTurn()
+          // Lowering from Full access ends the CLI, whose tool server returns content.
+          try! await driver.send(turnId: "f\(tag)", text: "Again SCENARIO:read")
+          await waitFor("\(label) full read") { events.ended("f\(tag)") }
+          check(driver.isRunning, "\(label): the Full access CLI is running")
+          try! session.lower(to: .auto)
+          driver.lower(to: .auto)
+          check(!driver.isRunning, "\(label): lowering below Full access ends the CLI")
+          check(events.of("notice").contains { ($0["text"] as? String ?? "").contains("restarts at Auto-approve actions") },
+            "\(label): and says why")
+          try! await driver.send(turnId: "g\(tag)", text: "Again SCENARIO:read")
+          await waitFor("\(label) lowered read") { events.ended("g\(tag)") }
+          let relaunched = invocation(directory, provider == .claude ? "claude" : "grok")["arguments"] as? [String] ?? []
+          let lowered = provider == .claude
+            ? relaunched.firstIndex(of: "--system-prompt").map { relaunched[$0 + 1] } == agentSystemPrompt(.auto)
+            : ((try? String(contentsOf: directory.appendingPathComponent("origin-trace-agent.md"), encoding: .utf8)) ?? "").contains(agentSystemPrompt(.auto))
+          check(lowered, "\(label): the next CLI starts with the lowered prompt")
+          // Lowering a running CLI that keeps its tool server tells it in the next question.
+          driver.lower(to: .ask)
+          check(driver.isRunning, "\(label): lowering below Auto-approve keeps the conversation")
         }
         driver.shutdown()
         session.disable()
       }
-      print("PASS agent subscriptions: \(label) CLI driver, isolation flags and environment, structural reads, Allow once and Deny, refusals, Stop with process-group kill (stand-in CLI, real reb-api)")
+      print("PASS agent subscriptions: \(label) CLI driver at every permission level, isolation flags and environment, structural reads, Allow once and Deny, actions without asking, sensitive refusal, lowering, refusals, Stop with process-group kill (stand-in CLI, real reb-api)")
     }
   }
 }

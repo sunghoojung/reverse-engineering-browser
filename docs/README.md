@@ -34,6 +34,9 @@ skills under `.agents/skills/`.
 - [Agent cookbook](development/agent-cookbook.md): exact MCP tool calls for
   checking a capture, finding Wasm modules and samples, waiting for activity,
   and following native requests
+- [Agent feature coverage](development/agent-feature-coverage.md): every
+  Origin Trace feature, the operations behind it and the permission level it
+  needs, with what is not exposed and why.
 - [Document-start Console scripts](development/console-document-start-scripts.md):
   enabling the separately armed experiment, writing a rule that cannot widen,
   and the example snippet for the local synthetic page

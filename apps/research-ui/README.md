@@ -306,25 +306,28 @@ default. Turning it on is an explicit action for the current session, behind a
 disclosure, and stops completely when it is turned off.
 
 The header is one row: **Agent**, a status chip with the running model and how
-it is paid for (for example *Claude Opus 5.5 · API key*, or *Off*), and icon
-buttons for **New conversation**, a menu and close. The menu holds **What
-leaves this Mac** (the disclosure and the account details), **Change provider
-or model**, **Clear transcript** (behind a confirmation) and **Turn off**; tool
-and token counts are in the menu and the chip's tooltip.
+it is paid for (for example *Claude Opus 5.5 · API key*, or *Off*), a badge
+with the running permission level (*Read only*, *Ask*, *Auto-approve* in amber
+or *Full access* in red), and icon buttons for **New conversation**, a menu and
+close. The menu holds **What leaves this Mac** (the disclosure and the account
+details), **Change provider or model**, **Clear transcript** (behind a
+confirmation), **Lower to** each level below the running one, **Raise
+permission…** and **Turn off**; tool and token counts are in the menu and the
+chip's tooltip.
 
 - **Off**: a centered setup with one card per provider and its real readiness
   (a stored key, a ChatGPT sign-in, or what the CLI reported), the card's own
   **Add key**, **Sign in** or **Check again**, and **Turn on for this
   session**. A CLI is asked about its sign-in only when its card is chosen.
 - **Consent**: what leaves the machine for the chosen provider and payment, and
-  the **Let the agent request actions** option, before anything starts.
+  the **Permission** choice below, before anything starts.
 - **On**: the conversation, with the composer card at the bottom. Its model
   button opens a picker grouped by provider; choosing another provider, payment
   or model turns the agent off and asks again, as doing it by hand does. Return
   sends and Shift+Return adds a line; during a turn Send becomes Stop and
   Return does nothing. The empty state offers suggestions that fill the
   composer without sending.
-- **New conversation** enables the same provider, model, permission and
+- **New conversation** enables the same provider, model, permission level and
   session again with an empty history. Earlier rows stay in the local
   transcript (**Show earlier rows**) unless **Clear transcript** deleted them.
 - A tool call is one collapsed line with its state, arguments and result size.
@@ -332,6 +335,54 @@ and token counts are in the menu and the chip's tooltip.
   sent to the provider in a bounded, scrollable block; the block is drawn only
   while open. An action request is an amber card with **Deny** and **Allow
   once**, focused when it appears while the researcher is in the dock.
+
+### Permission levels
+
+One setting with four ordered levels, chosen in consent for this session. The
+same names are used by `reb-api mcp --permission`, so a Claude Code or Codex
+client connected through `scripts/reb-api-mcp.sh` can run at the same level
+([local coding agents](../../docs/development/local-coding-agents.md#permission-levels)).
+
+| Level | Tools the model gets | What a call needs | What leaves this Mac |
+| --- | --- | --- | --- |
+| **Read only** (default) | Structural reads | Nothing | Question, pins, structural results |
+| **Ask for actions** | Reads and actions | **Allow once** per action | The same |
+| **Auto-approve actions** | Reads and actions | Nothing; every call and result is in the transcript | The same |
+| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies and every content field of results |
+
+Below Full access the tool server omits captured content from every result,
+and reads that return local store paths (`get_health`) or the researcher's own
+drafts (Collection, Analyst workspace) are not offered. `get_artifact_content`
+is never offered: Full access reads bytes as text pages instead.
+
+- The default is Read only. The page remembers the last choice across launches
+  only up to Ask for actions.
+- Consent is the only confirmation. It lists the levels with the chosen one's
+  line of text, then one box with what leaves the Mac. For Auto-approve and
+  Full access that box is the plain-language warning; for Full access it lists
+  exactly what more leaves the Mac and offers a separate **Also allow
+  sensitive capture options** box, off by default and never remembered,
+  without which the agent's own sessions cannot name `request_content`,
+  `response_media`, `canvas_images` or `js_invocation_digests`. The primary
+  button names the level (**Turn on Full access**). At the normal window size
+  the box and the button are in view together; at a short window, choosing a
+  level scrolls them in.
+- Native accepts only a known level, and the sensitive choice only with Full
+  access (`AgentPermission.requested`), before it touches the running agent.
+- **Lower to** applies at once and keeps the conversation: native filters the
+  tools, the next tool call is decided at the lower level, the tool server
+  restarts at it, and the graph's next model call gets the lower prompt. A CLI
+  whose own tool server ran at Full access is ended and starts again at the
+  lower level with the next question; a CLI kept running is told the new level
+  in its next question.
+- **Raise permission…** turns the agent off and opens consent with the next
+  level chosen. **Stop** ends a turn and **Turn off** ends everything at every
+  level.
+- The system prompt has one paragraph per level (`AgentCore.swift`, matched by
+  `agent-runtime/src/runtime.mjs`). Below Full access it says content stays on
+  the Mac unless pinned; at Full access it says content read through tools goes
+  to the provider, how to page through it, and whether sensitive capture
+  options are allowed.
 
 ### Keys and subscriptions
 
@@ -407,8 +458,9 @@ they use the subscription. A CLI starts with the first question, not when the
 switch turns on, and keeps its conversation between turns. **Stop**, the switch,
 a navigation, app exit and 15 idle minutes kill its whole process group,
 including helpers it moved to another group; the next question starts a new
-conversation and says so. Every tool call it wants comes to native first: a
-structural read runs, an action waits for **Allow once** or **Deny**, anything
+conversation and says so. Every tool call it wants comes to native first and
+is decided by the running level (`AgentToolGate`): what the level runs, runs;
+at Ask for actions an action waits for **Allow once** or **Deny**; anything
 else is refused. Lines longer than 16 MiB, more than 128 tool rounds or
 repeated unreadable output stop it with a visible row.
 
@@ -467,12 +519,19 @@ The native app keeps what the page must not hold:
   chunks on SSE event boundaries, so token streaming works. An error body is
   bounded and scrubbed of anything shaped like a key. This is a transport for
   the two chat models, not a general proxy.
-- **The tool server.** One `reb-api mcp` child (the packaged `OriginTraceAPI`)
-  with `--base-url` set to this workspace's loopback API. It runs only while the
-  agent is on. It stops when the switch turns off, when the session or document
+- **The permission level**, set only by enabling from consent and by
+  lowering. `AgentToolGate` decides every tool call by it for the LangGraph
+  loop and both CLI drivers.
+- **The tool server.** One `reb-api mcp --permission <level>` child (the
+  packaged `OriginTraceAPI`) with `--base-url` set to this workspace's loopback
+  API, plus `--allow-sensitive-capture` only when that box was ticked. Below
+  Full access its environment is only `LANG` and `LC_ALL`; at Full access it
+  also gets `HOME`, `USER`, `LOGNAME`, `TMPDIR`, a fixed `PATH`, and the app's
+  `REB_BRAVE_BINARY`, `REB_LIVE_SESSION_ROOT` and `REB_OPEN_COMMAND` when set,
+  which starting a live session needs. It runs only while the agent is on. It stops when the switch turns off, when the session or document
   changes, when the dock closes with no turn running, or after five idle minutes
-  with the dock open; the next tool call starts it again. Native refuses any
-  action call that did not come with Allow once.
+  with the dock open; the next tool call starts it again. At Ask for actions
+  native refuses any action call that did not come with Allow once.
 - **The transcript file**, below.
 
 A workspace without a loopback API (the bundled offline workspace) says the
@@ -482,17 +541,17 @@ agent is unavailable.
 
 As the disclosure says: the question, excerpts the researcher pins, and every
 tool result, including its URLs, hosts, identifiers and counts. Tool calls and
-full results are visible in the transcript. The tool surface is `reb-api mcp`
-started without `--allow-effects`, so only read-only tools are listed, narrowed
-further to structural reads (`AgentCore.swift`). `--omit-content` makes every
-response structural: rows and identifiers stay, while source, bytecode,
-disassembly, bodies, and long strings do not. Those leave only when pinned. The
+full results are visible in the transcript. Below Full access the level
+includes `--omit-content`, which makes every response structural: rows and
+identifiers stay, while source, bytecode, disassembly, bodies, and long
+strings do not. Those leave only when pinned. At Full access they leave
+whenever the agent reads them, as the consent box says. The
 ChatGPT path stores nothing at OpenAI (`store: false`, with encrypted reasoning
 replayed from local history). Pins are bounded to 128 KiB each and 512 KiB per
 turn, and a cut pin says so.
 
-**Actions** are off unless the researcher opts in during the disclosure step,
-which adds `--allow-effects` for that session.
+**Actions** are off unless the researcher chooses Ask for actions or higher in
+consent for that session.
 
 ### Citations, rendering and the transcript
 

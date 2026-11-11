@@ -14,6 +14,12 @@ reb-api call get_events --read-only --endpoint-file "$ENDPOINT" \
   --param type=gap --param limit=20
 ```
 
+Each recipe works at the [permission level](local-coding-agents.md#permission-levels)
+it names: Read only, Ask for actions (or Auto-approve, the same tools), or Full
+access. `get_session_context` reports the connection's level in
+`mcp_admission`. Every Origin Trace feature and the operations behind it are
+in the [feature coverage table](agent-feature-coverage.md).
+
 Keep responses small. JSON over 128 KiB comes back from MCP as a structural
 summary (counts and shapes, no records), so filter first and use a `limit`
 around 20 to 50. Every filtered read returns `query`. Pass
@@ -272,8 +278,9 @@ workspace.
 
 ## 14. Start a session with capture options
 
-Needs `reb-api mcp --allow-effects --allow-session-start` and an authorized
-target. Name every switch you need; all are off otherwise.
+Needs `reb-api mcp --permission full` (or `--allow-effects
+--allow-session-start`) and an authorized target. Name every switch you need;
+all are off otherwise.
 
 ```text
 start_live_session {"url": "https://authorized.example/", "wasm_dispatch": true}
@@ -290,7 +297,12 @@ Canvas content for this target; `"request_content": true` (request paths,
 queries, headers, cookies and bodies; read headers with `get_request_headers`
 and cookies with `get_request_cookies` and `get_cookie_provenance`) and `"js_invocation_digests": true` take the same
 confirmation; `"request_content_budget_mib": 1024` raises the request content
-kept from the default 256 MiB. `"request_stacks": true` records the stack that
+kept from the default 256 MiB, `"response_body_budget_mib": 2048` the response
+bodies kept from the default 512 MiB, and `"response_media": true` also keeps
+element images, audio, video and fonts. Under `--permission full` these
+sensitive options are refused unless the connection also has
+`--allow-sensitive-capture` (in the dock, **Also allow sensitive capture
+options**). `"request_stacks": true` records the stack that
 started each renderer request for `get_request_stack`. `"document_start": true`
 permits document-start Console scripts (recipe 19). `"js_invocation_sites": "/absolute/path/sites.json"`, or
 `"js_invocation_saved_sites": true` for the sites agent sessions saved with
@@ -446,6 +458,73 @@ does not enter. `trap` and `did_not_return` have `entered: true` and no
 `results`. A stale document or a different instance is refused and does not
 change memory. These commands do not replace dispatch capture.
 Details: [live Wasm instance commands](../../protocol/live-wasm-instance-v1.md).
+
+## 21. Read source or a body in pages
+
+Needs Full access (`--permission full` or `--allow-content`): the result is
+captured content that goes to the model provider.
+
+```text
+get_artifacts {"kind": "javascript", "host": "authorized.example", "limit": 20}
+get_artifact_text {"artifact_id": "41"}
+get_artifact_text {"artifact_id": "41", "offset": 65536}
+get_artifact_text {"artifact_id": "52", "encoding": "hex", "length": 256}
+```
+
+Good: `text` with `offset`, `length` and `next_offset`. Keep calling with
+`offset` set to `next_offset` until it is null; `complete: true` means one
+page held the artifact. Use `encoding` `hex` or `base64` for Wasm modules,
+bytecode buffers and binary bodies. Request and response bodies are
+`request_body` and `response_body` artifacts; a request's body artifact is
+named in its `get_events` records. For readable JavaScript, page
+`get_source_format {"session_id": "1", "artifact_id": "41", "start_line": 1,
+"line_count": 400}` instead, which at Full access also lays out JSON and
+JavaScript bodies. `replacements` counts bytes that were not UTF-8. Header blocks and cookie
+lists are refused: read them with `get_request_headers` and
+`get_request_cookies`, which withhold credential and cookie values.
+
+## 22. Find text across every retained file
+
+Needs Full access.
+
+```text
+search_artifact_text {"q": "sha256", "kind": "javascript", "limit": 50}
+search_artifact_text {"q": "sha256", "kind": "javascript", "limit": 50, "offset": 50}
+```
+
+Good: `matches` with `artifact_id`, `line`, `column` and a little context, and
+`coverage.complete: true`. `next_offset` pages further. A file named in
+`coverage.not_fully_searched` was skipped (over 16 MiB) or hit 100 matches;
+narrow with `artifact_id`, `sha256` or `host`, or read it with recipe 21. The
+literal is plain text: there are no patterns, and `match_case` false folds
+ASCII letters only.
+
+## 23. Read a large Wasm module's disassembly
+
+Structure works at every level; instruction text needs Full access.
+
+```text
+inspect_wasm {"artifact_id": "9", "sections": "code", "row_limit": 1024}
+inspect_wasm {"artifact_id": "9", "sections": "code", "row_offset": 1024, "row_limit": 1024}
+```
+
+Good: `row_window` with `total_rows` and `next_offset`; continue until it is
+null. A window stops early to fit the inline limit. For one function's blocks
+use `get_wasm_functions` then `get_wasm_function_graph`.
+
+## 24. Work autonomously at Full access
+
+With `--permission full` the agent can run a whole investigation without
+asking, while the researcher watches every call. A complete loop:
+
+1. `get_session_context`, then `get_session_summary`, for the researcher's
+   session this connection was opened on.
+2. `start_live_session {"url": "<the authorized page>", "request_stacks":
+   true}` when a fresh capture is needed. Wait with `wait_for_events`.
+3. Read with recipes 2, 10 and 21 to 23, and act with the Console (recipe 18)
+   or input (recipe 17) inside the authorized target only.
+4. `session_action {"body": {"action": "end", "confirm": true}}`. The
+   connection returns to the session it was opened on.
 
 ## Response shapes at a glance
 

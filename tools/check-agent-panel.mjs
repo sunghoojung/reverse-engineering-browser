@@ -68,8 +68,17 @@ export async function checkAgentPanel() {
   log.appendText('next', 'z'.repeat(4000));
   assert.equal(log.get('next').text.length, 8000, 'a streaming row is not evicted');
 
+  // Permission levels: never remembered above Ask for actions.
+  assert.deepEqual(copy(model.PERMISSIONS.map(level => level.id)), ['read-only', 'ask', 'auto', 'full']);
+  for (const [stored, remembered] of [['full', 'ask'], ['auto', 'ask'], ['ask', 'ask'], ['read-only', 'read-only'], [null, 'read-only'], ['everything', 'read-only']]) {
+    assert.equal(model.rememberable(stored), remembered, `remembered ${stored}`);
+  }
+
   // Panel states through the shipped controller and a fake native bridge.
   const posted = [];
+  // Consent in the dock is the only confirmation. Native checks what enable
+  // carries, as AgentPermission.requested does, and this fake refuses the same.
+  const levelsNative = ['read-only', 'ask', 'auto', 'full'];
   let engine = {type: 'status', phase: 'off', running: false, childRunning: false, tools: [], provider: null, model: null, effects: false};
   // Later the native side reports subscriptions too, as AgentBridge.status does.
   let subscriptions = false, standIn = true, grokSignedIn = false, chatgptSignedIn = false;
@@ -83,9 +92,19 @@ export async function checkAgentPanel() {
     posted.push(message);
     if (message.op === 'enable') {
       const cli = message.auth === 'subscription' && message.provider !== 'chatgpt';
+      const permission = message.permission;
+      if (!levelsNative.includes(permission)) return Promise.reject(new Error('Choose a permission level to turn the agent on.'));
+      if (typeof message.sensitive !== 'boolean' || (message.sensitive && permission !== 'full')) {
+        return Promise.reject(new Error('Sensitive capture options belong to Full access.'));
+      }
       engine = {...engine, phase: 'ready', childRunning: !cli, provider: message.provider, model: message.model || 'claude-opus-5-5',
-        auth: message.auth, loop: cli ? 'cli' : 'langgraph', cliRunning: false, tools: [{name: 'get_events', readOnly: true}]};
-      return Promise.resolve({...status(), tools: [{name: 'get_events', description: 'Read', schema: {type: 'object'}, readOnly: true}]});
+        auth: message.auth, loop: cli ? 'cli' : 'langgraph', cliRunning: false, permission, sensitive: permission === 'full' && message.sensitive === true,
+        tools: [{name: 'get_events', readOnly: true, needsApproval: false}]};
+      return Promise.resolve({...status(), tools: [{name: 'get_events', description: 'Read', schema: {type: 'object'}, readOnly: true, needsApproval: false}]});
+    }
+    if (message.op === 'lowerPermission') {
+      engine = {...engine, permission: message.permission, sensitive: false};
+      return Promise.resolve({...status(), tools: [{name: 'get_events', description: 'Read', schema: {type: 'object'}, readOnly: true, needsApproval: false}]});
     }
     if (message.op === 'subscriptionStatus') {
       return Promise.resolve(grokSignedIn ? {kind: 'cli', available: true, signedIn: true, cli: 'grok'}
@@ -108,9 +127,11 @@ export async function checkAgentPanel() {
   const runtimeCalls = [];
   context.__runtimeCalls = runtimeCalls;
   runInContext(`const fakeRuntime = {createAgentRuntime(options) {
-      __runtimeCalls.push({op: 'create', provider: options.provider, model: options.model, tools: options.tools.map(tool => tool.name)});
+      __runtimeCalls.push({op: 'create', provider: options.provider, model: options.model, tools: options.tools.map(tool => tool.name),
+        permission: options.permission, sensitive: options.sensitive});
       globalThis.__runtimeEmit = options.emit;
       return {running: false, send(turn) { __runtimeCalls.push({op: 'send', text: turn.text}); return Promise.resolve(); },
+        setPermission(next) { __runtimeCalls.push({op: 'setPermission', permission: next.permission, tools: next.tools.length}); },
         decide(callId, allow) { __runtimeCalls.push({op: 'decide', callId, allow}); return true; },
         cancel() { __runtimeCalls.push({op: 'cancel'}); }, dispose() { __runtimeCalls.push({op: 'dispose'}); }};
     }};
@@ -188,7 +209,40 @@ export async function checkAgentPanel() {
   assert.match(byId('agent-surface').textContent, /tool result/i);
   assert.match(byId('agent-surface').textContent, /URLs, hosts/);
   assert.equal(posted.some(message => message.op === 'enable'), false, 'consent comes before enabling');
-  assert.equal(byId('agent-effects').checked, false, 'actions stay off by default');
+  const levels = [...doc.querySelectorAll('input[name="agent-permission"]')];
+  assert.deepEqual(levels.map(radio => radio.value), ['read-only', 'ask', 'auto', 'full'], 'four levels, lowest first');
+  assert.equal(levels.find(radio => radio.checked)?.value, 'read-only', 'Read only is the default');
+  assert.equal(byId('agent-permission-warning'), null, 'no warning below Auto-approve');
+  assert.equal(byId('agent-consent-accept').textContent, 'Turn on Read only', 'the button names the level');
+  const choose = async value => {
+    const radio = byId(`agent-level-${value}`);
+    radio.checked = true;
+    radio.dispatchEvent(new window.Event('change'));
+    await settle();
+  };
+  await choose('ask');
+  assert.equal(byId('agent-permission-warning'), null, 'Ask for actions needs no warning');
+  assert.equal(byId('agent-consent-accept').textContent, 'Turn on Ask for actions');
+  await choose('auto');
+  assert.match(byId('agent-permission-warning').textContent, /without asking you first/, 'Auto-approve warns in plain words');
+  assert.equal(byId('agent-consent-accept').textContent, 'Turn on Auto-approve actions');
+  assert.equal(byId('agent-sensitive'), null, 'the sensitive option belongs to Full access');
+  await choose('full');
+  const warning = byId('agent-permission-warning').textContent;
+  for (const item of model.FULL_LEAVES) assert.ok(warning.includes(item), `Full access lists ${item}`);
+  assert.match(warning, /runs its own live capture sessions/);
+  assert.match(warning, /go to the local stand-in provider, with captured content/, 'the box says content leaves, never that it stays local');
+  assert.doesNotMatch(warning, /stay on this Mac/);
+  assert.match(warning, /Also allow sensitive capture options/);
+  assert.doesNotMatch(byId('agent-surface').textContent, /once more/, 'no second confirmation is promised');
+  assert.equal(byId('agent-sensitive').checked, false, 'sensitive capture stays off unless ticked');
+  assert.equal(byId('agent-consent-accept').textContent, 'Turn on Full access', 'the button names the level');
+  byId('agent-sensitive').checked = true;
+  byId('agent-sensitive').dispatchEvent(new window.Event('change'));
+  await choose('ask');
+  await choose('full');
+  assert.equal(byId('agent-sensitive').checked, false, 'leaving Full access clears the sensitive option');
+  await choose('read-only');
   // Cancel goes back without starting anything.
   [...byId('agent-surface').querySelectorAll('button')].find(node => node.textContent === 'Cancel').click();
   await settle();
@@ -198,7 +252,10 @@ export async function checkAgentPanel() {
   byId('agent-consent-accept').click();
   await settle();
   const enable = posted.find(message => message.op === 'enable');
-  assert.equal(enable.effects, false);
+  assert.equal(enable.permission, 'read-only');
+  assert.equal(enable.sensitive, false);
+  assert.equal(byId('agent-permission').textContent, 'Read only', 'the header names the running level');
+  assert.equal(byId('agent-permission').hidden, false);
   assert.equal(enable.sessionKey, '100:200');
   assert.equal(enable.model, 'claude-opus-5-5', 'the model chosen in the setup card is the one enabled');
   assert.equal(dockState(), 'ready');
@@ -221,8 +278,8 @@ export async function checkAgentPanel() {
   input.dispatchEvent(new window.Event('input'));
   byId('agent-send').click();
   await settle();
-  assert.deepEqual(copy(runtimeCalls.find(call => call.op === 'create')), {op: 'create', provider: 'claude', model: 'claude-opus-5-5', tools: ['get_events']},
-    'the graph is built from the native tool list');
+  assert.deepEqual(copy(runtimeCalls.find(call => call.op === 'create')), {op: 'create', provider: 'claude', model: 'claude-opus-5-5', tools: ['get_events'],
+    permission: 'read-only', sensitive: false}, 'the graph is built from the native tool list and level');
   assert.ok(runtimeCalls.some(call => call.op === 'send' && call.text === 'What loaded?'), 'the question goes to the graph');
   assert.ok(posted.some(message => message.op === 'turn' && message.running === true), 'native knows a turn is running');
   assert.ok(posted.some(message => message.op === 'transcriptAppend' && message.row.role === 'user'), 'the question is kept locally');
@@ -314,7 +371,7 @@ export async function checkAgentPanel() {
 
   // Counts live in the menu and the tooltip, not the header text.
   assert.doesNotMatch(byId('agent-status').textContent, /tool|token/);
-  assert.match(byId('agent-status').title, /1 tool · read only · last turn 1,200 tokens in, 34 tokens out/);
+  assert.match(byId('agent-status').title, /1 tool · Read only · last turn 1,200 tokens in, 34 tokens out/);
   byId('agent-more').click();
   await settle();
   const menu = byId('agent-menu');
@@ -379,7 +436,56 @@ export async function checkAgentPanel() {
   assert.equal(posted.filter(message => message.op === 'enable').length, enables + 2);
   assert.doesNotMatch(byId('agent-surface').textContent, /Show earlier rows/);
 
+  // Full access: the consent step turns it on, with nothing asked after it.
+  await turnOff();
+  await turnOn();
+  await choose('full');
+  const enablesBefore = posted.filter(message => message.op === 'enable').length;
+  byId('agent-sensitive').checked = true;
+  byId('agent-sensitive').dispatchEvent(new window.Event('change'));
+  byId('agent-consent-accept').click();
+  await settle();
+  assert.equal(posted.filter(message => message.op === 'enable').length, enablesBefore + 1, 'one enable, straight from consent');
+  assert.equal(dockState(), 'ready', 'Full access is on with no further step');
+  const full = posted.findLast(message => message.op === 'enable');
+  assert.equal(full.permission, 'full');
+  assert.equal(full.sensitive, true, 'the sensitive option reaches native only when ticked');
+  assert.equal(runtimeCalls.findLast(call => call.op === 'create').permission, 'full', 'the graph builds the Full access prompt');
+  const badge = byId('agent-permission');
+  assert.equal(badge.textContent, 'Full access');
+  assert.equal(badge.dataset.level, 'full');
+  assert.equal(window.localStorage.getItem('origin-trace.agent.permission'), 'ask', 'Full access is never remembered');
+  // Lower from the menu, without restarting the conversation.
+  byId('agent-more').click();
+  await settle();
+  const visible = id => byId(id) && !byId(id).hidden;
+  assert.ok(visible('agent-lower-read-only') && visible('agent-lower-ask') && visible('agent-lower-auto'), 'every lower level is offered');
+  assert.equal(visible('agent-raise'), false, 'nothing is above Full access');
+  const createdBefore = runtimeCalls.filter(call => call.op === 'create').length;
+  byId('agent-lower-ask').click();
+  await settle();
+  assert.deepEqual(copy(posted.findLast(message => message.op === 'lowerPermission')), {op: 'lowerPermission', permission: 'ask'});
+  assert.equal(runtimeCalls.findLast(call => call.op === 'setPermission')?.permission, 'ask', 'the running graph takes the lower level');
+  assert.equal(runtimeCalls.filter(call => call.op === 'create').length, createdBefore, 'lowering keeps the conversation');
+  assert.equal(badge.textContent, 'Ask');
+  assert.match(byId('agent-log').textContent, /Permission lowered to Ask for actions/);
+  byId('agent-more').click();
+  await settle();
+  assert.equal(visible('agent-lower-ask') || visible('agent-lower-auto'), false, 'only lower levels stay offered');
+  assert.ok(visible('agent-lower-read-only') && visible('agent-raise'));
+  // Raising goes back through consent, one level up.
+  byId('agent-raise').click();
+  await settle();
+  assert.equal(dockState(), 'consent', 'raising asks again');
+  assert.equal([...doc.querySelectorAll('input[name="agent-permission"]')].find(radio => radio.checked)?.value, 'auto');
+  [...byId('agent-surface').querySelectorAll('button')].find(node => node.textContent === 'Cancel').click();
+  await settle();
+
   // Off is a full stop and clears the view.
+  await turnOn();
+  await choose('read-only');
+  byId('agent-consent-accept').click();
+  await settle();
   await turnOff();
   assert.ok(posted.some(message => message.op === 'disable'));
   assert.ok(runtimeCalls.some(call => call.op === 'dispose'), 'off disposes the graph');
@@ -417,9 +523,16 @@ export async function checkAgentPanel() {
   // The Swift CLI drivers and the graph send the same system prompt.
   const runtimeSource = readFileSync(new URL('../apps/research-ui/agent-runtime/src/runtime.mjs', import.meta.url), 'utf8');
   const swiftSource = readFileSync(new URL('../apps/research-ui/macos/AgentCore.swift', import.meta.url), 'utf8');
-  const jsPrompt = /export const SYSTEM_PROMPT = `([^`]*)`;/.exec(runtimeSource)?.[1];
-  const swiftPrompt = /let agentSystemPrompt = """\n([\s\S]*?)\n  """/.exec(swiftSource)?.[1]?.split('\n').map(line => line.replace(/^  /, '')).join('\n');
-  assert.ok(jsPrompt && jsPrompt === swiftPrompt, 'the CLI loops get the same system prompt as the graph');
+  const swiftText = name => new RegExp(`let ${name} = """\\n([\\s\\S]*?)\\n  """`).exec(swiftSource)?.[1]?.split('\n').map(line => line.replace(/^  /, '')).join('\n');
+  const jsText = name => new RegExp(`export const ${name} = \`([^\`]*)\`;`).exec(runtimeSource)?.[1];
+  for (const [js, swift] of [['SYSTEM_PROMPT', 'agentSystemPrompt'], ['PERMISSION_PROMPT_READ_ONLY', 'agentPermissionPromptReadOnly'],
+    ['PERMISSION_PROMPT_ASK', 'agentPermissionPromptAsk'], ['PERMISSION_PROMPT_AUTO', 'agentPermissionPromptAuto'],
+    ['PERMISSION_PROMPT_FULL', 'agentPermissionPromptFull'], ['PERMISSION_PROMPT_FULL_SENSITIVE', 'agentPermissionPromptFullSensitive']]) {
+    assert.ok(jsText(js) && jsText(js) === swiftText(swift), `the CLI loops get the same ${js} as the graph`);
+  }
+  assert.ok(jsText('SYSTEM_PROMPT').includes('{permission}'));
+  assert.doesNotMatch(jsText('PERMISSION_PROMPT_FULL'), /stay on this Mac|stay local/, 'Full access never claims content stays local');
+  for (const name of ['PERMISSION_PROMPT_READ_ONLY', 'PERMISSION_PROMPT_ASK', 'PERMISSION_PROMPT_AUTO']) assert.match(jsText(name), /stay on this Mac/);
 
   // Subscriptions: Grok is subscription only and asks its CLI whether it is signed in.
   // A provider stand-in stays configured: it never applies to a CLI loop.
@@ -545,7 +658,7 @@ export async function checkAgentPanel() {
   await settle();
   assert.deepEqual(asyncErrors, [], 'no asynchronous errors');
   release();
-  console.log('PASS agent panel: safe markdown, verified citations, byte budget, consent, collapsed tool results, approvals, menus and picker, new conversation, closed-panel behavior, and subscription states with the CLI and ChatGPT paths (not rendered QA)');
+  console.log('PASS agent panel: safe markdown, verified citations, byte budget, consent as the only confirmation for the four permission levels (warning, named button, badge, lowering and raising), collapsed tool results, approvals, menus and picker, new conversation, closed-panel behavior, and subscription states with the CLI and ChatGPT paths (not rendered QA)');
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) await checkAgentPanel();

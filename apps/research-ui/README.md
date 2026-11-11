@@ -2152,7 +2152,10 @@ more**, and a selection the records still hold stays selected, drawn or not.
   started while some call was open; a chip selects that request.
 - Bounds: 64 tracks, 512 samples and 128 requests per renderer, and three rows
   of request chips; the rest are counted where they would be drawn. Several
-  renderers are one at a time, behind a renderer picker.
+  renderers are one at a time, behind a renderer picker. A selection past a
+  bound, such as a sample J or K stepped to, stays selected: the detail line
+  ends with why it is not drawn, and the drawn item nearest it in record order
+  keeps the timeline's one tab stop.
 - Gaps are never silent. A notice under the banner names the shown
   renderer's `gap` reasons with their counts and what they mean (such as
   `native_js_invocation_budget_incomplete`, the 256-call budget), the

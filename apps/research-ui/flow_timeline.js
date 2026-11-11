@@ -570,7 +570,7 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
       if (row.type === 'track') {
         const {track} = row;
         line.dataset.track = track.key;
-        const name = make('button', 'flow-tl-call', flowTrackName(track)); name.type = 'button'; name.dataset.key = `call:${track.key}`; name.tabIndex = -1;
+        const name = make('button', 'flow-tl-call', flowTrackName(track)); name.type = 'button'; name.dataset.key = `call:${track.key}`; name.dataset.seq = String(track.first); name.tabIndex = -1;
         name.setAttribute('aria-label', `${flowTrackName(track)}, ${flowTrackOutcome(track)}, ${track.samples.length} samples, ${track.requests.length} requests`);
         name.addEventListener('click', () => choose({type: 'call', key: `call:${track.key}`}));
         items.set(`call:${track.key}`, name);
@@ -614,7 +614,7 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
           if (!chipLevels.has(request.key)) continue;
           const known = describeRequest(view.process, request.request);
           const chip = make('button', `flow-tl-chip${request.invocation ? '' : ' flow-tl-chip-unknown'}`); chip.type = 'button'; chip.tabIndex = -1;
-          chip.dataset.key = `request:${request.key}`;
+          chip.dataset.key = `request:${request.key}`; chip.dataset.seq = String(request.seq);
           chip.append(make('span', 'flow-tl-chip-name', known?.label ?? `request #${request.request}`), make('span', 'flow-tl-chip-meta', request.invocation ? `in #${request.invocation}` : 'call unknown'));
           chip.style.left = `${X(request.seq)}px`; chip.style.top = `${6 + chipLevels.get(request.key) * 32}px`; chip.style.width = `${G.chip}px`;
           chip.setAttribute('aria-label', `${known?.label ?? `Renderer request ${request.request}`}, ${request.invocation ? `started inside call #${request.invocation}` : 'started while a call was open, which one is unknown'}, sequence ${request.seq.toLocaleString('en-US')}`);
@@ -629,14 +629,12 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
     }
     canvas.style.width = `${width}px`; canvas.style.height = `${top + 8}px`;
     canvas.replaceChildren(...nodes);
-    // One tab stop: the selected item, else the first.
-    const tabStop = items.get(selected?.key) ?? items.values().next().value;
-    if (tabStop) tabStop.tabIndex = 0;
+    // The one tab stop is set by paintSelection, which always follows.
   }
   function sampleButton(sample, X, mid) {
     const site = view.sites.get(sample.site);
     const button = make('button', `flow-tl-sample flow-tl-${sample.kind}`); button.type = 'button'; button.tabIndex = -1;
-    button.dataset.key = `sample:${sample.key}`;
+    button.dataset.key = `sample:${sample.key}`; button.dataset.seq = String(sample.seq);
     button.style.left = `${X(sample.seq) - 9}px`; button.style.top = `${mid - 21}px`;
     button.append(make('span', 'flow-tl-tick-mark'), make('span', 'flow-tl-value', sample.kind === 'br_table' ? String(sample.selector ?? '?') : 'ci'));
     button.setAttribute('aria-label', flowSampleLabel(sample, site));
@@ -674,28 +672,49 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
     if (!silent) onSelect(info);
     return info;
   }
-  function paintSelection() {
-    for (const [key, element] of items) {
-      const on = key === selected?.key;
-      element.setAttribute('aria-pressed', String(on));
-      if (on) element.tabIndex = 0; else if (element.tabIndex === 0 && selected) element.tabIndex = -1;
+  /** The one tab stop: the selected item when it is drawn, else the drawn
+   * item nearest it in record order, else the first. */
+  function tabStopFor(info) {
+    if (!items.size) return null;
+    if (info && items.has(info.key)) return items.get(info.key);
+    const at = info?.type === 'sample' ? info.sample.seq : info?.type === 'request' ? info.request.seq : info?.track ? info.track.first : null;
+    let best = null, distance = null;
+    if (at !== null) for (const element of items.values()) {
+      const seq = flowSeq(element.dataset.seq);
+      if (seq === null) continue;
+      const gap = seq > at ? seq - at : at - seq;
+      if (distance === null || gap < distance) { best = element; distance = gap; }
     }
-    const info = describe(selected);
+    return best ?? items.values().next().value;
+  }
+  /** Why a selection the records hold is not drawn, or ''. */
+  function notDrawn(info) {
+    if (!info || items.has(info.key)) return '';
+    if (info.type === 'request') return view.drawnRequests.includes(info.request) ? 'not drawn: its chip is past the third row of overlapping chips' : `not drawn: past the ${limits.maxRequests} requests drawn`;
+    if (info.track && !view.drawn.includes(info.track)) return `not drawn: ${info.type === 'call' ? 'it is' : 'its call is'} past the ${limits.maxTracks} calls drawn`;
+    return info.type === 'sample' ? `not drawn: past the ${limits.maxSamples} samples drawn for this renderer` : 'not drawn';
+  }
+  function paintSelection() {
+    const info = describe(selected), stop = tabStopFor(info);
+    for (const [key, element] of items) {
+      element.setAttribute('aria-pressed', String(key === selected?.key));
+      element.tabIndex = element === stop ? 0 : -1;
+    }
     for (const row of canvas.querySelectorAll('.flow-tl-row-track')) row.toggleAttribute('data-selected', Boolean(info?.track && row.dataset.track === info.track.key));
     if (!info) { detailText.textContent = view ? 'Pick a sample, a call or a request. Enter on a sample opens its block in the CFG.' : ''; detailFollow.hidden = true; return; }
     if (info.type === 'sample') {
       const sample = info.sample;
       detailText.textContent = [`${sample.kind} ${info.count}`, info.track ? `${flowTrackName(info.track)} · ${sample.callOrdinal} of ${info.track.samples.length}` : `outside a tracked call (${FLOW_INVOCATION_STATES[sample.state] ?? 'unknown'})`,
         `func ${sample.function_index} ${flowHex(sample.offset)}`, sample.kind === 'br_table' ? `selector ${sample.selector ?? 'unknown'}` : `callee ${sample.resolution === 'resolved' ? `func ${sample.callee}` : sample.resolution ?? 'unknown'}`,
-        `seq ${sample.seq.toLocaleString('en-US')} · renderer ${sample.process}`].join(' · ');
+        `seq ${sample.seq.toLocaleString('en-US')} · renderer ${sample.process}`, notDrawn(info)].filter(Boolean).join(' · ');
       detailFollow.hidden = false;
     } else if (info.type === 'call') {
       const track = info.track;
       detailText.textContent = [flowTrackName(track), track.slot !== null ? `site slot ${track.slot}` : '', flowTrackOutcome(track), `${track.samples.length} samples`, `${track.requests.length} requests`,
-        track.start ? `seq ${track.start.seq.toLocaleString('en-US')}${track.settle ? ` → ${track.settle.seq.toLocaleString('en-US')}` : ''}` : ''].filter(Boolean).join(' · ');
+        track.start ? `seq ${track.start.seq.toLocaleString('en-US')}${track.settle ? ` → ${track.settle.seq.toLocaleString('en-US')}` : ''}` : '', notDrawn(info)].filter(Boolean).join(' · ');
       detailFollow.hidden = true;
     } else {
-      detailText.textContent = [info.label, info.track ? `started inside ${flowTrackName(info.track)}` : 'started while a call was open; which one is unknown', `seq ${info.request.seq.toLocaleString('en-US')}`].join(' · ');
+      detailText.textContent = [info.label, info.track ? `started inside ${flowTrackName(info.track)}` : 'started while a call was open; which one is unknown', `seq ${info.request.seq.toLocaleString('en-US')}`, notDrawn(info)].filter(Boolean).join(' · ');
       detailFollow.hidden = true;
     }
   }

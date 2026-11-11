@@ -505,6 +505,23 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
     assert.equal(paged.model().counts.records, 13, 'with every record it held');
     assert.equal(paged.selection()?.key, 'sample:41:109', 'and the selection it could read');
   }
+  // A selected sample past the drawing budget keeps one tab stop, on the
+  // drawn item nearest it, and the detail line says why it is not drawn.
+  {
+    const budgetRoot = document.createElement('div');
+    const budgeted = context.createFlowTimeline({root: budgetRoot, limits: {...timeline.FLOW_TIMELINE_LIMITS, maxSamples: 3}, fetchJSON: async () => page(sessionRecords())});
+    await budgeted.load('7');
+    // LinkeDOM reflects tabindex as an attribute only.
+    const stops = () => [...budgetRoot.querySelectorAll('[data-key]')].filter(item => item.getAttribute('tabindex') === '0');
+    assert.equal(stops().length, 1, 'one tab stop before anything is selected');
+    budgeted.select('sample:41:106', {silent: false});
+    assert.equal(budgeted.stepSample(1)?.key, 'sample:41:108', 'J steps to the next sample at the site, drawn or not');
+    assert.equal(budgetRoot.querySelector('[data-key="sample:41:108"]'), null, 'that sample is past the drawing budget');
+    assert.equal(stops().length, 1, 'exactly one item keeps the tab stop');
+    assert.equal(stops()[0].dataset.key, 'sample:41:106', 'the drawn sample nearest the selected one in record order');
+    assert.match(budgetRoot.querySelector('.flow-tl-detail-text').textContent, /seq 108 · renderer 41 · not drawn: past the 3 samples drawn for this renderer$/);
+    assert.equal(budgeted.focus(), true, 'focus lands on the tab stop');
+  }
   const failing = context.createFlowTimeline({root: document.createElement('div'), fetchJSON: async () => { throw Error('Event store returned 503'); }});
   await failing.load('7');
   assert.equal(failing.status(), 'error');

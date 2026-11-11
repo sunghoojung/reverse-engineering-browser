@@ -2131,6 +2131,10 @@ redraws more than 15 seconds after a complete read.
   renderer's `sequence_number` order, never wall-clock time. A run of records
   nobody here names is compressed to a break mark (≈) whose tooltip counts
   them.
+- A track is named by its invocation (`call #12`); the detail line adds its
+  site slot. Saved site labels are not applied: `/api/js-invocation-sites`
+  lists what the backend's own launcher armed and names no session, so it
+  cannot be tied to the session the timeline reads.
 - With the backend's decoded `js_invocation` object, a track has start and
   settle marks, a dotted line while the call is open, a solid span only when
   it settled synchronously, the settle's outcome, value kind and length (never

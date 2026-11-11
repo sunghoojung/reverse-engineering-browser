@@ -197,20 +197,11 @@ function flowTimelineAxis(seqs, {unit = 12, gapCap = 12, labelEvery = 96} = {}) 
   return {width: x, points, ticks, breaks, x: at};
 }
 
-function flowTrackName(track) { return track.label ? `${track.label} #${track.invocation}` : `call #${track.invocation}`; }
-/** Names tracks from the armed sites `get_js_invocation_sites` lists in slot
- * order, only where the start names that exact site; otherwise the slot stays
- * the only name. Labels are text, cut to 80 characters. */
-function flowTimelineLabel(model, sites) {
-  if (!model || !Array.isArray(sites) || !sites.length) return model;
-  for (const process of model.processes) for (const track of process.tracks) {
-    const site = Number.isSafeInteger(track.slot) ? sites[track.slot] : null, start = track.start?.site;
-    if (!site || typeof site.label !== 'string' || !site.label || site.label === 'Unlabeled function') continue;
-    if (start && (site.source_sha256 !== start.sha256 || site.anchor_offset !== start.anchor)) continue;
-    track.label = site.label.slice(0, 80);
-  }
-  return model;
-}
+/* Tracks are named by invocation, with the site slot in the detail line.
+ * `/api/js-invocation-sites` lists what the backend's own launcher armed and
+ * names no session, so its labels cannot be tied to the session this
+ * timeline reads and are not applied. */
+function flowTrackName(track) { return `call #${track.invocation}`; }
 /** What a track's settle says, or what is missing. */
 function flowTrackOutcome(track) {
   if (!track.settle) return track.start ? 'not settled in the records read' : 'start and settle not read';
@@ -251,7 +242,7 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
   root.append(banner, state, scroll, detail);
   const processSelect = make('select', 'flow-tl-process'); processSelect.setAttribute('aria-label', 'Renderer process'); processSelect.hidden = true;
 
-  let session = null, events = [], model = null, view = null, cursor = '0', partial = false, status = 'idle', error = null, sites = null;
+  let session = null, events = [], model = null, view = null, cursor = '0', partial = false, status = 'idle', error = null;
   let generation = 0, controller = null, loadedAt = 0, chosenProcess = null, selected = null, items = new Map(), focusKey = null;
 
   function setState(kind, title = '', text = '', retry = false) {
@@ -293,13 +284,8 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
         if (typeof query.next_after !== 'string' || query.next_after === after) { done = true; break; }
         after = query.next_after;
       }
-      if (!sites) {
-        try { const body = await fetchJSON('/api/js-invocation-sites', abort?.signal); sites = Array.isArray(body?.session?.sites) ? body.session.sites : []; }
-        catch (failure) { if (failure?.name === 'AbortError') throw failure; sites = []; }
-        if (owner !== generation) return;
-      }
       events = collected; cursor = after; partial = !done; error = null; loadedAt = now();
-      model = flowTimelineLabel(flowTimelineModel(events, limits), sites);
+      model = flowTimelineModel(events, limits);
       render();
       onPartial(partial);
     } catch (failure) {
@@ -313,7 +299,7 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
   }
   function reset() {
     controller?.abort(); controller = null; generation += 1;
-    events = []; model = null; view = null; cursor = '0'; sites = null; partial = false; loadedAt = 0; chosenProcess = null; selected = null; items = new Map(); focusKey = null;
+    events = []; model = null; view = null; cursor = '0'; partial = false; loadedAt = 0; chosenProcess = null; selected = null; items = new Map(); focusKey = null;
     canvas.replaceChildren(); detailText.textContent = ''; detailFollow.hidden = true; setBanner('');
     processSelect.replaceChildren(); processSelect.hidden = true;
   }
@@ -642,5 +628,5 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
 }
 
 if (typeof module === 'object' && module?.exports) {
-  module.exports = {FLOW_TIMELINE_TYPES, FLOW_TIMELINE_LIMITS, flowSeq, flowValueLabel, flowTimelineModel, flowTimelineLabel, flowTimelineAxis, flowTrackOutcome, flowTrackName, createFlowTimeline};
+  module.exports = {FLOW_TIMELINE_TYPES, FLOW_TIMELINE_LIMITS, flowSeq, flowValueLabel, flowTimelineModel, flowTimelineAxis, flowTrackOutcome, flowTrackName, createFlowTimeline};
 }

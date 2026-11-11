@@ -60,14 +60,11 @@ function sessionRecords({decoded = true} = {}) {
   assert.equal(timeline.flowValueLabel('array_buffer_view', 4), 'typed array · 4 bytes', 'decoded kind names read as the panel words');
   assert.ok(timeline.flowValueLabel('bigint', null).startsWith('BigInt'));
   assert.ok(timeline.flowValueLabel(8, null).startsWith('BigInt'), 'the stored integer still reads for an older decode');
-  // Armed sites name a track only where the start names that exact site.
-  timeline.flowTimelineLabel(model, [{source_sha256: SITE_SHA, anchor_offset: 2380, label: 'hsw'}]);
-  assert.equal(timeline.flowTrackName(call12), 'hsw #12');
-  const other = timeline.flowTimelineModel(sessionRecords());
-  timeline.flowTimelineLabel(other, [{source_sha256: 'b'.repeat(64), anchor_offset: 2380, label: 'elsewhere'}]);
-  assert.equal(timeline.flowTrackName(other.processes[0].tracks[0]), 'call #12', 'a site that does not match the start leaves the slot unnamed');
-  timeline.flowTimelineLabel(other, [{source_sha256: SITE_SHA, anchor_offset: 2380, label: 'Unlabeled function'}]);
-  assert.equal(timeline.flowTrackName(other.processes[0].tracks[0]), 'call #12', 'the backend default label adds nothing');
+  // The site route names no session, so its labels are never applied: a
+  // track is its invocation, and its slot and site key stay in the detail.
+  assert.equal(timeline.flowTrackName(call12), 'call #12');
+  assert.equal(timeline.flowTimelineLabel, undefined, 'no slot or site label is joined from the armed site list');
+  same(call12.start.site, {sha256: SITE_SHA, anchor: 2380});
   assert.deepEqual(call12.samples.map(sample => sample.selector), [3, 0, 3]);
   assert.deepEqual(call12.requests.map(request => request.request), ['71']);
   assert.equal(view.outside.length, 1, 'a sample outside any tracked call is kept in its own lane, not dropped');
@@ -212,6 +209,7 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   assert.equal(document.querySelectorAll('#flow-timeline .flow-tl-sample').length, 6);
   assert.equal(document.querySelectorAll('#flow-timeline .flow-tl-chip').length, 3);
   assert.equal(document.querySelectorAll('#flow-timeline .flow-tl-run').length, 1, 'only the synchronous settle draws a running span');
+  assert(!fetches.some(url => url.startsWith('/api/js-invocation-sites')), 'the armed site list, which names no session, is not read for labels');
   same(workspace.trail().map(crumb => crumb.label), ['POST collect.frame.test #73']);
   assert.equal($('#flow-request-meta').textContent, '#73 · 200 · renderer 41');
   same(shown(), ['graph', 'lineage', 'timeline'], 'the CFG waits for a function');

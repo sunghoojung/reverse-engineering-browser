@@ -2121,7 +2121,7 @@
       "get": {
         "operationId": "get_events",
         "summary": "Read native events, optionally filtered and paged",
-        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; response_body (33), in those sessions only, says whether each response body was retained, partial, refused or never observed, names its response_body artifact and joins its response_started parent; select one request with request_id. request_headers (30) and response_headers (31) summarize each header block in those sessions; read them with get_request_headers. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. A sample refused by a function, module, call-site, or the 16-record stream budget is wasm_dispatch_overflow (28) or wasm_indirect_overflow (29): a compact identity, not a full observation. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0.  wasm_dispatch_overflow and wasm_indirect_overflow include wasm_overflow beside that hex. status decoded names kind identity or omitted. An identity names ring_index, function_index, and module_byte_offset, plus selector and arm_count, or table_index, slot, and resolution. An omitted record names omitted_count and no site. status invalid carries no fields. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
+        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; response_body (33), in those sessions only, says whether each response body was retained, partial, refused or never observed, names its response_body artifact and joins its response_started parent; select one request with request_id. request_headers (30) and response_headers (31) summarize each header block in those sessions; read them with get_request_headers. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. Each also includes js_invocation beside the hex (JsInvocationDecode): status decoded with kind start, settle or request, never a value digest; status invalid has no fields. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. A sample refused by a function, module, call-site, or the 16-record stream budget is wasm_dispatch_overflow (28) or wasm_indirect_overflow (29): a compact identity, not a full observation. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0.  wasm_dispatch_overflow and wasm_indirect_overflow include wasm_overflow beside that hex. status decoded names kind identity or omitted. An identity names ring_index, function_index, and module_byte_offset, plus selector and arm_count, or table_index, slot, and resolution. An omitted record names omitted_count and no site. status invalid carries no fields. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
         "tags": [
           "events"
         ],
@@ -2712,7 +2712,7 @@
       "get": {
         "operationId": "wait_for_events",
         "summary": "Wait for matching events",
-        "description": "Waits up to timeout_ms for the first events after a cursor that match the same filters as get_events, then returns them in the filtered get_events shape plus a wait object. wasm_dispatch_observation and wasm_indirect_observation include wasm_observation. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. status invalid has no fields. A payload version other than 1 or 2 is invalid in full. The record is protocol 3, category vm, and flags 0. Without after, only events written after the call count, so take a cursor first (timeout_ms 1) and then act: session_action open_url or click, or a Console evaluate. On timeout it returns no events, wait.timed_out true and query.next_after for the next wait. Waiting does not change the browser or the stores. At most eight waits run at once.",
+        "description": "Waits up to timeout_ms for the first events after a cursor that match the same filters as get_events, then returns them in the filtered get_events shape plus a wait object. wasm_dispatch_observation and wasm_indirect_observation include wasm_observation. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. status invalid has no fields. A payload version other than 1 or 2 is invalid in full. The record is protocol 3, category vm, and flags 0. js_invocation_start, js_invocation_settle and js_invocation_request include js_invocation with kind start, settle or request (JsInvocationDecode); status invalid has no fields. Without after, only events written after the call count, so take a cursor first (timeout_ms 1) and then act: session_action open_url or click, or a Console evaluate. On timeout it returns no events, wait.timed_out true and query.next_after for the next wait. Waiting does not change the browser or the stores. At most eight waits run at once.",
         "tags": [
           "events"
         ],
@@ -17751,13 +17751,242 @@
           }
         ]
       },
+      "JsInvocationDecode": {
+        "description": "Read-path decode of one js_invocation_start, js_invocation_settle or js_invocation_request, placed beside the unchanged payload hex by get_events and wait_for_events. kind names the record. status invalid means the record was rejected and no field is returned: the envelope is not protocol 3, category vm, flags 0 with an untruncated 128-byte hex payload and zero artifact, parent and navigation IDs; the payload version is not 1; or any other rule of protocol/native-js-invocation-v1.md failed. Decoding reads that record only. 32-bit and smaller integers are JSON numbers, so invocation_id joins wasm_observation.js_invocation_id directly; document_id and request_id are canonical decimal strings. Order calls by sequence_number within one (session_id, process_id), not by file order or time. No settled-value digest is decoded: digest_state only says whether one was retained. Site labels are not stored with events: get_js_invocation_sites session.sites lists what this session armed in site_slot order, each with its label.",
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "kind",
+              "site_slot",
+              "invocation_id",
+              "parent_invocation_id",
+              "parent_unknown",
+              "argument_count",
+              "script_id",
+              "anchor_offset",
+              "source_sha256",
+              "site_sample_index",
+              "sample_index",
+              "document_id"
+            ],
+            "properties": {
+              "status": {
+                "const": "decoded"
+              },
+              "kind": {
+                "const": "start"
+              },
+              "site_slot": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 7,
+                "description": "Index of the called function in the site file this session armed."
+              },
+              "invocation_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295,
+                "description": "Nonzero and never reused in the renderer isolate. An invocation is (session_id, process_id, invocation_id)."
+              },
+              "parent_invocation_id": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967294,
+                "description": "The invocation current when this call entered, always below invocation_id, or 0 for none. A dynamic-extent relation, not value flow."
+              },
+              "parent_unknown": {
+                "type": "boolean",
+                "description": "The invocation current at entry was a wrapper from an older configuration, so no parent is recorded. parent_invocation_id is then 0, which is not evidence of having none."
+              },
+              "argument_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65535,
+                "description": "Actual arguments excluding the receiver, saturating at 65535."
+              },
+              "script_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295,
+                "description": "V8 script ID in this renderer process, the unit stack frames and script_compiled use."
+              },
+              "anchor_offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967294,
+                "description": "UTF-16 offset of the function's V8 start position: with script_id, the function a stack frame names."
+              },
+              "source_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "The armed site's key with anchor_offset: get_js_invocation_sites session.sites names the same pair."
+              },
+              "site_sample_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 63,
+                "description": "This call's index in its site's 64-start budget."
+              },
+              "sample_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255,
+                "description": "This call's index in the configuration's 256-start budget."
+              },
+              "document_id": {
+                "$ref": "#/components/schemas/NonzeroUint64String",
+                "description": "Digest of the DocumentToken the call ran in."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "kind",
+              "site_slot",
+              "invocation_id",
+              "fulfilled",
+              "via",
+              "value_kind",
+              "value_length",
+              "digest_state",
+              "document_id"
+            ],
+            "properties": {
+              "status": {
+                "const": "decoded"
+              },
+              "kind": {
+                "const": "settle"
+              },
+              "site_slot": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 7
+              },
+              "invocation_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295,
+                "description": "The start this settle closes."
+              },
+              "fulfilled": {
+                "type": "boolean",
+                "description": "False means rejected."
+              },
+              "via": {
+                "type": "string",
+                "enum": [
+                  "sync_return",
+                  "sync_throw",
+                  "promise"
+                ],
+                "description": "sync_return and sync_throw settle the initial synchronous extent; promise is the native promise the caller received."
+              },
+              "value_kind": {
+                "type": "string",
+                "enum": [
+                  "integer",
+                  "number",
+                  "string",
+                  "symbol",
+                  "undefined",
+                  "null",
+                  "boolean",
+                  "bigint",
+                  "object",
+                  "function",
+                  "array",
+                  "array_buffer",
+                  "array_buffer_view",
+                  "promise"
+                ],
+                "description": "Wire kinds 1 to 14 in order. number is a non-integer number, object any other object, array_buffer_view a typed array or DataView."
+              },
+              "value_length": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295,
+                "description": "UTF-16 length of a string, element count of an array, byte length of an ArrayBuffer or view; 0 for other kinds."
+              },
+              "digest_state": {
+                "type": "string",
+                "enum": [
+                  "not_requested",
+                  "present",
+                  "not_digestible",
+                  "too_large",
+                  "unavailable"
+                ],
+                "description": "Whether the session retained a settled-value digest. The digest itself is sensitive capture and is never returned here."
+              },
+              "document_id": {
+                "$ref": "#/components/schemas/NonzeroUint64String"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "kind",
+              "inside",
+              "invocation_id",
+              "request_id"
+            ],
+            "properties": {
+              "status": {
+                "const": "decoded"
+              },
+              "kind": {
+                "const": "request"
+              },
+              "inside": {
+                "type": "boolean",
+                "description": "True: script started the request while invocation_id was current. False: no script was on the stack while some admitted invocation had not settled, so which one is unknown."
+              },
+              "invocation_id": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295,
+                "description": "Nonzero exactly when inside is true."
+              },
+              "request_id": {
+                "$ref": "#/components/schemas/NonzeroUint64String",
+                "description": "The renderer request ID of the request_initiated record written just before, as in the envelope."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "invalid"
+              }
+            }
+          }
+        ]
+      },
       "Event": {
         "type": "object",
         "additionalProperties": true,
-        "description": "Native event record validated before HTTP delivery for protocol version, canonical identifiers, process ID, and bounded hexadecimal payload consistency. Additional native record fields remain extensible; see protocol/README.md. This schema does not yet describe every native event field. wasm_dispatch_observation and wasm_indirect_observation responses from get_events and wait_for_events include wasm_observation. The payload hex remains.",
+        "description": "Native event record validated before HTTP delivery for protocol version, canonical identifiers, process ID, and bounded hexadecimal payload consistency. Additional native record fields remain extensible; see protocol/README.md. This schema does not yet describe every native event field. wasm_dispatch_observation and wasm_indirect_observation responses from get_events and wait_for_events include wasm_observation, and js_invocation_start, js_invocation_settle and js_invocation_request responses include js_invocation. The payload hex remains.",
         "properties": {
           "wasm_observation": {
             "$ref": "#/components/schemas/WasmObservationDecode"
+          },
+          "js_invocation": {
+            "$ref": "#/components/schemas/JsInvocationDecode"
           }
         }
       },
@@ -35294,6 +35523,7 @@
               "sites": {
                 "type": "array",
                 "maxItems": 8,
+                "description": "The armed site file in order: entry n is site_slot n of this session's js_invocation records, and its source_sha256 and anchor_offset equal theirs. label comes from the saved set this backend started with, or Unlabeled function.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,

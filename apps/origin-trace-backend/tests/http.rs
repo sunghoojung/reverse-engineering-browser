@@ -1639,6 +1639,199 @@ async fn get_events_returns_decoded_wasm_observations_without_a_workspace() {
 }
 
 #[tokio::test]
+async fn get_events_decodes_js_invocations_and_names_the_armed_site_key() {
+    // The session armed one site; its key is what start records carry.
+    let directory = tempfile::tempdir().unwrap();
+    let source = "window.hsw=function(aGh){return aGh};";
+    let anchor = source.find("(aGh").unwrap() as u32;
+    let units = source
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<u8>>();
+    let source_sha256: [u8; 32] = Sha256::digest(&units).into();
+    let file = format!(
+        r#"{{"sites":[{{"anchor_offset":{anchor},"artifact_id":"3","artifact_sha256":"{}","byte_offset":{anchor},"shape":"function-entry","source_length":{},"source_sha256":"{}"}}],"version":1}}"#,
+        hex::encode(Sha256::digest(source.as_bytes())),
+        units.len() / 2,
+        hex::encode(source_sha256)
+    );
+    let store = directory.path().join("js-invocation-sites-v1.json");
+    std::fs::write(&store, &file).unwrap();
+    std::fs::write(
+        directory.path().join("js-invocation-sites-v1.labels.json"),
+        json!({"version":1,"sites":[{"anchor_offset":anchor,"label":"window.hsw",
+            "session_id":"1","source_sha256":hex::encode(source_sha256),
+            "source_url":"https://example.test/source.js"}]})
+        .to_string(),
+    )
+    .unwrap();
+    let armed = directory.path().join("armed.json");
+    std::fs::write(&armed, &file).unwrap();
+    let server = Server::start_with_args(&[
+        "--js-invocation-site-store".into(),
+        store.display().to_string(),
+        "--js-invocation-session-sites".into(),
+        armed.display().to_string(),
+    ])
+    .await;
+
+    let header = |p: &mut [u8; 128]| {
+        p[0] = 1;
+        p[2] = 128;
+    };
+    let mut start = [0u8; 128];
+    header(&mut start);
+    start[6] = 1;
+    start[8..12].copy_from_slice(&17u32.to_le_bytes());
+    start[12..16].copy_from_slice(&anchor.to_le_bytes());
+    start[16..20].copy_from_slice(&((units.len() / 2) as u32).to_le_bytes());
+    start[20..24].copy_from_slice(&12u32.to_le_bytes());
+    start[28] = 3;
+    start[30] = 9;
+    start[32] = 3;
+    start[72..104].copy_from_slice(&source_sha256);
+    start[104..112].copy_from_slice(&u64::MAX.to_le_bytes());
+    let mut settle = [0u8; 128];
+    header(&mut settle);
+    (settle[5], settle[6], settle[7]) = (1, 3, 3);
+    settle[8..12].copy_from_slice(&12u32.to_le_bytes());
+    settle[12..16].copy_from_slice(&3u32.to_le_bytes());
+    (settle[16], settle[17]) = (1, 1);
+    settle[20..24].copy_from_slice(&3u32.to_le_bytes());
+    settle[24..32].copy_from_slice(&0x1234u64.to_le_bytes());
+    let value_sha256 = Sha256::digest(b"tok");
+    settle[32..64].copy_from_slice(&value_sha256);
+    settle[64..72].copy_from_slice(&u64::MAX.to_le_bytes());
+    let mut inside = [0u8; 128];
+    header(&mut inside);
+    inside[4] = 2;
+    inside[8..12].copy_from_slice(&12u32.to_le_bytes());
+    let mut unknown = [0u8; 128];
+    header(&mut unknown);
+    unknown[4] = 3;
+    let mut reserved = start;
+    reserved[120] = 1;
+    let record = |sequence, kind: &str, request: &str, payload: &[u8; 128]| {
+        let mut event = metadata_event(sequence);
+        event["category"] = json!("vm");
+        event["type"] = json!(kind);
+        event["navigation_id"] = json!("0");
+        event["frame_id"] = json!("6");
+        event["request_id"] = json!(request);
+        event["payload"] = json!(hex::encode(payload));
+        event["payload_size"] = json!(128);
+        event
+    };
+    let records = [
+        record(1, "js_invocation_start", "0", &start),
+        record(2, "js_invocation_request", "31", &inside),
+        record(3, "js_invocation_request", "32", &unknown),
+        record(4, "js_invocation_settle", "0", &settle),
+        record(5, "js_invocation_start", "0", &reserved),
+        window_event(6, "vm", "module_compiled", ""),
+    ];
+    server.file("events.jsonl", &jsonl(&records));
+    let expected = [
+        json!({"status":"decoded","kind":"start","site_slot":0,"invocation_id":12,
+            "parent_invocation_id":0,"parent_unknown":false,"argument_count":1,"script_id":17,
+            "anchor_offset":anchor,"source_sha256":hex::encode(source_sha256),
+            "site_sample_index":3,"sample_index":9,"document_id":u64::MAX.to_string()}),
+        json!({"status":"decoded","kind":"request","inside":true,"invocation_id":12,
+            "request_id":"31"}),
+        json!({"status":"decoded","kind":"request","inside":false,"invocation_id":0,
+            "request_id":"32"}),
+        json!({"status":"decoded","kind":"settle","site_slot":0,"invocation_id":12,
+            "fulfilled":true,"via":"promise","value_kind":"string","value_length":3,
+            "digest_state":"present","document_id":u64::MAX.to_string()}),
+        json!({"status":"invalid"}),
+    ];
+    let check = |page: &Value, label: &str| {
+        let events = page["events"].as_array().unwrap();
+        for (index, decoded) in expected.iter().enumerate() {
+            let sequence = (index + 1).to_string();
+            let event = events
+                .iter()
+                .find(|event| event["sequence_number"] == sequence.as_str())
+                .unwrap_or_else(|| panic!("{label} {sequence}"));
+            assert_eq!(&event["js_invocation"], decoded, "{label} {sequence}");
+            assert_eq!(event["payload"], records[index]["payload"], "{label}");
+        }
+        // The retained value digest stays in the hex only; it is never decoded.
+        let digest = hex::encode(value_sha256);
+        assert!(
+            events
+                .iter()
+                .all(|event| !event["js_invocation"].to_string().contains(&digest))
+        );
+    };
+
+    let filtered =
+        "/api/events?type=js_invocation_start,js_invocation_settle,js_invocation_request&limit=10";
+    let page: Value = serde_json::from_slice(
+        &assert_contract_response(server.get(filtered).await, "get", "/api/events", 200).await,
+    )
+    .unwrap();
+    assert_eq!(page["count"], 5);
+    assert_eq!(page["query"]["returned"], 5);
+    check(&page, "filtered");
+    let waited: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server
+                .get(&format!(
+                    "/api/events/wait?{}&after=0&timeout_ms=1",
+                    filtered.split_once('?').unwrap().1
+                ))
+                .await,
+            "get",
+            "/api/events/wait",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(waited["wait"]["timed_out"], false);
+    check(&waited, "waited");
+    // The unfiltered polling window keeps its shape and adds the same objects.
+    let window: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.get("/api/events?limit=10").await,
+            "get",
+            "/api/events",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert!(window.get("query").is_none());
+    assert_eq!(window["count"], 6);
+    check(&window, "window");
+    let other = window["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "module_compiled")
+        .unwrap();
+    assert!(other.get("js_invocation").is_none());
+
+    // A slot's label is a lookup: the armed site with the same key.
+    let sites: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.get("/api/js-invocation-sites").await,
+            "get",
+            "/api/js-invocation-sites",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    let slot = expected[0]["site_slot"].as_u64().unwrap() as usize;
+    let site = &sites["session"]["sites"][slot];
+    assert_eq!(site["source_sha256"], expected[0]["source_sha256"]);
+    assert_eq!(site["anchor_offset"], expected[0]["anchor_offset"]);
+    assert_eq!(site["label"], "window.hsw");
+}
+
+#[tokio::test]
 async fn filtered_artifacts_select_by_kind_frame_host_and_digest() {
     let server = Server::start().await;
     let hash = |n: u64| format!("{:064x}", n);

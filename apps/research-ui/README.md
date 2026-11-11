@@ -2186,9 +2186,14 @@ the graph, and shows its selector histogram in Lineage.
 The workspace passes `onSelect` and `onFollow` to `createFlowGraphPanel` and
 calls its `select`, `setMark`, `resize` and `highlightRequest` only when the
 panel has them, so it also runs with a graph that offers none. A Wasm card
-opens its CFG; a lineage request link lights that request's stack; a sample
-marks its function's card; Back and Forward reselect the card a trail entry
-named.
+opens its CFG; a sample marks its function's card; Back and Forward reselect
+the card a trail entry named. What the graph reports while the workspace
+drives it is never applied as it arrives, so nothing loops, but a pick made
+through the workspace is applied once the call returns: a lineage request
+step lights that request's stack and the card the graph selects for it
+becomes the selection, in the same trail entry as the step, and a card,
+caller or callee in the Related rail is selected in the graph and followed
+like a click on it, with its CFG and a trail entry.
 
 ## Flow graph
 

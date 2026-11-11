@@ -101,12 +101,27 @@ function createFlowWorkspace(options) {
   // A graph that reports its own selection while the workspace drives it
   // (select, setMark, highlightRequest) must not rewrite the selection that
   // caused the call; `drivingGraph` marks those calls.
-  let drivingGraph = false;
+  let drivingGraph = false, echo, intended = null;
   const graphCall = (name, ...args) => {
     if (!graph || typeof graph[name] !== 'function') return undefined;
     const was = drivingGraph; drivingGraph = true;
     try { return graph[name](...args); } finally { drivingGraph = was; }
   };
+  // A pick the researcher makes through the workspace (a Related entry, a
+  // lineage step that lights its request) drives the graph, and the card the
+  // graph selects in answer is that pick: it is applied once, after the call,
+  // so the echo during the call still cannot loop. A select queued before
+  // layout comes back `requested`; `intended` marks it as this pick.
+  function graphIntent(name, ...args) {
+    echo = undefined;
+    const result = graphCall(name, ...args);
+    let picked = echo;
+    echo = undefined;
+    if (picked === undefined && result && typeof graph?.selection === 'function') picked = graph.selection() ?? null;
+    if (picked !== undefined) { intended = null; graphPicked(picked, {intent: true}); }
+    else if (name === 'select' && result === false) intended = String(args[0]);
+    return result;
+  }
   const doc = root.ownerDocument ?? document;
   const $ = selector => root.querySelector(selector);
   const make = (tag, className = '', text = '') => { const element = doc.createElement(tag); if (className) element.className = className; if (text) element.textContent = text; return element; };
@@ -136,6 +151,8 @@ function createFlowWorkspace(options) {
   // Selection, trail and history.
   let selection = {request: null, call: null, fn: null, site: null, sample: null, step: null, graphKey: null};
   let history = [], cursor = -1, restoring = false, graphInfo = null, lineageModels = [], lineageStepModel = null;
+  // Above zero while one pick makes several changes that are one trail entry.
+  let batching = 0;
   // Short feedback for a key that did nothing visible; it clears itself.
   let flashTimer = 0;
   const flash = text => {
@@ -370,9 +387,13 @@ function createFlowWorkspace(options) {
   // Graph pane: selection API used with feature detection.
   function graphPicked(info, {followed = false, requested = false} = {}) {
     graphInfo = info ?? null;
+    if (drivingGraph) { echo = info ?? null; renderRelated(); renderTabs(); return; }
     // A key the workspace queued with select() before the graph was laid out
-    // comes back `requested` once drawn: the workspace asked, nobody picked.
-    if (restoring || drivingGraph || requested) { renderRelated(); renderTabs(); return; }
+    // comes back `requested` once drawn: the workspace asked, nobody picked,
+    // unless it was a researcher's pick made while the graph laid out.
+    if (requested && intended !== null && info?.key === intended) { intended = null; requested = false; }
+    if (restoring || requested) { renderRelated(); renderTabs(); return; }
+    intended = null;
     // A card replaces a picked sample, so the timeline lets go of it too.
     if (info && selection.sample) timeline?.clear();
     if (!info) { setSelection({graphKey: null}, {pane: 'graph'}); renderRelated(); return; }
@@ -394,21 +415,24 @@ function createFlowWorkspace(options) {
   function lineagePicked(model) {
     lineageStepModel = model ?? null;
     if (restoring || !model) return;
-    setSelection({step: model.key}, {pane: 'lineage'});
-    const step = model.step;
-    if (step) {
+    // The step, the card its request lights and its call are one pick and
+    // one trail entry.
+    batch(() => {
+      setSelection({step: model.key}, {pane: 'lineage'});
+      const step = model.step;
+      if (!step) return;
       // A renderer request record names the stack that made it; the
       // request's own browser records follow the selected request's stack.
       const own = call('getRequest');
       const rendererKey = step.operation === 'request_initiated' && step.request_id && step.request_id !== '0'
         ? {process: step.event.process_id, request: String(step.request_id)} : own?.renderer ?? null;
-      if (rendererKey && step.category === 'network') graphCall('highlightRequest', rendererKey);
+      if (rendererKey && step.category === 'network') graphIntent('highlightRequest', rendererKey);
       // A tracked call's start or settle record selects that call's track.
       const record = `${step.event.process_id}:${step.event.sequence_number}`;
       const track = timeline?.view()?.tracks.find(item => item.start?.key === record || item.settle?.key === record);
       if (track) timeline.select(`call:${track.key}`, {silent: true});
-      if (track) setSelection({call: {key: `call:${track.key}`, label: `call #${track.invocation}`}}, {pane: 'lineage', record: false});
-    }
+      if (track) setSelection({call: {key: `call:${track.key}`, label: `call #${track.invocation}`}}, {pane: 'lineage'});
+    });
     renderLineageSelected(); renderRelated();
   }
   function setLineageTab(name, {focus = false} = {}) {
@@ -454,8 +478,14 @@ function createFlowWorkspace(options) {
     selection = {...selection, ...patch};
     if (flowSelectionKey(selection) === before) return;
     renderTrail();
-    if (record && !restoring) pushHistory(active);
+    if (record && !restoring && !batching) pushHistory(active);
     renderTabs();
+  }
+  /** Runs one pick that changes several things as a single trail entry. */
+  function batch(run) {
+    batching += 1;
+    try { run(); } finally { batching -= 1; }
+    if (!batching && !restoring) pushHistory(active);
   }
   function snapshot(pane) { return {selection: {...selection}, pane, sample: timeline?.selection()?.key ?? null}; }
   function pushHistory(pane) {
@@ -662,7 +692,7 @@ function createFlowWorkspace(options) {
     applyLayout();
     if (name === 'cfg' && cfg.fn && !cfg.loaded) loadCfg(cfg.fn, {offset: cfg.mark});
     if (focus) focusPaneContent(name);
-    if (record && before !== name && !restoring) pushHistory(name);
+    if (record && before !== name && !restoring && !batching) pushHistory(name);
     return true;
   }
   /** Keyboard focus on the pane's working control, else the pane itself. */
@@ -844,11 +874,13 @@ function createFlowWorkspace(options) {
     }
     // The graph card: its row, and its callers and callees when the graph says.
     if (graphInfo) {
-      const entries = [entry(graphInfo.name || graphInfo.kind || 'card', [graphInfo.kind, graphInfo.location].filter(Boolean).join(' · '), () => { if (graphInfo.key) graphCall('select', graphInfo.key, {reveal: true}); reveal('graph', {focus: true}); })];
+      // Each card entry is a pick: the graph selects it and the workspace follows.
+      const pickCard = key => batch(() => { if (key) graphIntent('select', key, {reveal: true}); reveal('graph', {focus: true}); });
+      const entries = [entry(graphInfo.name || graphInfo.kind || 'card', [graphInfo.kind, graphInfo.location].filter(Boolean).join(' · '), () => pickCard(graphInfo.key))];
       if (graphInfo.row) entries.push(entry(`${graphInfo.row.op ?? 'call'} ${graphInfo.row.target ?? ''}`.trim(), graphInfo.row.site ?? '', () => reveal('graph', {focus: true})));
       for (const [label, list] of [['called by', graphInfo.callers], ['calls', graphInfo.callees]]) {
         if (!Array.isArray(list)) continue;
-        for (const item of list.slice(0, 4)) entries.push(entry(`${label} ${item.name ?? item.key ?? ''}`.trim(), item.note ?? '', () => { if (item.key) graphCall('select', item.key, {reveal: true}); reveal('graph', {focus: true}); }));
+        for (const item of list.slice(0, 4)) entries.push(entry(`${label} ${item.name ?? item.key ?? ''}`.trim(), item.note ?? '', () => pickCard(item.key)));
       }
       if (graphInfo.request) {
         const known = call('findRendererRequest', graphInfo.request.process, graphInfo.request.request);

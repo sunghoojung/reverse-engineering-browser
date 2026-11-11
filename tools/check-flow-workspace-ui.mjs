@@ -435,11 +435,44 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   assert.equal(workspace.timeline.selection()?.key, sampleKey, 'and keeps the sample selected');
 }
 {
-  // A graph that echoes its own selection while being driven changes nothing.
-  const echo = workspace.selection();
-  graph.highlightRequest = key => { graphCalls.push(['highlightRequest', key]); workspace.graphSelected({key: 'echo', kind: 'javascript', name: 'echo', row: null, request: null}); return true; };
+  // A lineage step that lights its request picks the card the graph selects
+  // in answer: the trail, the CFG and one history entry follow it, and the
+  // echo during the call cannot loop back into the graph.
+  const before = workspace.history().entries;
+  graphCalls.length = 0;
+  const lit = {key: 'wasm|lit', kind: 'wasm', name: 'send', artifact_id: '4', function_index: 2, row: {index: 0, site: '+0x4b', op: 'call', target: 'hash'}, request: {process: 41, request: '73'}};
+  graph.highlightRequest = key => { graphCalls.push(['highlightRequest', key]); workspace.graphSelected(lit); return true; };
   workspace.lineageSelected({key: '41:9', step: {relation: 'request_initiator', confidence: 'observed', category: 'network', operation: 'request_initiated', request_id: '73', event: {process_id: 41, sequence_number: '9'}}});
-  same(workspace.selection().fn, echo.fn, 'an echoed graph selection does not replace the trail');
+  await settle();
+  assert.equal(workspace.selection().graphKey, 'wasm|lit', 'the lit card is the selection');
+  assert.equal(workspace.selection().fn.key, 'wasm:4:2');
+  assert.equal(workspace.selection().site.label, '+0x4b call');
+  assert.equal(workspace.cfg().fn?.function_index, 2, 'its CFG opens');
+  assert.equal(workspace.history().entries, before + 1, 'the step and its card are one trail entry');
+  assert.equal(graphCalls.filter(call => call[0] === 'select').length, 0, 'nothing selects back into the graph');
+  // A caller in the Related rail is a pick too: the graph selects it, and the
+  // workspace follows with its CFG and a trail entry.
+  graph.select = (key, options) => {
+    graphCalls.push(['select', key, options]);
+    workspace.graphSelected({key, kind: 'wasm', name: 'bridge', artifact_id: '4', function_index: 1, row: null, request: null, callers: [], callees: []});
+    return true;
+  };
+  workspace.graphSelected({...lit, callers: [{key: 'wasm|bridge', name: 'bridge', kind: 'wasm', note: 'call', count: 2}], callees: []});
+  key('z', {target: $('#flow-pane-graph')});
+  const entries = workspace.history().entries;
+  const caller = [...document.querySelectorAll('#flow-related .flow-related-item')].find(item => item.textContent.startsWith('called by bridge'));
+  assert(caller, 'the Related rail lists the caller');
+  graphCalls.length = 0;
+  caller.dispatchEvent(new window.Event('click'));
+  await settle();
+  same(graphCalls.filter(call => call[0] === 'select').map(call => call[1]), ['wasm|bridge'], 'the graph is asked once, and its answer does not loop');
+  assert.equal(workspace.selection().graphKey, 'wasm|bridge', 'the caller is the selection');
+  assert.equal(workspace.selection().fn.key, 'wasm:4:1');
+  assert.equal(workspace.cfg().fn?.function_index, 1, 'its CFG opens');
+  assert.equal(workspace.history().entries, entries + 1, 'and one trail entry records the pick');
+  key('z');
+  graph.select = (...args) => { graphCalls.push(['select', ...args]); return true; };
+  graph.highlightRequest = (...args) => { graphCalls.push(['highlightRequest', ...args]); return true; };
 }
 {
   // Switching sessions cancels a CFG read in flight: its graph, names and

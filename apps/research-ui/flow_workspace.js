@@ -368,9 +368,11 @@ function createFlowWorkspace(options) {
   }
 
   // Graph pane: selection API used with feature detection.
-  function graphPicked(info, {followed = false} = {}) {
+  function graphPicked(info, {followed = false, requested = false} = {}) {
     graphInfo = info ?? null;
-    if (restoring || drivingGraph) { renderRelated(); renderTabs(); return; }
+    // A key the workspace queued with select() before the graph was laid out
+    // comes back `requested` once drawn: the workspace asked, nobody picked.
+    if (restoring || drivingGraph || requested) { renderRelated(); renderTabs(); return; }
     // A card replaces a picked sample, so the timeline lets go of it too.
     if (info && selection.sample) timeline?.clear();
     if (!info) { setSelection({graphKey: null}, {pane: 'graph'}); renderRelated(); return; }
@@ -996,7 +998,7 @@ function createFlowWorkspace(options) {
     /** The lineage rows renderBacktrace just drew, for the Related rail. */
     setLineage(models) { lineageModels = Array.isArray(models) ? models.slice(0, 256) : []; if (!related?.hidden) renderRelated(); },
     lineageSelected: lineagePicked,
-    graphSelected: info => graphPicked(info),
+    graphSelected: (info, how) => graphPicked(info, {requested: how?.requested === true}),
     graphFollowed: info => graphPicked(info, {followed: true}),
     reveal, follow, back, forward, togglePane, setMode, toggleFocus,
     selection: () => ({...selection}),

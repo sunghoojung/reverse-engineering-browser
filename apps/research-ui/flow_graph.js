@@ -354,8 +354,9 @@ function flowGraphAlpha(color, alpha) {
 /**
  * The flow graph view: the Graph pane of the Flow workspace.
  * `open(node)` reveals a resolved function in Sources; `available()` says
- * whether this shell serves the route. `onSelect(info | null)` hears every
- * change of the selected card or row, clears included; `onFollow(info)`, when
+ * whether this shell serves the route. `onSelect(info | null, {requested})`
+ * hears every change of the selected card or row, clears included, with
+ * `requested` true for a key `select` queued before layout; `onFollow(info)`, when
  * given, takes Enter or a double-click on a Wasm card instead of Sources. The
  * README's Flow graph section documents `info` and the returned methods.
  */
@@ -523,6 +524,9 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
   // The workspace's timeline mark: a Wasm function (and row) a sample points
   // to, apart from the selection. The selection last reported to onSelect.
   let mark = null, markTarget = null, reported = '', pendingKey = null, keyIndex = null, labelSides = null;
+  // True while a key `select` queued before layout is selected, so onSelect
+  // can tell the host that selection was its own request, not a pick.
+  let replaying = false;
   // A layout the view was hidden during is redone when it shows again.
   let layoutStale = false, layingOut = false, highlightFromRequest = false, detailsOpen = false, minimapOn = true, pendingSelect = null, pendingRequest = false;
   // Cards visited by following calls, for Backspace.
@@ -669,7 +673,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
       if (fresh) { needsStart = cssW <= 1; start(); } else if (selected >= 0 && !reselect) ensureVisible(selected); else requestDraw();
       if (reselect && selected >= 0) select(selected, {reveal: false, row: selectedRow});
       if (requestKey && (fresh || rehighlight)) highlightRequest(requestKey, {reveal: fresh});
-      if (pendingKey) { const wanted = pendingKey; pendingKey = null; selectKey(wanted.key, {reveal: wanted.reveal}); }
+      if (pendingKey) { const wanted = pendingKey; pendingKey = null; replaying = true; try { selectKey(wanted.key, {reveal: wanted.reveal}); } finally { replaying = false; } }
       notify();
     } catch (problem) {
       layingOut = false;
@@ -1296,7 +1300,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     if (signature === reported) return;
     reported = signature;
     if (typeof onSelect !== 'function') return;
-    try { onSelect(info); } catch (problem) { console.error(problem); }
+    try { onSelect(info, {requested: replaying}); } catch (problem) { console.error(problem); }
   }
   /** Display index by the key of every model node a card holds. */
   function indexOfKey(key) {

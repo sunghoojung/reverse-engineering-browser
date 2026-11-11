@@ -424,6 +424,17 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   same(appCalls, [['selectRequest', 'r0']]);
 }
 {
+  // A key the workspace queued before layout comes back `requested`: it is
+  // not a pick, so a restored sample, the history and Forward all stay.
+  const sampleKey = document.querySelectorAll('#flow-timeline .flow-tl-sample')[0].dataset.key;
+  workspace.timeline.select(sampleKey, {silent: false});
+  const held = workspace.selection(), entries = workspace.history();
+  workspace.graphSelected({key: 'wasm|queued', kind: 'wasm', name: 'send', artifact_id: '4', function_index: 2, row: null, request: null}, {requested: true});
+  same(workspace.selection(), held, 'a requested graph selection changes no workspace selection');
+  same(workspace.history(), entries, 'and records no trail entry');
+  assert.equal(workspace.timeline.selection()?.key, sampleKey, 'and keeps the sample selected');
+}
+{
   // A graph that echoes its own selection while being driven changes nothing.
   const echo = workspace.selection();
   graph.highlightRequest = key => { graphCalls.push(['highlightRequest', key]); workspace.graphSelected({key: 'echo', kind: 'javascript', name: 'echo', row: null, request: null}); return true; };

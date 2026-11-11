@@ -605,10 +605,10 @@ const text = selector => host.querySelector(selector)?.textContent ?? '';
   for (const name of ['flow_graph_layout.js', 'flow_graph.js']) runInContext(await readFile(new URL(name, ui), 'utf8'), ws, {filename: name});
   const doc = sessionDoc();
   doc.edges[5].sites = [{module_offset: 47}]; // run calls its import send at +0x2f
-  Object.assign(ws, {__doc: doc, __seen: [], __followed: [], __opened: []});
+  Object.assign(ws, {__doc: doc, __seen: [], __how: [], __followed: [], __opened: []});
   runInContext(`var panel = createFlowGraphPanel({host: document.querySelector('#host'), open: node => __opened.push(node.name), fetchGraph: async () => __doc,
     onSelect: info => __seen.push(info), onFollow: info => __followed.push(info)});
-    var late = createFlowGraphPanel({host: document.querySelector('#late'), fetchGraph: async () => __doc, onSelect: info => __seen.push(info)});`, ws);
+    var late = createFlowGraphPanel({host: document.querySelector('#late'), fetchGraph: async () => __doc, onSelect: (info, how) => { __seen.push(info); __how.push(how); }});`, ws);
   const call = text => runInContext(text, ws), seen = ws.__seen, keyOf = name => model.flowGraphNodeKey(doc.nodes.find(item => item.name === name));
   // A key asked for before the graph is drawn is selected once it is.
   assert.equal(call(`late.select(${JSON.stringify(keyOf('send'))})`), false, 'nothing is found before the graph is drawn');
@@ -616,6 +616,9 @@ const text = selector => host.querySelector(selector)?.textContent ?? '';
   await settle();
   assert.equal(call('late.selection()')?.name, 'send', 'the key asked for early is selected when the graph lands');
   assert.equal(seen.at(-1)?.name, 'send', 'and onSelect hears it');
+  assert.deepEqual({...ws.__how.at(-1)}, {requested: true}, 'marked as the host\u2019s own request, not a pick');
+  call(`late.select(${JSON.stringify(keyOf('run'))})`);
+  assert.deepEqual({...ws.__how.at(-1)}, {requested: false}, 'a selection once the graph is drawn is not marked');
   call(`late.hide()`); seen.length = 0;
   call(`panel.show({session: '7', request: null})`);
   await settle();

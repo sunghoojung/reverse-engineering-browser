@@ -2400,9 +2400,12 @@ The canvas announces this list through `aria-describedby`.
 
 The Flow workspace hosts this view as its Graph pane. `createFlowGraphPanel`
 takes, besides `host`, `open`, `available` and `fetchGraph`:
-- `onSelect(info | null)`, called whenever the selected card, its chosen row
-  or the lit request changes, and with `null` when the selection clears. A
-  change to the same card and row is not reported twice.
+- `onSelect(info | null, {requested})`, called whenever the selected card,
+  its chosen row or the lit request changes, and with `null` when the
+  selection clears. A change to the same card and row is not reported twice.
+  `requested` is true only when the change is a key `select` queued before the
+  graph was drawn, selected once it lands: the host asked for it, nobody
+  picked it, so the Flow workspace records no trail entry for it.
 - `onFollow(info)`, called on Enter or a double-click on a Wasm card. Without
   it a Wasm card opens in Sources, as before. Enter on a call row still
   follows the call.
@@ -2430,7 +2433,8 @@ The panel returns, besides `show`, `hide`, `highlightRequest`, `focus`,
 - `select(key, {reveal = true} = {})` selects the card that holds `key`, any
   member's key for a chain, and centres it unless `reveal` is false. It
   returns whether the card is in the graph. Asked before the graph is drawn,
-  it returns `false` and selects the key once the graph lands.
+  it returns `false` and selects the key once the graph lands, reported with
+  `requested: true`.
 - `selection()` returns the current `info`, or `null`.
 - `resize()` re-measures the stage after the host changed its size, such as
   when a pane opens, closes or is dragged.

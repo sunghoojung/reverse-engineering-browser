@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Backtraces Flow graph: the flow-graph-v1 model, chain folding, card rows,
-// the vertical layout (realm bands stacked in call order) and its routes, and
-// the panel's selection, highlight, details, menu, failure states and the
-// Flow workspace API in a DOM model. Offline: no rendered pixels are claimed
-// here.
+// Flow graph (the Flow workspace's Graph pane): the flow-graph-v1 model, chain
+// folding, card rows, the vertical layout (realm bands stacked in call order)
+// and its routes, and the panel's selection, highlight, details, menu, failure
+// states and the Flow workspace API in a DOM model. Offline: no rendered
+// pixels are claimed here.
 // Requires: npm ci --prefix tools/ui-startup-deps --ignore-scripts --no-audit --no-fund
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
@@ -723,7 +723,7 @@ const text = selector => host.querySelector(selector)?.textContent ?? '';
   assert(!/\u2014/.test(view + layoutSource + css), 'no em dash characters');
   assert(/flowGraphEdgeNote\(model, display, edge\)/.test(view) && /'cross', 'crosses a frame, JS ↔ Wasm or into eval'/.test(view), 'a crossing is written on its row and in the key, not only colored');
   assert(/setAttribute\('role', 'menuitem'\)/.test(view), 'the card menu is a menu to assistive technology');
-  assert(html.includes('id="trace-mode-graph"') && html.includes('id="flow-graph-host"'), 'Backtraces offers Flow graph beside Steps');
+  assert(html.includes('id="flow-pane-graph"') && html.includes('id="flow-graph-host"') && !html.includes('id="trace-mode-graph"'), 'the Flow workspace holds the graph as its Graph pane, with no Steps toggle');
   assert(html.indexOf('flow_graph_layout.js') < html.indexOf('flow_graph.js"') && html.indexOf('flow_graph.js"') < html.indexOf('app.js"'), 'the layout and view load before app.js');
   assert(/typeof flowGraphPanel !== 'undefined'/.test(app), 'extracted app.js sections run without the panel');
   for (const [path, assets] of [['scripts/build-research-app.sh', ['flow_graph.js', 'flow_graph_layout.js', 'flow_graph.css']], ['apps/origin-trace-backend/src/app.rs', ['"flow_graph.js"', '"flow_graph_layout.js"', '"flow_graph.css"']],

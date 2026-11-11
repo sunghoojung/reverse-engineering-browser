@@ -60,7 +60,7 @@ let investigationRange = null;
 let investigationPendingReturn = null;
 let investigationPassiveSource = false;
 let investigationDecoderOrigin = null;
-const investigationNames = {traffic:'Requests', evidence:'Evidence', backtrace:'Backtrace', sources:'Sources', tools:'Decoder', signals:'Fingerprinting', 'api-collection':'Collection', analyst:'Analyst', vm:'VM candidates'};
+const investigationNames = {traffic:'Requests', evidence:'Evidence', backtrace:'Flow', sources:'Sources', tools:'Decoder', signals:'Fingerprinting', 'api-collection':'Collection', analyst:'Analyst', vm:'VM candidates'};
 const investigationScreen = () => document.querySelector('.screen:not([hidden])')?.id.replace('screen-', '') ?? 'traffic';
 function investigationSelector(node, root = document, stableOnly = false) {
   if (!node || !root.contains(node)) return null;

@@ -2505,7 +2505,7 @@ var(--panel);
       .tool-detail-disclosure[open] > summary { color: var(--accent); }
       .tool-detail-disclosure .experiment-privacy { padding: 0 12px 10px; }
 
-      /* Backtraces, Analyst and Tools share a quiet hierarchy: task, input, result, optional detail. */
+      /* Flow, Analyst and Tools share a quiet hierarchy: task, input, result, optional detail. */
       .workspace-disclosure, details.analyst-storage, details.analyst-card,
       details.decoder-card { min-width: 0; }
       .workspace-disclosure > summary, .workspace-disclosure-title {
@@ -2743,8 +2743,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 @media (max-width: 600px) { .evidence-package-panel { padding: 12px; } .package-facts { grid-template-columns: 1fr; gap: 3px; } .package-facts dd { margin-bottom: 8px; } }
 
 @media (max-width: 650px) {
-  #screen-backtrace > .screen-head, #screen-evidence > .screen-head { flex-wrap: wrap; }
-  #screen-backtrace .screen-head-actions .package-navigation { display: inline-flex; }
+  #screen-evidence > .screen-head { flex-wrap: wrap; }
 }
 
 .package-window { position: relative; }
@@ -4244,10 +4243,10 @@ input[type="file"]:hover::file-selector-button { background: var(--panel-3); }
 .captured-export-footer .secondary-button:not(.captured-export-primary):hover:not(:disabled) { border-color: var(--line); background: var(--panel-3); }
 /* End traffic and request inspector */
 
-/* Evidence and backtraces */
+/* Evidence and the Flow lineage */
 /* Captured evidence carries mono and color; labels, notices and controls stay
    quiet. Properties that narrow-layout rules also set are left to those rules. */
-#screen-evidence .screen-head-actions .secondary-button, #screen-backtrace .screen-head-actions .package-navigation { align-items: center; }
+#screen-evidence .screen-head-actions .secondary-button { align-items: center; }
 #screen-evidence .evidence-eyebrow { font-size: 11px; }
 #screen-evidence .evidence-context h2 { font-weight: 500; }
 #screen-evidence .evidence-coverage > span { color: var(--muted); }
@@ -4290,21 +4289,18 @@ input[type="file"]:hover::file-selector-button { background: var(--panel-3); }
 /* The pager has nothing to page until a comparison returns rows. */
 #evidence-comparison-panel > .package-toolbar:last-child:has(> span:empty) { display: none; }
 
-/* Backtraces: one 16px inset for the heading, steps and inspector. Recorded
-   links are the normal case; only shared-identifier and gap steps keep color. */
-#screen-backtrace .trace-toolbar :is(select, button) { min-height: 32px; }
-#screen-backtrace .trace-list-heading { padding: 12px 16px; }
-#screen-backtrace .trace-row { padding: 12px 16px; }
+/* Flow lineage (Lineage and Details tabs). Insets and the link lines are in
+   flow_workspace.css. Recorded links are the normal case; only
+   shared-identifier and gap steps keep color. */
 #screen-backtrace .trace-link-type { font-size: 11px; }
 #screen-backtrace .trace-link-type.exact { color: var(--muted); }
-#screen-backtrace .trace-inspector { padding: 12px 16px 24px; }
 #screen-backtrace .trace-inspector > h2 { margin-bottom: 16px; }
 #screen-backtrace .trace-detail-relation { margin: 4px 0 16px; }
 #screen-backtrace .trace-facts { gap: 8px 12px; margin-bottom: 16px; }
 #screen-backtrace .trace-inspector .workspace-disclosure > summary { padding-inline: 0; }
 #screen-backtrace .trace-value { padding: 12px 16px; }
-#screen-backtrace .trace-empty { padding: 32px; border-radius: 8px; }
-/* End evidence and backtraces */
+#screen-backtrace .trace-empty { border-radius: 8px; }
+/* End evidence and the Flow lineage */
 
 /* Sources */
 /* The details sidebar is one scrolling stack of panes. Its earlier three-row

@@ -33,14 +33,38 @@ const entropyMap = createEntropyMap({
   toolbar: document.querySelector('.source-editor-toolbar'),
   getSource: selectedSource, identityOf: sourceIdentity, reveal: revealSourceByteOffset
 });
-// Backtraces Flow graph: every recorded stack of the session as one graph.
+// Flow graph: every recorded stack of the session as one graph, the Graph
+// pane of the Flow workspace. A graph without the selection options ignores them.
 const flowGraphPanel = typeof createFlowGraphPanel === 'function' && document.querySelector('#flow-graph-host') ? createFlowGraphPanel({
   host: document.querySelector('#flow-graph-host'),
   // The stored-evidence window has no flow graph route.
   available: () => location.protocol === 'http:' || location.protocol === 'https:',
   open: node => {
     if (node.artifact_id) openResolvedFrame({artifact_id: node.artifact_id, artifact_line: node.artifact_line ?? null, artifact_column: node.artifact_column ?? 0});
-  }
+  },
+  onSelect: info => { if (typeof flowWorkspace !== 'undefined') flowWorkspace?.graphSelected(info); },
+  onFollow: info => { if (typeof flowWorkspace !== 'undefined') flowWorkspace?.graphFollowed(info); }
+}) : null;
+// The Flow workspace: Graph, CFG, Lineage and Timeline share one selection and trail.
+const flowWorkspace = typeof createFlowWorkspace === 'function' && document.querySelector('#flow-body') ? createFlowWorkspace({
+  root: document.querySelector('#screen-backtrace'),
+  graph: flowGraphPanel,
+  storage: (() => { try { return localStorage; } catch { return null; } })(),
+  getRequest: () => flowWorkspaceRequest(),
+  selectRequest: id => flowWorkspaceSelectRequest(id),
+  findRendererRequest: (process, request) => flowWorkspaceRendererRequest(process, request),
+  selectTraceRow: key => {
+    const row = [...elements.backtraceSteps.querySelectorAll('.trace-row')].find(candidate => candidate.dataset.traceKey === key);
+    if (!row) return false;
+    row.click(); return true;
+  },
+  focusTraceRow: () => {
+    const rows = [...elements.backtraceSteps.querySelectorAll('.trace-row')];
+    const target = rows.find(row => row.dataset.traceKey === state.selectedTraceRow) ?? rows[0] ?? (elements.traceLoad.disabled ? null : elements.traceLoad);
+    if (!target || !target.getClientRects?.().length) return false;
+    target.focus({preventScroll: false, focusVisible: true}); return true;
+  },
+  openSource: target => flowWorkspaceOpenSource(target)
 }) : null;
 // The Sources status bar never cuts the cursor position, which has the full
 // text as its tooltip. When the items do not fit, it drops in turn the hash,
@@ -145,9 +169,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           events: state.events, artifacts: state.artifacts, eventsLimited: state.eventsLimited,
           error: state.eventFailureKind, mode: state.sessionMode}),
         packagePanel: evidencePackagePanel,
-        onTrace: () => typeof openInvestigation === 'function'
-          ? openInvestigation({kind: 'trace', identity: investigationRequestIdentity(state.requests.find(request => request.id === state.selectedRequestId))})
-          : showScreen('backtrace'),
+        onTrace: () => {
+          const opened = typeof openInvestigation === 'function'
+            ? openInvestigation({kind: 'trace', identity: investigationRequestIdentity(state.requests.find(request => request.id === state.selectedRequestId))})
+            : showScreen('backtrace');
+          if (opened && typeof flowWorkspace !== 'undefined') flowWorkspace?.reveal('lineage', {record: false});
+          return opened;
+        },
         onRequest: () => typeof openInvestigation === 'function'
           ? openInvestigation({kind: 'request', identity: investigationRequestIdentity(state.requests.find(request => request.id === state.selectedRequestId))})
           : showScreen('traffic'),
@@ -4334,11 +4362,15 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const item = document.createElement('li'); item.className = `trace-step${model.gap ? ' gap' : ''}`;
         const row = document.createElement('button'); row.type = 'button'; row.className = 'trace-row';
         row.dataset.traceKey = model.key;
+        // Line style says how sure the link is; colour says what it is (flow_workspace.css).
+        row.dataset.relation = model.step?.relation ?? 'gap';
+        row.dataset.confidence = model.step?.confidence ?? 'gap';
         row.setAttribute('aria-pressed', String(state.selectedTraceRow === model.key));
         row.tabIndex = state.selectedTraceRow === model.key ? 0 : -1;
         const copy = document.createElement('span'); copy.className = 'trace-row-copy';
         copy.append(textElement('span', 'step-title', model.title), textElement('span', 'step-kind', model.kind));
-        row.append(textElement('span', 'step-index', model.index), copy,
+        const line = document.createElement('span'); line.className = 'trace-line'; line.setAttribute('aria-hidden', 'true');
+        row.append(line, textElement('span', 'step-index', model.index), copy,
           textElement('span', `trace-link-type ${model.style}`, model.confidence));
         row.addEventListener('click', () => {
           state.selectedTraceRow = model.key;
@@ -4347,6 +4379,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             candidate.setAttribute('aria-pressed', String(active)); candidate.tabIndex = active ? 0 : -1;
           });
           traceStepDetails(model);
+          if (typeof flowWorkspace !== 'undefined') flowWorkspace?.lineageSelected(model);
         });
         row.addEventListener('keydown', event => {
           if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
@@ -4378,22 +4411,55 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const id = investigationId(initiated?.request_id);
         return initiated && id && id !== '0' ? {process: initiated.process_id, request: id} : null;
       }
-      function renderTraceMode() {
-        const graph = state.traceMode === 'graph';
+      /** Shows the Flow workspace's panes for the selected request, or hides them. */
+      function renderFlowWorkspace() {
         const screen = document.querySelector('#screen-backtrace');
-        if (screen) screen.dataset.traceMode = graph ? 'graph' : 'steps';
-        document.querySelector('#trace-mode-steps')?.setAttribute('aria-pressed', String(!graph));
-        document.querySelector('#trace-mode-graph')?.setAttribute('aria-pressed', String(graph));
-        if (typeof flowGraphPanel === 'undefined' || !flowGraphPanel) return graph;
-        const showing = graph && screen && !screen.hidden;
-        if (showing) flowGraphPanel.show({session: flowGraphSession(), request: flowGraphRequestKey()});
-        else flowGraphPanel.hide();
-        return graph;
+        const showing = Boolean(screen && !screen.hidden);
+        if (typeof flowGraphPanel !== 'undefined' && flowGraphPanel) {
+          if (showing) flowGraphPanel.show({session: flowGraphSession(), request: flowGraphRequestKey()});
+          else flowGraphPanel.hide();
+        }
+        if (typeof flowWorkspace !== 'undefined' && flowWorkspace) flowWorkspace.sync({visible: showing, session: flowGraphSession(), request: showing ? flowWorkspaceRequest() : null});
+      }
+      /** The selected request as the workspace names it: its trail crumb and request card. */
+      function flowWorkspaceRequest() {
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId) ?? null;
+        if (!request) return null;
+        const renderer = flowGraphRequestKey();
+        const path = String(request.path ?? '').replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, '') || String(request.path ?? '');
+        return {id: request.id, method: request.method, path: request.path, status: request.status ?? null, renderer,
+          label: `${request.method ?? ''} ${path.length > 48 ? `${path.slice(0, 47)}…` : path}${renderer ? ` #${renderer.request}` : ''}`.trim()};
+      }
+      function flowWorkspaceSelectRequest(id) {
+        if (state.selectedRequestId === id || !state.requests.some(candidate => candidate.id === id)) return;
+        selectRequest(id);
+        refreshOriginTrace();
+      }
+      // Renderer request ID to the captured request row that names it, rebuilt
+      // only when the request list changes.
+      let flowRendererIndex = {requests: null, map: new Map()};
+      function flowWorkspaceRendererRequest(process, request) {
+        if (flowRendererIndex.requests !== state.requests) {
+          const map = new Map();
+          for (const candidate of state.requests) {
+            const initiated = candidate.events?.find(event => event.type === 'request_initiated');
+            const id = investigationId(initiated?.request_id);
+            if (initiated && id && id !== '0') map.set(`${initiated.process_id}:${id}`, {id: candidate.id, label: `${candidate.method} ${String(candidate.path ?? '').replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')}`});
+          }
+          flowRendererIndex = {requests: state.requests, map};
+        }
+        return flowRendererIndex.map.get(`${process}:${request}`) ?? null;
+      }
+      /** Opens a Wasm module in Sources from the CFG pane, at the function's first byte. */
+      function flowWorkspaceOpenSource({artifact_id: artifactId}) {
+        const matches = state.artifacts.filter(candidate => String(candidate.artifact_id) === String(artifactId));
+        if (matches.length !== 1) { investigationNotice('This module is not retained once in the artifact catalog, so Sources cannot open it.', 'unavailable'); return false; }
+        return openInvestigation({kind: 'artifact', identity: investigationArtifactIdentity(matches[0]), relation: 'Opened from the Flow CFG. The block graph is declared static flow, not observed execution.'});
       }
 
       function renderBacktrace() {
-        // Checks run this function alone, without the Flow graph helpers.
-        const graphMode = typeof renderTraceMode === 'function' ? renderTraceMode() : false;
+        // Checks run this function alone, without the Flow workspace helpers.
+        if (typeof renderFlowWorkspace === 'function') renderFlowWorkspace();
         const selection = originTraceSelection();
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         const captured = state.requests.filter(candidate => requestTraceRoot(candidate));
@@ -4422,9 +4488,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.traceRequest.disabled = !choices.length;
         elements.traceLoad.disabled = !selection || state.originTraceStatus === 'loading';
         elements.traceLoad.textContent = state.originTrace ? 'Refresh trace' : 'Load trace';
-        elements.backtraceSubtitle.textContent = graphMode
-          ? 'Every recorded stack of this session, across frames, realms, JavaScript, eval and Wasm'
-          : selection
+        elements.backtraceSubtitle.textContent = selection
           ? `${request.method} ${request.path}`
           : 'Request events and their recorded predecessors';
         const trace = selection && state.originTraceKey === selection.key ? state.originTrace : null;
@@ -4478,6 +4542,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         const active = models.find(model => model.key === state.selectedTraceRow);
         if (active) traceStepDetails(active); else elements.traceStepDetails.replaceChildren();
+        if (typeof flowWorkspace !== 'undefined' && flowWorkspace) flowWorkspace.setLineage(models);
         if (hasSteps) {
           const {linked_steps: linked, gap_count: gaps} = trace.coverage;
           const links = `${linked} recorded predecessor link${linked === 1 ? '' : 's'}`;
@@ -8619,6 +8684,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
         evidenceWorkspace.setVisible(screenName === 'evidence');
         if (screenName !== 'backtrace' && typeof flowGraphPanel !== 'undefined') flowGraphPanel?.hide();
+        if (screenName !== 'backtrace' && typeof flowWorkspace !== 'undefined') flowWorkspace?.sync({visible: false});
         if (screenName !== 'sources') sourceFactsPanel.cancel();
         if (typeof entropyMap !== 'undefined') entropyMap.setVisible(screenName === 'sources');
         if (screenName !== 'tools') float32Panel.cancel();
@@ -9045,14 +9111,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         await refreshOriginTrace();
       });
       elements.traceLoad.addEventListener('click', refreshOriginTrace);
-      for (const [id, mode] of [['#trace-mode-steps', 'steps'], ['#trace-mode-graph', 'graph']]) {
-        document.querySelector(id)?.addEventListener('click', () => {
-          if (state.traceMode === mode || (!state.traceMode && mode === 'steps')) return;
-          state.traceMode = mode;
-          renderBacktrace();
-          if (mode === 'graph') flowGraphPanel?.focus();
-        });
-      }
       elements.traceFirstRequest.addEventListener('click', async () => {
         const first = state.requests.find(candidate => requestTraceRoot(candidate));
         if (!first) return;
@@ -9141,7 +9199,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       });
       elements.traceButton.addEventListener('click', () => {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
-        openInvestigation({kind: 'trace', identity: investigationRequestIdentity(request), relation: 'Captured request → recorded trace. Shared-identifier relationships and missing predecessors remain explicit.'});
+        // Trace origin opens Flow with this request selected and its Lineage showing.
+        if (openInvestigation({kind: 'trace', identity: investigationRequestIdentity(request), relation: 'Captured request → recorded trace. Shared-identifier relationships and missing predecessors remain explicit.'}) && typeof flowWorkspace !== 'undefined') flowWorkspace?.reveal('lineage', {record: false});
       });
 
       elements.requestCollectionPivot.addEventListener('click', copyInvestigationRequestToCollection);

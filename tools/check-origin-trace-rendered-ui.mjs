@@ -257,13 +257,21 @@ fetch("/getcaptcha");
   execFileSync('plutil', ['-convert', 'xml1', '-o', hosted, '-'], {input: JSON.stringify(description)});
   const launchTarget = launchDescription.OriginTraceRenderedUITests;
   // No --ui-url and no explicit evidence-store argument, so the app takes its
-  // automatic live-session path; the stores come from the environment, as a
-  // researcher's overrides would, and the saved site set starts empty.
-  launchTarget.CommandLineArguments = ['--api-collection', stores.apiCollection, '--local-analyst', stores.localAnalyst];
+  // automatic live-session path. Its stores come from the environment, as a
+  // researcher's overrides would, and start empty, as on a first launch, so
+  // the workspace beside the panel is the offline one with nothing captured.
+  const launchStores = join(temporary, 'launch-stores');
+  await mkdir(join(launchStores, 'artifacts'), {recursive: true});
+  for (const name of ['events.jsonl', 'origin-trace.jsonl', 'request-signals.jsonl', 'artifacts/manifest.jsonl']) {
+    await writeFile(join(launchStores, name), '');
+  }
+  launchTarget.CommandLineArguments = ['--api-collection', join(launchStores, 'api-collection.json'),
+    '--local-analyst', join(launchStores, 'local-analyst.json')];
   launchTarget.EnvironmentVariables = {...launchTarget.EnvironmentVariables,
     REB_DISABLE_AUTOMATIC_LIVE_SESSION: '0', REB_RENDERED_UI_LAUNCH: '1',
-    REB_EVENT_STORE: stores.store, REB_ORIGIN_TRACE_STORE: stores.traceStore, REB_REQUEST_SIGNAL_STORE: stores.signalStore,
-    REB_ARTIFACT_STORE: stores.artifacts, REB_JS_INVOCATION_SITE_STORE: join(temporary, 'launch-sites', 'js-invocation-sites-v1.json')};
+    REB_EVENT_STORE: join(launchStores, 'events.jsonl'), REB_ORIGIN_TRACE_STORE: join(launchStores, 'origin-trace.jsonl'),
+    REB_REQUEST_SIGNAL_STORE: join(launchStores, 'request-signals.jsonl'), REB_ARTIFACT_STORE: join(launchStores, 'artifacts'),
+    REB_JS_INVOCATION_SITE_STORE: join(launchStores, 'js-invocation-sites-v1.json')};
   launchTarget.OnlyTestIdentifiers = [`OriginTraceRenderedUITests/${launchTest}`];
   const hostedLaunch = join(products, 'hosted-origin-trace-launch.xctestrun');
   await writeFile(hostedLaunch, '');

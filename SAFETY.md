@@ -31,6 +31,13 @@ it.
 - Opening the packaged Origin Trace app starts a visibly labeled local research
   session with implemented native capture categories. CDP collection and injected
   JavaScript hooks have been removed. Launch only for authorized targets/data.
+  Every session the app starts uses an isolated research profile with
+  Chromium's mock Keychain, so the browser neither reads nor writes the macOS
+  Keychain; the start panel offers no Keychain choice. The only route to the
+  macOS Keychain for an app session is `REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN=1`,
+  which applies to the automatic launch and a reopen's restart, never to a
+  session the panel starts or retries. The standalone `make live` launcher reads
+  `REB_USE_SYSTEM_KEYCHAIN`. Do not save real credentials in an isolated profile.
   The session expires after one hour. The packaged app also enables native Wasm
   `br_table` and `call_indirect` dispatch instrumentation and ignores page
   `debugger;` statements by default; set `REB_NATIVE_WASM_DISPATCH`,

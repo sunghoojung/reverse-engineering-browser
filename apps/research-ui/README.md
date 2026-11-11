@@ -752,21 +752,26 @@ This packages `build/Origin Trace.app` and opens a complete live capture
 session without a setup dialog when the discovered browser is the release's
 paired build (see below). This research launch enables every implemented
 native capture category and Canvas image artifacts. Retained credentials are unmasked; evidence stays
-local. Use this profile only for authorized targets. The default isolated research
-profile uses Chromium's mock Keychain so launch does not stop on a macOS password
-prompt; do not save credentials in that profile. The start panel's Keychain
-checkbox opts into macOS Keychain encryption when credential storage is required.
+local. Use this profile only for authorized targets. Every app session uses the
+isolated research profile, which uses Chromium's mock Keychain so launch does
+not stop on a macOS password prompt; do not save credentials in that profile.
+The start panel offers no Keychain choice. The advanced route to macOS Keychain
+encryption, when credential storage is required, is
+`REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN=1`: it applies to the automatic launch and a
+reopen's restart, never to a session the panel starts or retries. The
+standalone `make live` launcher reads `REB_USE_SYSTEM_KEYCHAIN` instead (on
+unless set to `0`).
 The app does not mark the session live until the launcher publishes its loopback
 handshake. A failure shows in the window's **start panel**, at the right edge
 of the workspace, with **Retry**, which starts again with the same capture mode
-and Keychain choice without restarting Origin Trace, and **Continue Offline**.
+without restarting Origin Trace, and **Continue Offline**.
 Retry is focused, so Return retries.
 Startup allows up to 60 seconds for the bounded broker, receiver, backend and
 browser readiness stages; individual helper failures are reported sooner.
 The failure keeps the launcher's explicit browser/helper diagnosis
 when teardown writes later shell messages; the full session log path stays visible.
 **New Live Session…** in the application menu opens the start panel to choose
-the capture mode and Keychain storage. The panel is part of the workspace, not
+the capture mode. The panel is part of the workspace, not
 a modal: the evidence beside it stays usable while you decide. It also lists
 the saved functions the capture will track (see
 [Track calls](#track-calls-to-a-function)). Start Session is focused, so
@@ -789,9 +794,8 @@ off.
 The app saves no capture choice between launches. `REB_AUTOMATIC_CAPTURE_MODE=metadata`
 selects Metadata for the automatic launch and preselects it in the start panel.
 Any value other than `content` does the same, so a misspelled opt-out never
-turns content capture on. A choice made in the panel, including the Keychain
-checkbox, holds for later sessions in the same app run, including one a Dock
-reopen starts.
+turns content capture on. A mode chosen in the panel holds for later sessions
+in the same app run, including one a Dock reopen starts.
 
 Every app session also enables quiet mode and native Wasm `br_table` and
 `call_indirect` dispatch capture; Wasm dispatch forces Liftoff-only compilation,

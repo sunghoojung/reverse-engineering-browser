@@ -104,6 +104,11 @@ pub struct Start {
     pub parent_invocation_id: u32,
     pub parent_unknown: bool,
     pub argument_count: u16,
+    pub script_id: u32,
+    pub anchor_offset: u32,
+    pub site_sample_index: u16,
+    pub sample_index: u16,
+    pub source_sha256: [u8; 32],
     pub document_id: u64,
 }
 
@@ -146,6 +151,11 @@ pub fn start(event: &Value) -> Option<Start> {
         parent_invocation_id: parent,
         parent_unknown: flags & 0x01 != 0,
         argument_count: argc,
+        script_id: le32(&p, 8),
+        anchor_offset: le32(&p, 12),
+        site_sample_index: le16(&p, 28),
+        sample_index: le16(&p, 30),
+        source_sha256: p[72..104].try_into().ok()?,
         document_id: le64(&p, 104),
     })
 }
@@ -162,6 +172,8 @@ pub struct Settle {
     pub site_slot: u8,
     pub invocation_id: u32,
     pub fulfilled: bool,
+    /// 1 synchronous return, 2 synchronous throw, 3 the caller's promise.
+    pub via: u8,
     pub value_kind: u8,
     pub value_length: u32,
     pub digest_state: u8,
@@ -231,6 +243,7 @@ pub fn settle(event: &Value) -> Option<Settle> {
         site_slot: slot,
         invocation_id: le32(&p, 8),
         fulfilled,
+        via,
         value_kind: kind,
         value_length: length,
         digest_state: state,
@@ -262,6 +275,84 @@ pub fn request(event: &Value) -> Option<Request> {
         inside: state == 2,
         invocation_id: id,
     })
+}
+
+/// API names of value kinds 1 to 14 in wire order. The first nine are the
+/// JavaScript dispatch selector names; 13 is a typed array or `DataView`.
+const VALUE_KINDS: [&str; 14] = [
+    "integer",
+    "number",
+    "string",
+    "symbol",
+    "undefined",
+    "null",
+    "boolean",
+    "bigint",
+    "object",
+    "function",
+    "array",
+    "array_buffer",
+    "array_buffer_view",
+    "promise",
+];
+/// Settle `via` 1 to 3, named as the shipped viewer names them.
+const VIA: [&str; 3] = ["sync_return", "sync_throw", "promise"];
+/// Settle digest states 0 to 4.
+const DIGEST_STATES: [&str; 5] = [
+    "not_requested",
+    "present",
+    "not_digestible",
+    "too_large",
+    "unavailable",
+];
+
+/// The `js_invocation` object `get_events` puts beside the hex payload of an
+/// invocation record; `None` for every other type. A record the parser refuses
+/// is `{status: invalid}` with no fields, never a partial row. A settle names
+/// only its digest state: the digest is sensitive capture that only the
+/// value-flow join reads, and the API never decodes it.
+pub fn query(event: &Value) -> Option<Value> {
+    let decoded = match event["type"].as_str()? {
+        "js_invocation_start" => start(event).map(|s| {
+            json!({"status":"decoded","kind":"start","site_slot":s.site_slot,
+                "invocation_id":s.invocation_id,"parent_invocation_id":s.parent_invocation_id,
+                "parent_unknown":s.parent_unknown,"argument_count":s.argument_count,
+                "script_id":s.script_id,"anchor_offset":s.anchor_offset,
+                "source_sha256":hex::encode(s.source_sha256),
+                "site_sample_index":s.site_sample_index,"sample_index":s.sample_index,
+                "document_id":s.document_id.to_string()})
+        }),
+        "js_invocation_settle" => settle(event).and_then(|s| {
+            let name = |names: &[&'static str], index: usize| names.get(index).copied();
+            Some(
+                json!({"status":"decoded","kind":"settle","site_slot":s.site_slot,
+                "invocation_id":s.invocation_id,"fulfilled":s.fulfilled,
+                "via":name(&VIA, usize::from(s.via).checked_sub(1)?)?,
+                "value_kind":name(&VALUE_KINDS, usize::from(s.value_kind).checked_sub(1)?)?,
+                "value_length":s.value_length,
+                "digest_state":name(&DIGEST_STATES, usize::from(s.digest_state))?,
+                "document_id":s.document_id.to_string()}),
+            )
+        }),
+        "js_invocation_request" => request(event).map(|r| {
+            json!({"status":"decoded","kind":"request","inside":r.inside,
+                "invocation_id":r.invocation_id,"request_id":event["request_id"]})
+        }),
+        _ => return None,
+    };
+    Some(decoded.unwrap_or_else(|| json!({"status":"invalid"})))
+}
+
+/// Puts `js_invocation` beside the payload of each invocation record and
+/// leaves every other event, and every stored field, as it is.
+pub(crate) fn annotate(events: &mut [Value]) {
+    for event in events {
+        if let Some(decoded) = query(event)
+            && let Some(object) = event.as_object_mut()
+        {
+            object.insert("js_invocation".to_owned(), decoded);
+        }
+    }
 }
 
 /// Whether the exact digested bytes occur in `body`. The rolling hash selects
@@ -447,6 +538,146 @@ pub(crate) mod tests {
             ))
             .is_none()
         );
+    }
+
+    #[test]
+    fn query_objects_name_each_record_and_refuse_without_fields() {
+        let invalid = json!({"status":"invalid"});
+        let start_event = event("js_invocation_start", 1, 0, &start_payload(5, 2));
+        assert_eq!(
+            query(&start_event),
+            Some(
+                json!({"status":"decoded","kind":"start","site_slot":0,"invocation_id":5,
+                "parent_invocation_id":2,"parent_unknown":false,"argument_count":2,
+                "script_id":17,"anchor_offset":41,
+                "source_sha256":format!("5a{}", "00".repeat(31)),
+                "site_sample_index":0,"sample_index":0,"document_id":"7"})
+            )
+        );
+        // Parent unknown: no parent ID, and a parent ID beside the flag is refused.
+        let mut unknown = start_payload(5, 0);
+        unknown[5] = 0x01;
+        unknown[4] = 3;
+        unknown[28] = 12;
+        unknown[30] = 40;
+        let decoded = query(&event("js_invocation_start", 1, 0, &unknown)).unwrap();
+        assert_eq!(
+            (
+                &decoded["parent_unknown"],
+                &decoded["parent_invocation_id"],
+                &decoded["site_slot"],
+                &decoded["site_sample_index"],
+                &decoded["sample_index"]
+            ),
+            (&json!(true), &json!(0), &json!(3), &json!(12), &json!(40))
+        );
+        let mut both = start_payload(5, 2);
+        both[5] = 0x01;
+        assert_eq!(
+            query(&event("js_invocation_start", 1, 0, &both)),
+            Some(invalid.clone())
+        );
+
+        let present = query(&event(
+            "js_invocation_settle",
+            2,
+            0,
+            &settle_payload(5, Some(b"tok")),
+        ))
+        .unwrap();
+        assert_eq!(
+            present,
+            json!({"status":"decoded","kind":"settle","site_slot":0,"invocation_id":5,
+                "fulfilled":true,"via":"promise","value_kind":"string","value_length":3,
+                "digest_state":"present","document_id":"7"})
+        );
+        // The digest is never decoded into the object, under any name.
+        let text = present.to_string();
+        let sha = hex::encode(Sha256::digest(b"tok"));
+        assert!(!text.contains(&sha) && !text.contains("sha256") && !text.contains("rolling"));
+        let mut thrown = settle_payload(5, None);
+        (thrown[5], thrown[6], thrown[7]) = (2, 2, 13);
+        let thrown = query(&event("js_invocation_settle", 2, 0, &thrown)).unwrap();
+        assert_eq!(
+            (
+                &thrown["fulfilled"],
+                &thrown["via"],
+                &thrown["value_kind"],
+                &thrown["digest_state"]
+            ),
+            (
+                &json!(false),
+                &json!("sync_throw"),
+                &json!("array_buffer_view"),
+                &json!("not_requested")
+            )
+        );
+
+        assert_eq!(
+            query(&event(
+                "js_invocation_request",
+                3,
+                31,
+                &request_payload(2, 5)
+            )),
+            Some(json!({"status":"decoded","kind":"request","inside":true,
+                "invocation_id":5,"request_id":"31"}))
+        );
+        let outside = query(&event(
+            "js_invocation_request",
+            3,
+            31,
+            &request_payload(3, 0),
+        ))
+        .unwrap();
+        assert_eq!(
+            (&outside["inside"], &outside["invocation_id"]),
+            (&json!(false), &json!(0))
+        );
+
+        // Every refusal is the same one-field object.
+        let mut refused = Vec::new();
+        let mut truncated = start_event.clone();
+        truncated["payload_truncated"] = json!(true);
+        refused.push(truncated);
+        let mut short = start_event.clone();
+        short["payload"] = json!(hex::encode(&start_payload(5, 2)[..127]));
+        short["payload_size"] = json!(127);
+        refused.push(short);
+        for (field, value) in [
+            ("protocol_version", json!(2)),
+            ("flags", json!(1)),
+            ("category", json!("network")),
+            ("payload_encoding", json!("utf8")),
+            ("navigation_id", json!("4")),
+        ] {
+            let mut wrong = start_event.clone();
+            wrong[field] = value;
+            refused.push(wrong);
+        }
+        // Another record's payload under this type, and a version this reader does not know.
+        let mut wrong_type = event("js_invocation_settle", 2, 0, &start_payload(5, 2));
+        refused.push(wrong_type.clone());
+        wrong_type["type"] = json!("js_invocation_request");
+        wrong_type["request_id"] = json!("31");
+        refused.push(wrong_type);
+        let mut version = start_payload(5, 2);
+        version[0] = 2;
+        refused.push(event("js_invocation_start", 1, 0, &version));
+        refused.push(event("js_invocation_request", 3, 0, &request_payload(2, 5)));
+        for record in &refused {
+            assert_eq!(query(record), Some(invalid.clone()), "{record}");
+        }
+
+        let mut other = start_event.clone();
+        other["type"] = json!("module_compiled");
+        let mut events = vec![start_event.clone(), refused[0].clone(), other];
+        annotate(&mut events);
+        assert_eq!(events[0]["js_invocation"]["kind"], "start");
+        assert_eq!(events[0]["payload"], start_event["payload"]);
+        assert_eq!(events[1]["js_invocation"], invalid);
+        assert_eq!(events[1]["js_invocation"].as_object().unwrap().len(), 1);
+        assert!(events[2].get("js_invocation").is_none());
     }
 
     #[test]

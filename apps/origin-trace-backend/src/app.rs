@@ -878,6 +878,7 @@ impl App {
                 // of allocating a second complete evidence tree on every refresh.
                 let mut events = window.events;
                 crate::vm_opcode::annotate_wasm_observations(&mut events);
+                crate::js_invocation::annotate(&mut events);
                 result["events"] = Value::Array(events);
                 result["network_events"] = Value::Array(window.network_events);
                 self.event_state(&mut result, capture);

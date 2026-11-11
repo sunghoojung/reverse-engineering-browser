@@ -789,6 +789,7 @@ pub fn events_document(
     tally.write(&mut document);
     let mut events = page.records.clone();
     crate::vm_opcode::annotate_wasm_observations(&mut events);
+    crate::js_invocation::annotate(&mut events);
     document["events"] = Value::Array(events);
     document
 }

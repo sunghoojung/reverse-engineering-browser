@@ -258,13 +258,11 @@ fetch("/getcaptcha");
   const launchTarget = launchDescription.OriginTraceRenderedUITests;
   // No --ui-url and no explicit evidence-store argument, so the app takes its
   // automatic live-session path. Its stores come from the environment, as a
-  // researcher's overrides would, and start empty, as on a first launch, so
-  // the workspace beside the panel is the offline one with nothing captured.
+  // researcher's overrides would, and do not exist yet, as on a first launch:
+  // the bundled workspace reports an existing event store as live capture, so
+  // only an absent one shows the idle offline workspace beside the panel.
   const launchStores = join(temporary, 'launch-stores');
-  await mkdir(join(launchStores, 'artifacts'), {recursive: true});
-  for (const name of ['events.jsonl', 'origin-trace.jsonl', 'request-signals.jsonl', 'artifacts/manifest.jsonl']) {
-    await writeFile(join(launchStores, name), '');
-  }
+  await mkdir(launchStores, {recursive: true});
   launchTarget.CommandLineArguments = ['--api-collection', join(launchStores, 'api-collection.json'),
     '--local-analyst', join(launchStores, 'local-analyst.json')];
   launchTarget.EnvironmentVariables = {...launchTarget.EnvironmentVariables,

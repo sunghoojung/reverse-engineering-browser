@@ -107,9 +107,9 @@ the panel and return focus to the workspace.
 
 `testLaunchOpensStartPanel` runs alone in a second launch pass. That pass
 starts the copied app without `--ui-url` or an evidence-store argument, with
-automatic live sessions on, empty stores in `REB_EVENT_STORE` and its
-siblings (as on a first launch), an empty saved site set and the same missing
-`REB_BRAVE_BINARY`. The
+automatic live sessions on, `REB_EVENT_STORE` and its siblings naming stores
+that do not exist yet (as on a first launch, so the workspace is idle), an
+empty saved site set and the same missing `REB_BRAVE_BINARY`. The
 window must open on the bundled workspace with the start panel at both sizes,
 a Launch Services reopen while it is open must start nothing, Start must reach
 the native start, and after Continue Offline a reopen must offer nothing. The

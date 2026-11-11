@@ -118,7 +118,7 @@ function createFlowWorkspace(options) {
     let picked = echo;
     echo = undefined;
     if (picked === undefined && result && typeof graph?.selection === 'function') picked = graph.selection() ?? null;
-    if (picked !== undefined) { intended = null; graphPicked(picked, {intent: true}); }
+    if (picked !== undefined) { intended = null; graphPicked(picked); }
     else if (name === 'select' && result === false) intended = String(args[0]);
     return result;
   }

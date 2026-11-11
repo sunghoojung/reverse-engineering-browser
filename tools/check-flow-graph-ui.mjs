@@ -162,10 +162,24 @@ const stackedBands = (layout, label) => {
   assert.deepEqual(rows('init'), ['postMessage onMessage ; → frame.test ×4'], 'a posted task names the realm it enters');
   assert.deepEqual(rows('send'), ['request POST collect.frame.test ×3'], 'the request is a row of the frame that sent it');
   assert.equal(cards[at('run')].location, 'func 1 · m.wasm');
+  const C = model.FLOW_GRAPH_CARD;
   for (const card of cards) {
-    assert(card.w >= 176 && card.w <= 420, 'card widths stay in their bounds');
-    assert.equal(card.h, 30 + 18 + 4 + (card.rows.length + (card.more ? 1 : 0)) * 18 + 8, 'card heights follow their rows');
+    assert(card.w >= C.minW && card.w <= C.maxW, 'card widths stay in their bounds');
+    assert.equal(card.h, C.head + C.location + C.gap + (card.rows.length + (card.more ? 1 : 0)) * C.row + C.foot, 'card heights follow their rows');
+    assert(card.badgeW > 0 && card.pillW > 0 && card.w >= C.pad * 2 + card.badgeW + card.pillW, 'the header has room for the stack badge and the kind pill');
   }
+  // The badge counts distinct stacks, not records.
+  assert.equal(cards[at('onMessage')].badge, '3', 'every distinct stack enters the iframe through onMessage');
+  assert.equal(cards[at('boot')].badge, '2', 'two distinct stacks start at boot');
+  assert.equal(cards[at('boot')].tag, 'js');
+  assert.equal(cards[at('run')].tag, 'wasm');
+  assert.deepEqual(cards[at('bridge')].rows.map(row => row.family), ['cross', 'cross'], 'a row knows the family its edge is coloured by');
+  assert.deepEqual(cards[at('send')].rows.map(row => row.family), ['sink']);
+  assert.deepEqual(cards[at('boot')].rows.map(row => row.family), ['call']);
+  assert.equal(model.flowGraphEdgeFamily({kind: 'request', crosses: []}), 'sink', 'a request edge is coloured as a request');
+  assert.equal(model.flowGraphEdgeFamily({kind: 'task', task: 'post_message', crosses: ['frame']}), 'cross', 'a crossing wins over the task kind');
+  assert.equal(model.flowGraphAlpha('#9ccfd8', 0.5), 'rgba(156, 207, 216, 0.5)');
+  assert.equal(model.flowGraphAlpha('#abc', 1), 'rgba(170, 187, 204, 1)');
   // A sink nothing calls keeps its own card rather than vanish.
   const lonely = sessionDoc(); lonely.edges = lonely.edges.filter(item => item.to !== 8);
   const alone = model.flowGraphDisplay(model.flowGraphModel(lonely));
@@ -392,9 +406,9 @@ const text = selector => host.querySelector(selector)?.textContent ?? '';
   assert.equal(snapshot.display.nodes[snapshot.selected].status, 'unresolved', 'the top-left card is the unidentified caller');
   key('Enter');
   assert.deepEqual(opened, [], 'an unresolved frame has nothing to open');
-  for (let step = 0; step < 8 && panel('snapshot()').display.nodes[panel('snapshot()').selected].status !== 'resolved'; step += 1) key('ArrowRight');
+  for (let step = 0; step < 8 && panel('snapshot()').display.nodes[panel('snapshot()').selected].status !== 'resolved'; step += 1) key('ArrowDown');
   const picked = panel('snapshot()').display.nodes[panel('snapshot()').selected];
-  assert.equal(picked.status, 'resolved', 'ArrowRight reaches the next lane');
+  assert.equal(picked.status, 'resolved', 'ArrowDown reaches the band below');
   key('Enter');
   assert.deepEqual(opened, [picked.name], 'Enter opens the selected function in Sources');
   key('Escape');
@@ -566,6 +580,38 @@ const text = selector => host.querySelector(selector)?.textContent ?? '';
   await settle();
   assert.equal(fetched, 0);
   assert.match(d2.querySelector('.flow-graph-state').textContent, /needs the live backend/);
+}
+{
+  // Colour tokens: every ink clears 4.5:1 on the card, its tinted header, its
+  // kind pill and a selected row in both themes, so colour never costs
+  // legibility. Values resolve through app.css, as the browser resolves them.
+  const [appCss, flowCss] = await Promise.all(['app.css', 'flow_graph.css'].map(name => readFile(new URL(name, ui), 'utf8')));
+  const block = (css, selector) => { const at = css.indexOf(`${selector} {`); assert(at >= 0, selector); const body = css.slice(at + selector.length + 2, css.indexOf('}', at)); return Object.fromEntries([...body.matchAll(/(--[\w-]+):\s*([^;]+);/g)].map(match => [match[1], match[2].trim()])); };
+  const themes = {dark: {...block(appCss, ':root'), ...block(flowCss, ':root')}, light: {...block(appCss, ':root'), ...block(flowCss, ':root'), ...block(appCss, ':root[data-theme="light"]'), ...block(flowCss, ':root[data-theme="light"]')}};
+  const rgb = hex => { const digits = hex.slice(1, 7); return [0, 2, 4].map(at => parseInt(digits.slice(at, at + 2), 16) / 255); };
+  const luminance = hex => { const [r, g, b] = rgb(hex).map(c => c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+  const ratio = (a, b) => { const [x, y] = [luminance(a), luminance(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+  const blend = (base, over, alpha) => `#${rgb(base).map((c, i) => Math.round((c * (1 - alpha) + rgb(over)[i] * alpha) * 255).toString(16).padStart(2, '0')).join('')}`;
+  for (const [theme, values] of Object.entries(themes)) {
+    const value = name => { let text = values[name]; for (let guard = 0; guard < 8 && text?.startsWith('var('); guard += 1) text = values[/var\((--[\w-]+)\)/.exec(text)[1]]; assert(/^#[0-9a-f]{6}/i.test(text ?? ''), `${theme} ${name} resolves to a colour (${text})`); return text.slice(0, 7); };
+    const alpha = name => Number.parseFloat(values[name]);
+    const card = value('--flow-card'), hues = ['js', 'eval', 'wasm', 'request', 'navigation', 'cookie', 'chain'];
+    const check = (fg, bg, what) => assert(ratio(fg, bg) >= 4.5, `${theme}: ${what} is ${ratio(fg, bg).toFixed(2)}:1, under 4.5:1`);
+    for (const kind of hues) {
+      const hue = value(`--flow-${kind}`), ink = value(`--flow-${kind}-ink`), header = blend(card, hue, alpha('--flow-tint-head')), pill = blend(value('--flow-tag-fill'), hue, alpha('--flow-tint-tag'));
+      check(ink, card, `${kind} ink on the card`); check(ink, pill, `${kind} ink on its pill`);
+      check(value('--text'), header, `a name on the ${kind} header`); check(value('--muted'), value('--flow-badge-fill'), 'the stack badge');
+      for (const family of ['call', 'async', 'cross', 'sink', 'omitted']) {
+        const rowInk = value(`--flow-ink-${family}`);
+        check(rowInk, card, `a ${family} row`); check(rowInk, blend(value('--flow-row-fill'), hue, alpha('--flow-tint-row')), `a selected ${family} row on a ${kind} card`);
+      }
+    }
+    for (const name of ['--flow-site', '--flow-note', '--muted', '--text']) check(value(name), card, `${name} on the card`);
+    for (let index = 0; index < 6; index += 1) {
+      const band = blend(value('--code-bg'), value(`--flow-realm-${index}`), alpha('--flow-tint-band'));
+      check(value('--text'), band, `a realm name on band ${index}`); check(value('--muted'), band, `realm detail on band ${index}`);
+    }
+  }
 }
 {
   // Shipped-source rules.

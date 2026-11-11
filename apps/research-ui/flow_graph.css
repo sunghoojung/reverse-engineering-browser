@@ -1,47 +1,103 @@
-/* Session flow graph in Backtraces. Canvas tokens alias plain app.css values,
- * never color-mix(), so the canvas can parse them in both themes. */
+/* Session flow graph in Backtraces and the Flow workspace. Canvas tokens
+ * alias plain app.css values, never color-mix(), so the canvas can parse them
+ * in both themes. Rosé Pine Moon in the dark theme, Dawn and the light app
+ * palette in the light one.
+ *
+ * Every kind has a hue (--flow-<kind>: a card's header tint, outline and
+ * minimap block) and an ink (--flow-<kind>-ink: text in that colour). Inks
+ * clear 4.5:1 on the card, on its tinted header and on its kind pill; a hue
+ * that would not (Dawn's gold on white, Moon's pine on the panel) never sets
+ * text. Tint strengths are plain numbers the canvas reads as alpha. */
 :root {
   --flow-card: var(--panel);
   --flow-card-line: var(--line);
   --flow-card-rule: var(--line-soft);
-  --flow-cluster: var(--panel-2);
-  --flow-cluster-line: var(--line-soft);
+  --flow-card-shadow: var(--shadow);
   --flow-badge: var(--line);
-  --flow-badge-fill: var(--panel-3);
+  --flow-badge-fill: var(--bg);
+  --flow-tag-fill: var(--bg);
+  --flow-row-fill: var(--bg);
   --flow-box: var(--panel-3);
   --flow-minimap: var(--panel);
-  /* Row text: a plain call is neutral; only a crossing or an async hop takes
-   * the edge colour, so the colour of a row and of its edge always agree. */
+  /* Body text: sites, the location and notes stay muted; Moon's faint is
+   * just under 4.5:1 on the panel. */
   --flow-site: var(--muted);
-  --flow-op: var(--muted);
   --flow-note: var(--muted);
-  --flow-sink: var(--syntax-type);
+  /* Kind hues. */
   --flow-js: var(--syntax-type);
-  --flow-eval: var(--syntax-string);
   --flow-wasm: var(--syntax-parameter);
+  --flow-eval: var(--syntax-string);
   --flow-request: var(--syntax-number);
-  --flow-navigation: var(--syntax-keyword);
+  --flow-navigation: var(--syntax-number);
   --flow-cookie: var(--syntax-support-function);
-  --flow-chain: var(--muted);
-  --flow-edge-call: var(--faint);
+  --flow-chain: var(--faint);
+  /* Kind inks. */
+  --flow-js-ink: var(--syntax-type);
+  --flow-wasm-ink: var(--syntax-parameter);
+  --flow-eval-ink: var(--syntax-string);
+  --flow-request-ink: var(--syntax-number);
+  --flow-navigation-ink: var(--syntax-number);
+  --flow-cookie-ink: var(--syntax-support-function);
+  --flow-chain-ink: var(--muted);
+  /* Edges by what they are; a row's mnemonic takes the matching ink. A
+   * crossing is a frame change, JavaScript to Wasm or back, or a call into
+   * eval. */
+  --flow-edge-call: var(--syntax-type);
   --flow-edge-async: var(--syntax-string);
   --flow-edge-cross: var(--syntax-support-function);
+  --flow-edge-sink: var(--syntax-number);
   --flow-edge-omitted: var(--faint);
+  --flow-ink-call: var(--syntax-type);
+  --flow-ink-async: var(--syntax-string);
+  --flow-ink-cross: var(--syntax-support-function);
+  --flow-ink-sink: var(--syntax-number);
+  --flow-ink-omitted: var(--muted);
+  /* Realm bands cycle these hues; only their dot and tint use them. */
+  --flow-realm-0: var(--syntax-keyword);
+  --flow-realm-1: var(--syntax-parameter);
+  --flow-realm-2: var(--syntax-type);
+  --flow-realm-3: var(--syntax-string);
+  --flow-realm-4: var(--syntax-number);
+  --flow-realm-5: var(--syntax-support-function);
+  /* The minimap's view box. */
+  --flow-viewport: var(--syntax-type);
+  /* Tints, as alpha over the surface under them. */
+  --flow-tint-head: 0.2;
+  --flow-tint-tag: 0.08;
+  --flow-tint-tag-line: 0;
+  --flow-tint-row: 0.06;
+  --flow-tint-band: 0.06;
+  --flow-tint-band-line: 0.3;
+  --flow-tint-border: 0.45;
 }
-/* Light: the Dawn canvas lifts white cards, and every text colour clears
- * 4.5:1 on white. */
+/* Light: white cards on the Dawn canvas. Dawn's hues tint; text takes the
+ * light app inks, each 4.5:1 or better on white and on the lighter tints
+ * used here. */
 :root[data-theme="light"] {
-  --flow-request: var(--green);
-  --flow-chain: var(--muted);
-  --flow-js: var(--cyan);
-  --flow-eval: var(--amber);
-  --flow-wasm: var(--code-text);
-  --flow-sink: var(--green);
-  --flow-cookie: var(--red);
-  --flow-edge-async: var(--amber);
-  --flow-edge-cross: var(--red);
+  --flow-badge-fill: var(--panel);
+  --flow-tag-fill: var(--panel);
+  --flow-row-fill: var(--panel);
   --flow-box: var(--line);
-  --flow-cluster-line: var(--line);
+  --flow-js-ink: var(--syntax-keyword);
+  --flow-wasm-ink: var(--code-text);
+  --flow-eval-ink: var(--amber);
+  --flow-request-ink: var(--green);
+  --flow-navigation-ink: var(--green);
+  --flow-cookie-ink: var(--red);
+  --flow-edge-async: var(--amber);
+  --flow-edge-sink: var(--green);
+  --flow-ink-call: var(--syntax-keyword);
+  --flow-ink-async: var(--amber);
+  --flow-ink-cross: var(--red);
+  --flow-ink-sink: var(--green);
+  --flow-viewport: var(--accent);
+  --flow-tint-head: 0.08;
+  --flow-tint-tag: 0;
+  --flow-tint-tag-line: 0.6;
+  --flow-tint-row: 0.025;
+  --flow-tint-band: 0.07;
+  --flow-tint-band-line: 0.45;
+  --flow-tint-border: 0.7;
 }
 .flow-graph { --graph-canvas: var(--code-bg); }
 
@@ -106,22 +162,26 @@
 .flow-graph-toast[data-kind="error"] { color: var(--red); }
 
 /* Minimap: the whole graph and the part in view. */
-.flow-graph-minimap { position: absolute; z-index: 2; right: 14px; bottom: 14px; width: 200px; height: 128px; border: 1px solid var(--line); border-radius: 10px; background: var(--flow-minimap); box-shadow: 0 8px 22px var(--shadow); cursor: crosshair; }
+.flow-graph-minimap { position: absolute; z-index: 2; right: 14px; bottom: 14px; width: 140px; height: 260px; border: 1px solid var(--line); border-radius: 10px; background: var(--flow-minimap); box-shadow: 0 8px 22px var(--shadow); cursor: crosshair; }
 .flow-graph[data-minimap-off] .flow-graph-minimap, .flow-graph[data-all-in-view] .flow-graph-minimap, .flow-graph:not([data-state="ready"]) .flow-graph-minimap { display: none; }
 
 /* Hover facts and the card menu. */
 .flow-graph-tooltip { position: absolute; z-index: 6; max-width: min(380px, calc(100% - 16px)); padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 10px 26px var(--shadow); pointer-events: none; }
 .flow-graph-tooltip-title { display: block; margin-bottom: 6px; color: var(--text); font: 600 12px var(--mono); overflow-wrap: anywhere; }
-.flow-graph-tooltip-title[data-kind="wasm"] { color: var(--flow-wasm); }
-.flow-graph-tooltip-title[data-kind="eval"] { color: var(--flow-eval); }
-.flow-graph-tooltip-title[data-kind="cross"] { color: var(--flow-edge-cross); }
-.flow-graph-tooltip-title[data-kind="async"] { color: var(--flow-edge-async); }
+.flow-graph-tooltip-title[data-kind="javascript"] { color: var(--flow-js-ink); }
+.flow-graph-tooltip-title[data-kind="wasm"] { color: var(--flow-wasm-ink); }
+.flow-graph-tooltip-title[data-kind="eval"] { color: var(--flow-eval-ink); }
+.flow-graph-tooltip-title:is([data-kind="request"], [data-kind="navigation"], [data-kind="sink"]) { color: var(--flow-request-ink); }
+.flow-graph-tooltip-title[data-kind="cookie_write"] { color: var(--flow-cookie-ink); }
+.flow-graph-tooltip-title[data-kind="call"] { color: var(--flow-ink-call); }
+.flow-graph-tooltip-title[data-kind="cross"] { color: var(--flow-ink-cross); }
+.flow-graph-tooltip-title[data-kind="async"] { color: var(--flow-ink-async); }
 .flow-graph-tooltip dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0; }
 .flow-graph-tooltip dt { color: var(--faint); font: 11.5px var(--sans); }
 .flow-graph-tooltip dd { margin: 0; color: var(--text); font: 11.5px var(--mono); overflow-wrap: anywhere; }
-.flow-graph-tooltip dd[data-tone="location"] { color: var(--flow-js); }
+.flow-graph-tooltip dd[data-tone="location"] { color: var(--flow-js-ink); }
 .flow-graph-tooltip dd[data-tone="count"] { color: var(--text); }
-.flow-graph-tooltip dd[data-tone="cross"] { color: var(--flow-edge-cross); }
+.flow-graph-tooltip dd[data-tone="cross"] { color: var(--flow-ink-cross); }
 .flow-graph-menu { position: absolute; z-index: 7; min-width: 220px; padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-3); box-shadow: 0 14px 34px var(--shadow); }
 .flow-graph-menu-item { width: 100%; min-height: 30px; display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--text); font: 13px var(--sans); text-align: left; }
 .flow-graph-menu-item kbd { color: var(--faint); font: 12px var(--sans); }
@@ -136,14 +196,15 @@
 .flow-inspector-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-bottom: 10px; }
 .flow-inspector-title { min-width: 0; margin: 0 0 10px; color: var(--text); font: 600 13px var(--mono); overflow-wrap: anywhere; }
 .flow-inspector-head .flow-inspector-title { margin: 0; }
-.flow-kind-tag { padding: 1px 7px; border: 1px solid currentColor; border-radius: 999px; font: 600 10px var(--mono); }
-.flow-kind-tag[data-kind="javascript"], .flow-graph-key-tag[data-kind="javascript"] { color: var(--flow-js); }
-.flow-kind-tag[data-kind="eval"], .flow-graph-key-tag[data-kind="eval"] { color: var(--flow-eval); }
-.flow-kind-tag[data-kind="wasm"], .flow-graph-key-tag[data-kind="wasm"] { color: var(--flow-wasm); }
-.flow-kind-tag[data-kind="request"], .flow-graph-key-tag[data-kind="request"] { color: var(--flow-request); }
-.flow-kind-tag[data-kind="navigation"], .flow-graph-key-tag[data-kind="navigation"] { color: var(--flow-navigation); }
-.flow-kind-tag[data-kind="cookie_write"], .flow-graph-key-tag[data-kind="cookie_write"] { color: var(--flow-cookie); }
-.flow-kind-tag[data-kind="chain"], .flow-graph-key-tag[data-kind="chain"] { color: var(--flow-chain); }
+.flow-kind-tag { padding: 1px 7px; border: 1px solid currentColor; border-radius: 4px; font: 600 10px var(--sans); letter-spacing: 0.06em; text-transform: uppercase; }
+.flow-kind-tag[data-kind="javascript"], .flow-graph-key-tag[data-kind="javascript"] { color: var(--flow-js-ink); }
+.flow-kind-tag[data-kind="eval"], .flow-graph-key-tag[data-kind="eval"] { color: var(--flow-eval-ink); }
+.flow-kind-tag[data-kind="wasm"], .flow-graph-key-tag[data-kind="wasm"] { color: var(--flow-wasm-ink); }
+.flow-kind-tag[data-kind="request"], .flow-graph-key-tag[data-kind="request"] { color: var(--flow-request-ink); }
+.flow-kind-tag[data-kind="navigation"], .flow-graph-key-tag[data-kind="navigation"] { color: var(--flow-navigation-ink); }
+.flow-kind-tag[data-kind="cookie_write"], .flow-graph-key-tag[data-kind="cookie_write"] { color: var(--flow-cookie-ink); }
+.flow-kind-tag[data-kind="chain"], .flow-graph-key-tag[data-kind="chain"] { color: var(--flow-chain-ink); }
+.flow-graph-key-tag[data-kind] { justify-self: start; min-width: 0; padding: 0 6px; border: 1px solid currentColor; border-radius: 4px; font: 600 9.5px var(--sans); letter-spacing: 0.06em; }
 .flow-inspector-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 10px; margin: 0 0 12px; }
 .flow-inspector-facts dt { color: var(--faint); }
 .flow-inspector-facts dd { margin: 0; color: var(--text); font: 11px var(--mono); overflow-wrap: anywhere; white-space: pre-line; }
@@ -169,7 +230,7 @@ ol.flow-inspector-list { padding-left: 18px; list-style: decimal; color: var(--t
 /* Status bar: where the selection is, then what the graph rests on. */
 .flow-graph-status { position: relative; min-width: 0; display: flex; align-items: center; gap: 16px; padding: 0 12px; border-top: 1px solid var(--line); background: var(--panel); color: var(--muted); font: 11.5px var(--mono); white-space: nowrap; }
 .flow-graph-status > * { flex: 0 0 auto; }
-.flow-graph-selection { flex: 0 1 auto; min-width: 0; max-width: 52%; overflow: hidden; color: var(--flow-js); text-overflow: ellipsis; }
+.flow-graph-selection { flex: 0 1 auto; min-width: 0; max-width: 52%; overflow: hidden; color: var(--flow-js-ink); text-overflow: ellipsis; }
 .flow-graph-selection:empty { display: none; }
 .flow-graph-summary { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; }
 .flow-graph-summary::before { content: "●"; margin-right: 7px; color: var(--accent); font-size: 9px; vertical-align: 1px; }
@@ -184,24 +245,31 @@ ol.flow-inspector-list { padding-left: 18px; list-style: decimal; color: var(--t
 .flow-graph-request-again[hidden] { display: none; }
 .flow-graph-status .flow-graph-tool { min-height: 20px; }
 .flow-graph-details-toggle[aria-pressed="true"] { background: var(--accent-soft); color: var(--text); }
-.flow-graph-legend { position: absolute; z-index: 8; right: 70px; bottom: 30px; display: none; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; align-items: center; max-width: min(460px, calc(100% - 24px)); padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-3); box-shadow: 0 10px 26px var(--shadow); color: var(--text); font: 11.5px var(--sans); }
+.flow-graph-legend { position: absolute; z-index: 8; right: 70px; bottom: 30px; display: none; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; align-items: center; max-width: min(460px, calc(100% - 24px)); max-height: min(640px, calc(100vh - 120px)); overflow: auto; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-3); box-shadow: 0 10px 26px var(--shadow); color: var(--text); font: 11.5px var(--sans); }
 .flow-graph-legend h4 { grid-column: 1 / -1; margin: 6px 0 0; color: var(--muted); font: 600 11px var(--sans); }
 .flow-graph-legend h4:first-child { margin-top: 0; }
 .flow-graph-legend p { grid-column: 1 / -1; margin: 6px 0 0; color: var(--muted); line-height: 1.45; white-space: normal; }
 .flow-graph-status[data-key-open] > .flow-graph-legend { display: grid; }
 .flow-graph-key { display: contents; }
+.flow-graph-key-kinds { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.flow-graph-key-kind { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.flow-graph-key-kinds-note { color: var(--muted); }
 .flow-graph-key > span { min-width: 0; white-space: normal; line-height: 1.35; }
 .flow-graph-key-line { display: inline-block; width: 24px; height: 0; border-top: 2.5px solid var(--flow-edge-call); border-radius: 2px; }
 .flow-graph-key-async { border-top-color: var(--flow-edge-async); }
 .flow-graph-key-cross { border-top-color: var(--flow-edge-cross); }
+.flow-graph-key-sink { border-top-color: var(--flow-edge-sink); }
 .flow-graph-key-omitted { border-top-style: dotted; border-top-color: var(--flow-edge-omitted); }
+.flow-graph-key-glow { border-top-width: 3.5px; box-shadow: 0 0 6px var(--flow-edge-call); }
 .flow-graph-key-tag { min-width: 44px; font: 600 10.5px var(--mono); }
-.flow-graph-key-tag[data-tone="call"] { color: var(--flow-op); }
-.flow-graph-key-tag[data-tone="async"] { color: var(--flow-edge-async); }
-.flow-graph-key-tag[data-tone="cross"] { color: var(--flow-edge-cross); }
-.flow-graph-key-tag[data-tone="sink"] { color: var(--flow-sink); }
+.flow-graph-key-tag[data-tone="call"] { color: var(--flow-ink-call); }
+.flow-graph-key-tag[data-tone="async"] { color: var(--flow-ink-async); }
+.flow-graph-key-tag[data-tone="cross"] { color: var(--flow-ink-cross); }
+.flow-graph-key-tag[data-tone="sink"] { color: var(--flow-ink-sink); }
+.flow-graph-key-tag[data-tone="badge"] { justify-self: start; min-width: 0; padding: 0 5px; border: 1px solid var(--flow-badge); border-radius: 4px; background: var(--flow-badge-fill); color: var(--muted); font-weight: 400; }
 .flow-graph-key-mark { display: inline-block; width: 24px; height: 12px; border: 1.5px dashed var(--faint); border-radius: 3px; }
 .flow-graph-key-stub { display: inline-block; width: 24px; height: 12px; border-left: 1.5px dashed var(--faint); margin-left: 8px; }
+.flow-graph-key-band { display: inline-block; width: 24px; height: 14px; border: 1px solid var(--flow-realm-1); border-radius: 4px; background: var(--flow-box); }
 
 /* The stats give way before the tools move; only a narrow canvas drops the
  * tools under the heading, then everything tightens. */
@@ -219,11 +287,14 @@ ol.flow-inspector-list { padding-left: 18px; list-style: decimal; color: var(--t
   .flow-graph-tools { top: 38px; gap: 4px; }
   .flow-graph-filter input { width: 160px; }
   .flow-graph-tools > .flow-graph-tool { min-height: 28px; padding: 0 10px; }
-  .flow-graph-minimap { width: 150px; height: 96px; }
   .flow-graph-banner { top: 76px; }
 }
 @container flow-stage (max-width: 520px) {
-  .flow-graph-minimap, .flow-graph-evidence { display: none; }
+  .flow-graph-evidence { display: none; }
+}
+/* A workspace pane keeps its minimap down to here. */
+@container flow-stage (max-width: 380px) {
+  .flow-graph-minimap { display: none; }
 }
 /* The status bar yields its summary first; on a narrow panel details become
  * a sheet over the bottom of the canvas. */

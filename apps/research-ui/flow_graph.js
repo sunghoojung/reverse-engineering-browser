@@ -1,14 +1,23 @@
 /* Session flow graph (protocol/flow-graph-v1.md): every recorded stack of one
- * session as one graph of functions in realm clusters. A card lists the calls
- * its function made, one row each, the way a disassembly block lists its
- * instructions; a call into a same-process iframe, a posted task into one, a
- * JavaScript to Wasm call and a call into eval code say so on their row and
- * in the edge's color. The drawing is one canvas and layout runs in
- * flow_graph_layout.js as a Web Worker. Captured names and URLs are painted as
- * glyphs or inserted as text. */
+ * session as one graph of functions, read top to bottom like a disassembler's
+ * CFG. Realms are full-width bands stacked in call order. A card lists the
+ * calls its function made, one row each, the way a disassembly block lists its
+ * instructions; its header is tinted by its kind (JavaScript, Wasm, eval, a
+ * request), and edges are coloured by what they are: a call, an await or task,
+ * a crossing (a frame, JavaScript and Wasm, a call into eval) or a request. A
+ * call into a same-process iframe, a posted task into one, a JavaScript to
+ * Wasm call and a call into eval code also say so on their row. The drawing is
+ * one canvas and layout runs in flow_graph_layout.js as a Web Worker. Captured
+ * names and URLs are painted as glyphs or inserted as text. */
 const FLOW_GRAPH_KIND_LABELS = Object.freeze({javascript: 'JavaScript', eval: 'eval · dynamic', wasm: 'Wasm', request: 'Request',
   navigation: 'Navigation', cookie_write: 'Cookie write', chain: 'Chain'});
-const FLOW_GRAPH_KIND_TAGS = Object.freeze({javascript: 'js', eval: 'eval', wasm: 'wasm', request: 'fetch', navigation: 'nav', cookie_write: 'cookie', chain: 'chain'});
+const FLOW_GRAPH_KIND_TAGS = Object.freeze({javascript: 'js', eval: 'eval', wasm: 'wasm', request: 'request', navigation: 'nav', cookie_write: 'cookie', chain: 'chain'});
+/* The CSS custom property stem of each kind: --flow-<stem> is its hue and
+ * --flow-<stem>-ink its text colour. */
+const FLOW_GRAPH_KIND_TOKENS = Object.freeze({javascript: 'js', eval: 'eval', wasm: 'wasm', request: 'request', navigation: 'navigation', cookie_write: 'cookie', chain: 'chain'});
+const FLOW_GRAPH_EDGE_FAMILIES = Object.freeze(['call', 'async', 'cross', 'sink', 'omitted']);
+/* Realm bands cycle --flow-realm-0 to -5. */
+const FLOW_GRAPH_REALM_HUES = 6;
 const FLOW_GRAPH_TASKS = Object.freeze({set_timeout: 'setTimeout', set_interval: 'setInterval', request_animation_frame: 'requestAnimationFrame',
   request_idle_callback: 'requestIdleCallback', post_message: 'postMessage', xhr_send: 'XMLHttpRequest.send', post_task: 'scheduler.postTask',
   event: 'event', microtask: 'microtask'});
@@ -29,16 +38,20 @@ const FLOW_GRAPH_CANVAS_BYTES = 32 * 1024 * 1024;
  * boxes remain. */
 const FLOW_GRAPH_TEXT_ZOOM = 0.85;
 const FLOW_GRAPH_SKETCH_ZOOM = 0.2;
-/* The first view fits the whole graph when its rows stay legible; a larger
- * graph opens at this reading zoom on its busiest entry. */
+/* The first view fits the whole graph when its rows stay legible; a taller
+ * or wider one opens at reading size at its top, never as an unreadable
+ * overview: the minimap is the overview. Below this zoom it centres on the
+ * busiest entry of the first band instead of the whole width. */
 const FLOW_GRAPH_START_ZOOM = 0.92;
-/* A graph this small opens fitted, as an overview, whatever the zoom. */
-const FLOW_GRAPH_SMALL = 60;
 const FLOW_GRAPH_SINKS = new Set(['request', 'navigation', 'cookie_write']);
-/* Card geometry, in graph units at zoom 1. Text is monospace, so widths come
- * from character counts and one measured advance per font. */
-const FLOW_GRAPH_CARD = Object.freeze({head: 30, location: 18, gap: 4, row: 18, foot: 8, pad: 10, minW: 176, maxW: 420, rows: 8});
-const FLOW_GRAPH_MEASURE = Object.freeze({row: 6.62, head: 7.22, tag: 6.02});
+/* Card geometry, in graph units at zoom 1: a tinted header (name, stack
+ * badge, kind pill), the location, then the rows. Text is monospace, so widths
+ * come from character counts and one measured advance per font; the kind pill
+ * is measured per tag. */
+const FLOW_GRAPH_CARD = Object.freeze({head: 32, location: 22, gap: 2, row: 19, foot: 9, pad: 12, radius: 8, minW: 184, maxW: 440, rows: 8});
+const FLOW_GRAPH_MEASURE = Object.freeze({row: 6.93, head: 7.53, badge: 6.32, pill: 7});
+/* Tint strengths when the stylesheet gives none, as alpha over the surface. */
+const FLOW_GRAPH_ALPHA = Object.freeze({head: 0.14, tag: 0.08, tagLine: 0, row: 0.06, band: 0.06, bandLine: 0.3, border: 0.45});
 
 function flowGraphFile(url) {
   const text = String(url ?? '');
@@ -184,7 +197,11 @@ function flowGraphDisplay(model, expanded = new Set(), collapse = true) {
   return {nodes: display.filter((node, index) => keep[index]), edges: drawn, sinkRows, displayOf, groups: groups.length, foldKey};
 }
 
-const flowGraphEdgeFamily = edge => edge.crosses?.length ? 'cross' : edge.kind === 'await' || edge.kind === 'task' ? 'async' : edge.kind === 'omitted' ? 'omitted' : 'call';
+/** What colours an edge: a crossing (frame, JavaScript and Wasm, into eval)
+ * first, then an await or task, a request, navigation or cookie write, frames
+ * omitted, else a plain call. */
+const flowGraphEdgeFamily = edge => edge.crosses?.length ? 'cross' : edge.kind === 'await' || edge.kind === 'task' ? 'async'
+  : FLOW_GRAPH_SINKS.has(edge.kind) ? 'sink' : edge.kind === 'omitted' ? 'omitted' : 'call';
 
 /** What an edge's row says after the callee: the boundary it crosses, the
  * hops it went through and what was dropped. */
@@ -210,12 +227,23 @@ function flowGraphEdgeSites(model, edge) {
   return sites;
 }
 
-/** What each card says: its name, kind tag, stack count and location, then
- * one row per call it made (site, mnemonic, callee and a note), the way a
- * disassembly block lists its instructions. Sizes follow from the text. */
+/** Distinct stacks (paths) through each display node, each counted once. */
+function flowGraphDistinctStacks(model, display) {
+  const counts = new Uint32Array(display.nodes.length), seen = new Int32Array(display.nodes.length).fill(-1);
+  model.paths.forEach((path, index) => {
+    for (const node of path.nodes ?? []) { const at = display.displayOf[node]; if (at >= 0 && seen[at] !== index) { seen[at] = index; counts[at] += 1; } }
+  });
+  return counts;
+}
+
+/** What each card says: its name, a badge with the distinct stacks through
+ * it, its kind tag and location, then one row per call it made (site,
+ * mnemonic, callee and a note), the way a disassembly block lists its
+ * instructions. Sizes follow from the text. */
 function flowGraphCards(model, display, measure = FLOW_GRAPH_MEASURE) {
   const C = FLOW_GRAPH_CARD, outs = display.nodes.map(() => []);
   display.edges.forEach((edge, index) => outs[edge.from].push(index));
+  const stacks = flowGraphDistinctStacks(model, display);
   const rank = {call: 0, await: 1, task: 2, omitted: 3, request: 4, navigation: 4, cookie_write: 4};
   return display.nodes.map((node, v) => {
     const chain = node.kind === 'chain', sink = FLOW_GRAPH_SINKS.has(node.kind);
@@ -227,23 +255,24 @@ function flowGraphCards(model, display, measure = FLOW_GRAPH_MEASURE) {
       const order = [rank[edge.kind] ?? 5, first ? first.line ?? 0 : 1e15, first ? first.column ?? first.module_offset ?? 0 : 0];
       return {site: sites[0] ? `${sites[0]}${sites.length > 1 ? `+${sites.length - 1}` : ''}` : '', op: FLOW_GRAPH_OPS[edge.kind === 'task' ? edge.task : edge.kind] ?? edge.task ?? edge.kind,
         target: edge.sink ? flowGraphNodeName(edge.sink) : flowGraphNodeName(display.nodes[edge.to]), note: edge.sink ? '' : flowGraphEdgeNote(model, display, edge),
-        count: edge.count > 1 ? `×${edge.count.toLocaleString()}` : '', edge: index, sink: edge.sink ?? null, members: edge.members, order: order.concat(index < 0 ? 1e9 : index)};
+        count: edge.count > 1 ? `×${edge.count.toLocaleString()}` : '', edge: index, sink: edge.sink ?? null, members: edge.members, family: edge.sink ? 'sink' : flowGraphEdgeFamily(edge), order: order.concat(index < 0 ? 1e9 : index)};
     }).sort((a, b) => a.order[0] - b.order[0] || a.order[1] - b.order[1] || a.order[2] - b.order[2] || a.order[3] - b.order[3]);
     let more = 0;
     if (rows.length > C.rows) { more = rows.length - (C.rows - 1); rows = rows.slice(0, C.rows - 1); }
     const nouns = {request: ['request', 'requests'], navigation: ['navigation', 'navigations'], cookie_write: ['cookie write', 'cookie writes']};
     const location = sink ? `${node.hits.toLocaleString()} ${nouns[node.kind][node.hits === 1 ? 0 : 1]}` : chain ? `${node.members.length} pass-through frames, folded` : flowGraphNodeDetail(node);
-    const title = flowGraphNodeName(node), tag = FLOW_GRAPH_KIND_TAGS[node.kind] ?? node.kind, badge = (node.hits ?? 0).toLocaleString();
+    const title = flowGraphNodeName(node), tag = FLOW_GRAPH_KIND_TAGS[node.kind] ?? node.kind, badge = stacks[v].toLocaleString();
     const siteW = rows.reduce((max, row) => Math.max(max, row.site.length), 0), opW = rows.reduce((max, row) => Math.max(max, row.op.length), 0);
-    const headW = C.pad * 2 + title.length * measure.head + 12 + tag.length * measure.tag + 8 + badge.length * measure.tag + 10;
-    let rowW = C.pad * 2 + location.length * measure.tag;
+    const pillW = Math.ceil((measure.pillWidth ? measure.pillWidth(tag) : tag.length * measure.pill) + 12), badgeW = Math.ceil(badge.length * measure.badge + 10);
+    const headW = C.pad * 2 + title.length * measure.head + 12 + badgeW + 6 + pillW;
+    let rowW = C.pad * 2 + location.length * measure.badge;
     for (const row of rows) {
       rowW = Math.max(rowW, C.pad * 2 + (siteW ? siteW * measure.row + 12 : 0) + (opW ? opW * measure.row + 10 : 0) + row.target.length * measure.row
         + (row.note ? 10 + (row.note.length + 2) * measure.row : 0) + (row.count ? 12 + row.count.length * measure.row : 0));
     }
     const w = Math.round(Math.max(C.minW, Math.min(C.maxW, Math.max(headW, rowW))));
     const h = C.head + C.location + C.gap + (rows.length + (more ? 1 : 0)) * C.row + C.foot;
-    return {title, tag, badge, location, rows, more, siteW: siteW * measure.row, opW: opW * measure.row, w, h};
+    return {title, tag, badge, stacks: stacks[v], badgeW, pillW, location, rows, more, siteW: siteW * measure.row, opW: opW * measure.row, w, h};
   });
 }
 
@@ -303,6 +332,23 @@ function createFlowGraphRunner() {
       });
     }
   };
+}
+
+/** Parses a colour token (#rgb, #rrggbb, rgb() or rgba()) into a canvas
+ * colour at `alpha`, for shadows, which take no global alpha of their own. */
+function flowGraphAlpha(color, alpha) {
+  const text = String(color ?? '').trim();
+  let r, g, b;
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})([0-9a-f]{2})?$/i.exec(text);
+  if (hex) {
+    const digits = hex[1].length === 3 ? [...hex[1]].map(digit => digit + digit).join('') : hex[1];
+    [r, g, b] = [0, 2, 4].map(at => parseInt(digits.slice(at, at + 2), 16));
+  } else {
+    const rgb = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(text);
+    if (!rgb) return text || 'transparent';
+    [r, g, b] = rgb.slice(1, 4).map(Number);
+  }
+  return `rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, alpha))})`;
 }
 
 /**
@@ -396,17 +442,25 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
   const keyRow = (mark, label) => { const item = make('span', 'flow-graph-key'); item.append(mark, make('span', '', label)); legend.append(item); };
   const keyTag = (text, tone, kind) => { const tag = make('b', 'flow-graph-key-tag', text); if (tone) tag.dataset.tone = tone; if (kind) tag.dataset.kind = kind; return tag; };
   legend.append(make('h4', '', 'Edges'));
-  for (const [family, label] of [['call', 'call'], ['async', 'await or posted task'], ['cross', 'crosses a frame, JS ↔ Wasm or into eval'], ['omitted', 'frames omitted']]) keyRow(make('i', `flow-graph-key-line flow-graph-key-${family}`), label);
+  for (const [family, label] of [['call', 'call'], ['async', 'await or posted task'], ['cross', 'crosses a frame, JS ↔ Wasm or into eval'], ['sink', 'request, navigation or cookie write'], ['omitted', 'frames omitted']]) keyRow(make('i', `flow-graph-key-line flow-graph-key-${family}`), label);
+  keyRow(make('i', 'flow-graph-key-line flow-graph-key-glow'), 'the lit stack glows; edges off it fade');
   legend.append(make('h4', '', 'Rows'));
-  keyRow(keyTag('call', 'call'), 'a plain call, coloured like its edge');
+  keyRow(keyTag('call', 'call'), 'a mnemonic in its edge\u2019s colour');
   keyRow(keyTag('setTimeout', 'async'), 'an await or a posted task');
   keyRow(keyTag('; → frame', 'cross'), 'what a call crosses, after its callee');
   keyRow(keyTag('request', 'sink'), 'a request, navigation or cookie write it made');
   legend.append(make('h4', '', 'Cards'));
-  for (const kind of ['javascript', 'eval', 'wasm', 'chain']) keyRow(keyTag(FLOW_GRAPH_KIND_TAGS[kind], null, kind), FLOW_GRAPH_KIND_LABELS[kind]);
-  keyRow(keyTag('18', 'call'), 'records whose stack passed through the card');
+  // The kinds in one wrapped row: each tints its card's header and names
+  // its pill.
+  const kinds = make('div', 'flow-graph-key-kinds');
+  for (const kind of ['javascript', 'eval', 'wasm', 'request', 'chain']) { const item = make('span', 'flow-graph-key-kind'); item.append(keyTag(FLOW_GRAPH_KIND_TAGS[kind].toUpperCase(), null, kind), make('span', '', FLOW_GRAPH_KIND_LABELS[kind])); kinds.append(item); }
+  kinds.append(make('span', 'flow-graph-key-kinds-note', 'each tints its card\u2019s header'));
+  legend.append(kinds);
+  keyRow(keyTag('18', 'badge'), 'distinct stacks that passed through the card');
   keyRow(make('i', 'flow-graph-key-mark'), 'dashed: an unresolved frame');
   keyRow(make('i', 'flow-graph-key-stub'), 'a dashed stub above: earlier async callers not recorded');
+  legend.append(make('h4', '', 'Realms'));
+  keyRow(make('i', 'flow-graph-key-band'), 'a band each, stacked in call order: a realm that calls or posts into another sits above it');
   legend.append(make('h4', '', 'Keys'));
   for (const [keys, label] of [['\u2190\u2191\u2192\u2193', 'move between cards'], ['J K', 'step through calls'], ['\u21a9', 'follow the call, or open'], ['\u232b', 'go back'], ['U', 'go to the caller'], ['O  S', 'open in Sources, copy call site'],
     ['I  F  M', 'details, center, minimap'], ['C  L', 'copy name, location'], ['/', 'find'], ['0  +  \u2212', 'fit and zoom']]) keyRow(keyTag(keys, 'call'), label);
@@ -418,30 +472,51 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
 
   const ctx = canvas.getContext?.('2d');
   const miniCtx = minimap.getContext?.('2d');
-  const tokenNames = {bg: '--graph-canvas', card: '--flow-card', cardLine: '--flow-card-line', cardRule: '--flow-card-rule', badgeFill: '--flow-badge-fill', box: '--flow-box', sink: '--flow-sink',
-    cluster: '--flow-cluster', clusterLine: '--flow-cluster-line',
+  const tokenNames = {bg: '--graph-canvas', card: '--flow-card', cardLine: '--flow-card-line', cardRule: '--flow-card-rule', shadow: '--flow-card-shadow',
+    badgeFill: '--flow-badge-fill', badge: '--flow-badge', tagFill: '--flow-tag-fill', rowFill: '--flow-row-fill', box: '--flow-box', mini: '--flow-minimap',
     text: '--text', muted: '--muted', faint: '--faint', accent: '--accent', soft: '--accent-soft', mono: '--mono', sans: '--sans',
-    site: '--flow-site', op: '--flow-op', note: '--flow-note', badge: '--flow-badge', mini: '--flow-minimap',
-    javascript: '--flow-js', eval: '--flow-eval', wasm: '--flow-wasm', request: '--flow-request', navigation: '--flow-navigation', cookie_write: '--flow-cookie', chain: '--flow-chain',
-    call: '--flow-edge-call', async: '--flow-edge-async', cross: '--flow-edge-cross', omitted: '--flow-edge-omitted'};
-  let tokens = {};
+    site: '--flow-site', note: '--flow-note', viewport: '--flow-viewport'};
+  const alphaNames = {head: '--flow-tint-head', tag: '--flow-tint-tag', tagLine: '--flow-tint-tag-line', row: '--flow-tint-row', band: '--flow-tint-band', bandLine: '--flow-tint-band-line', border: '--flow-tint-border'};
+  let tokens = {kind: {}, ink: {}, edge: {}, rowInk: {}, realm: [], alpha: {...FLOW_GRAPH_ALPHA}};
   let measure = FLOW_GRAPH_MEASURE;
+  const pillWidths = new Map();
   const readTokens = () => {
-    const style = globalThis.getComputedStyle?.(host) ?? {getPropertyValue: () => ''}; const next = {};
-    for (const [key, name] of Object.entries(tokenNames)) next[key] = style.getPropertyValue(name).trim() || (key === 'mono' ? 'monospace' : key === 'sans' ? 'sans-serif' : '#888');
-    tokens = next; miniKey = '';
+    const style = globalThis.getComputedStyle?.(host) ?? {getPropertyValue: () => ''};
+    const read = name => style.getPropertyValue(name).trim(), color = (name, fallback = '#888') => read(name) || fallback;
+    const next = {};
+    for (const [key, name] of Object.entries(tokenNames)) next[key] = color(name, key === 'mono' ? 'monospace' : key === 'sans' ? 'sans-serif' : '#888');
+    // A kind's hue tints its card; its ink is the text in that colour.
+    next.kind = {}; next.ink = {};
+    for (const [kind, stem] of Object.entries(FLOW_GRAPH_KIND_TOKENS)) { next.kind[kind] = color(`--flow-${stem}`); next.ink[kind] = color(`--flow-${stem}-ink`, next.kind[kind]); }
+    next.edge = {}; next.rowInk = {};
+    for (const family of FLOW_GRAPH_EDGE_FAMILIES) { next.edge[family] = color(`--flow-edge-${family}`); next.rowInk[family] = color(`--flow-ink-${family}`, next.edge[family]); }
+    next.realm = Array.from({length: FLOW_GRAPH_REALM_HUES}, (_, index) => color(`--flow-realm-${index}`));
+    next.alpha = {};
+    for (const [key, name] of Object.entries(alphaNames)) { const value = Number.parseFloat(read(name)); next.alpha[key] = Number.isFinite(value) ? value : FLOW_GRAPH_ALPHA[key]; }
+    tokens = next; miniKey = ''; labelSides = null; pillWidths.clear();
     if (ctx) {
       // Monospace: one advance per font sizes every card.
       const advance = font => { ctx.font = font; return ctx.measureText('0000000000').width / 10 || 0; };
-      measure = {row: advance(`11px ${tokens.mono}`) || FLOW_GRAPH_MEASURE.row, head: advance(`600 12px ${tokens.mono}`) || FLOW_GRAPH_MEASURE.head, tag: advance(`10px ${tokens.mono}`) || FLOW_GRAPH_MEASURE.tag};
+      measure = {row: advance(`11.5px ${tokens.mono}`) || FLOW_GRAPH_MEASURE.row, head: advance(`600 12.5px ${tokens.mono}`) || FLOW_GRAPH_MEASURE.head,
+        badge: advance(`10.5px ${tokens.mono}`) || FLOW_GRAPH_MEASURE.badge, pill: FLOW_GRAPH_MEASURE.pill, pillWidth: pillWidth};
     }
   };
+  /** The kind pill's text width: small capitals, letter-spaced. */
+  function pillWidth(tag) {
+    if (!ctx) return tag.length * FLOW_GRAPH_MEASURE.pill;
+    if (!pillWidths.has(tag)) { setPillFont(); pillWidths.set(tag, ctx.measureText(tag.toUpperCase()).width || tag.length * FLOW_GRAPH_MEASURE.pill); clearLetterSpacing(); }
+    return pillWidths.get(tag);
+  }
+  const setPillFont = () => { ctx.font = `600 9.5px ${tokens.sans}`; if ('letterSpacing' in ctx) ctx.letterSpacing = '0.6px'; };
+  const clearLetterSpacing = () => { if ('letterSpacing' in ctx) ctx.letterSpacing = '0px'; };
   if (typeof MutationObserver === 'function') new MutationObserver(() => { readTokens(); requestDraw(); }).observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
   globalThis.matchMedia?.('(prefers-color-scheme: dark)')?.addEventListener?.('change', () => { readTokens(); requestDraw(); });
 
   const runner = createFlowGraphRunner();
   let session = null, requested = null, status_ = 'idle', error = '', model = null, display = null, cards = null, layout = null, generation = 0, controller = null;
-  let collapse = true, expanded = new Set(), selected = -1, selectedRow = -1, highlight = null, highlightLabel = '', matches = [], matchIndex = -1, requestKey = null, shownRequest = '', visible = false;
+  let collapse = true, expanded = new Set(), selected = -1, selectedRow = -1, highlight = null, highlightLabel = '', matches = [], matchSet = new Set(), matchIndex = -1, requestKey = null, shownRequest = '', visible = false;
+  // Which top corner each band's label takes, chosen once per layout.
+  let labelSides = null;
   // A layout the view was hidden during is redone when it shows again.
   let layoutStale = false, layingOut = false, highlightFromRequest = false, detailsOpen = false, minimapOn = true, pendingSelect = null, pendingRequest = false;
   // Cards visited by following calls, for Backspace.
@@ -576,7 +651,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
       const result = await runner.layout(flowGraphLayoutInput(next, nextCards), metrics, available() ? 'triskel' : 'layered');
       layingOut = false;
       if (mine !== generation) return;
-      display = next; cards = nextCards; layout = result; layoutStale = false;
+      display = next; cards = nextCards; layout = result; layoutStale = false; labelSides = null;
       edgeBounds = null; edgeFlat = []; miniKey = ''; hover = {node: -1, row: -1, edge: -1};
       selected = keep === null || keep === undefined ? -1 : display.displayOf[keep] ?? -1;
       selectedRow = selected >= 0 && keepRow >= 0 && keepRow < cards[selected].rows.length ? keepRow : -1;
@@ -689,67 +764,113 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
 
   // Drawing ----------------------------------------------------------------
   const lodNow = () => view.z >= FLOW_GRAPH_TEXT_ZOOM ? 2 : view.z >= FLOW_GRAPH_SKETCH_ZOOM ? 1 : 0;
+  const realmHue = key => tokens.realm[((Number(key) || 0) % FLOW_GRAPH_REALM_HUES + FLOW_GRAPH_REALM_HUES) % FLOW_GRAPH_REALM_HUES] ?? tokens.faint;
   function draw() {
     if (!ctx || !visible) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.fillStyle = tokens.bg; ctx.fillRect(0, 0, cssW, cssH);
     if (!layout || !display || !cards || layout.x.length !== display.nodes.length) return;
     ctx.setTransform(dpr * view.z, 0, 0, dpr * view.z, -view.x * view.z * dpr, -view.y * view.z * dpr);
     const lod = lodNow();
-    drawClusters();
+    drawBands();
     drawEdges();
-    if (lod === 2) drawClusterLabels();
+    // A realm's name sits under the cards at its home corner, and over them
+    // while it is pinned under the heading.
+    if (lod === 2) drawBandLabels(false);
     const shown = [];
-    for (let index = 0; index < display.nodes.length; index += 1) {
-      const box = nodeBox(index);
-      if (!visibleBox(box.x - 8, box.y - 26, box.w + 16, box.h + 34)) continue;
-      drawCard(index, box, lod);
-      if (lod === 1) shown.push(index);
-    }
+    let lift = 0;
+    for (let index = 0; index < display.nodes.length; index += 1) { const box = nodeBox(index); if (visibleBox(box.x - 8, box.y - 26, box.w + 16, box.h + 34)) { shown.push(index); lift += 1; } }
+    // A soft lift under each card while few are in view; a dense view skips it.
+    for (const index of shown) drawCard(index, nodeBox(index), lod, lod === 2 && lift <= 160);
+    if (lod === 2) drawBandLabels(true);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (lod === 1) drawScreenTitles(shown);
-    if (lod < 2) drawScreenClusterLabels();
+    if (lod < 2) drawScreenBandLabels();
     zoomLabel.textContent = `${Math.round(view.z * 100)}%`;
     drawMinimap();
   }
 
-  function drawClusters() {
+  /** Each realm is a full-width band with a faint tint of its own. */
+  function drawBands() {
     layout.lanes.forEach(lane => {
       if (!visibleBox(lane.x, lane.y, lane.w, lane.h)) return;
-      ctx.globalAlpha = 0.55; ctx.fillStyle = tokens.cluster;
-      ctx.beginPath(); roundedRect(lane.x, lane.y, lane.w, lane.h, 10); ctx.fill();
-      ctx.globalAlpha = 1; ctx.strokeStyle = tokens.clusterLine; ctx.lineWidth = 1 / view.z; ctx.stroke();
+      const hue = realmHue(lane.key);
+      ctx.beginPath(); roundedRect(lane.x, lane.y, lane.w, lane.h, 14);
+      ctx.globalAlpha = tokens.alpha.band; ctx.fillStyle = hue; ctx.fill();
+      ctx.globalAlpha = tokens.alpha.bandLine; ctx.strokeStyle = hue; ctx.lineWidth = 1 / view.z; ctx.stroke();
+      ctx.globalAlpha = 1;
     });
   }
-  /** Realm names sit over the edges, haloed, so a crossing never strikes
-   * one out. */
-  function drawClusterLabels() {
+  /** The band label: realm name and its process, frame and realm IDs, in the
+   * top corner of the band that no edge crosses (the right one when both are
+   * clear), so it never sits on the spine. */
+  const LABEL = Object.freeze({inset: 18, top: 14, height: 24});
+  function bandLabelText(lane) {
+    const context = model.contexts[lane.key]?.label;
+    return {title: context?.title ?? 'Realm', detail: context?.detail ?? ''};
+  }
+  function bandLabelWidth(lane) {
+    const {title, detail} = bandLabelText(lane);
+    ctx.font = `600 12.5px ${tokens.sans}`; const titleW = ctx.measureText(title).width;
+    ctx.font = `11px ${tokens.sans}`; const detailW = detail ? ctx.measureText(detail).width + 10 : 0;
+    return Math.min(lane.w - LABEL.inset * 2, 16 + titleW + detailW + 4);
+  }
+  function chooseLabelSides() {
+    labelSides = new Map();
+    if (!ctx) return;
+    layout.lanes.forEach(lane => {
+      const width = bandLabelWidth(lane), y0 = lane.y + LABEL.top - 2, y1 = lane.y + LABEL.top + LABEL.height + 2;
+      const crossings = (x0, x1) => {
+        let found = 0;
+        for (let e = 0; e < display.edges.length; e += 1) {
+          const points = flatRoute(e);
+          for (let i = 2; i < points.length; i += 2) {
+            const ax = Math.min(points[i - 2], points[i]), bx = Math.max(points[i - 2], points[i]), ay = Math.min(points[i - 1], points[i + 1]), by = Math.max(points[i - 1], points[i + 1]);
+            if (bx >= x0 && ax <= x1 && by >= y0 && ay <= y1) { found += 1; break; }
+          }
+        }
+        return found;
+      };
+      const right = crossings(lane.x + lane.w - LABEL.inset - width, lane.x + lane.w - LABEL.inset), left = right ? crossings(lane.x + LABEL.inset, lane.x + LABEL.inset + width) : 0;
+      labelSides.set(lane.key, right && left < right ? 'left' : 'right');
+    });
+  }
+  function drawBandLabels(pinnedPass) {
+    if (!labelSides) chooseLabelSides();
     ctx.textBaseline = 'alphabetic';
     layout.lanes.forEach(lane => {
       if (!visibleBox(lane.x, lane.y, lane.w, lane.h)) return;
-      // The label follows the view's left edge across a wide cluster, and
-      // sits on a plate so an edge passing under it never strikes it out.
-      const context = model.contexts[lane.key]?.label;
-      const left = Math.max(lane.x + 14, Math.min(view.x + 14 / view.z, lane.x + lane.w - 120)), room = lane.x + lane.w - 14 - left;
-      ctx.font = `600 12.5px ${tokens.sans}`; const title = fitText(context?.title ?? 'Realm', room);
-      const titleW = ctx.measureText(title).width;
-      ctx.font = `10.5px ${tokens.mono}`; const detail = fitText(context?.detail ?? '', room);
-      const plateW = Math.max(titleW, ctx.measureText(detail).width) + 12;
-      // Pinned under the heading while its realm is in view, so panning
-      // down never loses which realm a card is in.
-      const top = Math.min(Math.max(lane.y, view.y + (topInset() - 6) / view.z), lane.y + lane.h - 48);
-      ctx.globalAlpha = 0.92; ctx.fillStyle = tokens.bg; ctx.beginPath(); roundedRect(left - 6, top + 7, plateW, 34, 5); ctx.fill(); ctx.globalAlpha = 1;
-      ctx.font = `600 12.5px ${tokens.sans}`; ctx.fillStyle = tokens.text; ctx.fillText(title, left, top + 21);
-      ctx.font = `10.5px ${tokens.mono}`; ctx.fillStyle = tokens.muted; ctx.fillText(detail, left, top + 36);
+      // Pinned under the heading while its band is in view, so panning down
+      // a tall band never loses which realm a card is in.
+      const home = lane.y + LABEL.top, top = Math.min(Math.max(home, view.y + (topInset() - 4) / view.z), lane.y + lane.h - LABEL.height - 10);
+      const pinned = top > home + 0.5;
+      if (pinned !== pinnedPass) return;
+      const {title, detail} = bandLabelText(lane), width = bandLabelWidth(lane), hue = realmHue(lane.key);
+      // A label level with the minimap stops short of it.
+      const screenTop = (top - view.y) * view.z, mini = minimapOn && !host.hasAttribute('data-all-in-view') && minimap.offsetWidth ? minimap : null;
+      const miniLeft = mini && screenTop + LABEL.height * view.z > (mini.offsetTop ?? cssH) ? (mini.offsetLeft ?? cssW) - 8 : cssW;
+      const viewLeft = Math.max(lane.x, view.x), viewRight = Math.min(lane.x + lane.w, view.x + miniLeft / view.z);
+      const left = labelSides?.get(lane.key) === 'left' ? viewLeft + LABEL.inset : Math.max(lane.x + LABEL.inset, viewRight - LABEL.inset - width);
+      // A plate keeps an edge passing under the name from striking it out.
+      ctx.globalAlpha = 0.9; ctx.fillStyle = tokens.bg; ctx.beginPath(); roundedRect(left - 8, top, width + 16, LABEL.height, 6); ctx.fill(); ctx.globalAlpha = 1;
+      ctx.fillStyle = hue; ctx.beginPath(); ctx.arc(left + 4, top + LABEL.height / 2, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.font = `600 12.5px ${tokens.sans}`; ctx.fillStyle = tokens.text;
+      const titleText = fitText(title, width - 16), titleW = ctx.measureText(titleText).width;
+      ctx.fillText(titleText, left + 14, top + 16.5);
+      if (detail && width - 16 - titleW > 40) { ctx.font = `11px ${tokens.sans}`; ctx.fillStyle = tokens.muted; ctx.fillText(fitText(detail, width - 26 - titleW), left + 24 + titleW, top + 16.5); }
     });
   }
-  /** Zoomed out, each cluster keeps its realm's name at screen size. */
-  function drawScreenClusterLabels() {
-    ctx.textBaseline = 'alphabetic'; ctx.font = `600 11px ${tokens.sans}`; ctx.fillStyle = tokens.muted;
+  /** Zoomed out, each band keeps its realm's name at screen size, on a
+   * plate, since its top pad is too small to hold it. */
+  function drawScreenBandLabels() {
+    ctx.textBaseline = 'alphabetic'; ctx.font = `600 11px ${tokens.sans}`;
     layout.lanes.forEach(lane => {
-      const x = (lane.x - view.x) * view.z, y = (lane.y - view.y) * view.z, w = lane.w * view.z;
-      if (x > cssW || x + w < 0 || y > cssH || y + lane.h * view.z < 0 || w < 24) return;
-      const left = Math.max(x + 6, Math.min(8, x + w - 60)), pinned = Math.min(Math.max(y - 6, topInset() + 4), y + lane.h * view.z - 8);
-      ctx.fillText(fitText(model.contexts[lane.key]?.label.title ?? 'Realm', x + w - left - 4), left, pinned);
+      const x = (lane.x - view.x) * view.z, y = (lane.y - view.y) * view.z, w = lane.w * view.z, h = lane.h * view.z;
+      if (x > cssW || x + w < 0 || y > cssH || y + h < 0 || w < 24 || h < 18) return;
+      const left = Math.max(x + 6, 6), base = Math.min(Math.max(y + 14, topInset() + 8), y + h - 4);
+      const text = fitText(model.contexts[lane.key]?.label.title ?? 'Realm', Math.min(x + w, cssW) - left - 22), width = ctx.measureText(text).width;
+      ctx.globalAlpha = 0.88; ctx.fillStyle = tokens.bg; ctx.beginPath(); roundedRect(left - 2, base - 12, width + 20, 16, 4); ctx.fill(); ctx.globalAlpha = 1;
+      ctx.fillStyle = realmHue(lane.key); ctx.beginPath(); ctx.arc(left + 5, base - 4, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = tokens.muted; ctx.fillText(text, left + 13, base);
     });
   }
 
@@ -761,7 +882,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     return low ? `${text.slice(0, low)}…` : '';
   }
 
-  const edgeColor = edge => tokens[flowGraphEdgeFamily(edge)] ?? tokens.call;
+  const edgeColor = edge => tokens.edge[flowGraphEdgeFamily(edge)] ?? tokens.edge.call;
   let maxEdgeCount = 1;
   function drawEdges() {
     maxEdgeCount = display.edges.reduce((max, edge) => Math.max(max, edge.count), 1);
@@ -772,7 +893,9 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     display.edges.forEach((edge, index) => { if (!lit(index)) order.push(index); });
     display.edges.forEach((edge, index) => { if (lit(index) && !hot.has(index)) order.push(index); });
     hot.forEach(index => order.push(index));
-    const casing = view.z >= 0.3, log = Math.log(maxEdgeCount + 1);
+    // The lit stack glows: a heavier stroke and a soft shadow of its colour.
+    // A huge lit set skips the shadow, which costs a blur per edge.
+    const casing = view.z >= 0.3, log = Math.log(maxEdgeCount + 1), glows = dim && view.z >= 0.25 && highlight.edges.size <= 600;
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     for (const index of order) {
       const at = index * 4;
@@ -781,18 +904,17 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
       // Zoomed out to boxes, plain calls recede to hairlines so crossings
       // and tasks carry the picture; dimmed edges stay traceable.
       const boxes = view.z < FLOW_GRAPH_SKETCH_ZOOM && family !== 'cross' && family !== 'async' && !strong;
-      // A lit stack is marked, not only left undimmed: its plain calls take
-      // the accent and draw heavier.
-      const marked = dim && on && family === 'call';
-      const weight = boxes ? 1 / view.z : (1.4 + 1.6 * Math.log(edge.count + 1) / log + (strong ? 1.2 : 0) + (marked ? 0.8 : 0)) * Math.max(1, 0.7 / view.z);
-      ctx.globalAlpha = (on ? 1 : family === 'cross' ? 0.4 : 0.28) * (boxes ? 0.6 : 1);
+      const glow = dim && on;
+      const weight = boxes ? 1 / view.z : (1.4 + 1.6 * Math.log(edge.count + 1) / log + (strong ? 1.2 : 0) + (glow ? 1 : 0)) * Math.max(1, 0.7 / view.z);
+      ctx.globalAlpha = (on ? 1 : family === 'cross' ? 0.4 : 0.26) * (boxes ? 0.6 : 1);
       ctx.beginPath(); tracePath(index);
       if (casing) { ctx.strokeStyle = tokens.bg; ctx.lineWidth = weight + 3.4; ctx.setLineDash([]); ctx.stroke(); }
-      const stroke = marked ? tokens.accent : color;
-      ctx.strokeStyle = stroke; ctx.lineWidth = weight;
+      if (glow && glows) { ctx.shadowColor = flowGraphAlpha(color, 0.6); ctx.shadowBlur = 9 * dpr; }
+      ctx.strokeStyle = color; ctx.lineWidth = weight;
       ctx.setLineDash(edge.kind === 'omitted' ? [1.5, 4.5] : []);
       ctx.stroke(); ctx.setLineDash([]);
-      if (view.z >= 0.25) arrowHead(index, stroke, Math.max(6.5, 4 + weight * 1.5));
+      ctx.shadowBlur = 0; ctx.shadowColor = 'transparent';
+      if (view.z >= 0.25) arrowHead(index, color, Math.max(6.5, 4 + weight * 1.5));
     }
     ctx.globalAlpha = 1;
   }
@@ -803,52 +925,71 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     ctx.fillStyle = color; ctx.fill();
   }
 
-  /** The colour a row's mnemonic and note take: its edge's family, or the
-   * sink colour for a request, navigation or cookie write. */
-  const rowTone = item => {
-    if (!item) return tokens.op;
-    if (item.sink) return tokens.sink;
-    const edge = item.edge >= 0 ? display.edges[item.edge] : null, family = edge ? flowGraphEdgeFamily(edge) : 'call';
-    return family === 'cross' ? tokens.cross : family === 'async' ? tokens.async : tokens.op;
-  };
-  function drawCard(index, box, lod) {
-    const node = display.nodes[index], card = cards[index], picked = index === selected;
-    const matched = matches.length > 0 && matches.includes(index), C = FLOW_GRAPH_CARD, kindColor = tokens[node.kind] ?? tokens.muted;
-    // Dimmed cards keep their fill and outline, so the graph keeps its shape;
-    // only their text fades. A match of Find is never dimmed.
-    const lit = !highlight || highlight.nodes.has(index) || matched, textAlpha = lit ? 1 : 0.45, {x, y, w, h} = box;
+  /** The family a row's mnemonic is coloured by: its edge's, or a sink's. */
+  const rowFamily = item => item?.family ?? (item?.sink ? 'sink' : 'call');
+  /** A row band: the surface, a tint of `hue` and a bar on the left. */
+  function rowBand(x, top, w, hue, strength) {
+    const C = FLOW_GRAPH_CARD;
+    ctx.globalAlpha = 1; ctx.fillStyle = tokens.rowFill; ctx.fillRect(x + 1, top, w - 2, C.row);
+    ctx.globalAlpha = tokens.alpha.row * strength; ctx.fillStyle = hue; ctx.fillRect(x + 1, top, w - 2, C.row);
+    ctx.globalAlpha = strength; ctx.fillRect(x + 1, top, 2, C.row); ctx.globalAlpha = 1;
+  }
+  function drawCard(index, box, lod, lift) {
+    const node = display.nodes[index], card = cards[index], picked = index === selected, C = FLOW_GRAPH_CARD;
+    const matched = matchSet.has(index), hue = tokens.kind[node.kind] ?? tokens.faint, ink = tokens.ink[node.kind] ?? tokens.muted;
+    // Off the lit stack, a card keeps its place and fill; its tint, outline
+    // and colours fade, and its text turns muted (still 4.5:1). A match of
+    // Find is never dimmed.
+    const dim = Boolean(highlight) && !highlight.nodes.has(index) && !matched;
+    const {x, y, w, h} = box, r = C.radius, hair = 1 / view.z;
     ctx.globalAlpha = 1;
     if (node.kind === 'chain') {
       // A folded chain reads as a stack of cards behind it, down and right.
-      ctx.fillStyle = tokens.card; ctx.strokeStyle = tokens.cardLine; ctx.lineWidth = 1 / view.z;
-      for (const offset of [6, 3]) { ctx.beginPath(); roundedRect(x + offset, y + offset, w, h, 4); ctx.fill(); ctx.stroke(); }
+      ctx.fillStyle = tokens.card; ctx.strokeStyle = hue; ctx.lineWidth = hair;
+      for (const offset of [6, 3]) { ctx.beginPath(); roundedRect(x + offset, y + offset, w, h, r); ctx.fill(); ctx.globalAlpha = dim ? 0.25 : tokens.alpha.border; ctx.stroke(); ctx.globalAlpha = 1; }
     }
     if (node.chain_cut && lod > 0) {
       // Earlier async callers were not recorded: a stub with no edge.
       ctx.strokeStyle = tokens.faint; ctx.lineWidth = 1.4 / Math.max(view.z, 0.5); ctx.setLineDash([3, 3]);
       ctx.beginPath(); ctx.moveTo(x + 16, y - 20); ctx.lineTo(x + 16, y); ctx.stroke(); ctx.setLineDash([]);
     }
-    ctx.fillStyle = lod === 0 ? tokens.box : tokens.card;
-    ctx.beginPath(); roundedRect(x, y, w, h, 4); ctx.fill();
-    // The outline is the card's edge against a fill close to the realm's,
-    // so it is drawn at about 3:1.
-    ctx.strokeStyle = picked || matched ? tokens.accent : tokens.faint; ctx.globalAlpha = picked || matched ? 1 : 0.8;
+    if (picked && lod > 0) {
+      // Selected: a soft ring and a glow in the card's colour.
+      ctx.globalAlpha = 0.2; ctx.fillStyle = hue; ctx.beginPath(); roundedRect(x - 4, y - 4, w + 8, h + 8, r + 4); ctx.fill(); ctx.globalAlpha = 1;
+      ctx.shadowColor = flowGraphAlpha(hue, 0.35); ctx.shadowBlur = 30 * dpr;
+    } else if (lift && !dim) { ctx.shadowColor = tokens.shadow; ctx.shadowBlur = 14 * dpr; ctx.shadowOffsetY = 5 * dpr * view.z; }
+    // A dimmed card's fill fades toward its band, so it recedes while its
+    // muted text keeps its contrast; no edge runs under a card.
+    ctx.globalAlpha = dim ? 0.5 : 1; ctx.fillStyle = tokens.card; ctx.beginPath(); roundedRect(x, y, w, h, r); ctx.fill(); ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0; ctx.shadowOffsetY = 0; ctx.shadowColor = 'transparent';
+    if (lod === 0) {
+      // Boxes: filled with the kind's colour, like the minimap.
+      ctx.globalAlpha = dim ? 0.18 : 0.5; ctx.fillStyle = hue; ctx.fill(); ctx.globalAlpha = 1;
+      if (picked) { ctx.strokeStyle = hue; ctx.lineWidth = 2 / view.z; ctx.stroke(); }
+      return;
+    }
+    // Header strip, tinted by the kind, ruled off from the body.
+    ctx.save(); ctx.beginPath(); roundedRect(x, y, w, h, r); ctx.clip();
+    ctx.globalAlpha = tokens.alpha.head * (dim ? 0.35 : 1); ctx.fillStyle = hue; ctx.fillRect(x, y, w, C.head);
+    ctx.globalAlpha = dim ? 0.15 : 0.38; ctx.fillRect(x, y + C.head - hair, w, hair);
+    ctx.restore(); ctx.globalAlpha = 1;
+    // Outline: the kind's colour, heavier when selected; dashed for an
+    // unresolved frame or a match of Find.
+    ctx.beginPath(); roundedRect(x, y, w, h, r);
+    ctx.strokeStyle = matched && !picked ? tokens.accent : hue;
+    ctx.globalAlpha = picked || matched ? 1 : dim ? 0.3 : highlight ? 0.85 : tokens.alpha.border;
     ctx.lineWidth = (picked ? 2 : matched ? 1.5 : 1) / view.z;
     if ((node.status !== 'resolved' && !picked) || (matched && !picked)) ctx.setLineDash(matched && !picked ? [5 / view.z, 3 / view.z] : [4, 3]);
     ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
-    if (lod === 0) {
-      // Boxes: the kind as a thin strip, not a fill.
-      ctx.globalAlpha = textAlpha; ctx.fillStyle = kindColor; ctx.fillRect(x, y, w, Math.min(h, 2 / view.z)); ctx.globalAlpha = 1; return;
-    }
     if (lod === 1) {
-      // A sketch of the rows, coloured where a row crosses, waits or sends;
-      // the name is painted at screen size later.
-      ctx.globalAlpha = textAlpha;
+      // A sketch of the rows, coloured by what each row does; the name is
+      // painted at screen size later.
+      ctx.globalAlpha = dim ? 0.35 : 0.8;
       const rows = card.rows.length + (card.more ? 1 : 0);
       for (let row = -1; row < rows; row += 1) {
-        const item = row >= 0 ? card.rows[row] : null, tone = item ? rowTone(item) : tokens.cardLine;
-        ctx.fillStyle = tone === tokens.op ? tokens.cardLine : tone;
-        const top = row < 0 ? y + C.head + 5 : rowTop(box, row) + 6, width = row < 0 ? card.location.length * measure.tag : Math.min(w - C.pad * 2, card.siteW + card.opW + 22 + (item?.target.length ?? 6) * measure.row);
+        const item = row >= 0 ? card.rows[row] : null;
+        ctx.fillStyle = item ? tokens.rowInk[rowFamily(item)] ?? tokens.cardLine : tokens.cardLine;
+        const top = row < 0 ? y + C.head + 7 : rowTop(box, row) + 7, width = row < 0 ? card.location.length * measure.badge : card.siteW + card.opW + 22 + (item?.target.length ?? 6) * measure.row;
         ctx.fillRect(x + C.pad, top, Math.min(w - C.pad * 2, width), 5);
       }
       ctx.globalAlpha = 1;
@@ -856,41 +997,40 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     }
     ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
     ctx.textBaseline = 'alphabetic';
-    // Header: name, kind tag and record count, ruled off from the rows.
-    ctx.fillStyle = tokens.cardRule; ctx.fillRect(x + 1, y + C.head + C.location + 1, w - 2, 1 / view.z);
-    ctx.font = `10px ${tokens.mono}`;
-    const badgeW = card.badge.length * measure.tag + 10, badgeX = x + w - C.pad - badgeW, tagW = card.tag.length * measure.tag, tagX = badgeX - 8 - tagW;
-    ctx.fillStyle = tokens.badgeFill; ctx.strokeStyle = tokens.badge; ctx.lineWidth = 1 / view.z; ctx.beginPath(); roundedRect(badgeX, y + 8, badgeW, 14, 3); ctx.fill(); ctx.stroke();
-    ctx.globalAlpha = textAlpha;
-    ctx.fillStyle = tokens.muted; ctx.fillText(card.badge, badgeX + 5, y + 19);
-    ctx.font = `600 10px ${tokens.mono}`; ctx.fillStyle = tokens.muted; ctx.fillText(card.tag, tagX, y + 19);
-    ctx.font = `600 12px ${tokens.mono}`; ctx.fillStyle = node.status === 'resolved' ? tokens.text : tokens.muted;
-    ctx.fillText(fitText(card.title, tagX - x - C.pad - 10), x + C.pad, y + 20);
-    ctx.font = `10.5px ${tokens.mono}`; ctx.fillStyle = tokens.site;
-    ctx.fillText(fitText(card.location, w - C.pad * 2), x + C.pad, y + C.head + 11);
+    // Header: name, then the stack badge, then the kind pill.
+    const pillX = x + w - C.pad - card.pillW, badgeX = pillX - 6 - card.badgeW;
+    ctx.fillStyle = tokens.tagFill; ctx.beginPath(); roundedRect(pillX, y + 8, card.pillW, 16, 4); ctx.fill();
+    if (tokens.alpha.tag > 0) { ctx.globalAlpha = tokens.alpha.tag * (dim ? 0.4 : 1); ctx.fillStyle = hue; ctx.fill(); }
+    if (tokens.alpha.tagLine > 0) { ctx.globalAlpha = tokens.alpha.tagLine * (dim ? 0.4 : 1); ctx.strokeStyle = hue; ctx.lineWidth = hair; ctx.stroke(); }
+    ctx.globalAlpha = 1;
+    setPillFont(); ctx.fillStyle = dim ? tokens.muted : ink; ctx.textAlign = 'center';
+    ctx.fillText(card.tag.toUpperCase(), pillX + card.pillW / 2, y + 19.5); ctx.textAlign = 'left'; clearLetterSpacing();
+    ctx.fillStyle = tokens.badgeFill; ctx.strokeStyle = tokens.badge; ctx.lineWidth = hair; ctx.beginPath(); roundedRect(badgeX, y + 8, card.badgeW, 16, 4); ctx.fill(); ctx.stroke();
+    ctx.font = `10.5px ${tokens.mono}`; ctx.fillStyle = tokens.muted; ctx.fillText(card.badge, badgeX + 5, y + 19.5);
+    ctx.font = `600 12.5px ${tokens.mono}`; ctx.fillStyle = node.status === 'resolved' && !dim ? tokens.text : tokens.muted;
+    ctx.fillText(fitText(card.title, badgeX - x - C.pad - 8), x + C.pad, y + 21);
+    ctx.font = `11px ${tokens.mono}`; ctx.fillStyle = tokens.site;
+    ctx.fillText(fitText(card.location, w - C.pad * 2), x + C.pad, y + C.head + 15);
     // Rows: site, mnemonic, callee, then the note and the count.
-    ctx.font = `11px ${tokens.mono}`;
+    ctx.font = `11.5px ${tokens.mono}`;
     const opX = x + C.pad + (card.siteW ? card.siteW + 12 : 0), targetX = opX + (card.opW ? card.opW + 10 : 0);
     const rowCount = card.rows.length + (card.more ? 1 : 0);
     for (let row = 0; row < rowCount; row += 1) {
-      const top = rowTop(box, row), base = top + 13, item = card.rows[row];
+      const top = rowTop(box, row), base = top + 13.5, item = card.rows[row];
       const isHover = hover.node === index && hover.row === row, isPicked = picked && selectedRow === row;
-      if (isHover || isPicked) {
-        ctx.globalAlpha = isPicked ? 0.55 : 0.35; ctx.fillStyle = tokens.soft; ctx.fillRect(x + 1, top, w - 2, C.row);
-        ctx.globalAlpha = 1; ctx.fillStyle = tokens.accent; ctx.fillRect(x + 1, top, 2, C.row);
-      }
-      ctx.globalAlpha = textAlpha;
+      if (isPicked) rowBand(x, top, w, hue, 1); else if (isHover) rowBand(x, top, w, hue, 0.55);
       if (!item) { ctx.fillStyle = tokens.muted; ctx.fillText(`… ${card.more.toLocaleString()} more ${node.kind === 'chain' ? 'frames' : 'calls'}, in Details`, x + C.pad, base); continue; }
-      if (highlight && !isHover && !isPicked && lit && item.members?.some(member => highlight.originalEdges.has(member))) { ctx.fillStyle = tokens.accent; ctx.fillRect(x + 4, top + 4, 2, C.row - 8); }
+      const family = rowFamily(item), tone = dim ? tokens.muted : tokens.rowInk[family] ?? tokens.muted;
+      if (highlight && !dim && !isHover && !isPicked && item.members?.some(member => highlight.originalEdges.has(member))) { ctx.fillStyle = tokens.edge[family] ?? hue; ctx.fillRect(x + 4, top + 4, 2, C.row - 8); }
       ctx.fillStyle = tokens.site; ctx.fillText(item.site, x + C.pad, base);
-      const edge = item.edge >= 0 ? display.edges[item.edge] : null, tone = rowTone(item);
+      const edge = item.edge >= 0 ? display.edges[item.edge] : null;
       ctx.fillStyle = tone; ctx.fillText(item.op, opX, base);
       const countW = item.count ? ctx.measureText(item.count).width + 10 : 0, room = x + w - C.pad - countW - targetX;
       const target = fitText(item.target, room);
-      ctx.fillStyle = edge && display.nodes[edge.to]?.status !== 'resolved' ? tokens.muted : tokens.text; ctx.fillText(target, targetX, base);
+      ctx.fillStyle = dim || (edge && display.nodes[edge.to]?.status !== 'resolved') ? tokens.muted : tokens.text; ctx.fillText(target, targetX, base);
       if (item.note) {
         const used = ctx.measureText(target).width + 10;
-        if (room - used > 30) { ctx.fillStyle = tone === tokens.op ? tokens.note : tone; ctx.fillText(fitText(`; ${item.note}`, room - used), targetX + used, base); }
+        if (room - used > 30) { ctx.fillStyle = family === 'call' || dim ? tokens.note : tone; ctx.fillText(fitText(`; ${item.note}`, room - used), targetX + used, base); }
       }
       if (item.count) { ctx.fillStyle = tokens.muted; ctx.fillText(item.count, x + w - C.pad - countW + 10, base); }
     }
@@ -904,13 +1044,12 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     for (const index of indexes) {
       const box = nodeBox(index), sx = (box.x - view.x) * view.z, sy = (box.y - view.y) * view.z, sw = box.w * view.z;
       if (sw < 28) continue;
-      const node = display.nodes[index];
-      ctx.globalAlpha = !highlight || highlight.nodes.has(index) || matches.includes(index) ? 1 : 0.45;
-      ctx.fillStyle = node.status === 'resolved' ? tokens.text : tokens.muted;
+      const node = display.nodes[index], dim = Boolean(highlight) && !highlight.nodes.has(index) && !matchSet.has(index);
+      ctx.fillStyle = node.status === 'resolved' && !dim ? tokens.text : tokens.muted;
       // A name may run a little past a narrow card, into the gap beside it.
-      ctx.fillText(fitText(cards[index].title, sw - 10 + Math.min(24, 26 * view.z)), sx + 5, sy + Math.max(8, FLOW_GRAPH_CARD.head * view.z / 2));
+      ctx.fillText(fitText(cards[index].title, sw - 10 + Math.min(24, 26 * view.z)), sx + 6, sy + Math.max(8, FLOW_GRAPH_CARD.head * view.z / 2));
     }
-    ctx.globalAlpha = 1;
+    ctx.textBaseline = 'alphabetic';
   }
 
   function roundedRect(x, y, w, h, r) {
@@ -923,10 +1062,10 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     const inView = view.x <= 0 && view.y <= 0 && view.x + cssW / view.z >= layout.width && view.y + cssH / view.z >= layout.height;
     host.toggleAttribute('data-all-in-view', inView);
     if (!miniCtx || !minimapOn || !layout || inView) return;
-    // The minimap takes the graph's shape: a wide graph gets a short strip
-    // of full width, a tall one a narrow column, never an unreadable sliver.
-    const shape = layout.width / Math.max(1, layout.height), maxW = Math.min(200, cssW * 0.3), maxH = Math.min(150, cssH * 0.35);
-    const wantW = Math.round(Math.max(90, Math.min(maxW, maxH * shape))), wantH = Math.round(Math.max(60, Math.min(maxH, wantW / shape)));
+    // The minimap takes the graph's shape: a tall graph gets a tall column,
+    // like a disassembler's overview, a wide one a short strip.
+    const shape = layout.width / Math.max(1, layout.height), maxW = Math.max(72, Math.min(170, cssW * 0.16)), maxH = Math.max(80, Math.min(440, cssH * 0.55, cssH - topInset() - 40));
+    const wantW = Math.round(Math.max(72, Math.min(maxW, maxH * shape))), wantH = Math.round(Math.max(60, Math.min(maxH, wantW / shape)));
     if (minimap.style.width !== `${wantW}px`) minimap.style.width = `${wantW}px`;
     if (minimap.style.height !== `${wantH}px`) minimap.style.height = `${wantH}px`;
     const mw = minimap.clientWidth || wantW, mh = minimap.clientHeight || wantH;
@@ -934,7 +1073,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     const ratio = Math.min(window.devicePixelRatio || 1, 2);
     if (minimap.width !== Math.round(mw * ratio) || minimap.height !== Math.round(mh * ratio)) { minimap.width = Math.round(mw * ratio); minimap.height = Math.round(mh * ratio); miniKey = ''; }
     const key = `${selected}:${highlight ? highlight.nodes.size + highlight.paths : 0}:${matches.length}:${layout.width}:${display.nodes.length}`;
-    const scale = Math.min((mw - 16) / layout.width, (mh - 16) / layout.height), ox = (mw - layout.width * scale) / 2, oy = (mh - layout.height * scale) / 2;
+    const scale = Math.min((mw - 12) / layout.width, (mh - 12) / layout.height), ox = (mw - layout.width * scale) / 2, oy = (mh - layout.height * scale) / 2;
     miniFit = {scale, ox, oy};
     if (key !== miniKey || !miniBase) {
       miniKey = key;
@@ -943,28 +1082,40 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
       const g = miniBase.getContext?.('2d');
       if (!g) return;
       g.setTransform(ratio, 0, 0, ratio, 0, 0); g.clearRect(0, 0, mw, mh);
-      g.fillStyle = tokens.cluster; g.strokeStyle = tokens.clusterLine; g.lineWidth = 1;
-      layout.lanes.forEach(lane => { g.fillRect(ox + lane.x * scale, oy + lane.y * scale, lane.w * scale, lane.h * scale); g.strokeRect(ox + lane.x * scale, oy + lane.y * scale, lane.w * scale, lane.h * scale); });
-      g.globalAlpha = 0.3; g.strokeStyle = tokens.call; g.lineWidth = 0.8;
-      g.beginPath();
-      display.edges.forEach(edge => {
-        const a = nodeBox(edge.from), b = nodeBox(edge.to);
-        g.moveTo(ox + (a.x + a.w / 2) * scale, oy + (a.y + a.h) * scale); g.lineTo(ox + (b.x + b.w / 2) * scale, oy + b.y * scale);
+      layout.lanes.forEach(lane => {
+        const hue = realmHue(lane.key);
+        g.globalAlpha = Math.min(1, tokens.alpha.band * 2); g.fillStyle = hue; g.fillRect(ox + lane.x * scale, oy + lane.y * scale, lane.w * scale, lane.h * scale);
+        g.globalAlpha = Math.min(1, tokens.alpha.bandLine + 0.1); g.strokeStyle = hue; g.lineWidth = 1; g.strokeRect(ox + lane.x * scale, oy + lane.y * scale, lane.w * scale, lane.h * scale);
       });
-      g.stroke(); g.globalAlpha = 1;
+      g.lineWidth = 1;
+      display.edges.forEach((edge, index) => {
+        const on = !highlight || highlight.edges.has(index), points = flatRoute(index);
+        g.globalAlpha = highlight ? (on ? 0.95 : 0.15) : 0.5; g.strokeStyle = edgeColor(edge); g.lineWidth = highlight && on ? 1.6 : 1;
+        g.beginPath();
+        for (let i = 0; i < points.length; i += 2) { const px = ox + points[i] * scale, py = oy + points[i + 1] * scale; if (i) g.lineTo(px, py); else g.moveTo(px, py); }
+        g.stroke();
+      });
       for (let index = 0; index < display.nodes.length; index += 1) {
-        const box = nodeBox(index), on = !highlight || highlight.nodes.has(index);
-        g.fillStyle = index === selected || (highlight && on) || matches.includes(index) ? tokens.accent : tokens.faint;
-        g.globalAlpha = index === selected || (highlight && on) ? 0.95 : on ? 0.6 : 0.3;
+        const box = nodeBox(index), on = !highlight || highlight.nodes.has(index) || matchSet.has(index);
+        g.fillStyle = tokens.kind[display.nodes[index].kind] ?? tokens.faint;
+        g.globalAlpha = index === selected ? 0.95 : highlight ? (on ? 0.7 : 0.18) : 0.5;
         g.fillRect(ox + box.x * scale, oy + box.y * scale, Math.max(1.5, box.w * scale), Math.max(1.5, box.h * scale));
+        if (index === selected || matchSet.has(index)) {
+          g.globalAlpha = 1; g.strokeStyle = index === selected ? tokens.kind[display.nodes[index].kind] ?? tokens.accent : tokens.accent; g.lineWidth = 1.2;
+          g.strokeRect(ox + box.x * scale - 1, oy + box.y * scale - 1, Math.max(1.5, box.w * scale) + 2, Math.max(1.5, box.h * scale) + 2);
+        }
       }
       g.globalAlpha = 1;
     }
     miniCtx.setTransform(1, 0, 0, 1, 0, 0); miniCtx.clearRect(0, 0, minimap.width, minimap.height); miniCtx.drawImage(miniBase, 0, 0);
     miniCtx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    const vx = ox + view.x * scale, vy = oy + view.y * scale, vw = cssW / view.z * scale, vh = cssH / view.z * scale;
-    miniCtx.fillStyle = tokens.accent; miniCtx.globalAlpha = 0.1; miniCtx.fillRect(vx, vy, vw, vh); miniCtx.globalAlpha = 1;
-    miniCtx.strokeStyle = tokens.accent; miniCtx.lineWidth = 1.5; miniCtx.strokeRect(vx + 0.75, vy + 0.75, Math.max(2, vw - 1.5), Math.max(2, vh - 1.5));
+    // The view box, clipped to the graph so a view wider or taller than the
+    // graph still shows as a box.
+    const x0 = Math.max(ox - 3, ox + view.x * scale), y0 = Math.max(oy - 3, oy + view.y * scale);
+    const x1 = Math.min(ox + layout.width * scale + 3, ox + (view.x + cssW / view.z) * scale), y1 = Math.min(oy + layout.height * scale + 3, oy + (view.y + cssH / view.z) * scale);
+    const vx = Math.min(x0, x1 - 4), vy = Math.min(y0, y1 - 4), vw = Math.max(4, x1 - x0), vh = Math.max(4, y1 - y0);
+    miniCtx.fillStyle = tokens.viewport; miniCtx.globalAlpha = 0.08; miniCtx.fillRect(vx, vy, vw, vh); miniCtx.globalAlpha = 1;
+    miniCtx.strokeStyle = tokens.viewport; miniCtx.lineWidth = 1.5; miniCtx.strokeRect(vx + 0.75, vy + 0.75, Math.max(2, vw - 1.5), Math.max(2, vh - 1.5));
   }
   const miniPointer = {down: false};
   const miniJump = event => {
@@ -994,20 +1145,27 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     const mini = minimapOn && !host.hasAttribute('data-all-in-view') && minimap.offsetWidth ? {w: minimap.offsetWidth + 14, h: minimap.offsetHeight + 14} : null;
     return {top: topInset(), bottom: cssH - 8, left: 8, right: cssW - drawer - 8, mini: drawer ? null : mini};
   }
-  /** First view: a small graph or one whose rows stay legible opens fitted;
-   * a larger one opens at reading size on the top of its busiest entry. */
+  /** First view: the whole graph when its rows stay legible; else reading
+   * size at the top of the first band, the full width in view when it fits,
+   * so a tall session reads from its top down like a CFG. */
   function start() {
     if (!layout || cssW <= 1) { needsStart = true; return; }
     const whole = fitted();
-    if (whole.z >= FLOW_GRAPH_TEXT_ZOOM || (display.nodes.length <= FLOW_GRAPH_SMALL && whole.z >= FLOW_GRAPH_SKETCH_ZOOM)) { view = whole; requestDraw(); return; }
-    let best = -1;
-    display.nodes.forEach((node, index) => {
-      if (best < 0 || layout.layer[index] < layout.layer[best] || (layout.layer[index] === layout.layer[best] && (node.hits ?? 0) > (display.nodes[best].hits ?? 0))) best = index;
-    });
-    view.z = FLOW_GRAPH_START_ZOOM;
-    const lane = layout.lanes.find(item => item.key === display.nodes[best].context);
-    const left = lane && lane.w * view.z <= cssW ? lane.x - 24 : layout.x[best] + layout.w[best] / 2 - cssW / view.z / 2;
-    view.x = Math.max(-16, Math.min(left, layout.width - cssW / view.z)); view.y = (lane ? lane.y : layout.y[best]) - topInset() / view.z;
+    if (whole.z >= FLOW_GRAPH_TEXT_ZOOM) { view = whole; requestDraw(); return; }
+    const room = Math.max(120, cssW - 32 - (minimapOn ? Math.max(72, Math.min(170, cssW * 0.16)) + 14 : 0)), first = layout.lanes[0];
+    view.z = Math.min(1, room / layout.width);
+    if (view.z >= FLOW_GRAPH_START_ZOOM) view.x = layout.width / 2 - (16 + room / 2) / view.z;
+    else {
+      view.z = FLOW_GRAPH_START_ZOOM;
+      let best = -1;
+      display.nodes.forEach((node, index) => {
+        if (node.context !== first?.key || layout.layer[index] !== 0) return;
+        if (best < 0 || (node.hits ?? 0) > (display.nodes[best].hits ?? 0)) best = index;
+      });
+      const at = best >= 0 ? layout.x[best] + layout.w[best] / 2 : layout.width / 2;
+      view.x = Math.max(-16, Math.min(at - (16 + room / 2) / view.z, layout.width - cssW / view.z));
+    }
+    view.y = (first ? first.y : 0) - (topInset() + 4) / view.z;
     requestDraw();
   }
   function fit() {
@@ -1086,6 +1244,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     selected = -1; selectedRow = -1; highlight = null; highlightLabel = ''; highlightFromRequest = false; selectionText.textContent = '';
     renderSelection(); renderInspector(); requestDraw();
   }
+
   function toggleChain(index) {
     const node = display?.nodes[index];
     if (!node) return;
@@ -1130,7 +1289,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
   function activate(index) {
     const node = display?.nodes[index];
     if (!node) return;
-    if (node.kind === 'chain') toggleChain(index); else if (canOpen(node)) open(node);
+    if (node.kind === 'chain') toggleChain(index);
+    else if (canOpen(node)) open(node);
   }
   /** Follows a row's call to the card it reaches; Backspace comes back. */
   function follow(index, row) {
@@ -1185,6 +1345,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
         ...(display.sinkRows?.[index] ?? []).map(row => flowGraphNodeName(row.sink))].join(' ').toLowerCase();
       if (haystack.includes(needle)) matches.push(index);
     });
+    matchSet = new Set(matches);
     matchIndex = -1;
     find.hidden = !needle;
     renderMatches();
@@ -1243,7 +1404,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     if (node.kind === 'wasm') fact('Function index', node.function_index);
     if (node.script_id !== undefined) fact('Script ID', node.kind === 'eval' ? `${node.script_id} (eval or new Function)` : node.script_id);
     fact('Records', `${node.hits.toLocaleString()} ${FLOW_GRAPH_SINKS.has(node.kind) ? (node.hits === 1 ? 'occurrence' : 'occurrences') : `stack ${node.hits === 1 ? 'record passes' : 'records pass'} through it`}`);
-    if (highlight && !FLOW_GRAPH_SINKS.has(node.kind)) fact('Distinct stacks', highlight.paths.toLocaleString());
+    fact('Distinct stacks', (cards?.[selected]?.stacks ?? 0).toLocaleString());
     if (node.entries) fact('Task entry', `${node.entries.toLocaleString()} ${node.entries === 1 ? 'time' : 'times'}`);
     if (node.leaves) fact('Innermost', `${node.leaves.toLocaleString()} ${node.leaves === 1 ? 'time' : 'times'}`);
     if (node.schedules) fact('Scheduled', Object.entries(node.schedules).map(([task, count]) => `${FLOW_GRAPH_TASKS[task] ?? task} ×${count}`).join(', '));
@@ -1338,6 +1499,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
       const location = flowGraphNodeLocation(node);
       if (location && !FLOW_GRAPH_SINKS.has(node.kind)) facts.push(['at', location, 'location']);
       facts.push(['realm', `${context?.title ?? ''} · ${context?.detail ?? ''}`, '']);
+      facts.push(['stacks', `${(cards[hover.node]?.stacks ?? 0).toLocaleString()} distinct`, 'count']);
       facts.push(['records', `${(node.hits ?? 0).toLocaleString()}`, 'count']);
       if (node.entries) facts.push(['task entry', node.entries.toLocaleString(), 'count']);
       if (node.status !== 'resolved') facts.push(['unresolved', FLOW_GRAPH_REASONS[node.reason] ?? node.reason ?? '', '']);
@@ -1602,6 +1764,6 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
 }
 
 if (typeof module === 'object' && module?.exports) {
-  module.exports = {flowGraphModel, flowGraphNodeKey, flowGraphDisplay, flowGraphCards, flowGraphLayoutInput, flowGraphPathsThrough, flowGraphHighlight, flowGraphNodeName, flowGraphNodeDetail,
-    flowGraphNodeLocation, flowGraphEdgeNote, flowGraphEdgeSites, flowGraphContextLabel, createFlowGraphPanel};
+  module.exports = {flowGraphModel, flowGraphNodeKey, flowGraphDisplay, flowGraphCards, flowGraphDistinctStacks, flowGraphLayoutInput, flowGraphPathsThrough, flowGraphHighlight, flowGraphNodeName, flowGraphNodeDetail,
+    flowGraphNodeLocation, flowGraphEdgeNote, flowGraphEdgeSites, flowGraphEdgeFamily, flowGraphContextLabel, flowGraphAlpha, createFlowGraphPanel, FLOW_GRAPH_CARD};
 }

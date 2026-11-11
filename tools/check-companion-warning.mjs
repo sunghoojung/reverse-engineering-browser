@@ -93,7 +93,7 @@ try {
     receipts[scenario]=expected;
   }
   await writeFile(join(report,'result.json'),JSON.stringify({pairingPrompt:false,realXCTest:true,fakeBrowserOnly:true,screenshots,receipts},null,2)+'\n');
-  console.log('PASS prompt-free live-session startup, failure Retry, Continue Offline and reopen with launch receipts; owned unsigned fake browser only, no native capture claim');
+  console.log('PASS prompt-free live-session startup, in-window failure Retry, Continue Offline and reopen with launch receipts; owned unsigned fake browser only, no native capture claim');
 } finally {
   await writeFile(join(report,'xcodebuild.log'),log);
   // Match only this unique relocated bundle, including orphaned packaged helpers

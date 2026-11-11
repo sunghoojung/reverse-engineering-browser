@@ -50,8 +50,9 @@ session data.
 Origin Trace starts capture and an isolated Brave window. A session runs for
 one hour with the implemented capture categories, bounded request content,
 Canvas images, quiet mode, and Wasm dispatch. A page `debugger;` statement
-is ignored. **New Live Session…** records metadata only. What that pair
-includes is on the release page.
+is ignored. **New Live Session…** can start a **Metadata only** session
+instead, which keeps no request content. What that pair includes is on the
+release page.
 
 Both apps are ad-hoc signed and not notarized. Brave Browser Development is
 a workstation build from pinned sources, not a Brave Software release.

@@ -32,7 +32,7 @@ enum LiveCaptureMode: String {
 // starts arms (protocol/native-js-invocation-v1.md#site-file). The site file
 // is exactly the browser's native-js-invocation-sites-v1 form with 1 to 8
 // sites; a sidecar the browser never reads keeps each label, source URL and
-// session. The backend's routes add sites from Sources, the start dialog lists
+// session. The backend's routes add sites from Sources, the start panel lists
 // and removes them, and each capture arms a private copy, because the browser
 // rereads the file it was given and refuses a session whose file changed.
 struct InvocationSiteSet: Equatable {
@@ -62,7 +62,7 @@ struct InvocationSiteSet: Equatable {
   enum State: Equatable {
     case empty
     case saved([Site])
-    // A file the browser would refuse is never armed; the dialog offers Clear.
+    // A file the browser would refuse is never armed; the start panel offers Clear.
     case unreadable
   }
 

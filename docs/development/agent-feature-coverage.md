@@ -38,7 +38,7 @@ Recipes for the calls are in the [agent cookbook](agent-cookbook.md).
 | Reset both Wasm sample budgets without a new session | `session_action` `reset_wasm_sample_budgets` | F | Covered for outside clients; Added for the in-app agent |
 | End a session the agent started | `session_action` `end` | F | Covered; the connection now returns to the session it was opened on |
 | New Live Session… for the researcher's own capture | none | none | Not exposed: SAFETY.md keeps the researcher's session under the researcher's control; the agent starts its own sessions instead |
-| Keychain toggle in New Live Session… | none | none | Not exposed: agent sessions never use the macOS Keychain (SAFETY.md) |
+| macOS Keychain for the researcher's session | none | none | Not exposed: New Live Session… has no Keychain choice (app sessions use the isolated profile; `REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN` covers only the automatic launch), and agent sessions never use the macOS Keychain (SAFETY.md) |
 | Open Live Workspace, Quit, window menus | none | none | Not exposed: window management of the app itself |
 
 ## Live session options and capture switches
@@ -202,6 +202,6 @@ The tables have 100 rows.
 - **12 rows are not exposed**, each for the reason in its row: per-viewer
   layout and preferences (columns, panes, theme, navigation history, Console
   snippets and history), the clipboard, the app's own windows and menus, the
-  researcher's own session and Keychain choice, browser-internal and extension
+  researcher's own session and its Keychain route, browser-internal and extension
   capture, the packaged app's own opt-outs, the Save-dialog client export, and
   the agent's own controls.

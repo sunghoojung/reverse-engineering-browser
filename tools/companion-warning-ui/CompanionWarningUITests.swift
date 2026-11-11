@@ -1,7 +1,8 @@
 import AppKit
 import XCTest
 
-// Exercise the packaged application's production live-session startup with no
+// Exercise the packaged application's production live-session startup, from
+// launch to a real startup failure shown in the in-window panel, with no
 // browser pairing prompt. The outer cloud-CI driver owns the synthetic stores,
 // inert Brave app and launch receipts. This sandboxed runner persists
 // screenshots only through XCTest attachments.
@@ -18,10 +19,11 @@ final class CompanionWarningUITests: XCTestCase {
     defer { if app.state != .notRunning { app.terminate() } }
 
     // Reaching the inert browser's startup failure proves the launch was not
-    // held behind any decision.
-    let failure = assertStartupFailure(app)
+    // held behind any decision, a start panel or a pairing prompt included.
+    assertStartupFailure(app)
+    XCTAssertFalse(app.staticTexts[setupTitle].exists, "Launch starts without the start panel")
     attachScreenshot(app, name: "automatic-startup-failure")
-    failure.buttons["Continue Offline"].click()
+    app.buttons["Continue Offline"].click()
     assertOffline(app, observationTimeout: 65)
     attachScreenshot(app, name: "automatic-after-offline")
   }
@@ -33,18 +35,18 @@ final class CompanionWarningUITests: XCTestCase {
 
     let first = failureDetail(assertStartupFailure(app))
     attachScreenshot(app, name: "retry-initial-failure")
-    // No focus change or button click: Return is the failure alert's Retry.
+    // No focus change or button click: the failure focuses Retry, so Return retries.
     app.typeKey(.return, modifierFlags: [])
-    let retried = assertFreshStartupFailure(app, after: first)
+    assertFreshStartupFailure(app, after: first)
     attachScreenshot(app, name: "retry-fresh-failure")
-    retried.buttons["Continue Offline"].click()
+    app.buttons["Continue Offline"].click()
     assertOffline(app)
     attachScreenshot(app, name: "retry-after-offline")
 
     openNewLiveSession(app)
-    let later = assertStartupFailure(app)
+    assertStartupFailure(app)
     attachScreenshot(app, name: "retry-new-session-failure")
-    later.buttons["Continue Offline"].click()
+    app.buttons["Continue Offline"].click()
     assertOffline(app, observationTimeout: 65)
     attachScreenshot(app, name: "retry-new-session-offline")
     // The outer driver verifies exactly three browser launches.
@@ -61,15 +63,14 @@ final class CompanionWarningUITests: XCTestCase {
     let secondPID = try reopenApplication()
     XCTAssertEqual(firstPID, secondPID, "Reopen must address the existing app instance")
     XCTAssertEqual(app.staticTexts.matching(identifier: failureTitle).count, 1,
-                   "Reopen must not nest a second live-session alert")
-    XCTAssertEqual(failureDetail(app.dialogs.containing(.staticText, identifier: failureTitle).element),
-                   first, "Reopen must not replace the open failure with another session")
+                   "Reopen must not show a second live-session failure")
+    XCTAssertEqual(failureDetail(app), first, "Reopen must not replace the open failure with another session")
     attachScreenshot(app, name: "modal-reopen-single-failure")
 
-    // Reopen must preserve modal keyboard focus: Return still reaches Retry.
+    // Reopen must keep keyboard focus on Retry: Return still reaches it.
     app.typeKey(.return, modifierFlags: [])
-    let retried = assertFreshStartupFailure(app, after: first)
-    retried.buttons["Continue Offline"].click()
+    assertFreshStartupFailure(app, after: first)
+    app.buttons["Continue Offline"].click()
     assertOffline(app)
     // An explicit offline decision also suppresses automatic live startup on
     // a later OS reopen. Activating the app alone would not test that callback.
@@ -122,28 +123,45 @@ final class CompanionWarningUITests: XCTestCase {
     return app
   }
 
+  // The in-window start panel New Live Session opens, with its two choices.
+  @MainActor
+  private func assertStartPanel(_ app: XCUIApplication) {
+    XCTAssertTrue(app.staticTexts[setupTitle].waitForExistence(timeout: 30),
+                  "New Live Session must open the start panel in the window: " + app.debugDescription)
+    XCTAssertFalse(app.staticTexts[retiredPairingTitle].exists, "A live session must start without a browser pairing prompt")
+    XCTAssertTrue(app.windows["Origin Trace"].exists, "The panel is part of the Origin Trace window")
+    let start = app.buttons["Start Session"]
+    XCTAssertTrue(start.isEnabled && start.isHittable)
+    XCTAssertTrue(app.buttons["Continue Offline"].isEnabled)
+  }
+
+  @MainActor
+  private func startFromPanel(_ app: XCUIApplication, screenshot: String?) {
+    assertStartPanel(app)
+    if let screenshot { attachScreenshot(app, name: screenshot) }
+    app.buttons["Start Session"].click()
+  }
+
   @MainActor
   @discardableResult
   private func assertStartupFailure(_ app: XCUIApplication) -> XCUIElement {
     let failure = app.staticTexts[failureTitle]
     XCTAssertTrue(failure.waitForExistence(timeout: 90),
-                  "The inert browser must reach the real startup failure alert: " + app.debugDescription)
+                  "The inert browser must reach the real startup failure in the start panel: " + app.debugDescription)
     XCTAssertFalse(app.staticTexts[retiredPairingTitle].exists,
                    "A live session must start without a browser pairing prompt")
-    let dialog = app.dialogs.containing(.staticText, identifier: failureTitle).element
-    XCTAssertTrue(dialog.exists)
-    XCTAssertTrue(failureDetail(dialog).contains(stoppedBrowser),
+    XCTAssertTrue(failureDetail(app).contains(stoppedBrowser),
                   "Failure must come from the owned browser exiting, not a missing helper: " + app.debugDescription)
-    // NSAlert also exposes a Touch Bar Retry button; target only the real dialog.
-    XCTAssertEqual(dialog.buttons.matching(identifier: "Retry").count, 1)
-    XCTAssertTrue(dialog.buttons["Retry"].isEnabled)
-    XCTAssertTrue(dialog.buttons["Continue Offline"].isEnabled)
-    XCTAssertTrue(dialog.buttons["Continue Offline"].isHittable)
-    return dialog
+    XCTAssertEqual(app.buttons.matching(identifier: "Retry").count, 1)
+    XCTAssertTrue(app.buttons["Retry"].isEnabled)
+    XCTAssertTrue(app.buttons["Continue Offline"].isEnabled)
+    XCTAssertTrue(app.buttons["Continue Offline"].isHittable)
+    return app
   }
 
-  /// Each attempt writes a new session log, and the alert names its path.
+  /// Each attempt writes a new session log, and the panel names its path.
   @MainActor
+  @discardableResult
   private func assertFreshStartupFailure(_ app: XCUIApplication, after previous: String) -> XCUIElement {
     let fresh = app.staticTexts.matching(NSPredicate(
       format: "(label CONTAINS %@ OR value CONTAINS %@) AND NOT (label == %@ OR value == %@)",
@@ -154,10 +172,10 @@ final class CompanionWarningUITests: XCTestCase {
   }
 
   @MainActor
-  private func failureDetail(_ dialog: XCUIElement) -> String {
-    let detail = dialog.staticTexts.matching(NSPredicate(
+  private func failureDetail(_ scope: XCUIElement) -> String {
+    let detail = scope.staticTexts.matching(NSPredicate(
       format: "label CONTAINS %@ OR value CONTAINS %@", "Session log:", "Session log:")).firstMatch
-    XCTAssertTrue(detail.exists, "The failure alert must name its session log")
+    XCTAssertTrue(detail.exists, "The failure must name its session log")
     return (detail.value as? String).flatMap { $0.isEmpty ? nil : $0 } ?? detail.label
   }
 
@@ -167,7 +185,7 @@ final class CompanionWarningUITests: XCTestCase {
     let dismissed = XCTNSPredicateExpectation(
       predicate: NSPredicate(format: "exists == false"), object: failure)
     XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 10), .completed,
-                   "Continue Offline must dismiss the failure alert")
+                   "Continue Offline must dismiss the failure")
     XCTAssertTrue(app.windows["Origin Trace"].waitForExistence(timeout: 10),
                   "The stored-evidence window must remain open")
     // The initial offline decisions and final reopen observe longer than the
@@ -181,7 +199,7 @@ final class CompanionWarningUITests: XCTestCase {
       predicate: NSPredicate(format: "exists == true"), object: liveDialog)
     unexpected.isInverted = true
     XCTAssertEqual(XCTWaiter.wait(for: [unexpected], timeout: observationTimeout), .completed,
-                   "Offline must not leave a duplicate or delayed live-session dialog")
+                   "Offline must not leave a duplicate or delayed live-session panel")
     XCTAssertEqual(app.state, .runningForeground)
   }
 
@@ -193,12 +211,7 @@ final class CompanionWarningUITests: XCTestCase {
     let newSession = app.menuItems["New Live Session…"]
     XCTAssertTrue(newSession.waitForExistence(timeout: 5))
     newSession.click()
-    XCTAssertTrue(app.staticTexts[setupTitle].waitForExistence(timeout: 10))
-    XCTAssertFalse(app.staticTexts[retiredPairingTitle].exists)
-    let start = app.dialogs.containing(.staticText, identifier: setupTitle).element.buttons["Start Session"]
-    XCTAssertTrue(start.isEnabled && start.isHittable)
-    attachScreenshot(app, name: "retry-new-session-setup")
-    start.click()
+    startFromPanel(app, screenshot: "retry-new-session-setup")
   }
 
   @MainActor

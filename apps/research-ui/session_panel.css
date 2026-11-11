@@ -1,0 +1,99 @@
+/* Live session panel (session_panel.js). It floats over the workspace's
+ * right edge, above the docks, in the agent dock's language: quiet surfaces,
+ * 12.5 px text, accent only for the primary action and red only for a
+ * failure. The workspace beside it stays usable; it is not a modal. The body
+ * scrolls and the actions stay in view down to the 760 x 560 minimum. */
+
+.workspace { position: relative; }
+
+.session-panel {
+  --session-raised: color-mix(in srgb, var(--panel-3) 55%, var(--panel));
+  --session-hover: color-mix(in srgb, var(--panel-3) 80%, transparent);
+  position: absolute; top: 6px; right: 6px; z-index: 60;
+  width: min(392px, calc(100% - 12px)); max-height: calc(100% - 12px);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--panel-radius);
+  box-shadow: var(--overlay-shadow); color: var(--text); font: 12.5px/1.5 var(--sans);
+  animation: session-panel-in 140ms ease-out;
+}
+:root[data-theme="light"] .session-panel {
+  --session-raised: var(--panel-2);
+  --session-hover: color-mix(in srgb, var(--panel-3) 75%, transparent);
+}
+.session-panel:focus { outline: none; }
+@keyframes session-panel-in { from { opacity: 0; transform: translateY(-4px); } }
+@keyframes session-panel-spin { to { transform: rotate(360deg); } }
+
+/* ---- Header ---- */
+.session-panel-head { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 14px 16px 10px; }
+.session-panel-icon, .session-panel-spinner { flex: 0 0 auto; width: 30px; height: 30px; display: grid; place-items: center;
+  border-radius: 9px; background: var(--session-raised); color: var(--accent); }
+.session-panel-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.session-panel-head[data-tone="error"] .session-panel-icon { color: var(--red); }
+.session-panel-spinner::after { content: ""; width: 13px; height: 13px; border-radius: 50%;
+  border: 1.6px solid color-mix(in srgb, var(--accent) 28%, transparent); border-top-color: var(--accent);
+  animation: session-panel-spin 0.8s linear infinite; }
+.session-panel-title { margin: 0; min-width: 0; color: var(--text); font: 600 14px/1.35 var(--sans); overflow-wrap: anywhere; }
+
+/* ---- Body ---- */
+.session-panel-body { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain;
+  display: grid; align-content: start; gap: 12px; padding: 0 16px 14px; }
+.session-panel-lede, .session-panel-text { margin: 0; color: var(--muted); font: 12.5px/1.5 var(--sans); overflow-wrap: anywhere; }
+.session-panel-note { margin-top: -4px; color: var(--faint); font-size: 12px; }
+.session-panel-label { margin: 0; padding: 0; color: var(--text); font: 600 12px/1.35 var(--sans); }
+
+.session-panel-modes { min-width: 0; margin: 0; padding: 0; border: 0; display: grid; gap: 6px; }
+.session-panel-modes > legend { margin-bottom: 6px; }
+.session-panel-mode { min-width: 0; display: flex; align-items: flex-start; gap: 9px; padding: 9px 12px;
+  border: 1px solid var(--line-soft); border-radius: 10px; cursor: pointer; }
+.session-panel-mode:hover { border-color: var(--line); }
+.session-panel-mode[data-selected="true"] { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); background: var(--session-raised); }
+.session-panel-mode:has(input:focus-visible) { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.session-panel-mode input { flex: 0 0 auto; margin: 2px 0 0; accent-color: var(--accent); }
+.session-panel-mode input:focus-visible { outline: none; }
+.session-panel-mode-text { min-width: 0; display: grid; gap: 2px; }
+.session-panel-mode-name { color: var(--text); font: 500 12.5px/1.4 var(--sans); }
+.session-panel-mode-detail { color: var(--muted); font: 12px/1.45 var(--sans); overflow-wrap: anywhere; }
+
+.session-panel-sites { min-width: 0; display: grid; justify-items: start; gap: 6px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
+.session-panel-sites > :not(button) { justify-self: stretch; }
+.session-panel-site-list { margin: 2px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.session-panel-site { min-width: 0; display: flex; align-items: center; gap: 8px; padding: 5px 6px 5px 10px; border-radius: 8px; background: var(--session-raised); }
+.session-panel-site-text { flex: 1 1 auto; min-width: 0; display: grid; }
+.session-panel-site-name { overflow: hidden; color: var(--text); font: 12px/1.4 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+/* The end of a script URL names it, so a long one loses its start, as the
+ * native dialog's head truncation did. */
+.session-panel-site-url { overflow: hidden; color: var(--faint); font: 11px/1.4 var(--sans); text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; text-align: left; }
+
+.session-panel-failure { margin: 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--red) 35%, var(--line-soft)); border-radius: 8px;
+  background: color-mix(in srgb, var(--red) 9%, var(--panel)); color: var(--text); font: 12px/1.5 var(--sans);
+  white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+
+/* ---- Actions ---- */
+.session-panel-actions { flex: 0 0 auto; display: grid; gap: 8px; padding: 10px 16px 14px; border-top: 1px solid var(--line-soft); }
+.session-panel-action-row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.session-panel-notice { margin: 0; color: var(--muted); font: 12px/1.45 var(--sans); overflow-wrap: anywhere; }
+.session-panel-notice-error { color: var(--red); }
+.session-panel-button { flex: 0 0 auto; height: 28px; padding: 0 12px; border: 1px solid var(--line); border-radius: 7px; background: transparent;
+  color: var(--text); font: 500 12px/1 var(--sans); white-space: nowrap; }
+.session-panel-button:hover:not(:disabled) { background: var(--session-hover); }
+.session-panel-button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.session-panel-button:disabled { border-color: var(--line-soft); color: var(--faint); cursor: default; }
+.session-panel-button-primary { border-color: transparent; background: var(--accent); color: var(--bg); font-weight: 600; }
+.session-panel-button-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 85%, var(--text)); }
+.session-panel-button-primary:disabled { border-color: transparent; background: var(--panel-3); color: var(--faint); }
+.session-panel-button-small { height: 24px; padding: 0 9px; font-size: 11.5px; }
+.session-panel-button[data-tone="danger"]:not(:disabled) { border-color: color-mix(in srgb, var(--red) 55%, var(--line)); color: var(--red); }
+
+@media (max-height: 650px) {
+  /* The 560 px minimum: tighter spacing before the body has to scroll. */
+  .session-panel-head { padding: 10px 14px 8px; }
+  .session-panel-icon, .session-panel-spinner { width: 26px; height: 26px; border-radius: 8px; }
+  .session-panel-body { gap: 10px; padding: 0 14px 12px; }
+  .session-panel-mode { padding: 7px 10px; }
+  .session-panel-actions { padding: 8px 14px 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-panel, .session-panel *, .session-panel *::after { animation: none !important; transition: none !important; }
+}

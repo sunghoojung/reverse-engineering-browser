@@ -178,12 +178,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       switch requestURL.path {
       case "", "/", "/index.html":
         response = (try Data(contentsOf: indexURL), "text/html; charset=utf-8", 200, [:])
-      case "/app.css", "/xrefs_view.css", "/entropy_map.css", "/block_graph.css", "/agent_panel.css":
+      case "/app.css", "/xrefs_view.css", "/entropy_map.css", "/block_graph.css", "/agent_panel.css", "/session_panel.css":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(String(requestURL.path.dropFirst()))),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/block_graph.js", "/block_graph_layout.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/invocation_sites.js", "/entropy_map.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/native_console_completion.js", "/native_console.js":
+      case "/block_graph.js", "/block_graph_layout.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/invocation_sites.js", "/entropy_map.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/native_console_completion.js", "/native_console.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -2566,137 +2566,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 }
 
-// The start dialog's saved invocation sites: what the capture about to start
-// will track, with Remove and Clear All. Changes are saved at once; each
-// capture arms its own copy, so a running one keeps what it armed.
-private final class InvocationSiteSetupView: NSStackView {
-  private let storeURL: URL
-  private var contentMode: Bool
-  private var state = InvocationSiteSet.State.empty
-  private var confirmClear = false
-  private let title = NSTextField(labelWithString: "")
-  private let detail = NSTextField(wrappingLabelWithString: "")
-  private let rows = NSStackView()
-  private let clearButton = NSButton(title: "Clear All", target: nil, action: nil)
-  var onResize: (() -> Void)?
-
-  init(storeURL: URL, contentMode: Bool) {
-    self.storeURL = storeURL
-    self.contentMode = contentMode
-    super.init(frame: .zero)
-    orientation = .vertical
-    alignment = .leading
-    spacing = 6
-    title.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-    title.setAccessibilityIdentifier("invocation-sites-title")
-    detail.textColor = .secondaryLabelColor
-    detail.maximumNumberOfLines = 0
-    detail.preferredMaxLayoutWidth = 420
-    rows.orientation = .vertical
-    rows.alignment = .leading
-    rows.spacing = 4
-    clearButton.target = self
-    clearButton.action = #selector(clearAll(_:))
-    clearButton.bezelStyle = .rounded
-    clearButton.controlSize = .small
-    addArrangedSubview(title)
-    addArrangedSubview(detail)
-    addArrangedSubview(rows)
-    addArrangedSubview(clearButton)
-    reload()
-  }
-
-  required init?(coder: NSCoder) { nil }
-
-  func reload() {
-    state = InvocationSiteSet.load(storeURL)
-    render()
-  }
-
-  @objc func modeChanged(_ sender: NSPopUpButton) {
-    contentMode = sender.titleOfSelectedItem == LiveCaptureMode.content.title
-    render()
-  }
-
-  private func render() {
-    for row in rows.arrangedSubviews {
-      rows.removeArrangedSubview(row)
-      row.removeFromSuperview()
-    }
-    clearButton.title = confirmClear ? "Confirm Clear All" : "Clear All"
-    switch state {
-    case .empty:
-      title.stringValue = "Tracking no functions"
-      detail.stringValue = "Choose Track calls in Sources during a capture to save a function. The next capture you start tracks its calls."
-      clearButton.isHidden = true
-    case .unreadable:
-      title.stringValue = "Saved functions unreadable"
-      detail.stringValue = "The saved invocation site file is not a valid site file, so this capture tracks nothing. Clear it to start again."
-      clearButton.isHidden = false
-    case .saved(let sites):
-      title.stringValue = "Tracking \(sites.count) function\(sites.count == 1 ? "" : "s")"
-      detail.stringValue = "This capture arms these functions in pages it loads; a page already open cannot gain tracking. "
-        + (contentMode
-          ? "Content mode also records settled-value digests of their string and byte results (sensitive capture); set REB_NATIVE_JS_INVOCATION_DIGESTS=0 to opt out."
-          : "Metadata mode records no settled-value digests.")
-        + " A Brave without invocation capture starts without them and says so."
-      clearButton.isHidden = false
-      for (index, site) in sites.enumerated() {
-        let name = NSTextField(labelWithString: site.label)
-        name.font = NSFont.monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
-        name.lineBreakMode = .byTruncatingMiddle
-        let source = NSTextField(labelWithString: site.sourceURL ?? "Source URL not recorded")
-        source.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize - 1)
-        source.textColor = .secondaryLabelColor
-        source.lineBreakMode = .byTruncatingHead
-        source.toolTip = site.sourceURL
-        let text = NSStackView(views: [name, source])
-        text.orientation = .vertical
-        text.alignment = .leading
-        text.spacing = 1
-        text.widthAnchor.constraint(equalToConstant: 330).isActive = true
-        let remove = NSButton(title: "Remove", target: self, action: #selector(remove(_:)))
-        remove.bezelStyle = .rounded
-        remove.controlSize = .small
-        remove.tag = index
-        remove.setAccessibilityLabel("Remove \(site.label)")
-        let row = NSStackView(views: [text, remove])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        rows.addArrangedSubview(row)
-      }
-    }
-    onResize?()
-  }
-
-  @objc private func remove(_ sender: NSButton) {
-    guard case .saved(var sites) = state, sites.indices.contains(sender.tag) else { return }
-    sites.remove(at: sender.tag)
-    confirmClear = false
-    save(sites)
-  }
-
-  @objc private func clearAll(_ sender: NSButton) {
-    guard confirmClear else {
-      confirmClear = true
-      render()
-      return
-    }
-    confirmClear = false
-    save([])
-  }
-
-  private func save(_ sites: [InvocationSiteSet.Site]) {
-    do {
-      try InvocationSiteSet.write(sites, to: storeURL)
-    } catch {
-      detail.stringValue = "The saved functions could not be changed: \(error.localizedDescription)"
-    }
-    reload()
-  }
-}
-
 private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, NSMenuItemValidation {
   private var window: NSWindow?
   private weak var webView: WKWebView?
@@ -2704,16 +2573,20 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private var closeGuard: NativeCloseGuard?
   private var clientProjectExport: NativeClientProjectExport?
   private var agentBridge: NativeAgentBridge?
+  private var sessionPanel: NativeSessionPanel?
   private var clientProjectSmoke: ClientProjectExportSmoke?
   private var closeSmoke: NativeCloseGuardSmoke?
   private let liveSessionCoordinator = LiveSessionCoordinator()
   private let smokeTest = ProcessInfo.processInfo.environment["REB_APP_SMOKE_TEST"] == "1"
-  // The researcher's choices for this app run. They start from the environment
-  // and follow the setup dialog, so a reopen never replaces Metadata with the default.
+  // The researcher's capture mode for this app run. It starts from the
+  // environment and follows the start panel, so a later panel or reopen never
+  // replaces Metadata with the default.
   private lazy var selectedCaptureMode = LiveCaptureMode.configured(ProcessInfo.processInfo.environment)
-  private lazy var selectedSystemKeychain = configuredAutomaticSystemKeychain()
+  // Continue Offline holds for the rest of the run: a reopen starts nothing.
   private var automaticSessionSuppressed = false
-  private var liveSessionDecisionOpen = false
+  // The panel shows a start or failure decision. Nothing starts a session
+  // behind it, so a reopen while it is open changes nothing.
+  private var liveSessionDecisionOpen: Bool { sessionPanel?.decisionOpen ?? false }
   private var localApplicationURL: URL?
   // The live workspace the app last opened, so its page is recognized after
   // its session ends.
@@ -2811,6 +2684,15 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       agentBridge, contentWorld: .page, name: NativeAgentBridge.handlerName
     )
     self.agentBridge = agentBridge
+    let sessionPanel = NativeSessionPanel(
+      webView: webView,
+      siteStoreURL: InvocationSiteSet.storeURL(
+        environment: ProcessInfo.processInfo.environment, applicationSupport: originTraceSupportURL()))
+    sessionPanel.decide = { [weak self] choice in self?.answerLiveSessionPanel(choice) }
+    configuration.userContentController.addScriptMessageHandler(
+      sessionPanel, contentWorld: .page, name: NativeSessionPanel.handlerName
+    )
+    self.sessionPanel = sessionPanel
 
     NSApp.setActivationPolicy(.regular)
     if !smokeTest {
@@ -2835,7 +2717,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
           NSApp.terminate(nil)
         },
         failed: { [weak self] failure in
-          self?.presentLiveSessionError(failure, captureMode: .metadata, useSystemKeychain: false)
+          self?.presentLiveSessionError(failure, captureMode: .metadata)
         }
       )
     }
@@ -2854,6 +2736,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     closeGuard?.navigationWillStart()
     clientProjectExport?.navigationWillStart()
     agentBridge?.navigationWillStart()
+    sessionPanel?.navigationWillStart()
   }
 
   func webView(
@@ -2865,6 +2748,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       clientProjectExport?.navigationWillStart()
       agentBridge?.navigationWillStart()
     agentBridge?.navigationWillStart()
+      sessionPanel?.navigationWillStart()
     }
     decisionHandler(.allow)
   }
@@ -2876,6 +2760,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     closeGuard?.navigationWillStart()
     clientProjectExport?.navigationWillStart()
     agentBridge?.navigationWillStart()
+    sessionPanel?.navigationWillStart()
     // WebKit can forget the page's URL once this callback returns.
     let url = webView.url
     if let last = lastContentProcessReload, Date().timeIntervalSince(last) < 30 {
@@ -2944,94 +2829,53 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private let customBraveBundleIdentifier = "com.brave.Browser.development"
   private let customBraveApplicationName = "Brave Browser Development.app"
 
+  // Launch, and a reopen that Continue Offline has not suppressed, start a
+  // session with this run's choices and no panel. An open decision in the
+  // panel refuses it in startAutomaticLiveSession.
   private func requestAutomaticLiveSession() {
     guard !liveSessionCoordinator.isRunning else { return }
+    // REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN=1 is the advanced route to the macOS
+    // Keychain for these automatic sessions; the panel never offers it.
     startAutomaticLiveSession(
       captureMode: selectedCaptureMode,
-      useSystemKeychain: selectedSystemKeychain
+      useSystemKeychain: configuredAutomaticSystemKeychain()
     )
   }
 
+  // Opens the start panel in the window for New Live Session. The choices
+  // start from this run's last ones; the panel lists the saved invocation
+  // sites the capture arms.
   private func presentLiveSessionSetup() {
-    guard NSApp.isRunning, !liveSessionCoordinator.isRunning else { return }
+    guard !liveSessionCoordinator.isRunning, let sessionPanel else { return }
     presentOriginTraceWindow()
+    sessionPanel.content = .choose(mode: selectedCaptureMode)
+  }
 
-    let captureModes: [LiveCaptureMode] = [.content, .metadata]
-    let captureMode = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 390, height: 28))
-    captureMode.addItems(withTitles: captureModes.map(\.title))
-    captureMode.selectItem(at: captureModes.firstIndex(of: selectedCaptureMode) ?? 0)
-
-    let modeLabel = NSTextField(labelWithString: "Capture mode")
-    modeLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-    let privacyLabel = NSTextField(wrappingLabelWithString:
-      "Content mode, the default, retains request paths, queries and bodies and response bodies up to 16 MiB each, request and response headers, cookies, and Canvas images. Metadata mode keeps request hosts and each request body's length, type and SHA-256, without headers, cookies or Canvas images. Artifacts keep raw source URLs locally; only an explicitly exported redacted copy is altered."
-    )
-    privacyLabel.textColor = .secondaryLabelColor
-    privacyLabel.maximumNumberOfLines = 0
-    privacyLabel.preferredMaxLayoutWidth = 420
-    let keychainToggle = NSButton(
-      checkboxWithTitle: "Use macOS Keychain for browser credential storage",
-      target: nil,
-      action: nil
-    )
-    keychainToggle.state = selectedSystemKeychain ? .on : .off
-    let keychainLabel = NSTextField(wrappingLabelWithString:
-      "Keep this off for a prompt-free isolated research profile, and do not save passwords in that profile. Enable it only when you need encrypted browser credentials; macOS may then request your login password in its own Safe Storage prompt."
-    )
-    keychainLabel.maximumNumberOfLines = 4
-    keychainLabel.preferredMaxLayoutWidth = 420
-
-    let tracking = InvocationSiteSetupView(
-      storeURL: InvocationSiteSet.storeURL(
-        environment: ProcessInfo.processInfo.environment,
-        applicationSupport: originTraceSupportURL()),
-      contentMode: selectedCaptureMode == .content)
-    captureMode.target = tracking
-    captureMode.action = #selector(InvocationSiteSetupView.modeChanged(_:))
-    let separator = NSBox()
-    separator.boxType = .separator
-
-    let stack = NSStackView(views: [
-      modeLabel, captureMode, privacyLabel, keychainToggle, keychainLabel, separator, tracking,
-    ])
-    stack.orientation = .vertical
-    stack.alignment = .leading
-    stack.spacing = 8
-    stack.distribution = .fill
-    separator.widthAnchor.constraint(equalToConstant: 420).isActive = true
-    let fit = {
-      stack.layoutSubtreeIfNeeded()
-      stack.frame = NSRect(x: 0, y: 0, width: 420, height: max(260, stack.fittingSize.height))
-    }
-    fit()
-
-    let alert = NSAlert()
-    alert.alertStyle = .informational
-    alert.messageText = "Start a live research session"
-    alert.informativeText = "Choose the evidence boundary for this session. You can start another session later from the Origin Trace menu."
-    alert.accessoryView = stack
-    alert.addButton(withTitle: "Start Session")
-    alert.addButton(withTitle: "Continue Offline")
-    tracking.onResize = { [weak alert] in
-      fit()
-      alert?.layout()
-    }
-    // A reopen during this modal must not start a session behind it.
-    liveSessionDecisionOpen = true
-    let response = alert.runModal()
-    liveSessionDecisionOpen = false
-    guard response == .alertFirstButtonReturn else {
+  // The panel already accepted this choice for the decision on screen; it is
+  // checked again because the decision can change before this runs.
+  private func answerLiveSessionPanel(_ choice: NativeSessionPanel.Choice) {
+    guard let sessionPanel else { return }
+    switch (choice, sessionPanel.content) {
+    // A session the panel starts or retries uses the isolated, prompt-free
+    // research profile; the page cannot ask for the macOS Keychain.
+    case (.start(let mode), .choose):
+      automaticSessionSuppressed = false
+      selectedCaptureMode = mode
+      // Not a decision, so the start below is not refused as one behind it.
+      sessionPanel.content = .starting(mode: mode)
+      startAutomaticLiveSession(captureMode: mode, useSystemKeychain: false)
+    case (.retry, .failed(_, let mode)):
+      sessionPanel.content = .starting(mode: mode)
+      liveSessionCoordinator.stop()
+      startAutomaticLiveSession(captureMode: mode, useSystemKeychain: false)
+    case (.offline, .choose), (.offline, .failed):
+      sessionPanel.content = .hidden
       automaticSessionSuppressed = true
       presentOriginTraceWindow()
-      return
+      leaveEndedLiveWorkspace()
+    default:
+      break
     }
-    automaticSessionSuppressed = false
-    selectedCaptureMode = captureModes[max(0, captureMode.indexOfSelectedItem)]
-    selectedSystemKeychain = keychainToggle.state == .on
-    startAutomaticLiveSession(
-      captureMode: selectedCaptureMode,
-      useSystemKeychain: selectedSystemKeychain
-    )
   }
 
   private func startAutomaticLiveSession(
@@ -3045,11 +2889,13 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     else {
       presentLiveSessionError(
         .init(
-          message: "Origin Trace could not find Brave Browser Development. "
+          message: configuredBraveBinary.map {
+            "REB_BRAVE_BINARY names \($0), which is not the executable inside a Brave Browser Development app. "
+              + "Correct it, or unset it to use the Brave beside Origin Trace."
+          } ?? "Origin Trace could not find Brave Browser Development. "
             + "Place it beside Origin Trace or set REB_BRAVE_BINARY.",
           afterStartup: false),
-        captureMode: captureMode,
-        useSystemKeychain: useSystemKeychain
+        captureMode: captureMode
       )
       return
     }
@@ -3059,22 +2905,18 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       useSystemKeychain: useSystemKeychain,
       ready: { [weak self] liveURL in
         guard let self else { return }
+        self.sessionPanel?.content = .hidden
         guard nativeUIURL(liveURL.absoluteString) != nil else {
           self.presentLiveSessionError(
             .init(message: "Origin Trace received an invalid loopback UI URL.", afterStartup: false),
-            captureMode: captureMode,
-            useSystemKeychain: useSystemKeychain
+            captureMode: captureMode
           )
           return
         }
         self.openLiveWorkspace(nil)
       },
       failed: { [weak self] failure in
-        self?.presentLiveSessionError(
-          failure,
-          captureMode: captureMode,
-          useSystemKeychain: useSystemKeychain
-        )
+        self?.presentLiveSessionError(failure, captureMode: captureMode)
       }
     )
   }
@@ -3085,6 +2927,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     closeGuard?.prepareForLoad(url)
     clientProjectExport?.prepareForLoad(url)
     agentBridge?.prepareForLoad(url)
+    sessionPanel?.prepareForLoad(url)
     webView?.load(URLRequest(url: url))
     if url.scheme != "reb" { contentHandler?.stopStoredBackend() }
   }
@@ -3153,10 +2996,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       guard let self else { return }
       self.automaticSessionSuppressed = false
       self.liveSessionCoordinator.stop()
+      self.sessionPanel?.content = .hidden
       if let localApplicationURL = self.localApplicationURL { self.load(localApplicationURL) }
-      // From the run loop, outside the WebKit or AppKit callback that settled
-      // the decision, so the dialog's modal session runs at the top level.
-      RunLoop.main.perform(inModes: [.default]) { self.presentLiveSessionSetup() }
+      self.presentLiveSessionSetup()
     })
   }
 
@@ -3182,19 +3024,23 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     (NSApp.modalWindow ?? window).makeKeyAndOrderFront(nil)
   }
 
+  private var configuredBraveBinary: String? {
+    ProcessInfo.processInfo.environment["REB_BRAVE_BINARY"].flatMap { $0.isEmpty ? nil : $0 }
+  }
+
+  // An explicit REB_BRAVE_BINARY names the one browser to use, as it does for
+  // the launcher: one that is not Brave Browser Development fails the start
+  // instead of quietly starting another build found elsewhere.
   private func customBraveApplicationURL() -> URL? {
-    var candidates: [URL] = []
-    if let configuredBinary = ProcessInfo.processInfo.environment["REB_BRAVE_BINARY"],
-      !configuredBinary.isEmpty
-    {
-      let executableURL = URL(fileURLWithPath: configuredBinary).standardizedFileURL
-      candidates.append(
-        executableURL.deletingLastPathComponent()
-          .deletingLastPathComponent()
-          .deletingLastPathComponent()
-      )
+    if let configuredBinary = configuredBraveBinary {
+      let application = URL(fileURLWithPath: configuredBinary).standardizedFileURL
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+      return isCustomBraveApplication(application) ? application : nil
     }
 
+    var candidates: [URL] = []
     let applicationDirectory = Bundle.main.bundleURL.deletingLastPathComponent()
     let siblingApplication = applicationDirectory.appendingPathComponent(
       customBraveApplicationName,
@@ -3476,43 +3322,27 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     NSApp.terminate(nil)
   }
 
+  // A failed or ended session is a decision in the start panel, with Retry
+  // and Continue Offline, over whichever workspace the window shows.
   private func presentLiveSessionError(
     _ failure: LiveSessionCoordinator.Failure,
-    captureMode: LiveCaptureMode,
-    useSystemKeychain: Bool
+    captureMode: LiveCaptureMode
   ) {
-    guard NSApp.isRunning else { return }
+    // No modal any more, so a failure at launch, before the event loop runs,
+    // is held by the panel and drawn once the page loads.
     if smokeTest {
       print("SMOKE_LIVE_FAILURE \(failure.message)")
       automaticSessionSuppressed = true
       return
     }
-    let alert = NSAlert()
-    alert.alertStyle = .critical
-    alert.messageText = failure.afterStartup ? "Live session ended" : "Live session unavailable"
-    alert.informativeText = failure.message
-    alert.addButton(withTitle: "Retry")
-    alert.addButton(withTitle: "Continue Offline")
-    // A reopen during this modal must not start a second session behind it.
-    liveSessionDecisionOpen = true
-    let response = alert.runModal()
-    liveSessionDecisionOpen = false
-    if response == .alertFirstButtonReturn {
-      liveSessionCoordinator.stop()
-      startAutomaticLiveSession(
-        captureMode: captureMode,
-        useSystemKeychain: useSystemKeychain
-      )
-      return
-    }
-    automaticSessionSuppressed = true
     presentOriginTraceWindow()
-    leaveEndedLiveWorkspace()
+    sessionPanel?.content = .failed(failure, mode: captureMode)
   }
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     clientProjectExport?.navigationDidFinish(webView)
     agentBridge?.navigationDidFinish(webView)
+    sessionPanel?.navigationDidFinish(webView)
     if openLiveWorkspaceWhenLoaded {
       openLiveWorkspaceWhenLoaded = false
       openLiveWorkspace(nil)

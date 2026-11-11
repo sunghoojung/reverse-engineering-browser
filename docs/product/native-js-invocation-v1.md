@@ -522,7 +522,7 @@ Live (needs a rebuilt Brave, on the build machine):
 | Overlay | wire header, site-file parsing for `function-entry`, renderer budgets and gaps, Mojo configuration, browser forwarding of Wasm context |
 | Protocol and backend | events 24 to 26, Wasm payload versions, C++/Python/Rust/JavaScript validators, origin-trace relations in the broker index, the value-flow join in both the Rust and the native app's Swift trace builders, viewer labels |
 | Tooling | `tools/native-js-invocation-site.py` writes the site file; the launcher's `REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS` and `REB_NATIVE_JS_INVOCATION_IF_SUPPORTED` |
-| Saved sites | the worker's `invocation_site` query, the backend's site key, saved set and routes (`js_invocation_sites.rs`), Sources **Track calls**, the titlebar, and the app's start dialog and `captureDefaults` |
+| Saved sites | the worker's `invocation_site` query, the backend's site key, saved set and routes (`js_invocation_sites.rs`), Sources **Track calls**, the titlebar, and the app's start panel and `captureDefaults` |
 
 What runs in this repository's gate: the C++ parity and rule test, the Python
 validator, the Rust readers and value search, the shared Rust and Swift trace

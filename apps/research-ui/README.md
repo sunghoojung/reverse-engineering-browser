@@ -752,18 +752,35 @@ This packages `build/Origin Trace.app` and opens a complete live capture
 session without a setup dialog when the discovered browser is the release's
 paired build (see below). This research launch enables every implemented
 native capture category and Canvas image artifacts. Retained credentials are unmasked; evidence stays
-local. Use this profile only for authorized targets. The default isolated research
-profile uses Chromium's mock Keychain so launch does not stop on a macOS password
-prompt; do not save credentials in that profile. An explicit checkbox opts into
-macOS Keychain encryption when credential storage is required. The app does not
-mark the session live until the launcher publishes its loopback handshake, and the
-failure dialog can retry the same privacy mode without restarting Origin Trace.
+local. Use this profile only for authorized targets. Every app session uses the
+isolated research profile, which uses Chromium's mock Keychain so launch does
+not stop on a macOS password prompt; do not save credentials in that profile.
+The start panel offers no Keychain choice. The advanced route to macOS Keychain
+encryption, when credential storage is required, is
+`REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN=1`: it applies to the automatic launch and a
+reopen's restart, never to a session the panel starts or retries. The
+standalone `make live` launcher reads `REB_USE_SYSTEM_KEYCHAIN` instead (on
+unless set to `0`).
+The app does not mark the session live until the launcher publishes its loopback
+handshake. A failure shows in the window's **start panel**, at the right edge
+of the workspace, with **Retry**, which starts again with the same capture mode
+without restarting Origin Trace, and **Continue Offline**.
+Retry is focused, so Return retries.
 Startup allows up to 60 seconds for the bounded broker, receiver, backend and
 browser readiness stages; individual helper failures are reported sooner.
-The failure dialog preserves the launcher's explicit browser/helper diagnosis
+The failure keeps the launcher's explicit browser/helper diagnosis
 when teardown writes later shell messages; the full session log path stays visible.
-**New Live Session…** in the application menu chooses the capture mode and
-Keychain storage. **Content (default)** sets `REB_CAPTURE_REQUEST_CONTENT=1`,
+**New Live Session…** in the application menu opens the start panel to choose
+the capture mode. The panel is part of the workspace, not
+a modal: the evidence beside it stays usable while you decide. It also lists
+the saved functions the capture will track (see
+[Track calls](#track-calls-to-a-function)). Start Session is focused, so
+Return starts with the choices shown; Tab and the arrow keys reach every
+choice, and while the session starts the panel says so. The page only asks:
+the native app accepts a choice only from the document it loaded and only
+while that decision is open, checks it, and starts the session itself
+([`SessionPanel.swift`](macos/SessionPanel.swift)). A Dock reopen while the
+panel shows a decision starts nothing behind it. **Content (default)** sets `REB_CAPTURE_REQUEST_CONTENT=1`,
 which retains request paths, queries and request bodies up to 16 MiB each, and
 retains Canvas images. While a live session has either turned on, the titlebar
 shows **Content capture** and its tooltip names which; a browser built before
@@ -775,11 +792,10 @@ each request body's length, type and SHA-256. In Content mode,
 off.
 
 The app saves no capture choice between launches. `REB_AUTOMATIC_CAPTURE_MODE=metadata`
-selects Metadata for the automatic launch and preselects it in the dialog. Any
-value other than `content` does the same, so a misspelled opt-out never turns
-content capture on. A choice made in the dialog, including the Keychain
-checkbox, holds for later sessions in the same app run, including one a Dock
-reopen starts.
+selects Metadata for the automatic launch and preselects it in the start panel.
+Any value other than `content` does the same, so a misspelled opt-out never
+turns content capture on. A mode chosen in the panel holds for later sessions
+in the same app run, including one a Dock reopen starts.
 
 Every app session also enables quiet mode and native Wasm `br_table` and
 `call_indirect` dispatch capture; Wasm dispatch forces Liftoff-only compilation,
@@ -810,7 +826,10 @@ Trace/sessions/live/`.
 Origin Trace looks beside its app bundle, in the reused browser output recorded
 at packaging time, in the local `browser/worktree/`
 build output, and among registered applications for Brave Browser Development.
-A `REB_BRAVE_BINARY` override takes precedence. The app bundles its Rust backend
+A `REB_BRAVE_BINARY` override takes precedence and is the only browser used: an
+override that does not name the executable inside a Brave Browser Development
+app fails the start and says so, as the launcher does, rather than starting
+another build found elsewhere. The app bundles its Rust backend
 and VM analyzer, so Python is not required. A startup problem is shown explicitly
 and leaves the stored-evidence interface available offline.
 
@@ -838,13 +857,15 @@ browser requests to an unused loopback proxy and blocks external DNS while
 preserving Chromium's sandbox. Do not wrap live Brave in `sandbox-exec`: nested
 macOS sandbox initialization fails. Build commands can still use that wrapper.
 If Brave or a required live helper exits, Origin Trace reports the closed
-connection and offers retry instead of silently leaving a failed session running.
-A session that stops after its workspace opened is reported as **Live session
-ended**, with the launcher's cause; one that never became ready is **Live
-session unavailable**.
-**Continue Offline** after an ended session replaces its workspace, which can no
-longer load or save anything, with the offline workspace; the ended session's
-evidence stays in its session folder. Origin Trace asks first when that page
+connection in the start panel and offers Retry instead of silently leaving a
+failed session running. A session that stops after its workspace opened is
+reported as **Live session ended**, with the launcher's cause, over the ended
+workspace; one that never became ready is **Live session unavailable**.
+**Continue Offline** keeps a later Dock reopen from starting a session for the
+rest of that app run; **New Live Session…** still starts one. After an ended
+session it also replaces its workspace, which can no longer load or save
+anything, with the offline workspace; the ended session's evidence stays in its
+session folder. Origin Trace asks first when that page
 still holds unsaved work, so Stay leaves it open for copying. When a session
 becomes ready while the window holds unsaved work, the same question comes
 before its workspace opens; after Stay the session keeps running and **Open Live
@@ -1007,8 +1028,8 @@ children and analyzer-worker cleanup; it does not replace native package accepta
 The macOS CI job runs this check before uploading the app preview.
 
 The failed-start smoke uses a deliberately missing browser and follows the offline
-branch without showing a modal dialog. It does not automate the Retry/Continue
-Offline buttons. Headless Chrome stands in for the browser to test live session
+branch without showing the start panel. It does not automate the Retry/Continue
+Offline buttons; the rendered harness and the companion startup suite do. Headless Chrome stands in for the browser to test live session
 startup and packaged routing, not custom Brave probe capture. These checks do not replace interactive native
 keyboard, resize and visual QA. On other platforms, `--contract-only` checks
 source wiring only and does not claim native runtime coverage.
@@ -1317,6 +1338,7 @@ capture, fetch anything or change a row.
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
 | `entropy_map.js`, `entropy_map.css` | Sources Map: the fixed-size canvas view, its segmented modes, summary and states; the only color tokens the map uses |
 | `invocation_sites.js` | Track calls: the saved invocation site pane, byte offsets of Sources positions and the titlebar tracking chip |
+| `session_panel.js`, `session_panel.css` | The live session start panel: start choices, startup, failure with Retry; the decision itself is native (`macos/SessionPanel.swift`) |
 | `request_stack.js` | Initiator tab: the native request or navigation call stack and task chain from `get_request_stack`, opening Sources at a frame, and the initiator chain |
 | `command_palette.js` | The ⌘ / Ctrl + K palette: provider registry, matching, ranking and caps, and its dialog controller; `app.js` supplies the built-in providers |
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
@@ -1878,9 +1900,12 @@ initializer is refused with its reason, as is top-level code. Context lines
 and labels are captured text, inserted as text.
 
 Saving changes nothing in the open page or the running capture. The pane says
-tracking starts with the next capture: **New Live Session…** shows "Tracking N
-functions" with each label, a Remove for each and Clear All, and the
-capture it starts arms a private copy of the set. Content mode also records
+tracking starts with the next capture: the start panel that **New Live
+Session…** opens shows "Tracking N functions" with each label and
+script URL, a Remove for each and Clear All (which asks once more), and the
+capture it starts arms a private copy of the set. The native app reads and
+rewrites the saved file for the panel; a Remove names the list the panel
+showed, so a list that changed since is refused rather than edited. Content mode also records
 the calls' settled-value digests; Metadata mode does not. The titlebar names
 what the running capture tracks, says when its Brave predates invocation
 capture and started without the sites, and warns when this session retained

@@ -607,7 +607,7 @@ const text = selector => host.querySelector(selector)?.textContent ?? '';
   doc.edges[5].sites = [{module_offset: 47}]; // run calls its import send at +0x2f
   Object.assign(ws, {__doc: doc, __seen: [], __how: [], __followed: [], __opened: []});
   runInContext(`var panel = createFlowGraphPanel({host: document.querySelector('#host'), open: node => __opened.push(node.name), fetchGraph: async () => __doc,
-    onSelect: info => __seen.push(info), onFollow: info => __followed.push(info)});
+    onSelect: (info, how) => { __seen.push(info); __how.push(how); }, onFollow: info => __followed.push(info)});
     var late = createFlowGraphPanel({host: document.querySelector('#late'), fetchGraph: async () => __doc, onSelect: (info, how) => { __seen.push(info); __how.push(how); }});`, ws);
   const call = text => runInContext(text, ws), seen = ws.__seen, keyOf = name => model.flowGraphNodeKey(doc.nodes.find(item => item.name === name));
   // A key asked for before the graph is drawn is selected once it is.
@@ -682,8 +682,16 @@ const text = selector => host.querySelector(selector)?.textContent ?? '';
   assert.deepEqual({...info.request}, {process: 41, request: '73'}, 'the highlighted request is reported');
   assert.equal(info.name, '<img src=x onerror=alert(1)>', 'with the function that made it');
   assert.equal(info.row.target, 'GET frame.test');
+  assert.deepEqual({...ws.__how.at(-1)}, {requested: false}, 'a highlight the host calls for itself is not marked');
   call(`panel.select(${JSON.stringify(keyOf('run'))})`);
   assert.equal(seen.at(-1).request, null, 'selecting a card replaces the lit request');
+  // The stack of the request show() names is lit for the host: reported as requested.
+  call(`panel.show({session: '7', request: {process: 41, request: '73'}})`);
+  assert.deepEqual({...seen.at(-1).request}, {process: 41, request: '73'});
+  assert.deepEqual({...ws.__how.at(-1)}, {requested: true}, 'the request show() names is the host\u2019s, not a pick');
+  call(`panel.show({session: '7', request: null})`);
+  assert.deepEqual({...ws.__how.at(-1)}, {requested: true}, 'and so is clearing it when show() names none');
+  call(`panel.select(${JSON.stringify(keyOf('run'))})`);
   call('panel.resize()');
   assert.equal(call('panel.snapshot()').status, 'ready', 'resize() re-measures without reloading');
   // Without onFollow, Enter on a Wasm card opens Sources, as before.

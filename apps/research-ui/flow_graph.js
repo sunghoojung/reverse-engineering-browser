@@ -356,7 +356,7 @@ function flowGraphAlpha(color, alpha) {
  * `open(node)` reveals a resolved function in Sources; `available()` says
  * whether this shell serves the route. `onSelect(info | null, {requested})`
  * hears every change of the selected card or row, clears included, with
- * `requested` true for a key `select` queued before layout; `onFollow(info)`, when
+ * `requested` true when the graph changed it for the host; `onFollow(info)`, when
  * given, takes Enter or a double-click on a Wasm card instead of Sources. The
  * README's Flow graph section documents `info` and the returned methods.
  */
@@ -524,9 +524,12 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
   // The workspace's timeline mark: a Wasm function (and row) a sample points
   // to, apart from the selection. The selection last reported to onSelect.
   let mark = null, markTarget = null, reported = '', pendingKey = null, keyIndex = null, labelSides = null;
-  // True while a key `select` queued before layout is selected, so onSelect
-  // can tell the host that selection was its own request, not a pick.
-  let replaying = false;
+  // True while the graph changes its selection for the host rather than the
+  // researcher: a key `select` queued before layout, the stack of the request
+  // `show` names, a refresh keeping the selection or a new session clearing
+  // it. onSelect then says `requested`, so the host does not count a pick.
+  let hostDriven = false;
+  const forHost = run => { const was = hostDriven; hostDriven = true; try { return run(); } finally { hostDriven = was; } };
   // A layout the view was hidden during is redone when it shows again.
   let layoutStale = false, layingOut = false, highlightFromRequest = false, detailsOpen = false, minimapOn = true, pendingSelect = null, pendingRequest = false;
   // Cards visited by following calls, for Backspace.
@@ -671,9 +674,11 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
       renderSummary(); applyFilter(); renderInspector(); renderSelection();
       setState('ready');
       if (fresh) { needsStart = cssW <= 1; start(); } else if (selected >= 0 && !reselect) ensureVisible(selected); else requestDraw();
-      if (reselect && selected >= 0) select(selected, {reveal: false, row: selectedRow});
-      if (requestKey && (fresh || rehighlight)) highlightRequest(requestKey, {reveal: fresh});
-      if (pendingKey) { const wanted = pendingKey; pendingKey = null; replaying = true; try { selectKey(wanted.key, {reveal: wanted.reveal}); } finally { replaying = false; } }
+      forHost(() => {
+        if (reselect && selected >= 0) select(selected, {reveal: false, row: selectedRow});
+        if (requestKey && (fresh || rehighlight)) highlightRequest(requestKey, {reveal: fresh});
+        if (pendingKey) { const wanted = pendingKey; pendingKey = null; selectKey(wanted.key, {reveal: wanted.reveal}); }
+      });
       notify();
     } catch (problem) {
       layingOut = false;
@@ -1300,7 +1305,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     if (signature === reported) return;
     reported = signature;
     if (typeof onSelect !== 'function') return;
-    try { onSelect(info, {requested: replaying}); } catch (problem) { console.error(problem); }
+    try { onSelect(info, {requested: hostDriven}); } catch (problem) { console.error(problem); }
   }
   /** Display index by the key of every model node a card holds. */
   function indexOfKey(key) {
@@ -1838,7 +1843,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
       session = next ?? null;
       // A key asked for before the first session waits for it; one asked for
       // in another session does not carry over.
-      if (changed) { model = null; display = null; cards = null; layout = null; selected = -1; selectedRow = -1; highlight = null; keyIndex = null; markTarget = null; if (!first) pendingKey = null; generation += 1; runner.cancel(); notify(); }
+      if (changed) { model = null; display = null; cards = null; layout = null; selected = -1; selectedRow = -1; highlight = null; keyIndex = null; markTarget = null; if (!first) pendingKey = null; generation += 1; runner.cancel(); forHost(notify); }
       // Evidence polls re-render Flow; only a newly chosen request moves
       // the highlight, so a card the researcher picked stays lit.
       const requestText = request ? `${request.process}:${request.request}` : '';
@@ -1849,8 +1854,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
       if (!model || (status_ === 'empty' && !layingOut)) load(Boolean(model));
       // Polls call show() often; a layout already running is left to finish.
       else if (!layingOut && (layoutStale || !layout)) rebuild(!layout);
-      else if (newRequest && request) highlightRequest(request);
-      else if (newRequest && highlightFromRequest) clearSelection();
+      else if (newRequest && request) forHost(() => highlightRequest(request));
+      else if (newRequest && highlightFromRequest) forHost(clearSelection);
       requestDraw();
     },
     hide() {

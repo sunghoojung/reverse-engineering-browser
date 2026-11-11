@@ -525,6 +525,42 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   assert.equal(drawn.length, 1);
 }
 {
+  // Back to an entry with no request, or with one no longer listed: the app
+  // keeps its request, and its next render is not a pick that truncates Forward.
+  let shownRequest = null;
+  const requestR = {id: 'rR', label: 'GET r.test #5', method: 'GET', path: '/r', renderer: {process: 41, request: '5'}};
+  const selects = [];
+  const own = context.createFlowWorkspace({root: parseHTML(html).document.querySelector('#screen-backtrace'), graph: null, fetch: fetchStub,
+    createBlockGraphView: makeView, createBlockGraphRunner: runner, getRequest: () => shownRequest, selectRequest: id => selects.push(id)});
+  eventPages.push(page([]));
+  own.sync({visible: true, session: '7', request: null});
+  own.graphSelected({key: 'js|a', kind: 'javascript', name: 'a', row: null, request: null});
+  shownRequest = requestR;
+  own.sync({visible: true, session: '7', request: shownRequest});
+  own.graphSelected({key: 'js|b', kind: 'javascript', name: 'b', row: null, request: null});
+  same(own.trail().map(crumb => crumb.label), ['GET r.test #5', 'b']);
+  const full = own.history();
+  own.back(); own.back();
+  same(own.trail().map(crumb => crumb.label), ['a'], 'Back reaches the entry that had no request');
+  own.sync({visible: true, session: '7', request: shownRequest});
+  same(own.history(), {entries: full.entries, cursor: full.cursor - 2}, 'the app still showing its request records nothing and keeps Forward');
+  same(own.trail().map(crumb => crumb.label), ['a'], 'and leaves the restored entry as it was');
+  own.forward(); own.forward();
+  same(own.trail().map(crumb => crumb.label), ['GET r.test #5', 'b'], 'Forward still reaches the end of the trail');
+  // An entry whose request the app can no longer select holds the app's own.
+  shownRequest = {id: 'rS', label: 'GET s.test #6', method: 'GET', path: '/s', renderer: {process: 41, request: '6'}};
+  own.sync({visible: true, session: '7', request: shownRequest});
+  own.back();
+  assert.equal(selects.at(-1), 'rR', 'Back asks the app for the entry\u2019s request');
+  const restored = own.history();
+  own.sync({visible: true, session: '7', request: shownRequest});
+  assert.equal(own.selection().request?.id, 'rR', 'the request the app could not select is kept in the entry');
+  same(own.history(), restored, 'and the app\u2019s own request is not a pick');
+  // Once the app selects another request, that is a pick again.
+  own.sync({visible: true, session: '7', request: {...requestR, id: 'rT', label: 'GET t.test #7'}});
+  assert.equal(own.selection().request?.id, 'rT');
+}
+{
   // Without the selection API the workspace still runs.
   const bare = context.createFlowWorkspace({root: parseHTML(html).document.querySelector('#screen-backtrace'), graph: {show() {}, hide() {}}, fetch: fetchStub,
     createBlockGraphView: makeView, createBlockGraphRunner: runner, getRequest: () => null});

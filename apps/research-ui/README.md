@@ -2095,7 +2095,10 @@ already handles while it has focus.
   Wasm function opens the CFG at its block; a request opens Lineage.
 - ⌫ and ⇧⌫, or the arrows beside the title: walk the trail back and forward,
   including jumps between panes. On the graph canvas ⌫ keeps the graph's own
-  Back and ⇧⌫ still walks the trail forward.
+  Back and ⇧⌫ still walks the trail forward. An entry restores its request in
+  the app; when it had none, or its request is no longer listed, the app keeps
+  the request it shows (a notice says so) and that is not a pick, so Forward
+  stays until another request is selected.
 - J and K: in the CFG, the previous or next sample at the selected site; in the
   timeline, samples in record order. Arrows move along and between tracks.
 
@@ -2415,9 +2418,12 @@ takes, besides `host`, `open`, `available` and `fetchGraph`:
 - `onSelect(info | null, {requested})`, called whenever the selected card,
   its chosen row or the lit request changes, and with `null` when the
   selection clears. A change to the same card and row is not reported twice.
-  `requested` is true only when the change is a key `select` queued before the
-  graph was drawn, selected once it lands: the host asked for it, nobody
-  picked it, so the Flow workspace records no trail entry for it.
+  `requested` is true when the graph changed the selection for the host, not
+  the researcher: a key `select` queued before the graph was drawn, selected
+  once it lands; the stack of the request `show` names, lit on a new request
+  or after a refresh, or cleared when `show` names none; a refresh keeping the
+  selection; or a new session clearing it. The Flow workspace records no
+  trail entry for those.
 - `onFollow(info)`, called on Enter or a double-click on a Wasm card. Without
   it a Wasm card opens in Sources, as before. Enter on a call row still
   follows the call.

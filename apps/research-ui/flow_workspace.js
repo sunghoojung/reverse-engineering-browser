@@ -153,6 +153,9 @@ function createFlowWorkspace(options) {
   let history = [], cursor = -1, restoring = false, graphInfo = null, lineageModels = [], lineageStepModel = null;
   // Above zero while one pick makes several changes that are one trail entry.
   let batching = 0;
+  // `{id}` of the app's request after restoring an entry that names another
+  // (or none); the app still showing it is not a pick.
+  let heldRequest = null;
   // Short feedback for a key that did nothing visible; it clears itself.
   let flashTimer = 0;
   const flash = text => {
@@ -534,6 +537,12 @@ function createFlowWorkspace(options) {
       const target = entry.selection;
       const current = call('getRequest');
       if (target.request?.id && current?.id !== target.request.id) call('selectRequest', target.request.id);
+      // The app keeps its own request when the entry had none or its request
+      // is no longer listed; that request is held, so the next render's sync
+      // neither counts it as a pick nor truncates Forward.
+      const shown = call('getRequest')?.id ?? null, wanted = target.request?.id ?? null;
+      heldRequest = shown !== wanted ? {id: shown} : null;
+      if (heldRequest && shown !== null) flash(wanted ? 'This trail entry\u2019s request is no longer in the request list; Lineage still shows the selected request.' : 'This trail entry had no request; Lineage still shows the selected one.');
       selection = {...target};
       if (target.step) call('selectTraceRow', target.step);
       if (target.sample) timeline?.select(target.sample.key, {silent: true});
@@ -1037,14 +1046,17 @@ function createFlowWorkspace(options) {
         // The old session's CFG read, layout, decoded result and names must
         // never land in or be reused by this one.
         cfg.generation += 1; cfg.abort?.abort(); cfg.abort = null; cfg.runner?.cancel?.();
-        history = []; cursor = -1; graphInfo = null; cfg.fn = null; cfg.key = null; cfg.result = null; cfg.mark = null; cfg.loaded = false; cfg.error = null;
+        history = []; cursor = -1; heldRequest = null; graphInfo = null; cfg.fn = null; cfg.key = null; cfg.result = null; cfg.mark = null; cfg.loaded = false; cfg.error = null;
         cfg.names.clear(); nameReads.clear();
         if (cfg.view) cfg.view.release();
         selection = {request: null, call: null, fn: null, site: null, sample: null, step: null, graphKey: null};
         renderCfgChrome();
       }
       const crumb = request ? {id: request.id, label: request.label ?? `${request.method ?? ''} ${request.path ?? ''}`.trim(), renderer: request.renderer?.request ?? null} : null;
-      if (!restoring) {
+      // A request a restored entry did not have stays held until the app
+      // selects another one.
+      if (heldRequest && heldRequest.id !== (crumb?.id ?? null)) heldRequest = null;
+      if (!restoring && !heldRequest) {
         if ((crumb?.id ?? null) !== (selection.request?.id ?? null)) {
           // The app chose another request: a new pick, and nothing below the
           // old request is a recorded relationship of it.

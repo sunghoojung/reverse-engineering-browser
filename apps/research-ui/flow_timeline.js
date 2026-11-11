@@ -395,6 +395,9 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
   // scanned, every session and record type in it, not this session alone.
   const noScan = () => ({sequence: 0n, sequenceSaturated: false, drops: 0n, dropsSaturated: false});
   let scan = noScan();
+  // Pages behind the records held. A refresh reads at least as many again,
+  // so it never undoes a Read more or shrinks the view.
+  let pagesHeld = 0;
 
   function setState(kind, title = '', text = '', retry = false) {
     status = kind;
@@ -423,7 +426,8 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
     if (!model) setState('loading', 'Reading tracked calls…', 'Invocation records and Wasm samples, in record order.');
     else if (!quiet) setBanner('Refreshing tracked calls…');
     try {
-      while (pages < limits.pagesPerRead && collected.length < limits.maxRecords) {
+      const budget = more ? limits.pagesPerRead : Math.max(limits.pagesPerRead, pagesHeld);
+      while (pages < budget && collected.length < limits.maxRecords) {
         const parameters = new URLSearchParams({session_id: session, category: FLOW_TIMELINE_CATEGORY, type: FLOW_TIMELINE_TYPES.join(','), after, limit: String(limits.pageSize)});
         const body = await fetchJSON(`/api/events?${parameters}`, abort?.signal);
         if (owner !== generation) return;
@@ -437,7 +441,7 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
         if (typeof query.next_after !== 'string' || query.next_after === after) { done = true; break; }
         after = query.next_after;
       }
-      events = collected; cursor = after; partial = !done; error = null; loadedAt = now(); scan = scanned;
+      events = collected; cursor = after; partial = !done; error = null; loadedAt = now(); scan = scanned; pagesHeld = (more ? pagesHeld : 0) + pages;
       model = flowTimelineModel(events, limits);
       render();
       onPartial(partial);
@@ -452,7 +456,7 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
   }
   function reset() {
     controller?.abort(); controller = null; generation += 1;
-    events = []; model = null; view = null; cursor = '0'; partial = false; loadedAt = 0; chosenProcess = null; selected = null; items = new Map(); focusKey = null; scan = noScan();
+    events = []; model = null; view = null; cursor = '0'; partial = false; loadedAt = 0; chosenProcess = null; selected = null; items = new Map(); focusKey = null; scan = noScan(); pagesHeld = 0;
     canvas.replaceChildren(); detailText.textContent = ''; detailFollow.hidden = true; setBanner(''); gapNotice.textContent = ''; gapNotice.hidden = true;
     processSelect.replaceChildren(); processSelect.hidden = true;
   }
@@ -491,7 +495,8 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
     }
     setState('ready');
     draw();
-    if (selected && !items.has(selected.key)) selected = null;
+    // A selection the records still hold stays, drawn or not.
+    if (selected && !describe(selected)) selected = null;
     paintSelection();
   }
   /** The gap notice: this renderer's refusals and losses, which other

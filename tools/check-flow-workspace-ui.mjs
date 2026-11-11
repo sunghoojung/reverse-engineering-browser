@@ -478,6 +478,33 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   await partial.load('7');
   assert.equal(partial.isPartial(), true);
   assert.match(partial.summary(), /partial$/);
+  // A quiet refresh after Read more reads at least as far again: the view
+  // never shrinks and a selection from the later page stays.
+  {
+    const reads = [];
+    let clock = 0;
+    const moreRoot = document.createElement('div');
+    const paged = context.createFlowTimeline({root: moreRoot, limits, now: () => clock, fetchJSON: async url => {
+      const after = new URL(url, 'http://fixture.invalid').searchParams.get('after');
+      reads.push(after);
+      return after === '0' ? page(sessionRecords().slice(0, 5), {limited: true, next_after: '500'}) : page(sessionRecords().slice(5), {limited: false, next_after: '900'});
+    }});
+    await paged.load('7');
+    assert.equal(paged.isPartial(), true);
+    assert.equal(moreRoot.querySelector('.flow-tl-banner-action').textContent, 'Read more');
+    moreRoot.querySelector('.flow-tl-banner-action').onclick();
+    await settle();
+    assert.equal(paged.isPartial(), false); assert.equal(paged.model().counts.records, 13);
+    const later = paged.select('sample:41:109');
+    assert.equal(later?.sample.seq, 109n, 'a sample from the second page is selected');
+    reads.length = 0; clock = 60000;
+    paged.sync('7', {visible: true, staleAfter: 15000});
+    await settle();
+    same(reads, ['0', '500'], 'the quiet refresh reads from the start through every page held');
+    assert.equal(paged.isPartial(), false, 'and stays complete');
+    assert.equal(paged.model().counts.records, 13, 'with every record it held');
+    assert.equal(paged.selection()?.key, 'sample:41:109', 'and the selection it could read');
+  }
   const failing = context.createFlowTimeline({root: document.createElement('div'), fetchJSON: async () => { throw Error('Event store returned 503'); }});
   await failing.load('7');
   assert.equal(failing.status(), 'error');

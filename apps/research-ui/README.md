@@ -2125,7 +2125,9 @@ The timeline reads
 forward from the start of the store, 1,000 records a page, at most 4 pages a
 read and 8,000 records held; anything unread is stated, with **Read more**.
 It reads again when the session changes, on **Refresh**, and quietly when Flow
-redraws more than 15 seconds after a complete read.
+redraws more than 15 seconds after a complete read. A refresh reads from the
+start through at least as many pages as it holds, so it never undoes **Read
+more**, and a selection the records still hold stays selected, drawn or not.
 
 - One track per invocation, keyed by process and invocation ID, along that
   renderer's `sequence_number` order, never wall-clock time. A run of

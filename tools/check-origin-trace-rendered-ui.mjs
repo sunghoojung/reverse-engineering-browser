@@ -274,9 +274,13 @@ fetch("/getcaptcha");
     ...(!only || only === launchTest ? [{xctestrun: hostedLaunch, result: join(report, 'rendered-ui-launch.xcresult'), label: 'Rendered UI launch'}] : []),
   ];
   try {
-    for (const pass of passes) {
-      // Each pass starts its own host; never let one still running take the reopen.
-      try { execFileSync('pkill', ['-f', join(temporary, 'Origin Trace.app/Contents/MacOS/')]); } catch {}
+    for (const [index, pass] of passes.entries()) {
+      // Each pass starts its own host; never let one still running take the
+      // launch pass's reopen. Only the app executable: the harness backend
+      // runs from the same bundle and serves both passes.
+      if (index > 0) {
+        try { execFileSync('pkill', ['-f', `${join(temporary, 'Origin Trace.app/Contents/MacOS/OriginTrace').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}( |$)`]); } catch {}
+      }
       log += await run('xcodebuild', ['test-without-building', '-xctestrun', pass.xctestrun, '-destination', destination,
         '-resultBundlePath', pass.result, '-parallel-testing-enabled', 'NO'], {timeout: 900000, label: pass.label});
     }

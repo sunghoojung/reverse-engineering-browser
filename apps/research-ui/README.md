@@ -2163,8 +2163,8 @@ named.
 
 ## Flow graph
 
-**Flow graph** in Backtraces draws every recorded stack of the session as one
-graph ([flow graph v1](../../protocol/flow-graph-v1.md)): request, navigation,
+The Flow workspace's **Graph** pane draws every recorded stack of the session
+as one graph ([flow graph v1](../../protocol/flow-graph-v1.md)): request, navigation,
 async scheduling and walked cookie-write stacks, folded so that each distinct
 stack and each retained source is read once. It is observed evidence only; a
 call that never reached a recorded request, navigation, task or cookie write is
@@ -2364,8 +2364,7 @@ The canvas announces this list through `aria-describedby`.
   view, in a short canvas and below 380 px, so a workspace pane keeps it.
 - Centring a card keeps it clear of the minimap and of a Details sheet.
 - In a canvas narrower than 860 px the tools drop under the heading. In a
-  narrow window Details is a sheet over the bottom 40% of the canvas, and the
-  Backtraces subtitle gives way.
+  narrow window Details is a sheet over the bottom 40% of the canvas.
 
 ### Workspace API
 

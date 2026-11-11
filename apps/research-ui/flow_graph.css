@@ -1,4 +1,4 @@
-/* Session flow graph in Backtraces and the Flow workspace. Canvas tokens
+/* Session flow graph, the Graph pane of the Flow workspace. Canvas tokens
  * alias plain app.css values, never color-mix(), so the canvas can parse them
  * in both themes. Rosé Pine Moon in the dark theme, Dawn and the light app
  * palette in the light one.
@@ -102,16 +102,6 @@
   --flow-tint-border: 0.7;
 }
 .flow-graph { --graph-canvas: var(--code-bg); }
-
-/* Steps and Flow graph are two views of one screen. */
-.trace-modes { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-2); }
-.trace-mode { min-height: 24px; padding: 0 12px; white-space: nowrap; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font: 500 11.5px var(--sans); }
-.trace-mode:hover { color: var(--text); }
-.trace-mode[aria-pressed="true"] { background: var(--accent-soft); color: var(--text); }
-.trace-mode:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-#screen-backtrace[data-trace-mode="graph"] :is(#trace-load, #trace-evidence, #trace-notice, #trace-empty, #trace-content, #trace-first-request) { display: none !important; }
-/* A short window gives the graph the subtitle's line. */
-@media (max-width: 1000px), (max-height: 640px) { #screen-backtrace[data-trace-mode="graph"] #backtrace-subtitle { display: none; } }
 
 .flow-graph[hidden], .flow-graph-state[hidden], .flow-graph-banner[hidden], .flow-graph-tooltip[hidden], .flow-graph-menu[hidden], .flow-graph-inspector[hidden] { display: none; }
 .flow-graph { flex: 1; min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr) 26px; background: var(--graph-canvas); container: flow-graph / inline-size; }

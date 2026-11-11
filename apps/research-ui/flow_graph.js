@@ -352,7 +352,7 @@ function flowGraphAlpha(color, alpha) {
 }
 
 /**
- * The Backtraces Flow graph view, also the Graph pane of the Flow workspace.
+ * The flow graph view: the Graph pane of the Flow workspace.
  * `open(node)` reveals a resolved function in Sources; `available()` says
  * whether this shell serves the route. `onSelect(info | null)` hears every
  * change of the selected card or row, clears included; `onFollow(info)`, when
@@ -1834,7 +1834,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
       // A key asked for before the first session waits for it; one asked for
       // in another session does not carry over.
       if (changed) { model = null; display = null; cards = null; layout = null; selected = -1; selectedRow = -1; highlight = null; keyIndex = null; markTarget = null; if (!first) pendingKey = null; generation += 1; runner.cancel(); notify(); }
-      // Evidence polls re-render Backtraces; only a newly chosen request moves
+      // Evidence polls re-render Flow; only a newly chosen request moves
       // the highlight, so a card the researcher picked stays lit.
       const requestText = request ? `${request.process}:${request.request}` : '';
       const newRequest = requestText !== shownRequest;

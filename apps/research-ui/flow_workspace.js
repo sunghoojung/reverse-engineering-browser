@@ -160,9 +160,19 @@ function createFlowWorkspace(options) {
     if (head) { const mark = make('span', 'flow-pane-mark'); mark.setAttribute('aria-hidden', 'true'); head.prepend(mark); head.dataset.flowHead = 'cfg'; }
     const open = button('source-tool block-graph-tool flow-cfg-source', 'Sources', 'Open this function in Sources');
     open.title = 'Open the module in Sources at this function';
-    open.addEventListener('click', () => { if (cfg.fn) call('openSource', {artifact_id: cfg.fn.artifact_id, offset: cfg.mark ?? cfg.result?.graph?.offsets?.[0] ?? 0}); });
+    open.addEventListener('click', () => { if (cfg.fn) call('openSource', {artifact_id: cfg.fn.artifact_id, offset: cfgFirstByte()}); });
     cfg.view.tools?.append(open, focusButton('cfg'));
     return cfg.view;
+  }
+  /** The function's first byte: its body's start in the module, which the
+   * graph document names, else its lowest block start; null before a read. */
+  function cfgFirstByte() {
+    const graph = cfg.result?.flowKey === cfg.key ? cfg.result.graph : null;
+    if (!graph) return null;
+    if (Number.isSafeInteger(graph.byteOffset)) return graph.byteOffset;
+    let first = null;
+    for (let block = 0; block < graph.count; block += 1) if (first === null || graph.offsets[block] < first) first = graph.offsets[block];
+    return first;
   }
   function cfgPicked(offset, block, graphDoc) {
     if (cfg.marking || restoring) return;

@@ -5,6 +5,7 @@
 // linking between panes, storage, and the shipped-source rules. Offline DOM
 // model only (LinkeDOM); rendered acceptance is the packaged-app gate.
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import {createRequire} from 'node:module';
 import {createContext, runInContext} from 'node:vm';
@@ -190,7 +191,8 @@ const makeView = (host, options) => {
 // One function: three blocks, the br_table at 0x45 in block 1.
 const rows = '37 block\n39 loop\n43 local.get 0\n45 br_table [3 targets] default 3\n4b end\n';
 const starts = [0]; for (const line of rows.split('\n').slice(0, -1)) starts.push(starts.at(-1) + line.length + 1);
-const cfgResult = () => ({graph: {count: 3, offsets: [0x37, 0x39, 0x4b], ends: [0x39, 0x4b, 0x50], firstRow: [0, 1, 4], rowCount: [1, 3, 1], rows}, starts, layout: {}});
+// The function body starts at 0x35 (its locals); the entry block at 0x37.
+const cfgResult = () => ({graph: {count: 3, offsets: [0x37, 0x39, 0x4b], ends: [0x39, 0x4b, 0x50], firstRow: [0, 1, 4], rowCount: [1, 3, 1], rows, byteOffset: 0x35}, starts, layout: {}});
 let runs = 0;
 const runner = () => ({run: async message => { runs += 1; assert.equal(message.type, 'wasm'); assert(message.metrics && message.engine); return cfgResult(); }, cancel() {}});
 let eventPages = [], graphFailure = false;
@@ -222,7 +224,7 @@ const workspace = context.createFlowWorkspace({
   findRendererRequest: (process, request) => known[`${process}:${request}`] ?? null,
   selectTraceRow: key => { appCalls.push(['selectTraceRow', key]); return true; },
   focusTraceRow: () => { appCalls.push(['focusTraceRow']); return true; },
-  openSource: target => appCalls.push(['openSource', target.artifact_id])
+  openSource: target => appCalls.push(['openSource', target.artifact_id, target.offset])
 });
 const $ = selector => document.querySelector(selector);
 const shown = () => [...document.querySelectorAll('.flow-pane')].filter(pane => pane.dataset.shown === 'true').map(pane => pane.dataset.pane);
@@ -311,6 +313,10 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   key('k', {target: $('#flow-pane-cfg')});
   assert.equal(workspace.selection().sample.label, 'sample 2');
   assert.equal(runs, 1, 'stepping within one function reuses its layout');
+  // Sources opens the module at the function's first byte, not the marked block.
+  appCalls.length = 0;
+  $('#flow-pane-cfg .flow-cfg-source').dispatchEvent(new window.Event('click'));
+  same(appCalls, [['openSource', '4', 0x35]], 'the CFG\u2019s Sources button names the function body\u2019s first byte');
 }
 {
   // Trail and history: Back and Forward walk selections and pane jumps.
@@ -585,6 +591,31 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   const malformed = context.createFlowTimeline({root: document.createElement('div'), fetchJSON: async () => ({events: 'nope'})});
   await malformed.load('7');
   assert.equal(malformed.status(), 'error', 'a malformed page is an error, not an empty session');
+}
+{
+  // The app opens that byte: the shipped scripts in the offline DOM model,
+  // a retained module whose hex view holds it, and the Sources reveal.
+  const {loadShippedUi} = require('./check-native-only-startup.cjs');
+  const timers = {setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout};
+  const {window: shell, context: app, release} = loadShippedUi();
+  try {
+    // Layout leaves the DOM model lacks, as the Sources search check supplies them.
+    Object.assign(shell, {NodeFilter: shell.NodeFilter ?? {SHOW_TEXT: 4}});
+    shell.document.createRange = () => ({setStart() {}, setEnd() {}, getBoundingClientRect: () => ({left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0})});
+    const bytes = Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, ...Array(56).fill(0x0b)]);
+    const hexText = runInContext('formatWasmHex', app)(new Uint8Array(bytes));
+    app.flowModule = {protocol_version: 1, artifact_id: '301', session_id: '7', navigation_id: '1', frame_id: '1', parent_artifact_id: '0', creator_event_id: '0',
+      execution_context_id: '0', capture_origin: 'network_response', kind: 'wasm', url: 'wasm://wasm/0a1b2c3d', mime_type: 'application/wasm', byte_size: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex'), sensitive: false, origin: 'demo', content: hexText, sourceTextLength: hexText.length, wasmHexBytes: bytes.length,
+      contentLossy: false, contentTruncated: false, contentVerified: true};
+    runInContext(`state.artifacts = [flowModule]; showScreen('backtrace');`, app);
+    assert.equal(runInContext(`flowWorkspaceOpenSource({artifact_id: '301', offset: 0x23})`, app), true);
+    assert.equal(runInContext('state.selectedArtifactId', app), '301');
+    assert.equal(runInContext('state.sourceReveal', app), null, 'the byte reveal is consumed once the module is held');
+    assert.equal(runInContext('elements.sourcePosition.textContent', app), 'Byte 0x23 · hex row 0x20', 'Sources shows the hex row that holds the function\u2019s first byte');
+    runInContext(`flowWorkspaceOpenSource({artifact_id: '301', offset: 0x400})`, app);
+    assert.match(runInContext('elements.sourcePosition.textContent', app), /^Byte 0x400 is past the first/, 'a byte the view cannot show says so');
+  } finally { release(); Object.assign(globalThis, timers); }
 }
 {
   // Shipped-source rules.

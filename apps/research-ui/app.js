@@ -4451,10 +4451,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         return flowRendererIndex.map.get(`${process}:${request}`) ?? null;
       }
       /** Opens a Wasm module in Sources from the CFG pane, at the function's first byte. */
-      function flowWorkspaceOpenSource({artifact_id: artifactId}) {
+      function flowWorkspaceOpenSource({artifact_id: artifactId, offset = null}) {
         const matches = state.artifacts.filter(candidate => String(candidate.artifact_id) === String(artifactId));
         if (matches.length !== 1) { investigationNotice('This module is not retained once in the artifact catalog, so Sources cannot open it.', 'unavailable'); return false; }
-        return openInvestigation({kind: 'artifact', identity: investigationArtifactIdentity(matches[0]), relation: 'Opened from the Flow CFG. The block graph is declared static flow, not observed execution.'});
+        if (!openInvestigation({kind: 'artifact', identity: investigationArtifactIdentity(matches[0]), relation: 'Opened from the Flow CFG. The block graph is declared static flow, not observed execution.'})) return false;
+        // The byte is revealed once Sources holds the module, now or when its read lands.
+        if (Number.isSafeInteger(offset) && offset >= 0) { state.sourceReveal = {identity: sourceIdentity(matches[0]), byte: offset}; renderSources(); }
+        return true;
       }
 
       function renderBacktrace() {
@@ -7649,7 +7652,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!investigationPassiveSource && state.sourceDeobfuscated && source?.kind === 'javascript' && !document.querySelector('#screen-sources').hidden) loadDeobfuscation(source);
         renderDeobfuscationReport(source);
         const reveal = state.sourceReveal;
-        if (reveal && source?.content !== undefined && reveal.identity === sourceIdentity(source)) {
+        if (reveal && source?.content !== undefined && reveal.identity === sourceIdentity(source) && reveal.byte !== undefined) {
+          // A module byte (the Flow CFG's function start), placed as the entropy
+          // map places one; why it cannot be shown is said in the status bar.
+          state.sourceReveal = null;
+          const problem = revealSourceByteOffset(source, reveal.byte, () => { if (typeof entropyMap !== 'undefined') entropyMap.close(); });
+          if (problem) elements.sourcePosition.textContent = problem;
+        } else if (reveal && source?.content !== undefined && reveal.identity === sourceIdentity(source)) {
           state.sourceReveal = null;
           revealOriginalLine(source, reveal.line, reveal.column);
           if (reveal.length && markSourceMatch(reveal.line, reveal.column, reveal.length)) {

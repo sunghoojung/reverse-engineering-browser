@@ -172,7 +172,7 @@ later catalog refreshes do not silently rerun the analysis.
 On phones, expanded **Link context** uses a full-width row below Back/Forward;
 long explanations stay in the bounded navigation scroller above the workspace.
 
-A captured request opens its recorded Backtrace using its exact session,
+A captured request opens its recorded lineage in Flow using its exact session,
 process and sequence identity. Reused IDs in other sessions cannot supply its
 trace; unsafe numeric identities and ambiguous rows are rejected. **Open retained source** uses
 that step's session and artifact identity. A Facts **Original bytes** link
@@ -1037,7 +1037,7 @@ source wiring only and does not claim native runtime coverage.
 ## Workspace layout
 
 The sidebar lists every workspace in two groups. **Evidence** holds Traffic,
-Sources, VM, Fingerprinting and Backtraces; **Workbench** holds Collection,
+Sources, VM, Fingerprinting and Flow; **Workbench** holds Collection,
 Analyst and Tools. **Search** at its top opens the [command palette](#command-palette).
 Console, the investigation notebook and the theme switch sit at its foot. ⌘ or Ctrl with 1-8 opens the workspace at that position, the same
 as a click, except while a modal dialog is open. In a browser on the development
@@ -1205,8 +1205,8 @@ and summary focus survive evidence refreshes. Activity opens its details pane
 when an event is selected, or with **Details**. Decoder processing limits and
 result statistics are likewise available in expanders beside their controls.
 
-Backtraces, Analyst and Tools keep the primary task visible and secondary
-information in expandable sections. Backtraces groups correlation identifiers separately from
+Flow, Analyst and Tools keep the primary task visible and secondary
+information in expandable sections. Flow's Lineage groups correlation identifiers separately from
 relationship facts. Origin traces expose the recorded location as text; they do
 not open a source using only a possibly reused script ID or URL, because the
 trace contract lacks the execution-context/source-hash identity needed for that
@@ -1492,12 +1492,13 @@ beside the step list. JWT test-token creation is an optional disclosure below
 inspection. Use the interface font for instructions and labels, and monospace
 for captured values, code, and identifiers. Empty states explain how to begin.
 
-Backtraces lets the researcher select a captured request, load its recorded
-predecessors, and select a row to inspect event identifiers, values, and source.
-Empty traces show a next action rather than a graph or coverage meter. Gaps and
-shared-identifier matches remain explicit. Refresh failures retain the previous
-trace, and arrow keys move between trace rows. **Flow graph** beside **Steps**
-shows every recorded stack of the session as one graph ([Flow graph](#flow-graph)).
+Flow (formerly Backtraces) lets the researcher select a captured request, load
+its recorded predecessors in the Lineage pane, and select a row to inspect event
+identifiers, values, and source under **Details**. Empty traces show a next
+action rather than a graph or coverage meter. Gaps and shared-identifier
+matches remain explicit. Refresh failures retain the previous trace, and arrow
+keys move between trace rows. The session's flow graph, the selected function's
+CFG and the tracked-call timeline sit beside it ([Flow workspace](#flow-workspace)).
 
 Fingerprinting is a first-class session workspace for Canvas, WebGL, Web Audio,
 device, layout, and WebGPU APIs, Permissions, Storage, WebRTC, and Runtime activity.
@@ -2049,6 +2050,117 @@ artifact changes or the screen leaves. The canvas is one bounded backing store
 that does not grow with graph size, and only visible cards and edges are drawn.
 A byte budget cuts row text before structure and labels what it cut.
 
+## Flow workspace
+
+**Flow** (⌘5, formerly Backtraces) is one screen with four linked panes that
+share one selection. Each pane keeps its own zoom and scroll, and changing
+pane, tab or layout never changes the selection.
+
+- **Graph** (gold): the session [flow graph](#flow-graph).
+- **CFG** (iris): one Wasm function's basic blocks, read and drawn exactly as
+  Sources does ([basic-block graphs](#basic-block-graphs)), with the block that
+  holds the selected byte offset marked. It opens when a Wasm card is selected
+  or followed, or a timeline sample is picked, and names the function from the
+  module's name section. Empty, it says how to fill it. **Sources** opens the
+  module there.
+- **Lineage** (rose): the selected request's recorded predecessors from
+  `/api/origin-trace`, what Steps used to show, with the event under
+  **Details**. Each link shows how sure it is by line style (solid observed,
+  dashed shared identifiers, dotted time-adjacent, a cut for a gap) and what it
+  is by colour. A picked sample's selector counts appear under **Selected**.
+- **Timeline** (pine): tracked calls in record order (below).
+
+Traffic's **Trace origin** and Evidence's **Show in Flow** open Flow with that
+request selected and Lineage showing.
+
+### Moving around
+
+The keys never act while typing in a field, never with ⌘, Ctrl or Option (the
+app's own shortcuts), and never take a key the graph or block graph canvas
+already handles while it has focus.
+- 1 to 4: Graph, CFG, Lineage, Timeline. In the split they move keyboard focus
+  to that pane, showing it if it was hidden; in focus mode and in a narrow
+  window they switch panes.
+- Z: open the active pane on its own, or return to the split exactly as it
+  was, with the same panes and sizes. Each pane's corner button and a
+  double-click on its head do the same.
+- ⇧C, ⇧L, ⇧T: show or hide CFG, Lineage and Timeline in the split. A CFG hidden
+  this way stays hidden when a function is picked; Enter still opens it.
+- Enter: follow the selection into the pane that explains it. A sample or a
+  Wasm function opens the CFG at its block; a request opens Lineage.
+- ⌫ and ⇧⌫, or the arrows beside the title: walk the trail back and forward,
+  including jumps between panes. On the graph canvas ⌫ keeps the graph's own
+  Back.
+- J and K: in the CFG, the previous or next sample at the selected site; in the
+  timeline, samples in record order. Arrows move along and between tracks.
+
+The **trail** in the head reads request › tracked call › function › site ›
+sample, and each crumb jumps to its item in its pane. In focus mode a tab bar
+names what each pane holds, and the **Related** rail lists what links to the
+selection: its lineage links, its samples, the function's sampled sites and the
+graph card with its row, callers, callees and request where the graph reports
+them. Every entry jumps.
+
+### Layout
+
+Container queries on the Flow screen decide the layout from the screen's own
+width, so a docked Console or agent narrows it as a smaller window would.
+- 1240 px and wider: every pane, with the timeline docked under them.
+- 900 to 1240 px: CFG is a tab beside Lineage and Details, and the timeline is
+  a strip that opens with **Open**, 4, or a jump to a sample.
+- Narrower, down to the 760 by 560 window minimum: one pane at a time behind
+  the Graph, CFG, Lineage and Timeline switch. A request selected on entry
+  shows Lineage first.
+
+Dividers resize CFG, Lineage and the timeline: drag, or the arrow keys (Shift
+for 50 px), and Home or a double-click resets. Sizes and pane toggles are
+remembered per evidence session, at most 16, in the local
+`origin-trace.flow-workspace.v1` preference; a store the shell blocks is
+ignored.
+
+### Tracked-call timeline
+
+The timeline reads
+`GET /api/events?session_id=…&type=wasm_dispatch_observation,wasm_indirect_observation,js_invocation_start,js_invocation_settle,js_invocation_request`
+forward from the start of the store, 1,000 records a page, at most 4 pages a
+read and 8,000 records held; anything unread is stated, with **Read more**.
+It reads again when the session changes, on **Refresh**, and quietly when Flow
+redraws more than 15 seconds after a complete read.
+
+- One track per invocation, keyed by process and invocation ID, along that
+  renderer's `sequence_number` order, never wall-clock time. A run of records
+  nobody here names is compressed to a break mark (≈) whose tooltip counts
+  them.
+- With the backend's decoded `js_invocation` object, a track has start and
+  settle marks, a dotted line while the call is open, a solid span only when
+  it settled synchronously, the settle's outcome, value kind and length (never
+  content), and the requests started inside it. Without that object, calls are
+  grouped from the Wasm records' `js_invocation_id` alone, with no start,
+  settle or request marks, and a note says so.
+- `br_table` samples are ticks with the selector under each; `call_indirect`
+  samples are dots. Samples outside any tracked call (no call, unknown, not
+  observed) have their own lane.
+- The Requests lane holds requests started inside a call and, dashed, those
+  started while some call was open; a chip selects that request.
+- Bounds: 64 tracks, 512 samples and 128 requests per renderer, and three rows
+  of request chips; the rest are counted where they would be drawn. Several
+  renderers are one at a time, behind a renderer picker.
+- States: loading, empty (with how to track calls), a failed read with Retry, a
+  failed refresh that keeps the last records under a banner, partial reads,
+  and counts of undecoded, malformed and repeated records.
+
+Picking a sample selects its call, marks its block in the CFG and its card in
+the graph, and shows its selector histogram in Lineage.
+
+### Graph selection
+
+The workspace passes `onSelect` and `onFollow` to `createFlowGraphPanel` and
+calls its `select`, `setMark`, `resize` and `highlightRequest` only when the
+panel has them, so it also runs with a graph that offers none. A Wasm card
+opens its CFG; a lineage request link lights that request's stack; a sample
+marks its function's card; Back and Forward reselect the card a trail entry
+named.
+
 ## Flow graph
 
 **Flow graph** in Backtraces draws every recorded stack of the session as one
@@ -2393,7 +2505,7 @@ session changes. A stale request is cancelled. The page keeps no artifact bytes.
 ## Evidence investigation and metadata packages
 
 Open **Evidence → Inspect observations & artifacts** in the Requests inspector,
-or **Evidence** from Backtraces. The initial view leads with the selected request,
+or **Evidence** from Flow. The initial view leads with the selected request,
 a bounded recorded-observation list and an independently scrolling record inspector.
 It separates native request records, explicit same-process parent links, matching
 nonzero session/process/navigation/frame context and unlinked retained records.

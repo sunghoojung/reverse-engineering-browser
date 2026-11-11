@@ -3643,7 +3643,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       // The browser start, else the renderer initiation, else any event with a
-      // request ID. Backtraces need a live root; researcher names also accept
+      // request ID. Flow lineage needs a live root; researcher names also accept
       // demo rows, whose identity then records that origin.
       function requestRootEvent(request) {
         const candidates = request?.events ?? [];

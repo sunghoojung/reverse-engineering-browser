@@ -1,7 +1,7 @@
 # Flow graph v1
 
 Status: implemented in the Rust backend (`apps/origin-trace-backend/src/flow_graph.rs`)
-and the Backtraces **Flow graph** view (`apps/research-ui/flow_graph.js`,
+and the Flow workspace's **Graph** pane (`apps/research-ui/flow_graph.js`,
 `flow_graph_layout.js`).
 
 ## Why
@@ -124,8 +124,8 @@ next request reads again.
 
 ## UI
 
-Backtraces **Flow graph** draws the answer on one canvas, read top to bottom
-like a disassembler's CFG. Each realm (context) is a full-width band titled by
+The Flow workspace's **Graph** pane draws the answer on one canvas, read top
+to bottom like a disassembler's CFG. Each realm (context) is a full-width band titled by
 its script origin, realm, frame and process, and the bands are stacked in call
 order: a realm that calls or posts into another sits above it, so an iframe
 sits below its parent, and a call between realms runs down across the band
@@ -143,8 +143,7 @@ a card lights every path through it; choosing a request lights its own paths
 and the row that made it, and dims the rest. Each realm is laid out by
 Triskel through `POST /api/graph-layout` when the backend serves it and
 Triskel's drawing is not much wider than the layered one; the layout is
-presentation only and never changes this document. The view is also the Flow
-workspace's Graph pane. See the
+presentation only and never changes this document. See the
 [Research UI README](../apps/research-ui/README.md#flow-graph).
 
 ## Validation

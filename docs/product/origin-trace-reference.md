@@ -29,11 +29,14 @@ The UI does not inject hooks into a page and does not communicate directly with
 a renderer. It reads evidence through the local event broker so capture and
 presentation remain separate.
 
-## Backtraces
+## Flow
 
+Flow (formerly Backtraces) holds four linked panes: the session flow graph, the
+selected Wasm function's CFG, the request's lineage and the tracked-call
+timeline ([Flow workspace](../../apps/research-ui/README.md#flow-workspace)).
 Choose a captured request from the request picker. Loading its trace shows
-ordered event rows, with details for the selected row. Up/Down and Home/End
-move between rows. Source links open the matching captured artifact.
+ordered event rows in Lineage, with the selected row under Details. Up/Down and
+Home/End move between rows. Source links open the matching captured artifact.
 
 Recorded event links and matches based on shared identifiers have separate row
 labels. Missing events remain selectable gap rows. A failed refresh preserves

@@ -170,17 +170,20 @@ The Runtime claims panel is opened on that store at all four sizes: the
 contradicting claim expands with native input, and the claims heading, the
 contradiction and the nested guest row are each revealed and photographed.
 
-Backtraces is opened at both window sizes on one synthetic request whose
+Flow is opened at both window sizes on one synthetic request whose
 renderer record no initiator edge reached, 113 µs before `request_started` in
-another process. The harness opens the Advanced disclosure first so the
-Backtraces control is visible. The renderer event keeps its own per-process
+another process; the window shows its Lineage pane (beside the graph in the
+normal window, on its own behind the pane switch in the narrow one). The
+renderer event keeps its own per-process
 sequence stream so it does not invent a browser sequence-gap ID. The trace must
 list the selected request, its missing-predecessor gap, then the renderer
 record as a time-adjacent row with its own label and style, while the coverage
 line stays at 0% and counts the row separately. Arrow keys must reach that row
 with visible `:focus-visible` focus and keep it fully in view. The coverage
 line sits above the steps scroller so centering the adjacency row cannot
-scroll it away or cover rows.
+scroll it away or cover rows. Layout is asserted on the Flow head, toolbar,
+Lineage pane and, when narrow, the pane switch; the flow graph's tools float
+over its own canvas by design.
 
 VM layout assertions check full-width compact evidence, complete footer and
 tab-strip visibility, and an exact boundary between the analysis scroller and

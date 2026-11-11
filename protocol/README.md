@@ -128,7 +128,7 @@ the sensitive `cookie_list` artifact); and type 39 `script_cookie`
 index of a whole session, its private sidecar beside the store and
 `GET /api/requests`, which Traffic pages instead of the newest network window.
 [Flow graph v1](flow-graph-v1.md) folds every recorded stack of a session into
-one graph across realms, JavaScript, eval and Wasm for the Backtraces Flow
+one graph across realms, JavaScript, eval and Wasm for the Flow workspace's Flow
 graph (`GET /api/flow-graph`).
 [Graph layout](http-api.md#graph-layout) (`graph-layout-v1`,
 `POST /api/graph-layout`) returns node corners and edge routes from the

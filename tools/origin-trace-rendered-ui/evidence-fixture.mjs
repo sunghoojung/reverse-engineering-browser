@@ -128,7 +128,7 @@ async function goldenEvidence(root, store) {
 
 // A request whose renderer and browser records no initiator edge joined, as on a
 // live capture where initiator resolution did not close. The renderer record sits
-// 113 us before request_started in its own process, so Backtraces reports it as
+// 113 us before request_started in its own process, so Flow Lineage reports it as
 // a time-adjacent row after the missing-predecessor gap, outside coverage.
 export const TIME_ADJACENT_HOST = 'adjacent.trace.test';
 function timeAdjacentRequest(template, firstSequence, firstTime) {

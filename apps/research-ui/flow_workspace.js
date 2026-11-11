@@ -98,7 +98,15 @@ function createFlowWorkspace(options) {
   const engine = options.blockGraphEngine ?? (typeof blockGraphEngine === 'function' ? blockGraphEngine : () => 'layered');
   const makeTimeline = options.createFlowTimeline ?? (typeof createFlowTimeline === 'function' ? createFlowTimeline : null);
   const call = (name, ...args) => (typeof options[name] === 'function' ? options[name](...args) : undefined);
-  const graphCall = (name, ...args) => (graph && typeof graph[name] === 'function' ? graph[name](...args) : undefined);
+  // A graph that reports its own selection while the workspace drives it
+  // (select, setMark, highlightRequest) must not rewrite the selection that
+  // caused the call; `drivingGraph` marks those calls.
+  let drivingGraph = false;
+  const graphCall = (name, ...args) => {
+    if (!graph || typeof graph[name] !== 'function') return undefined;
+    const was = drivingGraph; drivingGraph = true;
+    try { return graph[name](...args); } finally { drivingGraph = was; }
+  };
   const doc = root.ownerDocument ?? document;
   const $ = selector => root.querySelector(selector);
   const make = (tag, className = '', text = '') => { const element = doc.createElement(tag); if (className) element.className = className; if (text) element.textContent = text; return element; };
@@ -349,8 +357,10 @@ function createFlowWorkspace(options) {
 
   // Graph pane: selection API used with feature detection.
   function graphPicked(info, {followed = false} = {}) {
-    if (restoring) return;
     graphInfo = info ?? null;
+    if (restoring || drivingGraph) { renderRelated(); renderTabs(); return; }
+    // A card replaces a picked sample, so the timeline lets go of it too.
+    if (info && selection.sample) timeline?.clear();
     if (!info) { setSelection({graphKey: null}, {pane: 'graph'}); renderRelated(); return; }
     const wasm = info.kind === 'wasm' && info.artifact_id && Number.isSafeInteger(info.function_index);
     if (wasm) {

@@ -344,6 +344,13 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   same(appCalls, [['selectRequest', 'r0']]);
 }
 {
+  // A graph that echoes its own selection while being driven changes nothing.
+  const echo = workspace.selection();
+  graph.highlightRequest = key => { graphCalls.push(['highlightRequest', key]); workspace.graphSelected({key: 'echo', kind: 'javascript', name: 'echo', row: null, request: null}); return true; };
+  workspace.lineageSelected({key: '41:9', step: {relation: 'request_initiator', confidence: 'observed', category: 'network', operation: 'request_initiated', request_id: '73', event: {process_id: 41, sequence_number: '9'}}});
+  same(workspace.selection().fn, echo.fn, 'an echoed graph selection does not replace the trail');
+}
+{
   // Without the selection API the workspace still runs.
   const bare = context.createFlowWorkspace({root: parseHTML(html).document.querySelector('#screen-backtrace'), graph: {show() {}, hide() {}}, fetch: fetchStub,
     createBlockGraphView: makeView, createBlockGraphRunner: runner, getRequest: () => null});

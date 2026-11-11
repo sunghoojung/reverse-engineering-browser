@@ -2086,7 +2086,9 @@ already handles while it has focus.
   window they switch panes.
 - Z: open the active pane on its own, or return to the split exactly as it
   was, with the same panes and sizes. Each pane's corner button and a
-  double-click on its head do the same.
+  double-click on its head do the same. Returning, focus stays on the pane
+  focus mode showed when the split shows it; otherwise it goes to the pane
+  focused before focus mode, else the graph, never to the page.
 - ⇧C, ⇧L, ⇧T: show or hide CFG, Lineage and Timeline in the split. A CFG hidden
   this way stays hidden when a function is picked; Enter still opens it.
 - Enter: follow the selection into the pane that explains it. A sample or a

@@ -130,6 +130,8 @@ function createFlowWorkspace(options) {
   // single-pane layout leave it untouched, so returning restores it exactly.
   let session = null, visible = false, layout = 'wide', mode = 'split', focusPane = 'graph', active = 'graph', singlePane = null;
   let split = {cfg: false, lineage: true, timeline: true}, cfgUserHidden = false, sideTab = 'lineage', lineageTab = 'lineage', timelineOpen = false;
+  // The pane that was active when focus mode opened, for Z to return to.
+  let returnPane = 'graph';
   let sizes = {...FLOW_SIZE_DEFAULTS}, prefs = flowWorkspacePrefs(storage);
   // Selection, trail and history.
   let selection = {request: null, call: null, fn: null, site: null, sample: null, step: null, graphKey: null};
@@ -669,15 +671,28 @@ function createFlowWorkspace(options) {
     else if (name === 'lineage') done = Boolean(call('focusTraceRow'));
     else if (name === 'timeline') done = Boolean(timeline?.focus());
     if (!done) panes[name]?.focus?.({preventScroll: true, focusVisible: true});
+    // Focus never stays on the page itself; a DOM without activeElement skips this.
+    const focused = doc.activeElement;
+    if (focused !== undefined && (!focused || focused === doc.body) && name !== 'graph') { focusPaneContent('graph'); return; }
     active = name;
     for (const pane of FLOW_PANES) panes[pane]?.toggleAttribute('data-active', pane === name && body?.dataset.mode === 'split');
   }
+  /** Whether a pane can take focus in this layout: shown, and in the laptop
+   * split not the closed timeline strip or the Lineage list behind the CFG tab. */
+  function paneVisible(name) {
+    if (!shownPanes().has(name)) return false;
+    if (layout !== 'laptop' || mode !== 'split') return true;
+    if (name === 'timeline') return timelineOpen;
+    return name !== 'lineage' || currentSideTab() !== 'cfg';
+  }
   function setMode(next, pane = active) {
     if (layout === 'compact') { flash('One pane at a time at this width; 1 to 4 switch panes.'); return; }
-    if (next === 'focus') { focusPane = FLOW_PANES.includes(pane) ? pane : 'graph'; mode = 'focus'; active = focusPane; }
+    if (next === 'focus') { if (mode !== 'focus') returnPane = active; focusPane = FLOW_PANES.includes(pane) ? pane : 'graph'; mode = 'focus'; active = focusPane; }
     else mode = 'split';
     applyLayout();
-    focusPaneContent(mode === 'focus' ? focusPane : active);
+    // Back in the split, the pane focus mode showed may be one the split hides:
+    // focus goes to the pane focused before focus mode, else the graph.
+    focusPaneContent(mode === 'focus' ? focusPane : paneVisible(active) ? active : paneVisible(returnPane) ? returnPane : 'graph');
   }
   const toggleFocus = (pane = active) => setMode(mode === 'focus' ? 'split' : 'focus', pane);
   function togglePane(name) {

@@ -365,6 +365,24 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   $('#flow-pane-graph .flow-pane-head').dispatchEvent(new window.Event('dblclick', {bubbles: true}));
   same(shown(), ['graph']);
   key('z');
+  // Z never leaves focus in a pane the split hides: a pane switched to in
+  // focus mode that the split does not show hands focus back to the pane
+  // focused before focus mode.
+  key('T', {shift: true, code: 'KeyT'});
+  same(shown(), ['graph', 'cfg', 'lineage'], 'Shift T hides the timeline');
+  key('3');
+  assert.equal(workspace.state().active, 'lineage');
+  key('z', {target: $('#flow-pane-lineage')});
+  key('4');
+  same(shown(), ['timeline'], 'focus mode shows the timeline the split hides');
+  assert.equal(workspace.state().active, 'timeline');
+  appCalls.length = 0;
+  key('z', {target: $('#flow-pane-timeline')});
+  same(shown(), ['graph', 'cfg', 'lineage'], 'the split returns without the timeline');
+  assert.equal(workspace.state().active, 'lineage', 'and the pane focused before focus mode is active again');
+  same(appCalls, [['focusTraceRow']], 'with keyboard focus on its working row');
+  key('T', {shift: true, code: 'KeyT'});
+  same(shown(), ['graph', 'cfg', 'lineage', 'timeline'], 'Shift T shows it again');
 }
 {
   // The graph's selection API: a Wasm card opens its CFG; follow reveals it.

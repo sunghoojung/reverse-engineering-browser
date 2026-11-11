@@ -1,0 +1,1607 @@
+/* Session flow graph (protocol/flow-graph-v1.md): every recorded stack of one
+ * session as one graph of functions in realm clusters. A card lists the calls
+ * its function made, one row each, the way a disassembly block lists its
+ * instructions; a call into a same-process iframe, a posted task into one, a
+ * JavaScript to Wasm call and a call into eval code say so on their row and
+ * in the edge's color. The drawing is one canvas and layout runs in
+ * flow_graph_layout.js as a Web Worker. Captured names and URLs are painted as
+ * glyphs or inserted as text. */
+const FLOW_GRAPH_KIND_LABELS = Object.freeze({javascript: 'JavaScript', eval: 'eval · dynamic', wasm: 'Wasm', request: 'Request',
+  navigation: 'Navigation', cookie_write: 'Cookie write', chain: 'Chain'});
+const FLOW_GRAPH_KIND_TAGS = Object.freeze({javascript: 'js', eval: 'eval', wasm: 'wasm', request: 'fetch', navigation: 'nav', cookie_write: 'cookie', chain: 'chain'});
+const FLOW_GRAPH_TASKS = Object.freeze({set_timeout: 'setTimeout', set_interval: 'setInterval', request_animation_frame: 'requestAnimationFrame',
+  request_idle_callback: 'requestIdleCallback', post_message: 'postMessage', xhr_send: 'XMLHttpRequest.send', post_task: 'scheduler.postTask',
+  event: 'event', microtask: 'microtask'});
+/* Row mnemonics: short enough to align in a column. */
+const FLOW_GRAPH_OPS = Object.freeze({call: 'call', await: 'await', omitted: 'omitted', request: 'request', navigation: 'navigate', cookie_write: 'cookie',
+  set_timeout: 'setTimeout', set_interval: 'setInterval', request_animation_frame: 'rAF', request_idle_callback: 'idle', post_message: 'postMessage',
+  xhr_send: 'xhr.send', post_task: 'postTask', event: 'event', microtask: 'microtask'});
+const FLOW_GRAPH_REASONS = Object.freeze({script_identity_missing: 'no script identity record', source_unavailable: 'source unavailable',
+  source_not_retained: 'source not retained', source_artifact_missing: 'source artifact missing', source_artifact_unreadable: 'source artifact unreadable',
+  source_not_utf8: 'source is not UTF-8', source_budget: 'source read budget reached', source_deadline: 'read deadline reached before this source',
+  position_outside_source: 'position outside the retained source'});
+/* Record types that carry a walked stack; the others only label or resolve one. */
+const FLOW_GRAPH_STACK_RECORDS = ['request_initiator_stack', 'navigation_initiator_stack', 'async_task_stack'];
+const FLOW_GRAPH_LIMITS = 'Observed stacks only. A call that never reached a recorded request, navigation, task or cookie write is not drawn.';
+const FLOW_GRAPH_CANVAS_BYTES = 32 * 1024 * 1024;
+/* At and above this zoom a card shows its rows; below it, its name is painted
+ * at screen size over a sketch of the rows, and below the sketch zoom only
+ * boxes remain. */
+const FLOW_GRAPH_TEXT_ZOOM = 0.85;
+const FLOW_GRAPH_SKETCH_ZOOM = 0.2;
+/* The first view fits the whole graph when its rows stay legible; a larger
+ * graph opens at this reading zoom on its busiest entry. */
+const FLOW_GRAPH_START_ZOOM = 0.92;
+/* A graph this small opens fitted, as an overview, whatever the zoom. */
+const FLOW_GRAPH_SMALL = 60;
+const FLOW_GRAPH_SINKS = new Set(['request', 'navigation', 'cookie_write']);
+/* Card geometry, in graph units at zoom 1. Text is monospace, so widths come
+ * from character counts and one measured advance per font. */
+const FLOW_GRAPH_CARD = Object.freeze({head: 30, location: 18, gap: 4, row: 18, foot: 8, pad: 10, minW: 176, maxW: 420, rows: 8});
+const FLOW_GRAPH_MEASURE = Object.freeze({row: 6.62, head: 7.22, tag: 6.02});
+
+function flowGraphFile(url) {
+  const text = String(url ?? '');
+  try {
+    const parsed = new URL(text);
+    return parsed.pathname.split('/').filter(Boolean).pop() || parsed.host || text;
+  } catch { return text; }
+}
+
+/** Validates a `flow-graph-v1` document into a model, or throws. Edges that
+ * name a node outside the document are dropped and counted, never drawn. */
+function flowGraphModel(doc) {
+  if (doc?.schema !== 'flow-graph-v1' || !Array.isArray(doc.nodes) || !Array.isArray(doc.edges) || !Array.isArray(doc.contexts) || !Array.isArray(doc.paths))
+    throw Error('The flow graph provider returned an invalid document.');
+  const nodes = doc.nodes, count = nodes.length;
+  const valid = index => Number.isInteger(index) && index >= 0 && index < count;
+  let dropped = 0;
+  const edges = [];
+  doc.edges.forEach((edge, index) => { if (valid(edge?.from) && valid(edge?.to)) edges.push({...edge, index}); else dropped += 1; });
+  const contexts = doc.contexts.map((context, index) => ({...context, index, label: flowGraphContextLabel(context, index)}));
+  nodes.forEach(node => { if (!contexts[node.context]) node.context = 0; });
+  return {doc, nodes, edges, contexts, paths: doc.paths, dropped};
+}
+
+function flowGraphContextLabel(context, index) {
+  const origin = context?.origin;
+  if (context?.execution_context_id == null) return {title: 'Unidentified realm', detail: `process ${context?.process_id ?? '?'} · no script identity`};
+  let title = origin ?? `Realm ${index + 1}`;
+  try { if (origin && origin.includes('://')) title = new URL(origin).host || origin; } catch {}
+  const frame = context.frame_ids?.[0]?.frame_id;
+  const parts = [`realm ${context.execution_context_id}`];
+  if (frame) parts.push(`frame ${frame}${context.frame_ids.length > 1 ? ` +${context.frame_ids.length - 1}` : ''}`);
+  parts.push(`process ${context.process_id}`);
+  return {title, detail: parts.join(' · '), origin};
+}
+
+function flowGraphNodeName(node) {
+  if (!node) return '';
+  if (node.kind === 'chain') return node.name;
+  if (FLOW_GRAPH_SINKS.has(node.kind)) return node.name ?? node.kind;
+  if (node.kind === 'wasm') return node.name ?? `wasm-function[${node.function_index}]`;
+  if (node.top_level) return '(top level)';
+  return node.name ?? (node.status === 'resolved' ? '(anonymous)' : `(script ${node.script_id})`);
+}
+
+function flowGraphNodeDetail(node) {
+  if (!node) return '';
+  if (node.kind === 'chain') return `${node.members.length} functions · Space expands`;
+  if (FLOW_GRAPH_SINKS.has(node.kind)) return `${node.hits.toLocaleString()} ${node.hits === 1 ? 'time' : 'times'}`;
+  if (node.status !== 'resolved') return FLOW_GRAPH_REASONS[node.reason] ?? node.reason ?? 'unresolved';
+  if (node.kind === 'wasm') return `func ${node.function_index} · ${flowGraphFile(node.url)}`;
+  const file = node.kind === 'eval' ? `VM${node.script_id}` : flowGraphFile(node.url);
+  return node.line ? `${file}:${node.line}:${node.column}` : file;
+}
+
+/** The full location a researcher copies: URL, line and column. */
+function flowGraphNodeLocation(node) {
+  if (!node || node.kind === 'chain') return '';
+  if (FLOW_GRAPH_SINKS.has(node.kind)) return node.name ?? '';
+  if (node.status !== 'resolved') return '';
+  if (node.kind === 'wasm') return `${node.url ?? ''} func ${node.function_index}`.trim();
+  const file = node.kind === 'eval' ? `VM${node.script_id}` : node.url ?? '';
+  return node.line ? `${file}:${node.line}:${node.column}` : file;
+}
+
+/** The same function across two answers of one session: node ids are
+ * positions and change when new stacks arrive. */
+function flowGraphNodeKey(node) {
+  if (!node) return '';
+  return [node.kind, node.context, node.script_id ?? '', node.function_position ?? node.function_index ?? '', node.top_level ? 'top' : '', node.name ?? '', node.line ?? '', node.column ?? ''].join('|');
+}
+
+/** A node with one call in and one call out, inside one realm, that every path
+ * through it continues the same way: a frame of a wrapper or a framework that
+ * adds nothing to read. Runs of two or more fold into one chain card. A
+ * request, navigation or cookie write is a row of each function that made it,
+ * the way a disassembly lists a call to an import, unless nothing calls it. */
+function flowGraphDisplay(model, expanded = new Set(), collapse = true) {
+  const {nodes, edges} = model, count = nodes.length;
+  const ins = Array.from({length: count}, () => []), outs = Array.from({length: count}, () => []), recursive = new Uint8Array(count);
+  for (const edge of edges) { if (edge.from === edge.to) { recursive[edge.from] = 1; continue; } outs[edge.from].push(edge); ins[edge.to].push(edge); }
+  const quiet = edge => edge.kind === 'call' && !edge.crosses?.length;
+  const passes = new Uint8Array(count);
+  if (collapse) for (let v = 0; v < count; v += 1) {
+    const node = nodes[v];
+    // Recursion stays visible: a function that calls itself is never folded.
+    if (!['javascript', 'eval', 'wasm'].includes(node.kind) || node.chain_cut || recursive[v] || ins[v].length !== 1 || outs[v].length !== 1) continue;
+    const [inbound] = ins[v], [outbound] = outs[v];
+    if (quiet(inbound) && quiet(outbound) && inbound.count === outbound.count && nodes[inbound.from].context === node.context && nodes[outbound.to].context === node.context) passes[v] = 1;
+  }
+  const group = new Int32Array(count).fill(-1), groups = [], visited = new Uint8Array(count), foldKey = new Map();
+  for (let v = 0; v < count; v += 1) {
+    if (!passes[v] || visited[v]) continue;
+    // Walk to the first member of this run, then collect it forward.
+    let first = v;
+    for (let guard = 0; guard < count; guard += 1) { const previous = ins[first][0].from; if (!passes[previous] || previous === v) break; first = previous; }
+    const members = [];
+    for (let at = first; passes[at] && !visited[at] && members.length < count; at = outs[at][0].to) { members.push(at); visited[at] = 1; }
+    if (members.length < 2) continue;
+    if (expanded.has(String(members[0]))) { members.forEach(member => foldKey.set(member, String(members[0]))); continue; }
+    members.forEach(member => { group[member] = groups.length; });
+    groups.push(members);
+  }
+  const display = [], displayOf = new Int32Array(count);
+  for (let v = 0; v < count; v += 1) {
+    if (group[v] >= 0) {
+      const members = groups[group[v]];
+      if (members[0] !== v) { displayOf[v] = displayOf[members[0]]; continue; }
+      const head = nodes[members[0]], tail = nodes[members.at(-1)];
+      displayOf[v] = display.length;
+      display.push({kind: 'chain', key: String(members[0]), members, context: head.context, hits: head.hits, entries: 0, leaves: 0,
+        name: `${flowGraphNodeName(head)} → ${flowGraphNodeName(tail)}`, status: 'resolved'});
+    } else {
+      displayOf[v] = display.length;
+      display.push({...nodes[v], members: [v], key: String(v)});
+    }
+  }
+  // Groups are contiguous runs, so a member reached before its head still maps.
+  for (const members of groups) for (const member of members) displayOf[member] = displayOf[members[0]];
+  const merged = new Map(), list = [];
+  for (const edge of edges) {
+    const from = displayOf[edge.from], to = displayOf[edge.to];
+    if (from === to && edge.from !== edge.to) continue;
+    const key = `${from}:${to}:${edge.kind}:${edge.task ?? ''}`;
+    let item = merged.get(key);
+    if (!item) { item = {from, to, kind: edge.kind, task: edge.task, via: edge.via, label: edge.label, omitted: edge.omitted, crosses: new Set(), count: 0, members: []}; merged.set(key, item); list.push(item); }
+    edge.crosses?.forEach(cross => item.crosses.add(cross));
+    item.count += edge.count ?? 0; item.members.push(edge.index);
+  }
+  list.forEach(item => { item.crosses = [...item.crosses]; });
+  const called = new Uint8Array(display.length);
+  for (const item of list) called[item.to] = 1;
+  const keep = display.map((node, index) => !(FLOW_GRAPH_SINKS.has(node.kind) && called[index]));
+  const remap = new Int32Array(display.length).fill(-1);
+  let kept = 0;
+  keep.forEach((yes, index) => { if (yes) remap[index] = kept++; });
+  const sinkRows = Array.from({length: kept}, () => []), drawn = [];
+  for (const item of list) {
+    if (!keep[item.to]) { if (keep[item.from]) sinkRows[remap[item.from]].push({...item, from: remap[item.from], to: -1, sink: display[item.to]}); continue; }
+    if (keep[item.from]) drawn.push({...item, from: remap[item.from], to: remap[item.to]});
+  }
+  for (let v = 0; v < count; v += 1) displayOf[v] = remap[displayOf[v]];
+  return {nodes: display.filter((node, index) => keep[index]), edges: drawn, sinkRows, displayOf, groups: groups.length, foldKey};
+}
+
+const flowGraphEdgeFamily = edge => edge.crosses?.length ? 'cross' : edge.kind === 'await' || edge.kind === 'task' ? 'async' : edge.kind === 'omitted' ? 'omitted' : 'call';
+
+/** What an edge's row says after the callee: the boundary it crosses, the
+ * hops it went through and what was dropped. */
+function flowGraphEdgeNote(model, display, edge) {
+  const parts = [];
+  if (edge.crosses?.includes('frame')) parts.push(`→ ${model.contexts[display.nodes[edge.to]?.context]?.label.title ?? 'realm'}`);
+  if (edge.crosses?.includes('language')) parts.push(`${display.nodes[edge.from]?.kind === 'wasm' ? 'Wasm' : 'JS'} → ${display.nodes[edge.to]?.kind === 'wasm' ? 'Wasm' : 'JS'}`);
+  if (edge.crosses?.includes('dynamic')) parts.push('into eval');
+  if (edge.label) parts.push(edge.label);
+  if (edge.via?.length) parts.push(`via ${edge.via.join(', ')}`);
+  if (edge.kind === 'omitted') parts.push(`${(edge.omitted ?? 0).toLocaleString()} frames`);
+  if (edge.from === edge.to) parts.push('recursion');
+  return parts.join(' · ');
+}
+
+/** Call sites of a display edge, from the document's edges it merges. */
+function flowGraphEdgeSites(model, edge) {
+  const sites = [];
+  for (const member of edge.members ?? []) for (const site of model.doc.edges[member]?.sites ?? []) {
+    const text = site.module_offset !== undefined ? `+0x${Number(site.module_offset).toString(16)}` : `${site.line}:${site.column}`;
+    if (!sites.includes(text)) sites.push(text);
+  }
+  return sites;
+}
+
+/** What each card says: its name, kind tag, stack count and location, then
+ * one row per call it made (site, mnemonic, callee and a note), the way a
+ * disassembly block lists its instructions. Sizes follow from the text. */
+function flowGraphCards(model, display, measure = FLOW_GRAPH_MEASURE) {
+  const C = FLOW_GRAPH_CARD, outs = display.nodes.map(() => []);
+  display.edges.forEach((edge, index) => outs[edge.from].push(index));
+  const rank = {call: 0, await: 1, task: 2, omitted: 3, request: 4, navigation: 4, cookie_write: 4};
+  return display.nodes.map((node, v) => {
+    const chain = node.kind === 'chain', sink = FLOW_GRAPH_SINKS.has(node.kind);
+    let rows = [];
+    if (chain) rows = node.members.map((member, i) => ({site: String(i + 1), op: '', target: flowGraphNodeName(model.nodes[member]), note: flowGraphNodeDetail(model.nodes[member]), count: '', edge: -1}));
+    else rows = [...outs[v].map(index => ({edge: display.edges[index], index})), ...(display.sinkRows?.[v] ?? []).map(edge => ({edge, index: -1}))].map(({edge, index}) => {
+      const sites = flowGraphEdgeSites(model, edge), first = edge.members.map(member => model.doc.edges[member]?.sites?.[0]).find(Boolean);
+      // Rows read in source order: by kind, then line and column (or module offset).
+      const order = [rank[edge.kind] ?? 5, first ? first.line ?? 0 : 1e15, first ? first.column ?? first.module_offset ?? 0 : 0];
+      return {site: sites[0] ? `${sites[0]}${sites.length > 1 ? `+${sites.length - 1}` : ''}` : '', op: FLOW_GRAPH_OPS[edge.kind === 'task' ? edge.task : edge.kind] ?? edge.task ?? edge.kind,
+        target: edge.sink ? flowGraphNodeName(edge.sink) : flowGraphNodeName(display.nodes[edge.to]), note: edge.sink ? '' : flowGraphEdgeNote(model, display, edge),
+        count: edge.count > 1 ? `×${edge.count.toLocaleString()}` : '', edge: index, sink: edge.sink ?? null, members: edge.members, order: order.concat(index < 0 ? 1e9 : index)};
+    }).sort((a, b) => a.order[0] - b.order[0] || a.order[1] - b.order[1] || a.order[2] - b.order[2] || a.order[3] - b.order[3]);
+    let more = 0;
+    if (rows.length > C.rows) { more = rows.length - (C.rows - 1); rows = rows.slice(0, C.rows - 1); }
+    const nouns = {request: ['request', 'requests'], navigation: ['navigation', 'navigations'], cookie_write: ['cookie write', 'cookie writes']};
+    const location = sink ? `${node.hits.toLocaleString()} ${nouns[node.kind][node.hits === 1 ? 0 : 1]}` : chain ? `${node.members.length} pass-through frames, folded` : flowGraphNodeDetail(node);
+    const title = flowGraphNodeName(node), tag = FLOW_GRAPH_KIND_TAGS[node.kind] ?? node.kind, badge = (node.hits ?? 0).toLocaleString();
+    const siteW = rows.reduce((max, row) => Math.max(max, row.site.length), 0), opW = rows.reduce((max, row) => Math.max(max, row.op.length), 0);
+    const headW = C.pad * 2 + title.length * measure.head + 12 + tag.length * measure.tag + 8 + badge.length * measure.tag + 10;
+    let rowW = C.pad * 2 + location.length * measure.tag;
+    for (const row of rows) {
+      rowW = Math.max(rowW, C.pad * 2 + (siteW ? siteW * measure.row + 12 : 0) + (opW ? opW * measure.row + 10 : 0) + row.target.length * measure.row
+        + (row.note ? 10 + (row.note.length + 2) * measure.row : 0) + (row.count ? 12 + row.count.length * measure.row : 0));
+    }
+    const w = Math.round(Math.max(C.minW, Math.min(C.maxW, Math.max(headW, rowW))));
+    const h = C.head + C.location + C.gap + (rows.length + (more ? 1 : 0)) * C.row + C.foot;
+    return {title, tag, badge, location, rows, more, siteW: siteW * measure.row, opW: opW * measure.row, w, h};
+  });
+}
+
+/** The arrays the layout worker needs. */
+function flowGraphLayoutInput(display, cards = null) {
+  const count = display.nodes.length;
+  const input = {count, lane: Int32Array.from(display.nodes, node => node.context), weight: Float64Array.from(display.nodes, node => node.hits ?? 0),
+    from: Int32Array.from(display.edges, edge => edge.from), to: Int32Array.from(display.edges, edge => edge.to)};
+  if (cards) { input.w = Float32Array.from(cards, card => card.w); input.h = Float32Array.from(cards, card => card.h); }
+  return input;
+}
+
+/** Paths (one per distinct stack) through any of the given original nodes. */
+function flowGraphPathsThrough(model, members) {
+  const wanted = new Set(members);
+  return model.paths.filter(path => path.nodes.some(node => wanted.has(node)));
+}
+
+/** Highlight sets for a set of paths, as display node and edge indexes. */
+function flowGraphHighlight(model, display, paths) {
+  const nodes = new Set(), edges = new Set(), originalEdges = new Set();
+  for (const path of paths) {
+    path.nodes.forEach(node => { const at = display.displayOf[node]; if (at >= 0) nodes.add(at); });
+    path.edges.forEach(edge => originalEdges.add(edge));
+  }
+  display.edges.forEach((edge, index) => { if (edge.members.some(member => originalEdges.has(member))) edges.add(index); });
+  return {nodes, edges, originalEdges, paths: paths.length, occurrences: paths.reduce((sum, path) => sum + (path.occurrences ?? 0), 0)};
+}
+
+function createFlowGraphRunner() {
+  let worker = null, serial = 0, reject = null;
+  const cancel = () => { serial += 1; worker?.terminate(); worker = null; reject?.(new DOMException('Cancelled', 'AbortError')); reject = null; };
+  return {
+    cancel,
+    layout(graph, metrics, engine = 'layered') {
+      cancel();
+      const id = serial;
+      return new Promise((resolve, fail) => {
+        reject = fail;
+        const local = async () => {
+          // A shell that cannot start workers still lays out, on this thread.
+          if (typeof flowGraphLayout === 'undefined') { reject = null; fail(Error('The layout worker could not start.')); return; }
+          try {
+            const layout = engine === 'triskel' && typeof fetch === 'function' ? await flowGraphLayout.layoutWithTriskel(graph, metrics, flowGraphLayout.fetchTriskel) : flowGraphLayout.layoutGraph(graph, metrics);
+            if (id !== serial) return;
+            reject = null; resolve(layout);
+          } catch (error) { if (id === serial) { reject = null; fail(error); } }
+        };
+        try { worker = new Worker('flow_graph_layout.js'); } catch { worker = null; local(); return; }
+        worker.onmessage = event => {
+          if (event.data.id !== id) return;
+          worker?.terminate(); worker = null; reject = null;
+          if (event.data.ok) resolve(event.data.layout); else fail(Error(event.data.error));
+        };
+        worker.onerror = event => { if (id === serial) { worker?.terminate(); worker = null; local(); event.preventDefault?.(); } };
+        worker.postMessage({id, graph, metrics, engine});
+      });
+    }
+  };
+}
+
+/**
+ * The Backtraces Flow graph view. `open(node)` reveals a resolved function in
+ * Sources; `available()` says whether this shell serves the route.
+ */
+function createFlowGraphPanel({host, open = () => {}, available = () => true, fetchGraph = null}) {
+  const make = (tag, className = '', text = '') => { const element = document.createElement(tag); if (className) element.className = className; if (text) element.textContent = text; return element; };
+  const button = (label, action, aria, className = 'flow-graph-tool') => { const element = make('button', className, label); element.type = 'button'; element.setAttribute('aria-label', aria ?? label); element.addEventListener('click', action); return element; };
+  host.classList.add('flow-graph');
+  host.hidden = true;
+  const body = make('div', 'flow-graph-body');
+  const stage = make('div', 'flow-graph-stage');
+  const canvas = make('canvas', 'flow-graph-canvas');
+  canvas.tabIndex = 0; canvas.setAttribute('role', 'application');
+  canvas.setAttribute('aria-label', 'Flow graph of every recorded stack');
+  const help = make('p', 'flow-graph-help', 'Arrow keys move between functions. J and K step through the selected function\u2019s calls; Enter follows the call or opens the function in Sources; Backspace goes back. Space expands a chain, U goes to a caller, O opens in Sources, S copies the call site, the context menu key or Shift F10 opens actions, I shows details, F centers, C and L copy the name and location, M hides the minimap, slash finds, Escape clears the selection or closes details, plus and minus zoom, 0 fits, Shift and arrows pan.');
+  help.id = `flow-graph-help-${Math.random().toString(36).slice(2, 8)}`; help.hidden = true;
+  canvas.setAttribute('aria-describedby', help.id);
+
+  // Heading and tools float over the top of the canvas.
+  const heading = make('div', 'flow-graph-heading');
+  const title = make('strong', 'flow-graph-title', 'Flow graph');
+  const stats = make('span', 'flow-graph-stats', '');
+  const evidence = make('span', 'flow-graph-evidence', '');
+  heading.append(title, stats, evidence);
+  const tools = make('div', 'flow-graph-tools');
+  const filterLabel = make('label', 'flow-graph-filter');
+  const filter = make('input'); filter.type = 'search'; filter.maxLength = 256; filter.placeholder = 'Find function or host'; filter.setAttribute('aria-label', 'Find in the flow graph'); filter.autocomplete = 'off'; filter.spellcheck = false;
+  filterLabel.append(filter);
+  const matchLabel = make('span', 'flow-graph-matches', ''); matchLabel.setAttribute('aria-live', 'polite');
+  const find = make('div', 'flow-graph-find'); find.hidden = true;
+  find.append(button('\u25b2', () => stepMatch(-1), 'Previous match'), matchLabel, button('\u25bc', () => stepMatch(1), 'Next match'));
+  // Folded or every frame: one radio group, one tab stop, arrows switch.
+  const segment = make('div', 'flow-graph-segment'); segment.setAttribute('role', 'radiogroup'); segment.setAttribute('aria-label', 'Pass-through frames');
+  const setCollapse = (value, focus = false) => {
+    for (const [item, on] of [[folded, value], [every, !value]]) { item.setAttribute('aria-checked', String(on)); item.setAttribute('aria-pressed', String(on)); item.tabIndex = on ? 0 : -1; }
+    if (focus) (value ? folded : every).focus();
+    if (collapse === value) return;
+    collapse = value; rebuild();
+  };
+  const folded = button('Folded', () => setCollapse(true), 'Fold pass-through frames into chains', 'flow-graph-segment-item');
+  const every = button('Every frame', () => setCollapse(false), 'Draw every frame', 'flow-graph-segment-item');
+  folded.title = 'Fold frames that only pass one call through, inside one realm, into a chain card';
+  for (const item of [folded, every]) item.setAttribute('role', 'radio');
+  segment.addEventListener('keydown', event => { if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) { event.preventDefault(); setCollapse(!collapse, true); } });
+  segment.append(folded, every);
+  for (const [item, on] of [[folded, true], [every, false]]) { item.setAttribute('aria-checked', String(on)); item.setAttribute('aria-pressed', String(on)); item.tabIndex = on ? 0 : -1; }
+  const zoomBar = make('div', 'flow-graph-zoom-bar');
+  const zoomLabel = make('span', 'flow-graph-zoom', '100%');
+  zoomBar.append(button('−', () => zoomAt(0.8), 'Zoom out'), zoomLabel, button('+', () => zoomAt(1.25), 'Zoom in'), button('Fit', fit, 'Fit graph to view'));
+  const refresh = button('Refresh', () => load(true), 'Reload the flow graph');
+  tools.append(filterLabel, find, segment, zoomBar, refresh);
+  // The banner holds what stays true until dealt with (a failed refresh);
+  // passing feedback (a copy) uses the toast, so it never hides a warning.
+  const banner = make('div', 'flow-graph-banner'); banner.setAttribute('role', 'status'); banner.hidden = true;
+  const bannerText = make('span', '', ''), bannerRetry = make('button', 'secondary-button', 'Retry'); bannerRetry.type = 'button'; bannerRetry.hidden = true;
+  bannerRetry.addEventListener('click', () => load(true));
+  banner.append(bannerText, bannerRetry);
+  const toast = make('div', 'flow-graph-toast'); toast.setAttribute('role', 'status'); toast.hidden = true;
+  const stateBox = make('div', 'flow-graph-state'); stateBox.setAttribute('role', 'status'); stateBox.setAttribute('aria-live', 'polite');
+  const stateTitle = make('strong', '', ''), stateText = make('p', '', ''), retry = make('button', 'secondary-button', 'Retry'); retry.type = 'button'; retry.hidden = true;
+  retry.addEventListener('click', () => load(true));
+  stateBox.append(stateTitle, stateText, retry);
+  const minimap = make('canvas', 'flow-graph-minimap'); minimap.setAttribute('aria-hidden', 'true');
+  const tooltip = make('div', 'flow-graph-tooltip'); tooltip.setAttribute('role', 'tooltip'); tooltip.hidden = true;
+  const menu = make('div', 'flow-graph-menu'); menu.setAttribute('role', 'menu'); menu.setAttribute('aria-label', 'Card actions'); menu.hidden = true;
+  // Heading and tools come first in tab order; they float over the canvas.
+  stage.append(heading, tools, canvas, help, banner, toast, minimap, tooltip, menu, stateBox);
+  const inspector = make('aside', 'flow-graph-inspector'); inspector.setAttribute('aria-label', 'Flow graph details'); inspector.hidden = true;
+  body.append(stage, inspector);
+
+  // Status bar: the selection, the evidence behind the graph, the key.
+  const status = make('div', 'flow-graph-status');
+  const selectionText = make('span', 'flow-graph-selection', ''); selectionText.setAttribute('aria-live', 'polite');
+  const summary = make('span', 'flow-graph-summary', '');
+  const engineLabel = make('span', 'flow-graph-engine', '');
+  const limits = make('span', 'flow-graph-limits', FLOW_GRAPH_LIMITS);
+  const legend = make('div', 'flow-graph-legend'); legend.id = `flow-graph-legend-${Math.random().toString(36).slice(2, 8)}`;
+  const requestAgain = button('Request stack', () => { if (requestKey) highlightRequest(requestKey); canvas.focus({preventScroll: true}); }, 'Light the stack of the chosen request again', 'flow-graph-tool flow-graph-request-again');
+  requestAgain.hidden = true;
+  const keyToggle = button('Key', () => setKey(!status.hasAttribute('data-key-open')), 'Show the key', 'flow-graph-tool flow-graph-key-toggle');
+  keyToggle.setAttribute('aria-expanded', 'false'); keyToggle.setAttribute('aria-controls', legend.id);
+  const setKey = isOpen => { status.toggleAttribute('data-key-open', isOpen); keyToggle.setAttribute('aria-expanded', String(isOpen)); };
+  status.addEventListener('keydown', event => { if (event.key === 'Escape' && status.hasAttribute('data-key-open')) { event.stopPropagation(); setKey(false); keyToggle.focus(); } });
+  status.addEventListener('focusout', event => { if (event.relatedTarget && !status.contains(event.relatedTarget)) setKey(false); });
+  // WebKit does not focus a clicked button, so focus alone never closes the
+  // key there: any press outside it, or Escape anywhere in the view, does.
+  host.ownerDocument?.addEventListener?.('pointerdown', event => { if (status.hasAttribute('data-key-open') && !legend.contains(event.target) && event.target !== keyToggle) setKey(false); }, true);
+  host.addEventListener('keydown', event => { if (event.key === 'Escape' && status.hasAttribute('data-key-open')) { event.stopPropagation(); setKey(false); } }, true);
+  const keyRow = (mark, label) => { const item = make('span', 'flow-graph-key'); item.append(mark, make('span', '', label)); legend.append(item); };
+  const keyTag = (text, tone, kind) => { const tag = make('b', 'flow-graph-key-tag', text); if (tone) tag.dataset.tone = tone; if (kind) tag.dataset.kind = kind; return tag; };
+  legend.append(make('h4', '', 'Edges'));
+  for (const [family, label] of [['call', 'call'], ['async', 'await or posted task'], ['cross', 'crosses a frame, JS ↔ Wasm or into eval'], ['omitted', 'frames omitted']]) keyRow(make('i', `flow-graph-key-line flow-graph-key-${family}`), label);
+  legend.append(make('h4', '', 'Rows'));
+  keyRow(keyTag('call', 'call'), 'a plain call, coloured like its edge');
+  keyRow(keyTag('setTimeout', 'async'), 'an await or a posted task');
+  keyRow(keyTag('; → frame', 'cross'), 'what a call crosses, after its callee');
+  keyRow(keyTag('request', 'sink'), 'a request, navigation or cookie write it made');
+  legend.append(make('h4', '', 'Cards'));
+  for (const kind of ['javascript', 'eval', 'wasm', 'chain']) keyRow(keyTag(FLOW_GRAPH_KIND_TAGS[kind], null, kind), FLOW_GRAPH_KIND_LABELS[kind]);
+  keyRow(keyTag('18', 'call'), 'records whose stack passed through the card');
+  keyRow(make('i', 'flow-graph-key-mark'), 'dashed: an unresolved frame');
+  keyRow(make('i', 'flow-graph-key-stub'), 'a dashed stub above: earlier async callers not recorded');
+  legend.append(make('h4', '', 'Keys'));
+  for (const [keys, label] of [['\u2190\u2191\u2192\u2193', 'move between cards'], ['J K', 'step through calls'], ['\u21a9', 'follow the call, or open'], ['\u232b', 'go back'], ['U', 'go to the caller'], ['O  S', 'open in Sources, copy call site'],
+    ['I  F  M', 'details, center, minimap'], ['C  L', 'copy name, location'], ['/', 'find'], ['0  +  \u2212', 'fit and zoom']]) keyRow(keyTag(keys, 'call'), label);
+  const keyLimits = make('p', '', FLOW_GRAPH_LIMITS); legend.append(keyLimits);
+  const detailsToggle = button('Details', () => setDetails(!detailsOpen), 'Show details', 'flow-graph-tool flow-graph-details-toggle');
+  detailsToggle.setAttribute('aria-pressed', 'false');
+  status.append(selectionText, requestAgain, summary, engineLabel, limits, keyToggle, legend, detailsToggle);
+  host.append(body, status);
+
+  const ctx = canvas.getContext?.('2d');
+  const miniCtx = minimap.getContext?.('2d');
+  const tokenNames = {bg: '--graph-canvas', card: '--flow-card', cardLine: '--flow-card-line', cardRule: '--flow-card-rule', badgeFill: '--flow-badge-fill', box: '--flow-box', sink: '--flow-sink',
+    cluster: '--flow-cluster', clusterLine: '--flow-cluster-line',
+    text: '--text', muted: '--muted', faint: '--faint', accent: '--accent', soft: '--accent-soft', mono: '--mono', sans: '--sans',
+    site: '--flow-site', op: '--flow-op', note: '--flow-note', badge: '--flow-badge', mini: '--flow-minimap',
+    javascript: '--flow-js', eval: '--flow-eval', wasm: '--flow-wasm', request: '--flow-request', navigation: '--flow-navigation', cookie_write: '--flow-cookie', chain: '--flow-chain',
+    call: '--flow-edge-call', async: '--flow-edge-async', cross: '--flow-edge-cross', omitted: '--flow-edge-omitted'};
+  let tokens = {};
+  let measure = FLOW_GRAPH_MEASURE;
+  const readTokens = () => {
+    const style = globalThis.getComputedStyle?.(host) ?? {getPropertyValue: () => ''}; const next = {};
+    for (const [key, name] of Object.entries(tokenNames)) next[key] = style.getPropertyValue(name).trim() || (key === 'mono' ? 'monospace' : key === 'sans' ? 'sans-serif' : '#888');
+    tokens = next; miniKey = '';
+    if (ctx) {
+      // Monospace: one advance per font sizes every card.
+      const advance = font => { ctx.font = font; return ctx.measureText('0000000000').width / 10 || 0; };
+      measure = {row: advance(`11px ${tokens.mono}`) || FLOW_GRAPH_MEASURE.row, head: advance(`600 12px ${tokens.mono}`) || FLOW_GRAPH_MEASURE.head, tag: advance(`10px ${tokens.mono}`) || FLOW_GRAPH_MEASURE.tag};
+    }
+  };
+  if (typeof MutationObserver === 'function') new MutationObserver(() => { readTokens(); requestDraw(); }).observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
+  globalThis.matchMedia?.('(prefers-color-scheme: dark)')?.addEventListener?.('change', () => { readTokens(); requestDraw(); });
+
+  const runner = createFlowGraphRunner();
+  let session = null, requested = null, status_ = 'idle', error = '', model = null, display = null, cards = null, layout = null, generation = 0, controller = null;
+  let collapse = true, expanded = new Set(), selected = -1, selectedRow = -1, highlight = null, highlightLabel = '', matches = [], matchIndex = -1, requestKey = null, shownRequest = '', visible = false;
+  // A layout the view was hidden during is redone when it shows again.
+  let layoutStale = false, layingOut = false, highlightFromRequest = false, detailsOpen = false, minimapOn = true, pendingSelect = null, pendingRequest = false;
+  // Cards visited by following calls, for Backspace.
+  const history = [];
+  let hover = {node: -1, row: -1, edge: -1}, edgeBounds = null, edgeFlat = [];
+  let view = {x: 0, y: 0, z: 1}, cssW = 0, cssH = 0, dpr = 1, frame = 0, needsStart = false, miniKey = '', miniBase = null, miniFit = null;
+  const metrics = {...(typeof flowGraphLayout !== 'undefined' ? flowGraphLayout.METRICS : {nodeW: 220, nodeH: 34, margin: 40})};
+  const ROUTE = typeof flowGraphLayout !== 'undefined' ? flowGraphLayout.ROUTE : {MOVE: 0, CURVE: 1, LINE: 2, CORNER: 3};
+
+  const requestDraw = () => { if (visible && !frame) frame = requestAnimationFrame(() => { frame = 0; draw(); }); };
+  function resize() {
+    if (!visible) return;
+    const rect = stage.getBoundingClientRect?.() ?? {width: 0, height: 0};
+    cssW = Math.max(1, Math.floor(rect.width)); cssH = Math.max(1, Math.floor(rect.height));
+    dpr = Math.min(window.devicePixelRatio || 1, Math.sqrt(FLOW_GRAPH_CANVAS_BYTES / (4 * cssW * cssH)), 3);
+    const pw = Math.round(cssW * dpr), ph = Math.round(cssH * dpr);
+    if (canvas.width !== pw || canvas.height !== ph) { canvas.width = pw; canvas.height = ph; canvas.style.width = `${cssW}px`; canvas.style.height = `${cssH}px`; }
+    miniKey = '';
+    // The heading gives way to the tools by their measured width.
+    host.style?.setProperty?.('--flow-tools-w', `${Math.ceil(tools.offsetWidth || 0)}px`);
+    if (needsStart && layout && cssW > 1) { needsStart = false; start(); return; }
+    requestDraw();
+  }
+  if (typeof ResizeObserver === 'function') {
+    new ResizeObserver(resize).observe(stage);
+    // Find opening widens the tools; the heading gives way at once.
+    new ResizeObserver(() => host.style?.setProperty?.('--flow-tools-w', `${Math.ceil(tools.offsetWidth || 0)}px`)).observe(tools);
+  }
+  window.addEventListener('resize', resize);
+
+  function setState(kind, headingText = '', message = '', canRetry = false, retryLabel = 'Retry') {
+    status_ = kind;
+    stateBox.hidden = kind === 'ready';
+    stateBox.dataset.kind = kind;
+    stateTitle.textContent = headingText; stateText.textContent = message; retry.hidden = !canRetry; retry.textContent = retryLabel;
+    host.dataset.state = kind;
+  }
+  let flashTimer = 0;
+  /** Passing feedback, in its own toast: a warning in the banner stays. */
+  function flash(text, kind = 'info') {
+    toast.hidden = false; toast.dataset.kind = kind; toast.textContent = text;
+    clearTimeout(flashTimer); flashTimer = setTimeout(() => { toast.hidden = true; }, 1800);
+  }
+  function setBanner(kind, text) {
+    banner.hidden = !kind; banner.dataset.kind = kind ?? ''; bannerText.textContent = text ?? ''; bannerRetry.hidden = kind !== 'error';
+  }
+  function setDetails(isOpen) {
+    if (isOpen) setKey(false);
+    detailsOpen = isOpen;
+    inspector.hidden = !isOpen; host.toggleAttribute('data-details', isOpen);
+    detailsToggle.setAttribute('aria-pressed', String(isOpen));
+    detailsToggle.setAttribute('aria-label', isOpen ? 'Hide details' : 'Show details');
+    if (isOpen) renderInspector();
+    // A Details sheet over the bottom of a narrow canvas must not hide the
+    // card it describes.
+    if (isOpen && selected >= 0 && layout) requestAnimationFrame(() => { if (detailsOpen && selected >= 0) ensureVisible(selected); });
+  }
+
+  const sessionKey = () => session ? String(session) : null;
+  async function load(force = false) {
+    if (!available()) {
+      setState('unavailable', 'Flow graph needs the live backend', 'This stored-evidence window has no flow graph route. Open the session in the live workspace or with make ui.');
+      return;
+    }
+    if (!session) { setState('empty', 'No capture session', 'Capture requests in a live session, then return here to see every recorded stack as one graph.'); return; }
+    if (!force && requested === sessionKey() && (model || status_ === 'loading')) return;
+    requested = sessionKey();
+    controller?.abort(); controller = new AbortController();
+    const mine = ++generation;
+    if (!model) setState('loading', 'Building the flow graph…', 'Folding every recorded stack of this session.');
+    else setBanner('loading', 'Refreshing the flow graph…');
+    refresh.disabled = true;
+    try {
+      const doc = fetchGraph ? await fetchGraph(requested, controller.signal) : await (async () => {
+        const response = await fetch(`/api/flow-graph?${new URLSearchParams({session_id: requested})}`, {cache: 'no-store', signal: AbortSignal.any ? AbortSignal.any([controller.signal, AbortSignal.timeout(45000)]) : controller.signal});
+        if (!response.ok) { let message = `The flow graph route returned ${response.status}.`; try { message = (await response.json()).error ?? message; } catch {} throw Error(message); }
+        return response.json();
+      })();
+      if (mine !== generation) return;
+      const next = flowGraphModel(doc);
+      // A refresh keeps the selection, the expanded chains and the view
+      // wherever the same functions are still in the graph.
+      const keepSelected = selected >= 0 && display ? flowGraphNodeKey(model.nodes[display.nodes[selected].members[0]]) : null;
+      const keepExpanded = model ? [...expanded].map(id => flowGraphNodeKey(model.nodes[Number(id)])) : [];
+      const keepRow = selectedRow, keepHighlight = highlightFromRequest;
+      const first = !model;
+      model = next; selected = -1; selectedRow = -1; highlight = null; highlightLabel = '';
+      const byKey = new Map(next.nodes.map((node, index) => [flowGraphNodeKey(node), index]));
+      expanded = new Set(keepExpanded.map(key => byKey.get(key)).filter(index => index !== undefined).map(String));
+      pendingSelect = keepSelected && byKey.has(keepSelected) && !keepHighlight ? {original: byKey.get(keepSelected), row: keepRow} : null;
+      pendingRequest = keepHighlight;
+      setBanner(null);
+      await rebuild(first);
+    } catch (problem) {
+      if (mine !== generation || problem?.name === 'AbortError') return;
+      error = problem?.message ?? 'The flow graph could not be loaded.';
+      if (model) setBanner('error', `Refresh failed. Showing the previous graph. ${error}`);
+      else setState('error', 'Could not build the flow graph', error, true);
+    } finally {
+      if (mine === generation) refresh.disabled = false;
+    }
+  }
+
+  async function rebuild(fresh = false) {
+    if (!model) return;
+    const keep = pendingSelect ? pendingSelect.original : selected >= 0 ? display?.nodes[selected]?.members?.[0] : null;
+    const keepRow = pendingSelect ? pendingSelect.row : -1, reselect = Boolean(pendingSelect), rehighlight = pendingRequest;
+    pendingSelect = null; pendingRequest = false;
+    // The drawn display, cards and layout change together, only when the new
+    // layout is ready, so a card is never drawn at another card's position.
+    const next = flowGraphDisplay(model, expanded, collapse);
+    if (!next.nodes.length) {
+      display = next; cards = []; layout = null; layoutStale = false;
+      selected = -1; selectedRow = -1; highlight = null; highlightFromRequest = false; selectionText.textContent = ''; requestAgain.hidden = true;
+      const records = model.doc.stacks?.records ?? {}, walked = Object.values(model.doc.stacks?.not_walked ?? {}).reduce((sum, value) => sum + value, 0);
+      const stacks = FLOW_GRAPH_STACK_RECORDS.reduce((sum, type) => sum + (records[type] ?? 0), 0);
+      setState('empty', 'No recorded stacks in this session', stacks > walked
+        ? 'Stack records were found, but none could be decoded into frames. Details lists why.'
+        : walked
+          ? 'Every recorded request in this session started with no script on the stack: the parser, a preload, or a deferred start.'
+          : 'Request stacks are recorded when the session runs with request stacks on (the packaged app does when Network and Artifact capture are on). Refresh once the page has made requests.', true, 'Refresh');
+      renderSummary(); renderInspector();
+      return;
+    }
+    const mine = generation;
+    if (fresh || !layout) setState('loading', 'Laying out…', `${next.nodes.length.toLocaleString()} cards in ${model.contexts.length} ${model.contexts.length === 1 ? 'realm' : 'realms'}.`);
+    layingOut = true;
+    readTokens();
+    const nextCards = flowGraphCards(model, next, measure);
+    try {
+      // Triskel runs in the backend; a shell without the route lays out here.
+      const result = await runner.layout(flowGraphLayoutInput(next, nextCards), metrics, available() ? 'triskel' : 'layered');
+      layingOut = false;
+      if (mine !== generation) return;
+      display = next; cards = nextCards; layout = result; layoutStale = false;
+      edgeBounds = null; edgeFlat = []; miniKey = ''; hover = {node: -1, row: -1, edge: -1};
+      selected = keep === null || keep === undefined ? -1 : display.displayOf[keep] ?? -1;
+      selectedRow = selected >= 0 && keepRow >= 0 && keepRow < cards[selected].rows.length ? keepRow : -1;
+      if (highlight && highlight.source) applyHighlight(highlight.source, highlightLabel, false);
+      renderSummary(); applyFilter(); renderInspector(); renderSelection();
+      setState('ready');
+      if (fresh) { needsStart = cssW <= 1; start(); } else if (selected >= 0 && !reselect) ensureVisible(selected); else requestDraw();
+      if (reselect && selected >= 0) select(selected, {reveal: false, row: selectedRow});
+      if (requestKey && (fresh || rehighlight)) highlightRequest(requestKey, {reveal: fresh});
+    } catch (problem) {
+      layingOut = false;
+      if (problem?.name === 'AbortError') { layoutStale = true; return; }
+      setState('error', 'Could not lay out the flow graph', problem?.message ?? 'Layout failed.', true);
+    }
+  }
+
+  function renderSummary() {
+    const doc = model?.doc;
+    if (!doc) { stats.textContent = ''; evidence.textContent = ''; summary.textContent = ''; return; }
+    const functions = doc.nodes.filter(node => !FLOW_GRAPH_SINKS.has(node.kind)).length, sinks = doc.nodes.length - functions;
+    const parts = [`${doc.stacks.distinct.toLocaleString()} distinct ${doc.stacks.distinct === 1 ? 'stack' : 'stacks'}`, `${functions.toLocaleString()} ${functions === 1 ? 'function' : 'functions'}`,
+      `${sinks.toLocaleString()} ${sinks === 1 ? 'sink' : 'sinks'}`, `${model.contexts.length} ${model.contexts.length === 1 ? 'realm' : 'realms'}`];
+    if (display?.groups) parts.push(`${display.groups} ${display.groups === 1 ? 'chain' : 'chains'} folded`);
+    stats.textContent = parts.join(' · ');
+    evidence.textContent = doc.complete ? 'observed' : 'observed · partial';
+    evidence.dataset.partial = String(!doc.complete);
+    const crossing = display ? display.edges.filter(edge => edge.crosses.length) : [];
+    const frames = crossing.filter(edge => edge.crosses.includes('frame')).length, languages = crossing.filter(edge => edge.crosses.includes('language')).length, dynamic = crossing.filter(edge => edge.crosses.includes('dynamic')).length;
+    const crossings = [[frames, 'frame'], [languages, 'JS ↔ Wasm'], [dynamic, 'into eval']].filter(([count]) => count).map(([count, label]) => `${count} ${label}`);
+    summary.textContent = `${(doc.stacks?.occurrences ?? 0).toLocaleString()} stack records · ${crossings.length ? `crossings: ${crossings.join(', ')}` : 'no crossings'}`;
+    const notes = [];
+    if (doc.coverage?.stopped === 'deadline') notes.push('The scan stopped at its deadline.');
+    if (doc.stacks?.over_budget) notes.push(`${doc.stacks.over_budget} stacks past the ${doc.limits?.stacks?.toLocaleString?.() ?? ''} distinct-stack budget are counted, not drawn.`);
+    for (const [key, label] of [['nodes', 'nodes'], ['edges', 'edges'], ['paths', 'paths']]) if (doc.truncated?.[key]) notes.push(`${doc.truncated[key]} ${label} past the budget are not drawn.`);
+    if (model.dropped) notes.push(`${model.dropped} malformed edges are not drawn.`);
+    renderEngine();
+    // The status bar names only what cut this graph; what no graph shows is
+    // in the key.
+    limits.textContent = notes.join(' ');
+    limits.title = notes.join(' ');
+    keyLimits.textContent = `${FLOW_GRAPH_LIMITS}${doc.not_shown?.length ? ` Stacks cannot show ${doc.not_shown.join('; ')}.` : ''}`;
+  }
+
+  /** Which engine laid out the realms, and why a realm kept the layered one. */
+  function renderEngine() {
+    const engine = layout?.engine, realms = engine?.realms ?? [];
+    if (!engine) { engineLabel.textContent = ''; engineLabel.title = ''; return; }
+    const sized = realms.filter(item => item.reason !== 'one card'), triskel = sized.filter(item => item.engine === 'triskel').length;
+    engineLabel.textContent = triskel ? `Triskel layout${triskel < sized.length ? ` · ${triskel} of ${sized.length} realms` : ''}` : engine.failure ? 'Layered layout · Triskel unavailable' : 'Layered layout';
+    engineLabel.dataset.engine = triskel ? 'triskel' : 'layered';
+    engineLabel.title = [triskel ? `Triskel ${engine.revision ? engine.revision.slice(0, 7) : ''} lays out each realm that fits its limits; a realm it would draw far wider than the stacked layered layout keeps that one.`.trim() : 'Laid out in the app with the layered layout.',
+      ...realms.filter(item => item.reason && item.reason !== 'one card').map(item => `${model?.contexts[item.key]?.label.title ?? 'Realm'}: layered, ${item.reason}.`), engine.failure ?? ''].filter(Boolean).join('\n');
+  }
+
+  // Geometry ---------------------------------------------------------------
+  const nodeBox = index => ({x: layout.x[index], y: layout.y[index], w: layout.w[index], h: layout.h[index]});
+  const visibleBox = (x, y, w, h) => x < view.x + cssW / view.z && x + w > view.x && y < view.y + cssH / view.z && y + h > view.y;
+  const rowTop = (box, row) => box.y + FLOW_GRAPH_CARD.head + FLOW_GRAPH_CARD.location + FLOW_GRAPH_CARD.gap + row * FLOW_GRAPH_CARD.row;
+  function boundsOfEdges() {
+    if (edgeBounds) return edgeBounds;
+    const count = display.edges.length, bounds = new Float32Array(count * 4), P = layout.routes, S = layout.routeStart;
+    for (let e = 0; e < count; e += 1) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (let i = S[e]; i < S[e + 1]; i += 1) { const x = P[2 * i], y = P[2 * i + 1]; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+      bounds.set([x0, y0, x1, y1], e * 4);
+    }
+    return (edgeBounds = bounds);
+  }
+  /** Points along a route, curves flattened, for hit tests. */
+  function flatRoute(e) {
+    if (edgeFlat[e]) return edgeFlat[e];
+    const P = layout.routes, T = layout.routeTypes, S = layout.routeStart, out = [];
+    for (let i = S[e]; i < S[e + 1]; i += 1) {
+      const x = P[2 * i], y = P[2 * i + 1];
+      if (i > S[e] && T[i] === ROUTE.CURVE) { const py = P[2 * i - 1], mid = (py + y) / 2; out.push(P[2 * i - 2], mid, x, mid, x, y); }
+      else out.push(x, y);
+    }
+    return (edgeFlat[e] = out);
+  }
+  /** The canvas path of an edge's route: curves with vertical tangents
+   * between layers, straight runs past waypoints, rounded corners. */
+  function tracePath(e) {
+    const P = layout.routes, T = layout.routeTypes, S = layout.routeStart, start = S[e], end = S[e + 1];
+    for (let i = start; i < end; i += 1) {
+      const x = P[2 * i], y = P[2 * i + 1];
+      if (i === start) { ctx.moveTo(x, y); continue; }
+      const px = P[2 * i - 2], py = P[2 * i - 1];
+      if (T[i] === ROUTE.CURVE) {
+        // Down, across at mid-gap and down again, corners rounded: the same
+        // shape Triskel's waypoints take.
+        if (Math.abs(x - px) < 0.5) { ctx.lineTo(x, y); continue; }
+        const mid = (py + y) / 2, radius = Math.max(0.1, Math.min(12, Math.abs(x - px) / 2, Math.abs(y - py) / 4));
+        ctx.arcTo(px, mid, x, mid, radius); ctx.arcTo(x, mid, x, y, radius); ctx.lineTo(x, y);
+      }
+      else if (T[i] === ROUTE.CORNER && i + 1 < end) {
+        const nx = P[2 * i + 2], ny = P[2 * i + 3];
+        const radius = Math.max(0.1, Math.min(10, Math.hypot(x - px, y - py) / 2, Math.hypot(nx - x, ny - y) / 2));
+        ctx.arcTo(x, y, nx, ny, radius);
+      } else ctx.lineTo(x, y);
+    }
+  }
+  /** The direction an edge arrives in, for its arrowhead. */
+  function arrival(e) {
+    const P = layout.routes, T = layout.routeTypes, end = layout.routeStart[e + 1] - 1;
+    const x = P[2 * end], y = P[2 * end + 1], px = P[2 * end - 2], py = P[2 * end - 1];
+    if (T[end] === ROUTE.CURVE) return {x, y, dx: 0, dy: Math.sign(y - py) || 1};
+    const length = Math.hypot(x - px, y - py) || 1;
+    return {x, y, dx: (x - px) / length, dy: (y - py) / length};
+  }
+
+  // Drawing ----------------------------------------------------------------
+  const lodNow = () => view.z >= FLOW_GRAPH_TEXT_ZOOM ? 2 : view.z >= FLOW_GRAPH_SKETCH_ZOOM ? 1 : 0;
+  function draw() {
+    if (!ctx || !visible) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.fillStyle = tokens.bg; ctx.fillRect(0, 0, cssW, cssH);
+    if (!layout || !display || !cards || layout.x.length !== display.nodes.length) return;
+    ctx.setTransform(dpr * view.z, 0, 0, dpr * view.z, -view.x * view.z * dpr, -view.y * view.z * dpr);
+    const lod = lodNow();
+    drawClusters();
+    drawEdges();
+    if (lod === 2) drawClusterLabels();
+    const shown = [];
+    for (let index = 0; index < display.nodes.length; index += 1) {
+      const box = nodeBox(index);
+      if (!visibleBox(box.x - 8, box.y - 26, box.w + 16, box.h + 34)) continue;
+      drawCard(index, box, lod);
+      if (lod === 1) shown.push(index);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (lod === 1) drawScreenTitles(shown);
+    if (lod < 2) drawScreenClusterLabels();
+    zoomLabel.textContent = `${Math.round(view.z * 100)}%`;
+    drawMinimap();
+  }
+
+  function drawClusters() {
+    layout.lanes.forEach(lane => {
+      if (!visibleBox(lane.x, lane.y, lane.w, lane.h)) return;
+      ctx.globalAlpha = 0.55; ctx.fillStyle = tokens.cluster;
+      ctx.beginPath(); roundedRect(lane.x, lane.y, lane.w, lane.h, 10); ctx.fill();
+      ctx.globalAlpha = 1; ctx.strokeStyle = tokens.clusterLine; ctx.lineWidth = 1 / view.z; ctx.stroke();
+    });
+  }
+  /** Realm names sit over the edges, haloed, so a crossing never strikes
+   * one out. */
+  function drawClusterLabels() {
+    ctx.textBaseline = 'alphabetic';
+    layout.lanes.forEach(lane => {
+      if (!visibleBox(lane.x, lane.y, lane.w, lane.h)) return;
+      // The label follows the view's left edge across a wide cluster, and
+      // sits on a plate so an edge passing under it never strikes it out.
+      const context = model.contexts[lane.key]?.label;
+      const left = Math.max(lane.x + 14, Math.min(view.x + 14 / view.z, lane.x + lane.w - 120)), room = lane.x + lane.w - 14 - left;
+      ctx.font = `600 12.5px ${tokens.sans}`; const title = fitText(context?.title ?? 'Realm', room);
+      const titleW = ctx.measureText(title).width;
+      ctx.font = `10.5px ${tokens.mono}`; const detail = fitText(context?.detail ?? '', room);
+      const plateW = Math.max(titleW, ctx.measureText(detail).width) + 12;
+      // Pinned under the heading while its realm is in view, so panning
+      // down never loses which realm a card is in.
+      const top = Math.min(Math.max(lane.y, view.y + (topInset() - 6) / view.z), lane.y + lane.h - 48);
+      ctx.globalAlpha = 0.92; ctx.fillStyle = tokens.bg; ctx.beginPath(); roundedRect(left - 6, top + 7, plateW, 34, 5); ctx.fill(); ctx.globalAlpha = 1;
+      ctx.font = `600 12.5px ${tokens.sans}`; ctx.fillStyle = tokens.text; ctx.fillText(title, left, top + 21);
+      ctx.font = `10.5px ${tokens.mono}`; ctx.fillStyle = tokens.muted; ctx.fillText(detail, left, top + 36);
+    });
+  }
+  /** Zoomed out, each cluster keeps its realm's name at screen size. */
+  function drawScreenClusterLabels() {
+    ctx.textBaseline = 'alphabetic'; ctx.font = `600 11px ${tokens.sans}`; ctx.fillStyle = tokens.muted;
+    layout.lanes.forEach(lane => {
+      const x = (lane.x - view.x) * view.z, y = (lane.y - view.y) * view.z, w = lane.w * view.z;
+      if (x > cssW || x + w < 0 || y > cssH || y + lane.h * view.z < 0 || w < 24) return;
+      const left = Math.max(x + 6, Math.min(8, x + w - 60)), pinned = Math.min(Math.max(y - 6, topInset() + 4), y + lane.h * view.z - 8);
+      ctx.fillText(fitText(model.contexts[lane.key]?.label.title ?? 'Realm', x + w - left - 4), left, pinned);
+    });
+  }
+
+  function fitText(text, room) {
+    if (!text || room <= 0) return '';
+    if (ctx.measureText(text).width <= room) return text;
+    let low = 0, high = text.length;
+    while (low < high) { const mid = (low + high + 1) >> 1; if (ctx.measureText(`${text.slice(0, mid)}…`).width <= room) low = mid; else high = mid - 1; }
+    return low ? `${text.slice(0, low)}…` : '';
+  }
+
+  const edgeColor = edge => tokens[flowGraphEdgeFamily(edge)] ?? tokens.call;
+  let maxEdgeCount = 1;
+  function drawEdges() {
+    maxEdgeCount = display.edges.reduce((max, edge) => Math.max(max, edge.count), 1);
+    const bounds = boundsOfEdges(), dim = Boolean(highlight), rowEdge = selectedRow >= 0 ? cards[selected]?.rows[selectedRow]?.edge ?? -1 : -1;
+    const hot = new Set([hover.edge, hover.row >= 0 ? cards[hover.node]?.rows[hover.row]?.edge ?? -1 : -1, rowEdge].filter(index => index >= 0));
+    const lit = index => !dim || highlight.edges.has(index) || hot.has(index);
+    const order = [];
+    display.edges.forEach((edge, index) => { if (!lit(index)) order.push(index); });
+    display.edges.forEach((edge, index) => { if (lit(index) && !hot.has(index)) order.push(index); });
+    hot.forEach(index => order.push(index));
+    const casing = view.z >= 0.3, log = Math.log(maxEdgeCount + 1);
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    for (const index of order) {
+      const at = index * 4;
+      if (!visibleBox(bounds[at] - 6, bounds[at + 1] - 6, bounds[at + 2] - bounds[at] + 12, bounds[at + 3] - bounds[at + 1] + 12)) continue;
+      const edge = display.edges[index], on = lit(index), strong = hot.has(index), color = edgeColor(edge), family = flowGraphEdgeFamily(edge);
+      // Zoomed out to boxes, plain calls recede to hairlines so crossings
+      // and tasks carry the picture; dimmed edges stay traceable.
+      const boxes = view.z < FLOW_GRAPH_SKETCH_ZOOM && family !== 'cross' && family !== 'async' && !strong;
+      // A lit stack is marked, not only left undimmed: its plain calls take
+      // the accent and draw heavier.
+      const marked = dim && on && family === 'call';
+      const weight = boxes ? 1 / view.z : (1.4 + 1.6 * Math.log(edge.count + 1) / log + (strong ? 1.2 : 0) + (marked ? 0.8 : 0)) * Math.max(1, 0.7 / view.z);
+      ctx.globalAlpha = (on ? 1 : family === 'cross' ? 0.4 : 0.28) * (boxes ? 0.6 : 1);
+      ctx.beginPath(); tracePath(index);
+      if (casing) { ctx.strokeStyle = tokens.bg; ctx.lineWidth = weight + 3.4; ctx.setLineDash([]); ctx.stroke(); }
+      const stroke = marked ? tokens.accent : color;
+      ctx.strokeStyle = stroke; ctx.lineWidth = weight;
+      ctx.setLineDash(edge.kind === 'omitted' ? [1.5, 4.5] : []);
+      ctx.stroke(); ctx.setLineDash([]);
+      if (view.z >= 0.25) arrowHead(index, stroke, Math.max(6.5, 4 + weight * 1.5));
+    }
+    ctx.globalAlpha = 1;
+  }
+  function arrowHead(index, color, size) {
+    const {x, y, dx, dy} = arrival(index), nx = -dy, ny = dx, half = size * 0.48;
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - dx * size + nx * half, y - dy * size + ny * half); ctx.lineTo(x - dx * size - nx * half, y - dy * size - ny * half); ctx.closePath();
+    if (view.z >= 0.3) { ctx.strokeStyle = tokens.bg; ctx.lineWidth = 2; ctx.stroke(); }
+    ctx.fillStyle = color; ctx.fill();
+  }
+
+  /** The colour a row's mnemonic and note take: its edge's family, or the
+   * sink colour for a request, navigation or cookie write. */
+  const rowTone = item => {
+    if (!item) return tokens.op;
+    if (item.sink) return tokens.sink;
+    const edge = item.edge >= 0 ? display.edges[item.edge] : null, family = edge ? flowGraphEdgeFamily(edge) : 'call';
+    return family === 'cross' ? tokens.cross : family === 'async' ? tokens.async : tokens.op;
+  };
+  function drawCard(index, box, lod) {
+    const node = display.nodes[index], card = cards[index], picked = index === selected;
+    const matched = matches.length > 0 && matches.includes(index), C = FLOW_GRAPH_CARD, kindColor = tokens[node.kind] ?? tokens.muted;
+    // Dimmed cards keep their fill and outline, so the graph keeps its shape;
+    // only their text fades. A match of Find is never dimmed.
+    const lit = !highlight || highlight.nodes.has(index) || matched, textAlpha = lit ? 1 : 0.45, {x, y, w, h} = box;
+    ctx.globalAlpha = 1;
+    if (node.kind === 'chain') {
+      // A folded chain reads as a stack of cards behind it, down and right.
+      ctx.fillStyle = tokens.card; ctx.strokeStyle = tokens.cardLine; ctx.lineWidth = 1 / view.z;
+      for (const offset of [6, 3]) { ctx.beginPath(); roundedRect(x + offset, y + offset, w, h, 4); ctx.fill(); ctx.stroke(); }
+    }
+    if (node.chain_cut && lod > 0) {
+      // Earlier async callers were not recorded: a stub with no edge.
+      ctx.strokeStyle = tokens.faint; ctx.lineWidth = 1.4 / Math.max(view.z, 0.5); ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(x + 16, y - 20); ctx.lineTo(x + 16, y); ctx.stroke(); ctx.setLineDash([]);
+    }
+    ctx.fillStyle = lod === 0 ? tokens.box : tokens.card;
+    ctx.beginPath(); roundedRect(x, y, w, h, 4); ctx.fill();
+    // The outline is the card's edge against a fill close to the realm's,
+    // so it is drawn at about 3:1.
+    ctx.strokeStyle = picked || matched ? tokens.accent : tokens.faint; ctx.globalAlpha = picked || matched ? 1 : 0.8;
+    ctx.lineWidth = (picked ? 2 : matched ? 1.5 : 1) / view.z;
+    if ((node.status !== 'resolved' && !picked) || (matched && !picked)) ctx.setLineDash(matched && !picked ? [5 / view.z, 3 / view.z] : [4, 3]);
+    ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+    if (lod === 0) {
+      // Boxes: the kind as a thin strip, not a fill.
+      ctx.globalAlpha = textAlpha; ctx.fillStyle = kindColor; ctx.fillRect(x, y, w, Math.min(h, 2 / view.z)); ctx.globalAlpha = 1; return;
+    }
+    if (lod === 1) {
+      // A sketch of the rows, coloured where a row crosses, waits or sends;
+      // the name is painted at screen size later.
+      ctx.globalAlpha = textAlpha;
+      const rows = card.rows.length + (card.more ? 1 : 0);
+      for (let row = -1; row < rows; row += 1) {
+        const item = row >= 0 ? card.rows[row] : null, tone = item ? rowTone(item) : tokens.cardLine;
+        ctx.fillStyle = tone === tokens.op ? tokens.cardLine : tone;
+        const top = row < 0 ? y + C.head + 5 : rowTop(box, row) + 6, width = row < 0 ? card.location.length * measure.tag : Math.min(w - C.pad * 2, card.siteW + card.opW + 22 + (item?.target.length ?? 6) * measure.row);
+        ctx.fillRect(x + C.pad, top, Math.min(w - C.pad * 2, width), 5);
+      }
+      ctx.globalAlpha = 1;
+      return;
+    }
+    ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+    ctx.textBaseline = 'alphabetic';
+    // Header: name, kind tag and record count, ruled off from the rows.
+    ctx.fillStyle = tokens.cardRule; ctx.fillRect(x + 1, y + C.head + C.location + 1, w - 2, 1 / view.z);
+    ctx.font = `10px ${tokens.mono}`;
+    const badgeW = card.badge.length * measure.tag + 10, badgeX = x + w - C.pad - badgeW, tagW = card.tag.length * measure.tag, tagX = badgeX - 8 - tagW;
+    ctx.fillStyle = tokens.badgeFill; ctx.strokeStyle = tokens.badge; ctx.lineWidth = 1 / view.z; ctx.beginPath(); roundedRect(badgeX, y + 8, badgeW, 14, 3); ctx.fill(); ctx.stroke();
+    ctx.globalAlpha = textAlpha;
+    ctx.fillStyle = tokens.muted; ctx.fillText(card.badge, badgeX + 5, y + 19);
+    ctx.font = `600 10px ${tokens.mono}`; ctx.fillStyle = tokens.muted; ctx.fillText(card.tag, tagX, y + 19);
+    ctx.font = `600 12px ${tokens.mono}`; ctx.fillStyle = node.status === 'resolved' ? tokens.text : tokens.muted;
+    ctx.fillText(fitText(card.title, tagX - x - C.pad - 10), x + C.pad, y + 20);
+    ctx.font = `10.5px ${tokens.mono}`; ctx.fillStyle = tokens.site;
+    ctx.fillText(fitText(card.location, w - C.pad * 2), x + C.pad, y + C.head + 11);
+    // Rows: site, mnemonic, callee, then the note and the count.
+    ctx.font = `11px ${tokens.mono}`;
+    const opX = x + C.pad + (card.siteW ? card.siteW + 12 : 0), targetX = opX + (card.opW ? card.opW + 10 : 0);
+    const rowCount = card.rows.length + (card.more ? 1 : 0);
+    for (let row = 0; row < rowCount; row += 1) {
+      const top = rowTop(box, row), base = top + 13, item = card.rows[row];
+      const isHover = hover.node === index && hover.row === row, isPicked = picked && selectedRow === row;
+      if (isHover || isPicked) {
+        ctx.globalAlpha = isPicked ? 0.55 : 0.35; ctx.fillStyle = tokens.soft; ctx.fillRect(x + 1, top, w - 2, C.row);
+        ctx.globalAlpha = 1; ctx.fillStyle = tokens.accent; ctx.fillRect(x + 1, top, 2, C.row);
+      }
+      ctx.globalAlpha = textAlpha;
+      if (!item) { ctx.fillStyle = tokens.muted; ctx.fillText(`… ${card.more.toLocaleString()} more ${node.kind === 'chain' ? 'frames' : 'calls'}, in Details`, x + C.pad, base); continue; }
+      if (highlight && !isHover && !isPicked && lit && item.members?.some(member => highlight.originalEdges.has(member))) { ctx.fillStyle = tokens.accent; ctx.fillRect(x + 4, top + 4, 2, C.row - 8); }
+      ctx.fillStyle = tokens.site; ctx.fillText(item.site, x + C.pad, base);
+      const edge = item.edge >= 0 ? display.edges[item.edge] : null, tone = rowTone(item);
+      ctx.fillStyle = tone; ctx.fillText(item.op, opX, base);
+      const countW = item.count ? ctx.measureText(item.count).width + 10 : 0, room = x + w - C.pad - countW - targetX;
+      const target = fitText(item.target, room);
+      ctx.fillStyle = edge && display.nodes[edge.to]?.status !== 'resolved' ? tokens.muted : tokens.text; ctx.fillText(target, targetX, base);
+      if (item.note) {
+        const used = ctx.measureText(target).width + 10;
+        if (room - used > 30) { ctx.fillStyle = tone === tokens.op ? tokens.note : tone; ctx.fillText(fitText(`; ${item.note}`, room - used), targetX + used, base); }
+      }
+      if (item.count) { ctx.fillStyle = tokens.muted; ctx.fillText(item.count, x + w - C.pad - countW + 10, base); }
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  /** Between the sketch and text zooms, each card keeps a legible name. */
+  function drawScreenTitles(indexes) {
+    ctx.font = `600 10.5px ${tokens.mono}`; ctx.textBaseline = 'middle';
+    for (const index of indexes) {
+      const box = nodeBox(index), sx = (box.x - view.x) * view.z, sy = (box.y - view.y) * view.z, sw = box.w * view.z;
+      if (sw < 28) continue;
+      const node = display.nodes[index];
+      ctx.globalAlpha = !highlight || highlight.nodes.has(index) || matches.includes(index) ? 1 : 0.45;
+      ctx.fillStyle = node.status === 'resolved' ? tokens.text : tokens.muted;
+      // A name may run a little past a narrow card, into the gap beside it.
+      ctx.fillText(fitText(cards[index].title, sw - 10 + Math.min(24, 26 * view.z)), sx + 5, sy + Math.max(8, FLOW_GRAPH_CARD.head * view.z / 2));
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function roundedRect(x, y, w, h, r) {
+    ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  }
+
+  // Minimap ----------------------------------------------------------------
+  function drawMinimap() {
+    // The minimap is for a graph larger than the view.
+    const inView = view.x <= 0 && view.y <= 0 && view.x + cssW / view.z >= layout.width && view.y + cssH / view.z >= layout.height;
+    host.toggleAttribute('data-all-in-view', inView);
+    if (!miniCtx || !minimapOn || !layout || inView) return;
+    // The minimap takes the graph's shape: a wide graph gets a short strip
+    // of full width, a tall one a narrow column, never an unreadable sliver.
+    const shape = layout.width / Math.max(1, layout.height), maxW = Math.min(200, cssW * 0.3), maxH = Math.min(150, cssH * 0.35);
+    const wantW = Math.round(Math.max(90, Math.min(maxW, maxH * shape))), wantH = Math.round(Math.max(60, Math.min(maxH, wantW / shape)));
+    if (minimap.style.width !== `${wantW}px`) minimap.style.width = `${wantW}px`;
+    if (minimap.style.height !== `${wantH}px`) minimap.style.height = `${wantH}px`;
+    const mw = minimap.clientWidth || wantW, mh = minimap.clientHeight || wantH;
+    if (!mw || !mh) return;
+    const ratio = Math.min(window.devicePixelRatio || 1, 2);
+    if (minimap.width !== Math.round(mw * ratio) || minimap.height !== Math.round(mh * ratio)) { minimap.width = Math.round(mw * ratio); minimap.height = Math.round(mh * ratio); miniKey = ''; }
+    const key = `${selected}:${highlight ? highlight.nodes.size + highlight.paths : 0}:${matches.length}:${layout.width}:${display.nodes.length}`;
+    const scale = Math.min((mw - 16) / layout.width, (mh - 16) / layout.height), ox = (mw - layout.width * scale) / 2, oy = (mh - layout.height * scale) / 2;
+    miniFit = {scale, ox, oy};
+    if (key !== miniKey || !miniBase) {
+      miniKey = key;
+      miniBase ??= document.createElement('canvas');
+      miniBase.width = minimap.width; miniBase.height = minimap.height;
+      const g = miniBase.getContext?.('2d');
+      if (!g) return;
+      g.setTransform(ratio, 0, 0, ratio, 0, 0); g.clearRect(0, 0, mw, mh);
+      g.fillStyle = tokens.cluster; g.strokeStyle = tokens.clusterLine; g.lineWidth = 1;
+      layout.lanes.forEach(lane => { g.fillRect(ox + lane.x * scale, oy + lane.y * scale, lane.w * scale, lane.h * scale); g.strokeRect(ox + lane.x * scale, oy + lane.y * scale, lane.w * scale, lane.h * scale); });
+      g.globalAlpha = 0.3; g.strokeStyle = tokens.call; g.lineWidth = 0.8;
+      g.beginPath();
+      display.edges.forEach(edge => {
+        const a = nodeBox(edge.from), b = nodeBox(edge.to);
+        g.moveTo(ox + (a.x + a.w / 2) * scale, oy + (a.y + a.h) * scale); g.lineTo(ox + (b.x + b.w / 2) * scale, oy + b.y * scale);
+      });
+      g.stroke(); g.globalAlpha = 1;
+      for (let index = 0; index < display.nodes.length; index += 1) {
+        const box = nodeBox(index), on = !highlight || highlight.nodes.has(index);
+        g.fillStyle = index === selected || (highlight && on) || matches.includes(index) ? tokens.accent : tokens.faint;
+        g.globalAlpha = index === selected || (highlight && on) ? 0.95 : on ? 0.6 : 0.3;
+        g.fillRect(ox + box.x * scale, oy + box.y * scale, Math.max(1.5, box.w * scale), Math.max(1.5, box.h * scale));
+      }
+      g.globalAlpha = 1;
+    }
+    miniCtx.setTransform(1, 0, 0, 1, 0, 0); miniCtx.clearRect(0, 0, minimap.width, minimap.height); miniCtx.drawImage(miniBase, 0, 0);
+    miniCtx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    const vx = ox + view.x * scale, vy = oy + view.y * scale, vw = cssW / view.z * scale, vh = cssH / view.z * scale;
+    miniCtx.fillStyle = tokens.accent; miniCtx.globalAlpha = 0.1; miniCtx.fillRect(vx, vy, vw, vh); miniCtx.globalAlpha = 1;
+    miniCtx.strokeStyle = tokens.accent; miniCtx.lineWidth = 1.5; miniCtx.strokeRect(vx + 0.75, vy + 0.75, Math.max(2, vw - 1.5), Math.max(2, vh - 1.5));
+  }
+  const miniPointer = {down: false};
+  const miniJump = event => {
+    if (!miniFit || !layout) return;
+    const rect = minimap.getBoundingClientRect(), gx = (event.clientX - rect.left - miniFit.ox) / miniFit.scale, gy = (event.clientY - rect.top - miniFit.oy) / miniFit.scale;
+    view.x = gx - cssW / view.z / 2; view.y = gy - cssH / view.z / 2; requestDraw();
+  };
+  minimap.addEventListener('pointerdown', event => { miniPointer.down = true; minimap.setPointerCapture?.(event.pointerId); miniJump(event); event.preventDefault(); });
+  minimap.addEventListener('pointermove', event => { if (miniPointer.down) miniJump(event); });
+  minimap.addEventListener('pointerup', () => { miniPointer.down = false; canvas.focus({preventScroll: true}); });
+
+  // View -------------------------------------------------------------------
+  /** Screen room the floating heading and tools take at the top. */
+  const topInset = () => Math.max(56, (tools.offsetTop ?? 0) + (tools.offsetHeight ?? 0), (heading.offsetTop ?? 0) + (heading.offsetHeight ?? 0)) + 12;
+  /** The zoom and position that show the whole graph under the heading,
+   * centred. */
+  function fitted(cap = 1) {
+    const inset = topInset(), room = Math.max(40, cssH - inset - 16);
+    const z = Math.min(cap, Math.max(0.02, Math.min((cssW - 32) / layout.width, room / layout.height)));
+    return {z, x: (layout.width - cssW / z) / 2, y: (layout.height - room / z) / 2 - inset / z};
+  }
+  /** The part of the stage a card can be shown in: under the heading, above
+   * a Details sheet, and clear of the minimap. */
+  function freeArea() {
+    // In a narrow panel Details is a drawer over the right of the canvas.
+    const drawer = detailsOpen && globalThis.getComputedStyle?.(inspector)?.position === 'absolute' ? inspector.offsetWidth ?? 0 : 0;
+    const mini = minimapOn && !host.hasAttribute('data-all-in-view') && minimap.offsetWidth ? {w: minimap.offsetWidth + 14, h: minimap.offsetHeight + 14} : null;
+    return {top: topInset(), bottom: cssH - 8, left: 8, right: cssW - drawer - 8, mini: drawer ? null : mini};
+  }
+  /** First view: a small graph or one whose rows stay legible opens fitted;
+   * a larger one opens at reading size on the top of its busiest entry. */
+  function start() {
+    if (!layout || cssW <= 1) { needsStart = true; return; }
+    const whole = fitted();
+    if (whole.z >= FLOW_GRAPH_TEXT_ZOOM || (display.nodes.length <= FLOW_GRAPH_SMALL && whole.z >= FLOW_GRAPH_SKETCH_ZOOM)) { view = whole; requestDraw(); return; }
+    let best = -1;
+    display.nodes.forEach((node, index) => {
+      if (best < 0 || layout.layer[index] < layout.layer[best] || (layout.layer[index] === layout.layer[best] && (node.hits ?? 0) > (display.nodes[best].hits ?? 0))) best = index;
+    });
+    view.z = FLOW_GRAPH_START_ZOOM;
+    const lane = layout.lanes.find(item => item.key === display.nodes[best].context);
+    const left = lane && lane.w * view.z <= cssW ? lane.x - 24 : layout.x[best] + layout.w[best] / 2 - cssW / view.z / 2;
+    view.x = Math.max(-16, Math.min(left, layout.width - cssW / view.z)); view.y = (lane ? lane.y : layout.y[best]) - topInset() / view.z;
+    requestDraw();
+  }
+  function fit() {
+    if (!layout || cssW <= 1) return;
+    view = fitted(1.2); requestDraw();
+  }
+  function zoomAt(factor, cx = cssW / 2, cy = cssH / 2) {
+    const z = Math.min(2.5, Math.max(0.02, view.z * factor)), gx = view.x + cx / view.z, gy = view.y + cy / view.z;
+    view.z = z; view.x = gx - cx / z; view.y = gy - cy / z; hideTooltip(); requestDraw();
+  }
+  function centerOn(index) {
+    const box = nodeBox(index), area = freeArea();
+    if (view.z < FLOW_GRAPH_TEXT_ZOOM) view.z = 0.95;
+    const midX = (area.left + area.right - (area.mini ? area.mini.w : 0)) / 2, midY = (area.top + area.bottom) / 2;
+    view.x = box.x + box.w / 2 - midX / view.z; view.y = box.y + Math.min(box.h, (area.bottom - area.top) / view.z * 0.6) / 2 - midY / view.z; requestDraw();
+  }
+  function ensureVisible(index) {
+    const box = nodeBox(index), area = freeArea(), margin = 24;
+    const sx = (box.x - view.x) * view.z, sy = (box.y - view.y) * view.z, sw = box.w * view.z, sh = Math.min(box.h, 120) * view.z;
+    const underMini = area.mini && sx + sw > cssW - area.mini.w && sy + sh > area.bottom - area.mini.h;
+    if (sx - margin < area.left || sy - margin < area.top || sx + sw + margin > area.right || sy + sh + margin > area.bottom || underMini) centerOn(index);
+    else requestDraw();
+  }
+  function showRealm(key) {
+    const members = display ? display.nodes.map((node, index) => node.context === key ? index : -1).filter(index => index >= 0) : [];
+    if (members.length) { showCards(members); canvas.focus({preventScroll: true}); }
+  }
+  /** Fits a set of cards when they fit at a legible zoom and says so; else
+   * shows the top of the set at reading size and returns false, so a caller
+   * can centre the card that matters instead. */
+  function showCards(indexes) {
+    if (!indexes.length) return false;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const index of indexes) { const box = nodeBox(index); x0 = Math.min(x0, box.x); y0 = Math.min(y0, box.y); x1 = Math.max(x1, box.x + box.w); y1 = Math.max(y1, box.y + box.h); }
+    const area = freeArea(), roomW = area.right - area.left - 32 - (area.mini ? area.mini.w : 0), roomH = area.bottom - area.top - 24;
+    const z = Math.min(1, roomW / (x1 - x0 + 40), roomH / (y1 - y0 + 40));
+    if (z >= 0.66) { view.z = z; view.x = (x0 + x1) / 2 - (area.left + roomW / 2 + 16) / z; view.y = (y0 + y1) / 2 - (area.top + roomH / 2 + 12) / z; requestDraw(); return true; }
+    view.z = FLOW_GRAPH_START_ZOOM; view.x = (x0 + x1) / 2 - (area.left + roomW / 2 + 16) / view.z; view.y = y0 - (area.top + 24) / view.z;
+    requestDraw();
+    return false;
+  }
+
+  // Selection and highlight ---------------------------------------------------
+  function applyHighlight(paths, label, reveal = true) {
+    if (!paths?.length) { highlight = null; highlightLabel = ''; requestDraw(); return; }
+    highlight = {...flowGraphHighlight(model, display, paths), source: paths};
+    highlightLabel = label;
+    if (reveal) requestDraw();
+  }
+  const requestPaths = key => key && model ? model.paths.filter(path => String(path.process_id) === String(key.process) && path.requests?.includes(String(key.request))) : [];
+  function renderSelection() {
+    // A chosen request whose stack another selection replaced can be lit again.
+    requestAgain.hidden = !(requestKey && !highlightFromRequest && requestPaths(requestKey).length);
+    if (selected < 0 || !display?.nodes[selected]) { if (!requestKey) selectionText.textContent = ''; return; }
+    const node = display.nodes[selected], card = cards?.[selected], row = selectedRow >= 0 ? card?.rows[selectedRow] : null;
+    const parts = [flowGraphNodeName(node)];
+    if (row) parts.push(`${row.op} ${row.target}${row.note ? ` (${row.note})` : ''}`);
+    else parts.push(card?.location ?? flowGraphNodeDetail(node));
+    parts.push(model.contexts[node.context]?.label.title ?? '');
+    if (highlight) parts.push(`${highlight.paths} distinct ${highlight.paths === 1 ? 'stack' : 'stacks'}`);
+    selectionText.textContent = parts.filter(Boolean).join(' · ');
+  }
+  function select(index, {reveal = true, focusPaths = true, row = -1} = {}) {
+    if (!display || index < 0 || index >= display.nodes.length) return;
+    selected = index; selectedRow = row;
+    const node = display.nodes[index];
+    if (focusPaths) {
+      highlightFromRequest = false;
+      const paths = flowGraphPathsThrough(model, node.members);
+      applyHighlight(paths, `${paths.length.toLocaleString()} ${paths.length === 1 ? 'stack passes' : 'stacks pass'} through ${flowGraphNodeName(node)}`, false);
+    }
+    renderSelection(); renderInspector();
+    if (reveal) ensureVisible(index); else requestDraw();
+  }
+  function clearSelection() {
+    selected = -1; selectedRow = -1; highlight = null; highlightLabel = ''; highlightFromRequest = false; selectionText.textContent = '';
+    renderSelection(); renderInspector(); requestDraw();
+  }
+  function toggleChain(index) {
+    const node = display?.nodes[index];
+    if (!node) return;
+    if (node.kind === 'chain') expanded.add(node.key);
+    else {
+      // A member of an expanded chain folds it again.
+      const key = display.foldKey.get(node.members[0]);
+      if (!key) return;
+      expanded.delete(key);
+    }
+    selected = index; rebuild();
+  }
+  function highlightRequest(key, {reveal = true} = {}) {
+    requestKey = key;
+    if (!model || !display || !key) return false;
+    const paths = requestPaths(key);
+    if (!paths.length) {
+      // The previous request's stack must not stay lit for this one.
+      clearSelection();
+      requestKey = key; requestAgain.hidden = true;
+      selectionText.textContent = 'The selected request has no recorded stack in this graph.';
+      return false;
+    }
+    applyHighlight(paths, 'Stack of the selected request');
+    highlightFromRequest = true;
+    // The request is a row of the function that made it, or its own card
+    // when nothing recorded calls it.
+    const sinks = new Set(paths.flatMap(path => path.nodes.filter(node => FLOW_GRAPH_SINKS.has(model.nodes[node]?.kind))));
+    let target = null;
+    cards.forEach((card, index) => { if (target || !highlight.nodes.has(index)) return; const row = card.rows.findIndex(item => item.sink?.members.some(member => sinks.has(member))); if (row >= 0) target = {index, row}; });
+    if (!target) { const own = [...sinks].map(node => display.displayOf[node]).find(index => index >= 0); if (own !== undefined) target = {index: own, row: -1}; }
+    if (target) select(target.index, {focusPaths: false, row: target.row, reveal: false});
+    // The whole stack in view when it fits legibly, else its top.
+    if (reveal && !showCards([...highlight.nodes]) && target) centerOn(target.index);
+    const caller = target ? display.nodes[target.index] : null, sink = target && target.row >= 0 ? cards[target.index].rows[target.row] : null;
+    selectionText.textContent = [`Selected request${sink ? ` ${sink.target}` : ''}`, caller ? `\u2190 ${flowGraphNodeName(caller)} ${cards[target.index].location}` : '', caller ? model.contexts[caller.context]?.label.title : '',
+      `${highlight.paths} distinct ${highlight.paths === 1 ? 'stack' : 'stacks'}`, `${highlight.nodes.size} cards`].filter(Boolean).join(' · ');
+    requestAgain.hidden = true;
+    return true;
+  }
+  const canOpen = node => Boolean(node?.artifact_id && node.status === 'resolved' && !FLOW_GRAPH_SINKS.has(node.kind));
+  function activate(index) {
+    const node = display?.nodes[index];
+    if (!node) return;
+    if (node.kind === 'chain') toggleChain(index); else if (canOpen(node)) open(node);
+  }
+  /** Follows a row's call to the card it reaches; Backspace comes back. */
+  function follow(index, row) {
+    const edge = display.edges[cards[index]?.rows[row]?.edge];
+    if (!edge) { if (cards[index]?.rows[row]?.sink) setDetails(true); return; }
+    if (edge.to === index) return;
+    remember();
+    select(edge.to);
+  }
+  function remember() {
+    if (selected < 0) return;
+    history.push({key: flowGraphNodeKey(model.nodes[display.nodes[selected].members[0]]), row: selectedRow, view: {...view}});
+    if (history.length > 64) history.shift();
+  }
+  function back() {
+    const entry = history.pop();
+    if (!entry) { flash('Nothing to go back to'); return; }
+    const index = display.nodes.findIndex(node => flowGraphNodeKey(model.nodes[node.members[0]]) === entry.key);
+    if (index < 0) { back(); return; }
+    view = {...entry.view}; select(index, {reveal: false, row: entry.row});
+  }
+  /** Goes to the caller that reached this card most often. */
+  function toCaller(index) {
+    let best = null;
+    for (const edge of display.edges) if (edge.to === index && edge.from !== index && (!best || edge.count > best.count)) best = edge;
+    if (!best) { flash('No recorded caller'); return; }
+    remember();
+    select(best.from, {row: cards[best.from].rows.findIndex(row => row.edge === display.edges.indexOf(best))});
+  }
+  /** J and K step through the selected card's calls. */
+  function stepRow(direction) {
+    if (selected < 0) return;
+    const count = cards[selected]?.rows.length ?? 0;
+    if (!count) return;
+    const next = selectedRow < 0 ? (direction > 0 ? 0 : count - 1) : Math.max(0, Math.min(count - 1, selectedRow + direction));
+    if (next === selectedRow) return;
+    select(selected, {reveal: false, focusPaths: false, row: next});
+  }
+  function copy(text, what) {
+    if (!text) return;
+    const clipboard = globalThis.navigator?.clipboard;
+    if (!clipboard?.writeText) { flash(`Copy is not available here. ${what}: ${text}`, 'error'); return; }
+    clipboard.writeText(text).then(() => flash(`Copied ${what.toLowerCase()}`), () => flash(`Could not copy the ${what.toLowerCase()}`, 'error'));
+  }
+
+  function applyFilter() {
+    const needle = filter.value.trim().toLowerCase();
+    matches = [];
+    if (needle && display) display.nodes.forEach((node, index) => {
+      const context = model.contexts[node.context]?.label;
+      const haystack = [flowGraphNodeName(node), flowGraphNodeDetail(node), node.url ?? '', context?.title ?? '', ...(node.kind === 'chain' ? node.members.map(member => flowGraphNodeName(model.nodes[member])) : []),
+        ...(display.sinkRows?.[index] ?? []).map(row => flowGraphNodeName(row.sink))].join(' ').toLowerCase();
+      if (haystack.includes(needle)) matches.push(index);
+    });
+    matchIndex = -1;
+    find.hidden = !needle;
+    renderMatches();
+    miniKey = '';
+    requestDraw();
+  }
+  function renderMatches() {
+    matchLabel.textContent = !matches.length ? 'no matches' : matchIndex < 0 ? `${matches.length.toLocaleString()} ${matches.length === 1 ? 'match' : 'matches'}` : `${(matchIndex + 1).toLocaleString()} of ${matches.length.toLocaleString()}`;
+  }
+  function stepMatch(direction) {
+    if (!matches.length) return;
+    matchIndex = (matchIndex + direction + matches.length) % matches.length;
+    renderMatches();
+    // A match is shown at reading size, and the other matches stay undimmed.
+    select(matches[matchIndex], {reveal: false}); centerOn(matches[matchIndex]);
+  }
+  let filterTimer = 0;
+  filter.addEventListener('input', () => { clearTimeout(filterTimer); filterTimer = setTimeout(applyFilter, 120); });
+  filter.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && matches.length) { event.preventDefault(); stepMatch(event.shiftKey ? -1 : 1); }
+    else if (event.key === 'Escape' && filter.value) { event.stopPropagation(); filter.value = ''; applyFilter(); }
+  });
+
+  // Details -------------------------------------------------------------------
+  function renderInspector() {
+    host.toggleAttribute('data-selected', selected >= 0);
+    inspector.replaceChildren();
+    if (!model) return;
+    const close = button('Close', () => { setDetails(false); canvas.focus({preventScroll: true}); }, 'Hide details', 'flow-graph-tool flow-graph-inspector-close');
+    inspector.append(close);
+    if (selected < 0 || !display?.nodes[selected]) { renderOverview(); return; }
+    const node = display.nodes[selected], context = model.contexts[node.context];
+    const titleRow = make('div', 'flow-inspector-head');
+    const tag = make('span', 'flow-kind-tag', FLOW_GRAPH_KIND_LABELS[node.kind] ?? node.kind); tag.dataset.kind = node.kind;
+    titleRow.append(make('h3', 'flow-inspector-title', flowGraphNodeName(node)), tag);
+    inspector.append(titleRow);
+    const facts = make('dl', 'flow-inspector-facts');
+    const fact = (label, value) => { if (value === undefined || value === null || value === '') return; facts.append(make('dt', '', label), make('dd', '', String(value))); };
+    if (node.kind === 'chain') {
+      fact('Folded', `${node.members.length} pass-through functions in one realm`);
+      fact('Realm', `${context?.label.title ?? ''}\n${context?.label.detail ?? ''}`);
+      inspector.append(facts);
+      const list = make('ol', 'flow-inspector-list');
+      node.members.forEach(member => list.append(make('li', '', `${flowGraphNodeName(model.nodes[member])} · ${flowGraphNodeDetail(model.nodes[member])}`)));
+      inspector.append(list);
+      const expand = make('button', 'secondary-button', 'Expand chain'); expand.type = 'button'; expand.addEventListener('click', () => { toggleChain(selected); canvas.focus({preventScroll: true}); });
+      inspector.append(expand);
+      return;
+    }
+    const foldable = display.foldKey.get(node.members[0]);
+    if (!FLOW_GRAPH_SINKS.has(node.kind)) {
+      fact('Location', node.url ?? null);
+      if (node.line) fact('Line', `${node.line}:${node.column}${node.kind === 'eval' ? ` in VM${node.script_id}` : ''}`);
+    }
+    fact('Realm', `${context?.label.title ?? ''}\n${context?.label.detail ?? ''}`);
+    if (node.kind === 'wasm') fact('Function index', node.function_index);
+    if (node.script_id !== undefined) fact('Script ID', node.kind === 'eval' ? `${node.script_id} (eval or new Function)` : node.script_id);
+    fact('Records', `${node.hits.toLocaleString()} ${FLOW_GRAPH_SINKS.has(node.kind) ? (node.hits === 1 ? 'occurrence' : 'occurrences') : `stack ${node.hits === 1 ? 'record passes' : 'records pass'} through it`}`);
+    if (highlight && !FLOW_GRAPH_SINKS.has(node.kind)) fact('Distinct stacks', highlight.paths.toLocaleString());
+    if (node.entries) fact('Task entry', `${node.entries.toLocaleString()} ${node.entries === 1 ? 'time' : 'times'}`);
+    if (node.leaves) fact('Innermost', `${node.leaves.toLocaleString()} ${node.leaves === 1 ? 'time' : 'times'}`);
+    if (node.schedules) fact('Scheduled', Object.entries(node.schedules).map(([task, count]) => `${FLOW_GRAPH_TASKS[task] ?? task} ×${count}`).join(', '));
+    if (node.status !== 'resolved') fact('Unresolved', FLOW_GRAPH_REASONS[node.reason] ?? node.reason);
+    inspector.append(facts);
+    if (node.chain_cut) inspector.append(make('p', 'flow-inspector-note', 'Earlier async callers were not recorded: a scheduling stack in its task chain was not retained, or a microtask hop names no recorded task.'));
+    const actions = make('div', 'flow-inspector-actions');
+    if (canOpen(node)) {
+      const openButton = make('button', 'secondary-button', 'Open in Sources'); openButton.type = 'button';
+      openButton.addEventListener('click', () => open(node)); actions.append(openButton);
+    }
+    if (foldable) {
+      const fold = make('button', 'secondary-button', 'Fold chain'); fold.type = 'button';
+      fold.addEventListener('click', () => { toggleChain(selected); canvas.focus({preventScroll: true}); }); actions.append(fold);
+    }
+    if (actions.children.length) inspector.append(actions);
+    const neighbours = (incoming) => display.edges.map((edge, index) => ({edge, index})).filter(({edge}) => (incoming ? edge.to : edge.from) === selected && edge.from !== edge.to);
+    for (const [label, incoming] of [['Called by', true], ['Calls', false]]) {
+      const items = neighbours(incoming);
+      if (!items.length) continue;
+      inspector.append(make('h4', 'flow-inspector-heading', `${label} · ${items.length}`));
+      const list = make('ul', 'flow-inspector-list');
+      items.sort((a, b) => b.edge.count - a.edge.count).slice(0, 64).forEach(({edge}) => {
+        const other = incoming ? edge.from : edge.to, item = make('li');
+        const link = make('button', 'flow-inspector-link', flowGraphNodeName(display.nodes[other])); link.type = 'button';
+        link.addEventListener('click', () => { select(other); canvas.focus({preventScroll: true}); });
+        const sites = flowGraphEdgeSites(model, edge);
+        const meta = [edge.kind === 'task' ? FLOW_GRAPH_TASKS[edge.task] ?? edge.task : edge.kind, ...edge.crosses.map(cross => ({frame: 'frame boundary', language: 'JS ↔ Wasm', dynamic: 'into eval'})[cross]),
+          ...(sites.length ? [`at ${sites.slice(0, 4).join(', ')}${sites.length > 4 ? '…' : ''}`] : []), `×${edge.count.toLocaleString()}`];
+        item.append(link, make('span', 'flow-inspector-meta', meta.join(' · ')));
+        list.append(item);
+      });
+      inspector.append(list);
+      if (items.length > 64) inspector.append(make('p', 'flow-inspector-note', `${items.length - 64} more are in the graph.`));
+    }
+    const made = display.sinkRows?.[selected] ?? [];
+    if (made.length) {
+      inspector.append(make('h4', 'flow-inspector-heading', `Requests, navigations and cookie writes · ${made.length}`));
+      const list = make('ul', 'flow-inspector-list');
+      [...made].sort((a, b) => b.count - a.count).slice(0, 64).forEach(row => {
+        const item = make('li'), sites = flowGraphEdgeSites(model, row);
+        item.append(make('span', 'flow-inspector-sink', flowGraphNodeName(row.sink)), make('span', 'flow-inspector-meta', [FLOW_GRAPH_KIND_LABELS[row.sink.kind] ?? row.sink.kind, ...(sites.length ? [`at ${sites.slice(0, 4).join(', ')}`] : []), `×${row.count.toLocaleString()}`].join(' · ')));
+        list.append(item);
+      });
+      inspector.append(list);
+      if (made.length > 64) inspector.append(make('p', 'flow-inspector-note', `${made.length - 64} more.`));
+    }
+  }
+
+  function renderOverview() {
+    const doc = model.doc;
+    inspector.append(make('h3', 'flow-inspector-title', 'Realms'));
+    const list = make('ul', 'flow-inspector-realms');
+    model.contexts.forEach(context => {
+      const item = make('li');
+      const counts = Object.entries(context.counts ?? {}).map(([kind, count]) => `${count} ${FLOW_GRAPH_KIND_TAGS[kind] ?? kind}`).join(' · ');
+      // A realm jumps to its cluster.
+      const name = make('button', 'flow-inspector-link flow-inspector-realm', context.label.title); name.type = 'button';
+      name.addEventListener('click', () => showRealm(context.index));
+      const engine = layout?.engine?.realms?.find(entry => entry.key === context.index);
+      const laidBy = !engine || engine.reason === 'one card' ? '' : engine.engine === 'triskel' ? 'laid out by Triskel' : `layered layout: ${engine.reason}`;
+      item.append(name, make('span', '', context.label.detail), make('span', 'flow-inspector-meta', counts));
+      if (laidBy) item.append(make('span', 'flow-inspector-meta', laidBy));
+      list.append(item);
+    });
+    inspector.append(list);
+    const crossing = display ? display.edges.filter(edge => edge.crosses.length) : [];
+    if (crossing.length) {
+      const frames = crossing.filter(edge => edge.crosses.includes('frame')).length, languages = crossing.filter(edge => edge.crosses.includes('language')).length, dynamic = crossing.filter(edge => edge.crosses.includes('dynamic')).length;
+      inspector.append(make('p', 'flow-inspector-note', `Crossings: ${frames} frame, ${languages} JS ↔ Wasm, ${dynamic} into eval.`));
+    }
+    const decoded = doc.stacks?.decoded ?? 0, distinct = doc.stacks?.distinct ?? 0;
+    inspector.append(make('p', 'flow-inspector-note', `${(doc.stacks?.occurrences ?? 0).toLocaleString()} stack records, ${distinct.toLocaleString()} distinct, ${decoded.toLocaleString()} with retained frames.`));
+    const unresolved = Object.entries(doc.stacks?.unresolved ?? {});
+    if (unresolved.length) inspector.append(make('p', 'flow-inspector-note', `Not decoded: ${unresolved.map(([reason, count]) => `${count} ${reason.replaceAll('_', ' ')}`).join(', ')}.`));
+    const notWalked = Object.entries(doc.stacks?.not_walked ?? {});
+    if (notWalked.length) inspector.append(make('p', 'flow-inspector-note', `No script on the stack: ${notWalked.map(([reason, count]) => `${count} ${reason.replaceAll('_', ' ')}`).join(', ')}.`));
+    inspector.append(make('h4', 'flow-inspector-heading', 'Not shown'));
+    const missing = make('ul', 'flow-inspector-list'); (doc.not_shown ?? []).forEach(item => missing.append(make('li', '', item))); inspector.append(missing);
+    inspector.append(make('p', 'flow-inspector-hint', 'Select a card to light every stack through it. Choose a request above to light its own stack.'));
+  }
+
+  // Tooltip -------------------------------------------------------------------
+  function hideTooltip() { tooltip.hidden = true; }
+  function showTooltip(px, py) {
+    const facts = [];
+    let heading = '', kind = '';
+    if (hover.node >= 0 && hover.row < 0) {
+      const node = display.nodes[hover.node], context = model.contexts[node.context]?.label;
+      heading = flowGraphNodeName(node); kind = node.kind;
+      facts.push(['kind', FLOW_GRAPH_KIND_LABELS[node.kind] ?? node.kind, 'kind']);
+      const location = flowGraphNodeLocation(node);
+      if (location && !FLOW_GRAPH_SINKS.has(node.kind)) facts.push(['at', location, 'location']);
+      facts.push(['realm', `${context?.title ?? ''} · ${context?.detail ?? ''}`, '']);
+      facts.push(['records', `${(node.hits ?? 0).toLocaleString()}`, 'count']);
+      if (node.entries) facts.push(['task entry', node.entries.toLocaleString(), 'count']);
+      if (node.status !== 'resolved') facts.push(['unresolved', FLOW_GRAPH_REASONS[node.reason] ?? node.reason ?? '', '']);
+      if (node.chain_cut) facts.push(['callers', 'earlier async callers not recorded', '']);
+    } else if (hover.row >= 0 && cards[hover.node]?.rows[hover.row]?.sink) {
+      const row = cards[hover.node].rows[hover.row], sink = row.sink, context = model.contexts[sink.context]?.label;
+      heading = flowGraphNodeName(sink); kind = sink.kind;
+      facts.push(['kind', FLOW_GRAPH_KIND_LABELS[sink.kind] ?? sink.kind, 'kind']);
+      facts.push(['from', flowGraphNodeName(display.nodes[hover.node]), '']);
+      if (row.site) facts.push(['site', flowGraphEdgeSites(model, {members: row.members}).slice(0, 6).join(', '), 'location']);
+      facts.push(['realm', context?.title ?? '', '']);
+      facts.push(['seen', `${(sink.hits ?? 0).toLocaleString()} in this session, ${row.count ? row.count.slice(1) : '1'} from here`, 'count']);
+    } else {
+      const edgeIndex = hover.row >= 0 ? cards[hover.node]?.rows[hover.row]?.edge : hover.edge, edge = display.edges[edgeIndex];
+      if (!edge) { hideTooltip(); return; }
+      heading = `${edge.kind === 'task' ? FLOW_GRAPH_TASKS[edge.task] ?? edge.task : edge.kind}`; kind = flowGraphEdgeFamily(edge);
+      facts.push(['from', flowGraphNodeName(display.nodes[edge.from]), '']);
+      facts.push(['to', flowGraphNodeName(display.nodes[edge.to]), '']);
+      const note = flowGraphEdgeNote(model, display, edge);
+      if (note) facts.push(['crosses', note, 'cross']);
+      const sites = flowGraphEdgeSites(model, edge);
+      if (sites.length) facts.push(['site', sites.slice(0, 6).join(', ') + (sites.length > 6 ? ' …' : ''), 'location']);
+      facts.push(['walked', `${edge.count.toLocaleString()} ${edge.count === 1 ? 'time' : 'times'}`, '']);
+    }
+    tooltip.replaceChildren();
+    const head = make('strong', 'flow-graph-tooltip-title', heading); head.dataset.kind = kind; tooltip.append(head);
+    const list = make('dl');
+    for (const [label, value, tone] of facts) { const dd = make('dd', '', value); if (tone) dd.dataset.tone = tone; list.append(make('dt', '', label), dd); }
+    tooltip.append(list);
+    tooltip.hidden = false;
+    const tw = tooltip.offsetWidth || 240, th = tooltip.offsetHeight || 100;
+    // Beside the card, at the row, so it never covers what it describes or
+    // the callee about to be followed; at the pointer only for an edge.
+    let left = px + 16, top = py + 18;
+    if (hover.node >= 0) {
+      const box = nodeBox(hover.node), right = (box.x + box.w - view.x) * view.z + 12, leftSide = (box.x - view.x) * view.z - 12 - tw;
+      left = right + tw <= cssW - 8 ? right : leftSide >= 8 ? leftSide : left;
+      top = ((hover.row >= 0 ? rowTop(box, hover.row) : box.y) - view.y) * view.z - 4;
+    }
+    left = Math.max(8, Math.min(left, cssW - tw - 8)); top = Math.max(8, Math.min(top, cssH - th - 8));
+    tooltip.style.left = `${left}px`; tooltip.style.top = `${top}px`;
+  }
+
+  // Context menu --------------------------------------------------------------
+  let menuItems = [];
+  function closeMenu(refocus = true) {
+    if (menu.hidden) return;
+    menu.hidden = true; menuItems = [];
+    if (refocus) canvas.focus({preventScroll: true});
+  }
+  /** A call site as a researcher pastes it: file:line:column, or the module
+   * and its offset. */
+  function callSite(index, row) {
+    const node = display.nodes[index], item = cards[index]?.rows[row], site = item?.site?.replace(/\+\d+$/, '');
+    if (!site) return '';
+    const file = node.kind === 'eval' ? `VM${node.script_id}` : node.url ?? '';
+    return site.startsWith('+0x') ? `${file} ${site}`.trim() : `${file}:${site}`;
+  }
+  const hasCaller = index => display.edges.some(edge => edge.to === index && edge.from !== index);
+  function openMenu(index, px, py, row = -1) {
+    if (!display?.nodes[index]) return;
+    if (selected !== index || selectedRow !== row) select(index, {reveal: false, row, focusPaths: selected !== index});
+    hideTooltip();
+    const node = display.nodes[index], foldable = node.kind === 'chain' || display.foldKey.get(node.members[0]), item = row >= 0 ? cards[index].rows[row] : null;
+    const entries = [
+      ...(item ? [...(item.edge >= 0 ? [['Follow call', '↩', true, () => follow(index, row)]] : []), ['Copy call site', 'S', Boolean(callSite(index, row)), () => copy(callSite(index, row), 'Call site')], null] : []),
+      ['Open in Sources', item ? 'O' : '↩', canOpen(node), () => open(node)],
+      ...(foldable ? [[node.kind === 'chain' ? 'Expand chain' : 'Fold chain', 'Space', true, () => toggleChain(index)]] : []),
+      null,
+      ['Go to caller', 'U', hasCaller(index), () => toCaller(index)],
+      ['Center on card', 'F', true, () => centerOn(index)],
+      ['Show details', 'I', true, () => setDetails(true)],
+      null,
+      ['Copy name', 'C', true, () => copy(flowGraphNodeName(node), 'Name')],
+      ['Copy location', 'L', Boolean(flowGraphNodeLocation(node)), () => copy(flowGraphNodeLocation(node), 'Location')],
+    ];
+    menu.replaceChildren(); menuItems = [];
+    for (const entry of entries) {
+      if (!entry) { const rule = make('div', 'flow-graph-menu-rule'); rule.setAttribute('role', 'separator'); menu.append(rule); continue; }
+      const [label, shortcut, enabled, action] = entry;
+      const item = make('button', 'flow-graph-menu-item'); item.type = 'button'; item.setAttribute('role', 'menuitem'); item.tabIndex = -1; item.disabled = !enabled;
+      item.append(make('span', '', label), make('kbd', '', shortcut));
+      item.addEventListener('click', () => { closeMenu(); action(); });
+      menu.append(item);
+      if (enabled) menuItems.push({item, shortcut, action});
+    }
+    menu.hidden = false;
+    const mw = menu.offsetWidth || 220, mh = menu.offsetHeight || 220;
+    menu.style.left = `${Math.max(6, Math.min(px, cssW - mw - 6))}px`; menu.style.top = `${Math.max(6, Math.min(py, cssH - mh - 6))}px`;
+    menuItems[0]?.item.focus({preventScroll: true});
+  }
+  menu.addEventListener('keydown', event => {
+    const at = menuItems.findIndex(entry => entry.item === document.activeElement);
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); const next = (at + (event.key === 'ArrowDown' ? 1 : -1) + menuItems.length) % menuItems.length; menuItems[next]?.item.focus(); }
+    else if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); menuItems[event.key === 'Home' ? 0 : menuItems.length - 1]?.item.focus(); }
+    else if (event.key === 'Escape' || event.key === 'Tab') { event.preventDefault(); event.stopPropagation(); closeMenu(); }
+    else if (event.key.length === 1 && !event.metaKey && !event.ctrlKey) {
+      const entry = menuItems.find(item => item.shortcut.toLowerCase() === event.key.toLowerCase());
+      if (entry) { event.preventDefault(); closeMenu(); entry.action(); }
+    }
+  });
+  menu.addEventListener('focusout', event => { if (!menu.contains(event.relatedTarget)) closeMenu(false); });
+
+  // Input ----------------------------------------------------------------------
+  const toGraph = (px, py) => [view.x + px / view.z, view.y + py / view.z];
+  function hitTest(px, py) {
+    if (!layout) return {node: -1, row: -1, edge: -1};
+    const [gx, gy] = toGraph(px, py);
+    for (let index = display.nodes.length - 1; index >= 0; index -= 1) {
+      const box = nodeBox(index);
+      if (gx < box.x || gx > box.x + box.w || gy < box.y || gy > box.y + box.h) continue;
+      const card = cards[index], first = rowTop(box, 0);
+      const row = lodNow() === 2 && gy >= first ? Math.floor((gy - first) / FLOW_GRAPH_CARD.row) : -1;
+      return {node: index, row: row >= 0 && row < card.rows.length && (card.rows[row].edge >= 0 || card.rows[row].sink) ? row : -1, edge: -1};
+    }
+    if (view.z < 0.25) return {node: -1, row: -1, edge: -1};
+    const bounds = boundsOfEdges(), tolerance = 5 / view.z;
+    let best = -1, bestDistance = tolerance;
+    for (let e = 0; e < display.edges.length; e += 1) {
+      const at = e * 4;
+      if (gx < bounds[at] - tolerance || gx > bounds[at + 2] + tolerance || gy < bounds[at + 1] - tolerance || gy > bounds[at + 3] + tolerance) continue;
+      const points = flatRoute(e);
+      for (let i = 2; i < points.length; i += 2) {
+        const ax = points[i - 2], ay = points[i - 1], bx = points[i], by = points[i + 1], dx = bx - ax, dy = by - ay, length = dx * dx + dy * dy;
+        const t = length ? Math.max(0, Math.min(1, ((gx - ax) * dx + (gy - ay) * dy) / length)) : 0;
+        const distance = Math.hypot(gx - ax - t * dx, gy - ay - t * dy);
+        if (distance < bestDistance) { bestDistance = distance; best = e; }
+      }
+    }
+    return {node: -1, row: -1, edge: best};
+  }
+  const pointer = {down: false, x: 0, y: 0, moved: false};
+  const local = event => { const rect = canvas.getBoundingClientRect(); return [event.clientX - rect.left, event.clientY - rect.top]; };
+  canvas.addEventListener('pointerdown', event => {
+    if (event.button === 2) return;
+    pointer.down = true; pointer.x = event.clientX; pointer.y = event.clientY; pointer.moved = false;
+    canvas.setPointerCapture?.(event.pointerId); canvas.focus({preventScroll: true}); hideTooltip(); closeMenu(false);
+  });
+  canvas.addEventListener('pointermove', event => {
+    if (!layout) return;
+    if (pointer.down) {
+      if (Math.abs(event.clientX - pointer.x) + Math.abs(event.clientY - pointer.y) > 2) pointer.moved = true;
+      view.x -= (event.clientX - pointer.x) / view.z; view.y -= (event.clientY - pointer.y) / view.z; pointer.x = event.clientX; pointer.y = event.clientY; requestDraw();
+      return;
+    }
+    const [px, py] = local(event), next = hitTest(px, py);
+    const changed = next.node !== hover.node || next.row !== hover.row || next.edge !== hover.edge;
+    hover = next;
+    canvas.style.cursor = next.row >= 0 || next.edge >= 0 ? 'pointer' : '';
+    if (next.node < 0 && next.edge < 0) hideTooltip(); else if (menu.hidden) showTooltip(px, py);
+    if (changed) requestDraw();
+  });
+  canvas.addEventListener('pointerleave', () => { if (pointer.down) return; hover = {node: -1, row: -1, edge: -1}; hideTooltip(); requestDraw(); });
+  canvas.addEventListener('pointerup', event => {
+    if (!pointer.down) return;
+    pointer.down = false;
+    if (pointer.moved || !layout) return;
+    const [px, py] = local(event), hit = hitTest(px, py);
+    if (hit.node >= 0) { select(hit.node, {reveal: false, row: hit.row}); return; }
+    if (hit.edge >= 0) { const edge = display.edges[hit.edge]; select(edge.from, {reveal: false, row: cards[edge.from].rows.findIndex(row => row.edge === hit.edge)}); return; }
+    clearSelection();
+  });
+  canvas.addEventListener('dblclick', event => {
+    const [px, py] = local(event), hit = hitTest(px, py);
+    if (hit.node < 0) return;
+    if (hit.row >= 0) follow(hit.node, hit.row); else activate(hit.node);
+  });
+  canvas.addEventListener('contextmenu', event => {
+    const [px, py] = local(event), hit = hitTest(px, py);
+    if (hit.node < 0) return;
+    event.preventDefault();
+    openMenu(hit.node, px, py, hit.row);
+  });
+  canvas.addEventListener('wheel', event => {
+    if (!layout) return;
+    event.preventDefault(); hideTooltip(); closeMenu(false);
+    if (event.ctrlKey || event.metaKey) { const [px, py] = local(event); zoomAt(Math.exp(-event.deltaY * 0.01), px, py); }
+    else { view.x += event.deltaX / view.z; view.y += event.deltaY / view.z; requestDraw(); }
+  }, {passive: false});
+  function move(dx, dy) {
+    if (!display?.nodes.length) return;
+    if (selected < 0) { let first = 0; display.nodes.forEach((node, index) => { if (layout.y[index] < layout.y[first] || (layout.y[index] === layout.y[first] && layout.x[index] < layout.x[first])) first = index; }); return select(first); }
+    const from = nodeBox(selected), cx = from.x + from.w / 2, cy = from.y + from.h / 2;
+    let best = -1, bestScore = Infinity;
+    display.nodes.forEach((node, index) => {
+      if (index === selected) return;
+      const box = nodeBox(index), ddx = box.x + box.w / 2 - cx, ddy = box.y + box.h / 2 - cy;
+      const along = dx ? ddx * dx : ddy * dy, across = dx ? Math.abs(ddy) : Math.abs(ddx);
+      if (along <= 1) return;
+      const score = along + across * 2.5;
+      if (score < bestScore) { bestScore = score; best = index; }
+    });
+    if (best >= 0) select(best);
+  }
+  canvas.addEventListener('keydown', event => {
+    if (!layout) return;
+    const key = event.key, panStep = 80 / view.z, plain = !event.metaKey && !event.ctrlKey && !event.altKey; let handled = true;
+    hideTooltip();
+    // An open key closes before Escape does anything else.
+    if (key === 'Escape' && status.hasAttribute('data-key-open')) { setKey(false); event.preventDefault(); event.stopPropagation(); return; }
+    if ((key === 'Backspace' && plain) || (key === 'ArrowLeft' && event.altKey)) back();
+    else if (event.shiftKey && key.startsWith('Arrow')) { view.x += key === 'ArrowLeft' ? -panStep : key === 'ArrowRight' ? panStep : 0; view.y += key === 'ArrowUp' ? -panStep : key === 'ArrowDown' ? panStep : 0; requestDraw(); }
+    else if (key === 'ArrowDown') move(0, 1); else if (key === 'ArrowUp') move(0, -1); else if (key === 'ArrowLeft') move(-1, 0); else if (key === 'ArrowRight') move(1, 0);
+    else if (key === '+' || key === '=') zoomAt(1.25); else if (key === '-' || key === '_') zoomAt(0.8); else if (key === '0') fit();
+    else if (key === 'Escape' && (selected >= 0 || highlight)) clearSelection();
+    else if (key === 'Escape' && detailsOpen) setDetails(false);
+    else if (key === ' ' && selected >= 0) toggleChain(selected);
+    // Enter follows the chosen call, as in a disassembler; on the card
+    // itself it opens the function or expands the chain.
+    else if (key === 'Enter' && selected >= 0) { if (selectedRow >= 0 && cards[selected].rows[selectedRow]?.edge >= 0) follow(selected, selectedRow); else activate(selected); }
+    else if (plain && (key === 'j' || key === 'J' || key === 'k' || key === 'K') && selected >= 0) stepRow(key.toLowerCase() === 'j' ? 1 : -1);
+    else if (plain && (key === 'u' || key === 'U') && selected >= 0) toCaller(selected);
+    else if (plain && (key === 'o' || key === 'O') && selected >= 0 && canOpen(display.nodes[selected])) open(display.nodes[selected]);
+    else if (plain && (key === 's' || key === 'S') && selected >= 0 && selectedRow >= 0) copy(callSite(selected, selectedRow), 'Call site');
+    else if ((key === 'ContextMenu' || (key === 'F10' && event.shiftKey)) && selected >= 0) {
+      const box = nodeBox(selected), rowY = selectedRow >= 0 ? rowTop(box, selectedRow) + FLOW_GRAPH_CARD.row : box.y + 24;
+      openMenu(selected, (box.x + Math.min(box.w, 140) - view.x) * view.z, (rowY - view.y) * view.z, selectedRow);
+    }
+    else if (key === '/') { filter.focus(); filter.select(); }
+    else if (plain && (key === 'i' || key === 'I')) setDetails(!detailsOpen);
+    else if (plain && (key === 'm' || key === 'M')) { minimapOn = !minimapOn; host.toggleAttribute('data-minimap-off', !minimapOn); miniKey = ''; requestDraw(); }
+    else if (plain && (key === 'f' || key === 'F') && selected >= 0) centerOn(selected);
+    else if (plain && (key === 'c' || key === 'C') && selected >= 0) copy(flowGraphNodeName(display.nodes[selected]), 'Name');
+    else if (plain && (key === 'l' || key === 'L') && selected >= 0) copy(flowGraphNodeLocation(display.nodes[selected]), 'Location');
+    else handled = false;
+    if (handled) { event.preventDefault(); event.stopPropagation(); }
+  });
+
+  return {
+    /** Shows the view for one session; loads it the first time or when the session changes. */
+    show({session: next, request = null}) {
+      visible = true; host.hidden = false;
+      readTokens();
+      const changed = String(next ?? '') !== String(session ?? '');
+      session = next ?? null;
+      if (changed) { model = null; display = null; cards = null; layout = null; selected = -1; selectedRow = -1; highlight = null; generation += 1; runner.cancel(); }
+      // Evidence polls re-render Backtraces; only a newly chosen request moves
+      // the highlight, so a card the researcher picked stays lit.
+      const requestText = request ? `${request.process}:${request.request}` : '';
+      const newRequest = requestText !== shownRequest;
+      shownRequest = requestText;
+      requestKey = request;
+      resize();
+      if (!model || (status_ === 'empty' && !layingOut)) load(Boolean(model));
+      // Polls call show() often; a layout already running is left to finish.
+      else if (!layingOut && (layoutStale || !layout)) rebuild(!layout);
+      else if (newRequest && request) highlightRequest(request);
+      else if (newRequest && highlightFromRequest) clearSelection();
+      requestDraw();
+    },
+    hide() {
+      visible = false; host.hidden = true;
+      controller?.abort(); runner.cancel(); hideTooltip(); closeMenu(false);
+      if (status_ === 'loading' && !layout) { requested = null; status_ = 'idle'; }
+    },
+    highlightRequest,
+    focus() { canvas.focus({preventScroll: true}); },
+    isVisible: () => visible,
+    // For the offline checks: the current state without drawing.
+    snapshot: () => ({status: status_, model, display, cards, layout, selected, selectedRow, highlight, matches, details: detailsOpen, menu: !menu.hidden, view: {...view}})
+  };
+}
+
+if (typeof module === 'object' && module?.exports) {
+  module.exports = {flowGraphModel, flowGraphNodeKey, flowGraphDisplay, flowGraphCards, flowGraphLayoutInput, flowGraphPathsThrough, flowGraphHighlight, flowGraphNodeName, flowGraphNodeDetail,
+    flowGraphNodeLocation, flowGraphEdgeNote, flowGraphEdgeSites, flowGraphContextLabel, createFlowGraphPanel};
+}

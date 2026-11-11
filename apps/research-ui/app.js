@@ -33,6 +33,15 @@ const entropyMap = createEntropyMap({
   toolbar: document.querySelector('.source-editor-toolbar'),
   getSource: selectedSource, identityOf: sourceIdentity, reveal: revealSourceByteOffset
 });
+// Backtraces Flow graph: every recorded stack of the session as one graph.
+const flowGraphPanel = typeof createFlowGraphPanel === 'function' && document.querySelector('#flow-graph-host') ? createFlowGraphPanel({
+  host: document.querySelector('#flow-graph-host'),
+  // The stored-evidence window has no flow graph route.
+  available: () => location.protocol === 'http:' || location.protocol === 'https:',
+  open: node => {
+    if (node.artifact_id) openResolvedFrame({artifact_id: node.artifact_id, artifact_line: node.artifact_line ?? null, artifact_column: node.artifact_column ?? 0});
+  }
+}) : null;
 // The Sources status bar never cuts the cursor position, which has the full
 // text as its tooltip. When the items do not fit, it drops in turn the hash,
 // the pretty-print label (leaving "{ }"), the language, the size, a
@@ -4355,26 +4364,67 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         item.append(row); return item;
       }
 
+      /** The session the Flow graph folds: the selected request's, else the first captured one. */
+      function flowGraphSession() {
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId) ?? null;
+        const root = requestTraceRoot(request) ?? state.requests.map(candidate => requestTraceRoot(candidate)).find(Boolean);
+        const session = investigationId(root?.session_id);
+        return session && session !== '0' ? session : null;
+      }
+      /** The renderer request a Flow graph path names, from the row's request_initiated record. */
+      function flowGraphRequestKey() {
+        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId) ?? null;
+        const initiated = request?.events?.find(event => event.type === 'request_initiated');
+        const id = investigationId(initiated?.request_id);
+        return initiated && id && id !== '0' ? {process: initiated.process_id, request: id} : null;
+      }
+      function renderTraceMode() {
+        const graph = state.traceMode === 'graph';
+        const screen = document.querySelector('#screen-backtrace');
+        if (screen) screen.dataset.traceMode = graph ? 'graph' : 'steps';
+        document.querySelector('#trace-mode-steps')?.setAttribute('aria-pressed', String(!graph));
+        document.querySelector('#trace-mode-graph')?.setAttribute('aria-pressed', String(graph));
+        if (typeof flowGraphPanel === 'undefined' || !flowGraphPanel) return graph;
+        const showing = graph && screen && !screen.hidden;
+        if (showing) flowGraphPanel.show({session: flowGraphSession(), request: flowGraphRequestKey()});
+        else flowGraphPanel.hide();
+        return graph;
+      }
+
       function renderBacktrace() {
+        // Checks run this function alone, without the Flow graph helpers.
+        const graphMode = typeof renderTraceMode === 'function' ? renderTraceMode() : false;
         const selection = originTraceSelection();
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         const captured = state.requests.filter(candidate => requestTraceRoot(candidate));
         const choices = request && !requestTraceRoot(request) ? [request, ...captured] : captured;
-        const choiceKey = JSON.stringify(choices.map(candidate => [candidate.id, candidate.method, candidate.path]));
+        const choiceKey = JSON.stringify([Boolean(state.selectedRequestId), choices.map(candidate => [candidate.id, candidate.method, candidate.path])]);
         if (elements.traceRequest.dataset.choices !== choiceKey) {
-          elements.traceRequest.replaceChildren(...choices.map(candidate => {
-          const option = document.createElement('option'); option.value = candidate.id;
-          option.textContent = `${candidate.method} ${candidate.path}${requestTraceRoot(candidate) ? '' : candidate.origin === 'sample' ? ' (sample, no predecessor evidence)' : candidate.origin === 'demo' ? ' (demo, no predecessor evidence)' : ' (no request identifier)'}`;
-          option.selected = candidate.id === state.selectedRequestId;
-          return option;
-          }));
+          const labelOf = candidate => `${candidate.method} ${candidate.path}${requestTraceRoot(candidate) ? '' : candidate.origin === 'sample' ? ' (sample, no predecessor evidence)' : candidate.origin === 'demo' ? ' (demo, no predecessor evidence)' : ' (no request identifier)'}`;
+          // Requests to one target read alike; their renderer request ID tells them apart.
+          const repeats = new Map();
+          for (const candidate of choices) repeats.set(labelOf(candidate), (repeats.get(labelOf(candidate)) ?? 0) + 1);
+          const options = choices.map(candidate => {
+            const option = document.createElement('option'); option.value = candidate.id;
+            const label = labelOf(candidate), renderer = candidate.events?.find(event => event.type === 'request_initiated')?.request_id;
+            option.textContent = repeats.get(label) > 1 && renderer ? `${label} · #${renderer}` : label;
+            option.selected = candidate.id === state.selectedRequestId;
+            return option;
+          });
+          if (!state.selectedRequestId && choices.length) {
+            const placeholder = document.createElement('option'); placeholder.value = ''; placeholder.textContent = 'Choose a request to trace'; placeholder.selected = true;
+            options.unshift(placeholder);
+          }
+          elements.traceRequest.replaceChildren(...options);
           elements.traceRequest.dataset.choices = choiceKey;
         }
         elements.traceRequest.value = state.selectedRequestId || '';
         elements.traceRequest.disabled = !choices.length;
         elements.traceLoad.disabled = !selection || state.originTraceStatus === 'loading';
         elements.traceLoad.textContent = state.originTrace ? 'Refresh trace' : 'Load trace';
-        elements.backtraceSubtitle.textContent = selection
+        elements.backtraceSubtitle.textContent = graphMode
+          ? 'Every recorded stack of this session, across frames, realms, JavaScript, eval and Wasm'
+          : selection
           ? `${request.method} ${request.path}`
           : 'Request events and their recorded predecessors';
         const trace = selection && state.originTraceKey === selection.key ? state.originTrace : null;
@@ -8568,6 +8618,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
 
         evidenceWorkspace.setVisible(screenName === 'evidence');
+        if (screenName !== 'backtrace' && typeof flowGraphPanel !== 'undefined') flowGraphPanel?.hide();
         if (screenName !== 'sources') sourceFactsPanel.cancel();
         if (typeof entropyMap !== 'undefined') entropyMap.setVisible(screenName === 'sources');
         if (screenName !== 'tools') float32Panel.cancel();
@@ -8994,6 +9045,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         await refreshOriginTrace();
       });
       elements.traceLoad.addEventListener('click', refreshOriginTrace);
+      for (const [id, mode] of [['#trace-mode-steps', 'steps'], ['#trace-mode-graph', 'graph']]) {
+        document.querySelector(id)?.addEventListener('click', () => {
+          if (state.traceMode === mode || (!state.traceMode && mode === 'steps')) return;
+          state.traceMode = mode;
+          renderBacktrace();
+          if (mode === 'graph') flowGraphPanel?.focus();
+        });
+      }
       elements.traceFirstRequest.addEventListener('click', async () => {
         const first = state.requests.find(candidate => requestTraceRoot(candidate));
         if (!first) return;

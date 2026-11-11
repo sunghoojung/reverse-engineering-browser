@@ -1,0 +1,243 @@
+/* Session flow graph in Backtraces. Canvas tokens alias plain app.css values,
+ * never color-mix(), so the canvas can parse them in both themes. */
+:root {
+  --flow-card: var(--panel);
+  --flow-card-line: var(--line);
+  --flow-card-rule: var(--line-soft);
+  --flow-cluster: var(--panel-2);
+  --flow-cluster-line: var(--line-soft);
+  --flow-badge: var(--line);
+  --flow-badge-fill: var(--panel-3);
+  --flow-box: var(--panel-3);
+  --flow-minimap: var(--panel);
+  /* Row text: a plain call is neutral; only a crossing or an async hop takes
+   * the edge colour, so the colour of a row and of its edge always agree. */
+  --flow-site: var(--muted);
+  --flow-op: var(--muted);
+  --flow-note: var(--muted);
+  --flow-sink: var(--syntax-type);
+  --flow-js: var(--syntax-type);
+  --flow-eval: var(--syntax-string);
+  --flow-wasm: var(--syntax-parameter);
+  --flow-request: var(--syntax-number);
+  --flow-navigation: var(--syntax-keyword);
+  --flow-cookie: var(--syntax-support-function);
+  --flow-chain: var(--muted);
+  --flow-edge-call: var(--faint);
+  --flow-edge-async: var(--syntax-string);
+  --flow-edge-cross: var(--syntax-support-function);
+  --flow-edge-omitted: var(--faint);
+}
+/* Light: the Dawn canvas lifts white cards, and every text colour clears
+ * 4.5:1 on white. */
+:root[data-theme="light"] {
+  --flow-request: var(--green);
+  --flow-chain: var(--muted);
+  --flow-js: var(--cyan);
+  --flow-eval: var(--amber);
+  --flow-wasm: var(--code-text);
+  --flow-sink: var(--green);
+  --flow-cookie: var(--red);
+  --flow-edge-async: var(--amber);
+  --flow-edge-cross: var(--red);
+  --flow-box: var(--line);
+  --flow-cluster-line: var(--line);
+}
+.flow-graph { --graph-canvas: var(--code-bg); }
+
+/* Steps and Flow graph are two views of one screen. */
+.trace-modes { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-2); }
+.trace-mode { min-height: 24px; padding: 0 12px; white-space: nowrap; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font: 500 11.5px var(--sans); }
+.trace-mode:hover { color: var(--text); }
+.trace-mode[aria-pressed="true"] { background: var(--accent-soft); color: var(--text); }
+.trace-mode:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#screen-backtrace[data-trace-mode="graph"] :is(#trace-load, #trace-evidence, #trace-notice, #trace-empty, #trace-content, #trace-first-request) { display: none !important; }
+/* A short window gives the graph the subtitle's line. */
+@media (max-width: 1000px), (max-height: 640px) { #screen-backtrace[data-trace-mode="graph"] #backtrace-subtitle { display: none; } }
+
+.flow-graph[hidden], .flow-graph-state[hidden], .flow-graph-banner[hidden], .flow-graph-tooltip[hidden], .flow-graph-menu[hidden], .flow-graph-inspector[hidden] { display: none; }
+.flow-graph { flex: 1; min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr) 26px; background: var(--graph-canvas); container: flow-graph / inline-size; }
+.flow-graph-body { position: relative; min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+.flow-graph[data-details] .flow-graph-body { grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); }
+.flow-graph-stage { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--graph-canvas); container: flow-stage / size; }
+.flow-graph-canvas { display: block; cursor: grab; touch-action: none; }
+/* The floating heading gets a backdrop that fades into the canvas. */
+.flow-graph-stage::before { content: ""; position: absolute; z-index: 1; inset: 0 0 auto; height: 58px; background: linear-gradient(var(--graph-canvas) 62%, transparent); pointer-events: none; }
+.flow-graph-canvas:active { cursor: grabbing; }
+.flow-graph-canvas:focus { outline: none; }
+.flow-graph-canvas:focus-visible { outline: none; }
+/* The focus ring sits over the floating heading, so all four sides show. */
+.flow-graph-stage:has(.flow-graph-canvas:focus-visible)::after { content: ""; position: absolute; z-index: 4; inset: 0; border: 2px solid var(--accent); pointer-events: none; }
+.flow-graph:not([data-state="ready"]) :is(.flow-graph-tools, .flow-graph-heading) { visibility: hidden; }
+
+/* Heading and tools float over the canvas, like a document title. */
+.flow-graph-heading { position: absolute; z-index: 2; top: 12px; left: 18px; max-width: calc(100% - var(--flow-tools-w, 640px) - 48px); display: flex; align-items: baseline; gap: 12px; white-space: nowrap; pointer-events: none; }
+.flow-graph-title { flex: 0 0 auto; color: var(--text); font: 600 19px var(--sans); letter-spacing: -0.01em; }
+.flow-graph-stats { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--muted); font: 13px var(--sans); text-overflow: ellipsis; }
+.flow-graph-evidence { flex: 0 0 auto; color: var(--faint); font: 13px var(--sans); }
+.flow-graph-evidence[data-partial="true"] { color: var(--amber); }
+.flow-graph-tools { position: absolute; z-index: 3; top: 10px; right: 12px; max-width: calc(100% - 24px); display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; }
+.flow-graph-filter input { width: 200px; height: 30px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--text); font: 11.5px var(--sans); }
+.flow-graph-find { display: inline-flex; align-items: center; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); }
+.flow-graph-find[hidden] { display: none; }
+.flow-graph-find .flow-graph-tool { min-width: 24px; padding: 0 6px; }
+.flow-graph-filter input:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.flow-graph-matches { min-width: 0; padding: 2px 8px; border-radius: 999px; background: var(--panel); color: var(--faint); font: 10.5px var(--mono); }
+.flow-graph-matches:empty { display: none; }
+.flow-graph-segment, .flow-graph-zoom-bar { display: inline-flex; align-items: center; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); }
+.flow-graph-segment-item, .flow-graph-tool { min-height: 22px; padding: 0 10px; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font: 500 11.5px var(--sans); white-space: nowrap; }
+.flow-graph-segment-item:hover, .flow-graph-tool:hover:not(:disabled) { color: var(--text); background: var(--panel-3); }
+.flow-graph-segment-item[aria-pressed="true"] { background: var(--accent-soft); color: var(--text); }
+.flow-graph-zoom-bar .flow-graph-tool { min-width: 26px; padding: 0 8px; }
+.flow-graph-tools > .flow-graph-tool { min-height: 30px; padding: 0 14px; border: 1px solid var(--line); background: var(--panel); }
+.flow-graph-tool:disabled { cursor: default; opacity: 0.45; }
+.flow-graph-zoom { min-width: 40px; color: var(--faint); font: 11px var(--mono); text-align: center; }
+.flow-graph-segment-item:focus-visible, .flow-graph-tool:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.flow-graph-state { position: absolute; z-index: 4; inset: 0; display: grid; place-content: center; justify-items: center; gap: 8px; padding: 24px; color: var(--muted); font: 12px var(--sans); text-align: center; background: var(--graph-canvas); }
+.flow-graph-state strong { color: var(--text); font: 600 14px var(--sans); }
+.flow-graph-state p { max-width: 460px; margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.flow-graph-state[data-kind="error"] strong { color: var(--red); }
+.flow-graph-banner { position: absolute; z-index: 5; top: 52px; left: 50%; max-width: calc(100% - 32px); transform: translateX(-50%); padding: 6px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--muted); font: 11.5px var(--sans); box-shadow: 0 6px 18px var(--shadow); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.flow-graph-banner[data-kind="error"] { display: flex; align-items: center; gap: 10px; max-width: min(560px, calc(100% - 32px)); border-radius: 10px; color: var(--red); white-space: normal; text-overflow: clip; }
+.flow-graph-banner .secondary-button { flex: 0 0 auto; min-height: 24px; }
+.flow-graph-toast { position: absolute; z-index: 6; left: 50%; bottom: 16px; transform: translateX(-50%); padding: 6px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-3); color: var(--text); font: 11.5px var(--sans); box-shadow: 0 6px 18px var(--shadow); pointer-events: none; }
+.flow-graph-toast[hidden] { display: none; }
+.flow-graph-toast[data-kind="error"] { color: var(--red); }
+
+/* Minimap: the whole graph and the part in view. */
+.flow-graph-minimap { position: absolute; z-index: 2; right: 14px; bottom: 14px; width: 200px; height: 128px; border: 1px solid var(--line); border-radius: 10px; background: var(--flow-minimap); box-shadow: 0 8px 22px var(--shadow); cursor: crosshair; }
+.flow-graph[data-minimap-off] .flow-graph-minimap, .flow-graph[data-all-in-view] .flow-graph-minimap, .flow-graph:not([data-state="ready"]) .flow-graph-minimap { display: none; }
+
+/* Hover facts and the card menu. */
+.flow-graph-tooltip { position: absolute; z-index: 6; max-width: min(380px, calc(100% - 16px)); padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 10px 26px var(--shadow); pointer-events: none; }
+.flow-graph-tooltip-title { display: block; margin-bottom: 6px; color: var(--text); font: 600 12px var(--mono); overflow-wrap: anywhere; }
+.flow-graph-tooltip-title[data-kind="wasm"] { color: var(--flow-wasm); }
+.flow-graph-tooltip-title[data-kind="eval"] { color: var(--flow-eval); }
+.flow-graph-tooltip-title[data-kind="cross"] { color: var(--flow-edge-cross); }
+.flow-graph-tooltip-title[data-kind="async"] { color: var(--flow-edge-async); }
+.flow-graph-tooltip dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0; }
+.flow-graph-tooltip dt { color: var(--faint); font: 11.5px var(--sans); }
+.flow-graph-tooltip dd { margin: 0; color: var(--text); font: 11.5px var(--mono); overflow-wrap: anywhere; }
+.flow-graph-tooltip dd[data-tone="location"] { color: var(--flow-js); }
+.flow-graph-tooltip dd[data-tone="count"] { color: var(--text); }
+.flow-graph-tooltip dd[data-tone="cross"] { color: var(--flow-edge-cross); }
+.flow-graph-menu { position: absolute; z-index: 7; min-width: 220px; padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-3); box-shadow: 0 14px 34px var(--shadow); }
+.flow-graph-menu-item { width: 100%; min-height: 30px; display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--text); font: 13px var(--sans); text-align: left; }
+.flow-graph-menu-item kbd { color: var(--faint); font: 12px var(--sans); }
+.flow-graph-menu-item:hover:not(:disabled), .flow-graph-menu-item:focus-visible { outline: none; background: var(--accent-soft); }
+.flow-graph-menu-item:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+.flow-graph-menu-item:disabled { cursor: default; color: var(--faint); }
+.flow-graph-menu-rule { height: 1px; margin: 5px 6px; background: var(--line); }
+
+/* Details: opened from the status bar, the menu or I. */
+.flow-graph-inspector { position: relative; min-width: 0; min-height: 0; overflow: auto; padding: 12px 14px 18px; border-left: 1px solid var(--line); background: var(--panel); color: var(--muted); font: 11px var(--sans); }
+.flow-graph-inspector-close { float: right; margin: -2px -4px 6px 8px; }
+.flow-inspector-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-bottom: 10px; }
+.flow-inspector-title { min-width: 0; margin: 0 0 10px; color: var(--text); font: 600 13px var(--mono); overflow-wrap: anywhere; }
+.flow-inspector-head .flow-inspector-title { margin: 0; }
+.flow-kind-tag { padding: 1px 7px; border: 1px solid currentColor; border-radius: 999px; font: 600 10px var(--mono); }
+.flow-kind-tag[data-kind="javascript"], .flow-graph-key-tag[data-kind="javascript"] { color: var(--flow-js); }
+.flow-kind-tag[data-kind="eval"], .flow-graph-key-tag[data-kind="eval"] { color: var(--flow-eval); }
+.flow-kind-tag[data-kind="wasm"], .flow-graph-key-tag[data-kind="wasm"] { color: var(--flow-wasm); }
+.flow-kind-tag[data-kind="request"], .flow-graph-key-tag[data-kind="request"] { color: var(--flow-request); }
+.flow-kind-tag[data-kind="navigation"], .flow-graph-key-tag[data-kind="navigation"] { color: var(--flow-navigation); }
+.flow-kind-tag[data-kind="cookie_write"], .flow-graph-key-tag[data-kind="cookie_write"] { color: var(--flow-cookie); }
+.flow-kind-tag[data-kind="chain"], .flow-graph-key-tag[data-kind="chain"] { color: var(--flow-chain); }
+.flow-inspector-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 10px; margin: 0 0 12px; }
+.flow-inspector-facts dt { color: var(--faint); }
+.flow-inspector-facts dd { margin: 0; color: var(--text); font: 11px var(--mono); overflow-wrap: anywhere; white-space: pre-line; }
+.flow-inspector-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.flow-inspector-heading { margin: 14px 0 6px; color: var(--muted); font: 600 11px var(--sans); }
+.flow-inspector-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+ol.flow-inspector-list { padding-left: 18px; list-style: decimal; color: var(--text); font: 11px var(--mono); }
+.flow-inspector-list li { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; overflow-wrap: anywhere; }
+.flow-inspector-link { min-width: 0; padding: 2px 4px; border: 0; border-radius: 3px; background: transparent; color: var(--accent); font: 11px var(--mono); text-align: left; overflow-wrap: anywhere; }
+.flow-inspector-link:hover { background: var(--panel-3); }
+.flow-inspector-link:focus-visible, .flow-graph-inspector .secondary-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.flow-inspector-meta { color: var(--faint); font: 10px var(--mono); }
+.flow-inspector-sink { color: var(--text); font: 11px var(--mono); overflow-wrap: anywhere; }
+.flow-inspector-note { margin: 8px 0 0; line-height: 1.5; overflow-wrap: anywhere; }
+.flow-inspector-hint { margin: 14px 0 0; color: var(--faint); line-height: 1.5; }
+.flow-inspector-realms { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.flow-inspector-realms li { display: grid; gap: 2px; padding: 7px 9px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--panel-2); overflow-wrap: anywhere; }
+.flow-inspector-realms strong { color: var(--text); font: 600 11.5px var(--sans); }
+.flow-inspector-realm { justify-self: start; padding: 0; color: var(--text); font: 600 11.5px var(--sans); text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
+.flow-inspector-realm:hover { background: transparent; text-decoration-color: var(--accent); }
+.flow-inspector-realms span { font: 10.5px var(--mono); }
+
+/* Status bar: where the selection is, then what the graph rests on. */
+.flow-graph-status { position: relative; min-width: 0; display: flex; align-items: center; gap: 16px; padding: 0 12px; border-top: 1px solid var(--line); background: var(--panel); color: var(--muted); font: 11.5px var(--mono); white-space: nowrap; }
+.flow-graph-status > * { flex: 0 0 auto; }
+.flow-graph-selection { flex: 0 1 auto; min-width: 0; max-width: 52%; overflow: hidden; color: var(--flow-js); text-overflow: ellipsis; }
+.flow-graph-selection:empty { display: none; }
+.flow-graph-summary { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; }
+.flow-graph-summary::before { content: "●"; margin-right: 7px; color: var(--accent); font-size: 9px; vertical-align: 1px; }
+.flow-graph-summary:empty { display: none; }
+.flow-graph-engine { flex: 0 0 auto; color: var(--faint); font-family: var(--sans); }
+.flow-graph-engine[data-engine="triskel"] { color: var(--muted); }
+.flow-graph-engine:empty { display: none; }
+.flow-graph-status > .flow-graph-limits { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--amber); font-family: var(--sans); text-overflow: ellipsis; }
+.flow-graph-status > .flow-graph-limits:empty { flex: 1 1 0; }
+.flow-graph-key-toggle { margin-left: auto; }
+.flow-graph-request-again { color: var(--accent); }
+.flow-graph-request-again[hidden] { display: none; }
+.flow-graph-status .flow-graph-tool { min-height: 20px; }
+.flow-graph-details-toggle[aria-pressed="true"] { background: var(--accent-soft); color: var(--text); }
+.flow-graph-legend { position: absolute; z-index: 8; right: 70px; bottom: 30px; display: none; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; align-items: center; max-width: min(460px, calc(100% - 24px)); padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-3); box-shadow: 0 10px 26px var(--shadow); color: var(--text); font: 11.5px var(--sans); }
+.flow-graph-legend h4 { grid-column: 1 / -1; margin: 6px 0 0; color: var(--muted); font: 600 11px var(--sans); }
+.flow-graph-legend h4:first-child { margin-top: 0; }
+.flow-graph-legend p { grid-column: 1 / -1; margin: 6px 0 0; color: var(--muted); line-height: 1.45; white-space: normal; }
+.flow-graph-status[data-key-open] > .flow-graph-legend { display: grid; }
+.flow-graph-key { display: contents; }
+.flow-graph-key > span { min-width: 0; white-space: normal; line-height: 1.35; }
+.flow-graph-key-line { display: inline-block; width: 24px; height: 0; border-top: 2.5px solid var(--flow-edge-call); border-radius: 2px; }
+.flow-graph-key-async { border-top-color: var(--flow-edge-async); }
+.flow-graph-key-cross { border-top-color: var(--flow-edge-cross); }
+.flow-graph-key-omitted { border-top-style: dotted; border-top-color: var(--flow-edge-omitted); }
+.flow-graph-key-tag { min-width: 44px; font: 600 10.5px var(--mono); }
+.flow-graph-key-tag[data-tone="call"] { color: var(--flow-op); }
+.flow-graph-key-tag[data-tone="async"] { color: var(--flow-edge-async); }
+.flow-graph-key-tag[data-tone="cross"] { color: var(--flow-edge-cross); }
+.flow-graph-key-tag[data-tone="sink"] { color: var(--flow-sink); }
+.flow-graph-key-mark { display: inline-block; width: 24px; height: 12px; border: 1.5px dashed var(--faint); border-radius: 3px; }
+.flow-graph-key-stub { display: inline-block; width: 24px; height: 12px; border-left: 1.5px dashed var(--faint); margin-left: 8px; }
+
+/* The stats give way before the tools move; only a narrow canvas drops the
+ * tools under the heading, then everything tightens. */
+@container flow-stage (max-width: 860px) {
+  .flow-graph-heading { max-width: calc(100% - 36px); }
+  .flow-graph-stage::before { height: 96px; }
+  .flow-graph-tools { top: 44px; left: 12px; right: auto; justify-content: flex-start; }
+  .flow-graph-banner { top: 84px; }
+}
+@container flow-stage (max-width: 760px) {
+  .flow-graph-heading { top: 10px; left: 12px; gap: 8px; }
+  .flow-graph-title { font-size: 16px; }
+  .flow-graph-stats { font-size: 11.5px; }
+  .flow-graph-stage::before { height: 84px; }
+  .flow-graph-tools { top: 38px; gap: 4px; }
+  .flow-graph-filter input { width: 160px; }
+  .flow-graph-tools > .flow-graph-tool { min-height: 28px; padding: 0 10px; }
+  .flow-graph-minimap { width: 150px; height: 96px; }
+  .flow-graph-banner { top: 76px; }
+}
+@container flow-stage (max-width: 520px) {
+  .flow-graph-minimap, .flow-graph-evidence { display: none; }
+}
+/* The status bar yields its summary first; on a narrow panel details become
+ * a sheet over the bottom of the canvas. */
+@container flow-graph (max-width: 980px) {
+  .flow-graph-summary { display: none; }
+}
+@container flow-graph (max-width: 760px) {
+  .flow-graph[data-details] .flow-graph-body { grid-template-columns: minmax(0, 1fr); }
+  /* A drawer over the right of the canvas: the graph keeps its height. */
+  .flow-graph-inspector { position: absolute; z-index: 6; top: 0; right: 0; bottom: 0; width: min(300px, 62%); border-left: 1px solid var(--line); box-shadow: -10px 0 26px var(--shadow); }
+  .flow-graph-status > .flow-graph-limits { display: none; }
+  .flow-graph-selection { max-width: 70%; }
+}
+/* A short canvas keeps its room for the graph. */
+@container flow-stage (max-height: 380px) {
+  .flow-graph-minimap { display: none; }
+}

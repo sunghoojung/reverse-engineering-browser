@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="xrefs_view.css">
     <link rel="stylesheet" href="entropy_map.css">
     <link rel="stylesheet" href="block_graph.css">
+    <link rel="stylesheet" href="flow_graph.css">
     <link rel="stylesheet" href="agent_panel.css">
     <link rel="stylesheet" href="session_panel.css">
   </head>
@@ -382,7 +383,7 @@
           <section id="screen-backtrace" class="screen" aria-label="Request origin trace" hidden>
             <header class="screen-head">
               <div><h1>Backtraces</h1><div id="backtrace-subtitle" class="screen-subtitle">Follow a request back to its recorded origin.</div></div>
-              <div class="screen-head-actions"><button class="secondary-button package-navigation" type="button" data-screen="evidence">Evidence</button><button class="secondary-button" type="button" data-screen="traffic">View traffic</button></div>
+              <div class="screen-head-actions"><div class="trace-modes" role="group" aria-label="Backtrace view"><button id="trace-mode-steps" class="trace-mode" type="button" aria-pressed="true" title="One request's recorded predecessors">Steps</button><button id="trace-mode-graph" class="trace-mode" type="button" aria-pressed="false" title="Every recorded stack of the session as one graph across frames, realms, JavaScript, eval and Wasm">Flow graph</button></div><button class="secondary-button package-navigation" type="button" data-screen="evidence">Evidence</button><button class="secondary-button" type="button" data-screen="traffic">View traffic</button></div>
             </header>
             <div class="trace-toolbar">
               <label for="trace-request">Request</label>
@@ -406,6 +407,7 @@
                 <div id="trace-step-details"></div>
               </aside>
             </div>
+            <section id="flow-graph-host" aria-label="Flow graph" hidden></section>
           </section>
 
           <section id="screen-evidence" class="screen" aria-label="Supporting evidence" hidden>
@@ -869,6 +871,8 @@
     <!-- Loaded here as well so the page and the Worker share one script; it does work only inside the Worker. -->
     <script src="block_graph_layout.js"></script>
     <script src="block_graph.js"></script>
+    <script src="flow_graph_layout.js"></script>
+    <script src="flow_graph.js"></script>
     <script src="vm_static_view.js"></script>
     <script src="vm_contextual.js"></script>
     <script src="vm_contextual_evidence.js"></script>

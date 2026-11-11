@@ -118,8 +118,9 @@ export async function checkNativeRequestBacktrace(root) {
   assert.equal(native.length,1,'Explicit initiator identifiers group the native observations');
   state.requests=native;
   api.renderBacktrace();
-  assert.deepEqual(Array.from(elements.traceRequest.children,option=>option.value),[native[0].id],
-    'The native row is a Backtraces choice');
+  assert.deepEqual(Array.from(elements.traceRequest.children,option=>option.value),['',native[0].id],
+    'The native row is a Backtraces choice, under a placeholder while none is chosen');
+  assert.equal(elements.traceRequest.children[0].textContent,'Choose a request to trace');
   assert.equal(elements.traceRequest.disabled,false);
   assert.equal(elements.traceEmptyTitle.textContent,'Choose a captured request');
   state.selectedRequestId=native[0].id;

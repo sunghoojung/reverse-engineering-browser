@@ -122,6 +122,7 @@ native-only-check: $(UI_STARTUP_DEPS)
 	node tools/check-traffic-response-ui.mjs
 	node tools/check-traffic-headers-ui.mjs
 	node tools/check-traffic-cookies-ui.mjs
+	node tools/check-flow-graph-ui.mjs
 	node tools/check-agent-panel.mjs
 	node tools/check-session-panel.mjs
 	node tools/check-source-search.mjs

@@ -1496,7 +1496,8 @@ Backtraces lets the researcher select a captured request, load its recorded
 predecessors, and select a row to inspect event identifiers, values, and source.
 Empty traces show a next action rather than a graph or coverage meter. Gaps and
 shared-identifier matches remain explicit. Refresh failures retain the previous
-trace, and arrow keys move between trace rows.
+trace, and arrow keys move between trace rows. **Flow graph** beside **Steps**
+shows every recorded stack of the session as one graph ([Flow graph](#flow-graph)).
 
 Fingerprinting is a first-class session workspace for Canvas, WebGL, Web Audio,
 device, layout, and WebGPU APIs, Permissions, Storage, WebRTC, and Runtime activity.
@@ -2031,6 +2032,191 @@ terminated when a job finishes or is replaced, and laid-out graphs stay in a
 artifact changes or the screen leaves. The canvas is one bounded backing store
 that does not grow with graph size, and only visible cards and edges are drawn.
 A byte budget cuts row text before structure and labels what it cut.
+
+## Flow graph
+
+**Flow graph** in Backtraces draws every recorded stack of the session as one
+graph ([flow graph v1](../../protocol/flow-graph-v1.md)): request, navigation,
+async scheduling and walked cookie-write stacks, folded so that each distinct
+stack and each retained source is read once. It is observed evidence only; a
+call that never reached a recorded request, navigation, task or cookie write is
+not drawn, and the status bar says so.
+
+### Reading the graph
+
+The view reads like a disassembler's graph.
+- **Realms:** each realm is a cluster. All clusters start on one line, and each
+  is titled on a plate that follows the left edge of the view across a wide
+  cluster. The title names the scripts' origin, the realm (execution context),
+  the frame its stacks were recorded in and the process. Realms that call into
+  each other sit together, callers first; an unrelated out-of-process frame
+  comes after.
+- **Rows of the graph:** they are call depth, callers above callees.
+- **Card header:** each card is one function. The header gives its name, a kind
+  tag (`js`, `eval`, `wasm` or `chain`) and a badge with the number of stack
+  records that passed through it.
+- **Location line:** under a rule, the card gives `file:line:column`, `VM<id>`
+  for eval code, or `func <index> · module.wasm`.
+- **Call rows:** one row per call the function made, in source order, the way
+  a block lists its instructions. Each row has:
+  - the call site: `line:column`, or `+0x<offset>` in a Wasm module;
+  - a mnemonic: `call`, `await`, `postMessage`, `setTimeout`, `rAF`, `request`,
+    `navigate` or `cookie`;
+  - the callee;
+  - a note saying what the call crosses: `→ frame.test`, `JS → Wasm`,
+    `Wasm → JS`, `into eval` or `via microtask`;
+  - how many records walked it.
+- **Requests:** a request, navigation or cookie write is a row of each function
+  that made it, not a card of its own, unless nothing recorded calls it.
+- **Row limit:** a card shows seven rows and counts the rest; Details lists
+  them all.
+- **Unresolved and cut frames:** an unresolved frame keeps its script ID and
+  reason on a dashed card. A card whose earlier async callers were not recorded
+  has a dashed stub above it.
+- **Recursion:** a recursive call is a small loop on the card's right edge.
+
+### Colour and edges
+
+A row's mnemonic and note take its edge's colour:
+- neutral for a plain call;
+- gold (amber in the light theme) for an await or a posted task;
+- rose (red in light) for a call across a frame, between JavaScript and Wasm
+  or into eval;
+- a fourth colour for requests, navigations and cookie writes.
+
+Every text colour clears 4.5:1 on the card in both themes. The light theme
+draws white cards on the Dawn canvas.
+
+Edges leave the caller's bottom and enter the callee's top in rounded
+orthogonal runs, the same shape Triskel's waypoints take. Each edge is
+outlined against the canvas, and line width follows how many records walked
+it. A call that skips rows runs straight down between the cards it passes, and
+a back edge runs up the cluster's right gutter. A call into another realm runs
+down the gap beside its cluster and enters its callee from above that card's
+row, or from above the cluster for a first-row callee, so it never crosses a
+realm title. **Key** in the status bar explains the edges, the row colours, the
+card marks and the limits.
+
+### Folding, selection and the request journey
+
+**Folded**, the default, folds runs of pass-through frames inside one realm
+into a stacked chain card: one call in, one call out, the same count, no
+boundary, no recursion. **Every frame** draws them all. The two form one radio
+group. Space, Enter or **Expand chain** opens one chain, and **Fold chain** on
+a member closes it again.
+
+Selecting a card lights every stack through it and marks the rows those stacks
+took. Other cards keep their fill and outline, and only their text fades, so
+the graph keeps its shape.
+
+**Requests:**
+- The **Request** list opens on a placeholder. Requests to the same target
+  carry their renderer request ID.
+- Choosing a request lights only its stack and selects the row that made it.
+- The view fits that stack when it fits legibly, else it shows its top at
+  reading size.
+- The status bar names the request, the function that made it, the realm, and
+  the counts of distinct stacks and cards.
+- **Request stack** lights the chosen request again after another selection.
+
+**Hover and menu:**
+- Hovering a card, a row or an edge shows its facts beside the card: kind,
+  location, realm, call sites, records, and what it crosses.
+- Right-click, the context menu key or Shift+F10 opens the menu, with each
+  item's key.
+- On a row, the menu offers **Follow call** and **Copy call site**.
+- On every card it offers **Open in Sources**, **Expand chain** or **Fold
+  chain**, **Go to caller**, **Center on card**, **Show details**, **Copy
+  name** and **Copy location**.
+
+**Details** (I) opens a side panel with:
+- the location, realm, and script ID or Wasm function index;
+- the records and distinct stacks;
+- every caller and callee, with the boundary and the call sites;
+- the requests the function made.
+
+With nothing selected it lists the realms (each jumps to its cluster), the
+crossings, what was not decoded, and what stacks cannot contain.
+
+**Find** matches names, files, hosts and requested hosts. It says `1 of 3`,
+steps with Enter, Shift+Enter or its arrows, and never dims a match.
+
+**Status bar and feedback:**
+- The status bar names the selection and the evidence: records, the crossings
+  by kind, the layout engine, and any budget or deadline that cut the graph.
+- Copy feedback is a toast, so a refresh-failure warning stays until Retry.
+- A refresh keeps the selection, the expanded chains and the view wherever the
+  same functions are still in the graph.
+- An empty graph offers **Refresh** and asks again when the view reopens.
+
+### Keyboard and zoom
+
+**Keyboard:**
+- Arrows move to the nearest card.
+- J and K step through the selected card's calls.
+- Enter follows the chosen call, or opens the function or chain.
+- Backspace or Alt+Left goes back.
+- U goes to the caller that reached the card most often.
+- O opens the function in Sources.
+- S copies the chosen call site.
+- Space expands or folds a chain.
+- Escape clears the selection, then closes Details.
+- `/` focuses Find.
+- `+`, `-` and `0` zoom and fit, and Shift+arrows pan.
+- F centers the selection.
+- I toggles Details.
+- C and L copy the name and location.
+- M hides the minimap.
+
+The canvas announces this list through `aria-describedby`.
+
+**Zoom:**
+- A graph of up to 60 cards opens fitted. A larger one opens fitted when its
+  rows stay legible, else at reading size on the top of the busiest realm.
+- Rows show from 85% zoom.
+- Below that, cards sketch their rows, coloured where a row crosses, waits or
+  sends, and paint their names at screen size, tinted for eval and Wasm.
+- Below 20% they are boxes with a strip of their kind's colour, and plain
+  calls become hairlines.
+- The minimap takes the graph's shape. It hides while the whole graph is in
+  view, in a short canvas and below 520 px.
+- Centring a card keeps it clear of the minimap and of a Details sheet.
+- In a canvas narrower than 860 px the tools drop under the heading. In a
+  narrow window Details is a sheet over the bottom 40% of the canvas, and the
+  Backtraces subtitle gives way.
+
+### Layout
+
+Layout runs in `flow_graph_layout.js` as a Web Worker, or on the main thread
+when a shell cannot start one, on card sizes measured from their text.
+
+**Layered layout:**
+- Cycles are broken by a depth-first walk.
+- Layers are longest paths, with roots pulled down to their first callee.
+- A realm holds at most five cards per layer, more in a large realm so it stays
+  near square; the rest move down, leaves first.
+- An edge longer than one layer gets a waypoint in every layer it passes, up to
+  200,000.
+- Each realm and layer is ordered by its neighbours' mean position over
+  alternating sweeps, then placed by a weighted isotonic fit that keeps a single
+  chain of calls straight.
+
+**Triskel:** when the backend serves `POST /api/graph-layout`, each realm of 2
+to 2,000 cards is then sent to
+[Triskel](https://github.com/triskellib/triskel), at most 8,000 cards per
+request. A realm takes Triskel's coordinates and waypoints unless Triskel would
+draw it more than 1.6 times wider than the layered layout and over 1,400 px,
+or more than 1.6 times taller and over 1,600 px taller.
+Triskel does not stack a wide fan of calls, and a call tree's breadth would
+otherwise run off to the side. The layered layout also stays when Triskel's
+answer is missing, too large or the wrong shape. The status bar says `Triskel
+layout`, or how many realms it took, and hovering it gives each other realm's
+reason.
+
+Six thousand cards lay out in well under a second. The canvas is one bounded
+backing store, and only visible clusters, cards and edges are drawn. A refresh
+failure keeps the last graph under a banner. The `reb://` stored-evidence
+window has no flow graph route and says so.
 
 ## Pane sizes
 

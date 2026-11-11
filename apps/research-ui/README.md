@@ -2121,16 +2121,17 @@ ignored.
 ### Tracked-call timeline
 
 The timeline reads
-`GET /api/events?session_id=…&type=wasm_dispatch_observation,wasm_indirect_observation,js_invocation_start,js_invocation_settle,js_invocation_request`
+`GET /api/events?session_id=…&category=vm&type=wasm_dispatch_observation,wasm_indirect_observation,wasm_dispatch_overflow,wasm_indirect_overflow,js_invocation_start,js_invocation_settle,js_invocation_request,gap`
 forward from the start of the store, 1,000 records a page, at most 4 pages a
 read and 8,000 records held; anything unread is stated, with **Read more**.
 It reads again when the session changes, on **Refresh**, and quietly when Flow
 redraws more than 15 seconds after a complete read.
 
 - One track per invocation, keyed by process and invocation ID, along that
-  renderer's `sequence_number` order, never wall-clock time. A run of records
-  nobody here names is compressed to a break mark (≈) whose tooltip counts
-  them.
+  renderer's `sequence_number` order, never wall-clock time. A run of
+  sequence numbers nothing here draws is compressed to a break mark (≈). Its
+  tooltip counts the numbers, not records: they can be records of other types
+  or numbers that were never stored, and the read cannot tell which.
 - A track is named by its invocation (`call #12`); the detail line adds its
   site slot. Saved site labels are not applied: `/api/js-invocation-sites`
   lists what the backend's own launcher armed and names no session, so it
@@ -2149,6 +2150,19 @@ redraws more than 15 seconds after a complete read.
 - Bounds: 64 tracks, 512 samples and 128 requests per renderer, and three rows
   of request chips; the rest are counted where they would be drawn. Several
   renderers are one at a time, behind a renderer picker.
+- Gaps are never silent. A notice under the banner names the shown
+  renderer's `gap` reasons with their counts and what they mean (such as
+  `native_js_invocation_budget_incomplete`, the 256-call budget), the
+  executions `wasm_dispatch_overflow` and `wasm_indirect_overflow` say a
+  sample budget refused (identities, and at least the largest omitted
+  count), and queue-drop markers. It names other renderers that have gaps,
+  which the renderer picker also marks, and the page counters
+  `sequence_gaps` and `queue_drops`, which cover the whole scanned store
+  range, every session and type. A Gaps lane marks each record at its
+  sequence, and the pane head ends with `gaps`.
+- Sample counts read `sample 3 of 16 read`. When the stream refused or lost
+  executions they add `more refused here` (an overflow identity at that
+  function and offset) or `not every execution`.
 - States: loading, empty (with how to track calls), a failed read with Retry, a
   failed refresh that keeps the last records under a banner, partial reads,
   and counts of undecoded, malformed and repeated records.

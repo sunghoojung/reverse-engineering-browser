@@ -75,7 +75,45 @@ function sessionRecords({decoded = true} = {}) {
   assert.deepEqual([...site.samples.map(sample => sample.ordinal)], [1, 2, 3, 4, 5]);
   assert.deepEqual([...site.histogram.entries()].sort(), [[0, 1], [1, 1], [3, 3]]);
   assert.equal(call13.samples[0].callOrdinal, 1);
-  assert.deepEqual(model.counts, {records: 13, starts: 2, settles: 2, requests: 3, samples: 6, outside: 1, invalid: 0, undecoded: 0, duplicates: 0, conflicts: 0});
+  assert.deepEqual(model.counts, {records: 13, starts: 2, settles: 2, requests: 3, samples: 6, outside: 1, invalid: 0, undecoded: 0, duplicates: 0, conflicts: 0, gaps: 0, overflow: 0});
+  assert.equal(view.gaps.records, 0);
+  assert.equal(timeline.flowSampleCount(site.samples[2], site), 'sample 3 of 5 read', 'a count names the records read, nothing more');
+}
+// Budget refusals and losses: gap markers (named and queue drops) and overflow
+// identities, in the session's vm records.
+const hex = text => Buffer.from(text, 'latin1').toString('hex');
+const gapEvent = payload => base('gap', {category: 'vm', payload: hex(payload), payload_truncated: false});
+const overflow = (row, type = 'wasm_dispatch_overflow') => base(type, {wasm_overflow: {status: 'decoded', ...row}});
+function gapRecords() {
+  const records = sessionRecords();
+  return [...records,
+    gapEvent('native_wasm_dispatch_budget_incomplete'), gapEvent('native_js_invocation_budget_incomplete'), gapEvent('3'),
+    overflow({kind: 'identity', ring_index: 0, function_index: 1, module_byte_offset: 69, selector: 2, arm_count: 3}),
+    overflow({kind: 'omitted', omitted_count: 40}), {...overflow({kind: 'omitted', omitted_count: 25}), sequence_number: '900'},
+    base('wasm_indirect_overflow', {})];
+}
+{
+  const model = timeline.flowTimelineModel(gapRecords());
+  const view = model.processes[0];
+  assert.equal(model.counts.gaps, 3); assert.equal(model.counts.overflow, 4);
+  same(view.gaps.named.map(entry => [entry.reason, entry.stream, entry.count]), [['native_wasm_dispatch_budget_incomplete', 'br_table', 1], ['native_js_invocation_budget_incomplete', 'calls', 1]]);
+  assert.equal(view.gaps.dropped, 3n, 'a decimal gap payload weighs its count');
+  same(view.gaps.overflow.br_table, {identities: 1, omitted: 40, undecoded: 0}, 'several omitted records are a floor, never a sum');
+  same(view.gaps.overflow.call_indirect, {identities: 0, omitted: 0, undecoded: 1}, 'an overflow record the backend does not decode still counts');
+  const site = view.sites.get('4:1:69:br_table');
+  assert.equal(site.refused, 1, 'an overflow identity counts against the site at its function and offset');
+  assert.equal(timeline.flowSampleCount(site.samples[2], site), 'sample 3 of 5 read, more refused here');
+  const indirect = view.sites.get('4:1:90:call_indirect');
+  assert.equal(timeline.flowSampleCount(indirect.samples[0], indirect), 'sample 1 of 1 read, not every execution', 'a stream with refusals never reads as complete');
+  assert.equal(view.drawnGaps.length, 7, 'every gap and overflow record is a mark at its sequence');
+  const notes = timeline.flowGapNotes(view.gaps).join('; ');
+  assert.match(notes, /native_wasm_dispatch_budget_incomplete \u00d71 \(a sampling budget filled/);
+  assert.match(notes, /native_js_invocation_budget_incomplete \u00d71 \(the 256-call budget filled; later calls were not recorded\)/);
+  assert.match(notes, /br_table executions the sample budget refused: 1 named in overflow records, at least 40 more omitted/);
+  assert.match(notes, /call_indirect executions the sample budget refused: 1 overflow record this backend does not decode/);
+  assert.match(notes, /3 records dropped by a full queue/);
+  same(timeline.flowGapRecord({payload: hex('Not A Reason'), category: 'vm'}, 'k', 1n).reason, null, 'only an identifier payload names a reason');
+  same(timeline.flowGapRecord({payload: hex('native_wasm_dispatch_budget_incomplete'), payload_truncated: true, category: 'vm'}, 'k', 1n).reason, null, 'a cut payload names nothing');
 }
 {
   // Without the backend's decode: tracks come from Wasm records only.
@@ -109,7 +147,7 @@ function sessionRecords({decoded = true} = {}) {
   const limits = {...timeline.FLOW_TIMELINE_LIMITS, maxTracks: 3, maxSamples: 10, maxRequests: 4};
   const view = timeline.flowTimelineModel(records, limits).processes[0];
   assert.equal(view.drawn.length, 3);
-  assert.deepEqual(view.hidden, {tracks: 2, samples: 10, requests: 2}, '8 samples of hidden tracks plus 2 over the drawing budget');
+  assert.deepEqual(view.hidden, {tracks: 2, samples: 10, requests: 2, gaps: 0}, '8 samples of hidden tracks plus 2 over the drawing budget');
   assert.equal(view.drawn.reduce((sum, track) => sum + track.drawnSamples.length, 0), 10);
 }
 {
@@ -202,7 +240,10 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   const read = new URL(fetches.find(url => url.startsWith('/api/events')), 'http://fixture.invalid');
   assert.equal(read.searchParams.get('session_id'), '7');
   assert.equal(read.searchParams.get('after'), '0', 'the read starts at the store start, in record order');
-  assert.equal(read.searchParams.get('type'), 'wasm_dispatch_observation,wasm_indirect_observation,js_invocation_start,js_invocation_settle,js_invocation_request');
+  assert.equal(read.searchParams.get('type'), 'wasm_dispatch_observation,wasm_indirect_observation,wasm_dispatch_overflow,wasm_indirect_overflow,js_invocation_start,js_invocation_settle,js_invocation_request,gap',
+    'the read takes the budget refusals and gap markers beside the observations');
+  assert.equal(read.searchParams.get('category'), 'vm', 'and only vm records, so other producers\u2019 gap markers stay out');
+  assert.equal($('#flow-timeline .flow-tl-gaps').hidden, true, 'a session without gaps shows no gap notice');
   assert.equal(read.searchParams.get('limit'), '1000');
   assert.equal(workspace.timeline.status(), 'ready');
   assert.match(workspace.timeline.summary(), /^2 calls · 6 samples · renderer 41 record order$/);
@@ -258,7 +299,7 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   same(shown(), ['graph', 'cfg', 'lineage', 'timeline'], 'and following opens it beside the graph');
   assert.equal($('#flow-cfg-samples').hidden, false);
   assert.match($('#flow-cfg-samples').textContent, /sample 2 of 5/);
-  assert.match($('#flow-lineage-selected').textContent, /sample 2 of 5 · call #12 · selector 0/);
+  assert.match($('#flow-lineage-selected').textContent, /sample 2 of 5 read · call #12 · selector 0/);
   assert.equal(document.querySelectorAll('#flow-lineage-selected .flow-histogram li').length, 3, 'the selector histogram has one bar per value');
   // K and J in the CFG step samples at the site.
   key('j', {target: $('#flow-pane-cfg')});
@@ -444,6 +485,30 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   await view.load('8');
   assert.equal(view.status(), 'empty');
   assert.match(root.querySelector('.flow-tl-state').textContent, /No tracked calls in this session/);
+  // Gaps: the notice names this renderer's refusals and losses and the
+  // scanned range's counters; a lane marks them in record order; samples
+  // and the break mark never claim more than the records say.
+  const gapRoot = document.createElement('div');
+  const gapped = context.createFlowTimeline({root: gapRoot, fetchJSON: async () => ({...page(gapRecords()), sequence_gaps: '4', sequence_gaps_saturated: false, queue_drops: '2', queue_drops_saturated: true,
+    named_gaps: [{category: 'vm', reason: 'native_wasm_dispatch_budget_incomplete', count: '1'}]})});
+  await gapped.load('7');
+  const notice = gapRoot.querySelector('.flow-tl-gaps');
+  assert.equal(notice.hidden, false);
+  assert.match(notice.textContent, /^Gaps in renderer 41: native_wasm_dispatch_budget_incomplete \u00d71/);
+  assert.match(notice.textContent, /In the store range read, across every session and record type: 4 sequence numbers missing, 2 or more records dropped by a full queue\./);
+  const counters = gapped.scanGaps();
+  assert.deepEqual([counters.sequence, counters.sequenceSaturated, counters.drops, counters.dropsSaturated], [4n, false, 2n, true], 'the page counters are summed as exact integers');
+  assert.match(gapped.summary(), / · gaps$/, 'the pane head says the renderer has gaps');
+  const lane = gapRoot.querySelector('.flow-tl-row-gaps');
+  assert(lane, 'a Gaps lane is drawn');
+  assert.equal(lane.querySelectorAll('.flow-tl-gap').length, 7);
+  assert.match(lane.querySelector('.flow-tl-gap').title, /^native_wasm_dispatch_budget_incomplete \(/);
+  const refusedSample = [...gapRoot.querySelectorAll('.flow-tl-sample')].find(item => item.dataset.key.endsWith(':104'));
+  assert.match(refusedSample.getAttribute('aria-label'), /^br_table sample 1 of 5 read \(1 more execution at this offset refused\)/);
+  const breakMark = gapRoot.querySelector('.flow-tl-break');
+  assert(breakMark, 'the fixture has a compressed run');
+  assert.match(breakMark.title, /sequence numbers? between .* hold no record drawn here: records of other types, or numbers with no stored record/, 'a break never counts its numbers as records that exist');
+  assert(!/records of this renderer lie between/.test(breakMark.title));
   pages.push({events: 'nope'});
   const malformed = context.createFlowTimeline({root: document.createElement('div'), fetchJSON: async () => ({events: 'nope'})});
   await malformed.load('7');

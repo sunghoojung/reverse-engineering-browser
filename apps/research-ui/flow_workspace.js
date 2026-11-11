@@ -279,7 +279,7 @@ function createFlowWorkspace(options) {
     if (chosen?.type === 'sample' && chosen.sample.function_index === cfg.fn.function_index && chosen.sample.artifact_id === cfg.fn.artifact_id) {
       const sample = chosen.sample;
       const text = make('span', 'flow-cfg-sample-text');
-      text.append(make('b', '', `sample ${sample.ordinal} of ${chosen.site.samples.length}`),
+      text.append(make('b', '', chosen.count ?? `sample ${sample.ordinal} of ${chosen.site.samples.length} read`),
         make('span', '', [chosen.track ? `call #${chosen.track.invocation}` : 'outside a tracked call', `seq ${sample.seq.toLocaleString('en-US')}`,
           sample.kind === 'br_table' ? `selector ${sample.selector ?? 'unknown'}` : `callee ${sample.resolution === 'resolved' ? `func ${sample.callee}` : sample.resolution ?? 'unknown'}`].join(' · ')));
       const keys = make('span', 'flow-keys'); keys.append(make('kbd', '', 'K'), make('kbd', '', 'J'), make('span', '', 'step samples'));
@@ -409,7 +409,7 @@ function createFlowWorkspace(options) {
     const {sample, site} = chosen;
     const heading = make('h3', '', 'Selected');
     heading.append(make('span', 'flow-lineage-selected-site', ` · func ${sample.function_index} ${flowHexOffset(sample.offset)} ${sample.kind}`));
-    const line = make('p', 'flow-lineage-selected-line', [`sample ${sample.ordinal} of ${site.samples.length}`, chosen.track ? `call #${chosen.track.invocation}` : 'outside a tracked call',
+    const line = make('p', 'flow-lineage-selected-line', [chosen.count ?? `sample ${sample.ordinal} of ${site.samples.length} read`, chosen.track ? `call #${chosen.track.invocation}` : 'outside a tracked call',
       sample.kind === 'br_table' ? `selector ${sample.selector ?? 'unknown'}` : `callee ${sample.resolution === 'resolved' ? `func ${sample.callee}` : sample.resolution ?? 'unknown'}`].join(' · '));
     const nodes = [heading, line];
     if (sample.kind === 'br_table' && site.histogram.size) nodes.push(selectorHistogram(site, sample.selector));
@@ -804,7 +804,7 @@ function createFlowWorkspace(options) {
       }
       const entries = [strip];
       if (sampleList.length > FLOW_WORKSPACE_LIMITS.relatedSamples) entries.push(make('p', 'flow-more', `${sampleList.length - FLOW_WORKSPACE_LIMITS.relatedSamples} more samples in Timeline`));
-      section(chosen?.type === 'sample' ? `Timeline · sample ${chosen.sample.ordinal} of ${chosen.site.samples.length}` : `Timeline · ${chosen.label}`, 'timeline', entries,
+      section(chosen?.type === 'sample' ? `Timeline · ${chosen.count ?? `sample ${chosen.sample.ordinal} of ${chosen.site.samples.length} read`}` : `Timeline · ${chosen.label}`, 'timeline', entries,
         {label: 'Open', key: '4', aria: 'Open Timeline', run: () => { timelineOpen = true; reveal('timeline', {focus: true}); }});
     }
     // Sampled sites of the selected function.

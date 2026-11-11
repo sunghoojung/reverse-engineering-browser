@@ -1273,7 +1273,21 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     return {key: flowGraphNodeKey(node.kind === 'chain' ? first : node), kind: node.kind, name: flowGraphNodeName(node), location: flowGraphNodeLocation(node) || null,
       process_id: context?.process_id ?? null, execution_context_id: context?.execution_context_id ?? null, url: node.url ?? null, artifact_id: node.artifact_id ?? null,
       function_index: node.function_index ?? null, row: item ? {index: rowIndex, site: item.site, op: item.op, target: item.target} : null,
-      request: highlightFromRequest && requestKey ? {process: requestKey.process, request: requestKey.request} : null};
+      request: highlightFromRequest && requestKey ? {process: requestKey.process, request: requestKey.request} : null,
+      callers: neighbours(index, 'to', 'from'), callees: neighbours(index, 'from', 'to')};
+  }
+  /** Up to eight cards on drawn edges into or out of a card, most stacks first. */
+  function neighbours(index, side, other) {
+    const seen = new Map();
+    for (const edge of display?.edges ?? []) {
+      if (edge[side] !== index || edge[other] === index) continue;
+      const peer = display.nodes[edge[other]];
+      if (!peer) continue;
+      const key = flowGraphNodeKey(peer.kind === 'chain' ? model.nodes[peer.members[0]] : peer);
+      const entry = seen.get(key) ?? {key, name: flowGraphNodeName(peer), kind: peer.kind, note: edge.kind, count: 0};
+      entry.count += edge.count ?? 1; seen.set(key, entry);
+    }
+    return [...seen.values()].sort((a, b) => b.count - a.count).slice(0, 8);
   }
   /** Tells the host when the selected card, row or lit request changed. */
   function notify() {

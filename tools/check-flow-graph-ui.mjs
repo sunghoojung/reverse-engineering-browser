@@ -614,8 +614,12 @@ const text = selector => host.querySelector(selector)?.textContent ?? '';
   assert.equal(call(`panel.select(${JSON.stringify(keyOf('run'))})`), true, 'select finds a card by key');
   let info = seen.at(-1);
   assert.equal(seen.length, 1, 'onSelect fires once per change');
-  assert.deepEqual(Object.keys(info), ['key', 'kind', 'name', 'location', 'process_id', 'execution_context_id', 'url', 'artifact_id', 'function_index', 'row', 'request'], 'info has exactly the documented fields');
-  assert.deepEqual({...info}, {key: keyOf('run'), kind: 'wasm', name: 'run', location: 'https://frame.test/m.wasm func 1', process_id: 41, execution_context_id: '12', url: 'https://frame.test/m.wasm',
+  assert.deepEqual(Object.keys(info), ['key', 'kind', 'name', 'location', 'process_id', 'execution_context_id', 'url', 'artifact_id', 'function_index', 'row', 'request', 'callers', 'callees'], 'info has exactly the documented fields');
+  // The Related rail's neighbours: the cards on drawn edges in and out, with the edge kind and stack count.
+  assert.deepEqual(JSON.parse(JSON.stringify(info.callers)), [{key: keyOf('bridge'), name: 'bridge', kind: 'javascript', note: 'call', count: 3}]);
+  assert.deepEqual(JSON.parse(JSON.stringify(info.callees)), [{key: keyOf('send'), name: 'send', kind: 'javascript', note: 'call', count: 3}]);
+  const {callers: _callers, callees: _callees, ...facts} = info;
+  assert.deepEqual({...facts}, {key: keyOf('run'), kind: 'wasm', name: 'run', location: 'https://frame.test/m.wasm func 1', process_id: 41, execution_context_id: '12', url: 'https://frame.test/m.wasm',
     artifact_id: '4', function_index: 1, row: null, request: null});
   assert.deepEqual({...call('panel.selection()')}, {...info}, 'selection() reads the same info back');
   assert.equal(call(`panel.select(${JSON.stringify(keyOf('run'))}, {reveal: false})`), true);

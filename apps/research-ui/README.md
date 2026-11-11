@@ -2392,6 +2392,8 @@ takes, besides `host`, `open`, `available` and `fetchGraph`:
 | `function_index` | the Wasm function index, or `null` |
 | `row` | the chosen row as `{index, site, op, target}`, or `null`; `site` is the text the row shows, such as `8:3` or `+0x2f` |
 | `request` | the lit request as `{process, request}` while its stack is the highlight, else `null` |
+| `callers` | up to eight cards on drawn edges into this one, most stacks first, each `{key, name, kind, note, count}` with `note` the edge kind |
+| `callees` | the same for drawn edges out of this card |
 
 The panel returns, besides `show`, `hide`, `highlightRequest`, `focus`,
 `isVisible` and `snapshot`:

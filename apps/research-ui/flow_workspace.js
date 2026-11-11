@@ -542,7 +542,8 @@ function createFlowWorkspace(options) {
       // neither counts it as a pick nor truncates Forward.
       const shown = call('getRequest')?.id ?? null, wanted = target.request?.id ?? null;
       heldRequest = shown !== wanted ? {id: shown} : null;
-      if (heldRequest && shown !== null) flash(wanted ? 'This trail entry\u2019s request is no longer in the request list; Lineage still shows the selected request.' : 'This trail entry had no request; Lineage still shows the selected one.');
+      if (heldRequest) flash(!wanted ? 'This trail entry had no request; Lineage still shows the selected one.'
+        : `This trail entry\u2019s request is no longer in the request list${shown === null ? '' : '; Lineage still shows the selected request'}.`);
       selection = {...target};
       if (target.step) call('selectTraceRow', target.step);
       if (target.sample) timeline?.select(target.sample.key, {silent: true});

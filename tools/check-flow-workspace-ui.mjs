@@ -530,7 +530,8 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   let shownRequest = null;
   const requestR = {id: 'rR', label: 'GET r.test #5', method: 'GET', path: '/r', renderer: {process: 41, request: '5'}};
   const selects = [];
-  const own = context.createFlowWorkspace({root: parseHTML(html).document.querySelector('#screen-backtrace'), graph: null, fetch: fetchStub,
+  const ownRoot = parseHTML(html).document.querySelector('#screen-backtrace');
+  const own = context.createFlowWorkspace({root: ownRoot, graph: null, fetch: fetchStub,
     createBlockGraphView: makeView, createBlockGraphRunner: runner, getRequest: () => shownRequest, selectRequest: id => selects.push(id)});
   eventPages.push(page([]));
   own.sync({visible: true, session: '7', request: null});
@@ -542,6 +543,7 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   const full = own.history();
   own.back(); own.back();
   same(own.trail().map(crumb => crumb.label), ['a'], 'Back reaches the entry that had no request');
+  assert.equal(ownRoot.querySelector('#flow-status').textContent, 'This trail entry had no request; Lineage still shows the selected one.', 'and says the app keeps its request');
   own.sync({visible: true, session: '7', request: shownRequest});
   same(own.history(), {entries: full.entries, cursor: full.cursor - 2}, 'the app still showing its request records nothing and keeps Forward');
   same(own.trail().map(crumb => crumb.label), ['a'], 'and leaves the restored entry as it was');
@@ -555,6 +557,7 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   const restored = own.history();
   own.sync({visible: true, session: '7', request: shownRequest});
   assert.equal(own.selection().request?.id, 'rR', 'the request the app could not select is kept in the entry');
+  assert.equal(ownRoot.querySelector('#flow-status').textContent, 'This trail entry\u2019s request is no longer in the request list; Lineage still shows the selected request.');
   same(own.history(), restored, 'and the app\u2019s own request is not a pick');
   // Once the app selects another request, that is a pick again.
   own.sync({visible: true, session: '7', request: {...requestR, id: 'rT', label: 'GET t.test #7'}});

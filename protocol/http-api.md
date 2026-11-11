@@ -1038,11 +1038,54 @@ protocol 3, category `vm`, and flags 0, or when any other payload check
 fails. The decode reads that record only. It does not build an opcode
 workspace or open the module, so a module the detector never admits still
 has rows here. It does not recover a
-guest PC or a sample the payload does not store. The unfiltered polling
-window adds the same object. `before=OFFSET` continues backward and
-`after=OFFSET` reads forward from a record boundary. Each response adds `query`
-with the applied `filters`, `direction`, `returned`, `store_end`, `limited`,
-`budget_exhausted`, `next_before` (null at the start of the store) and
+guest PC or a sample the payload does not store.
+
+`js_invocation_start`, `js_invocation_settle` and `js_invocation_request`
+include `js_invocation` beside the hex `payload`, decoded with the rules of
+[native JavaScript invocation](native-js-invocation-v1.md#wire-contract).
+`status` `decoded` adds `kind` and that record's fields:
+
+| `kind` | Fields |
+| --- | --- |
+| `start` | `site_slot`, `invocation_id`, `parent_invocation_id` (0 for none), `parent_unknown`, `argument_count`, `script_id`, `anchor_offset` (UTF-16), `source_sha256`, `site_sample_index`, `sample_index`, `document_id` |
+| `settle` | `site_slot`, `invocation_id`, `fulfilled`, `via` (`sync_return`, `sync_throw` or `promise`), `value_kind`, `value_length`, `digest_state` (`not_requested`, `present`, `not_digestible`, `too_large` or `unavailable`), `document_id` |
+| `request` | `inside`, `invocation_id` (0 exactly when `inside` is false), `request_id` |
+
+`value_kind` names wire kinds 1 to 14 in order: `integer`, `number` (not an
+integer), `string`, `symbol`, `undefined`, `null`, `boolean`, `bigint`,
+`object` (any other object), `function`, `array`, `array_buffer`,
+`array_buffer_view` (a typed array or `DataView`) and `promise`. Integers of
+32 bits or fewer are JSON numbers, so `invocation_id` equals the
+`wasm_observation.js_invocation_id` of the Wasm records that ran inside the
+call; `document_id` and `request_id` are canonical decimal strings. An
+invocation is `(session_id, process_id, invocation_id)`. Order its records by
+`sequence_number` within that process, not by file order or time.
+`script_id` and `anchor_offset` name the called function the way a stack
+frame does. `inside: false` means a request started with no script on the
+stack while some admitted invocation had not settled, so which one is unknown.
+No settled-value digest is decoded: `digest_state` says only whether the
+session retained one, which the
+[value-flow join](native-js-invocation-v1.md#identity-and-relations) reads
+from the stored record ([sensitive capture](../SAFETY.md#sensitive-capture)).
+`status` `invalid` carries no fields. It is used when the record is not
+protocol 3, category `vm` and flags 0 with an untruncated 128-byte hex payload
+and zero artifact, parent and navigation IDs, when the payload version is not
+1, and when any other wire rule fails.
+
+Events carry no site label. `site_slot` is the index in the site file the
+session armed, and `source_sha256` with `anchor_offset` is that site's key.
+`get_js_invocation_sites` lists that file in `session.sites` in slot order,
+each entry with the same key, its `label` and its `source_url`; join on the
+key. The label comes from the saved set the backend started with, or is
+`Unlabeled function`. A backend that the session's launcher did not start,
+such as a later backend over the same store, reports `session.state`
+`not_armed` with no sites, and the slot number is the only name.
+
+The unfiltered polling window adds the same objects. `before=OFFSET`
+continues backward and `after=OFFSET` reads forward from a record boundary.
+Each response adds `query` with the applied `filters`, `direction`,
+`returned`, `store_end`, `limited`, `budget_exhausted`, `next_before` (null at
+the start of the store) and
 `next_after`. A page stops at `limit` matches or after 64 MiB of records, so
 pass the cursor on to continue. A record without its newline is still being
 written and is not returned until it is complete. `event_window.scope` is

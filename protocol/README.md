@@ -458,7 +458,9 @@ not observed, which is distinct from an unknown host caller. See
 `get_events` and `wait_for_events` return the two Wasm observation payloads
 decoded as `wasm_observation` beside the hex, and the overflow payloads
 decoded as `wasm_overflow`. See
-[event queries](native-wasm-dispatch-v1.md#event-queries).
+[event queries](native-wasm-dispatch-v1.md#event-queries). The three
+JavaScript invocation records get `js_invocation` the same way; see
+[invocation event queries](native-js-invocation-v1.md#event-queries).
 `wasm_dispatch_overflow` and `wasm_indirect_overflow` are version 1 and do not
 carry invocation or caller context: they are compact identities for samples a
 budget refused, not full observations.

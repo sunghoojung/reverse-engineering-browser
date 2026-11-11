@@ -165,6 +165,8 @@ pub struct App {
     analysis: Mutex<Option<VmDocumentsCache>>,
     /// Cursors of the current cross-reference selection; one entry only.
     xrefs: Arc<crate::xrefs::Cursors>,
+    /// The last flow graph and the store snapshot it describes.
+    flow_graph: Arc<crate::flow_graph::Cache>,
     events: Arc<Mutex<event_window::EventWindowCache>>,
     requests: Arc<Mutex<RequestIndex>>,
     initiator_frames: Arc<std::sync::Mutex<crate::request_stack::InitiatorFrames>>,
@@ -269,6 +271,7 @@ impl App {
             package_io: Arc::new(Semaphore::new(2)),
             analysis: Mutex::new(None),
             xrefs: Arc::default(),
+            flow_graph: Arc::default(),
             events: Arc::new(Mutex::new(event_window::EventWindowCache::default())),
             artifact_lookup: Arc::new(Mutex::new(ArtifactLookupCache::default())),
             event_waiters: Arc::new(Semaphore::new(event_query::MAX_WAITERS)),
@@ -1303,6 +1306,22 @@ impl App {
                 ));
                 value
             }
+            "/api/flow-graph" => {
+                q.only(&["session_id"], &[])?;
+                let session = q.number("session_id", None, 64, true)?;
+                let stores = crate::flow_graph::Stores {
+                    events: self.options.store.clone(),
+                    artifacts: self.options.artifacts.clone(),
+                };
+                let cache = self.flow_graph.clone();
+                // A client that moved on leaves no scan running.
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let _cancel_on_drop = CancelOnDrop(cancel.clone());
+                let graph = self
+                    .blocking(move || crate::flow_graph::run(&stores, session, &cache, &cancel))
+                    .await?;
+                (*graph).clone()
+            }
             "/api/xrefs" => {
                 let query = crate::xrefs::XrefQuery::parse(&q)?;
                 // Only the analysis already cached: this route never computes
@@ -2057,6 +2076,12 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             if path == "/api/float32/compare" {
                 return app
                     .float32_operation(bytes.to_vec())
+                    .await
+                    .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
+            }
+            // Typed parse of up to 8 MiB of numbers, never a generic JSON tree.
+            if path == "/api/graph-layout" {
+                return crate::graph_layout::route(bytes.to_vec())
                     .await
                     .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
             }

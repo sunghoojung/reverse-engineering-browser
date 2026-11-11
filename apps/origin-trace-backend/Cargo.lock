@@ -1054,6 +1054,7 @@ version = "0.5.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "cc",
  "clap",
  "hex",
  "jsonschema",

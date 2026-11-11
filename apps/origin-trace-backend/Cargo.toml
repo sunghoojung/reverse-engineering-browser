@@ -30,5 +30,9 @@ oxc_span = "=0.155.0"
 oxc_syntax = "=0.155.0"
 stacker = "=0.1.25"
 
+[build-dependencies]
+# Compiles the vendored Triskel graph layout engine; see vendor/README.md.
+cc = "=1.10.0"
+
 [dev-dependencies]
 wat = "=1.240.0"

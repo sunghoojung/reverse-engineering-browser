@@ -36,6 +36,21 @@ decoding, saved collections and evidence export remain local workflows.
 Only `reb-api mcp` exposes the existing versioned HTTP contract; effectful tools
 remain opt-in, not authorization to inspect an unowned target.
 
+## Graph layout
+
+`POST /api/graph-layout` lays out graphs the UI sends with Triskel, vendored
+unmodified with its {fmt} headers under [`vendor/`](vendor/README.md).
+[`build.rs`](build.rs) compiles them with the C ABI bridge in
+[`cpp/triskel_bridge.cpp`](cpp/triskel_bridge.cpp) as C++23 at `-O2` in every
+profile, so the backend build needs GCC 14 or later, Clang 18 or later, or a
+current Apple Clang; CI sets `CXX_x86_64_unknown_linux_gnu=g++-14` on Ubuntu.
+Only the hidden `--graph-layout-worker` mode of this binary calls Triskel, in a
+contained process per request with a deadline, a budget per graph and a memory
+limit; the server never does. Limits and failure statuses are in
+[`protocol/http-api.md`](../../protocol/http-api.md#graph-layout). The packaged
+app ships the MPL-2.0 and MIT texts, with where Triskel's source is, as
+`Contents/Resources/GraphLayoutLicenses.txt`.
+
 ## Live capture lifecycle
 
 A live backend (`--socket`) belongs to one native event broker, which the

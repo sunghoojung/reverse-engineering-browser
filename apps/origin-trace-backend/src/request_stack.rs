@@ -22,9 +22,9 @@ const TASK_FRAME_LIMIT: u32 = 256;
 const HEADER: usize = 32;
 const FRAME: usize = 16;
 const SEGMENT: usize = 48;
-const MAX_ARTIFACT: usize =
+pub(crate) const MAX_ARTIFACT: usize =
     HEADER + FRAME * (SYNC_LIMIT + ASYNC_LIMIT) as usize + SEGMENT * TASK_LIMIT as usize;
-const MAX_SOURCE: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_SOURCE: usize = 16 * 1024 * 1024;
 const IDENTITY_SCAN: usize = 4096;
 /// Version 1 records captured no task-attributed callers.
 const ASYNC_NOT_SHOWN_V1: [&str; 4] = [
@@ -37,12 +37,12 @@ const ASYNC_NOT_SHOWN: [&str; 1] = ["MessagePort and worker messages"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Frame {
-    kind: u8,
-    flags: u8,
-    combinator: u16,
-    script_id: u32,
-    position: u32,
-    detail: u32,
+    pub(crate) kind: u8,
+    pub(crate) flags: u8,
+    pub(crate) combinator: u16,
+    pub(crate) script_id: u32,
+    pub(crate) position: u32,
+    pub(crate) detail: u32,
 }
 
 pub(crate) fn u16_at(bytes: &[u8], at: usize) -> u16 {
@@ -56,7 +56,7 @@ pub(crate) fn u64_at(bytes: &[u8], at: usize) -> u64 {
 }
 
 impl Frame {
-    fn read(bytes: &[u8]) -> Self {
+    pub(crate) fn read(bytes: &[u8]) -> Self {
         Self {
             kind: bytes[0],
             flags: bytes[1],
@@ -86,11 +86,11 @@ impl Frame {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Segment {
-    kind: u8,
-    state: u8,
-    flags: u8,
-    recorded: u32,
-    digest: [u8; 32],
+    pub(crate) kind: u8,
+    pub(crate) state: u8,
+    pub(crate) flags: u8,
+    pub(crate) recorded: u32,
+    pub(crate) digest: [u8; 32],
 }
 
 impl Segment {
@@ -121,21 +121,21 @@ impl Segment {
 }
 
 /// The decoded `request_initiator_stack` payload.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     version: u16,
     task_segments: u32,
-    state: u8,
-    flags: u8,
-    total: u32,
-    recorded: u32,
-    omitted: u32,
+    pub(crate) state: u8,
+    pub(crate) flags: u8,
+    pub(crate) total: u32,
+    pub(crate) recorded: u32,
+    pub(crate) omitted: u32,
     async_frames: u32,
     async_segments: u32,
     wasm_frames: u32,
     scripts: u32,
-    digest: [u8; 32],
-    innermost: Frame,
+    pub(crate) digest: [u8; 32],
+    pub(crate) innermost: Frame,
 }
 
 pub fn decode_record(payload: &[u8]) -> Option<Record> {
@@ -244,7 +244,40 @@ pub fn decode_artifact(content: &[u8], record: &Record) -> Option<(Vec<Frame>, V
         .map(|segments| (frames, segments))
 }
 
-fn decode_segment_artifact(content: &[u8], recorded: u32) -> Option<Vec<Frame>> {
+/// A stack artifact read by its own header, for a digest that no stack record
+/// describes here (a `script_cookie` write's walk). The header is checked
+/// against the frames exactly as a record's would be.
+pub(crate) fn decode_artifact_alone(content: &[u8]) -> Option<(Record, Vec<Frame>, Vec<Segment>)> {
+    if content.len() < HEADER + FRAME || content[11] != 0 {
+        return None;
+    }
+    let record = Record {
+        version: u16_at(content, 4),
+        task_segments: u32::from(u16_at(content, 28)),
+        state: 1,
+        flags: content[10],
+        total: u32_at(content, 12),
+        recorded: u32_at(content, 16),
+        omitted: u32_at(content, 20),
+        async_frames: u32::from(u16_at(content, 24)),
+        async_segments: u32::from(u16_at(content, 26)),
+        wasm_frames: 0,
+        scripts: 0,
+        digest: [0; 32],
+        innermost: Frame::read(&content[HEADER..HEADER + FRAME]),
+    };
+    let bounded = matches!(record.version, 1 | 2)
+        && (1..=SYNC_LIMIT).contains(&record.recorded)
+        && record.async_frames <= ASYNC_LIMIT
+        && record.task_segments <= TASK_LIMIT
+        && u64::from(record.recorded) + u64::from(record.omitted) == u64::from(record.total);
+    let (frames, segments) = bounded
+        .then(|| decode_artifact(content, &record))
+        .flatten()?;
+    Some((record, frames, segments))
+}
+
+pub(crate) fn decode_segment_artifact(content: &[u8], recorded: u32) -> Option<Vec<Frame>> {
     let count = recorded as usize;
     let shape = content.len() == HEADER + FRAME * count
         && u32_at(content, 0) == 0x4b53_4252
@@ -290,12 +323,15 @@ fn segment_digests(content: &[u8]) -> Vec<String> {
 /// The newest `script_identity` per script ID, from one process's records.
 #[derive(Clone, Debug)]
 pub struct Identity {
-    wasm: bool,
-    eval: bool,
-    retained: bool,
-    start_line: u32,
-    start_column: u32,
-    sha256: Option<String>,
+    pub(crate) wasm: bool,
+    pub(crate) eval: bool,
+    pub(crate) retained: bool,
+    pub(crate) start_line: u32,
+    pub(crate) start_column: u32,
+    /// The execution context ID of the script's realm: one per document,
+    /// so a stack that changes realm crossed a frame boundary.
+    pub(crate) realm: u64,
+    pub(crate) sha256: Option<String>,
 }
 
 pub fn decode_identity(payload: &[u8]) -> Option<(u32, Identity)> {
@@ -333,6 +369,7 @@ pub fn decode_identity(payload: &[u8]) -> Option<(u32, Identity)> {
                 retained: flags & 0x02 != 0,
                 start_line: u32_at(payload, 12),
                 start_column: u32_at(payload, 16),
+                realm: u64_at(payload, 24),
                 sha256: matches!(retention, 0x00 | 0x02 | 0x10).then(|| hex::encode(digest)),
             },
         )
@@ -341,7 +378,7 @@ pub fn decode_identity(payload: &[u8]) -> Option<(u32, Identity)> {
 
 /// One-based LF lines and UTF-16 columns of sorted UTF-16 offsets in text, as
 /// Sources numbers them, with each offset's UTF-8 byte position.
-fn positions(text: &str, offsets: &BTreeSet<u32>) -> HashMap<u32, (usize, u64, u64)> {
+pub(crate) fn positions(text: &str, offsets: &BTreeSet<u32>) -> HashMap<u32, (usize, u64, u64)> {
     let mut out = HashMap::new();
     let mut wanted = offsets.iter().copied().peekable();
     let (mut unit, mut line, mut column) = (0u64, 1u64, 1u64);
@@ -388,7 +425,7 @@ fn identifier_end(bytes: &[u8], mut end: usize) -> Option<(usize, usize)> {
 /// The name the source gives the function starting at byte `start`: the
 /// declaration or method name, or the binding an anonymous function or arrow
 /// is assigned to. None for an anonymous function.
-fn function_name(text: &str, start: usize) -> Option<String> {
+pub(crate) fn function_name(text: &str, start: usize) -> Option<String> {
     let bytes = text.as_bytes();
     let mut cursor = start.min(bytes.len());
     if let Some((name_start, name_end)) = identifier_end(bytes, cursor) {
@@ -445,7 +482,7 @@ fn function_name(text: &str, start: usize) -> Option<String> {
     Some(text[chain_start..chain_end].to_owned())
 }
 
-fn wasm_names(bytes: &[u8]) -> HashMap<u32, String> {
+pub(crate) fn wasm_names(bytes: &[u8]) -> HashMap<u32, String> {
     let mut names = HashMap::new();
     for payload in wasmparser::Parser::new(0).parse_all(bytes) {
         let Ok(wasmparser::Payload::CustomSection(section)) = payload else {
@@ -561,7 +598,7 @@ pub fn summary(record: &Record) -> Value {
     })
 }
 
-fn task_kind(kind: u8) -> &'static str {
+pub(crate) fn task_kind(kind: u8) -> &'static str {
     match kind {
         1 => "set_timeout",
         2 => "set_interval",
@@ -948,7 +985,7 @@ fn payload(event: &Value) -> Option<Vec<u8>> {
 }
 
 /// Bytes 80-127 of a `navigation_initiator_stack`: its kind and target frame.
-fn decode_navigation(payload: &[u8]) -> Option<(Record, &'static str, u64)> {
+pub(crate) fn decode_navigation(payload: &[u8]) -> Option<(Record, &'static str, u64)> {
     if payload.len() != 128
         || payload[0] != 2
         || !matches!(payload[4], 1 | 4 | 5)

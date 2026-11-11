@@ -132,6 +132,8 @@ Every option is off unless the start names it, and none is inherited.
 | Overview, Activity, Request link | `get_events` (category and type filters), `get_request_signal_profile` | R | Covered |
 | Stop probes, Clear events | `capture_action` | A | Covered |
 | Backtraces: load a trace, steps, events | `get_origin_trace`, `get_events` | R | Covered |
+| Backtraces Flow graph: every recorded stack across frames, realms, JavaScript, eval and Wasm | `get_flow_graph` | R | Added |
+| Flow graph and Sources Graph layout: node corners and edge routes from Triskel for node sizes and edges the caller sends | `post_graph_layout` | A | Added; it reads no evidence, but it starts a contained layout worker, so it needs actions |
 
 ## Evidence screen and metadata packages
 
@@ -182,7 +184,7 @@ Every option is off unless the start names it, and none is inherited.
 
 ## Totals
 
-The tables have 100 rows.
+The tables have 102 rows.
 
 - **Before this change**, 76 rows were covered for a client started with
   `--allow-effects --allow-session-start`. The in-app agent had nine fixed
@@ -191,9 +193,10 @@ The tables have 100 rows.
   `get_analysis_catalog`, `get_js_invocation_sites`, `inspect_wasm`) plus,
   with actions on, every effectful operation. It could not read content or
   start sessions, and every action needed Allow once.
-- **Now** 85 rows are covered: the 76, plus 9 added (request and response
+- **Now** 87 rows are covered: the 76, plus 11 added (request and response
   bodies, source text, search across files and within one, Wasm row windows,
-  guest bytecode, and the two response options), and the in-app agent can use
+  guest bytecode, the two response options, the session flow graph and graph
+  layout), and the in-app agent can use
   all of them at the level each row names, including session control at Full
   access.
 - **3 rows are partial**: Decode value and Decode range need the value read

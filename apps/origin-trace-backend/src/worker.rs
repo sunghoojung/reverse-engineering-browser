@@ -12,7 +12,7 @@ use tokio::{
 
 // Workers own a process group. Cancellation and dropped futures must also stop
 // descendants that inherited stdout, not leave the pipe reader alive forever.
-struct ProcessGroup(u32);
+pub(crate) struct ProcessGroup(pub(crate) u32);
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
         #[cfg(unix)]

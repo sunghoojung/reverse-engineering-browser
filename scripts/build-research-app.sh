@@ -91,6 +91,27 @@ cp "${repo_root}/build/agent-runtime/agent_runtime.LICENSES.txt" "${resources_pa
 node "${repo_root}/tools/check-agent-runtime.mjs" \
   "${research_ui_resources}/agent_runtime_claude.js" "${research_ui_resources}/agent_runtime_chatgpt.js"
 cargo build --locked --release --manifest-path "${repo_root}/apps/origin-trace-backend/Cargo.toml"
+# The backend links the vendored Triskel (MPL-2.0) and {fmt} (MIT) graph layout
+# code. Ship both notices and where Triskel's source is; see
+# apps/origin-trace-backend/vendor/README.md.
+graph_layout_vendor="${repo_root}/apps/origin-trace-backend/vendor"
+triskel_revision="196ba112eba992c1460af3097c038defcf7a7e45"
+{
+  echo "OriginTraceBackend includes these projects, unmodified, for graph layout."
+  echo
+  echo "Triskel, commit ${triskel_revision}, under the Mozilla Public License 2.0."
+  echo "Source: https://github.com/triskellib/triskel/tree/${triskel_revision}"
+  echo "The compiled files are lib/include and lib/src without lib/src/renderer and"
+  echo "lib/src/llvm, also in this application's source at"
+  echo "apps/origin-trace-backend/vendor/triskel."
+  echo
+  cat "${graph_layout_vendor}/triskel/LICENSE"
+  echo
+  echo "{fmt} 12.2.0, header only, under the MIT license."
+  echo "Source: https://github.com/fmtlib/fmt/tree/12.2.0"
+  echo
+  cat "${graph_layout_vendor}/fmt/LICENSE"
+} > "${resources_path}/GraphLayoutLicenses.txt"
 cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-backend" "${macos_path}/OriginTraceBackend"
 cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-vm" "${macos_path}/OriginTraceVMAnalyzer"
 cp "${repo_root}/apps/origin-trace-backend/target/release/reb-api" "${macos_path}/OriginTraceAPI"

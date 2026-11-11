@@ -21,6 +21,8 @@ mod evidence;
 pub mod evidence_comparison;
 pub mod evidence_package;
 pub mod float32;
+mod flow_graph;
+mod graph_layout;
 mod js_invocation;
 mod js_invocation_sites;
 pub mod live_wasm;

@@ -1127,6 +1127,96 @@ counts cover only what was read; a malformed record is counted and skipped. The
 `filter` is a case-insensitive substring over the names on the rows and never
 reads captured source bodies.
 
+## Flow graph
+
+`get_flow_graph` (`GET /api/flow-graph?session_id=`) folds every recorded stack
+of one session (request, navigation, async scheduling and walked cookie-write
+stacks) into one observed graph: realms as contexts, JavaScript, eval and Wasm
+functions and request, navigation and cookie-write sinks as nodes, and call,
+await, task and omitted edges that name the frame, language and eval
+boundaries they cross. Each distinct stack is decoded once and each retained
+source read once; `paths` lists every stack's edges and request IDs. It is
+read-only, cached until the stores change, and stops at a 30-second deadline
+with `complete` false. A frame that does not resolve keeps its script ID and a
+reason; a lost scheduling stack is a `chain_cut`, never a bridged edge. Bounds
+and folding rules are in [flow-graph-v1.md](flow-graph-v1.md). The `reb://`
+stored-evidence workspace does not serve it.
+
+## Graph layout
+
+`post_graph_layout` (`POST /api/graph-layout`) lays out caller-supplied graphs
+for the Flow graph and the Sources Graph view with Triskel, a control flow
+graph layout engine built on SESE regions and Sugiyama layering, vendored at
+commit `196ba112eba992c1460af3097c038defcf7a7e45`
+([vendor/README.md](../apps/origin-trace-backend/vendor/README.md)). It reads
+no evidence and writes nothing; it is pure computation over the body.
+
+```json
+{"graphs": [{"nodes": [[120, 40], [80, 30]], "edges": [[0, 1], [1, 0]]}]}
+```
+
+`nodes[i]` is node `i`'s width and height, each a finite number above 0 and at
+most 100000; `edges` are `[from, to]` node indexes, self loops, duplicates and
+cycles included. The response keeps request order:
+
+```json
+{"schema": "graph-layout-v1",
+ "engine": {"name": "triskel", "revision": "196ba112eba992c1460af3097c038defcf7a7e45"},
+ "graphs": [{"status": "laid_out", "nodes": [[0, 70], [20, 250]],
+             "edges": [[60, 110, 60, 210, 60, 210, 60, 250],
+                       [73.33, 280, 73.33, 410, 220, 410, 220, 380, 220, 380, 220, 250,
+                        220, 250, 220, 210, 220, 210, 220, 70, 220, 70, 220, 30,
+                        220, 30, 220, 0, 80, 0, 80, 70]],
+             "width": 220, "height": 410, "elapsed_ms": 0}],
+ "elapsed_ms": 4}
+```
+
+The back edge `1 -> 0` leaves node 1's bottom, runs around the right side and
+enters node 0 from above, so the drawing's top is that waypoint at `y` 0 and
+node 0 starts at `y` 70.
+
+A laid-out graph gives each node's top-left corner and, for each input edge,
+Triskel's waypoints as a flat `x0, y0, x1, y1, ...` list from the source to the
+target. Values are rounded to 2 decimals and moved so the drawing, waypoints
+included, starts at `0, 0`; `width` and `height` are its extent. Separate
+weakly connected parts are laid out one at a time and packed in rows, largest
+first. Any other graph has `status` `too_large`, `failed` or `timeout` and a
+`reason`.
+
+The limits exist because Triskel's cost grows with about the square of the node
+count (measured on tree-like graphs with some back edges: 1,000 nodes 0.6 s,
+3,000 nodes 6.6 s, 8,000 nodes 85 s, and roughly three times that on a loaded
+machine):
+
+- A body holds at most 64 graphs and 8,000 nodes in all, within 8 MiB. Over
+  that, or with malformed JSON, an unknown member, a bad size or an index
+  outside its graph, the route returns 400 with an `error` and lays out
+  nothing.
+- A graph over 2,000 nodes or 8,000 edges is `too_large`; the others are still
+  laid out.
+- One request has 10 s. A graph has its own budget inside that, 1 s plus 8 µs
+  times its node count squared, so a graph Triskel never finishes costs only
+  its budget.
+
+Triskel is third-party C++ fed graphs shaped by captured pages, and this
+revision can loop forever, crash or place nodes on top of each other on some
+inputs, so it never runs in the server. Each request starts the backend
+executable again as a contained `--graph-layout-worker` process with no
+network access (on macOS no file access either) and a 2 GiB resident memory
+limit; at most two run at once and later requests wait for a slot. A graph
+whose budget passes is
+`timeout`; one that crashes the worker or reaches the memory limit is `failed`;
+either way a new worker continues with the graphs after it. When the request
+deadline passes, every graph without a result is `timeout`. A layout with
+overlapping nodes or an edge that does not reach its nodes is `failed`, so a
+`laid_out` result never has either. The worker adds a virtual root and, where a
+part has no node without out-edges, a virtual exit, both of size 0, which
+Triskel needs; neither appears in the result.
+
+The MCP projection lists it only with `--allow-effects`, like the contained
+JavaScript formatter, since it launches a worker process. The `reb://`
+stored-evidence workspace does not serve it.
+
 ## Artifact text pages and search
 
 `GET /api/artifacts/{artifact_id}/text` (`get_artifact_text`) returns one

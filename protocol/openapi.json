@@ -1894,6 +1894,105 @@
         }
       }
     },
+    "/api/flow-graph": {
+      "get": {
+        "operationId": "get_flow_graph",
+        "summary": "Fold every recorded stack of one session into one flow graph across frames, realms, JavaScript, eval and Wasm",
+        "description": "Every request_initiator_stack (34), navigation_initiator_stack (46), async_task_stack (48) and walked script_cookie write (39) of one session, folded into one observed graph. Each distinct stack digest is decoded once and counted by occurrences; each retained script or module is read once for every frame that names it. Nodes are functions (javascript, eval for eval or new Function scripts, wasm) and sinks (request as METHOD host, navigation kind, cookie_write API), keyed by realm and code, so the same code in one realm is one node. contexts are realms: process_id plus the execution_context_id of the script_identity records (35), with the frame_ids the realm's stacks were recorded in, tab_ids and script origins. Edges: call (adjacent synchronous frames, with call sites), await (an async function's awaiter, labeled by any Promise combinator), task (a task segment: the stack that scheduled a timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask or queued event, to that task's first frame; via names microtask hops), omitted (the run a stack deeper than 1,024 frames dropped) and request, navigation or cookie_write edges to sinks. crosses names frame (a change of realm), language (JavaScript and Wasm) and dynamic (a call into eval code). paths lists each distinct stack's edges and nodes for highlighting. A frame that does not resolve keeps its script ID and a reason; a missing scheduling stack cuts the chain (chain_cut on the node it would have entered), never bridged. Workers, MessagePort messages and out-of-process frames are not walked and are listed in not_shown. An edge counts each stack once however often that stack walks it; via, label and omitted merge what the stacks that share it say. A task edge enters only a frame known to be its task's first: the last awaiter of an await chain, else the outermost synchronous frame, never the outermost of a walk that stopped at 256 frames or of a truncated await chain. Limits are reported in limits and truncated, a scan stops at a 30-second deadline with coverage.stopped deadline, and complete is false whenever anything was cut. The answer is cached until the event store or artifact manifest changes; a deadline-cut answer is not cached. See protocol/flow-graph-v1.md.",
+        "tags": [
+          "events"
+        ],
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "description": "The capture session to fold.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          }
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads stored events, the artifact manifest and verified stack, JavaScript and Wasm bytes. Writes nothing and requests no browser mutation. A scan stops at a 30-second deadline and reports coverage.stopped deadline.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/flow_graph.rs",
+              "symbol": "run"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "responses": {
+          "200": {
+            "description": "The session's flow graph.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowGraph"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or malformed session_id, or an unknown parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/request-stack": {
       "get": {
         "operationId": "get_request_stack",
@@ -6702,6 +6801,219 @@
         }
       }
     },
+    "/api/graph-layout": {
+      "post": {
+        "operationId": "post_graph_layout",
+        "summary": "Lay out graphs with the vendored Triskel engine",
+        "description": "Side-effect-free layout of caller-supplied graphs for Flow graph and the Sources Graph view: node widths and heights and from, to edges in; each node's top-left corner and each edge's Triskel waypoints out, in request order. Triskel (SESE regions and Sugiyama layering, pinned revision) runs in a contained worker process, never in the server, with a 10 s deadline per request; at most two workers run at once and later requests wait for a slot. At most 64 graphs and 8000 nodes in all per request. A graph over 2000 nodes or 8000 edges is not laid out and gets too_large while the others are; a deadline, crash or memory limit marks every graph without a result timeout or failed. Coordinates are rounded to 2 decimals and moved so the drawing starts at 0, 0. Reads no evidence, writes nothing and never echoes input values.",
+        "tags": [
+          "graph-layout"
+        ],
+        "x-source": "apps/origin-trace-backend/src/graph_layout.rs",
+        "x-max-body-bytes": 8388608,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GraphLayoutRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One result per requested graph, in request order. A graph that was not laid out names why in status and reason; the others keep their layouts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphLayoutResult"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid framing or body size, malformed JSON, an unknown or missing member, a node size that is not a finite number above 0 and at most 100000, an edge index that is not an integer naming a node of its graph, more than 64 graphs or more than 8000 nodes in all. No input values are echoed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The request-body deadline expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "X-Reb-Expected-Instance names another backend instance. No operation was dispatched.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal validation or serialization task failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis",
+            "process-launch"
+          ],
+          "state_dependent_effects": [
+            {
+              "effects": [
+                "process-stop"
+              ],
+              "when": "The contained layout worker's process group is killed when the request ends, its deadline passes or it stops sending results."
+            }
+          ],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            },
+            {
+              "id": "layout-worker",
+              "condition": "The backend executable must start its contained graph layout worker; two run at once and later requests wait for a slot."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Pure computation over the supplied graphs. Reads no evidence or stores, writes no files, controls no browser, executes no captured code and makes no network request. The worker runs the vendored third-party Triskel C++ engine with no network access (on macOS no file access either) and a resident memory limit. No automatic retry.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/graph_layout.rs",
+              "symbol": "graph_layout::route"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/graph_layout.rs",
+              "symbol": "graph_layout::worker_main"
+            }
+          ]
+        }
+      }
+    },
     "/api/float32/compare": {
       "post": {
         "operationId": "compare_float32",
@@ -9278,6 +9590,526 @@
           "unterminated_tail_bytes": {
             "$ref": "#/components/schemas/Uint64String",
             "description": "Bytes after the store's last newline when a read covered the store: a record still being written, or torn when the writer stopped. They are not part of any answer. Zero for a per-request range."
+          }
+        }
+      },
+      "FlowGraph": {
+        "type": "object",
+        "required": [
+          "schema",
+          "session_id",
+          "evidence",
+          "complete",
+          "coverage",
+          "stacks",
+          "truncated",
+          "limits",
+          "not_shown",
+          "contexts",
+          "nodes",
+          "edges",
+          "paths"
+        ],
+        "properties": {
+          "schema": {
+            "const": "flow-graph-v1"
+          },
+          "session_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "evidence": {
+            "const": "observed"
+          },
+          "complete": {
+            "type": "boolean"
+          },
+          "coverage": {
+            "type": "object",
+            "required": [
+              "stopped",
+              "scanned_bytes",
+              "store_end",
+              "malformed_records",
+              "elapsed_ms"
+            ],
+            "properties": {
+              "stopped": {
+                "enum": [
+                  "end",
+                  "deadline"
+                ]
+              },
+              "scanned_bytes": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "store_end": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "malformed_records": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "elapsed_ms": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "stacks": {
+            "type": "object",
+            "required": [
+              "records",
+              "occurrences",
+              "distinct",
+              "decoded",
+              "not_walked",
+              "unresolved",
+              "over_budget"
+            ],
+            "properties": {
+              "records": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "occurrences": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "distinct": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "decoded": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "not_walked": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "unresolved": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "over_budget": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "truncated": {
+            "type": "object",
+            "required": [
+              "nodes",
+              "edges",
+              "paths",
+              "identities",
+              "request_labels",
+              "request_ids",
+              "source_budget",
+              "source_deadline"
+            ],
+            "properties": {
+              "nodes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "edges": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "paths": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "identities": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "request_labels": {
+                "type": "boolean"
+              },
+              "request_ids": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "source_budget": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "source_deadline": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "not_shown": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "contexts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "process_id",
+                "execution_context_id",
+                "origin",
+                "origins",
+                "frame_ids",
+                "tab_ids",
+                "counts"
+              ],
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "process_id": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "execution_context_id": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/NonzeroUint64String"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "origin": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "origins": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "origin",
+                      "functions"
+                    ],
+                    "properties": {
+                      "origin": {
+                        "type": "string"
+                      },
+                      "functions": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  }
+                },
+                "frame_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "frame_id",
+                      "stacks"
+                    ],
+                    "properties": {
+                      "frame_id": {
+                        "$ref": "#/components/schemas/NonzeroUint64String"
+                      },
+                      "stacks": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  }
+                },
+                "tab_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "counts": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "kind",
+                "context",
+                "status",
+                "hits",
+                "entries",
+                "leaves"
+              ],
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "kind": {
+                  "enum": [
+                    "javascript",
+                    "eval",
+                    "wasm",
+                    "request",
+                    "navigation",
+                    "cookie_write"
+                  ]
+                },
+                "context": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "status": {
+                  "enum": [
+                    "resolved",
+                    "unresolved"
+                  ]
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "script_id": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "artifact_id": {
+                  "$ref": "#/components/schemas/Uint64String"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "line": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "column": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "artifact_line": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "artifact_column": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "function_position": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "function_index": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "top_level": {
+                  "type": "boolean"
+                },
+                "chain_cut": {
+                  "type": "boolean"
+                },
+                "schedules": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "hits": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "entries": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "leaves": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "from",
+                "to",
+                "kind",
+                "crosses",
+                "count",
+                "stacks",
+                "sites"
+              ],
+              "properties": {
+                "from": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "to": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "kind": {
+                  "enum": [
+                    "call",
+                    "await",
+                    "task",
+                    "omitted",
+                    "request",
+                    "navigation",
+                    "cookie_write"
+                  ]
+                },
+                "task": {
+                  "type": "string"
+                },
+                "via": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "label": {
+                  "type": "string"
+                },
+                "omitted": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "crosses": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "frame",
+                      "language",
+                      "dynamic"
+                    ]
+                  }
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "stacks": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "sites": {
+                  "type": "array",
+                  "maxItems": 8,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "line": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "column": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "module_offset": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "process_id",
+                "digest",
+                "occurrences",
+                "retained",
+                "requests",
+                "nodes",
+                "edges"
+              ],
+              "properties": {
+                "process_id": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "occurrences": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "retained": {
+                  "type": "boolean"
+                },
+                "requests": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NonzeroUint64String"
+                  }
+                },
+                "nodes": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "edges": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
           }
         }
       },
@@ -28173,6 +29005,201 @@
             "maximum": 4294967295
           }
         }
+      },
+      "GraphLayoutRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "graphs"
+        ],
+        "description": "Graphs to lay out, at most 64 and 8000 nodes in all.",
+        "properties": {
+          "graphs": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "nodes",
+                "edges"
+              ],
+              "properties": {
+                "nodes": {
+                  "type": "array",
+                  "description": "Width and height of each node; a node's index is its position here.",
+                  "items": {
+                    "type": "array",
+                    "prefixItems": [
+                      {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "maximum": 100000
+                      },
+                      {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "maximum": 100000
+                      }
+                    ],
+                    "items": false,
+                    "minItems": 2
+                  }
+                },
+                "edges": {
+                  "type": "array",
+                  "description": "From and to node indexes of each edge. Self loops, duplicates and cycles are allowed.",
+                  "items": {
+                    "type": "array",
+                    "prefixItems": [
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    ],
+                    "items": false,
+                    "minItems": 2
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "GraphLayoutResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "engine",
+          "graphs",
+          "elapsed_ms"
+        ],
+        "properties": {
+          "schema": {
+            "const": "graph-layout-v1"
+          },
+          "engine": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "revision"
+            ],
+            "properties": {
+              "name": {
+                "const": "triskel"
+              },
+              "revision": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$",
+                "description": "The vendored upstream commit."
+              }
+            }
+          },
+          "graphs": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/GraphLayoutGraph"
+            }
+          },
+          "elapsed_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Server time for the whole request, waiting for a worker slot included."
+          }
+        }
+      },
+      "GraphLayoutGraph": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "nodes",
+              "edges",
+              "width",
+              "height",
+              "elapsed_ms"
+            ],
+            "properties": {
+              "status": {
+                "const": "laid_out"
+              },
+              "nodes": {
+                "type": "array",
+                "description": "Top-left x, y of each requested node, in request order.",
+                "items": {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "number",
+                      "minimum": 0
+                    }
+                  ],
+                  "items": false,
+                  "minItems": 2
+                }
+              },
+              "edges": {
+                "type": "array",
+                "description": "Triskel's waypoints for each requested edge, in request order, as a flat x0, y0, x1, y1, ... list from the source to the target.",
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                }
+              },
+              "width": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Extent of the nodes and waypoints."
+              },
+              "height": {
+                "type": "number",
+                "minimum": 0
+              },
+              "elapsed_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Triskel time for this graph in the worker."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "reason"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "too_large",
+                  "failed",
+                  "timeout"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        ]
       },
       "Float32Request": {
         "type": "object",

@@ -697,10 +697,12 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 58, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 60, "Review route coverage when the API changes");
     assert!(ids.contains("get_request_headers"));
     assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
     assert!(ids.contains("get_xrefs"));
+    assert!(ids.contains("get_flow_graph"));
+    assert!(ids.contains("post_graph_layout"));
     assert!(
         ids.contains("get_js_invocation_sites")
             && ids.contains("resolve_js_invocation_site")
@@ -788,7 +790,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 58);
+    assert_eq!(operation_count, 60);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -1141,6 +1143,14 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
         ),
         ("/api/wasm?artifact_id=missing", "/api/wasm", 400),
         ("/api/wasm?artifact_id=1&sections=exports", "/api/wasm", 400),
+        ("/api/flow-graph", "/api/flow-graph", 400),
+        ("/api/flow-graph?session_id=0", "/api/flow-graph", 400),
+        (
+            "/api/flow-graph?session_id=1&limit=2",
+            "/api/flow-graph",
+            400,
+        ),
+        ("/api/flow-graph?session_id=1", "/api/flow-graph", 200),
         ("/api/request-stack?request_id=3", "/api/request-stack", 400),
         (
             "/api/request-stack?process_id=0&request_id=3",
@@ -7021,6 +7031,166 @@ async fn source_facts_real_worker_http_and_cli() {
 fn float32_request() -> Value {
     json!({"protocol_version":1,"input":{"representation":"float32-le","channels":1,"frames":4,"source":{"kind":"bits","words":["3f800000","80000000","7fc00001","7f800000"]}},"reference":{"representation":"float32-le","channels":1,"frames":4,"source":{"kind":"bits","words":["3f800001","00000000","7fc00002","7f800000"]}},"tolerances":{"absolute":0,"relative":0,"ulps":1},"detail":{"start":0,"limit":256}})
 }
+#[tokio::test]
+async fn graph_layout_lays_out_in_order_and_refuses_bad_bodies() {
+    const ROUTE: &str = "/api/graph-layout";
+    let server = Server::start_with_helper_canaries(true).await;
+    let raw = |body: String| {
+        server
+            .client
+            .post(format!("{}{ROUTE}", server.url))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+    };
+    // A diamond with a back edge, a graph over the 2000-node limit, an
+    // empty graph and a lone node, in that order.
+    let diamond = json!({
+        "nodes": [[120, 40], [80.5, 30], [80, 30], [120, 40]],
+        "edges": [[0, 1], [0, 2], [1, 3], [2, 3], [3, 0]]
+    });
+    let oversized = json!({"nodes": vec![json!([10, 10]); 2001], "edges": []});
+    let request = json!({"graphs": [
+        diamond,
+        oversized,
+        {"nodes": [], "edges": []},
+        {"nodes": [[64, 24]], "edges": []}
+    ]});
+    let bytes =
+        assert_contract_response(server.action(ROUTE, request).await, "post", ROUTE, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["schema"], "graph-layout-v1");
+    assert_eq!(
+        result["engine"],
+        json!({"name": "triskel", "revision": "196ba112eba992c1460af3097c038defcf7a7e45"})
+    );
+    let graphs = result["graphs"].as_array().unwrap();
+    assert_eq!(graphs.len(), 4);
+    assert_eq!(graphs[0]["status"], "laid_out", "{}", graphs[0]);
+    let nodes = graphs[0]["nodes"].as_array().unwrap();
+    let edges = graphs[0]["edges"].as_array().unwrap();
+    assert_eq!((nodes.len(), edges.len()), (4, 5));
+    let number = |value: &Value| value.as_f64().unwrap();
+    // The drawing starts at 0, 0: a node or a waypoint routed around it.
+    for axis in 0..2 {
+        let low = nodes
+            .iter()
+            .chain(edges)
+            .flat_map(|list| list.as_array().unwrap().iter().skip(axis).step_by(2))
+            .map(number)
+            .fold(f64::INFINITY, f64::min);
+        assert_eq!(low, 0.0, "axis {axis}");
+    }
+    for value in nodes
+        .iter()
+        .chain(edges)
+        .flat_map(|list| list.as_array().unwrap())
+    {
+        let value = number(value);
+        assert!(value >= 0.0 && (value * 100.0).fract() == 0.0, "{value}");
+    }
+    // The back edge 3 -> 0 starts at node 3 and ends at node 0.
+    let back = edges[4].as_array().unwrap();
+    let (corner, target) = (&nodes[3], &nodes[0]);
+    assert!(
+        number(&back[0]) >= number(&corner[0]) - 1.0
+            && number(&back[0]) <= number(&corner[0]) + 121.0
+    );
+    assert!(
+        number(&back[1]) >= number(&corner[1]) - 1.0
+            && number(&back[1]) <= number(&corner[1]) + 41.0
+    );
+    let last = back.len() - 2;
+    assert!(
+        number(&back[last]) >= number(&target[0]) - 1.0
+            && number(&back[last]) <= number(&target[0]) + 121.0
+    );
+    assert!(
+        number(&back[last + 1]) >= number(&target[1]) - 1.0
+            && number(&back[last + 1]) <= number(&target[1]) + 41.0
+    );
+    assert_eq!(graphs[1]["status"], "too_large");
+    assert!(
+        graphs[1]["reason"].as_str().unwrap().contains("2001 nodes"),
+        "{}",
+        graphs[1]
+    );
+    assert_eq!(
+        graphs[2],
+        json!({"status": "laid_out", "nodes": [], "edges": [], "width": 0, "height": 0, "elapsed_ms": 0})
+    );
+    assert_eq!(graphs[3]["nodes"], json!([[0, 0]]));
+    assert_eq!(
+        (&graphs[3]["width"], &graphs[3]["height"]),
+        (&json!(64), &json!(24))
+    );
+
+    let response = server
+        .client
+        .post(format!("{}{ROUTE}", server.url))
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(response, "post", ROUTE, 400).await;
+    let many = |graphs: usize, nodes: usize| {
+        let graph = json!({"nodes": vec![json!([1, 1]); nodes], "edges": []});
+        json!({"graphs": vec![graph; graphs]}).to_string()
+    };
+    for (body, words) in [
+        ("{".to_owned(), "malformed JSON"),
+        ("[]".to_owned(), "must be"),
+        (
+            r#"{"graphs":[{"nodes":[[1,1]],"edges":[[0,1]]}]}"#.to_owned(),
+            "outside the graph",
+        ),
+        (
+            r#"{"graphs":[{"nodes":[[1,1]],"edges":[[0,0.5]]}]}"#.to_owned(),
+            "integer node indexes",
+        ),
+        (
+            r#"{"graphs":[{"nodes":[[1,NaN]],"edges":[]}]}"#.to_owned(),
+            "malformed JSON",
+        ),
+        (
+            r#"{"graphs":[{"nodes":[[1,-2]],"edges":[]}]}"#.to_owned(),
+            "above 0",
+        ),
+        (
+            r#"{"graphs":[{"nodes":[[0,2]],"edges":[]}]}"#.to_owned(),
+            "above 0",
+        ),
+        (many(65, 1), "at most 64 graphs"),
+        (many(5, 1601), "8000 nodes in all"),
+    ] {
+        let bytes =
+            assert_contract_response(raw(body.clone()).await.unwrap(), "post", ROUTE, 400).await;
+        let error: Value = serde_json::from_slice(&bytes).unwrap();
+        let message = error["error"].as_str().unwrap();
+        assert!(message.contains(words), "{body:.80}: {message}");
+        assert_eq!(error["code"], "invalid_request");
+    }
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["describe", "post_graph_layout"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let description: Value = serde_json::from_slice(&output.stdout).unwrap();
+    // A contained worker process, like the JavaScript formatter: listed only
+    // with --allow-effects.
+    assert_eq!(
+        description["x-reb-execution"]["effects"],
+        json!(["analysis", "process-launch"])
+    );
+}
+
 #[tokio::test]
 async fn float32_http_cli_discovery_parity_and_no_helpers() {
     const ROUTE: &str = "/api/float32/compare";

@@ -1,0 +1,2273 @@
+//! One session's flow graph (protocol/flow-graph-v1.md): every walked stack the
+//! store holds, folded into one graph of functions grouped by realm.
+//!
+//! Request, navigation and async-task scheduling stacks, and the walked stacks
+//! of script cookie writes, name their frames by digest. Each distinct stack is
+//! decoded once however often it repeats, each retained script is read once for
+//! every frame that names it, and its positions are resolved in one pass. Two
+//! adjacent synchronous frames are a call edge. A change of realm between them
+//! is a frame boundary (a same-process iframe), a change between JavaScript and
+//! Wasm a language boundary, and a call into an `eval` or `new Function` script
+//! a dynamic one. Task segments link the stack that scheduled a task to that
+//! task's first frame, so a `postMessage` into an iframe is one edge between
+//! realms. Nothing is inferred: a frame without a resolvable identity stays a
+//! node with a reason, and a cut chain, an omitted run or a budget is reported,
+//! never bridged.
+use crate::{
+    error::{Error, Result},
+    evidence, request_index,
+    request_stack::{self, Frame, Identity, Record, Segment},
+};
+use regex::bytes::Regex;
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+pub const SCHEMA: &str = "flow-graph-v1";
+/// A pathological store is a visible cut rather than an endless request.
+const SCAN_DEADLINE: Duration = Duration::from_secs(30);
+const MAX_RECORD_BYTES: usize = 64 * 1024;
+const READ_BUFFER_BYTES: usize = 256 * 1024;
+/// Distinct stacks decoded. A stack is one digest however often it repeats, and
+/// each renderer sends at most 1,024 request and 1,024 scheduling stacks per
+/// configuration; past this the rest are counted, not drawn.
+const MAX_STACKS: usize = 16_384;
+const MAX_NODES: usize = 32_768;
+const MAX_EDGES: usize = 131_072;
+/// Edge and node references kept for path highlighting, about 8 MiB of JSON.
+const MAX_PATH_REFS: usize = 1 << 20;
+const MAX_IDENTITIES: usize = 1 << 18;
+/// Request labels (`METHOD host`) waiting for their stack record.
+const MAX_REQUEST_LABELS: usize = 1 << 18;
+/// Distinct `METHOD host` texts; a session talks to far fewer hosts.
+const MAX_LABEL_TEXTS: usize = 1 << 16;
+/// Retained source read for names and positions, once per digest. One source
+/// is held at a time, so this bounds work, not memory.
+const MAX_SOURCE_BYTES: usize = 1 << 30;
+/// Renderer request IDs kept on paths, for finding a selected request's path.
+const MAX_REQUEST_REFS: usize = 1 << 17;
+/// Call sites kept per edge, enough to show that one call is many.
+const MAX_SITES: usize = 8;
+const TYPES: [&str; 6] = [
+    "request_initiator_stack",
+    "navigation_initiator_stack",
+    "async_task_stack",
+    "script_cookie",
+    "script_identity",
+    "request_initiated",
+];
+
+/// The last answer and the store snapshot it describes.
+#[derive(Default)]
+pub struct Cache(Mutex<Option<(String, Arc<Value>)>>);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum Sink {
+    Request(String),
+    Navigation(&'static str),
+    Cookie(&'static str),
+}
+
+impl Sink {
+    fn kind(&self) -> &'static str {
+        match self {
+            Sink::Request(_) => "request",
+            Sink::Navigation(_) => "navigation",
+            Sink::Cookie(_) => "cookie_write",
+        }
+    }
+    fn label(&self) -> String {
+        match self {
+            Sink::Request(label) => label.clone(),
+            Sink::Navigation(kind) => kind.replace('_', " "),
+            Sink::Cookie(api) => (*api).to_owned(),
+        }
+    }
+}
+
+/// How a digest's artifact is decoded: against its record, as a scheduling
+/// stack of a known depth, or by its own header.
+#[derive(Clone)]
+enum Shape {
+    Record(Record),
+    Scheduling(u32),
+    Alone,
+}
+
+/// One distinct walked stack and every record that named it.
+struct Walk {
+    process: u32,
+    digest: [u8; 32],
+    shape: Shape,
+    innermost: Frame,
+    /// Records naming it whose state says the frames were not retained.
+    unretained: bool,
+    /// An `async_task_stack` whose walk stopped at 256 frames.
+    bounded: bool,
+    occurrences: u64,
+    sinks: BTreeMap<Sink, u64>,
+    schedules: BTreeMap<&'static str, u64>,
+    frame_votes: BTreeMap<u64, u64>,
+    tabs: BTreeSet<u64>,
+    /// Renderer request IDs whose stack this is, so a selected request can
+    /// find its path.
+    requests: Vec<u64>,
+}
+
+#[derive(Default)]
+struct Scan {
+    identities: HashMap<u32, HashMap<u32, Identity>>,
+    identity_count: usize,
+    identities_dropped: u64,
+    labels: HashMap<(u32, u64), u32>,
+    label_ids: HashMap<String, u32>,
+    label_text: Vec<String>,
+    labels_dropped: bool,
+    walks: Vec<Walk>,
+    by_digest: HashMap<(u32, [u8; 32]), usize>,
+    stacks_over_budget: u64,
+    records: BTreeMap<&'static str, u64>,
+    not_walked: BTreeMap<&'static str, u64>,
+    malformed: u64,
+    stopped: &'static str,
+    scanned_bytes: u64,
+    request_refs: usize,
+    request_refs_dropped: u64,
+}
+
+fn unsigned(value: &Value) -> u64 {
+    match value {
+        Value::String(text) => text.parse().unwrap_or(0),
+        other => other.as_u64().unwrap_or(0),
+    }
+}
+
+fn payload(event: &Value) -> Option<Vec<u8>> {
+    (event["payload_encoding"] == "hex")
+        .then(|| hex::decode(event["payload"].as_str()?).ok())
+        .flatten()
+}
+
+impl Scan {
+    fn walk(
+        &mut self,
+        event: &Value,
+        digest: [u8; 32],
+        shape: Shape,
+        innermost: Frame,
+    ) -> Option<&mut Walk> {
+        let process = unsigned(&event["process_id"]) as u32;
+        let index = match self.by_digest.get(&(process, digest)) {
+            Some(index) => *index,
+            None if self.walks.len() < MAX_STACKS => {
+                self.walks.push(Walk {
+                    process,
+                    digest,
+                    shape,
+                    innermost,
+                    unretained: false,
+                    bounded: false,
+                    occurrences: 0,
+                    sinks: BTreeMap::new(),
+                    schedules: BTreeMap::new(),
+                    frame_votes: BTreeMap::new(),
+                    tabs: BTreeSet::new(),
+                    requests: Vec::new(),
+                });
+                self.by_digest
+                    .insert((process, digest), self.walks.len() - 1);
+                self.walks.len() - 1
+            }
+            None => {
+                self.stacks_over_budget += 1;
+                return None;
+            }
+        };
+        let walk = &mut self.walks[index];
+        walk.occurrences += 1;
+        *walk
+            .frame_votes
+            .entry(unsigned(&event["frame_id"]))
+            .or_default() += 1;
+        let tab = unsigned(&event["tab_id"]);
+        if tab != 0 && walk.tabs.len() < 64 {
+            walk.tabs.insert(tab);
+        }
+        Some(walk)
+    }
+
+    fn record(&mut self, event: &Value) -> bool {
+        let Some(kind) = event["type"]
+            .as_str()
+            .and_then(|kind| TYPES.iter().find(|t| **t == kind))
+        else {
+            return false;
+        };
+        let Some(bytes) = payload(event) else {
+            return false;
+        };
+        *self.records.entry(kind).or_default() += 1;
+        let process = unsigned(&event["process_id"]) as u32;
+        match *kind {
+            "script_identity" => {
+                let Some((script, identity)) = request_stack::decode_identity(&bytes) else {
+                    return false;
+                };
+                let table = self.identities.entry(process).or_default();
+                if !table.contains_key(&script) && self.identity_count == MAX_IDENTITIES {
+                    self.identities_dropped += 1;
+                } else {
+                    self.identity_count += usize::from(table.insert(script, identity).is_none());
+                }
+            }
+            "request_initiated" => {
+                let text = request_index::payload_text(&bytes);
+                let Some((method, host)) = request_index::network_target(&text, kind) else {
+                    return true;
+                };
+                if self.labels.len() == MAX_REQUEST_LABELS {
+                    // Stacks follow their request closely; forgetting old
+                    // labels costs only a host on a very old stack.
+                    self.labels.clear();
+                    self.labels_dropped = true;
+                }
+                let label = match method {
+                    Some(method) => format!("{method} {host}"),
+                    None => host,
+                };
+                let id = match self.label_ids.get(&label) {
+                    Some(id) => *id,
+                    None if self.label_text.len() < MAX_LABEL_TEXTS => {
+                        self.label_text.push(label.clone());
+                        self.label_ids
+                            .insert(label, (self.label_text.len() - 1) as u32);
+                        (self.label_text.len() - 1) as u32
+                    }
+                    None => {
+                        self.labels_dropped = true;
+                        return true;
+                    }
+                };
+                self.labels
+                    .insert((process, unsigned(&event["request_id"])), id);
+            }
+            "request_initiator_stack" => {
+                let Some(record) = request_stack::decode_record(&bytes) else {
+                    return false;
+                };
+                if matches!(record.state, 2 | 3) {
+                    let reason = if record.state == 2 {
+                        "no_script"
+                    } else {
+                        "unsupported_thread"
+                    };
+                    *self.not_walked.entry(reason).or_default() += 1;
+                    return true;
+                }
+                let label = self
+                    .labels
+                    .get(&(process, unsigned(&event["request_id"])))
+                    .map(|id| self.label_text[*id as usize].clone())
+                    .unwrap_or_else(|| "request".to_owned());
+                let (digest, innermost, unretained) =
+                    (record.digest, record.innermost, record.state != 1);
+                let request = unsigned(&event["request_id"]);
+                let room = self.request_refs < MAX_REQUEST_REFS;
+                let mut kept = false;
+                if let Some(walk) = self.walk(event, digest, Shape::Record(record), innermost) {
+                    walk.unretained |= unretained;
+                    *walk.sinks.entry(Sink::Request(label)).or_default() += 1;
+                    if room {
+                        walk.requests.push(request);
+                        kept = true;
+                    }
+                }
+                if kept {
+                    self.request_refs += 1;
+                } else {
+                    self.request_refs_dropped += 1;
+                }
+            }
+            "navigation_initiator_stack" => {
+                let Some((record, kind, _target)) = request_stack::decode_navigation(&bytes) else {
+                    return false;
+                };
+                let (digest, innermost, unretained) =
+                    (record.digest, record.innermost, record.state != 1);
+                if let Some(walk) = self.walk(event, digest, Shape::Record(record), innermost) {
+                    walk.unretained |= unretained;
+                    *walk.sinks.entry(Sink::Navigation(kind)).or_default() += 1;
+                }
+            }
+            "async_task_stack" => {
+                let Some((task, recorded, digest, innermost)) = decode_scheduling(&bytes) else {
+                    return false;
+                };
+                let bounded = bytes[5] & 1 != 0;
+                if let Some(walk) = self.walk(event, digest, Shape::Scheduling(recorded), innermost)
+                {
+                    walk.bounded |= bounded;
+                    *walk.schedules.entry(task).or_default() += 1;
+                }
+            }
+            "script_cookie" => {
+                // Only writes walk the stack; a read keeps one frame.
+                let api = match bytes.get(4) {
+                    Some(1) => "document.cookie set",
+                    Some(3) => "cookieStore.set",
+                    Some(6) => "cookieStore.delete",
+                    _ => return true,
+                };
+                if bytes.len() != 128 || bytes[5] & 0x06 != 0x06 {
+                    return true;
+                }
+                let digest: [u8; 32] = bytes[40..72].try_into().unwrap();
+                let innermost = Frame::read(&bytes[24..40]);
+                if let Some(walk) = self.walk(event, digest, Shape::Alone, innermost) {
+                    *walk.sinks.entry(Sink::Cookie(api)).or_default() += 1;
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+}
+
+/// The `async_task_stack` payload: task kind, recorded depth, digest and the
+/// innermost frame, or None for a malformed record.
+fn decode_scheduling(bytes: &[u8]) -> Option<(&'static str, u32, [u8; 32], Frame)> {
+    if bytes.len() != 128
+        || bytes[..4] != [1, 0, 128, 0]
+        || !(1..=8).contains(&bytes[4])
+        || bytes[5] & !1 != 0
+        || bytes[6..8] != [0, 0]
+        || bytes[20..32].iter().any(|b| *b != 0)
+        || bytes[80..].iter().any(|b| *b != 0)
+    {
+        return None;
+    }
+    let recorded = request_stack::u32_at(bytes, 8);
+    let digest: [u8; 32] = bytes[32..64].try_into().unwrap();
+    let innermost = Frame::read(&bytes[64..80]);
+    ((1..=256).contains(&recorded)
+        && (bytes[5] & 1 == 0 || recorded == 256)
+        && digest.iter().any(|b| *b != 0))
+    .then(|| {
+        (
+            request_stack::task_kind(bytes[4]),
+            recorded,
+            digest,
+            innermost,
+        )
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stopped {
+    End,
+    Deadline,
+}
+
+/// Reads complete records in `[0, end)` forward, parsing only lines the byte
+/// prefilter selects.
+fn scan_store(
+    path: &Path,
+    end: u64,
+    prefilter: &Regex,
+    deadline: Instant,
+    cancel: &AtomicBool,
+    visit: &mut dyn FnMut(&[u8]),
+) -> Result<(u64, u64, Stopped)> {
+    let (mut position, mut malformed) = (0u64, 0u64);
+    let mut file = match evidence::regular_file(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((0, 0, Stopped::End));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    file.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::with_capacity(READ_BUFFER_BYTES, file.take(end));
+    let mut line = Vec::with_capacity(8 * 1024);
+    let mut read = 0u32;
+    loop {
+        read = read.wrapping_add(1);
+        if read & 0x3ff == 0 {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(Error::new(499, "The flow graph request was cancelled"));
+            }
+            if Instant::now() >= deadline {
+                return Ok((position, malformed, Stopped::Deadline));
+            }
+        }
+        line.clear();
+        let taken = reader
+            .by_ref()
+            .take(MAX_RECORD_BYTES as u64 + 1)
+            .read_until(b'\n', &mut line)?;
+        if taken == 0 {
+            return Ok((position, malformed, Stopped::End));
+        }
+        position += taken as u64;
+        if line.last() != Some(&b'\n') {
+            if taken <= MAX_RECORD_BYTES {
+                return Ok((position - taken as u64, malformed, Stopped::End));
+            }
+            // An oversized line: skip to its newline and count it.
+            malformed += 1;
+            loop {
+                let buffer = reader.fill_buf()?;
+                if buffer.is_empty() {
+                    return Ok((position, malformed, Stopped::End));
+                }
+                if let Some(index) = buffer.iter().position(|byte| *byte == b'\n') {
+                    reader.consume(index + 1);
+                    position += index as u64 + 1;
+                    break;
+                }
+                let length = buffer.len();
+                reader.consume(length);
+                position += length as u64;
+            }
+            continue;
+        }
+        let record = &line[..line.len() - 1];
+        if prefilter.is_match(record) {
+            visit(record);
+        }
+    }
+}
+
+/// The end of the last complete record: the snapshot this answer describes.
+fn complete_end(path: &Path) -> Result<u64> {
+    let mut file = match evidence::regular_file(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    let length = file.metadata()?.len();
+    let window = length.min(MAX_RECORD_BYTES as u64 + 1);
+    file.seek(SeekFrom::Start(length - window))?;
+    let mut tail = vec![0; window as usize];
+    file.read_exact(&mut tail)?;
+    Ok(tail
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(length.saturating_sub(window), |index| {
+            length - window + index as u64 + 1
+        }))
+}
+
+/// A decoded stack: synchronous frames innermost first, the await chain, and
+/// each task segment with its scheduling frames when they were retained.
+struct Decoded {
+    sync: Vec<Frame>,
+    omitted: u32,
+    asyncs: Vec<Frame>,
+    segments: Vec<(Segment, Option<Vec<Frame>>)>,
+    /// Record flags bit 2, bit 3 and bit 4.
+    asyncs_truncated: bool,
+    chain_cut: bool,
+    chain_truncated: bool,
+    /// A scheduling stack whose walk stopped at 256 frames: its outermost
+    /// recorded frame is not the first frame of its task.
+    bounded: bool,
+    retained: bool,
+}
+
+/// Function identity: the same code in the same realm is one node however many
+/// script IDs compiled it (an eval of one string, an inline script twice).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Code {
+    Sha(String),
+    Script(u32),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum NodeKey {
+    Function {
+        process: u32,
+        realm: u64,
+        code: Code,
+        wasm: bool,
+        function: u32,
+    },
+    Sink {
+        context: usize,
+        sink: Sink,
+    },
+}
+
+struct Node {
+    key: NodeKey,
+    context: usize,
+    value: Value,
+    hits: u64,
+    entries: u64,
+    leaves: u64,
+}
+
+struct Edge {
+    value: Value,
+    count: u64,
+    stacks: u64,
+    sites: BTreeSet<(u64, u64)>,
+    /// Details that can differ between the stacks that share this edge.
+    via: BTreeSet<&'static str>,
+    labels: BTreeSet<&'static str>,
+    omitted: Option<u32>,
+}
+
+/// What one stack says about an edge beyond its endpoints.
+#[derive(Default)]
+struct Detail {
+    via: Vec<&'static str>,
+    label: Option<&'static str>,
+    omitted: Option<u32>,
+}
+
+/// What one script's retained bytes resolved: positions and names by offset.
+#[derive(Default)]
+struct Resolved {
+    artifact_id: Value,
+    url: Value,
+    lines: HashMap<u32, (u64, u64)>,
+    names: HashMap<u32, String>,
+    reason: Option<&'static str>,
+}
+
+struct Context {
+    process: u32,
+    realm: u64,
+    frame_votes: BTreeMap<u64, u64>,
+    tabs: BTreeSet<u64>,
+    origins: BTreeMap<String, u64>,
+    kinds: BTreeMap<&'static str, u64>,
+}
+
+struct Builder<'a> {
+    scan: &'a Scan,
+    resolved: &'a HashMap<String, Resolved>,
+    contexts: Vec<Context>,
+    context_index: HashMap<(u32, u64), usize>,
+    nodes: Vec<Node>,
+    node_index: HashMap<NodeKey, usize>,
+    edges: Vec<Edge>,
+    edge_index: HashMap<(usize, usize, &'static str, Option<&'static str>), usize>,
+    paths: Vec<Value>,
+    path_refs: usize,
+    nodes_cut: u64,
+    edges_cut: u64,
+    paths_cut: u64,
+}
+
+fn origin(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    match parsed.origin() {
+        url::Origin::Tuple(..) => Some(parsed.origin().ascii_serialization()),
+        url::Origin::Opaque(_) => Some(format!("{}:", parsed.scheme())),
+    }
+}
+
+fn combinator(frame: &Frame) -> &'static str {
+    match frame.combinator {
+        1 => "Promise.all",
+        2 => "Promise.allSettled",
+        _ => "Promise.any",
+    }
+}
+
+impl Builder<'_> {
+    fn identity(&self, process: u32, script: u32) -> Option<&Identity> {
+        self.scan.identities.get(&process)?.get(&script)
+    }
+
+    fn context(&mut self, process: u32, realm: u64) -> usize {
+        *self
+            .context_index
+            .entry((process, realm))
+            .or_insert_with(|| {
+                self.contexts.push(Context {
+                    process,
+                    realm,
+                    frame_votes: BTreeMap::new(),
+                    tabs: BTreeSet::new(),
+                    origins: BTreeMap::new(),
+                    kinds: BTreeMap::new(),
+                });
+                self.contexts.len() - 1
+            })
+    }
+
+    /// The node for one frame, or None past the node budget. Combinator frames
+    /// are labels on the await edge, never nodes.
+    fn function(&mut self, process: u32, frame: &Frame) -> Option<usize> {
+        let identity = self.identity(process, frame.script_id).cloned();
+        let realm = identity.as_ref().map_or(0, |identity| identity.realm);
+        let wasm = frame.kind == 2;
+        let top_level = !wasm && frame.flags & 2 != 0;
+        let function = if wasm {
+            frame.detail
+        } else if top_level {
+            u32::MAX
+        } else {
+            frame.detail
+        };
+        let sha = identity
+            .as_ref()
+            .and_then(|identity| identity.sha256.clone());
+        let code = sha.clone().map_or(Code::Script(frame.script_id), Code::Sha);
+        let key = NodeKey::Function {
+            process,
+            realm,
+            code,
+            wasm,
+            function,
+        };
+        if let Some(index) = self.node_index.get(&key) {
+            return Some(*index);
+        }
+        if self.nodes.len() == MAX_NODES {
+            self.nodes_cut += 1;
+            return None;
+        }
+        let context = self.context(process, realm);
+        let eval = identity.as_ref().is_some_and(|identity| identity.eval);
+        let kind = if wasm {
+            "wasm"
+        } else if eval {
+            "eval"
+        } else {
+            "javascript"
+        };
+        let mut value = json!({
+            "kind": kind,
+            "context": context,
+            "script_id": frame.script_id,
+            "status": "unresolved",
+        });
+        let resolved = sha.as_deref().and_then(|sha| self.resolved.get(sha));
+        let reason = match (&identity, resolved) {
+            (None, _) => Some("script_identity_missing"),
+            (Some(_), None) if sha.is_none() => Some("source_unavailable"),
+            (Some(identity), None) => Some(if identity.wasm || identity.retained {
+                "source_artifact_missing"
+            } else {
+                "source_not_retained"
+            }),
+            (Some(_), Some(resolved)) => resolved.reason,
+        };
+        if let Some(resolved) = resolved {
+            value["artifact_id"] = resolved.artifact_id.clone();
+            value["url"] = resolved.url.clone();
+            if let Some(origin) = resolved.url.as_str().and_then(origin) {
+                *self.contexts[context].origins.entry(origin).or_default() += 1;
+            }
+        }
+        if wasm {
+            value["function_index"] = json!(frame.detail);
+            if let Some(name) = resolved.and_then(|resolved| resolved.names.get(&frame.detail)) {
+                value["name"] = json!(name);
+            }
+            if resolved.is_some() && reason.is_none() {
+                value["status"] = json!("resolved");
+            }
+        } else {
+            value["top_level"] = json!(top_level);
+            value["function_position"] = json!(if top_level {
+                Value::Null
+            } else {
+                json!(frame.detail)
+            });
+            let at = if top_level { None } else { Some(frame.detail) };
+            if let (Some(resolved), Some(identity)) = (resolved, identity.as_ref())
+                && reason.is_none()
+            {
+                value["status"] = json!("resolved");
+                if let Some(&(line, column)) = at.and_then(|at| resolved.lines.get(&at)) {
+                    // Sources numbers the artifact itself; line and column
+                    // add the script's start in its document.
+                    value["artifact_line"] = json!(line);
+                    value["artifact_column"] = json!(column);
+                    value["line"] = json!(u64::from(identity.start_line) + line);
+                    value["column"] = json!(if line == 1 {
+                        u64::from(identity.start_column) + column
+                    } else {
+                        column
+                    });
+                } else if top_level {
+                    value["line"] = json!(u64::from(identity.start_line) + 1);
+                    value["column"] = json!(u64::from(identity.start_column) + 1);
+                } else {
+                    value["status"] = json!("unresolved");
+                    value["reason"] = json!("position_outside_source");
+                }
+                if let Some(name) = at.and_then(|at| resolved.names.get(&at)) {
+                    value["name"] = json!(name);
+                }
+            }
+        }
+        if let Some(reason) = reason {
+            value["reason"] = json!(reason);
+        }
+        *self.contexts[context].kinds.entry(kind).or_default() += 1;
+        self.nodes.push(Node {
+            key: key.clone(),
+            context,
+            value,
+            hits: 0,
+            entries: 0,
+            leaves: 0,
+        });
+        self.node_index.insert(key, self.nodes.len() - 1);
+        Some(self.nodes.len() - 1)
+    }
+
+    fn sink(&mut self, context: usize, sink: &Sink) -> Option<usize> {
+        let key = NodeKey::Sink {
+            context,
+            sink: sink.clone(),
+        };
+        if let Some(index) = self.node_index.get(&key) {
+            return Some(*index);
+        }
+        if self.nodes.len() == MAX_NODES {
+            self.nodes_cut += 1;
+            return None;
+        }
+        let value = json!({"kind": sink.kind(), "context": context, "name": sink.label(), "status": "resolved"});
+        *self.contexts[context].kinds.entry(sink.kind()).or_default() += 1;
+        self.nodes.push(Node {
+            key: key.clone(),
+            context,
+            value,
+            hits: 0,
+            entries: 0,
+            leaves: 0,
+        });
+        self.node_index.insert(key, self.nodes.len() - 1);
+        Some(self.nodes.len() - 1)
+    }
+
+    /// The call position inside the caller, as a one-based line and column.
+    fn site(&self, process: u32, caller: &Frame) -> Option<(u64, u64)> {
+        if caller.kind == 2 {
+            return Some((0, u64::from(caller.position)));
+        }
+        let identity = self.identity(process, caller.script_id)?;
+        let resolved = self.resolved.get(identity.sha256.as_deref()?)?;
+        let &(line, column) = resolved.lines.get(&caller.position)?;
+        Some((
+            u64::from(identity.start_line) + line,
+            if line == 1 {
+                u64::from(identity.start_column) + column
+            } else {
+                column
+            },
+        ))
+    }
+
+    /// Adds one stack's use of an edge. A stack that walks an edge twice (a
+    /// recursion, two segments naming one scheduling stack) counts once.
+    #[allow(clippy::too_many_arguments)]
+    fn edge(
+        &mut self,
+        from: usize,
+        to: usize,
+        kind: &'static str,
+        task: Option<&'static str>,
+        weight: u64,
+        site: Option<(u64, u64)>,
+        detail: Detail,
+        path: &mut BTreeSet<usize>,
+    ) {
+        let key = (from, to, kind, task);
+        let index = match self.edge_index.get(&key) {
+            Some(index) => *index,
+            None if self.edges.len() == MAX_EDGES => {
+                self.edges_cut += 1;
+                return;
+            }
+            None => {
+                let (a, b) = (&self.nodes[from], &self.nodes[to]);
+                let mut crosses = Vec::new();
+                let (ra, rb) = (&self.contexts[a.context], &self.contexts[b.context]);
+                if a.context != b.context && ra.realm != 0 && rb.realm != 0 {
+                    crosses.push("frame");
+                }
+                let language = |node: &Node| match node.value["kind"].as_str() {
+                    Some("wasm") => Some(true),
+                    Some("javascript" | "eval") => Some(false),
+                    _ => None,
+                };
+                if let (Some(x), Some(y)) = (language(a), language(b))
+                    && x != y
+                {
+                    crosses.push("language");
+                }
+                if b.value["kind"] == "eval"
+                    && !(a.value["kind"] == "eval" && same_code(&a.key, &b.key))
+                {
+                    crosses.push("dynamic");
+                }
+                let mut value = json!({"from": from, "to": to, "kind": kind, "crosses": crosses});
+                if let Some(task) = task {
+                    value["task"] = json!(task);
+                }
+                self.edges.push(Edge {
+                    value,
+                    count: 0,
+                    stacks: 0,
+                    sites: BTreeSet::new(),
+                    via: BTreeSet::new(),
+                    labels: BTreeSet::new(),
+                    omitted: None,
+                });
+                self.edge_index.insert(key, self.edges.len() - 1);
+                self.edges.len() - 1
+            }
+        };
+        let edge = &mut self.edges[index];
+        if path.insert(index) {
+            edge.count += weight;
+            edge.stacks += 1;
+        }
+        if let Some(site) = site
+            && edge.sites.len() < MAX_SITES
+        {
+            edge.sites.insert(site);
+        }
+        edge.via.extend(detail.via);
+        edge.labels.extend(detail.label);
+        if let Some(omitted) = detail.omitted {
+            edge.omitted = Some(edge.omitted.map_or(omitted, |known| known.max(omitted)));
+        }
+    }
+
+    /// Call edges of one synchronous run, innermost first; returns its nodes.
+    fn run(
+        &mut self,
+        process: u32,
+        frames: &[Frame],
+        omitted_after: Option<(usize, u32)>,
+        weight: u64,
+        path: &mut BTreeSet<usize>,
+    ) -> Vec<Option<usize>> {
+        let nodes: Vec<Option<usize>> = frames
+            .iter()
+            .map(|frame| self.function(process, frame))
+            .collect();
+        for index in 0..frames.len().saturating_sub(1) {
+            let (Some(callee), Some(caller)) = (nodes[index], nodes[index + 1]) else {
+                continue;
+            };
+            match omitted_after {
+                Some((at, omitted)) if at == index => {
+                    let detail = Detail {
+                        omitted: Some(omitted),
+                        ..Detail::default()
+                    };
+                    self.edge(caller, callee, "omitted", None, weight, None, detail, path);
+                }
+                _ => {
+                    let site = self.site(process, &frames[index + 1]);
+                    self.edge(
+                        caller,
+                        callee,
+                        "call",
+                        None,
+                        weight,
+                        site,
+                        Detail::default(),
+                        path,
+                    );
+                }
+            }
+        }
+        nodes
+    }
+
+    fn add(&mut self, walk: &Walk, decoded: &Decoded) {
+        let (process, weight) = (walk.process, walk.occurrences);
+        let mut path = BTreeSet::new();
+        // A stack deeper than 1,024 keeps the innermost and outermost 512.
+        let omitted_after = (decoded.omitted != 0).then_some((511usize, decoded.omitted));
+        let sync = self.run(process, &decoded.sync, omitted_after, weight, &mut path);
+        let innermost = sync.first().copied().flatten();
+        let outermost = sync.last().copied().flatten();
+        // The frame that began this task: the last awaiter of the await chain,
+        // else the outermost synchronous frame. None when it is not known, so
+        // no task edge enters a frame that was not the task's first.
+        let mut root = if decoded.retained && !decoded.bounded {
+            outermost
+        } else {
+            None
+        };
+        let mut cut_at = if decoded.retained && decoded.bounded {
+            outermost
+        } else {
+            None
+        };
+        // The await chain: each async frame awaited the one before it.
+        let mut target = outermost;
+        let mut label = None;
+        for frame in &decoded.asyncs {
+            if frame.kind == 4 {
+                label = Some(combinator(frame));
+                continue;
+            }
+            let Some(node) = self.function(process, frame) else {
+                // A node past the budget is a gap, never bridged.
+                root = None;
+                target = None;
+                break;
+            };
+            if let Some(to) = target {
+                let detail = Detail {
+                    label: label.take(),
+                    ..Detail::default()
+                };
+                let site = self.site(process, frame);
+                self.edge(node, to, "await", None, weight, site, detail, &mut path);
+            }
+            target = Some(node);
+            root = root.map(|_| node);
+        }
+        if decoded.asyncs_truncated {
+            // The await chain continues past 32 frames: its first awaiter is unknown.
+            cut_at = cut_at.or(target);
+            root = None;
+        }
+        // The task chain, nearest first: a segment's innermost frame scheduled
+        // the task whose first frame is `target`.
+        let mut target = root;
+        let mut via: Vec<&'static str> = Vec::new();
+        let mut cut = decoded.chain_cut || decoded.chain_truncated;
+        for (segment, frames) in &decoded.segments {
+            if target.is_none() {
+                break;
+            }
+            let task = request_stack::task_kind(segment.kind);
+            match frames {
+                Some(frames) if !frames.is_empty() => {
+                    let nodes = self.run(process, frames, None, weight, &mut path);
+                    if let (Some(from), Some(to)) = (nodes[0], target) {
+                        let detail = Detail {
+                            via: std::mem::take(&mut via),
+                            ..Detail::default()
+                        };
+                        let site = self.site(process, &frames[0]);
+                        self.edge(
+                            from,
+                            to,
+                            "task",
+                            Some(task),
+                            weight,
+                            site,
+                            detail,
+                            &mut path,
+                        );
+                    } else {
+                        // The scheduling frame is past the node budget.
+                        cut_at = cut_at.or(target);
+                    }
+                    let outer = nodes.last().copied().flatten();
+                    if segment.flags & 1 != 0 || nodes[0].is_none() || outer.is_none() {
+                        // The walk stopped at 256 frames, or a node is past the
+                        // budget: that task's first frame is not known.
+                        cut_at = cut_at.or(outer).or(nodes[0]);
+                        target = None;
+                        cut = false;
+                        break;
+                    }
+                    target = outer;
+                }
+                _ if segment.kind == 9 => via.push(task),
+                _ => {
+                    cut = true;
+                    break;
+                }
+            }
+        }
+        if let Some(at) = target
+            && (cut || !via.is_empty())
+        {
+            cut_at = cut_at.or(Some(at));
+        }
+        if let Some(at) = cut_at {
+            self.nodes[at].value["chain_cut"] = json!(true);
+        }
+        let mut sink_nodes = Vec::new();
+        if let Some(innermost) = innermost {
+            let context = self.nodes[innermost].context;
+            for (sink, count) in &walk.sinks {
+                if let Some(node) = self.sink(context, sink) {
+                    self.edge(
+                        innermost,
+                        node,
+                        sink.kind(),
+                        None,
+                        *count,
+                        None,
+                        Detail::default(),
+                        &mut path,
+                    );
+                    self.nodes[node].hits += count;
+                    sink_nodes.push(node);
+                }
+            }
+            if !walk.schedules.is_empty() {
+                let node = &mut self.nodes[innermost].value;
+                let schedules = node["schedules"].as_object().cloned().unwrap_or_default();
+                let mut schedules: BTreeMap<String, u64> = schedules
+                    .into_iter()
+                    .map(|(k, v)| (k, v.as_u64().unwrap_or(0)))
+                    .collect();
+                for (task, count) in &walk.schedules {
+                    *schedules.entry((*task).to_owned()).or_default() += count;
+                }
+                node["schedules"] = json!(schedules);
+            }
+            let context = &mut self.contexts[context];
+            for (frame, votes) in &walk.frame_votes {
+                *context.frame_votes.entry(*frame).or_default() += votes;
+            }
+            context.tabs.extend(walk.tabs.iter().copied());
+        }
+        // Each node of this stack counts its occurrences once.
+        let mut members: Vec<usize> = sync.iter().flatten().copied().collect();
+        for &edge in &path {
+            members.push(self.edges[edge].value["from"].as_u64().unwrap() as usize);
+            members.push(self.edges[edge].value["to"].as_u64().unwrap() as usize);
+        }
+        let members: BTreeSet<usize> = members
+            .into_iter()
+            .filter(|node| !sink_nodes.contains(node))
+            .collect();
+        for &node in &members {
+            self.nodes[node].hits += weight;
+        }
+        if let Some(innermost) = innermost {
+            self.nodes[innermost].leaves += weight;
+        }
+        // Only a known first frame is an entry; an undecoded or cut stack names none.
+        if let Some(entry) = target {
+            self.nodes[entry].entries += weight;
+        }
+        let edges = path;
+        let refs = edges.len() + members.len() + sink_nodes.len();
+        if self.path_refs + refs > MAX_PATH_REFS {
+            self.paths_cut += 1;
+            return;
+        }
+        self.path_refs += refs;
+        let mut nodes: Vec<usize> = members.into_iter().collect();
+        nodes.extend(sink_nodes);
+        self.paths.push(json!({
+            "process_id": process,
+            "digest": hex::encode(walk.digest),
+            "occurrences": walk.occurrences,
+            "retained": decoded.retained,
+            "requests": walk.requests.iter().map(u64::to_string).collect::<Vec<_>>(),
+            "nodes": nodes,
+            "edges": edges,
+        }));
+    }
+}
+
+fn same_code(a: &NodeKey, b: &NodeKey) -> bool {
+    match (a, b) {
+        (
+            NodeKey::Function {
+                process: p,
+                code: c,
+                ..
+            },
+            NodeKey::Function {
+                process: q,
+                code: d,
+                ..
+            },
+        ) => p == q && c == d,
+        _ => false,
+    }
+}
+
+/// One walk's own artifact, decoded: recorded depth, omitted run, record
+/// flags, frames (innermost first) and task segments.
+type Main = (u32, u32, u8, Vec<Frame>, Vec<Segment>);
+
+fn decode_main(
+    walk: &Walk,
+    stacks: &HashMap<String, Value>,
+    read: &dyn Fn(&Value, usize) -> Option<Vec<u8>>,
+) -> std::result::Result<Main, &'static str> {
+    let content = stacks
+        .get(&hex::encode(walk.digest))
+        .and_then(|artifact| read(artifact, request_stack::MAX_ARTIFACT));
+    let decoded = content.as_deref().and_then(|content| match &walk.shape {
+        Shape::Record(record) => {
+            request_stack::decode_artifact(content, record).map(|(frames, segments)| {
+                (
+                    record.recorded,
+                    record.omitted,
+                    record.flags,
+                    frames,
+                    segments,
+                )
+            })
+        }
+        Shape::Scheduling(recorded) => request_stack::decode_segment_artifact(content, *recorded)
+            .map(|frames| (*recorded, 0, 0, frames, Vec::new())),
+        Shape::Alone => {
+            request_stack::decode_artifact_alone(content).map(|(record, frames, segments)| {
+                (
+                    record.recorded,
+                    record.omitted,
+                    record.flags,
+                    frames,
+                    segments,
+                )
+            })
+        }
+    });
+    decoded.ok_or(if walk.unretained {
+        "frames_not_retained"
+    } else if content.is_none() {
+        "stack_artifact_missing"
+    } else {
+        "stack_artifact_malformed"
+    })
+}
+
+/// Completes a decoded walk with its task segments' scheduling frames. Many
+/// requests share one scheduling stack, so each is decoded once.
+fn decode(
+    walk: &Walk,
+    main: std::result::Result<Main, &'static str>,
+    stacks: &HashMap<String, Value>,
+    read: &dyn Fn(&Value, usize) -> Option<Vec<u8>>,
+    segments_seen: &mut HashMap<[u8; 32], Option<Vec<Frame>>>,
+    missing: &mut BTreeMap<&'static str, u64>,
+) -> Decoded {
+    let (recorded, omitted, flags, mut frames, segments) = match main {
+        Ok(main) => main,
+        Err(reason) => {
+            *missing.entry(reason).or_default() += 1;
+            return Decoded {
+                sync: vec![walk.innermost],
+                omitted: 0,
+                asyncs: Vec::new(),
+                segments: Vec::new(),
+                asyncs_truncated: false,
+                chain_cut: false,
+                chain_truncated: false,
+                bounded: walk.bounded,
+                retained: false,
+            };
+        }
+    };
+    let asyncs = frames.split_off(recorded as usize);
+    let segments = segments
+        .into_iter()
+        .map(|segment| {
+            if segment.kind == 9 || segment.state != 1 {
+                return (segment, None);
+            }
+            let frames = segments_seen
+                .entry(segment.digest)
+                .or_insert_with(|| {
+                    stacks
+                        .get(&hex::encode(segment.digest))
+                        .and_then(|artifact| read(artifact, request_stack::MAX_ARTIFACT))
+                        .and_then(|content| {
+                            request_stack::decode_segment_artifact(&content, segment.recorded)
+                        })
+                })
+                .clone();
+            if frames.is_none() {
+                *missing.entry("segment_not_retained").or_default() += 1;
+            }
+            (segment, frames)
+        })
+        .collect();
+    Decoded {
+        sync: frames,
+        omitted,
+        asyncs,
+        segments,
+        asyncs_truncated: flags & 0x04 != 0,
+        chain_cut: flags & 0x08 != 0,
+        chain_truncated: flags & 0x10 != 0,
+        bounded: walk.bounded,
+        retained: true,
+    }
+}
+
+/// Sources left unread, by why.
+#[derive(Default)]
+struct SourceCuts {
+    budget: u64,
+    deadline: u64,
+}
+
+/// Positions and names for every offset any frame names in one retained
+/// script or module, reading its bytes once.
+fn resolve_sources(
+    wanted: &BTreeMap<String, (bool, BTreeSet<u32>)>,
+    sources: &HashMap<String, Value>,
+    read: &dyn Fn(&Value, usize) -> Option<Vec<u8>>,
+    deadline: Instant,
+    budget: &mut usize,
+    cuts: &mut SourceCuts,
+) -> HashMap<String, Resolved> {
+    let mut out = HashMap::new();
+    for (sha, (wasm, offsets)) in wanted {
+        let Some(artifact) = sources.get(sha) else {
+            continue;
+        };
+        let mut resolved = Resolved {
+            artifact_id: artifact["artifact_id"].clone(),
+            url: artifact["url"].clone(),
+            ..Resolved::default()
+        };
+        let size = artifact["byte_size"].as_u64().unwrap_or(0) as usize;
+        if Instant::now() >= deadline {
+            resolved.reason = Some("source_deadline");
+            cuts.deadline += 1;
+            out.insert(sha.clone(), resolved);
+            continue;
+        }
+        if size > *budget {
+            resolved.reason = Some("source_budget");
+            cuts.budget += 1;
+            out.insert(sha.clone(), resolved);
+            continue;
+        }
+        match read(artifact, request_stack::MAX_SOURCE) {
+            None => resolved.reason = Some("source_artifact_unreadable"),
+            Some(bytes) => {
+                *budget = budget.saturating_sub(bytes.len());
+                if *wasm {
+                    resolved.names = request_stack::wasm_names(&bytes)
+                        .into_iter()
+                        .filter(|(index, _)| offsets.contains(index))
+                        .collect();
+                } else {
+                    match String::from_utf8(bytes) {
+                        Err(_) => resolved.reason = Some("source_not_utf8"),
+                        Ok(text) => {
+                            for (offset, (byte, line, column)) in
+                                request_stack::positions(&text, offsets)
+                            {
+                                resolved.lines.insert(offset, (line, column));
+                                if let Some(name) = request_stack::function_name(&text, byte) {
+                                    resolved.names.insert(offset, name);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out.insert(sha.clone(), resolved);
+    }
+    out
+}
+
+pub struct Stores {
+    pub events: PathBuf,
+    pub artifacts: PathBuf,
+}
+
+fn snapshot_key(stores: &Stores, session: u64, end: u64) -> String {
+    let manifest =
+        std::fs::metadata(stores.artifacts.join("manifest.jsonl")).map_or(0, |meta| meta.len());
+    format!("{session}:{end}:{manifest}")
+}
+
+/// The session's flow graph, answered from the cache while the stores have not
+/// changed.
+pub fn run(
+    stores: &Stores,
+    session: u64,
+    cache: &Cache,
+    cancel: &AtomicBool,
+) -> Result<Arc<Value>> {
+    let end = complete_end(&stores.events)?;
+    let key = snapshot_key(stores, session, end);
+    if let Some((cached, value)) = cache.0.lock().unwrap().as_ref()
+        && *cached == key
+    {
+        return Ok(value.clone());
+    }
+    let value = Arc::new(build(stores, session, end, cancel)?);
+    // A scan cut by its deadline is answered but not kept: the next request
+    // reads again instead of repeating the partial graph.
+    let deadline_cut =
+        value["coverage"]["stopped"] != "end" || value["truncated"]["source_deadline"] != 0;
+    *cache.0.lock().unwrap() = (!deadline_cut).then(|| (key, value.clone()));
+    Ok(value)
+}
+
+fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result<Value> {
+    let started = Instant::now();
+    let deadline = started + SCAN_DEADLINE;
+    let prefilter = Regex::new(&format!(r#""type":"(?:{})""#, TYPES.join("|")))
+        .map_err(|_| Error::new(500, "Flow graph filter failed"))?;
+    let session_text = session.to_string();
+    let mut scan = Scan::default();
+    let (scanned, malformed_lines, stopped) = scan_store(
+        &stores.events,
+        end,
+        &prefilter,
+        deadline,
+        cancel,
+        &mut |line| {
+            let Ok(event) = serde_json::from_slice::<Value>(line) else {
+                scan.malformed += 1;
+                return;
+            };
+            let same = match &event["session_id"] {
+                Value::String(text) => *text == session_text,
+                other => other.as_u64() == Some(session),
+            };
+            if same && !scan.record(&event) {
+                scan.malformed += 1;
+            }
+        },
+    )?;
+    scan.malformed += malformed_lines;
+    scan.scanned_bytes = scanned;
+    scan.stopped = if stopped == Stopped::Deadline {
+        "deadline"
+    } else {
+        "end"
+    };
+
+    // One manifest pass for the stack and source artifacts every walk names.
+    let session_id = session.to_string();
+    let mut wanted: HashSet<String> = scan
+        .walks
+        .iter()
+        .map(|walk| hex::encode(walk.digest))
+        .collect();
+    for table in scan.identities.values() {
+        wanted.extend(
+            table
+                .values()
+                .filter_map(|identity| identity.sha256.clone()),
+        );
+    }
+    let select = |wanted: &HashSet<String>| -> Result<Vec<Value>> {
+        evidence::select_artifacts(&stores.artifacts, |a| {
+            a["session_id"].as_str() == Some(session_id.as_str())
+                && matches!(a["kind"].as_str(), Some("stack" | "javascript" | "wasm"))
+                && a["sha256"].as_str().is_some_and(|sha| wanted.contains(sha))
+        })
+    };
+    let mut stacks: HashMap<String, Value> = HashMap::new();
+    let mut sources: HashMap<String, Value> = HashMap::new();
+    let place = |artifact: Value,
+                 stacks: &mut HashMap<String, Value>,
+                 sources: &mut HashMap<String, Value>| {
+        let sha = artifact["sha256"].as_str().unwrap_or_default().to_owned();
+        // Later manifest records are newer and win, as stack resolution reads them.
+        if artifact["kind"] == "stack" {
+            stacks.insert(sha, artifact);
+        } else {
+            sources.insert(sha, artifact);
+        }
+    };
+    for artifact in select(&wanted)? {
+        place(artifact, &mut stacks, &mut sources);
+    }
+    let root = stores.artifacts.clone();
+    let read = move |artifact: &Value, limit: usize| evidence::content(&root, artifact, limit).ok();
+    let mains: Vec<_> = scan
+        .walks
+        .iter()
+        .map(|walk| decode_main(walk, &stacks, &read))
+        .collect();
+    // Task segments can name scheduling stacks that no record here describes.
+    let segment_digests: HashSet<String> = mains
+        .iter()
+        .flatten()
+        .flat_map(|(_, _, _, _, segments)| segments.iter())
+        .filter(|segment| segment.kind != 9 && segment.state == 1)
+        .map(|segment| hex::encode(segment.digest))
+        .filter(|sha| !stacks.contains_key(sha))
+        .collect();
+    if !segment_digests.is_empty() {
+        for artifact in select(&segment_digests)? {
+            place(artifact, &mut stacks, &mut sources);
+        }
+    }
+    let mut missing = BTreeMap::new();
+    let mut segments_seen = HashMap::new();
+    let decoded: Vec<Decoded> = scan
+        .walks
+        .iter()
+        .zip(mains)
+        .map(|(walk, main)| decode(walk, main, &stacks, &read, &mut segments_seen, &mut missing))
+        .collect();
+    // Every offset each retained script is asked for, gathered before any read.
+    let mut offsets: BTreeMap<String, (bool, BTreeSet<u32>)> = BTreeMap::new();
+    for (walk, decoded) in scan.walks.iter().zip(&decoded) {
+        let frames = decoded.sync.iter().chain(&decoded.asyncs).chain(
+            decoded
+                .segments
+                .iter()
+                .filter_map(|(_, frames)| frames.as_ref())
+                .flatten(),
+        );
+        for frame in frames.filter(|frame| frame.script_id != 0) {
+            let Some(sha) = scan
+                .identities
+                .get(&walk.process)
+                .and_then(|t| t.get(&frame.script_id))
+                .and_then(|i| i.sha256.clone())
+            else {
+                continue;
+            };
+            let entry = offsets
+                .entry(sha)
+                .or_insert_with(|| (frame.kind == 2, BTreeSet::new()));
+            if frame.kind == 2 {
+                entry.1.insert(frame.detail);
+            } else {
+                entry.1.insert(frame.position);
+                entry.1.insert(frame.detail);
+            }
+        }
+    }
+    let (mut source_budget, mut source_cuts) = (MAX_SOURCE_BYTES, SourceCuts::default());
+    let resolved = resolve_sources(
+        &offsets,
+        &sources,
+        &read,
+        deadline,
+        &mut source_budget,
+        &mut source_cuts,
+    );
+
+    let mut builder = Builder {
+        scan: &scan,
+        resolved: &resolved,
+        contexts: Vec::new(),
+        context_index: HashMap::new(),
+        nodes: Vec::new(),
+        node_index: HashMap::new(),
+        edges: Vec::new(),
+        edge_index: HashMap::new(),
+        paths: Vec::new(),
+        path_refs: 0,
+        nodes_cut: 0,
+        edges_cut: 0,
+        paths_cut: 0,
+    };
+    for (walk, decoded) in scan.walks.iter().zip(&decoded) {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::new(499, "The flow graph request was cancelled"));
+        }
+        builder.add(walk, decoded);
+    }
+
+    let contexts: Vec<Value> = builder
+        .contexts
+        .iter()
+        .enumerate()
+        .map(|(id, context)| {
+            let mut origins: Vec<(&String, &u64)> = context.origins.iter().collect();
+            origins.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+            let mut frames: Vec<(&u64, &u64)> = context.frame_votes.iter().filter(|(frame, _)| **frame != 0).collect();
+            frames.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+            json!({
+                "id": id,
+                "process_id": context.process,
+                "execution_context_id": (context.realm != 0).then(|| context.realm.to_string()),
+                "origin": origins.first().map(|(origin, _)| origin),
+                "origins": origins.iter().take(8).map(|(origin, functions)| json!({"origin": origin, "functions": functions})).collect::<Vec<_>>(),
+                "frame_ids": frames.iter().take(8).map(|(frame, stacks)| json!({"frame_id": frame.to_string(), "stacks": stacks})).collect::<Vec<_>>(),
+                "tab_ids": context.tabs.iter().take(16).collect::<Vec<_>>(),
+                "counts": context.kinds,
+            })
+        })
+        .collect();
+    let nodes: Vec<Value> = builder
+        .nodes
+        .into_iter()
+        .enumerate()
+        .map(|(id, node)| {
+            let mut value = node.value;
+            value["id"] = json!(id);
+            value["hits"] = json!(node.hits);
+            value["entries"] = json!(node.entries);
+            value["leaves"] = json!(node.leaves);
+            value
+        })
+        .collect();
+    let edges: Vec<Value> = builder
+        .edges
+        .into_iter()
+        .map(|edge| {
+            let mut value = edge.value;
+            value["count"] = json!(edge.count);
+            value["stacks"] = json!(edge.stacks);
+            if !edge.via.is_empty() {
+                value["via"] = json!(edge.via);
+            }
+            if !edge.labels.is_empty() {
+                value["label"] = json!(edge.labels.into_iter().collect::<Vec<_>>().join(" / "));
+            }
+            if let Some(omitted) = edge.omitted {
+                value["omitted"] = json!(omitted);
+            }
+            value["sites"] = json!(
+                edge.sites
+                    .iter()
+                    .map(|(line, column)| if *line == 0 {
+                        json!({"module_offset": column})
+                    } else {
+                        json!({"line": line, "column": column})
+                    })
+                    .collect::<Vec<_>>()
+            );
+            value
+        })
+        .collect();
+    let occurrences: u64 = scan.walks.iter().map(|walk| walk.occurrences).sum();
+    // Complete means nothing was cut: no deadline, no budget and no table
+    // that forgot entries.
+    let complete = scan.stopped == "end"
+        && scan.stacks_over_budget == 0
+        && builder.nodes_cut == 0
+        && builder.edges_cut == 0
+        && builder.paths_cut == 0
+        && scan.identities_dropped == 0
+        && !scan.labels_dropped
+        && scan.request_refs_dropped == 0
+        && source_cuts.budget == 0
+        && source_cuts.deadline == 0;
+    Ok(json!({
+        "schema": SCHEMA,
+        "session_id": session.to_string(),
+        "evidence": "observed",
+        "complete": complete,
+        "coverage": {
+            "stopped": scan.stopped,
+            "scanned_bytes": scan.scanned_bytes.to_string(),
+            "store_end": end.to_string(),
+            "malformed_records": scan.malformed,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        },
+        "stacks": {
+            "records": scan.records,
+            "occurrences": occurrences,
+            "distinct": scan.walks.len(),
+            "decoded": decoded.iter().filter(|d| d.retained).count(),
+            "not_walked": scan.not_walked,
+            "unresolved": missing,
+            "over_budget": scan.stacks_over_budget,
+        },
+        "truncated": {
+            "nodes": builder.nodes_cut,
+            "edges": builder.edges_cut,
+            "paths": builder.paths_cut,
+            "identities": scan.identities_dropped,
+            "request_labels": scan.labels_dropped,
+            "request_ids": scan.request_refs_dropped,
+            "source_budget": source_cuts.budget,
+            "source_deadline": source_cuts.deadline,
+        },
+        "limits": {
+            "stacks": MAX_STACKS,
+            "nodes": MAX_NODES,
+            "edges": MAX_EDGES,
+            "path_refs": MAX_PATH_REFS,
+            "request_refs": MAX_REQUEST_REFS,
+            "source_bytes": MAX_SOURCE_BYTES,
+            "scan_deadline_ms": SCAN_DEADLINE.as_millis() as u64,
+        },
+        "not_shown": [
+            "worker and worklet stacks (stacks are walked on the document main thread only)",
+            "MessagePort and worker messages",
+            "calls that never reached a recorded request, navigation, task or cookie write",
+            "cross-process frames (an out-of-process iframe is another renderer; only its own stacks appear)",
+        ],
+        "contexts": contexts,
+        "nodes": nodes,
+        "edges": edges,
+        "paths": builder.paths,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    fn frame(kind: u8, flags: u8, script: u32, position: u32, detail: u32) -> Vec<u8> {
+        let mut bytes = vec![kind, flags, 0, 0];
+        for value in [script, position, detail] {
+            bytes.extend(value.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// A version 2 stack artifact: frames innermost first, then segments.
+    fn stack_artifact(version: u16, frames: &[Vec<u8>], segments: &[Vec<u8>]) -> Vec<u8> {
+        let recorded = frames.len() as u32;
+        let mut a = 0x4b53_4252u32.to_le_bytes().to_vec();
+        a.extend(version.to_le_bytes());
+        a.extend([32, 0, 16, 0, 0, 0]);
+        for value in [recorded, recorded, 0] {
+            a.extend(value.to_le_bytes());
+        }
+        a.extend(0u16.to_le_bytes());
+        a.extend((segments.len() as u16).to_le_bytes());
+        a.extend((segments.len() as u16).to_le_bytes());
+        a.extend(0u16.to_le_bytes());
+        for f in frames {
+            a.extend(f);
+        }
+        for s in segments {
+            a.extend(s);
+        }
+        a
+    }
+
+    fn segment(kind: u8, recorded: u32, digest: &[u8]) -> Vec<u8> {
+        let mut s = vec![kind, 1, 0, 0];
+        s.extend(recorded.to_le_bytes());
+        s.extend([0; 8]);
+        s.extend(digest);
+        s
+    }
+
+    fn request_record(
+        digest: &[u8],
+        innermost: &[u8],
+        recorded: u32,
+        segments: u16,
+        wasm: u32,
+    ) -> Vec<u8> {
+        let mut p = vec![2, 0, 128, 0, 1, 0];
+        p.extend(segments.to_le_bytes());
+        for value in [recorded, recorded, 0] {
+            p.extend(value.to_le_bytes());
+        }
+        p.extend(0u16.to_le_bytes());
+        p.extend(segments.to_le_bytes());
+        p.extend(wasm.to_le_bytes());
+        p.extend(1u32.to_le_bytes());
+        p.extend(digest);
+        p.extend(innermost);
+        p.resize(128, 0);
+        p
+    }
+
+    fn scheduling_record(kind: u8, recorded: u32, digest: &[u8], innermost: &[u8]) -> Vec<u8> {
+        let mut p = vec![1, 0, 128, 0, kind, 0, 0, 0];
+        p.extend(recorded.to_le_bytes());
+        p.extend(0u32.to_le_bytes());
+        p.extend(1u32.to_le_bytes());
+        p.resize(32, 0);
+        p.extend(digest);
+        p.extend(innermost);
+        p.resize(128, 0);
+        p
+    }
+
+    fn identity(kind: u8, flags: u8, script: u32, realm: u64, bytes: &[u8]) -> Vec<u8> {
+        let mut p = vec![1, 0, 128, 0, kind, flags, 0, 0];
+        for value in [script, 0, 0, 0] {
+            p.extend(value.to_le_bytes());
+        }
+        p.extend(realm.to_le_bytes());
+        p.extend((bytes.len() as u64).to_le_bytes());
+        p.extend(Sha256::digest(bytes));
+        p.resize(128, 0);
+        p
+    }
+
+    struct Fixture {
+        root: tempfile::TempDir,
+        events: Vec<Value>,
+        artifacts: Vec<Value>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join("artifacts/blobs")).unwrap();
+            Self {
+                root,
+                events: Vec::new(),
+                artifacts: Vec::new(),
+            }
+        }
+        fn event(&mut self, kind: &str, process: u64, request: u64, frame: u64, payload: &[u8]) {
+            let sequence = self.events.len() as u64 + 1;
+            self.events.push(json!({"protocol_version":3,"session_id":"9","sequence_number":sequence.to_string(),
+                "monotonic_time_ns":sequence.to_string(),"navigation_id":"0","frame_id":frame.to_string(),"artifact_id":"0",
+                "parent_event_id":"0","request_id":request.to_string(),"process_id":process,"thread_id":1,"tab_id":5,
+                "category":"network","type":kind,"flags":0,"payload_encoding":"hex","payload":hex::encode(payload),
+                "payload_size":payload.len(),"payload_truncated":false}));
+        }
+        fn text_event(&mut self, kind: &str, process: u64, request: u64, text: &str) {
+            self.event(kind, process, request, 1, text.as_bytes());
+        }
+        fn artifact(&mut self, kind: &str, url: &str, bytes: &[u8]) -> String {
+            let sha = hex::encode(Sha256::digest(bytes));
+            std::fs::write(
+                self.root.path().join(format!("artifacts/blobs/{sha}.bin")),
+                bytes,
+            )
+            .unwrap();
+            let id = self.artifacts.len() + 1;
+            self.artifacts.push(json!({"protocol_version": 1, "artifact_id": id.to_string(), "session_id": "9",
+                "navigation_id": "0", "frame_id": "0", "parent_artifact_id": "0", "creator_event_id": "1", "kind": kind,
+                "execution_context_id": "99", "capture_origin": match kind {
+                    "stack" => "request_stack",
+                    "wasm" => "webassembly_module",
+                    _ => "stack_script",
+                },
+                "url": url, "mime_type": "application/octet-stream", "sensitive": false, "sha256": sha,
+                "byte_size": bytes.len(), "content_path": format!("blobs/{sha}.bin")}));
+            sha
+        }
+        fn stores(&self) -> Stores {
+            let events = self.root.path().join("events.jsonl");
+            let mut file = std::fs::File::create(&events).unwrap();
+            for event in &self.events {
+                writeln!(file, "{event}").unwrap();
+            }
+            let mut manifest =
+                std::fs::File::create(self.root.path().join("artifacts/manifest.jsonl")).unwrap();
+            for artifact in &self.artifacts {
+                writeln!(manifest, "{artifact}").unwrap();
+            }
+            Stores {
+                events,
+                artifacts: self.root.path().join("artifacts"),
+            }
+        }
+    }
+
+    /// Every answer must match the published contract.
+    fn assert_contract(value: &Value) {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol/openapi.json");
+        let spec: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let document = json!({"$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$ref": "#/components/schemas/FlowGraph", "components": spec["components"]});
+        let validator = jsonschema::validator_for(&document).unwrap();
+        if let Err(error) = validator.validate(value) {
+            panic!("flow graph contract: {error}");
+        }
+    }
+
+    fn graph(fixture: &Fixture) -> Value {
+        let stores = fixture.stores();
+        let value = run(&stores, 9, &Cache::default(), &AtomicBool::new(false)).unwrap();
+        assert_contract(&value);
+        (*value).clone()
+    }
+
+    fn node<'a>(graph: &'a Value, name: &str) -> &'a Value {
+        graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["name"] == name)
+            .unwrap_or_else(|| panic!("no node {name}"))
+    }
+
+    fn edge<'a>(graph: &'a Value, from: &str, to: &str) -> &'a Value {
+        let (from, to) = (&node(graph, from)["id"], &node(graph, to)["id"]);
+        graph["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|edge| edge["from"] == *from && edge["to"] == *to)
+            .unwrap_or_else(|| panic!("no edge"))
+    }
+
+    /// A top page posts a message into a same-process iframe, whose handler
+    /// calls an eval'd helper and a Wasm export, and the Wasm import fetches.
+    fn iframe_wasm_fixture() -> Fixture {
+        let mut f = Fixture::new();
+        let top = "function boot() {\n  frames[0].postMessage('go', '*');\n}\nboot();\n";
+        let inner = "function onMessage() {\n  helper();\n  exports.run();\n}\nfunction send() {\n  fetch('/beacon', {method: 'POST'});\n}\n";
+        let dynamic = "function helper() { return 1; }";
+        let module = wat::parse_str(
+            r#"(module (import "env" "send" (func $send)) (func $run (export "run") call $send))"#,
+        )
+        .unwrap();
+        f.artifact("javascript", "https://top.test/app.js", top.as_bytes());
+        f.artifact(
+            "javascript",
+            "https://frame.test/inner.js",
+            inner.as_bytes(),
+        );
+        f.artifact("javascript", "https://frame.test/", dynamic.as_bytes());
+        f.artifact("wasm", "https://frame.test/m.wasm", &module);
+        let at = |text: &str, needle: &str| text.find(needle).unwrap() as u32;
+        // Scheduling stack in the top realm: boot -> postMessage, from top level.
+        let scheduling = [
+            frame(1, 0, 10, at(top, "frames[0]"), at(top, "() {")),
+            frame(1, 2, 10, at(top, "boot();"), 0),
+        ];
+        let scheduling_artifact = stack_artifact(1, &scheduling, &[]);
+        let scheduling_sha = f.artifact("stack", "reb-stack:x", &scheduling_artifact);
+        let scheduling_digest = hex::decode(&scheduling_sha).unwrap();
+        // The request stack in the iframe realm, innermost first:
+        // send <- wasm run <- onMessage (the posted task).
+        let request = [
+            frame(1, 0, 20, at(inner, "fetch"), at(inner, "() {\n  fetch")),
+            frame(2, 0, 30, 0x2c, 1),
+            frame(
+                1,
+                0,
+                20,
+                at(inner, "exports.run"),
+                at(inner, "() {\n  helper"),
+            ),
+        ];
+        let request_artifact = stack_artifact(2, &request, &[segment(5, 2, &scheduling_digest)]);
+        let request_sha = f.artifact("stack", "reb-stack:y", &request_artifact);
+        let request_digest = hex::decode(&request_sha).unwrap();
+        // A second, cookie-free request through the eval'd helper.
+        let helper = [
+            frame(1, 0, 40, 9, 15),
+            frame(
+                1,
+                0,
+                20,
+                at(inner, "helper();"),
+                at(inner, "() {\n  helper"),
+            ),
+        ];
+        let helper_artifact = stack_artifact(2, &helper, &[]);
+        let helper_sha = f.artifact("stack", "reb-stack:z", &helper_artifact);
+        let helper_digest = hex::decode(&helper_sha).unwrap();
+        for (script, realm, kind, flags, bytes) in [
+            (10u32, 99u64, 1u8, 2u8, top.as_bytes().to_vec()),
+            (20, 100, 1, 2, inner.as_bytes().to_vec()),
+            (40, 100, 1, 3, dynamic.as_bytes().to_vec()),
+            (30, 100, 2, 0, module.clone()),
+        ] {
+            f.event(
+                "script_identity",
+                41,
+                0,
+                7,
+                &identity(kind, flags, script, realm, &bytes),
+            );
+        }
+        f.event(
+            "async_task_stack",
+            41,
+            0,
+            6,
+            &scheduling_record(5, 2, &scheduling_digest, &scheduling[0]),
+        );
+        for request_id in [70, 71] {
+            f.text_event("request_initiated", 41, request_id, "POST frame.test");
+            f.event(
+                "request_initiator_stack",
+                41,
+                request_id,
+                7,
+                &request_record(&request_digest, &request[0], 3, 1, 1),
+            );
+        }
+        f.text_event("request_initiated", 41, 72, "GET frame.test");
+        f.event(
+            "request_initiator_stack",
+            41,
+            72,
+            7,
+            &request_record(&helper_digest, &helper[0], 2, 0, 0),
+        );
+        f
+    }
+
+    #[test]
+    fn one_graph_crosses_realms_languages_and_dynamic_code() {
+        let g = graph(&iframe_wasm_fixture());
+        assert_eq!(g["schema"], SCHEMA);
+        assert_eq!(g["complete"], true, "{}", g["truncated"]);
+        assert_eq!(g["stacks"]["distinct"], 3);
+        assert_eq!(g["stacks"]["occurrences"], 4);
+        let contexts = g["contexts"].as_array().unwrap();
+        assert_eq!(contexts.len(), 2, "one lane per realm");
+        let lane = |name: &str| &contexts[node(&g, name)["context"].as_u64().unwrap() as usize];
+        assert_eq!(lane("boot")["origin"], "https://top.test");
+        assert_eq!(lane("onMessage")["origin"], "https://frame.test");
+        assert_eq!(lane("onMessage")["frame_ids"][0]["frame_id"], "7");
+        assert_eq!(node(&g, "run")["kind"], "wasm");
+        assert_eq!(node(&g, "helper")["kind"], "eval");
+        assert_eq!(node(&g, "onMessage")["line"], 1);
+        assert_eq!(node(&g, "send")["line"], 5);
+        assert_eq!(
+            (
+                node(&g, "send")["artifact_line"].as_u64(),
+                node(&g, "send")["artifact_column"].as_u64()
+            ),
+            (Some(5), Some(14))
+        );
+
+        // postMessage from the top realm into the iframe is one task edge.
+        let task = edge(&g, "boot", "onMessage");
+        assert_eq!(
+            (task["kind"].as_str(), task["task"].as_str()),
+            (Some("task"), Some("post_message"))
+        );
+        assert_eq!(task["crosses"], json!(["frame"]));
+        assert_eq!(task["count"], 2, "two requests rode the same posted task");
+        assert_eq!(edge(&g, "onMessage", "run")["crosses"], json!(["language"]));
+        assert_eq!(edge(&g, "run", "send")["crosses"], json!(["language"]));
+        assert_eq!(edge(&g, "run", "send")["sites"][0]["module_offset"], 0x2c);
+        assert_eq!(
+            edge(&g, "onMessage", "helper")["crosses"],
+            json!(["dynamic"])
+        );
+        assert_eq!(edge(&g, "onMessage", "run")["sites"][0]["line"], 3);
+        // The top-level frame scheduled boot's call.
+        let top = g["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["top_level"] == true)
+            .unwrap();
+        assert_eq!(top["context"], node(&g, "boot")["context"]);
+
+        let sink = node(&g, "POST frame.test");
+        assert_eq!(
+            (sink["kind"].as_str(), sink["hits"].as_u64()),
+            (Some("request"), Some(2))
+        );
+        assert_eq!(edge(&g, "send", "POST frame.test")["count"], 2);
+        assert_eq!(
+            node(&g, "onMessage")["hits"],
+            3,
+            "each stack counts a node once"
+        );
+        assert_eq!(node(&g, "onMessage")["schedules"], Value::Null);
+        assert_eq!(node(&g, "boot")["schedules"]["post_message"], 1);
+        // Paths name exactly the edges each stack walked.
+        let paths = g["paths"].as_array().unwrap();
+        assert_eq!(paths.len(), 3);
+        let request_path = paths.iter().find(|p| p["occurrences"] == 2).unwrap();
+        assert_eq!(request_path["requests"], json!(["70", "71"]));
+        let path_edges: BTreeSet<u64> = request_path["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e.as_u64().unwrap())
+            .collect();
+        assert!(path_edges.contains(&task_index(&g, "boot", "onMessage")));
+        assert!(!path_edges.contains(&task_index(&g, "onMessage", "helper")));
+    }
+
+    fn task_index(g: &Value, from: &str, to: &str) -> u64 {
+        let wanted = edge(g, from, to);
+        g["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|e| e == wanted)
+            .unwrap() as u64
+    }
+
+    #[test]
+    fn missing_bytes_stay_visible_and_never_bridge() {
+        let mut f = iframe_wasm_fixture();
+        // Drop the scheduling stack and the inner script: the task edge goes,
+        // inner frames keep their identity and a reason.
+        f.artifacts
+            .retain(|a| a["url"] != "reb-stack:x" && a["url"] != "https://frame.test/inner.js");
+        let g = graph(&f);
+        assert_eq!(g["stacks"]["unresolved"]["stack_artifact_missing"], 1);
+        assert_eq!(
+            g["stacks"]["unresolved"]["segment_not_retained"], 1,
+            "two requests share one decoded stack"
+        );
+        let unresolved: Vec<&Value> = g["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n["reason"] == "source_artifact_missing")
+            .collect();
+        assert_eq!(
+            unresolved.len(),
+            2,
+            "onMessage and send keep their identities"
+        );
+        assert!(
+            g["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|e| e["kind"] != "task")
+        );
+        let entry = unresolved
+            .iter()
+            .find(|n| n["chain_cut"] == true)
+            .expect("the cut task entry is marked");
+        assert_eq!(entry["kind"], "javascript");
+    }
+
+    #[test]
+    fn repeated_stacks_are_decoded_once_and_the_answer_is_cached() {
+        let mut f = iframe_wasm_fixture();
+        let digest = {
+            let stack = f
+                .events
+                .iter()
+                .find(|e| e["type"] == "request_initiator_stack")
+                .unwrap();
+            stack["payload"].clone()
+        };
+        for request in 100..400u64 {
+            let mut copy = f
+                .events
+                .iter()
+                .find(|e| e["type"] == "request_initiator_stack")
+                .unwrap()
+                .clone();
+            copy["request_id"] = json!(request.to_string());
+            copy["payload"] = digest.clone();
+            f.events.push(copy);
+        }
+        let stores = f.stores();
+        let cache = Cache::default();
+        let first = run(&stores, 9, &cache, &AtomicBool::new(false)).unwrap();
+        assert_eq!(first["stacks"]["distinct"], 3);
+        assert_eq!(first["stacks"]["occurrences"], 304);
+        assert_eq!(edge(&first, "boot", "onMessage")["count"], 302);
+        let second = run(&stores, 9, &cache, &AtomicBool::new(false)).unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "an unchanged store answers from the cache"
+        );
+        // Another session in the same store is not this one.
+        let other = run(&stores, 8, &cache, &AtomicBool::new(false)).unwrap();
+        assert_eq!(other["nodes"], json!([]));
+    }
+
+    #[test]
+    fn malformed_and_unwalked_records_are_counted() {
+        let mut f = iframe_wasm_fixture();
+        f.event("request_initiator_stack", 41, 80, 7, &[0; 128]);
+        let mut no_script = vec![2, 0, 128, 0, 2, 0, 0, 0];
+        no_script.resize(128, 0);
+        f.event("request_initiator_stack", 41, 81, 7, &no_script);
+        f.events.push(json!({"session_id": "9", "type": "async_task_stack", "payload_encoding": "hex", "payload": "zz"}));
+        let g = graph(&f);
+        assert_eq!(g["coverage"]["malformed_records"], 2);
+        assert_eq!(g["stacks"]["not_walked"]["no_script"], 1);
+        assert_eq!(g["stacks"]["distinct"], 3);
+    }
+
+    /// A version 2 artifact with an await chain after the synchronous frames.
+    fn stack_with_asyncs(sync: &[Vec<u8>], asyncs: &[Vec<u8>], segments: &[Vec<u8>]) -> Vec<u8> {
+        let recorded = sync.len() as u32;
+        let mut a = 0x4b53_4252u32.to_le_bytes().to_vec();
+        a.extend([2, 0, 32, 0, 16, 0, 0, 0]);
+        for value in [recorded, recorded, 0] {
+            a.extend(value.to_le_bytes());
+        }
+        for value in [
+            asyncs.len(),
+            asyncs.len() + segments.len(),
+            segments.len(),
+            0,
+        ] {
+            a.extend((value as u16).to_le_bytes());
+        }
+        for part in sync.iter().chain(asyncs).chain(segments) {
+            a.extend(part);
+        }
+        a
+    }
+
+    fn async_record(
+        digest: &[u8],
+        innermost: &[u8],
+        recorded: u32,
+        asyncs: u16,
+        segments: u16,
+    ) -> Vec<u8> {
+        let mut p = request_record(digest, innermost, recorded, segments, 0);
+        p[20..22].copy_from_slice(&asyncs.to_le_bytes());
+        p[22..24].copy_from_slice(&(asyncs + segments).to_le_bytes());
+        p
+    }
+
+    #[test]
+    fn task_edges_enter_only_a_known_first_frame_and_count_each_stack_once() {
+        let mut f = Fixture::new();
+        let text = "async function a() {\n  await b();\n}\nfunction b() {\n  fetch('/x');\n}\nfunction x() {\n  setTimeout(a);\n}\nfunction r() {\n  r();\n}\nfunction g() {\n  r();\n}\n";
+        let at = |needle: &str| text.find(needle).unwrap() as u32;
+        let start = |name: &str| at(&format!("function {name}(")) + 9 + name.len() as u32;
+        f.artifact("javascript", "https://top.test/app.js", text.as_bytes());
+        f.event(
+            "script_identity",
+            41,
+            0,
+            7,
+            &identity(1, 2, 50, 99, text.as_bytes()),
+        );
+        let b = frame(1, 0, 50, at("fetch"), start("b"));
+        let x = frame(1, 0, 50, at("setTimeout"), start("x"));
+        let scheduler = stack_artifact(1, std::slice::from_ref(&x), &[]);
+        let scheduler = hex::decode(f.artifact("stack", "reb-stack:x", &scheduler)).unwrap();
+        // 1. `setTimeout(a)` ran `a`, which awaited `b`: the task enters `a`.
+        let awaited = frame(3, 0, 50, at("await b"), start("a"));
+        let one = stack_with_asyncs(
+            std::slice::from_ref(&b),
+            std::slice::from_ref(&awaited),
+            &[segment(1, 1, &scheduler)],
+        );
+        let one = hex::decode(f.artifact("stack", "reb-stack:1", &one)).unwrap();
+        f.event(
+            "request_initiator_stack",
+            41,
+            70,
+            7,
+            &async_record(&one, &b, 1, 1, 1),
+        );
+        // 2. The timer was scheduled by a walk that stopped at 256 frames (`r`
+        //    recursing), itself posted by `g`: no task edge enters that walk.
+        let mut deep = vec![x.clone()];
+        deep.extend(std::iter::repeat_n(
+            frame(1, 0, 50, at("  r();"), start("r")),
+            255,
+        ));
+        let deep =
+            hex::decode(f.artifact("stack", "reb-stack:deep", &stack_artifact(1, &deep, &[])))
+                .unwrap();
+        let g = frame(1, 0, 50, at("  r();\n}\n"), start("g"));
+        let poster = hex::decode(f.artifact(
+            "stack",
+            "reb-stack:g",
+            &stack_artifact(1, std::slice::from_ref(&g), &[]),
+        ))
+        .unwrap();
+        let mut bounded = segment(1, 256, &deep);
+        bounded[2] = 1;
+        let two = stack_artifact(
+            2,
+            std::slice::from_ref(&b),
+            &[bounded, segment(5, 1, &poster)],
+        );
+        let two = hex::decode(f.artifact("stack", "reb-stack:2", &two)).unwrap();
+        f.event(
+            "request_initiator_stack",
+            41,
+            71,
+            7,
+            &request_record(&two, &b, 1, 2, 0),
+        );
+        // 3. A microtask hop before the same timer: the shared edge keeps it.
+        let mut microtask = vec![9, 6, 0, 0];
+        microtask.resize(48, 0);
+        let three = stack_artifact(
+            2,
+            std::slice::from_ref(&b),
+            &[microtask, segment(1, 1, &scheduler)],
+        );
+        let three = hex::decode(f.artifact("stack", "reb-stack:3", &three)).unwrap();
+        f.event(
+            "request_initiator_stack",
+            41,
+            72,
+            7,
+            &request_record(&three, &b, 1, 2, 0),
+        );
+        // 4. A stack whose artifact is missing names no entry.
+        f.event(
+            "request_initiator_stack",
+            41,
+            73,
+            7,
+            &request_record(&[7; 32], &b, 1, 0, 0),
+        );
+        let graph = graph(&f);
+        let id = |name: &str| node(&graph, name)["id"].clone();
+        let edges = graph["edges"].as_array().unwrap();
+        let between = |from: &str, to: &str| {
+            edges
+                .iter()
+                .filter(|e| e["from"] == id(from) && e["to"] == id(to))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            between("x", "a").len(),
+            1,
+            "the timer ran the awaiting function"
+        );
+        assert_eq!(between("a", "b")[0]["kind"], "await");
+        let timer = between("x", "b");
+        assert_eq!(timer.len(), 1);
+        assert_eq!(
+            (timer[0]["count"].as_u64(), timer[0]["via"].clone()),
+            (Some(2), json!(["microtask"])),
+            "stacks 2 and 3 share the edge; the hop is kept"
+        );
+        // The chain stops at the cut: the poster past it is neither linked nor
+        // drawn on this path (its own async_task_stack record would draw it).
+        assert!(
+            graph["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|n| n["name"] != "g"),
+            "nothing enters a walk that stopped at 256 frames"
+        );
+        assert_eq!(node(&graph, "r")["chain_cut"], true);
+        let recursion = &between("r", "r")[0];
+        assert_eq!(
+            (recursion["stacks"].as_u64(), recursion["count"].as_u64()),
+            (Some(1), Some(1)),
+            "one stack walking r -> r 254 times counts once"
+        );
+        assert_eq!(
+            node(&graph, "x")["entries"],
+            2,
+            "stacks 1 and 3 began in x's task"
+        );
+        assert_eq!(
+            (
+                node(&graph, "b")["entries"].as_u64(),
+                node(&graph, "a")["entries"].as_u64()
+            ),
+            (Some(0), Some(0))
+        );
+        assert_eq!(graph["stacks"]["unresolved"]["stack_artifact_missing"], 1);
+    }
+
+    #[test]
+    fn an_empty_store_is_an_empty_complete_graph() {
+        let f = Fixture::new();
+        let g = graph(&f);
+        assert_eq!(
+            (
+                g["nodes"].as_array().unwrap().len(),
+                g["complete"].as_bool()
+            ),
+            (0, Some(true))
+        );
+    }
+}

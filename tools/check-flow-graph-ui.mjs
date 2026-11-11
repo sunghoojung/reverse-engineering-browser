@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Backtraces Flow graph: the flow-graph-v1 model, chain folding, card rows,
-// the layered layout and its routes, and the panel's selection, highlight,
-// details, menu and failure states in a DOM model. Offline: no rendered
-// pixels are claimed here.
+// the vertical layout (realm bands stacked in call order) and its routes, and
+// the panel's selection, highlight, details, menu and failure states in a DOM
+// model. Offline: no rendered pixels are claimed here.
 // Requires: npm ci --prefix tools/ui-startup-deps --ignore-scripts --no-audit --no-fund
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
@@ -72,6 +72,36 @@ const overlaps = (layout, count) => {
 /** Each route's points, as [x, y, type]. */
 const route = (layout, e) => { const points = []; for (let i = layout.routeStart[e]; i < layout.routeStart[e + 1]; i += 1) points.push([layout.routes[2 * i], layout.routes[2 * i + 1], layout.routeTypes[i]]); return points; };
 const inside = (layout, count, x, y) => { for (let v = 0; v < count; v += 1) if (x > layout.x[v] + 0.5 && x < layout.x[v] + layout.w[v] - 0.5 && y > layout.y[v] + 0.5 && y < layout.y[v] + layout.h[v] - 0.5) return v; return -1; };
+/** A route's straight runs, a curve flattened the way the canvas draws it:
+ * down to mid-gap, across, and down. */
+const segments = (layout, e) => {
+  const out = [], P = layout.routes, T = layout.routeTypes, S = layout.routeStart;
+  let px = P[2 * S[e]], py = P[2 * S[e] + 1];
+  for (let i = S[e] + 1; i < S[e + 1]; i += 1) {
+    const x = P[2 * i], y = P[2 * i + 1];
+    if (T[i] === layoutModule.ROUTE.CURVE && Math.abs(x - px) > 0.5) { const mid = (py + y) / 2; out.push([px, py, px, mid], [px, mid, x, mid], [x, mid, x, y]); }
+    else out.push([px, py, x, y]);
+    px = x; py = y;
+  }
+  return out;
+};
+/** The first card a run passes through, or -1. Every run is horizontal or
+ * vertical, and a route only touches its own cards at their edges. */
+const crossedCard = (layout, count, [x0, y0, x1, y1]) => {
+  const [left, right, top, bottom] = [Math.min(x0, x1), Math.max(x0, x1), Math.min(y0, y1), Math.max(y0, y1)];
+  for (let v = 0; v < count; v += 1) if (right > layout.x[v] + 0.5 && left < layout.x[v] + layout.w[v] - 0.5 && bottom > layout.y[v] + 0.5 && top < layout.y[v] + layout.h[v] - 0.5) return v;
+  return -1;
+};
+const axisAligned = ([x0, y0, x1, y1]) => Math.abs(x0 - x1) < 0.01 || Math.abs(y0 - y1) < 0.01;
+/** Bands are full width and stacked top to bottom in order, never overlapping. */
+const stackedBands = (layout, label) => {
+  layout.lanes.forEach((lane, index) => {
+    assert.equal(lane.x, layout.lanes[0].x, `${label}: every band starts at the same x`);
+    assert.equal(lane.w, layout.lanes[0].w, `${label}: every band is full width`);
+    if (index) assert(layout.lanes[index - 1].y + layout.lanes[index - 1].h <= lane.y, `${label}: band ${index} sits below band ${index - 1}`);
+  });
+  assert(layout.lanes.every(lane => lane.x + lane.w <= layout.width && lane.y + lane.h <= layout.height), `${label}: the graph holds every band`);
+};
 
 {
   // The model refuses another shape and drops an edge that names no node.
@@ -148,36 +178,78 @@ const inside = (layout, count, x, y) => { for (let v = 0; v < count; v += 1) if 
   assert.equal(bridgeCard.more, 7);
 }
 {
-  // Layout: realms are lanes, callers before the realm they call into,
-  // nothing overlaps, and a straight chain stays straight.
+  // Layout: realms are full-width bands stacked top to bottom in call order,
+  // callers above the realm they call or post into; nothing overlaps, no edge
+  // runs through a card, and a straight chain stays straight.
   const m = model.flowGraphModel(sessionDoc()), display = model.flowGraphDisplay(m), cards = model.flowGraphCards(m, display), input = model.flowGraphLayoutInput(display, cards);
   const layout = layoutModule.layoutGraph(input);
   assert.equal(overlaps(layout, display.nodes.length), 0, 'no card overlaps another');
   assert.deepEqual([...layout.w], cards.map(card => card.w), 'cards keep the size their text needs');
   const laneOf = key => layout.lanes.findIndex(lane => lane.key === key);
-  assert(laneOf(0) < laneOf(1), 'the top page lane precedes the iframe it posts into');
-  assert(laneOf(2) < laneOf(0), 'a realm that only calls into the page sits before it');
-  for (let a = 0; a < layout.lanes.length; a += 1) for (let b = a + 1; b < layout.lanes.length; b += 1) {
-    const [x, y] = [layout.lanes[a], layout.lanes[b]];
-    assert(x.x + x.w <= y.x || y.x + y.w <= x.x, 'lanes do not overlap');
-  }
+  assert(laneOf(0) < laneOf(1), 'the top page band precedes the iframe it posts into');
+  assert(laneOf(2) < laneOf(0), 'a realm that only calls into the page sits above it');
+  stackedBands(layout, 'layered');
+  assert(layout.lanes[laneOf(0)].y + layout.lanes[laneOf(0)].h <= layout.lanes[laneOf(1)].y, 'the iframe band is below its parent');
+  assert(layout.height > layout.width, 'the session grows tall, not wide');
   display.nodes.forEach((item, index) => {
     const lane = layout.lanes[laneOf(item.context)];
-    assert(layout.x[index] >= lane.x && layout.x[index] + layout.w[index] <= lane.x + lane.w && layout.y[index] >= lane.y && layout.y[index] + layout.h[index] <= lane.y + lane.h, `${item.name} sits inside its realm cluster`);
+    assert(layout.x[index] >= lane.x && layout.x[index] + layout.w[index] <= lane.x + lane.w && layout.y[index] >= lane.y && layout.y[index] + layout.h[index] <= lane.y + lane.h, `${item.name} sits inside its realm band`);
   });
   const at = name => display.nodes.findIndex(item => item.name === name), center = index => layout.x[index] + layout.w[index] / 2;
   assert(layout.y[at('boot')] < layout.y[at('init')] && layout.y[at('init')] < layout.y[at('onMessage')], 'callers sit above callees');
   assert(Math.abs(center(at('onMessage')) - center(at('bridge'))) < 0.5, 'a single call stays a straight vertical line');
   assert(layout.y[at('send')] > layout.y[at('run')], 'Wasm calls back into JavaScript below itself');
+  assert.equal(layout.layer[at('onMessage')], 0, 'a realm entered from another starts at its own top row');
+  // Band order matches call order: every call between bands runs down,
+  // except a back edge, which the layout says is one.
+  display.edges.forEach((item, e) => {
+    const a = laneOf(display.nodes[item.from].context), b = laneOf(display.nodes[item.to].context);
+    if (a !== b) assert.equal(layout.back[e], b < a ? 1 : 0, 'a call between bands is a back edge exactly when it runs up');
+    if (a !== b && !layout.back[e]) assert(a < b, 'a call between bands runs down');
+  });
   // Routes: out of the caller's bottom, into the callee's top, never
-  // through another card.
+  // through another card, in straight runs with rounded corners.
   display.edges.forEach((item, e) => {
     const points = route(layout, e), [first, last] = [points[0], points.at(-1)];
     if (item.from === item.to) { assert(first[0] >= layout.x[item.from] + layout.w[item.from] - 0.5, 'recursion loops off the right edge'); return; }
     assert(Math.abs(first[1] - (layout.y[item.from] + layout.h[item.from])) < 0.5 && first[0] >= layout.x[item.from] && first[0] <= layout.x[item.from] + layout.w[item.from], 'a route leaves its caller at the bottom');
     assert(Math.abs(last[1] - layout.y[item.to]) < 0.5 && last[0] >= layout.x[item.to] && last[0] <= layout.x[item.to] + layout.w[item.to], 'a route enters its callee at the top');
     for (const [x, y] of points.slice(1, -1)) assert.equal(inside(layout, display.nodes.length, x, y), -1, 'a waypoint never sits inside a card');
+    for (const run of segments(layout, e)) {
+      assert(axisAligned(run), 'every run is horizontal or vertical');
+      assert.equal(crossedCard(layout, display.nodes.length, run), -1, `the edge ${display.nodes[item.from].name} → ${display.nodes[item.to].name} never crosses a card`);
+    }
   });
+  // The call into the iframe runs down across the band boundary.
+  const post = display.edges.findIndex(item => item.crosses.includes('frame')), postRoute = route(layout, post);
+  const boundary = layout.lanes[laneOf(0)].y + layout.lanes[laneOf(0)].h;
+  assert(postRoute[0][1] < boundary && postRoute.at(-1)[1] > boundary, 'the posted task crosses from the page band into the iframe band');
+  assert(postRoute.every(([, y], index) => !index || y >= postRoute[index - 1][1] - 0.5), 'and only ever runs down');
+  // A busier session: several realms that call down a chain of frames, with
+  // calls that skip a band and one that runs back up; still no run crosses
+  // a card and the bands keep call order.
+  const busy = {count: 0, lane: [], from: [], to: [], w: [], h: []};
+  const add = (lane, w = 200, h = 60 + (busy.count % 3) * 19) => { busy.lane.push(lane); busy.w.push(w); busy.h.push(h); return busy.count++; };
+  const link = (a, b) => { busy.from.push(a); busy.to.push(b); };
+  const tops = [0, 1, 2, 3].map(lane => add(lane));
+  for (let lane = 0; lane < 4; lane += 1) {
+    let previous = tops[lane];
+    for (let index = 0; index < 9; index += 1) { const next = add(lane, 160 + (index % 4) * 60); link(index % 3 ? previous : tops[lane], next); previous = next; }
+    if (lane < 3) link(previous, tops[lane + 1]);
+  }
+  link(tops[0] + 1, tops[2]);
+  link(busy.count - 1, tops[1] + 2);
+  const busyLayout = layoutModule.layoutGraph({count: busy.count, lane: Int32Array.from(busy.lane), from: Int32Array.from(busy.from), to: Int32Array.from(busy.to), w: Float32Array.from(busy.w), h: Float32Array.from(busy.h)});
+  stackedBands(busyLayout, 'busy');
+  assert.deepEqual(busyLayout.lanes.map(lane => lane.key), [0, 1, 2, 3], 'bands follow the chain of calls');
+  assert.equal(overlaps(busyLayout, busy.count), 0);
+  for (let e = 0; e < busy.from.length; e += 1) for (const run of segments(busyLayout, e)) {
+    assert(axisAligned(run));
+    assert.equal(crossedCard(busyLayout, busy.count, run), -1, `busy edge ${e} never crosses a card`);
+  }
+  assert.equal(busyLayout.back[busy.from.length - 1], 1, 'the call back up into an earlier band is a back edge');
+  const upRoute = route(busyLayout, busy.from.length - 1);
+  assert(upRoute.some(([x]) => x > Math.max(...Array.from(busyLayout.x, (value, v) => value + busyLayout.w[v]))), 'it runs up the right gutter, right of every card');
 }
 {
   // Cycles and wide layers.
@@ -199,7 +271,8 @@ const inside = (layout, count, x, y) => { for (let v = 0; v < count; v += 1) if 
 {
   // Triskel per realm: a realm it lays out takes its coordinates and routes;
   // one it would draw much wider, one past its limits and every realm when the
-  // route fails keep the layered layout. Calls between realms are routed here.
+  // route fails keep the layered layout. Bands stack in the same call order
+  // either way, and calls between bands are routed here, never through a card.
   const m = model.flowGraphModel(sessionDoc()), display = model.flowGraphDisplay(m), cards = model.flowGraphCards(m, display), input = model.flowGraphLayoutInput(display, cards);
   // A stand-in engine: each realm as one column, edges straight down its left.
   const column = graph => {
@@ -213,11 +286,13 @@ const inside = (layout, count, x, y) => { for (let v = 0; v < count; v += 1) if 
   assert.equal(realms.get(0).engine, 'triskel'); assert.equal(realms.get(1).engine, 'triskel');
   assert.equal(realms.get(2).reason, 'one card', 'a one-card realm needs no engine');
   assert.equal(overlaps(layout, display.nodes.length), 0, 'no card overlaps another');
-  for (let a = 0; a < layout.lanes.length; a += 1) for (let b = a + 1; b < layout.lanes.length; b += 1) assert(layout.lanes[a].x + layout.lanes[a].w <= layout.lanes[b].x || layout.lanes[b].x + layout.lanes[b].w <= layout.lanes[a].x, 'clusters do not overlap');
+  stackedBands(layout, 'Triskel');
+  assert.deepEqual(layout.lanes.map(lane => lane.key), layoutModule.layoutGraph(input).lanes.map(lane => lane.key), 'Triskel bands keep the layered call order');
   display.nodes.forEach((item, index) => {
     const lane = layout.lanes.find(entry => entry.key === item.context);
-    assert(layout.x[index] >= lane.x && layout.x[index] + layout.w[index] <= lane.x + lane.w && layout.y[index] >= lane.y && layout.y[index] + layout.h[index] <= lane.y + lane.h, `${item.name} sits inside its cluster`);
+    assert(layout.x[index] >= lane.x && layout.x[index] + layout.w[index] <= lane.x + lane.w && layout.y[index] >= lane.y && layout.y[index] + layout.h[index] <= lane.y + lane.h, `${item.name} sits inside its band`);
   });
+  assert(!('content' in layout), 'the band contents the layout worked from are not sent to the page');
   const at = name => display.nodes.findIndex(item => item.name === name);
   assert.equal(layout.x[at('onMessage')], layout.x[at('bridge')], 'Triskel coordinates are used as given');
   display.edges.forEach((item, e) => {
@@ -229,7 +304,13 @@ const inside = (layout, count, x, y) => { for (let v = 0; v < count; v += 1) if 
   });
   const post = display.edges.findIndex(item => item.crosses.includes('frame')), postRoute = route(layout, post);
   const topLane = layout.lanes.find(entry => entry.key === 0);
-  assert(postRoute.some(([x]) => x > topLane.x + topLane.w), 'a call into another realm runs down the gap beside its cluster');
+  assert(postRoute[0][1] < topLane.y + topLane.h && postRoute.at(-1)[1] > topLane.y + topLane.h, 'a call into another realm runs down across the band boundary');
+  // The stand-in draws calls straight down its column, so only the routes
+  // this layout makes, between bands, are held to never crossing a card.
+  display.edges.forEach((item, e) => {
+    if (display.nodes[item.from].context === display.nodes[item.to].context) return;
+    for (const run of segments(layout, e)) { assert(axisAligned(run)); assert.equal(crossedCard(layout, display.nodes.length, run), -1, 'a call between Triskel bands never crosses a card'); }
+  });
   // Much wider than the layered layout: kept layered, and the reason is given.
   layout = await layoutModule.layoutWithTriskel(input, layoutModule.METRICS, engine((graph, index) => index === 0 ? {...column(graph), width: 99999} : null));
   assert.equal(layout.engine.realms.find(item => item.key === 0).engine, 'layered');

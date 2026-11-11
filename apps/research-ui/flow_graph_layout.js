@@ -1,25 +1,31 @@
-/* Layered layout for the session flow graph. Runs off the main thread as a
+/* Vertical layout for the session flow graph. Runs off the main thread as a
  * Web Worker; also loads as CommonJS for the offline checks.
  *
- * Each realm is a cluster with its own columns, so a call that crosses into
- * an iframe, or a posted task that does, is an edge between clusters and reads
- * as such. Rows are call depth: cycles (recursion, re-entrant handlers) are
- * broken by a depth-first walk, nodes take their longest-path layer, and a
- * root is pulled down next to its first callee. An edge longer than one layer
- * gets a waypoint in every layer it passes, so it is routed between cards,
- * never through one. Within a cluster and layer, cards and waypoints are
- * ordered by the mean position of their neighbours (alternating down and up
- * sweeps), then placed as near that mean as the spacing allows (a weighted
- * isotonic fit), which keeps a chain of calls one straight vertical line. A
- * realm holds at most `wrap` cards per layer: the rest move down a layer,
- * leaves first, so a wide fan of calls stacks instead of running off to the
- * side. Back edges run up the cluster's right gutter. Card sizes come from
+ * The graph reads top to bottom like a disassembler's CFG: each realm is a
+ * full-width band, and the bands are stacked in call order, so a realm that
+ * calls or posts into another sits above it (an iframe below its parent) and a
+ * call between realms runs down across the band boundary. Inside a band, rows
+ * are call depth: cycles (recursion, re-entrant handlers) are broken by a
+ * depth-first walk over the realm's own calls, nodes take their longest-path
+ * layer, and a root is pulled down next to its first callee. A call into
+ * another realm never pushes a card down, so every band starts at its own top.
+ * An edge longer than one layer gets a waypoint in every layer it passes, so it
+ * is routed between cards, never through one. Within a band and layer, cards
+ * and waypoints are ordered by the mean position of their neighbours
+ * (alternating down and up sweeps), then placed as near that mean as the
+ * spacing allows (a weighted isotonic fit), which keeps a chain of calls one
+ * straight vertical line. A band holds at most `wrap` cards per layer: the
+ * rest move down a layer, leaves first, so a busy session grows tall, not
+ * wide. Bands share one width and are shifted sideways so the calls between
+ * them run as straight as the cards allow. Back edges run up the band's right
+ * gutter; a call between bands drops straight down when nothing is in its way,
+ * else it runs down the side gutter beside every band. Card sizes come from
  * the caller. No dependency is linked. */
 'use strict';
 
 const flowGraphLayout = (() => {
-  const METRICS = {nodeW: 220, nodeH: 34, gapX: 30, gapY: 72, laneGap: 56, lanePadX: 22, lanePadTop: 48, lanePadBottom: 22,
-    margin: 40, top: 0, wrap: 5, dummyW: 3, dummyGap: 12, busGap: 4, portGap: 18, gutter: 18, gutterStep: 7, gutterSlots: 6, maxDummies: 200000};
+  const METRICS = {nodeW: 220, nodeH: 34, gapX: 30, gapY: 64, laneGap: 56, lanePadX: 22, lanePadTop: 52, lanePadBottom: 26,
+    margin: 40, top: 0, wrap: 5, dummyW: 3, dummyGap: 12, busGap: 4, portGap: 18, gutter: 18, gutterStep: 7, gutterSlots: 6, crossSlots: 8, maxDummies: 200000};
   const SWEEPS = 9;
   /* Route point types: the segment that arrives at the point. A corner is
    * rounded toward the next point. */
@@ -90,7 +96,7 @@ const flowGraphLayout = (() => {
     return layer;
   }
 
-  /** At most `cap` cards of one lane in a layer, more in a big lane so it
+  /** At most `cap` cards of one band in a layer, more in a big band so it
    * stays near square: the excess moves down one layer, cards with the
    * fewest layers below them first (leaves cost nothing), and their callees
    * move with them. */
@@ -126,9 +132,9 @@ const flowGraphLayout = (() => {
     }
   }
 
-  /** Lanes left to right: realms that call into each other sit together,
-   * callers before the realms they call into (an iframe after its parent),
-   * the busiest connected group first, then shallower first. */
+  /** Bands top to bottom: realms that call into each other sit together,
+   * callers above the realms they call or post into (an iframe below its
+   * parent), the busiest connected group first, then shallower first. */
   function laneOrder(count, graph, from, to, back, layer) {
     const laneKeys = [...new Set(graph.lane)];
     const laneSum = new Map(), laneCount = new Map(), laneFirst = new Map(), laneWeight = new Map();
@@ -154,7 +160,7 @@ const flowGraphLayout = (() => {
     const ready = laneKeys.filter(key => laneIn.get(key) === 0), ordered = [], placed = new Set();
     while (ordered.length < laneKeys.length) {
       if (!ready.length) {
-        // A cycle between realms: take the best ranked remaining lane.
+        // A cycle between realms: take the best ranked remaining band.
         const rest = laneKeys.filter(key => !placed.has(key)).sort(rank);
         laneIn.set(rest[0], 0); ready.push(rest[0]);
       }
@@ -185,10 +191,173 @@ const flowGraphLayout = (() => {
     return value;
   }
 
+  /** Each band's sideways offset inside the shared width, so the calls between
+   * bands run as straight as they can: first in band order against the bands
+   * above, then a few passes against all of them. pairs: {a, ca, b, cb} with
+   * band indexes and local centres. */
+  function alignBands(widths, pairs) {
+    const n = widths.length, offset = new Float64Array(n), placed = new Uint8Array(n);
+    let shared = 0; for (const width of widths) shared = Math.max(shared, width);
+    const byBand = Array.from({length: n}, () => []);
+    pairs.forEach((pair, index) => { byBand[pair.a].push(index); if (pair.b !== pair.a) byBand[pair.b].push(index); });
+    const want = (band, any) => {
+      let sum = 0, mass = 0;
+      for (const index of byBand[band]) {
+        const pair = pairs[index], self = pair.a === band, other = self ? pair.b : pair.a;
+        if (!any && !placed[other]) continue;
+        sum += offset[other] + (self ? pair.cb - pair.ca : pair.ca - pair.cb); mass += 1;
+      }
+      return mass ? sum / mass : null;
+    };
+    const clamp = (band, value) => Math.max(0, Math.min(shared - widths[band], value));
+    for (let band = 0; band < n; band += 1) { const value = want(band, false); offset[band] = value === null ? 0 : clamp(band, value); placed[band] = 1; }
+    for (let pass = 0; pass < 3; pass += 1) for (let band = 0; band < n; band += 1) { const value = want(band, true); if (value !== null) offset[band] = clamp(band, value); }
+    return offset;
+  }
+
+  /** A route through corner points: repeats and straight-through points are
+   * dropped, the first point moves, the last is a line, the rest are
+   * rounded corners. */
+  function orthogonal(flat) {
+    const points = [];
+    for (let i = 0; i + 1 < flat.length; i += 2) {
+      const x = flat[i], y = flat[i + 1], last = points.length - 2;
+      if (last >= 0 && Math.abs(points[last] - x) < 0.01 && Math.abs(points[last + 1] - y) < 0.01) continue;
+      if (last >= 2) {
+        const ax = points[last - 2], ay = points[last - 1], bx = points[last], by = points[last + 1];
+        if ((Math.abs(ax - bx) < 0.01 && Math.abs(bx - x) < 0.01) || (Math.abs(ay - by) < 0.01 && Math.abs(by - y) < 0.01)) points.length = last;
+      }
+      points.push(x, y);
+    }
+    const last = points.length / 2 - 1;
+    return {points, types: Array.from({length: last + 1}, (_, k) => k === 0 ? MOVE : k === last ? LINE : CORNER)};
+  }
+
+  /**
+   * Places band contents top to bottom and routes the calls between bands.
+   * content: {bands: [{key, w, h, cards}], bandOf, lx, ly (local top-left),
+   * routes (per edge {points, types} in band-local units, or null for a call
+   * between bands), outPort, inPort (band-local x, NaN when unknown), offsets?}.
+   */
+  function stackBands(graph, nodeW, nodeH, content, m) {
+    const {count, from, to} = graph, edgeCount = from.length, bands = content.bands.length, {bandOf, lx, ly} = content;
+    const widths = content.bands.map(band => band.w);
+    const cross = [];
+    for (let e = 0; e < edgeCount; e += 1) if (bandOf[from[e]] !== bandOf[to[e]]) cross.push(e);
+    const offsets = content.offsets ?? alignBands(widths, cross.map(e => ({a: bandOf[from[e]], ca: lx[from[e]] + nodeW[from[e]] / 2, b: bandOf[to[e]], cb: lx[to[e]] + nodeW[to[e]] / 2})));
+    let shared = m.nodeW; for (const width of widths) shared = Math.max(shared, width);
+    // Rows of bands, in a frame whose content starts at x = 0; shifted at the end.
+    const top = new Float64Array(bands), contentTop = new Float64Array(bands), bottom = new Float64Array(bands), members = Array.from({length: bands}, () => []);
+    let cursor = m.margin + m.top;
+    content.bands.forEach((band, index) => {
+      top[index] = cursor; contentTop[index] = cursor + m.lanePadTop; bottom[index] = contentTop[index] + band.h + m.lanePadBottom;
+      cursor = bottom[index] + m.laneGap;
+    });
+    const x = new Float32Array(count), y = new Float32Array(count);
+    for (let v = 0; v < count; v += 1) { const band = bandOf[v]; x[v] = offsets[band] + lx[v]; y[v] = contentTop[band] + ly[v]; members[band].push(v); }
+    const routes = new Array(edgeCount).fill(null);
+    for (let e = 0; e < edgeCount; e += 1) {
+      const local = content.routes[e];
+      if (!local) continue;
+      const band = bandOf[from[e]], dx = offsets[band], dy = contentTop[band], points = local.points.slice();
+      for (let i = 0; i < points.length; i += 2) { points[i] += dx; points[i + 1] += dy; }
+      routes[e] = {points, types: local.types.slice()};
+    }
+    // Ports of calls between bands: the content's, else spread over the card
+    // in the order of where the other end is.
+    const outX = new Float64Array(edgeCount).fill(NaN), inX = new Float64Array(edgeCount).fill(NaN);
+    {
+      const outs = new Map(), ins = new Map(), otherX = v => x[v] + nodeW[v] / 2;
+      for (const e of cross) {
+        const a = from[e], b = to[e];
+        if (Number.isFinite(content.outPort?.[e])) outX[e] = offsets[bandOf[a]] + content.outPort[e]; else { if (!outs.has(a)) outs.set(a, []); outs.get(a).push(e); }
+        if (Number.isFinite(content.inPort?.[e])) inX[e] = offsets[bandOf[b]] + content.inPort[e]; else { if (!ins.has(b)) ins.set(b, []); ins.get(b).push(e); }
+      }
+      const spread = (v, list, key, target) => {
+        list.sort((p, q) => key(p) - key(q) || p - q);
+        const step = list.length > 1 ? Math.min(m.portGap, nodeW[v] * 0.5 / (list.length - 1)) : 0, mid = x[v] + nodeW[v] / 2;
+        list.forEach((e, i) => { target[e] = mid + (i - (list.length - 1) / 2) * step; });
+      };
+      outs.forEach((list, v) => spread(v, list, e => otherX(to[e]), outX));
+      ins.forEach((list, v) => spread(v, list, e => otherX(from[e]), inX));
+    }
+    // Nothing of a card in [y0, y1] at x, other than the edge's own ends.
+    const clearColumn = (cx, y0, y1, a, b) => {
+      const low = Math.min(y0, y1), high = Math.max(y0, y1);
+      for (let band = 0; band < bands; band += 1) {
+        if (bottom[band] < low || top[band] > high) continue;
+        for (const v of members[band]) {
+          if (v === a || v === b) continue;
+          if (cx > x[v] - 4 && cx < x[v] + nodeW[v] + 4 && high > y[v] - 2 && low < y[v] + nodeH[v] + 2) return false;
+        }
+      }
+      return true;
+    };
+    // A height in the gap under (or over) a card's row that a run across
+    // [x0, x1] can take without touching a card of its band.
+    const rowGap = (band, v, down, x0, x1, slot) => {
+      let at = down ? y[v] + nodeH[v] + 14 + slot * 3 : y[v] - 14 - slot * 3;
+      const low = Math.min(x0, x1) - 6, high = Math.max(x0, x1) + 6;
+      for (let guard = 0; guard < 32; guard += 1) {
+        let moved = false;
+        for (const u of members[band]) {
+          if (u === v || high <= x[u] || low >= x[u] + nodeW[u] || at <= y[u] - 8 || at >= y[u] + nodeH[u] + 8) continue;
+          at = down ? y[u] + nodeH[u] + 14 : y[u] - 14; moved = true;
+        }
+        if (!moved) break;
+      }
+      return down ? Math.min(at, bottom[band] + m.laneGap / 2 - 4) : Math.max(at, top[band] - m.laneGap / 2 + 4);
+    };
+    // Calls between bands. Down: straight from the caller to the gap over the
+    // callee's band and into it when no card is in the way; else along the gap
+    // under the caller's row, down the nearer side gutter beside every band,
+    // and into the callee from the gap over its band or over its row. Up (a
+    // back edge): the same, always by the right gutter.
+    const gapSlot = new Uint32Array(bands + 1), sideSlot = [0, 0], sideUsed = [0, 0];
+    const gutterX = (side, slot) => side === 0 ? -(m.gutter * 0.75 + slot * m.gutterStep) : shared + m.gutter * 0.75 + slot * m.gutterStep;
+    for (const e of cross) {
+      const a = from[e], b = to[e], A = bandOf[a], B = bandOf[b];
+      const sx = outX[e], sy = y[a] + nodeH[a], tx = inX[e], ty = y[b];
+      const above = B > 0 ? top[B] - m.laneGap / 2 + ((gapSlot[B]++ % 7) - 3) * 4 : top[B] - 12;
+      if (B > A && clearColumn(sx, sy, above, a, b) && clearColumn(tx, above, ty, a, b)) {
+        routes[e] = orthogonal([sx, sy, sx, above, tx, above, tx, ty]);
+        continue;
+      }
+      const side = B > A && (sx + tx) / 2 < shared / 2 ? 0 : 1, slot = sideSlot[side]++ % m.crossSlots;
+      sideUsed[side] = Math.max(sideUsed[side], slot + 1);
+      const gx = gutterX(side, slot);
+      const under = bottom[A] + m.laneGap / 2 + ((gapSlot[A + 1]++ % 7) - 3) * 4;
+      const y1 = clearColumn(sx, sy, under, a, b) ? under : rowGap(A, a, true, sx, gx, slot % 6);
+      const y2 = clearColumn(tx, above, ty, a, b) ? above : rowGap(B, b, false, tx, gx, slot % 6);
+      routes[e] = orthogonal([sx, sy, sx, y1, gx, y1, gx, y2, tx, y2, tx, ty]);
+    }
+    // Shift right of the left gutter, then the boxes.
+    const leftW = sideUsed[0] ? m.gutter * 1.5 + (sideUsed[0] - 1) * m.gutterStep : 0, rightW = sideUsed[1] ? m.gutter * 1.5 + (sideUsed[1] - 1) * m.gutterStep : 0;
+    const shift = m.margin + m.lanePadX + leftW;
+    for (let v = 0; v < count; v += 1) x[v] += shift;
+    const points = [], kinds = [], routeStart = new Uint32Array(edgeCount + 1);
+    for (let e = 0; e < edgeCount; e += 1) {
+      routeStart[e] = kinds.length;
+      const route = routes[e];
+      for (let i = 0; i < route.points.length; i += 2) points.push(route.points[i] + shift, route.points[i + 1]);
+      kinds.push(...route.types);
+    }
+    routeStart[edgeCount] = kinds.length;
+    const laneW = m.lanePadX * 2 + leftW + shared + rightW;
+    const lanes = content.bands.map((band, index) => {
+      const box = {key: band.key, x: m.margin, y: top[index], w: laneW, h: bottom[index] - top[index], gutter: shift + offsets[index] + band.cards + m.lanePadX / 2, top: contentTop[index]};
+      if (band.engine) { box.engine = band.engine; box.reason = band.reason; }
+      return box;
+    });
+    let height = (bands ? bottom[bands - 1] : m.margin + m.lanePadTop) + m.margin;
+    for (let i = 1; i < points.length; i += 2) height = Math.max(height, points[i] + m.margin);
+    return {x, y, lanes, width: m.margin * 2 + laneW, height, routes: Float32Array.from(points), routeTypes: Uint8Array.from(kinds), routeStart};
+  }
+
   /**
    * graph: {count, lane: Int32Array (lane key per node), from, to, weight?, w?, h?}
-   * Returns node boxes (top-left, with per-node w and h), lane boxes, which
-   * edges were treated as back edges, and one route per edge.
+   * Returns node boxes (top-left, with per-node w and h), band boxes in
+   * order, which edges were treated as back edges, and one route per edge.
    */
   function layoutGraph(graph, metrics = METRICS) {
     const m = {...METRICS, ...metrics};
@@ -196,36 +365,50 @@ const flowGraphLayout = (() => {
     const edgeCount = from.length;
     const nodeW = Float32Array.from({length: count}, (_, v) => graph.w?.[v] ?? m.nodeW);
     const nodeH = Float32Array.from({length: count}, (_, v) => graph.h?.[v] ?? m.nodeH);
-    const adj = adjacency(count, from, to);
-    const back = backEdges(count, from, to, adj, graph.weight);
-    const layer = layers(count, from, to, adj, back);
-    boundLayers(count, layer, graph.lane, adj, to, back, graph.weight, m.wrap);
-    let maxLayer = 0; for (let v = 0; v < count; v += 1) maxLayer = Math.max(maxLayer, layer[v]);
+    // Layers come from the calls inside each realm.
+    const intra = [];
+    for (let e = 0; e < edgeCount; e += 1) if (graph.lane[from[e]] === graph.lane[to[e]]) intra.push(e);
+    const innerFrom = Int32Array.from(intra, e => from[e]), innerTo = Int32Array.from(intra, e => to[e]);
+    const adj = adjacency(count, innerFrom, innerTo);
+    const innerBack = backEdges(count, innerFrom, innerTo, adj, graph.weight);
+    const layer = layers(count, innerFrom, innerTo, adj, innerBack);
+    boundLayers(count, layer, graph.lane, adj, innerTo, innerBack, graph.weight, m.wrap);
+    const back = new Uint8Array(edgeCount);
+    intra.forEach((e, i) => { back[e] = innerBack[i]; });
     const laneKeys = laneOrder(count, graph, from, to, back, layer);
     const laneIndex = new Map(laneKeys.map((key, index) => [key, index]));
-    const lanes = laneKeys.length;
+    const bands = laneKeys.length;
+    const bandOf = Int32Array.from({length: count}, (_, v) => laneIndex.get(graph.lane[v]));
+    // A call into a band drawn above its caller runs back up.
+    for (let e = 0; e < edgeCount; e += 1) if (bandOf[from[e]] !== bandOf[to[e]]) back[e] = bandOf[to[e]] < bandOf[from[e]] ? 1 : 0;
+    const maxLayerOf = new Int32Array(bands);
+    for (let v = 0; v < count; v += 1) maxLayerOf[bandOf[v]] = Math.max(maxLayerOf[bandOf[v]], layer[v]);
+    let maxLayer = 0; for (const value of maxLayerOf) maxLayer = Math.max(maxLayer, value);
 
     // Items: cards 0..count-1, then one waypoint per layer a long edge passes.
-    const itemLane = [], itemLayer = [], itemEdge = [];
-    for (let v = 0; v < count; v += 1) { itemLane.push(laneIndex.get(graph.lane[v])); itemLayer.push(layer[v]); itemEdge.push(-1); }
+    const itemBand = [], itemLayer = [];
+    for (let v = 0; v < count; v += 1) { itemBand.push(bandOf[v]); itemLayer.push(layer[v]); }
     const firstDummy = new Int32Array(edgeCount).fill(-1), dummyCount = new Uint32Array(edgeCount);
     const links = [];
     let budget = m.maxDummies;
     for (let e = 0; e < edgeCount; e += 1) {
+      const a = from[e], b = to[e];
+      // A card in another band pulls sideways, the upper end first.
+      if (bandOf[a] !== bandOf[b]) { if (bandOf[a] < bandOf[b]) links.push(a, b); else links.push(b, a); continue; }
       if (back[e]) continue;
-      const a = from[e], b = to[e], span = layer[b] - layer[a];
+      const span = layer[b] - layer[a];
       if (span > 1 && span - 1 <= budget) {
-        budget -= span - 1; firstDummy[e] = itemLane.length; dummyCount[e] = span - 1;
+        budget -= span - 1; firstDummy[e] = itemBand.length; dummyCount[e] = span - 1;
         let previous = a;
         for (let l = layer[a] + 1; l < layer[b]; l += 1) {
-          const id = itemLane.length;
-          itemLane.push(itemLane[a]); itemLayer.push(l); itemEdge.push(e);
+          const id = itemBand.length;
+          itemBand.push(itemBand[a]); itemLayer.push(l);
           links.push(previous, id); previous = id;
         }
         links.push(previous, b);
       } else links.push(a, b);
     }
-    const items = itemLane.length, isDummy = id => id >= count;
+    const items = itemBand.length, isDummy = id => id >= count;
     const width = new Float64Array(items), height = new Float64Array(items);
     for (let id = 0; id < items; id += 1) { width[id] = isDummy(id) ? m.dummyW : nodeW[id]; height[id] = isDummy(id) ? 0 : nodeH[id]; }
     // Neighbours above and below each item.
@@ -255,61 +438,65 @@ const flowGraphLayout = (() => {
       roots.forEach(visit);
       for (let id = 0; id < items; id += 1) visit(id);
     }
-    const cells = Array.from({length: lanes}, () => Array.from({length: maxLayer + 1}, () => []));
-    for (let id = 0; id < items; id += 1) cells[itemLane[id]][itemLayer[id]].push(id);
-    cells.forEach(laneCells => laneCells.forEach(cell => cell.sort((a, b) => discovery[a] - discovery[b])));
+    const cells = Array.from({length: bands}, (_, band) => Array.from({length: maxLayerOf[band] + 1}, () => []));
+    for (let id = 0; id < items; id += 1) cells[itemBand[id]][itemLayer[id]].push(id);
+    cells.forEach(bandCells => bandCells.forEach(cell => cell.sort((a, b) => discovery[a] - discovery[b])));
 
-    const layerH = new Float64Array(maxLayer + 1);
-    for (let v = 0; v < count; v += 1) layerH[layer[v]] = Math.max(layerH[layer[v]], height[v]);
-    const layerTop = new Float64Array(maxLayer + 2);
-    layerTop[0] = m.margin + m.top + m.lanePadTop;
-    for (let l = 0; l <= maxLayer; l += 1) layerTop[l + 1] = layerTop[l] + layerH[l] + m.gapY;
+    // Rows of each band, from the band's own top.
+    const layerH = cells.map(bandCells => new Float64Array(bandCells.length)), layerTop = cells.map(bandCells => new Float64Array(bandCells.length + 1));
+    for (let v = 0; v < count; v += 1) layerH[bandOf[v]][layer[v]] = Math.max(layerH[bandOf[v]][layer[v]], height[v]);
+    for (let band = 0; band < bands; band += 1) for (let l = 0; l < cells[band].length; l += 1) layerTop[band][l + 1] = layerTop[band][l] + layerH[band][l] + m.gapY;
 
-    // Horizontal placement: centres local to each lane, lanes side by side.
-    const local = new Float64Array(items), laneX = new Float64Array(lanes), laneW = new Float64Array(lanes);
-    const gutterOf = new Float64Array(lanes), backIn = new Uint32Array(lanes);
-    for (let e = 0; e < edgeCount; e += 1) if (back[e] && from[e] !== to[e]) backIn[itemLane[from[e]]] += 1;
-    for (let lane = 0; lane < lanes; lane += 1) gutterOf[lane] = backIn[lane] ? m.gutter + Math.min(backIn[lane], m.gutterSlots) * m.gutterStep : 0;
+    // Horizontal placement: centres local to each band, bands shifted to line
+    // up the calls between them.
+    const local = new Float64Array(items), bandX = new Float64Array(bands), bandW = new Float64Array(bands);
+    const gutterOf = new Float64Array(bands), backIn = new Uint32Array(bands);
+    for (let e = 0; e < edgeCount; e += 1) if (back[e] && from[e] !== to[e] && bandOf[from[e]] === bandOf[to[e]]) backIn[bandOf[from[e]]] += 1;
+    for (let band = 0; band < bands; band += 1) gutterOf[band] = backIn[band] ? m.lanePadX / 2 + m.gutter + Math.min(backIn[band], m.gutterSlots) * m.gutterStep : 0;
+    const crossEdges = [];
+    for (let e = 0; e < edgeCount; e += 1) if (bandOf[from[e]] !== bandOf[to[e]]) crossEdges.push(e);
     // Waypoints of a bundle of long edges run close together, like a bus.
     const gapOf = (a, b) => isDummy(a) && isDummy(b) ? m.busGap : isDummy(a) || isDummy(b) ? m.dummyGap : m.gapX;
-    const center = id => laneX[itemLane[id]] + local[id];
-    const placeLanes = () => {
-      let cursor = m.margin + m.lanePadX;
-      for (let lane = 0; lane < lanes; lane += 1) {
+    const center = id => bandX[itemBand[id]] + local[id];
+    const placeBands = () => {
+      for (let band = 0; band < bands; band += 1) {
         let left = Infinity, right = -Infinity;
-        for (const cell of cells[lane]) for (const id of cell) { left = Math.min(left, local[id] - width[id] / 2); right = Math.max(right, local[id] + width[id] / 2); }
+        for (const cell of cells[band]) for (const id of cell) { left = Math.min(left, local[id] - width[id] / 2); right = Math.max(right, local[id] + width[id] / 2); }
         if (left === Infinity) { left = 0; right = 0; }
-        for (const cell of cells[lane]) for (const id of cell) local[id] -= left;
-        laneW[lane] = right - left; laneX[lane] = cursor;
-        cursor += laneW[lane] + gutterOf[lane] + m.lanePadX * 2 + m.laneGap;
+        for (const cell of cells[band]) for (const id of cell) local[id] -= left;
+        bandW[band] = right - left;
       }
+      const offsets = alignBands(Array.from(bandW, (value, band) => value + gutterOf[band]),
+        crossEdges.map(e => ({a: bandOf[from[e]], ca: local[from[e]], b: bandOf[to[e]], cb: local[to[e]]})));
+      bandX.set(offsets);
     };
-    const placeCell = (lane, l, desired, weight) => {
-      const cell = cells[lane][l];
+    const placeCell = (band, l, desired, weight) => {
+      const cell = cells[band][l];
       if (!cell.length) return;
       const fitted = fitRow(cell, desired, weight, width, gapOf);
-      cell.forEach((id, i) => { local[id] = fitted[i] - laneX[lane]; });
+      cell.forEach((id, i) => { local[id] = fitted[i] - bandX[band]; });
     };
     // Start packed left to right.
-    cells.forEach(laneCells => laneCells.forEach(cell => { let x = 0; cell.forEach((id, i) => { if (i) x += (width[cell[i - 1]] + width[id]) / 2 + gapOf(cell[i - 1], id); local[id] = x; }); }));
-    placeLanes();
+    cells.forEach(bandCells => bandCells.forEach(cell => { let at = 0; cell.forEach((id, i) => { if (i) at += (width[cell[i - 1]] + width[id]) / 2 + gapOf(cell[i - 1], id); local[id] = at; }); }));
+    placeBands();
     const sweep = (down, both = false) => {
       for (let step = 0; step <= maxLayer; step += 1) {
-        const l = down ? step : maxLayer - step;
-        for (let lane = 0; lane < lanes; lane += 1) {
-          const cell = cells[lane][l];
+        for (let band = 0; band < bands; band += 1) {
+          const l = down ? step : maxLayerOf[band] - step;
+          if (l < 0 || l > maxLayerOf[band]) continue;
+          const cell = cells[band][l];
           if (!cell.length) continue;
           const desired = new Float64Array(cell.length), weight = new Float64Array(cell.length), keyed = new Array(cell.length);
-          const left = laneX[lane], right = laneX[lane] + laneW[lane];
+          const left = bandX[band], right = bandX[band] + bandW[band];
           cell.forEach((id, i) => {
             let sum = 0, n = 0;
-            // A neighbour in another realm pulls toward the nearer edge of
-            // this one, never past it: otherwise two clusters chase each
-            // other apart.
+            // A neighbour in another band pulls toward the nearer edge of
+            // this one, never past it: otherwise two bands chase each other
+            // apart.
             const add = (startArr, list) => {
               for (let k = startArr[id]; k < startArr[id + 1]; k += 1) {
                 const other = list[k];
-                if (itemLane[other] === lane) { sum += center(other); n += 1; } else { sum += 0.35 * Math.max(left, Math.min(right, center(other))); n += 0.35; }
+                if (itemBand[other] === band) { sum += center(other); n += 1; } else { sum += 0.35 * Math.max(left, Math.min(right, center(other))); n += 0.35; }
               }
             };
             if (down || both) add(upStart, upList);
@@ -320,98 +507,106 @@ const flowGraphLayout = (() => {
             keyed[i] = i;
           });
           // A card with no neighbour this way packs beside the ones that
-          // have one, instead of holding the lane open.
+          // have one, instead of holding the band open.
           let connected = 0, mass = 0;
           for (let i = 0; i < cell.length; i += 1) if (weight[i] > 0.05) { connected += desired[i]; mass += 1; }
           if (mass) for (let i = 0; i < cell.length; i += 1) if (weight[i] <= 0.05) desired[i] = connected / mass;
           keyed.sort((a, b) => desired[a] - desired[b] || discovery[cell[a]] - discovery[cell[b]]);
           const sorted = keyed.map(i => cell[i]), sortedDesired = Float64Array.from(keyed, i => desired[i]), sortedWeight = Float64Array.from(keyed, i => weight[i]);
-          cells[lane][l] = sorted;
-          placeCell(lane, l, sortedDesired, sortedWeight);
+          cells[band][l] = sorted;
+          placeCell(band, l, sortedDesired, sortedWeight);
         }
       }
-      placeLanes();
+      placeBands();
     };
     for (let pass = 0; pass < SWEEPS; pass += 1) sweep(pass % 2 === 0);
     // A last down sweep keeps single calls straight under their caller.
     sweep(true);
 
-    // Boxes.
-    const x = new Float32Array(count), y = new Float32Array(count);
-    cells.forEach((laneCells, lane) => laneCells.forEach((cell, l) => {
-      for (const id of cell) if (!isDummy(id)) { x[id] = center(id) - width[id] / 2; y[id] = layerTop[l]; }
-    }));
-    const laneBoxes = laneKeys.map((key, lane) => {
-      let top = Infinity, bottom = -Infinity;
-      for (const cell of cells[lane]) for (const id of cell) if (!isDummy(id)) { top = Math.min(top, y[id]); bottom = Math.max(bottom, y[id] + nodeH[id]); }
-      if (top === Infinity) { top = layerTop[0]; bottom = top; }
-      return {key, x: laneX[lane] - m.lanePadX, y: top - m.lanePadTop, w: laneW[lane] + m.lanePadX * 2 + gutterOf[lane], h: bottom - top + m.lanePadTop + m.lanePadBottom, gutter: laneX[lane] + laneW[lane] + m.lanePadX / 2};
-    });
+    // Band-local boxes.
+    const lx = new Float64Array(count), ly = new Float64Array(count);
+    for (let v = 0; v < count; v += 1) { lx[v] = local[v] - width[v] / 2; ly[v] = layerTop[bandOf[v]][layer[v]]; }
+    const lc = id => local[id];
 
     // Ports: a card's edges leave its bottom and enter its top in the order of
     // where they go, so bundles do not cross at the card. Back edges take the
     // right end, toward the gutter they run up.
     const outPort = new Float64Array(edgeCount), inPort = new Float64Array(edgeCount);
-    const nextX = e => firstDummy[e] >= 0 ? center(firstDummy[e]) : x[to[e]] + nodeW[to[e]] / 2;
-    const previousX = e => firstDummy[e] >= 0 ? center(firstDummy[e] + dummyCount[e] - 1) : x[from[e]] + nodeW[from[e]] / 2;
+    const nextX = e => firstDummy[e] >= 0 ? center(firstDummy[e]) : center(to[e]);
+    const previousX = e => firstDummy[e] >= 0 ? center(firstDummy[e] + dummyCount[e] - 1) : center(from[e]);
     const spread = (v, list, key, target) => {
       if (!list.length) return;
       list.sort((a, b) => key(a) - key(b) || a - b);
-      const step = list.length > 1 ? Math.min(m.portGap, nodeW[v] * 0.6 / (list.length - 1)) : 0, mid = x[v] + nodeW[v] / 2;
+      const step = list.length > 1 ? Math.min(m.portGap, nodeW[v] * 0.6 / (list.length - 1)) : 0, mid = lc(v);
       list.forEach((e, i) => { target[e] = mid + (i - (list.length - 1) / 2) * step; });
     };
-    for (let v = 0; v < count; v += 1) {
-      const outs = [], ins = [];
-      for (let k = adj.outStart[v]; k < adj.outStart[v + 1]; k += 1) outs.push(adj.outEdges[k]);
-      for (let k = adj.inStart[v]; k < adj.inStart[v + 1]; k += 1) ins.push(adj.inEdges[k]);
+    {
+      const outs = Array.from({length: count}, () => []), ins = Array.from({length: count}, () => []);
+      for (let e = 0; e < edgeCount; e += 1) { if (from[e] === to[e]) continue; outs[from[e]].push(e); ins[to[e]].push(e); }
       // A self call has its own loop on the card's right edge.
-      spread(v, outs.filter(e => to[e] !== v), e => back[e] ? Infinity : nextX(e), outPort);
-      spread(v, ins.filter(e => from[e] !== v), e => back[e] ? Infinity : previousX(e), inPort);
+      for (let v = 0; v < count; v += 1) {
+        spread(v, outs[v], e => back[e] && bandOf[to[e]] === bandOf[v] ? Infinity : nextX(e), outPort);
+        spread(v, ins[v], e => back[e] && bandOf[from[e]] === bandOf[v] ? Infinity : previousX(e), inPort);
+      }
     }
 
-    // Routes.
-    const points = [], types = [], routeStart = new Uint32Array(edgeCount + 1);
-    const push = (px, py, type) => { points.push(px, py); types.push(type); };
-    const laneSlot = new Uint32Array(lanes);
+    // Routes inside each band, in band-local units.
+    const routes = new Array(edgeCount).fill(null), bandSlot = new Uint32Array(bands);
     for (let e = 0; e < edgeCount; e += 1) {
-      routeStart[e] = types.length;
-      const a = from[e], b = to[e], sx = outPort[e], sy = y[a] + nodeH[a];
+      const a = from[e], b = to[e], band = bandOf[a];
+      if (band !== bandOf[b]) continue;
+      const points = [], types = [], push = (px, py, type) => { points.push(px, py); types.push(type); };
+      const sx = outPort[e], sy = ly[a] + nodeH[a], rows = layerTop[band], heights = layerH[band];
       if (a === b) {
         // Recursion: out of the right edge low, up through the gap beside
         // the card and back in at its right edge under the header.
-        const right = x[a] + nodeW[a], loop = Math.min(m.gapX * 0.66, 20), low = y[a] + Math.max(30, nodeH[a] - 14);
-        push(right, low, MOVE); push(right + loop, low, CORNER); push(right + loop, y[a] + 15, CORNER); push(right, y[a] + 15, LINE);
+        const right = lx[a] + nodeW[a], loop = Math.min(m.gapX * 0.66, 20), low = ly[a] + Math.max(30, nodeH[a] - 14);
+        push(right, low, MOVE); push(right + loop, low, CORNER); push(right + loop, ly[a] + 15, CORNER); push(right, ly[a] + 15, LINE);
       } else if (back[e]) {
         // Down out of the source, along the gap under its layer, up the
-        // lane's gutter, along the gap over the target's layer and down in.
-        const lane = itemLane[a], slot = laneSlot[lane]++ % m.gutterSlots;
-        const gx = laneBoxes[lane].gutter + m.gutter / 2 + slot * m.gutterStep;
-        const below = layerTop[layer[a]] + layerH[layer[a]] + m.gapY * 0.3 + slot * 3, above = y[b] - m.gapY * 0.3 - slot * 3;
-        push(sx, sy, MOVE); push(sx, below, CORNER); push(gx, below, CORNER); push(gx, above, CORNER); push(inPort[e], above, CORNER); push(inPort[e], y[b], LINE);
+        // band's gutter, along the gap over the target's layer and down in.
+        const slot = bandSlot[band]++ % m.gutterSlots;
+        const gx = bandW[band] + m.lanePadX / 2 + m.gutter / 2 + slot * m.gutterStep;
+        const below = rows[layer[a]] + heights[layer[a]] + m.gapY * 0.3 + slot * 3, above = ly[b] - m.gapY * 0.3 - slot * 3;
+        push(sx, sy, MOVE); push(sx, below, CORNER); push(gx, below, CORNER); push(gx, above, CORNER); push(inPort[e], above, CORNER); push(inPort[e], ly[b], LINE);
       } else {
+        // Straight down to the bottom of the caller's row first, so the bend
+        // into the next row is in the gap, clear of a taller card beside it.
+        const rowBottom = rows[layer[a]] + heights[layer[a]];
         push(sx, sy, MOVE);
+        if (rowBottom > sy + 0.5) push(sx, rowBottom, LINE);
         for (let d = 0; d < dummyCount[e]; d += 1) {
-          const id = firstDummy[e] + d, l = itemLayer[id], dx = center(id);
-          push(dx, layerTop[l], CURVE); push(dx, layerTop[l] + layerH[l], LINE);
+          const id = firstDummy[e] + d, l = itemLayer[id], dx = lc(id);
+          push(dx, rows[l], CURVE); push(dx, rows[l] + heights[l], LINE);
         }
-        push(inPort[e], y[b], CURVE);
+        push(inPort[e], ly[b], CURVE);
       }
+      routes[e] = {points, types};
     }
-    routeStart[edgeCount] = types.length;
-
-    let totalW = m.margin * 2 + m.nodeW, totalH = layerTop[0] + m.margin;
-    for (const box of laneBoxes) { totalW = Math.max(totalW, box.x + box.w + m.margin); totalH = Math.max(totalH, box.y + box.h + m.margin); }
-    return {x, y, w: nodeW, h: nodeH, layer, back, lanes: laneBoxes, width: totalW, height: totalH, top: m.margin,
-      routes: Float32Array.from(points), routeTypes: Uint8Array.from(types), routeStart, waypoints: items - count};
+    // A back edge into a first-row card runs over it through the band's top
+    // pad, which the band already has.
+    const contentBands = laneKeys.map((key, band) => {
+      const rowsTop = layerTop[band], last = cells[band].length - 1;
+      return {key, w: bandW[band] + gutterOf[band], h: last >= 0 ? rowsTop[last] + layerH[band][last] : 0, cards: bandW[band]};
+    });
+    const content = {bands: contentBands, bandOf, lx, ly, routes, outPort: crossPorts(outPort, crossEdges, edgeCount), inPort: crossPorts(inPort, crossEdges, edgeCount), offsets: Float64Array.from(bandX)};
+    const stacked = stackBands(graph, nodeW, nodeH, content, m);
+    return {...stacked, w: nodeW, h: nodeH, layer, back, top: m.margin, waypoints: items - count, content};
+  }
+  /** Ports of calls between bands only; the rest are in their routes. */
+  function crossPorts(ports, crossEdges, edgeCount) {
+    const out = new Float64Array(edgeCount).fill(NaN);
+    for (const e of crossEdges) out[e] = ports[e];
+    return out;
   }
 
   /* Triskel (graph-layout-v1, POST /api/graph-layout) lays out each realm
    * that fits its limits, the way a CFG tool lays out a function. A realm
    * Triskel would draw much wider than the layered layout above (a wide fan
    * of calls, which Triskel does not stack) keeps the layered one; so does
-   * every realm when the route is missing or fails. Realms keep the layered
-   * layout's order and top, so the page still sits above the frames it calls
-   * into, and calls between realms run down the gap beside their cluster. */
+   * every realm when the route is missing or fails. Bands keep the layered
+   * layout's order, so the page still sits above the frames it calls into,
+   * and calls between bands are routed the same way for either engine. */
   const TRISKEL = {maxNodes: 2000, maxEdges: 8000, maxTotal: 8000, widen: 1.6, freeWidth: 1400, freeHeight: 1600};
 
   /** Waypoints as a route: corners rounded, repeats and straight-through
@@ -448,17 +643,16 @@ const flowGraphLayout = (() => {
     return {sent, graphs, members, inner, localIndex};
   }
 
-  /** Places each realm from Triskel's answer or the layered layout, packs
-   * the realms left to right and routes calls between realms. */
+  /** Places each band from Triskel's answer or the layered layout, stacks
+   * the bands top to bottom and routes the calls between them. */
   function assemble(graph, local, plan, answer, metrics) {
     const m = {...METRICS, ...metrics};
-    const {count, from, to} = graph, edgeCount = from.length, lanes = local.lanes.length;
-    const x = new Float32Array(count), y = new Float32Array(count);
+    const {from, to} = graph, edgeCount = from.length, lanes = local.lanes.length;
     const engines = local.lanes.map(() => ({engine: 'layered', reason: 'one card'}));
-    const content = local.lanes.map(() => null);
+    const results = local.lanes.map(() => null);
     plan.sent.forEach((lane, position) => {
       const result = answer?.graphs?.[position], members = plan.members[lane];
-      const box = local.lanes[lane], layeredW = box.w - m.lanePadX * 2;
+      const band = local.content.bands[lane], layeredW = band.w, layeredH = band.h;
       if (!result) { engines[lane] = {engine: 'layered', reason: 'Triskel gave no answer'}; return; }
       if (result.status !== 'laid_out') { engines[lane] = {engine: 'layered', reason: result.status === 'too_large' ? 'over Triskel’s size limit' : `Triskel ${result.status}${result.reason ? `: ${result.reason}` : ''}`}; return; }
       const ok = Array.isArray(result.nodes) && result.nodes.length === members.length && Array.isArray(result.edges) && result.edges.length === plan.inner[lane].length
@@ -467,114 +661,52 @@ const flowGraphLayout = (() => {
       if (result.width > Math.max(layeredW * TRISKEL.widen, TRISKEL.freeWidth)) { engines[lane] = {engine: 'layered', reason: `Triskel would draw it ${(result.width / Math.max(1, layeredW)).toFixed(1)}× wider`}; return; }
       // Triskel stacks loop bodies, so a realm full of back edges can come
       // out far taller than it is wide; that, too, keeps the layered layout.
-      const layeredH = box.h - m.lanePadTop - m.lanePadBottom;
-      if (result.height > Math.max(layeredH * TRISKEL.widen, layeredH + TRISKEL.freeHeight)) { engines[lane] = {engine: 'layered', reason: `Triskel would draw it ${(result.height / Math.max(1, layeredH)).toFixed(1)}\u00d7 taller`}; return; }
+      if (result.height > Math.max(layeredH * TRISKEL.widen, layeredH + TRISKEL.freeHeight)) { engines[lane] = {engine: 'layered', reason: `Triskel would draw it ${(result.height / Math.max(1, layeredH)).toFixed(1)}× taller`}; return; }
       engines[lane] = {engine: 'triskel'};
-      content[lane] = result;
+      results[lane] = result;
     });
     plan.members.forEach((members, lane) => { if (members.length >= 2 && !plan.sent.includes(lane) && engines[lane].reason === 'one card') engines[lane] = {engine: 'layered', reason: 'over Triskel’s size limit'}; });
-    // Each realm's own content box, at the layered layout's top.
-    const routes = new Array(edgeCount).fill(null), types = new Array(edgeCount).fill(null);
-    const boxes = local.lanes.map((lane, index) => {
-      const members = plan.members[index];
-      let top = Infinity; for (const v of members) top = Math.min(top, local.y[v]);
-      if (top === Infinity) top = lane.y + m.lanePadTop;
-      if (content[index]) {
-        const result = content[index];
-        let minX = 0, maxX = result.width;
-        for (const list of result.edges) for (let i = 0; i < list.length; i += 2) { minX = Math.min(minX, list[i]); maxX = Math.max(maxX, list[i]); }
-        return {top, width: maxX - minX, height: result.height, shift: -minX, triskel: result};
-      }
-      const left = lane.x + m.lanePadX;
-      // The layered realm keeps its width, back-edge gutter included.
-      return {top, width: lane.w - m.lanePadX * 2, left};
-    });
-    // Every cluster starts on one line, so realm labels share a baseline over
-    // the first row and no edge runs through one.
-    const commonTop = Math.min(...boxes.map(box => box.top));
-    let cursor = m.margin;
-    const laneBoxes = local.lanes.map((lane, index) => {
-      const box = boxes[index], members = plan.members[index], originX = cursor + m.lanePadX;
-      let bottom = -Infinity;
-      if (box.triskel) {
-        members.forEach((v, i) => { x[v] = originX + box.shift + box.triskel.nodes[i][0]; y[v] = box.top + box.triskel.nodes[i][1]; bottom = Math.max(bottom, y[v] + local.h[v]); });
-        plan.inner[index].forEach((e, i) => {
-          if (from[e] === to[e]) {
-            // Recursion: a tight loop on the card's right edge, not
-            // Triskel's loop around the whole row.
-            const v = from[e], right = x[v] + local.w[v], low = y[v] + Math.max(30, local.h[v] - 14);
-            routes[e] = [right, low, right + 16, low, right + 16, y[v] + 15, right, y[v] + 15]; types[e] = [MOVE, CORNER, CORNER, LINE];
-            return;
-          }
-          const points = waypointRoute(box.triskel.edges[i], originX + box.shift, box.top), last = points.length / 2 - 1;
-          routes[e] = points; types[e] = Array.from({length: last + 1}, (_, k) => k === 0 ? MOVE : k === last ? LINE : CORNER);
-        });
-      } else {
-        const dx = originX - box.left;
-        for (const v of members) { x[v] = local.x[v] + dx; y[v] = local.y[v]; bottom = Math.max(bottom, y[v] + local.h[v]); }
-        plan.inner[index].forEach(e => {
-          const points = [], kinds = [];
-          for (let i = local.routeStart[e]; i < local.routeStart[e + 1]; i += 1) { points.push(local.routes[2 * i] + dx, local.routes[2 * i + 1]); kinds.push(local.routeTypes[i]); }
-          routes[e] = points; types[e] = kinds;
-        });
-      }
-      const width = box.width, w = width + m.lanePadX * 2;
-      const result = {key: lane.key, x: cursor, y: commonTop - m.lanePadTop, w, h: (bottom === -Infinity ? 0 : bottom - commonTop) + m.lanePadTop + m.lanePadBottom, gutter: cursor + w - m.lanePadX / 2, engine: engines[index].engine, reason: engines[index].reason};
-      // Every route of this realm stays inside its cluster.
-      for (const e of plan.inner[index]) for (let i = 0; i < routes[e].length; i += 2) { result.h = Math.max(result.h, routes[e][i + 1] - result.y + m.lanePadBottom); }
-      cursor += w + m.laneGap;
-      return result;
-    });
-    // Calls between realms: down out of the caller, along the gap under its
-    // row, through the gap beside the realm toward the callee, along the gap
-    // above the callee's row and down in.
-    const laneIndex = new Map(local.lanes.map((lane, index) => [lane.key, index]));
-    const byLane = plan.members;
-    const rowClear = (lane, yValue, below) => {
-      // The nearest y past every card of the realm that spans yValue.
-      let result = yValue;
-      for (let guard = 0; guard < 8; guard += 1) {
-        let moved = false;
-        for (const v of byLane[lane]) if (result > y[v] - 6 && result < y[v] + local.h[v] + 6) { result = below ? y[v] + local.h[v] + 16 : y[v] - 16; moved = true; }
-        if (!moved) break;
-      }
-      return result;
-    };
-    const outSlot = new Uint32Array(count), inSlot = new Uint32Array(count), gapSlot = new Uint32Array(lanes + 1);
-    for (let e = 0; e < edgeCount; e += 1) {
-      if (routes[e]) continue;
-      const a = from[e], b = to[e], la = laneIndex.get(graph.lane[a]), lb = laneIndex.get(graph.lane[b]);
-      const sx = x[a] + local.w[a] / 2 + (outSlot[a]++ % 5 - 2) * 7, sy = y[a] + local.h[a];
-      const tx = x[b] + local.w[b] / 2 + (inSlot[b]++ % 5 - 2) * 7 + 10, ty = y[b];
-      const right = lb >= la, gap = right ? la + 1 : la, slot = gapSlot[gap]++ % 6;
-      const gx = right ? laneBoxes[la].x + laneBoxes[la].w + m.laneGap / 2 - 15 + slot * 6 : laneBoxes[la].x - m.laneGap / 2 + 15 - slot * 6;
-      const ya = rowClear(la, sy + 16 + slot * 3, true);
-      // Into the callee's row from just above it; a callee in the realm's
-      // first row is entered from above the cluster, past its label.
-      let yb = rowClear(lb, ty - 16 - slot * 3, false);
-      if (yb < laneBoxes[lb].y + m.lanePadTop - 4) yb = laneBoxes[lb].y - 12 - slot * 3;
-      if (Math.abs(lb - la) === 1) {
-        routes[e] = [sx, sy, sx, ya, gx, ya, gx, yb, tx, yb, tx, ty];
-        types[e] = [MOVE, CORNER, CORNER, CORNER, CORNER, LINE];
-      } else {
-        // Realms in between are never crossed: up the gap beside the
-        // caller's cluster, over the top of every cluster, and down the gap
-        // beside the callee's.
-        const targetGap = right ? lb : lb + 1, targetSlot = gapSlot[targetGap]++ % 6;
-        const gx2 = right ? laneBoxes[lb].x - m.laneGap / 2 + 15 - targetSlot * 6 : laneBoxes[lb].x + laneBoxes[lb].w + m.laneGap / 2 - 15 + targetSlot * 6;
-        const over = Math.min(...laneBoxes.map(box => box.y)) - 14 - slot * 5;
-        routes[e] = [sx, sy, sx, ya, gx, ya, gx, over, gx2, over, gx2, yb, tx, yb, tx, ty];
-        types[e] = [MOVE, CORNER, CORNER, CORNER, CORNER, CORNER, CORNER, LINE];
+    // A Triskel band replaces its content: card positions, routes inside it
+    // and its size. Calls out of or into it get fresh ports.
+    const base = local.content, lx = Float64Array.from(base.lx), ly = Float64Array.from(base.ly), routes = base.routes.slice();
+    const outPort = Float64Array.from(base.outPort), inPort = Float64Array.from(base.inPort);
+    const bands = base.bands.map((band, index) => ({...band, engine: engines[index].engine, reason: engines[index].reason}));
+    for (let lane = 0; lane < lanes; lane += 1) {
+      const result = results[lane];
+      if (!result) continue;
+      const members = plan.members[lane];
+      let minX = 0;
+      for (const list of result.edges) for (let i = 0; i < list.length; i += 2) minX = Math.min(minX, list[i]);
+      for (const point of result.nodes) minX = Math.min(minX, point[0]);
+      // Everything of the band from x = 0, its routes included.
+      const shift = -minX;
+      let right = result.width + shift, cards = 0, bottom = result.height;
+      members.forEach((v, i) => { lx[v] = shift + result.nodes[i][0]; ly[v] = result.nodes[i][1]; cards = Math.max(cards, lx[v] + local.w[v]); bottom = Math.max(bottom, ly[v] + local.h[v]); });
+      plan.inner[lane].forEach((e, i) => {
+        if (from[e] === to[e]) {
+          // Recursion: a tight loop on the card's right edge, not
+          // Triskel's loop around the whole row.
+          const v = from[e], edge = lx[v] + local.w[v], low = ly[v] + Math.max(30, local.h[v] - 14);
+          routes[e] = {points: [edge, low, edge + 16, low, edge + 16, ly[v] + 15, edge, ly[v] + 15], types: [MOVE, CORNER, CORNER, LINE]};
+          right = Math.max(right, edge + 16);
+          return;
+        }
+        const points = waypointRoute(result.edges[i], shift, 0), last = points.length / 2 - 1;
+        for (let k = 0; k < points.length; k += 2) { right = Math.max(right, points[k]); bottom = Math.max(bottom, points[k + 1]); }
+        routes[e] = {points, types: Array.from({length: last + 1}, (_, k) => k === 0 ? MOVE : k === last ? LINE : CORNER)};
+      });
+      bands[lane] = {...bands[lane], w: Math.max(right, cards), h: bottom, cards};
+      for (let e = 0; e < edgeCount; e += 1) {
+        if (base.bandOf[from[e]] === base.bandOf[to[e]]) continue;
+        if (base.bandOf[from[e]] === lane) outPort[e] = NaN;
+        if (base.bandOf[to[e]] === lane) inPort[e] = NaN;
       }
     }
-    const points = [], kinds = [], routeStart = new Uint32Array(edgeCount + 1);
-    for (let e = 0; e < edgeCount; e += 1) { routeStart[e] = kinds.length; points.push(...routes[e]); kinds.push(...types[e]); }
-    routeStart[edgeCount] = kinds.length;
-    let totalW = m.margin * 2 + m.nodeW, totalH = 0;
-    for (const box of laneBoxes) { totalW = Math.max(totalW, box.x + box.w + m.margin); totalH = Math.max(totalH, box.y + box.h + m.margin); }
-    for (let i = 1; i < points.length; i += 2) totalH = Math.max(totalH, points[i] + m.margin);
+    const content = {bands, bandOf: base.bandOf, lx, ly, routes, outPort, inPort, offsets: results.some(Boolean) ? undefined : base.offsets};
+    const stacked = stackBands(graph, local.w, local.h, content, m);
     const laid = engines.filter(item => item.engine === 'triskel').length;
-    return {...local, x, y, lanes: laneBoxes, width: totalW, height: totalH, routes: Float32Array.from(points), routeTypes: Uint8Array.from(kinds), routeStart,
+    const {content: unused, ...rest} = local;
+    return {...rest, ...stacked,
       engine: {name: laid ? 'triskel' : 'layered', revision: answer?.engine?.revision ?? null, triskel: laid, realms: engines.map((item, index) => ({key: local.lanes[index].key, ...item}))}};
   }
 
@@ -604,8 +736,8 @@ const flowGraphLayout = (() => {
     } finally { clearTimeout(timer); }
   };
 
-  /** The layered layout alone, with calls between realms routed the same
-   * way as when Triskel takes part. */
+  /** The layered layout alone, with the same engine report as when Triskel
+   * takes part. */
   function run(message) {
     const graph = message.graph, metrics = message.metrics ?? METRICS, local = layoutGraph(graph, metrics);
     const layout = assemble(graph, local, {...triskelRequest(graph, local), sent: []}, null, metrics);
@@ -618,7 +750,7 @@ const flowGraphLayout = (() => {
   }
   const transfer = layout => [layout.x.buffer, layout.y.buffer, layout.w.buffer, layout.h.buffer, layout.layer.buffer, layout.back.buffer,
     layout.routes.buffer, layout.routeTypes.buffer, layout.routeStart.buffer];
-  return {METRICS, ROUTE: {MOVE, CURVE, LINE, CORNER}, TRISKEL, layoutGraph, layoutWithTriskel, assemble, triskelRequest, waypointRoute, fetchTriskel, run, runAsync, transfer, adjacency};
+  return {METRICS, ROUTE: {MOVE, CURVE, LINE, CORNER}, TRISKEL, layoutGraph, layoutWithTriskel, assemble, triskelRequest, waypointRoute, fetchTriskel, run, runAsync, transfer, adjacency, alignBands};
 })();
 
 if (typeof module === 'object' && module?.exports) module.exports = flowGraphLayout;

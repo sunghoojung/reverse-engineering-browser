@@ -1,0 +1,287 @@
+/* Flow workspace: four linked panes on one screen. Colours alias app.css
+ * tokens (Rosé Pine Moon, Dawn in the light theme) and are chosen by kind:
+ * Graph gold, CFG iris, Lineage rose, Timeline pine. A "-text" token is the
+ * same hue at a contrast that reads as text on its panel in both themes. */
+:root {
+  --fw-gold: var(--syntax-string);
+  --fw-iris: var(--syntax-parameter);
+  --fw-rose: var(--syntax-number);
+  --fw-love: var(--syntax-support-function);
+  --fw-foam: var(--syntax-type);
+  --fw-pine: var(--syntax-keyword);
+  --fw-gold-text: var(--syntax-string);
+  --fw-iris-text: var(--syntax-parameter);
+  --fw-rose-text: var(--syntax-number);
+  --fw-love-text: var(--syntax-support-function);
+  --fw-foam-text: var(--syntax-type);
+  /* Plain pine fails 4.5:1 as text on the dark panel; this is pine lifted. */
+  --fw-pine-text: #7cb7d1;
+}
+:root[data-theme="light"] {
+  --fw-gold-text: var(--amber);
+  --fw-iris-text: var(--code-text);
+  --fw-rose-text: var(--syntax-support-function);
+  --fw-love-text: var(--syntax-support-function);
+  --fw-foam-text: var(--cyan);
+  --fw-pine-text: var(--syntax-keyword);
+}
+[data-pane="graph"], .flow-tab[data-pane="graph"] { --pane: var(--fw-gold); --pane-text: var(--fw-gold-text); }
+[data-pane="cfg"], .flow-tab[data-pane="cfg"], [data-flow-head="cfg"] { --pane: var(--fw-iris); --pane-text: var(--fw-iris-text); }
+[data-pane="lineage"], .flow-tab[data-pane="lineage"] { --pane: var(--fw-rose); --pane-text: var(--fw-rose-text); }
+[data-pane="timeline"], .flow-tab[data-pane="timeline"] { --pane: var(--fw-pine); --pane-text: var(--fw-pine-text); }
+
+/* The screen is the container the layout queries; widths are its own, so a
+ * docked Console or agent narrows the workspace the same way a window does. */
+#screen-backtrace { container: flow-screen / inline-size; }
+#screen-backtrace :focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#screen-backtrace kbd { font: 500 10px/14px var(--sans); color: var(--faint); }
+
+/* Head: history, title, the selection trail, then the pane toggles. */
+.flow-head { gap: 10px; min-height: 48px; padding: 8px 16px; }
+.flow-head h1 { flex: none; margin: 0 4px 0 2px; font-size: 15px; letter-spacing: -0.01em; }
+.flow-history { flex: none; display: flex; gap: 4px; }
+.flow-icon-button, .flow-focus-button { flex: none; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--muted); }
+.flow-icon-button svg, .flow-focus-button svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.flow-icon-button:hover:not(:disabled), .flow-focus-button:hover { border-color: var(--faint); color: var(--text); }
+.flow-icon-button:disabled { opacity: .45; cursor: default; }
+.flow-focus-button { width: 26px; height: 26px; }
+.flow-trail { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+.flow-trail::-webkit-scrollbar { display: none; }
+.flow-trail-empty { color: var(--faint); font-size: 12px; white-space: nowrap; }
+.flow-crumb { flex: 0 0 auto; max-width: 16em; height: 24px; padding: 0 8px; overflow: hidden; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--crumb, var(--text)); font: 12px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.flow-crumb:hover { background: var(--panel-2); }
+.flow-crumb[aria-current="true"] { border-color: color-mix(in srgb, var(--crumb) 50%, transparent); background: color-mix(in srgb, var(--crumb) 14%, transparent); color: var(--text); }
+.flow-crumb-request { --crumb: var(--fw-rose-text); }
+.flow-crumb-call { --crumb: var(--fw-pine-text); }
+.flow-crumb-fn, .flow-crumb-site, .flow-crumb-sample { --crumb: var(--fw-iris-text); }
+.flow-crumb-separator { flex: none; color: var(--faint); font-size: 12px; }
+.flow-head-actions { flex: none; display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.flow-pane-toggles { display: flex; align-items: center; gap: 6px; }
+.flow-toggles-label { color: var(--muted); font-size: 12px; }
+.flow-toggle { height: 28px; display: inline-flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--muted); font: 500 12px var(--sans); white-space: nowrap; }
+.flow-toggle:hover { color: var(--text); }
+.flow-toggle[aria-pressed="true"] { border-color: color-mix(in srgb, var(--pane, var(--accent)) 55%, transparent); background: color-mix(in srgb, var(--pane, var(--accent)) 14%, transparent); color: var(--text); }
+#flow-toggle-cfg { --pane: var(--fw-iris); } #flow-toggle-lineage { --pane: var(--fw-rose); } #flow-toggle-timeline { --pane: var(--fw-pine); }
+
+/* Toolbar: the request picker and its trace actions, one quiet row. */
+#screen-backtrace .flow-toolbar { flex-wrap: nowrap; gap: 8px; padding: 6px 16px; }
+#screen-backtrace .flow-toolbar select { flex: 0 1 420px; min-width: 120px; min-height: 30px; height: 30px; font: 12px var(--mono); }
+#screen-backtrace .flow-toolbar :is(button) { flex: none; min-height: 30px; white-space: nowrap; }
+.flow-toolbar-spacer { flex: 1 1 auto; }
+
+/* Tabs: the focused pane's switch in focus mode, and the pane switch when narrow. */
+.flow-tabs { flex: none; display: flex; align-items: stretch; gap: 2px; min-height: 38px; padding: 0 12px; overflow-x: auto; border-bottom: 1px solid var(--line); background: var(--chrome); scrollbar-width: none; }
+.flow-tab { flex: none; display: inline-flex; align-items: center; gap: 8px; padding: 0 14px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font: 500 12px var(--sans); white-space: nowrap; }
+.flow-tab:hover { color: var(--text); }
+.flow-tab[aria-selected="true"] { border-bottom-color: var(--pane); background: color-mix(in srgb, var(--pane) 10%, transparent); color: var(--text); }
+.flow-tab-meta { max-width: 10em; overflow: hidden; color: var(--muted); font: 11px var(--mono); text-overflow: ellipsis; }
+.flow-tab-meta:empty { display: none; }
+.flow-tab kbd, .flow-toggle kbd, .flow-related-open kbd, .flow-keys kbd { min-width: 16px; padding: 0 4px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; background: var(--bg); color: var(--text); text-align: center; }
+.flow-tabs-hint { margin-left: auto; align-self: center; padding-left: 16px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+
+/* Body: the panes. Narrow (the default) shows one pane at a time. */
+.flow-body { --flow-layout: compact; position: relative; flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); grid-template-areas: "main"; background: var(--panel); }
+.flow-pane { grid-area: main; position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--panel); }
+.flow-pane[data-shown="false"], .flow-related[hidden] { display: none; }
+.flow-pane:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.flow-pane-head { flex: none; height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 12px; border-bottom: 1px solid var(--line); background: var(--chrome); white-space: nowrap; }
+.flow-pane-head h2 { flex: none; margin: 0; color: var(--text); font: 600 12px var(--sans); }
+.flow-pane-meta { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--muted); font: 11px var(--mono); text-overflow: ellipsis; }
+.flow-pane-mark { flex: none; width: 8px; height: 8px; border-radius: 2px; background: var(--pane); }
+.flow-pane[data-active] > .flow-pane-head, .flow-pane[data-active] [data-flow-head] { background: color-mix(in srgb, var(--pane) 9%, var(--chrome)); }
+.flow-pane[data-active] .flow-pane-mark { box-shadow: 0 0 0 3px color-mix(in srgb, var(--pane) 25%, transparent); }
+.flow-head-button { flex: none; height: 24px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--muted); font: 500 11px var(--sans); }
+.flow-head-button:hover { color: var(--text); }
+.flow-divider { display: none; position: absolute; z-index: 6; touch-action: none; }
+/* A divider owns a 5 px strip at the pane's leading edge and draws the pane
+ * border in its middle, so it never covers the pane's own controls. */
+.flow-divider[data-axis="x"] { left: 0; top: 0; bottom: 0; width: 5px; cursor: col-resize; background: linear-gradient(var(--line), var(--line)) center / 1px 100% no-repeat; }
+.flow-divider[data-axis="y"] { left: 0; right: 0; top: 0; height: 5px; cursor: row-resize; background: linear-gradient(var(--line), var(--line)) center / 100% 1px no-repeat; }
+.flow-divider:hover, .flow-divider:focus-visible, .flow-resizing .flow-divider:active { background: color-mix(in srgb, var(--accent) 55%, transparent); outline: none; }
+.flow-resizing { cursor: col-resize; user-select: none; }
+
+/* Laptop width: the CFG is a tab beside Lineage and the timeline is a strip
+ * that opens on demand. JS reads --flow-layout to know which layout applies. */
+@container flow-screen (min-width: 900px) {
+  .flow-body { --flow-layout: laptop; }
+  .flow-body[data-mode="split"] { grid-template-columns: minmax(360px, 1fr) var(--flow-side-track, 340px); grid-template-rows: 33px minmax(0, 1fr) var(--flow-dock-track, 33px); grid-template-areas: none; }
+  .flow-body[data-mode="split"] > [data-pane="graph"] { grid-row: 1 / 3; grid-column: 1; }
+  .flow-body[data-mode="split"] > [data-pane="lineage"] { grid-row: 1 / 3; grid-column: 2; border-left: 1px solid var(--line); }
+  .flow-body[data-mode="split"] > [data-pane="cfg"] { grid-row: 1 / 3; grid-column: 2; border-left: 1px solid var(--line); }
+  .flow-body[data-mode="split"][data-side-tab="cfg"] > [data-pane="lineage"] { grid-row: 1; }
+  .flow-body[data-mode="split"][data-side-tab="cfg"] > [data-pane="lineage"] > :not(.flow-pane-head, .flow-divider) { display: none; }
+  .flow-body[data-mode="split"][data-side-tab="cfg"] > [data-pane="cfg"] { grid-row: 2; }
+  .flow-body[data-mode="split"][data-side-tab="cfg"] #flow-cfg-head { display: none; }
+  .flow-body[data-mode="split"] > [data-pane="timeline"] { grid-row: 3; grid-column: 1 / -1; border-top: 1px solid var(--line); }
+  .flow-body[data-mode="split"][data-timeline-open="false"] > [data-pane="timeline"] > :not(.flow-pane-head) { display: none; }
+  .flow-body[data-mode="split"][data-timeline-open="false"] > [data-pane="timeline"] > .flow-pane-head { border-bottom: 0; }
+  .flow-body[data-mode="split"] .flow-divider { display: block; }
+  .flow-body[data-mode="split"] > :is([data-pane="cfg"], [data-pane="lineage"]) { border-left: 0; padding-left: 5px; }
+  .flow-body[data-mode="split"] > [data-pane="timeline"] { border-top: 0; padding-top: 5px; }
+  .flow-body[data-mode="split"][data-timeline-open="false"] > [data-pane="timeline"] { padding-top: 0; border-top: 1px solid var(--line); }
+  .flow-body[data-mode="split"][data-timeline-open="false"] [data-pane="timeline"] .flow-divider { display: none; }
+  .flow-body[data-mode="focus"] { grid-template-columns: minmax(0, 1fr) minmax(260px, 300px); grid-template-rows: minmax(0, 1fr); grid-template-areas: "main related"; }
+  .flow-body[data-mode="focus"] > .flow-related:not([hidden]) { grid-area: related; display: flex; }
+}
+/* Wide: every pane at once, the timeline as a dock under them. */
+@container flow-screen (min-width: 1240px) {
+  .flow-body { --flow-layout: wide; }
+  .flow-body[data-mode="split"] { grid-template-columns: minmax(320px, 1fr) var(--flow-cfg-track, 0px) var(--flow-lineage-track, 340px); grid-template-rows: minmax(0, 1fr) var(--flow-dock-track, 240px); }
+  .flow-body[data-mode="split"] > [data-pane="graph"] { grid-row: 1; grid-column: 1; }
+  .flow-body[data-mode="split"] > [data-pane="cfg"] { grid-row: 1; grid-column: 2; }
+  .flow-body[data-mode="split"] > [data-pane="lineage"] { grid-row: 1; grid-column: 3; }
+  .flow-body[data-mode="split"] > [data-pane="timeline"] { grid-row: 2; grid-column: 1 / -1; }
+  .flow-body[data-mode="focus"] { grid-template-columns: minmax(0, 1fr) 320px; }
+}
+/* Narrow: Evidence and View traffic stay in the sidebar and Back. */
+@container flow-screen (max-width: 899px) {
+  .flow-toolbar-extra { display: none; }
+  .flow-head { padding: 6px 10px; gap: 8px; }
+  #screen-backtrace .flow-toolbar { padding: 4px 10px; }
+  .flow-tabs-hint { display: none; }
+  .flow-tab { padding: 0 10px; }
+  .flow-focus-button { display: none; }
+  #screen-backtrace .flow-toolbar > label { display: none; }
+}
+
+/* Graph pane: the flow graph fills it. */
+#flow-pane-graph > #flow-graph-host { flex: 1 1 auto; min-height: 0; }
+
+/* CFG pane: the Sources block graph view, or how to fill it. */
+/* The host is the view's own root (.block-graph), so only its size is set here. */
+.flow-cfg-host { flex: 1 1 auto; min-height: 0; }
+.flow-cfg-host .block-graph-head { min-height: 32px; padding-left: 12px; background: var(--chrome); }
+.flow-cfg-host .block-graph-head .flow-pane-mark { margin-right: 2px; }
+#flow-cfg-head[data-has-view="true"] { display: none; }
+.flow-empty { margin: auto; max-width: 380px; padding: 24px; text-align: center; }
+.flow-empty h3 { margin: 0 0 8px; color: var(--text); font: 600 13px var(--sans); }
+.flow-empty p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.flow-cfg-samples { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px; padding: 6px 8px 6px 12px; border: 1px solid color-mix(in srgb, var(--fw-iris) 45%, var(--line)); border-radius: 8px; background: var(--panel-2); color: var(--muted); font: 11.5px var(--mono); }
+.flow-cfg-sample-text { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.flow-cfg-sample-text b { color: var(--text); font-weight: 500; }
+.flow-keys { display: inline-flex; align-items: center; gap: 4px; font-family: var(--sans); }
+.flow-chip { height: 24px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fw-iris-text); font: 11.5px var(--mono); }
+.flow-chip:hover { border-color: var(--fw-iris); }
+.flow-more { color: var(--faint); font-size: 11px; }
+#flow-pane-cfg { container: flow-cfg / inline-size; }
+@container flow-cfg (max-width: 520px) {
+  .flow-cfg-samples { flex-wrap: nowrap; gap: 6px; }
+  .flow-cfg-sample-text { flex-wrap: nowrap; overflow: hidden; white-space: nowrap; }
+  .flow-cfg-sample-text > span { overflow: hidden; text-overflow: ellipsis; }
+  .flow-cfg-samples .flow-keys { display: none; }
+  .flow-cfg-samples .secondary-button { min-height: 26px; padding: 0 8px; }
+}
+
+/* Lineage pane: inspector tabs, the request card, then the path back. */
+.flow-inspector-head { gap: 4px; padding-right: 6px; }
+.flow-inspector-tabs { flex: 1 1 auto; min-width: 0; display: flex; align-self: stretch; gap: 2px; }
+.flow-inspector-tab { padding: 0 10px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font: 500 12px var(--sans); }
+.flow-inspector-tab:hover { color: var(--text); }
+.flow-inspector-tab[aria-selected="true"] { border-bottom-color: var(--fw-rose); color: var(--text); }
+#flow-tab-lineage-cfg[aria-selected="true"] { border-bottom-color: var(--fw-iris); }
+.flow-request-card { flex: none; margin: 10px 12px 4px; border: 1px solid color-mix(in srgb, var(--fw-rose) 55%, var(--line)); border-radius: 8px; overflow: hidden; }
+.flow-request-card-head { display: flex; align-items: center; gap: 8px; padding: 7px 10px; background: color-mix(in srgb, var(--fw-rose) 14%, var(--panel)); }
+.flow-request-title { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--text); font: 600 12px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.flow-kind-tag { flex: none; padding: 0 6px; border-radius: 4px; background: color-mix(in srgb, var(--fw-rose) 18%, transparent); color: var(--fw-rose-text); font: 600 10px/16px var(--sans); letter-spacing: .07em; text-transform: uppercase; }
+.flow-request-meta { padding: 5px 10px 7px; color: var(--muted); font: 11.5px var(--mono); }
+#screen-backtrace .trace-notice { flex: none; margin: 4px 12px 0; border: 1px solid var(--line-soft); border-radius: 6px; }
+#screen-backtrace .trace-empty { flex: none; width: auto; max-width: none; margin: 10px 12px; padding: 20px 16px; }
+#screen-backtrace .trace-layout { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+#screen-backtrace .trace-list-pane { flex: 1 1 auto; }
+#screen-backtrace .trace-list-heading { flex-wrap: wrap; padding: 8px 12px; background: transparent; border-bottom: 1px solid var(--line-soft); font-size: 11px; }
+#screen-backtrace .trace-list-heading > :first-child { color: var(--muted); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+#screen-backtrace .trace-inspector { flex: 1 1 auto; min-height: 0; border-left: 0; padding: 12px; }
+#screen-backtrace .trace-row { grid-template-columns: 24px 18px minmax(0, 1fr) auto; gap: 8px; padding: 8px 12px; }
+#screen-backtrace .trace-row .step-index { color: var(--faint); font: 11px var(--mono); }
+#screen-backtrace .trace-row .step-title { font: 12px var(--mono); }
+/* Each link: line style says how sure, colour says what it is. */
+.trace-line, .flow-link-line { --link: var(--faint); display: block; width: 22px; height: 3px; border-radius: 2px; background: var(--link); }
+.trace-row[data-relation="parent_event"] .trace-line, .flow-link-line[data-kind="call"] { --link: var(--fw-foam); }
+.trace-row:is([data-relation="trace_target"], [data-relation="request_initiator"], [data-relation="request_lifecycle"]) .trace-line, .flow-link-line[data-kind="request"] { --link: var(--fw-rose); }
+.trace-row[data-relation="temporal_adjacency"] .trace-line, .flow-link-line[data-kind="cross"] { --link: var(--fw-love); }
+.trace-row:is([data-relation="issued_during_invocation"], [data-relation="invocation_settlement"]) .trace-line, .flow-link-line[data-kind="tracked"] { --link: var(--fw-pine); }
+.trace-row[data-relation="invocation_value_flow"] .trace-line, .flow-link-line[data-kind="data"] { --link: var(--fw-rose); }
+.trace-row[data-confidence="correlated"] .trace-line, .flow-link-line[data-line="correlated"] { background: repeating-linear-gradient(90deg, var(--link) 0 6px, transparent 6px 10px); }
+.trace-row[data-confidence="time_adjacent"] .trace-line, .flow-link-line[data-line="adjacent"] { background: repeating-linear-gradient(90deg, var(--link) 0 2px, transparent 2px 6px); }
+/* A gap is a cut: the chain stops and nothing is guessed. */
+.trace-row[data-confidence="gap"] .trace-line, .flow-link-line[data-line="cut"] { width: 14px; height: 12px; margin-left: 4px; border-radius: 0; background: linear-gradient(var(--faint), var(--faint)) center top / 14px 2px no-repeat, linear-gradient(var(--faint), var(--faint)) center / 2px 12px no-repeat; }
+.flow-lineage-selected { flex: none; max-height: 40%; overflow: auto; margin: 0 12px 10px; padding: 10px 0 0; border-top: 1px solid var(--line-soft); }
+.flow-lineage-selected h3 { margin: 0 0 4px; color: var(--muted); font: 600 11px var(--sans); letter-spacing: .04em; text-transform: uppercase; }
+.flow-lineage-selected-site { color: var(--fw-iris-text); font-family: var(--mono); letter-spacing: 0; text-transform: none; }
+.flow-lineage-selected-line { margin: 0 0 8px; color: var(--text); font: 11.5px var(--mono); }
+.flow-histogram { display: flex; align-items: flex-end; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.flow-histogram li { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 16px; color: var(--muted); font: 10.5px var(--mono); }
+.flow-histogram-bar { width: 14px; border-radius: 2px; background: color-mix(in srgb, var(--fw-iris) 45%, transparent); }
+.flow-histogram .flow-histogram-on { color: var(--text); }
+.flow-histogram .flow-histogram-on .flow-histogram-bar { background: var(--fw-iris); }
+
+/* Timeline pane: tracks of tracked calls, in record order. */
+#flow-pane-timeline .flow-pane-head { padding-top: 1px; }
+.flow-tl-process { flex: none; max-width: 200px; height: 24px; padding: 0 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); font: 11px var(--mono); }
+.flow-timeline { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.flow-tl-banner { flex: none; display: flex; align-items: center; gap: 10px; padding: 5px 12px; border-bottom: 1px solid var(--line-soft); background: var(--panel-2); color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+.flow-tl-banner-text { flex: 1 1 auto; min-width: 0; }
+.flow-tl-banner .secondary-button { flex: none; min-height: 24px; padding: 0 8px; }
+.flow-tl-state { margin: auto; max-width: 520px; padding: 16px 24px; text-align: center; }
+.flow-tl-state strong { display: block; margin-bottom: 6px; color: var(--text); font-size: 13px; }
+.flow-tl-state p { margin: 0 0 10px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.flow-tl-state[hidden] { display: none; }
+.flow-timeline[data-state="ready"] .flow-tl-state { display: none; }
+.flow-timeline:not([data-state="ready"]) :is(.flow-tl-scroll, .flow-tl-detail) { display: none; }
+.flow-tl-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.flow-tl-canvas { position: relative; min-width: 100%; }
+.flow-tl-axis { position: absolute; left: 0; top: 0; height: 26px; }
+.flow-tl-tick { position: absolute; top: 6px; transform: translateX(-50%); color: var(--faint); font: 10.5px var(--mono); white-space: nowrap; }
+.flow-tl-break { position: absolute; top: 4px; transform: translateX(-50%); color: var(--faint); font: 600 12px var(--mono); cursor: help; }
+.flow-tl-rule { position: absolute; top: 24px; bottom: 0; width: 1px; background: var(--line-soft); }
+.flow-tl-row { position: absolute; left: 0; border-top: 1px solid var(--line-soft); }
+.flow-tl-row[data-selected] { background: color-mix(in srgb, var(--fw-pine) 8%, transparent); }
+.flow-tl-label { position: sticky; left: 0; z-index: 3; width: 152px; height: 100%; display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 0 10px 0 12px; border-right: 1px solid var(--line-soft); background: var(--panel); }
+.flow-tl-row[data-selected] .flow-tl-label { background: color-mix(in srgb, var(--fw-pine) 8%, var(--panel)); }
+.flow-tl-call { align-self: flex-start; max-width: 100%; padding: 0 4px; margin-left: -4px; overflow: hidden; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--fw-pine-text); font: 600 12px/18px var(--mono); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.flow-tl-call[aria-pressed="true"] { border-color: color-mix(in srgb, var(--fw-pine) 60%, transparent); background: color-mix(in srgb, var(--fw-pine) 16%, transparent); }
+.flow-tl-lane-name { color: var(--text); font: 600 12px var(--sans); }
+.flow-tl-meta { overflow: hidden; color: var(--muted); font: 10.5px/14px var(--sans); text-overflow: ellipsis; white-space: nowrap; }
+.flow-tl-open { position: absolute; height: 0; border-top: 2px dotted color-mix(in srgb, var(--fw-pine-text) 75%, transparent); }
+.flow-tl-open-uncut { border-left: 0; }
+.flow-tl-run { position: absolute; height: 10px; border: 1px solid var(--fw-pine-text); border-radius: 3px; background: color-mix(in srgb, var(--fw-pine) 75%, transparent); }
+.flow-tl-start, .flow-tl-settle { position: absolute; width: 2px; height: 24px; margin-left: -1px; border-radius: 1px; background: var(--fw-pine-text); }
+.flow-tl-settle { width: 3px; background: var(--fw-foam); }
+.flow-tl-settle.flow-tl-rejected { background: var(--fw-love); }
+.flow-tl-request-mark { position: absolute; width: 2px; height: 10px; margin-left: -1px; background: var(--fw-rose); }
+.flow-tl-sample { position: absolute; z-index: 2; width: 18px; height: 40px; display: flex; flex-direction: column; align-items: center; justify-content: space-between; padding: 2px 0; border: 1px solid transparent; border-radius: 5px; background: transparent; }
+.flow-tl-tick-mark { width: 2px; height: 11px; border-radius: 1px; background: var(--fw-iris); }
+.flow-tl-call_indirect .flow-tl-tick-mark { width: 6px; height: 6px; margin-top: 2px; border-radius: 50%; }
+.flow-tl-value { color: var(--fw-iris-text); font: 10.5px/12px var(--mono); }
+.flow-tl-sample:hover { background: color-mix(in srgb, var(--fw-iris) 12%, transparent); }
+.flow-tl-sample[aria-pressed="true"] { border-color: var(--fw-iris); background: color-mix(in srgb, var(--fw-iris) 14%, transparent); box-shadow: 0 0 12px color-mix(in srgb, var(--fw-iris) 35%, transparent); }
+.flow-tl-more { position: absolute; color: var(--faint); font-size: 10.5px; white-space: nowrap; }
+.flow-tl-chip { position: absolute; z-index: 2; height: 28px; max-width: 220px; display: flex; align-items: center; gap: 6px; padding: 0 8px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--fw-rose) 50%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--fw-rose) 8%, var(--panel)); color: var(--text); font: 11px var(--mono); white-space: nowrap; }
+.flow-tl-chip-unknown { border-style: dashed; }
+.flow-tl-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.flow-tl-chip-meta { flex: none; color: var(--muted); }
+.flow-tl-chip[aria-pressed="true"] { border-color: var(--fw-rose); box-shadow: 0 0 12px color-mix(in srgb, var(--fw-rose) 30%, transparent); }
+.flow-tl-detail { flex: none; display: flex; align-items: center; gap: 10px; min-height: 34px; padding: 4px 8px 4px 12px; border-top: 1px solid var(--line-soft); color: var(--muted); font: 11.5px var(--mono); }
+.flow-tl-detail-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow-tl-detail .secondary-button { flex: none; min-height: 26px; padding: 0 10px; font-family: var(--sans); }
+
+/* Related rail (focus mode): what links to the selection; each entry jumps. */
+.flow-related { min-width: 0; min-height: 0; flex-direction: column; gap: 0; padding: 4px 16px 16px; overflow: auto; border-left: 1px solid var(--line); background: var(--panel); }
+.flow-related-title { margin: 10px 0 2px; color: var(--text); font: 600 12px var(--sans); }
+.flow-related-title b { color: var(--fw-iris-text); font: 600 12px var(--mono); }
+.flow-related-section { display: flex; flex-direction: column; gap: 6px; padding: 12px 0; border-bottom: 1px solid var(--line-soft); }
+.flow-related-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.flow-related-head h3 { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--muted); font: 600 10.5px var(--sans); letter-spacing: .07em; text-transform: uppercase; }
+.flow-related-open { height: 24px; display: inline-flex; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--pane) 45%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--pane) 10%, transparent); color: var(--text); font: 500 11.5px var(--sans); }
+.flow-related-item { width: 100%; min-height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid transparent; border-radius: 6px; background: var(--panel-2); color: var(--text); font: 11.5px var(--mono); text-align: left; }
+.flow-related-item:hover { border-color: var(--line); }
+.flow-related-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow-related-note { flex: none; max-width: 45%; overflow: hidden; color: var(--muted); font-family: var(--sans); text-overflow: ellipsis; white-space: nowrap; }
+.flow-related-strip { display: flex; flex-wrap: wrap; gap: 4px; }
+.flow-related-sample { min-width: 22px; height: 24px; padding: 0 4px; border: 1px solid transparent; border-radius: 4px; background: color-mix(in srgb, var(--fw-iris) 16%, transparent); color: var(--fw-iris-text); font: 11px var(--mono); }
+.flow-related-sample[aria-pressed="true"] { border-color: var(--text); background: color-mix(in srgb, var(--fw-iris) 35%, transparent); color: var(--text); }
+.flow-related-empty { margin: 12px 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+
+/* Feedback for a key that had nothing to act on; it clears itself. */
+.flow-status { position: absolute; z-index: 8; left: 50%; bottom: 16px; transform: translateX(-50%); max-width: min(560px, calc(100% - 32px)); padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-3); color: var(--text); font-size: 12px; box-shadow: 0 8px 24px var(--shadow); pointer-events: none; }
+.flow-status[hidden] { display: none; }

@@ -159,7 +159,7 @@ function createBlockGraphView(root, options = {}) {
     [BLOCK_GRAPH_KIND.call]: ['call', [1, 3]], [BLOCK_GRAPH_KIND.assumed]: ['assumed', [1, 3]], [BLOCK_GRAPH_KIND.sequence]: ['sequence', []]};
   const m = {charW: 6.6, rowH: 16, headerH: 22, padX: 10, padY: 7};
   const measure = () => { if (!ctx) return; ctx.font = `11px ${tokens.mono || 'monospace'}`; m.charW = ctx.measureText('0').width || 6.6; };
-  let needsFit = false;
+  let needsFit = false, fitted = false;
   const requestDraw = () => { if (active && !frame) frame = requestAnimationFrame(() => { frame = 0; draw(); }); };
   function resize() {
     if (!active) return;
@@ -169,6 +169,9 @@ function createBlockGraphView(root, options = {}) {
     const pw = Math.round(cssW * dpr), ph = Math.round(cssH * dpr);
     if (canvas.width !== pw || canvas.height !== ph) { canvas.width = pw; canvas.height = ph; canvas.style.width = `${cssW}px`; canvas.style.height = `${cssH}px`; }
     if (needsFit && layout && cssW > 1) { needsFit = false; start(); return; }
+    // A fitted view stays fitted when the pane resizes (Linear hidden or a
+    // divider dragged).
+    if (fitted && layout) { fit(); return; }
     requestDraw();
   }
   const visible = (x, y, w, h) => { const r = view.x + cssW / view.z, b = view.y + cssH / view.z; return x < r && x + w > view.x && y < b && y + h > view.y; };
@@ -239,13 +242,13 @@ function createBlockGraphView(root, options = {}) {
       const [token, dash] = edgeStyles[kind] ?? edgeStyles[BLOCK_GRAPH_KIND.branch];
       ctx.strokeStyle = tokens[token]; ctx.fillStyle = tokens[token]; ctx.setLineDash(lod === 2 ? dash : []);
     };
-    ctx.lineWidth = lod === 2 ? 1.1 : 1 / Math.max(view.z, 0.2);
+    ctx.lineWidth = lod === 2 ? 1.8 : 1 / Math.max(view.z, 0.2);
     for (const [kind, edges] of groups) {
       styleFor(kind);
       for (const edge of edges) { edgePath(edge, lod); if (lod >= 1 && graph.to[edge] >= 0) { arrow(edge); styleFor(kind); } }
     }
     if (selected.length) {
-      ctx.lineWidth = 2 / Math.max(view.z, 0.4);
+      ctx.lineWidth = 2.6 / Math.max(view.z, 0.4);
       for (const edge of selected) { styleFor(graph.kind[edge]); ctx.strokeStyle = tokens.accent; ctx.fillStyle = tokens.accent; edgePath(edge, lod); if (graph.to[edge] >= 0) arrow(edge); }
     }
     if (lod === 2) drawLabels(rv, bv, groups, selected);
@@ -282,7 +285,9 @@ function createBlockGraphView(root, options = {}) {
       else {
         ctx.fillText(blockLabel(block), x + m.padX, y + m.headerH / 2);
         const badge = String(graph.instructionCount[block]), bw = badge.length * m.charW + 8;
-        ctx.strokeStyle = tokens.line; ctx.lineWidth = 1; ctx.strokeRect(x + w - bw - 7.5, y + 4.5, bw, 13); ctx.fillStyle = tokens.faint; ctx.fillText(badge, x + w - bw - 3, y + m.headerH / 2);
+        // A filled count badge, as in the Flow graph.
+        ctx.fillStyle = tokens.head; ctx.fillRect(x + w - bw - 7.5, y + 4.5, bw, 13);
+        ctx.strokeStyle = tokens.line; ctx.lineWidth = 1; ctx.strokeRect(x + w - bw - 7.5, y + 4.5, bw, 13); ctx.fillStyle = tokens.muted; ctx.fillText(badge, x + w - bw - 3, y + m.headerH / 2);
       }
     }
     if (lod === 2) drawRows(block, x, y, w, h);
@@ -346,7 +351,13 @@ function createBlockGraphView(root, options = {}) {
     selectedBlock = -1; selectedRow = -1; view.z = 1; miniDirty = true;
     title.textContent = options.titleOf?.(graph) ?? graph.title;
     const parts = [`${graph.count.toLocaleString()} ${graph.count === 1 ? 'block' : 'blocks'}`, `${graph.instructions.toLocaleString()} ${graph.evidence === 'observed' ? 'retained steps' : 'instructions'}`];
+    // Which engine laid it out is said in the header, not only on hover.
+    const reason = layout.engine?.reason ?? '';
+    if (layout.engine?.name === 'triskel') parts.push('Triskel layout');
+    else if (/^Triskel would draw it/.test(reason)) parts.push(`region layout: ${reason.replace('Triskel would draw it ', 'Triskel ')}`);
+    else if (/size limit/.test(reason)) parts.push('region layout: over Triskel\u2019s limit');
     stats.textContent = stats_ ?? [options.statsPrefix?.(graph), ...parts].filter(Boolean).join(' · ');
+    stats.title = layout.engine?.name === 'triskel' ? `Laid out by Triskel ${layout.engine.revision?.slice(0, 7) ?? ''}, a CFG layout engine built on single-entry single-exit regions.`.replace(' ,', ',') : layout.engine?.reason ? `Region layout: ${layout.engine.reason}.` : '';
     evidence.textContent = graph.status === 'partial' ? `${graph.evidence} · partial` : graph.evidence;
     limits.textContent = graph.evidence === 'observed' ? graph.notice : BLOCK_GRAPH_LIMITS;
     limits.title = graph.evidence === 'observed' ? graph.notice : 'Declared static flow. Reachable here is not observed execution, and a complete drawing is not a proof.';
@@ -360,7 +371,7 @@ function createBlockGraphView(root, options = {}) {
    * A graph that fits at actual size is centered whole. Fit is one key away. */
   function start() {
     if (!layout || !cssW) return;
-    view.z = 1;
+    view.z = 1; fitted = false;
     if (layout.width <= cssW && layout.height <= cssH) { view.x = (layout.width - cssW) / 2; view.y = (layout.height - cssH) / 2; requestDraw(); return; }
     const block = selectedBlock >= 0 ? selectedBlock : Math.max(0, graph.roots?.[0] ?? 0);
     view.x = layout.x[block] + layout.w[block] / 2 - cssW / 2;
@@ -371,15 +382,17 @@ function createBlockGraphView(root, options = {}) {
     if (!layout || !cssW) return;
     const z = Math.min(1, Math.max(0.02, Math.min(cssW / layout.width, cssH / layout.height)));
     view.z = z; view.x = (layout.width - cssW / z) / 2; view.y = (layout.height - cssH / z) / 2;
+    fitted = true;
     requestDraw();
   }
   function zoomAt(factor, cx = cssW / 2, cy = cssH / 2) {
     const z = Math.min(2.5, Math.max(0.02, view.z * factor));
     const gx = view.x + cx / view.z, gy = view.y + cy / view.z;
-    view.z = z; view.x = gx - cx / z; view.y = gy - cy / z; requestDraw();
+    view.z = z; view.x = gx - cx / z; view.y = gy - cy / z; fitted = false; requestDraw();
   }
   function centerOn(block, zoom = null) {
     if (zoom) view.z = zoom;
+    fitted = false;
     view.x = layout.x[block] + layout.w[block] / 2 - cssW / view.z / 2;
     view.y = layout.y[block] + layout.h[block] / 2 - cssH / view.z / 2;
     requestDraw();
@@ -409,7 +422,7 @@ function createBlockGraphView(root, options = {}) {
   canvas.addEventListener('pointermove', event => {
     if (!pointer.down || !layout) return;
     if (Math.abs(event.clientX - pointer.x) + Math.abs(event.clientY - pointer.y) > 2) pointer.moved = true;
-    view.x -= (event.clientX - pointer.x) / view.z; view.y -= (event.clientY - pointer.y) / view.z; pointer.x = event.clientX; pointer.y = event.clientY; requestDraw();
+    view.x -= (event.clientX - pointer.x) / view.z; view.y -= (event.clientY - pointer.y) / view.z; pointer.x = event.clientX; pointer.y = event.clientY; fitted = false; requestDraw();
   });
   canvas.addEventListener('pointerup', event => {
     if (!pointer.down) return;
@@ -425,7 +438,7 @@ function createBlockGraphView(root, options = {}) {
     if (!layout) return;
     event.preventDefault();
     if (event.ctrlKey || event.metaKey) { const rect = canvas.getBoundingClientRect(); zoomAt(Math.exp(-event.deltaY * 0.01), event.clientX - rect.left, event.clientY - rect.top); }
-    else { view.x += event.deltaX / view.z; view.y += event.deltaY / view.z; requestDraw(); }
+    else { view.x += event.deltaX / view.z; view.y += event.deltaY / view.z; fitted = false; requestDraw(); }
   }, {passive: false});
   function move(dx, dy) {
     if (selectedBlock < 0) return select(0);
@@ -444,7 +457,7 @@ function createBlockGraphView(root, options = {}) {
     if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || !layout) return;
     const panStep = 96 / view.z;
     const key = event.key; let handled = true;
-    if (event.shiftKey && key.startsWith('Arrow')) { view.x += key === 'ArrowLeft' ? -panStep : key === 'ArrowRight' ? panStep : 0; view.y += key === 'ArrowUp' ? -panStep : key === 'ArrowDown' ? panStep : 0; requestDraw(); }
+    if (event.shiftKey && key.startsWith('Arrow')) { view.x += key === 'ArrowLeft' ? -panStep : key === 'ArrowRight' ? panStep : 0; view.y += key === 'ArrowUp' ? -panStep : key === 'ArrowDown' ? panStep : 0; fitted = false; requestDraw(); }
     else if (key === 'ArrowDown') move(0, 1); else if (key === 'ArrowUp') move(0, -1); else if (key === 'ArrowLeft') move(-1, 0); else if (key === 'ArrowRight') move(1, 0);
     else if (key === '+' || key === '=') zoomAt(1.25); else if (key === '-' || key === '_') zoomAt(0.8); else if (key === '0') fit();
     else if (key === 'Home') { select(0); centerOn(0); }
@@ -483,6 +496,9 @@ function createBlockGraphView(root, options = {}) {
     measurements: () => ({...m}), setResult, setState, fit, select, focus: () => canvas.focus(), hasGraph: () => Boolean(layout), getSelected: () => selectedBlock, tools, setTitle(text) { title.textContent = text; stats.textContent = ''; }, setStats(text) { stats.textContent = text; }
   };
 }
+
+/** Triskel lays out when this shell's backend serves the layout route. */
+const blockGraphEngine = () => /^https?:$/.test(globalThis.location?.protocol ?? '') ? 'triskel' : 'layered';
 
 /** Sends one job to a dedicated layout worker. A new job terminates the old. */
 function createBlockGraphRunner() {
@@ -653,7 +669,7 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
       const buffer = await fetchJSONBuffer(`/api/wasm/graph?artifact_id=${encodeURIComponent(source.artifact_id)}&function=${index}`, abort.signal);
       if (owner !== generation) return;
       view.setState('loading', 'Laying out the graph…');
-      const result = await runner.run({type: 'wasm', buffer, metrics: view.measurements()}, [buffer]);
+      const result = await runner.run({type: 'wasm', buffer, metrics: view.measurements(), engine: blockGraphEngine()}, [buffer]);
       if (owner !== generation) return;
       result.graph.functionIndex = index;
       remember(cacheKey, result); applyResult(result);
@@ -714,7 +730,7 @@ function createVmBlockGraph({host, button, getReport, getObservedPath, onReveal}
   async function lay(graph, owner) {
     view.setState('loading', 'Laying out the graph…');
     try {
-      const result = await runner.run({type: 'graph', graph, metrics: view.measurements()});
+      const result = await runner.run({type: 'graph', graph, metrics: view.measurements(), engine: blockGraphEngine()});
       if (owner === generation) view.setResult(result);
     } catch (error) { if (owner === generation && error.name !== 'AbortError') view.setState('error', error.message, true); }
   }

@@ -16,6 +16,13 @@
   --graph-edge-call: var(--accent);
   --graph-edge-assumed: var(--faint);
   --graph-edge-sequence: var(--text);
+  /* Mnemonics: control flow strongest, calls next, the rest plain text. */
+  --syntax-control: var(--syntax-support-function);
+  --syntax-function: var(--syntax-type);
+}
+:root[data-theme="light"] {
+  --syntax-control: var(--red);
+  --syntax-function: var(--cyan);
 }
 /* The graph and the linear view share one split; pane_layout.js drags it. */
 #screen-sources .source-view-split { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr); }

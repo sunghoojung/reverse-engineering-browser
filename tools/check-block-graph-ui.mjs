@@ -153,4 +153,54 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
   assert(/:is\(#source-window, #source-search-status\) \{ display: none/.test(css), 'text-window rows are hidden while Graph is active');
   assert(/BLOCK_GRAPH_ROW_ZOOM/.test(view) && /drawScreenLabels/.test(view), 'below row zoom, cards keep screen-size labels');
 }
+{
+  // Triskel through the backend route: its coordinates and waypoints replace
+  // the region layout, an unresolved edge keeps its stub, and the region
+  // layout stays when Triskel would draw much wider or the route fails.
+  const graph = fixture(4, [[0, 1, KIND.taken], [0, 2, KIND.not_taken], [1, 3], [2, 3], [3, -1, KIND.unresolved, 'unknown target']]);
+  const starts = layoutModule.rowStarts(graph.rows), sizes = layoutModule.nodeSizes(graph, starts, layoutModule.METRICS);
+  const base = () => ({graph, starts, layout: layoutModule.layoutGraph(graph, sizes, layoutModule.METRICS)});
+  const answers = [];
+  globalThis.fetch = async (url, init) => {
+    assert.equal(url, '/api/graph-layout'); assert.equal(init.method, 'POST');
+    const body = JSON.parse(init.body);
+    assert.equal(body.graphs.length, 1); assert.equal(body.graphs[0].nodes.length, 4);
+    assert.deepEqual(body.graphs[0].edges, [[0, 1], [0, 2], [1, 3], [2, 3]], 'an unresolved edge is not sent');
+    const next = answers.shift();
+    if (next instanceof Error) throw next;
+    return {ok: next.status === undefined || next.status === 200, status: next.status ?? 200, json: async () => next.body};
+  };
+  const laid = (width = 400) => ({schema: 'graph-layout-v1', engine: {name: 'triskel', revision: 'abc1234def'}, graphs: [{status: 'laid_out', width, height: 300,
+    nodes: [[100, 0], [0, 100], [200, 100], [100, 200]], edges: [[150, 30, 150, 60, 50, 60, 50, 100], [160, 30, 160, 60, 250, 60, 250, 100], [50, 130, 50, 170, 150, 170, 150, 200], [250, 130, 250, 170, 160, 170, 160, 200]]}]});
+  answers.push({body: laid()});
+  let result = await layoutModule.withTriskel(base(), layoutModule.METRICS);
+  const m = layoutModule.METRICS.margin;
+  assert.equal(result.layout.engine.name, 'triskel');
+  assert.deepEqual([result.layout.x[0], result.layout.y[0]], [m + 100, m], 'Triskel places the blocks');
+  assert.deepEqual(pointsOf(result.layout, 0).at(-1), [m + 50, m + 100], 'and routes the edges');
+  const stub = pointsOf(result.layout, 4);
+  assert.equal(stub.length, 2); assert.equal(stub[0][1], result.layout.y[3] + result.layout.h[3], 'an unresolved edge keeps its stub under its block');
+  assert.equal(overlaps(result.layout, 4), 0);
+  answers.push({body: laid(100000)});
+  result = await layoutModule.withTriskel(base(), layoutModule.METRICS);
+  assert.equal(result.layout.engine.name, 'layered'); assert.match(result.layout.engine.reason, /wider/, 'a much wider Triskel drawing keeps the region layout');
+  answers.push({body: {...laid(), graphs: [{...laid().graphs[0], height: 999999}]}});
+  result = await layoutModule.withTriskel(base(), layoutModule.METRICS);
+  assert.match(result.layout.engine.reason, /taller/, 'a far taller Triskel drawing keeps the region layout');
+  answers.push(new Error('connection refused'));
+  result = await layoutModule.withTriskel(base(), layoutModule.METRICS);
+  assert.match(result.layout.engine.reason, /unavailable/, 'a missing route keeps the region layout');
+  answers.push({status: 404, body: {}});
+  result = await layoutModule.withTriskel(base(), layoutModule.METRICS);
+  assert.match(result.layout.engine.reason, /404/);
+  answers.push({body: {...laid(), graphs: [{status: 'too_large', reason: 'over the per-graph limit'}]}});
+  result = await layoutModule.withTriskel(base(), layoutModule.METRICS);
+  assert.match(result.layout.engine.reason, /too_large/);
+  answers.push({body: {...laid(), graphs: [{...laid().graphs[0], nodes: [[0, 0]]}]}});
+  result = await layoutModule.withTriskel(base(), layoutModule.METRICS);
+  assert.match(result.layout.engine.reason, /did not match/, 'an answer of the wrong shape is never drawn');
+  result = await layoutModule.runAsync({type: 'graph', graph, metrics: layoutModule.METRICS, engine: 'layered'});
+  assert.equal(result.layout.engine.name, 'layered', 'a shell without the route never calls it');
+  delete globalThis.fetch;
+}
 console.log('PASS block graph model and layout (offline; rendered acceptance is the packaged-app gate)');

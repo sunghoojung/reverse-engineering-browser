@@ -2016,15 +2016,31 @@ Keyboard: arrows move to the nearest block in that direction, `[` and `]` step
 in byte order, Home returns to the entry, Enter shows the block in the
 disassembly and hex, `+`, `-` and `0` zoom and fit, and Shift+arrows pan.
 
-The layout is a small project-authored pass in `block_graph_layout.js`, run in
-a Web Worker. It uses dominator regions: each subtree is entered once, so it
+The layout runs in a Web Worker. When the backend serves
+`POST /api/graph-layout` ([HTTP API](../../protocol/http-api.md#graph-layout)),
+the function is laid out by [Triskel](https://github.com/triskellib/triskel), a
+CFG layout engine built on single-entry single-exit regions. It is vendored in
+the backend and runs in a separate worker process with size and time limits.
+The project-authored region layout in `block_graph_layout.js` stays in four
+cases:
+- Triskel would draw the function more than 1.6 times wider and over 1,400 px.
+  A flattened dispatcher's fan is the usual case: the region layout stacks it
+  into a grid, where Triskel puts every arm in one row.
+- The function has more than 2,000 blocks or 8,000 edges.
+- Triskel's answer does not match the function.
+- The route is missing or fails, as in the stored-evidence window.
+
+The header says `Triskel layout` when Triskel was used, and hovering the counts
+says why the region layout stayed. The region layout also stays when Triskel's
+drawing would be more than 1.6 times taller and over 1,600 px taller, as nested
+loops can make it. Triskel's and fmt's licence texts ship as
+`Contents/Resources/GraphLayoutLicenses.txt`.
+
+The region layout uses dominator regions: each subtree is entered once, so it
 lays out alone and only its members' sizes reach its parent. A layer of one
-continues the spine, a wider layer becomes side-by-side boxes and wraps into a
-grid past six, and arms with no way out stack on the spine. Edges leaving a box
-share a bottom port, and every back edge to a loop shares one rail. That is why a
-flattened dispatcher reads as a grid rather than a hairball. It follows the
-region idea from Triskel without linking it: this app has no C++ link into its
-web UI or backend, and no new dependency was needed.
+continues the spine. A wider layer becomes side-by-side boxes and wraps into a
+grid past six. Arms with no way out stack on the spine. Edges leaving a box
+share a bottom port, and every back edge to a loop shares one rail.
 
 Memory: one function is decoded on demand, layout runs in a worker that is
 terminated when a job finishes or is replaced, and laid-out graphs stay in a

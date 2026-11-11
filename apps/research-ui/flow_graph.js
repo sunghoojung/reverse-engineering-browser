@@ -352,10 +352,14 @@ function flowGraphAlpha(color, alpha) {
 }
 
 /**
- * The Backtraces Flow graph view. `open(node)` reveals a resolved function in
- * Sources; `available()` says whether this shell serves the route.
+ * The Backtraces Flow graph view, also the Graph pane of the Flow workspace.
+ * `open(node)` reveals a resolved function in Sources; `available()` says
+ * whether this shell serves the route. `onSelect(info | null)` hears every
+ * change of the selected card or row, clears included; `onFollow(info)`, when
+ * given, takes Enter or a double-click on a Wasm card instead of Sources. The
+ * README's Flow graph section documents `info` and the returned methods.
  */
-function createFlowGraphPanel({host, open = () => {}, available = () => true, fetchGraph = null}) {
+function createFlowGraphPanel({host, open = () => {}, available = () => true, fetchGraph = null, onSelect = null, onFollow = null}) {
   const make = (tag, className = '', text = '') => { const element = document.createElement(tag); if (className) element.className = className; if (text) element.textContent = text; return element; };
   const button = (label, action, aria, className = 'flow-graph-tool') => { const element = make('button', className, label); element.type = 'button'; element.setAttribute('aria-label', aria ?? label); element.addEventListener('click', action); return element; };
   host.classList.add('flow-graph');
@@ -365,7 +369,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
   const canvas = make('canvas', 'flow-graph-canvas');
   canvas.tabIndex = 0; canvas.setAttribute('role', 'application');
   canvas.setAttribute('aria-label', 'Flow graph of every recorded stack');
-  const help = make('p', 'flow-graph-help', 'Arrow keys move between functions. J and K step through the selected function\u2019s calls; Enter follows the call or opens the function in Sources; Backspace goes back. Space expands a chain, U goes to a caller, O opens in Sources, S copies the call site, the context menu key or Shift F10 opens actions, I shows details, F centers, C and L copy the name and location, M hides the minimap, slash finds, Escape clears the selection or closes details, plus and minus zoom, 0 fits, Shift and arrows pan.');
+  const help = make('p', 'flow-graph-help', 'Arrow keys move between functions. J and K step through the selected function\u2019s calls; Enter follows the call or opens the function (in Sources, or for a Wasm function in the pane beside the graph when there is one); Backspace goes back. Space expands a chain, U goes to a caller, O opens in Sources, S copies the call site, the context menu key or Shift F10 opens actions, I shows details, F centers, C and L copy the name and location, M hides the minimap, slash finds, Escape clears the selection or closes details, plus and minus zoom, 0 fits, Shift and arrows pan.');
   help.id = `flow-graph-help-${Math.random().toString(36).slice(2, 8)}`; help.hidden = true;
   canvas.setAttribute('aria-describedby', help.id);
 
@@ -459,6 +463,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
   keyRow(keyTag('18', 'badge'), 'distinct stacks that passed through the card');
   keyRow(make('i', 'flow-graph-key-mark'), 'dashed: an unresolved frame');
   keyRow(make('i', 'flow-graph-key-stub'), 'a dashed stub above: earlier async callers not recorded');
+  keyRow(make('i', 'flow-graph-key-sample'), 'a dashed ring around it: the function a timeline sample is in');
   legend.append(make('h4', '', 'Realms'));
   keyRow(make('i', 'flow-graph-key-band'), 'a band each, stacked in call order: a realm that calls or posts into another sits above it');
   legend.append(make('h4', '', 'Keys'));
@@ -475,7 +480,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
   const tokenNames = {bg: '--graph-canvas', card: '--flow-card', cardLine: '--flow-card-line', cardRule: '--flow-card-rule', shadow: '--flow-card-shadow',
     badgeFill: '--flow-badge-fill', badge: '--flow-badge', tagFill: '--flow-tag-fill', rowFill: '--flow-row-fill', box: '--flow-box', mini: '--flow-minimap',
     text: '--text', muted: '--muted', faint: '--faint', accent: '--accent', soft: '--accent-soft', mono: '--mono', sans: '--sans',
-    site: '--flow-site', note: '--flow-note', viewport: '--flow-viewport'};
+    site: '--flow-site', note: '--flow-note', mark: '--flow-mark', viewport: '--flow-viewport'};
   const alphaNames = {head: '--flow-tint-head', tag: '--flow-tint-tag', tagLine: '--flow-tint-tag-line', row: '--flow-tint-row', band: '--flow-tint-band', bandLine: '--flow-tint-band-line', border: '--flow-tint-border'};
   let tokens = {kind: {}, ink: {}, edge: {}, rowInk: {}, realm: [], alpha: {...FLOW_GRAPH_ALPHA}};
   let measure = FLOW_GRAPH_MEASURE;
@@ -515,8 +520,9 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
   const runner = createFlowGraphRunner();
   let session = null, requested = null, status_ = 'idle', error = '', model = null, display = null, cards = null, layout = null, generation = 0, controller = null;
   let collapse = true, expanded = new Set(), selected = -1, selectedRow = -1, highlight = null, highlightLabel = '', matches = [], matchSet = new Set(), matchIndex = -1, requestKey = null, shownRequest = '', visible = false;
-  // Which top corner each band's label takes, chosen once per layout.
-  let labelSides = null;
+  // The workspace's timeline mark: a Wasm function (and row) a sample points
+  // to, apart from the selection. The selection last reported to onSelect.
+  let mark = null, markTarget = null, reported = '', pendingKey = null, keyIndex = null, labelSides = null;
   // A layout the view was hidden during is redone when it shows again.
   let layoutStale = false, layingOut = false, highlightFromRequest = false, detailsOpen = false, minimapOn = true, pendingSelect = null, pendingRequest = false;
   // Cards visited by following calls, for Backspace.
@@ -629,8 +635,9 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     // layout is ready, so a card is never drawn at another card's position.
     const next = flowGraphDisplay(model, expanded, collapse);
     if (!next.nodes.length) {
-      display = next; cards = []; layout = null; layoutStale = false;
+      display = next; cards = []; layout = null; layoutStale = false; keyIndex = null; markTarget = null;
       selected = -1; selectedRow = -1; highlight = null; highlightFromRequest = false; selectionText.textContent = ''; requestAgain.hidden = true;
+      notify();
       const records = model.doc.stacks?.records ?? {}, walked = Object.values(model.doc.stacks?.not_walked ?? {}).reduce((sum, value) => sum + value, 0);
       const stacks = FLOW_GRAPH_STACK_RECORDS.reduce((sum, type) => sum + (records[type] ?? 0), 0);
       setState('empty', 'No recorded stacks in this session', stacks > walked
@@ -651,8 +658,9 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
       const result = await runner.layout(flowGraphLayoutInput(next, nextCards), metrics, available() ? 'triskel' : 'layered');
       layingOut = false;
       if (mine !== generation) return;
-      display = next; cards = nextCards; layout = result; layoutStale = false; labelSides = null;
+      display = next; cards = nextCards; layout = result; layoutStale = false; keyIndex = null; labelSides = null;
       edgeBounds = null; edgeFlat = []; miniKey = ''; hover = {node: -1, row: -1, edge: -1};
+      findMark();
       selected = keep === null || keep === undefined ? -1 : display.displayOf[keep] ?? -1;
       selectedRow = selected >= 0 && keepRow >= 0 && keepRow < cards[selected].rows.length ? keepRow : -1;
       if (highlight && highlight.source) applyHighlight(highlight.source, highlightLabel, false);
@@ -661,6 +669,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
       if (fresh) { needsStart = cssW <= 1; start(); } else if (selected >= 0 && !reselect) ensureVisible(selected); else requestDraw();
       if (reselect && selected >= 0) select(selected, {reveal: false, row: selectedRow});
       if (requestKey && (fresh || rehighlight)) highlightRequest(requestKey, {reveal: fresh});
+      if (pendingKey) { const wanted = pendingKey; pendingKey = null; selectKey(wanted.key, {reveal: wanted.reveal}); }
+      notify();
     } catch (problem) {
       layingOut = false;
       if (problem?.name === 'AbortError') { layoutStale = true; return; }
@@ -940,7 +950,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     // Off the lit stack, a card keeps its place and fill; its tint, outline
     // and colours fade, and its text turns muted (still 4.5:1). A match of
     // Find is never dimmed.
-    const dim = Boolean(highlight) && !highlight.nodes.has(index) && !matched;
+    const dim = Boolean(highlight) && !highlight.nodes.has(index) && !matched, marked = markTarget?.index === index;
     const {x, y, w, h} = box, r = C.radius, hair = 1 / view.z;
     ctx.globalAlpha = 1;
     if (node.kind === 'chain') {
@@ -965,7 +975,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     if (lod === 0) {
       // Boxes: filled with the kind's colour, like the minimap.
       ctx.globalAlpha = dim ? 0.18 : 0.5; ctx.fillStyle = hue; ctx.fill(); ctx.globalAlpha = 1;
-      if (picked) { ctx.strokeStyle = hue; ctx.lineWidth = 2 / view.z; ctx.stroke(); }
+      if (picked || marked) { ctx.strokeStyle = picked ? hue : tokens.mark; ctx.lineWidth = 2 / view.z; ctx.stroke(); }
       return;
     }
     // Header strip, tinted by the kind, ruled off from the body.
@@ -981,6 +991,11 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     ctx.lineWidth = (picked ? 2 : matched ? 1.5 : 1) / view.z;
     if ((node.status !== 'resolved' && !picked) || (matched && !picked)) ctx.setLineDash(matched && !picked ? [5 / view.z, 3 / view.z] : [4, 3]);
     ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+    if (marked) {
+      // A timeline sample's function: a dashed ring outside the card.
+      ctx.strokeStyle = tokens.mark; ctx.lineWidth = 2 / view.z; ctx.setLineDash([6 / view.z, 4 / view.z]);
+      ctx.beginPath(); roundedRect(x - 6, y - 6, w + 12, h + 12, r + 6); ctx.stroke(); ctx.setLineDash([]);
+    }
     if (lod === 1) {
       // A sketch of the rows, coloured by what each row does; the name is
       // painted at screen size later.
@@ -1017,8 +1032,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     const rowCount = card.rows.length + (card.more ? 1 : 0);
     for (let row = 0; row < rowCount; row += 1) {
       const top = rowTop(box, row), base = top + 13.5, item = card.rows[row];
-      const isHover = hover.node === index && hover.row === row, isPicked = picked && selectedRow === row;
-      if (isPicked) rowBand(x, top, w, hue, 1); else if (isHover) rowBand(x, top, w, hue, 0.55);
+      const isHover = hover.node === index && hover.row === row, isPicked = picked && selectedRow === row, isMarked = marked && markTarget.row === row;
+      if (isPicked) rowBand(x, top, w, hue, 1); else if (isMarked) rowBand(x, top, w, tokens.mark, 1); else if (isHover) rowBand(x, top, w, hue, 0.55);
       if (!item) { ctx.fillStyle = tokens.muted; ctx.fillText(`… ${card.more.toLocaleString()} more ${node.kind === 'chain' ? 'frames' : 'calls'}, in Details`, x + C.pad, base); continue; }
       const family = rowFamily(item), tone = dim ? tokens.muted : tokens.rowInk[family] ?? tokens.muted;
       if (highlight && !dim && !isHover && !isPicked && item.members?.some(member => highlight.originalEdges.has(member))) { ctx.fillStyle = tokens.edge[family] ?? hue; ctx.fillRect(x + 4, top + 4, 2, C.row - 8); }
@@ -1072,7 +1087,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     if (!mw || !mh) return;
     const ratio = Math.min(window.devicePixelRatio || 1, 2);
     if (minimap.width !== Math.round(mw * ratio) || minimap.height !== Math.round(mh * ratio)) { minimap.width = Math.round(mw * ratio); minimap.height = Math.round(mh * ratio); miniKey = ''; }
-    const key = `${selected}:${highlight ? highlight.nodes.size + highlight.paths : 0}:${matches.length}:${layout.width}:${display.nodes.length}`;
+    const key = `${selected}:${highlight ? highlight.nodes.size + highlight.paths : 0}:${matches.length}:${markTarget ? markTarget.index : -1}:${layout.width}:${display.nodes.length}`;
     const scale = Math.min((mw - 12) / layout.width, (mh - 12) / layout.height), ox = (mw - layout.width * scale) / 2, oy = (mh - layout.height * scale) / 2;
     miniFit = {scale, ox, oy};
     if (key !== miniKey || !miniBase) {
@@ -1100,8 +1115,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
         g.fillStyle = tokens.kind[display.nodes[index].kind] ?? tokens.faint;
         g.globalAlpha = index === selected ? 0.95 : highlight ? (on ? 0.7 : 0.18) : 0.5;
         g.fillRect(ox + box.x * scale, oy + box.y * scale, Math.max(1.5, box.w * scale), Math.max(1.5, box.h * scale));
-        if (index === selected || matchSet.has(index)) {
-          g.globalAlpha = 1; g.strokeStyle = index === selected ? tokens.kind[display.nodes[index].kind] ?? tokens.accent : tokens.accent; g.lineWidth = 1.2;
+        if (index === selected || markTarget?.index === index || matchSet.has(index)) {
+          g.globalAlpha = 1; g.strokeStyle = index === selected ? tokens.kind[display.nodes[index].kind] ?? tokens.accent : markTarget?.index === index ? tokens.mark : tokens.accent; g.lineWidth = 1.2;
           g.strokeRect(ox + box.x * scale - 1, oy + box.y * scale - 1, Math.max(1.5, box.w * scale) + 2, Math.max(1.5, box.h * scale) + 2);
         }
       }
@@ -1239,12 +1254,77 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     }
     renderSelection(); renderInspector();
     if (reveal) ensureVisible(index); else requestDraw();
+    notify();
   }
   function clearSelection() {
     selected = -1; selectedRow = -1; highlight = null; highlightLabel = ''; highlightFromRequest = false; selectionText.textContent = '';
     renderSelection(); renderInspector(); requestDraw();
+    notify();
   }
 
+  // Workspace API ---------------------------------------------------------------
+  /** What a host is told about a card and its chosen row. A chain card is
+   * keyed by its first member, and `select(key)` with any member's key finds
+   * the chain. Realm facts come from the node's context. */
+  function selectionInfo(index, rowIndex = -1) {
+    const node = display?.nodes[index];
+    if (!node || !model) return null;
+    const context = model.contexts[node.context], first = model.nodes[node.members[0]], item = rowIndex >= 0 ? cards?.[index]?.rows[rowIndex] : null;
+    return {key: flowGraphNodeKey(node.kind === 'chain' ? first : node), kind: node.kind, name: flowGraphNodeName(node), location: flowGraphNodeLocation(node) || null,
+      process_id: context?.process_id ?? null, execution_context_id: context?.execution_context_id ?? null, url: node.url ?? null, artifact_id: node.artifact_id ?? null,
+      function_index: node.function_index ?? null, row: item ? {index: rowIndex, site: item.site, op: item.op, target: item.target} : null,
+      request: highlightFromRequest && requestKey ? {process: requestKey.process, request: requestKey.request} : null};
+  }
+  /** Tells the host when the selected card, row or lit request changed. */
+  function notify() {
+    const info = selected >= 0 ? selectionInfo(selected, selectedRow) : null;
+    const signature = info ? JSON.stringify([info.key, info.row?.index ?? -1, info.request]) : '';
+    if (signature === reported) return;
+    reported = signature;
+    if (typeof onSelect !== 'function') return;
+    try { onSelect(info); } catch (problem) { console.error(problem); }
+  }
+  /** Display index by the key of every model node a card holds. */
+  function indexOfKey(key) {
+    if (!display || !model) return -1;
+    if (!keyIndex) {
+      keyIndex = new Map();
+      display.nodes.forEach((node, index) => node.members.forEach(member => { const text = flowGraphNodeKey(model.nodes[member]); if (!keyIndex.has(text)) keyIndex.set(text, index); }));
+    }
+    return keyIndex.get(String(key)) ?? -1;
+  }
+  function selectKey(key, {reveal = true} = {}) {
+    if (key === null || key === undefined) return false;
+    // Before the graph is drawn the key waits for it.
+    if (!layout || layingOut) { pendingKey = {key: String(key), reveal}; return false; }
+    const index = indexOfKey(key);
+    if (index < 0) return false;
+    select(index, {reveal: false});
+    if (reveal) centerOn(index);
+    return true;
+  }
+  /** The card (and row) a timeline sample's {artifact_id, function_index,
+   * offset} names: a Wasm function of that module and index, and its row
+   * whose call site is at that module offset, when one is. */
+  function findMark() {
+    markTarget = null;
+    if (!mark || !display || !cards) return;
+    for (let index = 0; index < display.nodes.length && !markTarget; index += 1) {
+      const node = display.nodes[index];
+      const hit = node.members.findIndex(member => { const item = model.nodes[member]; return item?.kind === 'wasm' && String(item.artifact_id ?? '') === mark.artifact_id && Number(item.function_index) === mark.function_index; });
+      if (hit < 0) continue;
+      let row = -1;
+      if (node.kind === 'chain') row = hit < cards[index].rows.length ? hit : -1;
+      else if (mark.offset !== null) row = cards[index].rows.findIndex(item => (item.members ?? []).some(edge => (model.doc.edges[edge]?.sites ?? []).some(site => site.module_offset !== undefined && Number(site.module_offset) === mark.offset)));
+      markTarget = {index, row};
+    }
+  }
+  function setMark(next) {
+    mark = next && typeof next === 'object' && next.artifact_id !== undefined && next.artifact_id !== null && Number.isFinite(Number(next.function_index))
+      ? {artifact_id: String(next.artifact_id), function_index: Number(next.function_index), offset: next.offset === undefined || next.offset === null || !Number.isFinite(Number(next.offset)) ? null : Number(next.offset)} : null;
+    findMark(); miniKey = ''; requestDraw();
+    return Boolean(markTarget);
+  }
   function toggleChain(index) {
     const node = display?.nodes[index];
     if (!node) return;
@@ -1290,6 +1370,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     const node = display?.nodes[index];
     if (!node) return;
     if (node.kind === 'chain') toggleChain(index);
+    // A Wasm function follows into the host's pane when it has one.
+    else if (node.kind === 'wasm' && typeof onFollow === 'function') { try { onFollow(selectionInfo(index, index === selected ? selectedRow : -1)); } catch (problem) { console.error(problem); } }
     else if (canOpen(node)) open(node);
   }
   /** Follows a row's call to the card it reaches; Backspace comes back. */
@@ -1733,9 +1815,11 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     show({session: next, request = null}) {
       visible = true; host.hidden = false;
       readTokens();
-      const changed = String(next ?? '') !== String(session ?? '');
+      const changed = String(next ?? '') !== String(session ?? ''), first = session === null;
       session = next ?? null;
-      if (changed) { model = null; display = null; cards = null; layout = null; selected = -1; selectedRow = -1; highlight = null; generation += 1; runner.cancel(); }
+      // A key asked for before the first session waits for it; one asked for
+      // in another session does not carry over.
+      if (changed) { model = null; display = null; cards = null; layout = null; selected = -1; selectedRow = -1; highlight = null; keyIndex = null; markTarget = null; if (!first) pendingKey = null; generation += 1; runner.cancel(); notify(); }
       // Evidence polls re-render Backtraces; only a newly chosen request moves
       // the highlight, so a card the researcher picked stays lit.
       const requestText = request ? `${request.process}:${request.request}` : '';
@@ -1758,8 +1842,18 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     highlightRequest,
     focus() { canvas.focus({preventScroll: true}); },
     isVisible: () => visible,
+    /** Selects (and by default centres) the card that holds `key`, a
+     * flowGraphNodeKey(); says whether it is in the graph. */
+    select: (key, options) => selectKey(key, options),
+    /** The selection as onSelect last described it, or null. */
+    selection: () => selected >= 0 ? selectionInfo(selected, selectedRow) : null,
+    /** Re-measures the stage after the host resized it. */
+    resize: () => resize(),
+    /** Marks the Wasm card (and row) a timeline sample points to, apart from
+     * the selection; null clears it. Says whether a card took the mark. */
+    setMark,
     // For the offline checks: the current state without drawing.
-    snapshot: () => ({status: status_, model, display, cards, layout, selected, selectedRow, highlight, matches, details: detailsOpen, menu: !menu.hidden, view: {...view}})
+    snapshot: () => ({status: status_, model, display, cards, layout, selected, selectedRow, highlight, matches, details: detailsOpen, menu: !menu.hidden, view: {...view}, mark: markTarget ? {...markTarget} : null})
   };
 }
 

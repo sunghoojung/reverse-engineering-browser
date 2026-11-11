@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Backtraces Flow graph: the flow-graph-v1 model, chain folding, card rows,
 // the vertical layout (realm bands stacked in call order) and its routes, and
-// the panel's selection, highlight, details, menu and failure states in a DOM
-// model. Offline: no rendered pixels are claimed here.
+// the panel's selection, highlight, details, menu, failure states and the
+// Flow workspace API in a DOM model. Offline: no rendered pixels are claimed
+// here.
 // Requires: npm ci --prefix tools/ui-startup-deps --ignore-scripts --no-audit --no-fund
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
@@ -582,6 +583,103 @@ const text = selector => host.querySelector(selector)?.textContent ?? '';
   assert.match(d2.querySelector('.flow-graph-state').textContent, /needs the live backend/);
 }
 {
+  // The Flow workspace API: onSelect hears every change of card, row and lit
+  // request, clears included; select(key) finds a card and selection() reads
+  // it back; setMark marks a Wasm card (and its row at an offset) without
+  // selecting it; onFollow takes Enter on a Wasm card only.
+  const {window: w4, document: d4} = parseHTML('<!doctype html><html><body><section id="host"></section><section id="late"></section></body></html>');
+  const ws = createContext({window: w4, document: d4, console, setTimeout, clearTimeout, AbortController, AbortSignal, URLSearchParams, DOMException,
+    requestAnimationFrame: callback => setTimeout(callback, 0), location: {protocol: 'http:'}});
+  ws.globalThis = ws;
+  for (const name of ['flow_graph_layout.js', 'flow_graph.js']) runInContext(await readFile(new URL(name, ui), 'utf8'), ws, {filename: name});
+  const doc = sessionDoc();
+  doc.edges[5].sites = [{module_offset: 47}]; // run calls its import send at +0x2f
+  Object.assign(ws, {__doc: doc, __seen: [], __followed: [], __opened: []});
+  runInContext(`var panel = createFlowGraphPanel({host: document.querySelector('#host'), open: node => __opened.push(node.name), fetchGraph: async () => __doc,
+    onSelect: info => __seen.push(info), onFollow: info => __followed.push(info)});
+    var late = createFlowGraphPanel({host: document.querySelector('#late'), fetchGraph: async () => __doc, onSelect: info => __seen.push(info)});`, ws);
+  const call = text => runInContext(text, ws), seen = ws.__seen, keyOf = name => model.flowGraphNodeKey(doc.nodes.find(item => item.name === name));
+  // A key asked for before the graph is drawn is selected once it is.
+  assert.equal(call(`late.select(${JSON.stringify(keyOf('send'))})`), false, 'nothing is found before the graph is drawn');
+  call(`late.show({session: '7'})`);
+  await settle();
+  assert.equal(call('late.selection()')?.name, 'send', 'the key asked for early is selected when the graph lands');
+  assert.equal(seen.at(-1)?.name, 'send', 'and onSelect hears it');
+  call(`late.hide()`); seen.length = 0;
+  call(`panel.show({session: '7', request: null})`);
+  await settle();
+  assert.equal(seen.length, 0, 'nothing is reported before anything is selected');
+  const canvas = d4.querySelector('#host .flow-graph-canvas');
+  const key = name => canvas.dispatchEvent(Object.assign(new w4.Event('keydown', {bubbles: true, cancelable: true}), {key: name}));
+  assert.equal(call(`panel.select(${JSON.stringify(keyOf('run'))})`), true, 'select finds a card by key');
+  let info = seen.at(-1);
+  assert.equal(seen.length, 1, 'onSelect fires once per change');
+  assert.deepEqual(Object.keys(info), ['key', 'kind', 'name', 'location', 'process_id', 'execution_context_id', 'url', 'artifact_id', 'function_index', 'row', 'request'], 'info has exactly the documented fields');
+  assert.deepEqual({...info}, {key: keyOf('run'), kind: 'wasm', name: 'run', location: 'https://frame.test/m.wasm func 1', process_id: 41, execution_context_id: '12', url: 'https://frame.test/m.wasm',
+    artifact_id: '4', function_index: 1, row: null, request: null});
+  assert.deepEqual({...call('panel.selection()')}, {...info}, 'selection() reads the same info back');
+  assert.equal(call(`panel.select(${JSON.stringify(keyOf('run'))}, {reveal: false})`), true);
+  assert.equal(seen.length, 1, 'selecting the same card again reports nothing new');
+  assert.equal(call(`panel.select('no|such|key')`), false, 'an unknown key is not found');
+  assert.equal(call('panel.selection()').name, 'run', 'and leaves the selection');
+  // Enter on a Wasm card follows into the host; on a JavaScript card it opens Sources.
+  key('Enter');
+  assert.equal(ws.__followed.length, 1, 'Enter on a Wasm card calls onFollow');
+  assert.equal(ws.__followed[0].key, keyOf('run'));
+  assert.deepEqual(ws.__opened, [], 'and does not open Sources');
+  key('j');
+  info = seen.at(-1);
+  assert.deepEqual({...info.row}, {index: 0, site: '+0x2f', op: 'call', target: 'send'}, 'a chosen row is reported with its site, mnemonic and callee');
+  key('Enter');
+  assert.equal(call('panel.selection()').name, 'send', 'Enter on a call row still follows the call');
+  assert.equal(ws.__followed.length, 1, 'following a call is not onFollow');
+  call(`panel.select(${JSON.stringify(keyOf('bridge'))})`);
+  key('Enter');
+  assert.deepEqual(ws.__opened, ['bridge'], 'Enter on a JavaScript card opens it in Sources');
+  assert.equal(ws.__followed.length, 1, 'onFollow is for Wasm cards only');
+  // A chain card is found by any member's key.
+  const before = seen.length;
+  key('Escape');
+  assert.equal(seen.length, before + 1, 'clearing is reported');
+  assert.equal(seen.at(-1), null, 'as null');
+  assert.equal(call('panel.selection()'), null);
+  // The timeline mark: a Wasm function by module and index, its row by offset.
+  assert.equal(call(`panel.setMark({artifact_id: '4', function_index: 1, offset: 47})`), true, 'a sample in run marks its card');
+  let snapshot = call('panel.snapshot()');
+  assert.equal(snapshot.display.nodes[snapshot.mark.index].name, 'run');
+  assert.equal(snapshot.mark.row, 0, 'and the row whose call site is at the offset');
+  assert.equal(snapshot.selected, -1, 'the mark does not select');
+  assert.equal(seen.length, before + 1, 'nor report a selection');
+  assert.equal(call(`panel.setMark({artifact_id: 4, function_index: '1', offset: 3})`), true, 'ids may come as numbers or strings');
+  assert.equal(call('panel.snapshot()').mark.row, -1, 'an offset no call site has marks no row');
+  assert.equal(call(`panel.setMark({artifact_id: '4', function_index: 9, offset: 47})`), false, 'another function of the module is not in the graph');
+  assert.equal(call('panel.snapshot()').mark, null);
+  call(`panel.setMark({artifact_id: '4', function_index: 1, offset: null})`);
+  assert.equal(call('panel.snapshot()').mark.row, -1, 'a mark without an offset marks the card alone');
+  assert.equal(call('panel.setMark(null)'), false);
+  assert.equal(call('panel.snapshot()').mark, null, 'null clears the mark');
+  // A lit request is part of the info.
+  call(`panel.highlightRequest({process: 41, request: '73'})`);
+  info = seen.at(-1);
+  assert.deepEqual({...info.request}, {process: 41, request: '73'}, 'the highlighted request is reported');
+  assert.equal(info.name, '<img src=x onerror=alert(1)>', 'with the function that made it');
+  assert.equal(info.row.target, 'GET frame.test');
+  call(`panel.select(${JSON.stringify(keyOf('run'))})`);
+  assert.equal(seen.at(-1).request, null, 'selecting a card replaces the lit request');
+  call('panel.resize()');
+  assert.equal(call('panel.snapshot()').status, 'ready', 'resize() re-measures without reloading');
+  // Without onFollow, Enter on a Wasm card opens Sources, as before.
+  answers.push(sessionDoc());
+  runInContext(`panel.show({session: '7', request: null})`, context);
+  await settle();
+  const wasmIndex = panel('snapshot()').display.nodes.findIndex(item => item.kind === 'wasm');
+  runInContext(`panel.select(${JSON.stringify(model.flowGraphNodeKey(sessionDoc().nodes[5]))})`, context);
+  assert.equal(panel('snapshot()').selected, wasmIndex);
+  host.querySelector('.flow-graph-canvas').dispatchEvent(Object.assign(new window.Event('keydown', {bubbles: true, cancelable: true}), {key: 'Enter'}));
+  assert.equal(opened.at(-1), 'run', 'without onFollow a Wasm card opens in Sources');
+  runInContext(`panel.hide()`, context);
+}
+{
   // Colour tokens: every ink clears 4.5:1 on the card, its tinted header, its
   // kind pill and a selected row in both themes, so colour never costs
   // legibility. Values resolve through app.css, as the browser resolves them.
@@ -604,6 +702,7 @@ const text = selector => host.querySelector(selector)?.textContent ?? '';
       for (const family of ['call', 'async', 'cross', 'sink', 'omitted']) {
         const rowInk = value(`--flow-ink-${family}`);
         check(rowInk, card, `a ${family} row`); check(rowInk, blend(value('--flow-row-fill'), hue, alpha('--flow-tint-row')), `a selected ${family} row on a ${kind} card`);
+        check(rowInk, blend(value('--flow-row-fill'), value('--flow-mark'), alpha('--flow-tint-row')), `a marked ${family} row`);
       }
     }
     for (const name of ['--flow-site', '--flow-note', '--muted', '--text']) check(value(name), card, `${name} on the card`);

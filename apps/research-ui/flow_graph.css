@@ -59,7 +59,8 @@
   --flow-realm-3: var(--syntax-string);
   --flow-realm-4: var(--syntax-number);
   --flow-realm-5: var(--syntax-support-function);
-  /* The minimap's view box. */
+  /* A timeline sample's mark, and the minimap's view box. */
+  --flow-mark: var(--syntax-string);
   --flow-viewport: var(--syntax-type);
   /* Tints, as alpha over the surface under them. */
   --flow-tint-head: 0.2;
@@ -90,6 +91,7 @@
   --flow-ink-async: var(--amber);
   --flow-ink-cross: var(--red);
   --flow-ink-sink: var(--green);
+  --flow-mark: var(--amber);
   --flow-viewport: var(--accent);
   --flow-tint-head: 0.08;
   --flow-tint-tag: 0;
@@ -269,6 +271,7 @@ ol.flow-inspector-list { padding-left: 18px; list-style: decimal; color: var(--t
 .flow-graph-key-tag[data-tone="badge"] { justify-self: start; min-width: 0; padding: 0 5px; border: 1px solid var(--flow-badge); border-radius: 4px; background: var(--flow-badge-fill); color: var(--muted); font-weight: 400; }
 .flow-graph-key-mark { display: inline-block; width: 24px; height: 12px; border: 1.5px dashed var(--faint); border-radius: 3px; }
 .flow-graph-key-stub { display: inline-block; width: 24px; height: 12px; border-left: 1.5px dashed var(--faint); margin-left: 8px; }
+.flow-graph-key-sample { display: inline-block; width: 24px; height: 12px; border: 1.5px dashed var(--flow-mark); border-radius: 4px; }
 .flow-graph-key-band { display: inline-block; width: 24px; height: 14px; border: 1px solid var(--flow-realm-1); border-radius: 4px; background: var(--flow-box); }
 
 /* The stats give way before the tools move; only a narrow canvas drops the

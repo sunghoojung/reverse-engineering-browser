@@ -29,7 +29,7 @@ The driver, [`check-origin-trace-rendered-ui.mjs`](../check-origin-trace-rendere
    (`TestHostPath`, `libXCTestBundleInject.dylib`) and the app receives
    `--ui-url` for that backend;
 5. runs `xcodebuild test-without-building`, then a second launch pass for
-   `testLaunchOpensStartPanel`, and checks the PNG screenshots.
+   `testLaunchStartsWithoutStartPanel`, and checks the PNG screenshots.
 
 `xcodebuild` cannot build a hosted bundle for an app that no scheme builds, so
 the bundle is built unhosted and the host is supplied only in the `.xctestrun`
@@ -105,15 +105,17 @@ the mode and Keychain choice made by keyboard (so native received them), and
 focus Retry; Return on Retry must fail afresh, and Continue Offline must close
 the panel and return focus to the workspace.
 
-`testLaunchOpensStartPanel` runs alone in a second launch pass. That pass
-starts the copied app without `--ui-url` or an evidence-store argument, with
-automatic live sessions on, `REB_EVENT_STORE` and its siblings naming stores
-that do not exist yet (as on a first launch, so the workspace is idle), an
-empty saved site set and the same missing `REB_BRAVE_BINARY`. The
-window must open on the bundled workspace with the start panel at both sizes,
-a Launch Services reopen while it is open must start nothing, Start must reach
-the native start, and after Continue Offline a reopen must offer nothing. The
-main pass skips this test and it skips itself outside the launch pass.
+`testLaunchStartsWithoutStartPanel` runs alone in a second launch pass. That
+pass starts the copied app without `--ui-url` or an evidence-store argument,
+with automatic live sessions on, `REB_EVENT_STORE` and its siblings naming
+stores that do not exist yet (as on a first launch, so the workspace is idle),
+an empty saved site set and the same missing `REB_BRAVE_BINARY`. Launch must
+start a Content session at once without the start panel; the missing Brave
+makes that start fail, so at both sizes the panel must show only that failure,
+with Retry focused. A Launch Services reopen while it is open must start
+nothing, Return on Retry must start again, and after Continue Offline a reopen
+must start nothing. The main pass skips this test and it skips itself outside
+the launch pass.
 The app also receives the harness's `--api-collection` and `--local-analyst`
 stores, so the bundled `reb://` workspace those tests open never reads or
 writes Application Support.

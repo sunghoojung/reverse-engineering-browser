@@ -44,16 +44,16 @@
 
 .session-panel-modes { min-width: 0; margin: 0; padding: 0; border: 0; display: grid; gap: 6px; }
 .session-panel-modes > legend { margin-bottom: 6px; }
-.session-panel-mode, .session-panel-check { min-width: 0; display: flex; align-items: flex-start; gap: 9px; padding: 9px 12px;
+.session-panel-mode { min-width: 0; display: flex; align-items: flex-start; gap: 9px; padding: 9px 12px;
   border: 1px solid var(--line-soft); border-radius: 10px; cursor: pointer; }
-.session-panel-mode:hover, .session-panel-check:hover { border-color: var(--line); }
+.session-panel-mode:hover { border-color: var(--line); }
 .session-panel-mode[data-selected="true"] { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); background: var(--session-raised); }
-.session-panel-mode:has(input:focus-visible), .session-panel-check:has(input:focus-visible) { outline: 2px solid var(--cyan); outline-offset: 1px; }
-.session-panel-mode input, .session-panel-check input { flex: 0 0 auto; margin: 2px 0 0; accent-color: var(--accent); }
-.session-panel-mode input:focus-visible, .session-panel-check input:focus-visible { outline: none; }
-.session-panel-mode-text, .session-panel-check-text { min-width: 0; display: grid; gap: 2px; }
-.session-panel-mode-name, .session-panel-check-name { color: var(--text); font: 500 12.5px/1.4 var(--sans); }
-.session-panel-mode-detail, .session-panel-check-detail { color: var(--muted); font: 12px/1.45 var(--sans); overflow-wrap: anywhere; }
+.session-panel-mode:has(input:focus-visible) { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.session-panel-mode input { flex: 0 0 auto; margin: 2px 0 0; accent-color: var(--accent); }
+.session-panel-mode input:focus-visible { outline: none; }
+.session-panel-mode-text { min-width: 0; display: grid; gap: 2px; }
+.session-panel-mode-name { color: var(--text); font: 500 12.5px/1.4 var(--sans); }
+.session-panel-mode-detail { color: var(--muted); font: 12px/1.45 var(--sans); overflow-wrap: anywhere; }
 
 .session-panel-sites { min-width: 0; display: grid; justify-items: start; gap: 6px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
 .session-panel-sites > :not(button) { justify-self: stretch; }
@@ -91,7 +91,7 @@
   .session-panel-head { padding: 10px 14px 8px; }
   .session-panel-icon, .session-panel-spinner { width: 26px; height: 26px; border-radius: 8px; }
   .session-panel-body { gap: 10px; padding: 0 14px 12px; }
-  .session-panel-mode, .session-panel-check { padding: 7px 10px; }
+  .session-panel-mode { padding: 7px 10px; }
   .session-panel-actions { padding: 8px 14px 12px; }
 }
 @media (prefers-reduced-motion: reduce) {

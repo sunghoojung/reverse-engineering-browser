@@ -3,9 +3,10 @@ import WebKit
 
 // The native half of the in-window live session panel. The page draws the
 // choices; this side decides what the panel shows, accepts a choice only while
-// that decision is open, validates the capture mode and Keychain flag, and
-// keeps the saved invocation sites the next capture arms. As with the agent
-// bridge, only the exact main document the app loaded can ask.
+// that decision is open, validates the capture mode, and keeps the saved
+// invocation sites the next capture arms. As with the agent bridge, only the
+// exact main document the app loaded can ask. The page has no Keychain
+// choice: a session it starts or retries always uses the isolated profile.
 //
 // Site labels and source URLs reach the page only to be drawn as text, as the
 // backend's saved-site route already serves them to the live workspace. The
@@ -18,13 +19,13 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
   // answered nothing starts a session behind it.
   enum Content: Equatable {
     case hidden
-    case choose(mode: LiveCaptureMode, keychain: Bool)
+    case choose(mode: LiveCaptureMode)
     case starting(mode: LiveCaptureMode)
-    case failed(LiveSessionCoordinator.Failure, mode: LiveCaptureMode, keychain: Bool)
+    case failed(LiveSessionCoordinator.Failure, mode: LiveCaptureMode)
   }
 
   enum Choice {
-    case start(LiveCaptureMode, Bool)
+    case start(LiveCaptureMode)
     case retry
     case offline
   }
@@ -129,14 +130,14 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
       return (state(), nil)
     case "start":
       guard case .choose = content else { throw SessionPanelRefusal("This start choice is no longer open.") }
+      // The mode is the only choice; a page cannot add a Keychain or any other switch.
+      guard Set(body.keys).isSubset(of: ["op", "mode"]) else {
+        throw SessionPanelRefusal("The start panel offers only the capture mode.")
+      }
       guard let raw = body["mode"] as? String, let mode = LiveCaptureMode(rawValue: raw) else {
         throw SessionPanelRefusal("Choose Content or Metadata only.")
       }
-      // A JavaScript boolean, not a number or string that happens to convert.
-      guard let keychain = body["keychain"] as? NSNumber, CFGetTypeID(keychain) == CFBooleanGetTypeID() else {
-        throw SessionPanelRefusal("The Keychain choice must be on or off.")
-      }
-      return accept(.start(mode, keychain.boolValue))
+      return accept(.start(mode))
     case "retry":
       guard case .failed = content else { throw SessionPanelRefusal("There is no failed session to retry.") }
       return accept(.retry)
@@ -206,11 +207,11 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
       return ["panel": "hidden"]
     case .starting(let mode):
       return ["panel": "starting", "mode": mode.rawValue, "modes": modes]
-    case .choose(let mode, let keychain):
-      return ["panel": "choose", "mode": mode.rawValue, "keychain": keychain, "modes": modes, "sites": siteState()]
-    case .failed(let failure, let mode, let keychain):
+    case .choose(let mode):
+      return ["panel": "choose", "mode": mode.rawValue, "modes": modes, "sites": siteState()]
+    case .failed(let failure, let mode):
       return [
-        "panel": "failed", "mode": mode.rawValue, "keychain": keychain, "modes": modes,
+        "panel": "failed", "mode": mode.rawValue, "modes": modes,
         "failure": [
           "title": failure.afterStartup ? "Live session ended" : "Live session unavailable",
           "message": failure.message, "afterStartup": failure.afterStartup,

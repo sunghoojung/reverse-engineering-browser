@@ -2803,9 +2803,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // The start panel through a whole decision at both window sizes. The harness
   // names a REB_BRAVE_BINARY that does not exist, so Start fails at once and
   // nothing launches. The panel must fit, reach every control by keyboard with
-  // visible focus, start with the mode and Keychain choice made by keyboard,
-  // come back as a failure with Retry focused and that same choice, fail
-  // afresh on Retry, and leave the offline workspace on Continue Offline.
+  // visible focus, offer no Keychain choice, start with the mode chosen by
+  // keyboard, come back as a failure with Retry focused and that same mode,
+  // fail afresh on Retry, and leave the offline workspace on Continue Offline.
   @MainActor
   func test27StartPanelStartRetryAndKeyboard() async throws {
     let ui = try await prepare(windowSizes[0])
@@ -2813,10 +2813,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
     // No saved sites, so the panel's controls are the same whatever ran before.
     try await clearSavedSites(ui)
     let focus = { try await ui.json("__rebUiProbe.focusState()") }
-    // Normal turns Metadata and the Keychain on; narrow, opened with that
-    // choice remembered for the run, turns both back.
-    let plans: [(size: (name: String, width: CGFloat, height: CGFloat), from: String, to: String, arrow: UInt16, keychain: Bool)] = [
-      (windowSizes[0], "content", "metadata", 125, true), (windowSizes[1], "metadata", "content", 126, false),
+    // Normal chooses Metadata; narrow, opened with that mode remembered for
+    // the run, chooses Content again.
+    let plans: [(size: (name: String, width: CGFloat, height: CGFloat), from: String, to: String, arrow: UInt16)] = [
+      (windowSizes[0], "content", "metadata", 125), (windowSizes[1], "metadata", "content", 126),
     ]
     do {
       for plan in plans {
@@ -2825,9 +2825,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
         try await openStartPanel(ui)
         try await ui.activate()
         let opened = try await ui.json(
-          "({mode: document.querySelector('#session-panel input[name=\"session-panel-mode\"]:checked')?.value, keychain: document.querySelector('#session-panel-keychain').checked})")
+          "({mode: document.querySelector('#session-panel input[name=\"session-panel-mode\"]:checked')?.value, checkboxes: document.querySelectorAll('#session-panel input[type=checkbox]').length, keychain: /keychain/i.test(document.querySelector('#session-panel').innerText)})")
         XCTAssertEqual(opened["mode"] as? String, plan.from, "\(name): the panel opens with this run's last mode: \(opened)")
-        XCTAssertEqual(opened["keychain"] as? Bool, !plan.keychain, "\(name): and its last Keychain choice: \(opened)")
+        XCTAssertEqual(opened["checkboxes"] as? Int, 0, "\(name): the panel has no Keychain checkbox: \(opened)")
+        XCTAssertEqual(opened["keychain"] as? Bool, false, "\(name): the panel says nothing about the Keychain: \(opened)")
         let initial = try await focus()
         XCTAssertEqual(initial["id"] as? String, "session-panel-start", "\(name): Start Session is focused, as the alert's default was: \(initial)")
         try await assertStartPanelFits(ui, "\(name) start panel")
@@ -2840,10 +2841,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
           let stop = try await focus()
           stops.append(stop["id"] as? String ?? "\(stop["element"] ?? "?")")
           XCTAssertEqual(stop["focusVisible"] as? Bool, true, "\(name): \(stop)")
-          // A mode or Keychain input draws its ring on the whole option card.
+          // A mode input draws its ring on the whole option card.
           let ring = try await ui.value("""
             (() => { const focused = document.activeElement;
-              const shown = getComputedStyle(focused.closest('.session-panel-mode, .session-panel-check') ?? focused);
+              const shown = getComputedStyle(focused.closest('.session-panel-mode') ?? focused);
               return shown.outlineStyle !== 'none' && parseFloat(shown.outlineWidth) > 0; })()
             """) as? Bool
           XCTAssertEqual(ring, true, "\(name): a focus ring shows around \(stop)")
@@ -2851,18 +2852,14 @@ final class OriginTraceRenderedUITests: XCTestCase {
           if stops.last?.hasPrefix("session-panel-mode-") == true { break }
         }
         print("RENDERED_UI_START_PANEL_FOCUS \(name) \(stops)")
-        XCTAssertEqual(stops, ["session-panel-offline", "session-panel-keychain", "session-panel-mode-\(plan.from)"],
+        XCTAssertEqual(stops, ["session-panel-offline", "session-panel-mode-\(plan.from)"],
           "\(name): the panel's controls in reverse order")
         try await ui.screenshot("start-panel-focus-\(name)")
-        // Arrow keys choose within the mode group; Space toggles the Keychain.
+        // Arrow keys choose within the mode group.
         try await ui.key(plan.arrow, plan.arrow == 125 ? "\u{F701}" : "\u{F700}")
         let moved = try await ui.json(
           "({focus: document.activeElement?.id, text: document.querySelector('#session-panel').innerText})")
         XCTAssertEqual(moved["focus"] as? String, "session-panel-mode-\(plan.to)", "\(name): the arrow moved the choice: \(moved)")
-        try await ui.tab()
-        try await ui.key(49, " ")
-        let toggled = try await ui.value("document.querySelector('#session-panel-keychain').checked") as? Bool
-        XCTAssertEqual(toggled, plan.keychain, "\(name): Space toggles the Keychain choice")
         try await ui.tab()
         try await ui.tab()
         let start = try await focus()
@@ -2873,11 +2870,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
         try await ui.key(36, "\r")
         try await ui.waitUntil("document.querySelector('#session-panel')?.dataset.state === 'failed'", "\(name): Start did not report its failure")
         let failure = try await panelText(ui)
-        let chosen = "\(plan.to == "metadata" ? "Metadata only" : "Content (default)"), macOS Keychain \(plan.keychain ? "on" : "off")."
+        let chosen = "\(plan.to == "metadata" ? "Metadata only" : "Content (default)")."
         XCTAssertTrue(failure.contains("Live session unavailable"), "\(name): \(failure)")
         XCTAssertTrue(failure.contains("REB_BRAVE_BINARY names"), "\(name): the failure names the cause: \(failure)")
-        XCTAssertTrue(failure.contains("Retry starts a new session with the same choices: \(chosen)"),
-          "\(name): native started with the choice made in the panel: \(failure)")
+        XCTAssertTrue(failure.contains("Retry starts a new session with the same capture mode: \(chosen)"),
+          "\(name): native started with the mode chosen in the panel: \(failure)")
         let retryFocus = try await focus()
         XCTAssertEqual(retryFocus["id"] as? String, "session-panel-retry", "\(name): Retry is focused: \(retryFocus)")
         try await assertStartPanelFits(ui, "\(name) start failure")
@@ -2890,7 +2887,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
           "document.querySelector('#session-panel')?.dataset.state === 'failed' && document.querySelector('#session-panel-failure')?.dataset.earlier === undefined",
           "\(name): Retry did not start again")
         let retried = try await panelText(ui)
-        XCTAssertTrue(retried.contains("Retry starts a new session with the same choices: \(chosen)"), "\(name): Retry keeps the choice: \(retried)")
+        XCTAssertTrue(retried.contains("Retry starts a new session with the same capture mode: \(chosen)"), "\(name): Retry keeps the mode: \(retried)")
         let again = try await focus()
         XCTAssertEqual(again["id"] as? String, "session-panel-retry", "\(name): Retry is focused again: \(again)")
 

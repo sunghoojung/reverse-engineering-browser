@@ -39,7 +39,7 @@ context.webkit = {messageHandlers: {rebSession: {postMessage: async message => {
 
 const modes = [{id: 'content', title: 'Content (default)'}, {id: 'metadata', title: 'Metadata only'}];
 const hostile = '<img src=x onerror="window.__rebInjected=1">';
-const choose = (sites, extra = {}) => ({panel: 'choose', mode: 'content', keychain: false, modes, sites, ...extra});
+const choose = (sites, extra = {}) => ({panel: 'choose', mode: 'content', modes, sites, ...extra});
 const saved = (generation, items) => ({state: 'saved', generation, limit: 8, items});
 
 // The start choices, with the same wording as the alert they replace.
@@ -51,9 +51,6 @@ for (const phrase of ['Start a live research session', 'Choose the evidence boun
   'Retains request paths, queries and bodies and response bodies up to 16 MiB each, request and response headers, cookies, and Canvas images.',
   'Keeps request hosts and each request body’s length, type and SHA-256, without headers, cookies or Canvas images.',
   'Artifacts keep raw source URLs locally; only an explicitly exported redacted copy is altered.',
-  'Use macOS Keychain for browser credential storage',
-  'Keep this off for a prompt-free isolated research profile, and do not save passwords in that profile.',
-  'macOS may then request your login password in its own Safe Storage prompt.',
   'Tracking 2 functions', 'window.hsw', 'https://hcaptcha.test/glue.js', 'Source URL not recorded',
   'Content mode also records settled-value digests of their string and byte results (sensitive capture)',
   'A Brave without invocation capture starts without them and says so.']) {
@@ -65,7 +62,9 @@ assert.equal(window.__rebInjected, undefined);
 assert.deepEqual([...panel.querySelectorAll('footer button')].map(button => button.textContent), ['Continue Offline', 'Start Session']);
 const radio = id => panel.querySelector(`#session-panel-mode-${id}`);
 assert.equal(radio('content').checked, true, 'native preselects the mode');
-assert.equal(panel.querySelector('#session-panel-keychain').checked, false);
+// Sessions from the panel always use the isolated profile: no Keychain choice.
+assert(!/keychain/i.test(text()), 'the start panel offers no Keychain choice');
+assert.equal(panel.querySelectorAll('input[type="checkbox"]').length, 0);
 assert.equal(posted.length, 0, 'drawing the panel asks native nothing');
 
 // The page selection drives the digest wording and is what Start sends.
@@ -73,13 +72,9 @@ radio('metadata').checked = true;
 radio('metadata').dispatchEvent(new window.Event('change'));
 assert(text().includes('Metadata mode records no settled-value digests.'));
 assert(!text().includes('Content mode also records settled-value digests'));
-const keychain = panel.querySelector('#session-panel-keychain');
-keychain.checked = true;
-keychain.dispatchEvent(new window.Event('change'));
 // Native republishing the same decision (a Remove reply) keeps that selection.
 push(choose(saved(1, [{label: 'window.hsw', sourceURL: 'https://hcaptcha.test/glue.js'}, {label: hostile, sourceURL: null}])));
 assert.equal(radio('metadata').checked, true, 'a redraw keeps the researcher’s mode');
-assert.equal(panel.querySelector('#session-panel-keychain').checked, true, 'a redraw keeps the Keychain choice');
 
 // Remove names the list it saw; native answers with the new state.
 answer = message => message.op === 'removeSite'
@@ -108,7 +103,7 @@ assert.equal(buttonNamed('Clear All'), undefined, 'nothing to clear');
 answer = () => ({ok: true});
 buttonNamed('Start Session').click();
 await settle();
-assert.deepEqual(posted.at(-1), {op: 'start', mode: 'metadata', keychain: true});
+assert.deepEqual(posted.at(-1), {op: 'start', mode: 'metadata'}, 'Start sends the capture mode and nothing else');
 
 // A refused choice stays on screen with the reason and working controls.
 answer = () => new Error('This start choice is no longer open.');
@@ -139,23 +134,24 @@ assert.equal(panel.getAttribute('aria-busy'), 'true');
 
 // A session that never became ready, then one that ended.
 const log = `Brave stopped during native startup. ${hostile}\n\nSession log: /tmp/live-session.log`;
-push({panel: 'failed', mode: 'content', keychain: false, modes,
+push({panel: 'failed', mode: 'content', modes,
   failure: {title: 'Live session unavailable', message: log, afterStartup: false}});
 assert.equal(panel.dataset.state, 'failed');
 assert(text().includes('Live session unavailable'));
 assert.equal(panel.querySelector('#session-panel-failure').textContent, log, 'the launcher cause and log path are shown as text');
 assert.equal(panel.querySelectorAll('img').length, 0);
-assert(text().includes('Retry starts a new session with the same choices: Content (default), macOS Keychain off.'));
+assert(text().includes('Retry starts a new session with the same capture mode: Content (default).'));
+assert(!/keychain/i.test(text()), 'Retry names no Keychain choice');
 assert(!text().includes('replaces this ended workspace'));
 assert.deepEqual([...panel.querySelectorAll('footer button')].map(button => button.textContent), ['Continue Offline', 'Retry']);
 answer = () => ({ok: true});
 buttonNamed('Retry').click();
 await settle();
 assert.deepEqual(posted.at(-1), {op: 'retry'});
-push({panel: 'failed', mode: 'metadata', keychain: true, modes,
+push({panel: 'failed', mode: 'metadata', modes,
   failure: {title: 'Live session ended', message: 'The live capture coordinator stopped unexpectedly.', afterStartup: true}});
 assert(text().includes('Live session ended'));
-assert(text().includes('Metadata only, macOS Keychain on.'));
+assert(text().includes('the same capture mode: Metadata only.'));
 assert(text().includes('Continue Offline replaces this ended workspace'));
 buttonNamed('Continue Offline').click();
 await settle();
@@ -173,8 +169,9 @@ const native = readFileSync(new URL('../apps/research-ui/macos/SessionPanel.swif
 for (const op of ['state', 'start', 'retry', 'offline', 'removeSite', 'clearSites']) {
   assert(native.includes(`case "${op}"`) || native.includes(`"${op}"`), `native handles ${op}`);
 }
-assert.match(native, /CFBooleanGetTypeID/, 'native accepts only a JavaScript boolean for the Keychain flag');
+assert.match(native, /isSubset\(of: \["op", "mode"\]\)/, 'native refuses a start that names anything but the mode');
+assert(!/body\["keychain"\]/.test(native), 'native reads no Keychain value from the page');
 assert.match(native, /LiveCaptureMode\(rawValue: raw\)/, 'native accepts only a known capture mode');
-console.log('PASS session panel: start choices with the alert’s wording, saved sites as text, Remove and Clear All by generation, '
+console.log('PASS session panel: start choices with the alert’s wording, no Keychain option, saved sites as text, Remove and Clear All by generation, '
   + 'Start with the page selection, a refused choice kept on screen, starting, unavailable and ended states with Retry and Continue Offline '
   + '(offline DOM model; rendered layout, focus and the real bridge are in the rendered harness)');

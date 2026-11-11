@@ -2578,10 +2578,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private var closeSmoke: NativeCloseGuardSmoke?
   private let liveSessionCoordinator = LiveSessionCoordinator()
   private let smokeTest = ProcessInfo.processInfo.environment["REB_APP_SMOKE_TEST"] == "1"
-  // The researcher's choices for this app run. They start from the environment
-  // and follow the start panel, so a later panel never replaces Metadata with the default.
+  // The researcher's capture mode for this app run. It starts from the
+  // environment and follows the start panel, so a later panel or reopen never
+  // replaces Metadata with the default.
   private lazy var selectedCaptureMode = LiveCaptureMode.configured(ProcessInfo.processInfo.environment)
-  private lazy var selectedSystemKeychain = configuredAutomaticSystemKeychain()
   // Continue Offline holds for the rest of the run: a reopen starts nothing.
   private var automaticSessionSuppressed = false
   // The panel shows a start or failure decision. Nothing starts a session
@@ -2717,7 +2717,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
           NSApp.terminate(nil)
         },
         failed: { [weak self] failure in
-          self?.presentLiveSessionError(failure, captureMode: .metadata, useSystemKeychain: false)
+          self?.presentLiveSessionError(failure, captureMode: .metadata)
         }
       )
     }
@@ -2834,9 +2834,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   // panel refuses it in startAutomaticLiveSession.
   private func requestAutomaticLiveSession() {
     guard !liveSessionCoordinator.isRunning else { return }
+    // REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN=1 is the advanced route to the macOS
+    // Keychain for these automatic sessions; the panel never offers it.
     startAutomaticLiveSession(
       captureMode: selectedCaptureMode,
-      useSystemKeychain: selectedSystemKeychain
+      useSystemKeychain: configuredAutomaticSystemKeychain()
     )
   }
 
@@ -2846,7 +2848,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private func presentLiveSessionSetup() {
     guard !liveSessionCoordinator.isRunning, let sessionPanel else { return }
     presentOriginTraceWindow()
-    sessionPanel.content = .choose(mode: selectedCaptureMode, keychain: selectedSystemKeychain)
+    sessionPanel.content = .choose(mode: selectedCaptureMode)
   }
 
   // The panel already accepted this choice for the decision on screen; it is
@@ -2854,17 +2856,18 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private func answerLiveSessionPanel(_ choice: NativeSessionPanel.Choice) {
     guard let sessionPanel else { return }
     switch (choice, sessionPanel.content) {
-    case (.start(let mode, let keychain), .choose):
+    // A session the panel starts or retries uses the isolated, prompt-free
+    // research profile; the page cannot ask for the macOS Keychain.
+    case (.start(let mode), .choose):
       automaticSessionSuppressed = false
       selectedCaptureMode = mode
-      selectedSystemKeychain = keychain
       // Not a decision, so the start below is not refused as one behind it.
       sessionPanel.content = .starting(mode: mode)
-      startAutomaticLiveSession(captureMode: mode, useSystemKeychain: keychain)
-    case (.retry, .failed(_, let mode, let keychain)):
+      startAutomaticLiveSession(captureMode: mode, useSystemKeychain: false)
+    case (.retry, .failed(_, let mode)):
       sessionPanel.content = .starting(mode: mode)
       liveSessionCoordinator.stop()
-      startAutomaticLiveSession(captureMode: mode, useSystemKeychain: keychain)
+      startAutomaticLiveSession(captureMode: mode, useSystemKeychain: false)
     case (.offline, .choose), (.offline, .failed):
       sessionPanel.content = .hidden
       automaticSessionSuppressed = true
@@ -2892,8 +2895,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
           } ?? "Origin Trace could not find Brave Browser Development. "
             + "Place it beside Origin Trace or set REB_BRAVE_BINARY.",
           afterStartup: false),
-        captureMode: captureMode,
-        useSystemKeychain: useSystemKeychain
+        captureMode: captureMode
       )
       return
     }
@@ -2907,19 +2909,14 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
         guard nativeUIURL(liveURL.absoluteString) != nil else {
           self.presentLiveSessionError(
             .init(message: "Origin Trace received an invalid loopback UI URL.", afterStartup: false),
-            captureMode: captureMode,
-            useSystemKeychain: useSystemKeychain
+            captureMode: captureMode
           )
           return
         }
         self.openLiveWorkspace(nil)
       },
       failed: { [weak self] failure in
-        self?.presentLiveSessionError(
-          failure,
-          captureMode: captureMode,
-          useSystemKeychain: useSystemKeychain
-        )
+        self?.presentLiveSessionError(failure, captureMode: captureMode)
       }
     )
   }
@@ -3329,8 +3326,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   // and Continue Offline, over whichever workspace the window shows.
   private func presentLiveSessionError(
     _ failure: LiveSessionCoordinator.Failure,
-    captureMode: LiveCaptureMode,
-    useSystemKeychain: Bool
+    captureMode: LiveCaptureMode
   ) {
     // No modal any more, so a failure at launch, before the event loop runs,
     // is held by the panel and drawn once the page loads.
@@ -3340,7 +3336,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       return
     }
     presentOriginTraceWindow()
-    sessionPanel?.content = .failed(failure, mode: captureMode, keychain: useSystemKeychain)
+    sessionPanel?.content = .failed(failure, mode: captureMode)
   }
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

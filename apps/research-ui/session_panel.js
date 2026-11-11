@@ -15,12 +15,11 @@
     metadata: 'Keeps request hosts and each request body’s length, type and SHA-256, without headers, cookies or Canvas images.',
   };
   const ARTIFACT_NOTE = 'Artifacts keep raw source URLs locally; only an explicitly exported redacted copy is altered.';
-  const KEYCHAIN_LABEL = 'Use macOS Keychain for browser credential storage';
-  const KEYCHAIN_TEXT = 'Keep this off for a prompt-free isolated research profile, and do not save passwords in that profile. Enable it only when you need encrypted browser credentials; macOS may then request your login password in its own Safe Storage prompt.';
 
-  // The page's own selection while the decision is open. It starts from what
-  // native offers and is sent with Start; native validates it.
-  const view = {state: null, mode: 'content', keychain: false, busy: false, confirmClear: false, notice: null};
+  // The page's own selection while the decision is open: the capture mode
+  // only. It starts from what native offers and is sent with Start; native
+  // validates it. Sessions started here always use the isolated profile.
+  const view = {state: null, mode: 'content', busy: false, confirmClear: false, notice: null};
 
   function element(tag, className, text) {
     const node = document.createElement(tag);
@@ -129,23 +128,6 @@
     return group;
   }
 
-  function keychainCheck() {
-    const label = element('label', 'session-panel-check');
-    const input = element('input');
-    input.type = 'checkbox';
-    input.id = 'session-panel-keychain';
-    input.dataset.focusKey = 'keychain';
-    input.checked = view.keychain;
-    input.setAttribute('aria-describedby', 'session-panel-keychain-text');
-    input.addEventListener('change', () => { view.keychain = input.checked; });
-    const text = element('span', 'session-panel-check-text');
-    const detail = element('span', 'session-panel-check-detail', KEYCHAIN_TEXT);
-    detail.id = 'session-panel-keychain-text';
-    text.append(element('span', 'session-panel-check-name', KEYCHAIN_LABEL), detail);
-    label.append(input, text);
-    return label;
-  }
-
   // The saved invocation sites the capture about to start arms, read by
   // native from the same file Sources writes.
   function sitesSection(sites) {
@@ -224,11 +206,11 @@
   function chooseContent(state) {
     const body = element('div', 'session-panel-body');
     body.append(element('p', 'session-panel-lede', 'Choose the evidence boundary for this session. You can start another session later from the Origin Trace menu.'),
-      modeGroup(), element('p', 'session-panel-text session-panel-note', ARTIFACT_NOTE), keychainCheck(), sitesSection(state.sites));
+      modeGroup(), element('p', 'session-panel-text session-panel-note', ARTIFACT_NOTE), sitesSection(state.sites));
     const offline = button('session-panel-button', 'Continue Offline', () => choose('offline'), 'offline');
     offline.id = 'session-panel-offline';
     const start = button('session-panel-button session-panel-button-primary', 'Start Session',
-      () => choose('start', {mode: view.mode, keychain: view.keychain}), 'start');
+      () => choose('start', {mode: view.mode}), 'start');
     start.id = 'session-panel-start';
     return [header('start', 'Start a live research session'), body, actions(start, offline)];
   }
@@ -247,8 +229,7 @@
     const message = element('p', 'session-panel-failure', String(failure.message ?? 'The live session stopped.'));
     message.id = 'session-panel-failure';
     body.append(message);
-    const keychain = state.keychain ? 'macOS Keychain on' : 'macOS Keychain off';
-    body.append(element('p', 'session-panel-text', `Retry starts a new session with the same choices: ${modeTitle(state.mode)}, ${keychain}.`));
+    body.append(element('p', 'session-panel-text', `Retry starts a new session with the same capture mode: ${modeTitle(state.mode)}.`));
     if (failure.afterStartup) {
       body.append(element('p', 'session-panel-text', 'Continue Offline replaces this ended workspace, which can no longer load or save anything, with the offline workspace. Its evidence stays in its session folder.'));
     }
@@ -312,7 +293,6 @@
     const previous = view.state?.panel;
     if (state.panel === 'choose' && previous !== 'choose') {
       view.mode = state.mode === 'metadata' ? 'metadata' : 'content';
-      view.keychain = state.keychain === true;
       view.confirmClear = false;
     }
     if (!keepNotice && state.panel !== previous) view.notice = null;

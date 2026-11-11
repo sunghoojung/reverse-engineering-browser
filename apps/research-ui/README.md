@@ -2064,8 +2064,9 @@ pane, tab or layout never changes the selection.
   module's name section. Empty, it says how to fill it. **Sources** opens the
   module in Sources at the function's first byte (its body's start), revealed
   the way the entropy map reveals a byte once the module's bytes are held; a
-  byte the hex view does not hold says so in the status bar. A session change cancels a read or layout in flight and forgets
-  the decoded graph and names, so nothing from another session is drawn.
+  byte the hex view does not hold says so in the status bar. A session change
+  cancels a read or layout in flight and forgets the decoded graph and names,
+  so nothing from another session is drawn.
 - **Lineage** (rose): the selected request's recorded predecessors from
   `/api/origin-trace`, what Steps used to show, with the event under
   **Details**. Each link shows how sure it is by line style (solid observed,
@@ -2110,11 +2111,11 @@ the request crumb and keeps the call it was issued in; a card keeps its
 function and row. A lineage step that lights a card or selects a call replaces
 the crumbs under the request with it; any other step leaves the trail alone.
 When the app selects another request the trail restarts at it, and the same
-request renamed is not a pick. In focus mode a tab bar
-names what each pane holds, and the **Related** rail lists what links to the
-selection: its lineage links, its samples, the function's sampled sites and the
-graph card with its row, callers, callees and request where the graph reports
-them. Every entry jumps.
+request renamed is not a pick. In focus mode a tab bar names what each pane
+holds, and the **Related** rail lists what links to the selection: its
+lineage links, its samples, the function's sampled sites and the graph card
+with its row, callers, callees and request where the graph reports them.
+Every entry jumps.
 
 ### Layout
 
@@ -2156,8 +2157,8 @@ more**, and a selection the records still hold stays selected, drawn or not.
 - With the backend's decoded `js_invocation` object, a track has start and
   settle marks, a dotted line while the call is open, a solid span only when
   it settled synchronously (returned or threw without a promise; its samples
-  and requests were recorded while it ran), the settle's outcome, value kind and length (never
-  content), and the requests started inside it. Without that object, calls are
+  and requests were recorded while it ran), the settle's outcome, value kind
+  and length (never content), and the requests started inside it. Without that object, calls are
   grouped from the Wasm records' `js_invocation_id` alone, with no start,
   settle or request marks, and a note says so.
 - `br_table` samples are ticks with the selector under each; `call_indirect`
@@ -2203,7 +2204,10 @@ through the workspace is applied once the call returns: a lineage request
 step lights that request's stack and the card the graph selects for it
 becomes the selection, in the same trail entry as the step, and a card,
 caller or callee in the Related rail is selected in the graph and followed
-like a click on it, with its CFG and a trail entry.
+like a click on it, with its CFG and a trail entry. What the graph selects
+for the host, reported with `requested: true` (a queued `select` landing, the
+stack of the request the app shows), updates the Related rail and the pane
+head but is not a pick.
 
 ## Flow graph
 

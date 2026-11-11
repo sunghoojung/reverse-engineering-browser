@@ -248,7 +248,7 @@ fetch("/getcaptcha");
     XCInjectBundleInto: executable};
   // The launch pass opens the app as a researcher does, which the harness
   // page's --ui-url would prevent, so it runs alone in its own host launch.
-  const launchTest = 'testLaunchOpensStartPanel';
+  const launchTest = 'testLaunchStartsWithoutStartPanel';
   const launchDescription = JSON.parse(JSON.stringify(description));
   if (only) target.OnlyTestIdentifiers = [`OriginTraceRenderedUITests/${only}`];
   else target.SkipTestIdentifiers = [`OriginTraceRenderedUITests/${launchTest}`];

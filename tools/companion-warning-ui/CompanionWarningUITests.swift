@@ -2,8 +2,8 @@ import AppKit
 import XCTest
 
 // Exercise the packaged application's production live-session startup, from
-// the in-window start panel to a real startup failure, with no browser
-// pairing prompt. The outer cloud-CI driver owns the synthetic stores,
+// launch to a real startup failure shown in the in-window panel, with no
+// browser pairing prompt. The outer cloud-CI driver owns the synthetic stores,
 // inert Brave app and launch receipts. This sandboxed runner persists
 // screenshots only through XCTest attachments.
 final class CompanionWarningUITests: XCTestCase {
@@ -18,11 +18,10 @@ final class CompanionWarningUITests: XCTestCase {
     let app = try launchApplication(scenario: "automatic")
     defer { if app.state != .notRunning { app.terminate() } }
 
-    // Launch opens the window on its workspace with the start panel; Start
-    // Session reaching the inert browser's startup failure proves nothing
-    // else, a pairing prompt included, holds the session back.
-    startFromPanel(app, screenshot: "automatic-start-panel")
+    // Reaching the inert browser's startup failure proves the launch was not
+    // held behind any decision, a start panel or a pairing prompt included.
     assertStartupFailure(app)
+    XCTAssertFalse(app.staticTexts[setupTitle].exists, "Launch starts without the start panel")
     attachScreenshot(app, name: "automatic-startup-failure")
     app.buttons["Continue Offline"].click()
     assertOffline(app, observationTimeout: 65)
@@ -34,7 +33,6 @@ final class CompanionWarningUITests: XCTestCase {
     let app = try launchApplication(scenario: "retry")
     defer { if app.state != .notRunning { app.terminate() } }
 
-    startFromPanel(app, screenshot: "retry-start-panel")
     let first = failureDetail(assertStartupFailure(app))
     attachScreenshot(app, name: "retry-initial-failure")
     // No focus change or button click: the failure focuses Retry, so Return retries.
@@ -59,16 +57,6 @@ final class CompanionWarningUITests: XCTestCase {
     let app = try launchApplication(scenario: "modal-reopen")
     defer { if app.state != .notRunning { app.terminate() } }
 
-    // A reopen while the start panel is open starts nothing behind it.
-    assertStartPanel(app)
-    let launchPID = try reopenApplication()
-    XCTAssertEqual(try reopenApplication(), launchPID, "Reopen must address the existing app instance")
-    assertStartPanel(app)
-    XCTAssertFalse(app.staticTexts[failureTitle].waitForExistence(timeout: 5),
-                   "Reopen must not start a session behind the start panel")
-    attachScreenshot(app, name: "modal-reopen-start-panel")
-    startFromPanel(app, screenshot: nil)
-
     let first = failureDetail(assertStartupFailure(app))
     attachScreenshot(app, name: "modal-reopen-initial-failure")
     let firstPID = try reopenApplication()
@@ -84,8 +72,8 @@ final class CompanionWarningUITests: XCTestCase {
     assertFreshStartupFailure(app, after: first)
     app.buttons["Continue Offline"].click()
     assertOffline(app)
-    // An explicit offline decision also suppresses any later offer on an OS
-    // reopen. Activating the app alone would not test that callback.
+    // An explicit offline decision also suppresses automatic live startup on
+    // a later OS reopen. Activating the app alone would not test that callback.
     let offlinePID = try reopenApplication()
     XCTAssertEqual(firstPID, offlinePID)
     assertOffline(app, observationTimeout: 65)
@@ -135,11 +123,11 @@ final class CompanionWarningUITests: XCTestCase {
     return app
   }
 
-  // The in-window start panel, with its two choices, inside the workspace.
+  // The in-window start panel New Live Session opens, with its two choices.
   @MainActor
   private func assertStartPanel(_ app: XCUIApplication) {
     XCTAssertTrue(app.staticTexts[setupTitle].waitForExistence(timeout: 30),
-                  "Launch must open the start panel in the window: " + app.debugDescription)
+                  "New Live Session must open the start panel in the window: " + app.debugDescription)
     XCTAssertFalse(app.staticTexts[retiredPairingTitle].exists, "A live session must start without a browser pairing prompt")
     XCTAssertTrue(app.windows["Origin Trace"].exists, "The panel is part of the Origin Trace window")
     let start = app.buttons["Start Session"]

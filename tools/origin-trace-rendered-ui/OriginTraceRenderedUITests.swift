@@ -2909,53 +2909,59 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   // Runs only in the driver's launch pass, where the app starts as a
-  // researcher opens it: no --ui-url, automatic live sessions on, synthetic
-  // stores and a REB_BRAVE_BINARY that does not exist. The window must open on
-  // the bundled workspace with the start panel, a reopen must not start a
-  // session behind it, Start must reach the native start, and after Continue
-  // Offline a reopen must offer nothing for the rest of the run.
+  // researcher opens it: no --ui-url, automatic live sessions on, stores that
+  // do not exist yet and a REB_BRAVE_BINARY that does not exist. Launch must
+  // start a Content session at once, without the start panel. The missing
+  // Brave makes that start fail, so the panel shows only the failure, which
+  // proves the start ran. A reopen while the failure is open starts nothing,
+  // Return on Retry starts again, and after Continue Offline a reopen starts
+  // nothing for the rest of the run.
   @MainActor
-  func testLaunchOpensStartPanel() async throws {
+  func testLaunchStartsWithoutStartPanel() async throws {
     guard ProcessInfo.processInfo.environment["REB_RENDERED_UI_LAUNCH"] == "1" else {
       throw XCTSkip("Runs in the driver's launch pass, where the app starts without --ui-url")
     }
     let ui = try Harness()
-    let choosing = "location.protocol === 'reb:' && document.readyState === 'complete' && typeof state === 'object' "
-      + "&& document.querySelector('#session-panel')?.dataset.state === 'choose'"
-    try await ui.waitUntil(choosing, timeout: 30, "launch did not open the start panel in the bundled workspace")
+    let failed = "location.protocol === 'reb:' && document.readyState === 'complete' && typeof state === 'object' "
+      + "&& document.querySelector('#session-panel')?.dataset.state === 'failed'"
+    try await ui.waitUntil(failed, timeout: 30, "launch did not start a session (its failure never showed)")
     let workspaceURL = ui.webView.url
     try await ui.activate()
     for size in windowSizes {
       try await ui.resize(width: size.width, height: size.height)
       let text = try await panelText(ui)
-      for phrase in ["Start a live research session", "Content (default)", "Metadata only", "Use macOS Keychain for browser credential storage",
-        "Tracking no functions", "Start Session", "Continue Offline"] {
-        XCTAssertTrue(text.contains(phrase), "\(size.name): the launch panel offers \(phrase): \(text)")
-      }
+      XCTAssertFalse(text.contains("Start a live research session"), "\(size.name): launch does not ask first: \(text)")
+      let noStart = try await ui.value("document.querySelector('#session-panel-start') === null") as? Bool
+      XCTAssertEqual(noStart, true, "\(size.name): launch shows no Start Session")
+      XCTAssertTrue(text.contains("Live session unavailable"), "\(size.name): \(text)")
+      XCTAssertTrue(text.contains("REB_BRAVE_BINARY names"), "\(size.name): the failure names the cause: \(text)")
+      XCTAssertTrue(text.contains("Content (default)"), "\(size.name): launch started the default Content mode: \(text)")
       let shown = try await ui.json("({traffic: !document.querySelector('#screen-traffic').hidden, focus: document.activeElement?.id})")
-      XCTAssertEqual(shown["traffic"] as? Bool, true, "\(size.name): the workspace is open beside the panel: \(shown)")
-      XCTAssertEqual(shown["focus"] as? String, "session-panel-start", "\(size.name): \(shown)")
-      try await assertStartPanelFits(ui, "\(size.name) launch panel")
-      try await ui.screenshot("launch-start-panel-\(size.name)")
+      XCTAssertEqual(shown["traffic"] as? Bool, true, "\(size.name): the workspace is open beside the failure: \(shown)")
+      XCTAssertEqual(shown["focus"] as? String, "session-panel-retry", "\(size.name): Retry is focused: \(shown)")
+      try await assertStartPanelFits(ui, "\(size.name) launch failure")
+      try await ui.screenshot("launch-failure-\(size.name)")
     }
-    // A start would fail at once on the missing Brave and show that failure.
+    // A start would fail at once on the missing Brave and redraw the failure.
+    _ = try await ui.value("(document.querySelector('#session-panel-failure').dataset.earlier = 'true', true)")
     try await ui.reopen()
     try await Task.sleep(nanoseconds: 2_000_000_000)
-    let reopened = try await ui.json("({state: document.querySelector('#session-panel')?.dataset.state, url: location.href})")
-    XCTAssertEqual(reopened["state"] as? String, "choose", "a reopen while the panel is open starts nothing behind it: \(reopened)")
+    let reopened = try await ui.json(
+      "({state: document.querySelector('#session-panel')?.dataset.state, earlier: document.querySelector('#session-panel-failure')?.dataset.earlier})")
+    XCTAssertEqual(reopened["state"] as? String, "failed", "a reopen keeps the open failure: \(reopened)")
+    XCTAssertEqual(reopened["earlier"] as? String, "true", "a reopen while the failure is open starts nothing: \(reopened)")
     XCTAssertEqual(ui.webView.url, workspaceURL, "a reopen keeps the document")
 
-    try await ui.click("#session-panel-start")
-    try await ui.waitUntil("document.querySelector('#session-panel')?.dataset.state === 'failed'", "Start from launch did not reach the native start")
-    let failure = try await panelText(ui)
-    XCTAssertTrue(failure.contains("REB_BRAVE_BINARY names"), failure)
-    try await ui.screenshot("launch-start-failure")
+    try await ui.key(36, "\r")
+    try await ui.waitUntil(
+      "document.querySelector('#session-panel')?.dataset.state === 'failed' && document.querySelector('#session-panel-failure')?.dataset.earlier === undefined",
+      "Return on Retry did not start again")
     try await ui.click("#session-panel-offline")
     try await ui.waitUntil("document.querySelector('#session-panel').hidden", "Continue Offline did not close the panel")
     try await ui.reopen()
     try await Task.sleep(nanoseconds: 2_000_000_000)
     let offline = try await ui.value("document.querySelector('#session-panel').hidden") as? Bool
-    XCTAssertEqual(offline, true, "after Continue Offline a reopen offers nothing for the run")
+    XCTAssertEqual(offline, true, "after Continue Offline a reopen starts nothing for the run")
     try await ui.screenshot("launch-offline-after-reopen")
   }
 }

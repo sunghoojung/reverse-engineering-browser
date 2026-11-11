@@ -2582,7 +2582,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   // and follow the start panel, so a later panel never replaces Metadata with the default.
   private lazy var selectedCaptureMode = LiveCaptureMode.configured(ProcessInfo.processInfo.environment)
   private lazy var selectedSystemKeychain = configuredAutomaticSystemKeychain()
-  // Continue Offline holds for the rest of the run: a reopen offers nothing.
+  // Continue Offline holds for the rest of the run: a reopen starts nothing.
   private var automaticSessionSuppressed = false
   // The panel shows a start or failure decision. Nothing starts a session
   // behind it, so a reopen while it is open changes nothing.
@@ -2721,10 +2721,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
         }
       )
     }
-    // The window opens on the offline workspace with the start panel; nothing
-    // is captured until the researcher chooses Start Session there.
     if !smokeTest && requestedUIURL == nil && automaticLiveSessionEnabled() {
-      presentLiveSessionSetup()
+      requestAutomaticLiveSession()
     }
   }
 
@@ -2815,7 +2813,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     guard !smokeTest else { return true }
     presentOriginTraceWindow()
     if automaticLiveSessionEnabled() && !automaticSessionSuppressed {
-      offerLiveSession()
+      requestAutomaticLiveSession()
     }
     return true
   }
@@ -2831,15 +2829,20 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private let customBraveBundleIdentifier = "com.brave.Browser.development"
   private let customBraveApplicationName = "Brave Browser Development.app"
 
-  // A reopen offers a session the way launch does. It never starts one by
-  // itself, and an open decision stays as it is.
-  private func offerLiveSession() {
-    guard !liveSessionCoordinator.isRunning, !liveSessionDecisionOpen else { return }
-    presentLiveSessionSetup()
+  // Launch, and a reopen that Continue Offline has not suppressed, start a
+  // session with this run's choices and no panel. An open decision in the
+  // panel refuses it in startAutomaticLiveSession.
+  private func requestAutomaticLiveSession() {
+    guard !liveSessionCoordinator.isRunning else { return }
+    startAutomaticLiveSession(
+      captureMode: selectedCaptureMode,
+      useSystemKeychain: selectedSystemKeychain
+    )
   }
 
-  // Opens the start panel in the window. The choices start from this run's
-  // last ones; the panel lists the saved invocation sites the capture arms.
+  // Opens the start panel in the window for New Live Session. The choices
+  // start from this run's last ones; the panel lists the saved invocation
+  // sites the capture arms.
   private func presentLiveSessionSetup() {
     guard !liveSessionCoordinator.isRunning, let sessionPanel else { return }
     presentOriginTraceWindow()
@@ -2919,8 +2922,6 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
         )
       }
     )
-    // A launch that failed at once reports from the next turn of the run loop.
-    if liveSessionCoordinator.isRunning { sessionPanel?.content = .starting(mode: captureMode) }
   }
 
   // The only way the app replaces the window's document. The close guard and
@@ -3331,7 +3332,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     captureMode: LiveCaptureMode,
     useSystemKeychain: Bool
   ) {
-    guard NSApp.isRunning else { return }
+    // No modal any more, so a failure at launch, before the event loop runs,
+    // is held by the panel and drawn once the page loads.
     if smokeTest {
       print("SMOKE_LIVE_FAILURE \(failure.message)")
       automaticSessionSuppressed = true

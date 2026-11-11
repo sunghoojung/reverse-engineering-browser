@@ -1818,8 +1818,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     else if (plain && (key === 'i' || key === 'I')) setDetails(!detailsOpen);
     else if (plain && (key === 'm' || key === 'M')) { minimapOn = !minimapOn; host.toggleAttribute('data-minimap-off', !minimapOn); miniKey = ''; requestDraw(); }
     else if (plain && (key === 'f' || key === 'F') && selected >= 0) centerOn(selected);
-    else if (plain && (key === 'c' || key === 'C') && selected >= 0) copy(flowGraphNodeName(display.nodes[selected]), 'Name');
-    else if (plain && (key === 'l' || key === 'L') && selected >= 0) copy(flowGraphNodeLocation(display.nodes[selected]), 'Location');
+    else if (plain && !event.shiftKey && (key === 'c' || key === 'C') && selected >= 0) copy(flowGraphNodeName(display.nodes[selected]), 'Name');
+    else if (plain && !event.shiftKey && (key === 'l' || key === 'L') && selected >= 0) copy(flowGraphNodeLocation(display.nodes[selected]), 'Location');
     else handled = false;
     if (handled) { event.preventDefault(); event.stopPropagation(); }
   });

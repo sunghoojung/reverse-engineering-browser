@@ -441,6 +441,13 @@ const text = selector => host.querySelector(selector)?.textContent ?? '';
   assert.equal(panel('snapshot()').menu, false, 'Escape closes the menu');
   key('c');
   assert.match(text('.flow-graph-toast'), /Copy is not available here\. Name: <img src=x onerror=alert\(1\)>/, 'copy says so when the shell has no clipboard, in a toast');
+  // Shift+C and Shift+L belong to the Flow workspace's pane toggles: the canvas leaves them unhandled.
+  const shifted = Object.assign(new window.Event('keydown', {bubbles: true, cancelable: true}), {key: 'C', shiftKey: true});
+  canvas.dispatchEvent(shifted);
+  assert.equal(shifted.defaultPrevented, false, 'Shift+C reaches the workspace');
+  const shiftedL = Object.assign(new window.Event('keydown', {bubbles: true, cancelable: true}), {key: 'L', shiftKey: true});
+  canvas.dispatchEvent(shiftedL);
+  assert.equal(shiftedL.defaultPrevented, false, 'Shift+L reaches the workspace');
   // Rows from the keyboard: J steps calls, U goes to the caller, Enter
   // follows a call and Backspace comes back.
   key('u');

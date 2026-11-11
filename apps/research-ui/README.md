@@ -2341,7 +2341,8 @@ steps with Enter, Shift+Enter or its arrows, and never dims a match.
 - `+`, `-` and `0` zoom and fit, and Shift+arrows pan.
 - F centers the selection.
 - I toggles Details.
-- C and L copy the name and location.
+- C and L copy the name and location. With Shift they are left to the Flow
+  workspace, where ⇧C and ⇧L show or hide the CFG and Lineage panes.
 - M hides the minimap.
 
 The canvas announces this list through `aria-describedby`.

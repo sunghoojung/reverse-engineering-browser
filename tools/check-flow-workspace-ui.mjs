@@ -335,6 +335,17 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   assert.equal(workspace.selection().sample.label, 'sample 2', 'and a pane jump never changes the selection');
 }
 {
+  // A new pick keeps only the crumbs that are its recorded relationships:
+  // call #13 after a sample in #12 drops #12's function, site and sample.
+  document.querySelector('#flow-timeline [data-key="call:41:13"]').dispatchEvent(new window.Event('click'));
+  same(workspace.trail().map(crumb => crumb.label), ['POST collect.frame.test #73', 'call #13'], 'a call keeps only itself under the request');
+  same([workspace.selection().fn, workspace.selection().site, workspace.selection().sample, workspace.selection().graphKey], [null, null, null, null]);
+  // Back to the sample, for the checks that follow.
+  document.querySelectorAll('#flow-timeline .flow-tl-sample')[1].dispatchEvent(new window.Event('click'));
+  await settle();
+  same(workspace.trail().map(crumb => crumb.label), ['POST collect.frame.test #73', 'call #12', 'run', '+0x45 br_table', 'sample 2']);
+}
+{
   // Focus mode: one pane, its tab, the Related rail; Z restores the split exactly.
   const split = workspace.state();
   key('2');
@@ -389,7 +400,8 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   graphCalls.length = 0; viewCalls.length = 0;
   workspace.graphSelected({key: 'wasm|12||2||send|||', kind: 'wasm', name: 'send', artifact_id: '4', function_index: 2, row: {index: 0, site: '+0x4b', op: 'call', target: 'hash'}, request: null});
   await settle();
-  same(workspace.trail().slice(2).map(crumb => crumb.label), ['send', '+0x4b call']);
+  same(workspace.trail().map(crumb => crumb.label), ['POST collect.frame.test #73', 'send', '+0x4b call'], 'a card keeps its function and row and drops the earlier sample\u2019s call, function, site and sample');
+  assert.equal(workspace.timeline.selection(), null, 'and the timeline lets go of the sample');
   assert(fetches.includes('/api/wasm/graph?artifact_id=4&function=2'));
   workspace.graphFollowed({key: 'wasm|12||2||send|||', kind: 'wasm', name: 'send', artifact_id: '4', function_index: 2, row: null, request: null});
   await settle();
@@ -418,10 +430,24 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   // A tracked call's start step selects its track.
   workspace.lineageSelected({key: '41:101', step: {relation: 'issued_during_invocation', confidence: 'observed', category: 'vm', operation: 'js_invocation_start', request_id: '0', event: {process_id: 41, sequence_number: '101'}}});
   assert.equal(workspace.selection().call.label, 'call #12');
-  // A request chip selects its request in the app.
+  // A JavaScript card has no recorded relationship to that call.
+  workspace.graphSelected({key: 'js|1|10|5|||init|||', kind: 'javascript', name: 'init', row: null, request: null});
+  same(workspace.trail().map(crumb => crumb.label), ['POST collect.frame.test #73', 'init'], 'a JavaScript card drops the old call crumb');
+  // A request chip selects its request in the app, keeps the call it was
+  // issued in and drops the card; with a sample picked, the sample goes too.
+  document.querySelectorAll('#flow-timeline .flow-tl-sample')[1].dispatchEvent(new window.Event('click'));
+  await settle();
   appCalls.length = 0;
   document.querySelector('#flow-timeline .flow-tl-chip').dispatchEvent(new window.Event('click'));
   same(appCalls, [['selectRequest', 'r0']]);
+  same(workspace.trail().map(crumb => crumb.label), ['GET frame.test #71', 'call #12'], 'the chip\u2019s request and call, and no old sample');
+  assert.equal(workspace.selection().step, null, 'the old request\u2019s lineage step goes with it');
+  assert.equal(workspace.timeline.selection()?.type, 'request');
+  // The app catching up with the same request renames it without a trail entry.
+  const named = workspace.history().entries;
+  appRequest = {id: 'r0', label: 'GET frame.test #71', method: 'GET', path: '/', status: 200, renderer: {process: 41, request: '71'}};
+  workspace.sync({visible: true, session: '7', request: appRequest});
+  assert.equal(workspace.history().entries, named, 'the same request again is not a new pick');
 }
 {
   // A key the workspace queued before layout comes back `requested`: it is

@@ -2100,7 +2100,14 @@ already handles while it has focus.
   timeline, samples in record order. Arrows move along and between tracks.
 
 The **trail** in the head reads request › tracked call › function › site ›
-sample, and each crumb jumps to its item in its pane. In focus mode a tab bar
+sample, and each crumb jumps to its item in its pane. A pick keeps only the
+crumbs that are recorded relationships of what was picked: a sample keeps its
+call, function and site; a call keeps itself; a request chip makes its request
+the request crumb and keeps the call it was issued in; a card keeps its
+function and row. A lineage step that lights a card or selects a call replaces
+the crumbs under the request with it; any other step leaves the trail alone.
+When the app selects another request the trail restarts at it, and the same
+request renamed is not a pick. In focus mode a tab bar
 names what each pane holds, and the **Related** rail lists what links to the
 selection: its lineage links, its samples, the function's sampled sites and the
 graph card with its row, callers, callees and request where the graph reports

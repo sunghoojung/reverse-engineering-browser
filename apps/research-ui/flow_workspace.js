@@ -347,27 +347,47 @@ function createFlowWorkspace(options) {
   if (timeline?.processSelect && timelineSlot) timelineSlot.replaceWith(timeline.processSelect);
   timelineRefresh?.addEventListener('click', () => timeline?.refresh());
   timelineOpenButton?.addEventListener('click', () => { timelineOpen = !timelineOpen; applyLayout(); if (timelineOpen) focusPaneContent('timeline'); });
+  // Every pick keeps only the crumbs that are recorded relationships of the
+  // new item: a sample keeps its call, function and site; a call or a request
+  // chip keeps the call it names; a card keeps its function and row. The
+  // request stays as the app selected it, and its lineage step with it.
+  const noCrumbs = {call: null, fn: null, site: null, sample: null, graphKey: null};
   function timelinePicked(info) {
     if (restoring) return;
-    if (!info) { setSelection({call: null, sample: null}, {pane: 'timeline'}); graphCall('setMark', null); renderCfgSamples(); renderLineageSelected(); return; }
+    if (!info) {
+      // The sample's function and site go with it, unless a graph card holds them.
+      setSelection({call: null, sample: null, ...(selection.graphKey ? {} : {fn: null, site: null})}, {pane: 'timeline'});
+      graphCall('setMark', null); renderCfgSamples(); renderLineageSelected(); return;
+    }
     const callCrumb = info.track ? {key: `call:${info.track.key}`, label: `call #${info.track.invocation}`} : null;
     if (info.type === 'sample') {
       const sample = info.sample;
       const fn = fnFor(sample.artifact_id, sample.function_index);
-      setSelection({call: callCrumb, fn, site: {offset: sample.offset, kind: sample.kind, label: `${flowHexOffset(sample.offset)} ${sample.kind}`}, sample: {key: info.key, label: `sample ${sample.ordinal}`}}, {pane: 'timeline'});
+      // The selected graph card stays only when it is the sample's function.
+      const sameCard = graphInfo?.key && graphInfo.key === selection.graphKey && String(graphInfo.artifact_id) === String(sample.artifact_id) && graphInfo.function_index === sample.function_index;
+      setSelection({...noCrumbs, call: callCrumb, fn, site: {offset: sample.offset, kind: sample.kind, label: `${flowHexOffset(sample.offset)} ${sample.kind}`}, sample: {key: info.key, label: `sample ${sample.ordinal}`},
+        graphKey: sameCard ? selection.graphKey : null}, {pane: 'timeline'});
       graphCall('setMark', {artifact_id: sample.artifact_id, function_index: sample.function_index, offset: sample.offset});
       openCfg(fn, sample.offset, {auto: true});
     } else if (info.type === 'call') {
-      setSelection({call: callCrumb, sample: null}, {pane: 'timeline'});
+      setSelection({...noCrumbs, call: callCrumb}, {pane: 'timeline'});
       graphCall('setMark', null);
     } else {
-      setSelection({call: callCrumb}, {pane: 'timeline'});
       const known = call('findRendererRequest', info.process, info.request.request);
+      // The chip's request is the request crumb now, in the same trail entry;
+      // the app's selection catches up and only refreshes its label.
+      const request = known?.id ? requestCrumb(known, info.request.request) : null;
+      setSelection({...noCrumbs, call: callCrumb, ...(request ? requestPatch(request) : {})}, {pane: 'timeline'});
+      graphCall('setMark', null);
       if (known?.id) call('selectRequest', known.id);
       else flash('This request is not in the captured request list, so Lineage cannot open it.');
     }
     renderCfgSamples(); renderLineageSelected(); renderRelated();
   }
+  /** A request crumb for a captured request row the workspace selects itself. */
+  const requestCrumb = (known, renderer) => ({id: known.id, label: renderer ? `${known.label} #${renderer}` : known.label, renderer: renderer ?? null});
+  /** A new request: its lineage step was the old request's. */
+  const requestPatch = request => (request.id === selection.request?.id ? {} : {request, step: null});
   /** A function crumb for a Wasm function, named from the graph when it knows. */
   function fnFor(artifactId, functionIndex) {
     const named = graphInfo && String(graphInfo.artifact_id) === String(artifactId) && graphInfo.function_index === functionIndex ? graphInfo.name : null;
@@ -395,17 +415,18 @@ function createFlowWorkspace(options) {
     if (restoring || requested) { renderRelated(); renderTabs(); return; }
     intended = null;
     // A card replaces a picked sample, so the timeline lets go of it too.
-    if (info && selection.sample) timeline?.clear();
-    if (!info) { setSelection({graphKey: null}, {pane: 'graph'}); renderRelated(); return; }
+    if (info && selection.sample) { timeline?.clear(); graphCall('setMark', null); }
+    // Clearing the card clears its own crumbs; a sample's stay.
+    if (!info) { setSelection(selection.graphKey ? {graphKey: null, fn: null, site: null} : {graphKey: null}, {pane: 'graph'}); renderRelated(); return; }
     const wasm = info.kind === 'wasm' && info.artifact_id && Number.isSafeInteger(info.function_index);
     if (wasm) {
       const fn = fnFor(info.artifact_id, info.function_index);
       const site = /^\+0x[0-9a-f]+$/i.test(info.row?.site ?? '') ? {offset: Number.parseInt(info.row.site.slice(3), 16), kind: info.row.op ?? 'site', label: `${info.row.site} ${info.row.op ?? ''}`.trim()} : null;
-      setSelection({graphKey: info.key ?? null, fn, site, sample: null}, {pane: 'graph'});
+      setSelection({...noCrumbs, graphKey: info.key ?? null, fn, site}, {pane: 'graph'});
       openCfg(fn, site?.offset ?? null, {auto: true});
       if (followed) reveal('cfg', {focus: true});
     } else {
-      setSelection({graphKey: info.key ?? null, fn: info.key ? {key: info.key, artifact_id: null, function_index: null, name: info.name ?? null, label: info.name || info.kind || 'card'} : selection.fn, site: null, sample: null}, {pane: 'graph'});
+      setSelection({...noCrumbs, graphKey: info.key ?? null, fn: info.key ? {key: info.key, artifact_id: null, function_index: null, name: info.name ?? null, label: info.name || info.kind || 'card'} : null}, {pane: 'graph'});
       if (followed && info.request) reveal('lineage', {focus: true});
     }
     renderRelated();
@@ -430,8 +451,12 @@ function createFlowWorkspace(options) {
       // A tracked call's start or settle record selects that call's track.
       const record = `${step.event.process_id}:${step.event.sequence_number}`;
       const track = timeline?.view()?.tracks.find(item => item.start?.key === record || item.settle?.key === record);
-      if (track) timeline.select(`call:${track.key}`, {silent: true});
-      if (track) setSelection({call: {key: `call:${track.key}`, label: `call #${track.invocation}`}}, {pane: 'lineage'});
+      // A step that names neither a card nor a call is a detail of the
+      // request and leaves the trail as it is.
+      if (!track) return;
+      if (selection.sample) graphCall('setMark', null);
+      timeline.select(`call:${track.key}`, {silent: true});
+      setSelection({...noCrumbs, call: {key: `call:${track.key}`, label: `call #${track.invocation}`}}, {pane: 'lineage'});
     });
     renderLineageSelected(); renderRelated();
   }
@@ -885,7 +910,9 @@ function createFlowWorkspace(options) {
       if (graphInfo.request) {
         const known = call('findRendererRequest', graphInfo.request.process, graphInfo.request.request);
         entries.push(entry(known?.label ?? `request #${graphInfo.request.request}`, known ? 'trace its lineage' : 'not in the request list', () => {
-          if (known?.id) { call('selectRequest', known.id); reveal('lineage', {focus: true}); } else flash('This request is not in the captured request list.');
+          // The card made this request, so its crumbs stay beside it.
+          if (known?.id) batch(() => { setSelection(requestPatch(requestCrumb(known, graphInfo.request.request)), {pane: 'lineage'}); call('selectRequest', known.id); reveal('lineage', {focus: true}); });
+          else flash('This request is not in the captured request list.');
         }));
       }
       section('Graph', 'graph', entries, {label: 'In graph', key: '1', aria: 'Open the graph', run: () => reveal('graph', {focus: true})});
@@ -1017,7 +1044,20 @@ function createFlowWorkspace(options) {
         renderCfgChrome();
       }
       const crumb = request ? {id: request.id, label: request.label ?? `${request.method ?? ''} ${request.path ?? ''}`.trim(), renderer: request.renderer?.request ?? null} : null;
-      if ((crumb?.id ?? null) !== (selection.request?.id ?? null) || crumb?.label !== selection.request?.label) setSelection({request: crumb}, {pane: 'lineage', record: Boolean(crumb) && !restoring});
+      if (!restoring) {
+        if ((crumb?.id ?? null) !== (selection.request?.id ?? null)) {
+          // The app chose another request: a new pick, and nothing below the
+          // old request is a recorded relationship of it.
+          if (selection.sample) { timeline?.clear(); graphCall('setMark', null); }
+          setSelection({...noCrumbs, request: crumb, step: null}, {pane: 'lineage', record: Boolean(crumb)});
+        } else if (crumb && (crumb.label !== selection.request.label || crumb.renderer !== selection.request.renderer)) {
+          // The same request, named afresh: no pick, so no trail entry; the
+          // entry that holds it takes the new name too.
+          selection = {...selection, request: crumb};
+          if (history[cursor]?.selection.request?.id === crumb.id) history[cursor] = {...history[cursor], selection: {...history[cursor].selection, request: crumb}};
+          renderTrail(); renderTabs();
+        }
+      }
       if (requestTag) requestTag.hidden = !request;
       if (requestMeta) {
         const parts = request ? [request.renderer?.request ? `#${request.renderer.request}` : null, request.status ? String(request.status) : null, request.renderer ? `renderer ${request.renderer.process}` : null].filter(Boolean) : [];

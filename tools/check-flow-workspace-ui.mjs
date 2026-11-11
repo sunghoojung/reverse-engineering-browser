@@ -250,6 +250,10 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   assert.equal(document.querySelectorAll('#flow-timeline .flow-tl-sample').length, 6);
   assert.equal(document.querySelectorAll('#flow-timeline .flow-tl-chip').length, 3);
   assert.equal(document.querySelectorAll('#flow-timeline .flow-tl-run').length, 1, 'only the synchronous settle draws a running span');
+  const run = document.querySelector('#flow-timeline .flow-tl-run');
+  assert.match(run.title, /^Settled synchronously: it returned or threw without a promise/);
+  assert.match(run.title, /Samples and requests on this track were recorded inside it/, 'the span says records inside it were made while it ran');
+  assert(!/before any other record/.test(run.title), 'and never that nothing else was recorded');
   assert(!fetches.some(url => url.startsWith('/api/js-invocation-sites')), 'the armed site list, which names no session, is not read for labels');
   same(workspace.trail().map(crumb => crumb.label), ['POST collect.frame.test #73']);
   assert.equal($('#flow-request-meta').textContent, '#73 · 200 · renderer 41');

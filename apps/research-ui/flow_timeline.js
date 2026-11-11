@@ -579,7 +579,10 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
         line.append(open);
         if (track.start && track.settle && FLOW_SYNC_VIA.has(track.settle.via)) {
           const run = make('span', 'flow-tl-run'); run.style.left = `${X(track.start.seq)}px`; run.style.width = `${Math.max(4, X(track.settle.seq) - X(track.start.seq))}px`; run.style.top = `${mid - 5}px`;
-          run.title = 'Ran synchronously: it returned or threw before any other record of this renderer';
+          // Records between start and settle are made while the call ran (the
+          // samples and requests on this track among them), so the span is
+          // not "nothing else happened".
+          run.title = 'Settled synchronously: it returned or threw without a promise, so it ran without yielding from its start record to its settle record. Samples and requests on this track were recorded inside it; other records in that range can come from other threads.';
           line.append(run);
         }
         if (track.start) { const mark = make('span', 'flow-tl-start'); mark.style.left = `${X(track.start.seq)}px`; mark.style.top = `${mid - 12}px`; mark.title = `start · sequence ${track.start.seq.toLocaleString('en-US')}${track.start.argumentCount !== null ? ` · ${track.start.argumentCount} arguments` : ''}`; line.append(mark); }

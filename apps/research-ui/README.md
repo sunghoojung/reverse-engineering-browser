@@ -2138,7 +2138,8 @@ redraws more than 15 seconds after a complete read.
   cannot be tied to the session the timeline reads.
 - With the backend's decoded `js_invocation` object, a track has start and
   settle marks, a dotted line while the call is open, a solid span only when
-  it settled synchronously, the settle's outcome, value kind and length (never
+  it settled synchronously (returned or threw without a promise; its samples
+  and requests were recorded while it ran), the settle's outcome, value kind and length (never
   content), and the requests started inside it. Without that object, calls are
   grouped from the Wasm records' `js_invocation_id` alone, with no start,
   settle or request marks, and a note says so.

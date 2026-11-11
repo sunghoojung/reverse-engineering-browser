@@ -448,6 +448,10 @@ const text = selector => host.querySelector(selector)?.textContent ?? '';
   const shiftedL = Object.assign(new window.Event('keydown', {bubbles: true, cancelable: true}), {key: 'L', shiftKey: true});
   canvas.dispatchEvent(shiftedL);
   assert.equal(shiftedL.defaultPrevented, false, 'Shift+L reaches the workspace');
+  // Shift+Backspace is the workspace's trail Forward: the canvas leaves it unhandled.
+  const shiftedBack = Object.assign(new window.Event('keydown', {bubbles: true, cancelable: true}), {key: 'Backspace', shiftKey: true});
+  canvas.dispatchEvent(shiftedBack);
+  assert.equal(shiftedBack.defaultPrevented, false, 'Shift+Backspace reaches the workspace');
   // Rows from the keyboard: J steps calls, U goes to the caller, Enter
   // follows a call and Backspace comes back.
   key('u');

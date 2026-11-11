@@ -1796,7 +1796,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     hideTooltip();
     // An open key closes before Escape does anything else.
     if (key === 'Escape' && status.hasAttribute('data-key-open')) { setKey(false); event.preventDefault(); event.stopPropagation(); return; }
-    if ((key === 'Backspace' && plain) || (key === 'ArrowLeft' && event.altKey)) back();
+    // Shift+Backspace is left to the Flow workspace, which walks its trail forward.
+    if ((key === 'Backspace' && plain && !event.shiftKey) || (key === 'ArrowLeft' && event.altKey)) back();
     else if (event.shiftKey && key.startsWith('Arrow')) { view.x += key === 'ArrowLeft' ? -panStep : key === 'ArrowRight' ? panStep : 0; view.y += key === 'ArrowUp' ? -panStep : key === 'ArrowDown' ? panStep : 0; requestDraw(); }
     else if (key === 'ArrowDown') move(0, 1); else if (key === 'ArrowUp') move(0, -1); else if (key === 'ArrowLeft') move(-1, 0); else if (key === 'ArrowRight') move(1, 0);
     else if (key === '+' || key === '=') zoomAt(1.25); else if (key === '-' || key === '_') zoomAt(0.8); else if (key === '0') fit();

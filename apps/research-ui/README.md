@@ -2090,7 +2090,7 @@ already handles while it has focus.
   Wasm function opens the CFG at its block; a request opens Lineage.
 - ⌫ and ⇧⌫, or the arrows beside the title: walk the trail back and forward,
   including jumps between panes. On the graph canvas ⌫ keeps the graph's own
-  Back.
+  Back and ⇧⌫ still walks the trail forward.
 - J and K: in the CFG, the previous or next sample at the selected site; in the
   timeline, samples in record order. Arrows move along and between tracks.
 
@@ -2355,7 +2355,8 @@ steps with Enter, Shift+Enter or its arrows, and never dims a match.
 - Enter follows the chosen call. On the card itself it opens the function in
   Sources or expands a chain; a Wasm card goes to the host's `onFollow` when
   there is one.
-- Backspace or Alt+Left goes back.
+- Backspace or Alt+Left goes back. Shift+Backspace is left to the Flow
+  workspace, where ⇧⌫ walks the trail forward.
 - U goes to the caller that reached the card most often.
 - O opens the function in Sources.
 - S copies the chosen call site.

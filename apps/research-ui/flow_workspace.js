@@ -948,7 +948,11 @@ function createFlowWorkspace(options) {
       if (String(nextSession ?? '') !== String(session ?? '')) {
         session = nextSession ? String(nextSession) : null;
         loadPrefs(session);
-        history = []; cursor = -1; graphInfo = null; cfg.fn = null; cfg.key = null; cfg.result = null; cfg.mark = null; cfg.names.clear();
+        // The old session's CFG read, layout, decoded result and names must
+        // never land in or be reused by this one.
+        cfg.generation += 1; cfg.abort?.abort(); cfg.abort = null; cfg.runner?.cancel?.();
+        history = []; cursor = -1; graphInfo = null; cfg.fn = null; cfg.key = null; cfg.result = null; cfg.mark = null; cfg.loaded = false; cfg.error = null;
+        cfg.names.clear(); nameReads.clear();
         if (cfg.view) cfg.view.release();
         selection = {request: null, call: null, fn: null, site: null, sample: null, step: null, graphKey: null};
         renderCfgChrome();

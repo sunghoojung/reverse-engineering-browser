@@ -407,6 +407,30 @@ const key = (key, {shift = false, code = null, target = $('#flow-pane-graph'), m
   same(workspace.selection().fn, echo.fn, 'an echoed graph selection does not replace the trail');
 }
 {
+  // Switching sessions cancels a CFG read in flight: its graph, names and
+  // decoded result never land in, or are reused by, the new session.
+  let release = null, layouts = 0;
+  const gate = new Promise(resolve => { release = resolve; });
+  const drawn = [];
+  const own = context.createFlowWorkspace({root: parseHTML(html).document.querySelector('#screen-backtrace'), graph: null, fetch: fetchStub, getRequest: () => null,
+    createBlockGraphRunner: () => ({run: async () => { layouts += 1; await gate; return cfgResult(); }, cancel() {}}),
+    createBlockGraphView: (host, options) => { const view = makeView(host, options); const set = view.setResult; view.setResult = next => { drawn.push(next); set(next); }; return view; }});
+  eventPages.push(page([]), page([]));
+  own.sync({visible: true, session: '7', request: null});
+  const card = {key: 'wasm|own', kind: 'wasm', name: null, artifact_id: '4', function_index: 1, row: null, request: null};
+  own.graphSelected(card);
+  await settle();
+  assert.equal(layouts, 1, 'the CFG layout is running');
+  own.sync({visible: true, session: '8', request: null});
+  release(); await settle();
+  assert.equal(drawn.length, 0, 'the old session\u2019s graph is never drawn in the new one');
+  same(own.cfg(), {fn: null, mark: null, loaded: false, error: null});
+  own.graphSelected(card);
+  await settle();
+  assert.equal(layouts, 2, 'the same function in the new session is read and laid out again');
+  assert.equal(drawn.length, 1);
+}
+{
   // Without the selection API the workspace still runs.
   const bare = context.createFlowWorkspace({root: parseHTML(html).document.querySelector('#screen-backtrace'), graph: {show() {}, hide() {}}, fetch: fetchStub,
     createBlockGraphView: makeView, createBlockGraphRunner: runner, getRequest: () => null});

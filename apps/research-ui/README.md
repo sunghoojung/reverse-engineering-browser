@@ -2062,7 +2062,8 @@ pane, tab or layout never changes the selection.
   holds the selected byte offset marked. It opens when a Wasm card is selected
   or followed, or a timeline sample is picked, and names the function from the
   module's name section. Empty, it says how to fill it. **Sources** opens the
-  module there.
+  module there. A session change cancels a read or layout in flight and forgets
+  the decoded graph and names, so nothing from another session is drawn.
 - **Lineage** (rose): the selected request's recorded predecessors from
   `/api/origin-trace`, what Steps used to show, with the event under
   **Details**. Each link shows how sure it is by line style (solid observed,

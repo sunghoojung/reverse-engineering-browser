@@ -8,7 +8,12 @@ const FLOW_TIMELINE_TYPES = ['wasm_dispatch_observation', 'wasm_indirect_observa
  * cover a session; the caps keep a long store from filling the page. */
 const FLOW_TIMELINE_LIMITS = Object.freeze({pageSize: 1000, pagesPerRead: 4, maxRecords: 8000, maxPageBytes: 8 * 1024 * 1024,
   maxTracks: 64, maxSamples: 512, maxRequests: 128, unit: 22, gapCap: 6, labelEvery: 96});
-const FLOW_VALUE_KINDS = ['', 'integer', 'number', 'string', 'symbol', 'undefined', 'null', 'boolean', 'BigInt', 'object', 'function', 'array', 'ArrayBuffer', 'typed array', 'promise'];
+// The decoded settle names its value kind (protocol/native-js-invocation-v1.md);
+// the stored integer order is the fallback for an older payload decode.
+const FLOW_VALUE_KINDS = ['', 'integer', 'number', 'string', 'symbol', 'undefined', 'null', 'boolean', 'bigint', 'object', 'function', 'array', 'array_buffer', 'array_buffer_view', 'promise'];
+const FLOW_VALUE_NAMES = {bigint: 'BigInt', array_buffer: 'ArrayBuffer', array_buffer_view: 'typed array'};
+// A settle reached by a synchronous return or throw ran start to settle without yielding.
+const FLOW_SYNC_VIA = new Set(['sync_return', 'sync_throw']);
 const FLOW_INVOCATION_STATES = ['not observed', 'none', 'inside', 'unknown'];
 
 /** A canonical unsigned decimal sequence number as a BigInt, else null. */
@@ -24,11 +29,12 @@ const flowHex = value => `+0x${Number(value).toString(16)}`;
 
 /** What a settle returned, from its kind and length; never its content. */
 function flowValueLabel(kind, length) {
-  const name = FLOW_VALUE_KINDS[kind] || 'value';
+  const raw = typeof kind === 'string' ? kind : FLOW_VALUE_KINDS[kind];
+  const name = FLOW_VALUE_NAMES[raw] ?? (raw || 'value');
   if (!Number.isSafeInteger(length) || length <= 0) return name;
-  if (kind === 3) return `${name} · ${flowNumber(length)} UTF-16 units`;
-  if (kind === 11) return `${name} · ${flowNumber(length)} elements`;
-  if (kind === 12 || kind === 13) return `${name} · ${flowNumber(length)} bytes`;
+  if (raw === 'string') return `${name} · ${flowNumber(length)} UTF-16 units`;
+  if (raw === 'array') return `${name} · ${flowNumber(length)} elements`;
+  if (raw === 'array_buffer' || raw === 'array_buffer_view') return `${name} · ${flowNumber(length)} bytes`;
   return name;
 }
 
@@ -98,12 +104,14 @@ function flowTimelineModel(events, limits = FLOW_TIMELINE_LIMITS) {
       if (track.start) { counts.conflicts += 1; continue; }
       counts.starts += 1;
       track.start = {key, seq, parent: js.parent_invocation_id ? String(js.parent_invocation_id) : null, parentUnknown: js.parent_unknown === true,
-        argumentCount: Number.isSafeInteger(js.argument_count) ? js.argument_count : null};
+        argumentCount: Number.isSafeInteger(js.argument_count) ? js.argument_count : null,
+        site: typeof js.source_sha256 === 'string' && Number.isSafeInteger(js.anchor_offset) ? {sha256: js.source_sha256, anchor: js.anchor_offset} : null};
     } else {
       if (track.settle) { counts.conflicts += 1; continue; }
       counts.settles += 1;
-      track.settle = {key, seq, fulfilled: js.fulfilled !== false, valueKind: Number.isSafeInteger(js.value_kind) ? js.value_kind : 0,
-        valueLength: Number.isSafeInteger(js.value_length) ? js.value_length : null, via: Number.isSafeInteger(js.via) ? js.via : null};
+      track.settle = {key, seq, fulfilled: js.fulfilled !== false,
+        valueKind: typeof js.value_kind === 'string' ? js.value_kind : (FLOW_VALUE_KINDS[js.value_kind] || ''),
+        valueLength: Number.isSafeInteger(js.value_length) ? js.value_length : null, via: typeof js.via === 'string' ? js.via : null};
     }
   }
   const list = [...processes.values()].map(owner => flowTimelineProcess(owner, limits));
@@ -189,7 +197,20 @@ function flowTimelineAxis(seqs, {unit = 12, gapCap = 12, labelEvery = 96} = {}) 
   return {width: x, points, ticks, breaks, x: at};
 }
 
-function flowTrackName(track) { return `call #${track.invocation}`; }
+function flowTrackName(track) { return track.label ? `${track.label} #${track.invocation}` : `call #${track.invocation}`; }
+/** Names tracks from the armed sites `get_js_invocation_sites` lists in slot
+ * order, only where the start names that exact site; otherwise the slot stays
+ * the only name. Labels are text, cut to 80 characters. */
+function flowTimelineLabel(model, sites) {
+  if (!model || !Array.isArray(sites) || !sites.length) return model;
+  for (const process of model.processes) for (const track of process.tracks) {
+    const site = Number.isSafeInteger(track.slot) ? sites[track.slot] : null, start = track.start?.site;
+    if (!site || typeof site.label !== 'string' || !site.label || site.label === 'Unlabeled function') continue;
+    if (start && (site.source_sha256 !== start.sha256 || site.anchor_offset !== start.anchor)) continue;
+    track.label = site.label.slice(0, 80);
+  }
+  return model;
+}
 /** What a track's settle says, or what is missing. */
 function flowTrackOutcome(track) {
   if (!track.settle) return track.start ? 'not settled in the records read' : 'start and settle not read';
@@ -230,7 +251,7 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
   root.append(banner, state, scroll, detail);
   const processSelect = make('select', 'flow-tl-process'); processSelect.setAttribute('aria-label', 'Renderer process'); processSelect.hidden = true;
 
-  let session = null, events = [], model = null, view = null, cursor = '0', partial = false, status = 'idle', error = null;
+  let session = null, events = [], model = null, view = null, cursor = '0', partial = false, status = 'idle', error = null, sites = null;
   let generation = 0, controller = null, loadedAt = 0, chosenProcess = null, selected = null, items = new Map(), focusKey = null;
 
   function setState(kind, title = '', text = '', retry = false) {
@@ -272,8 +293,13 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
         if (typeof query.next_after !== 'string' || query.next_after === after) { done = true; break; }
         after = query.next_after;
       }
+      if (!sites) {
+        try { const body = await fetchJSON('/api/js-invocation-sites', abort?.signal); sites = Array.isArray(body?.session?.sites) ? body.session.sites : []; }
+        catch (failure) { if (failure?.name === 'AbortError') throw failure; sites = []; }
+        if (owner !== generation) return;
+      }
       events = collected; cursor = after; partial = !done; error = null; loadedAt = now();
-      model = flowTimelineModel(events, limits);
+      model = flowTimelineLabel(flowTimelineModel(events, limits), sites);
       render();
       onPartial(partial);
     } catch (failure) {
@@ -287,7 +313,7 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
   }
   function reset() {
     controller?.abort(); controller = null; generation += 1;
-    events = []; model = null; view = null; cursor = '0'; partial = false; loadedAt = 0; chosenProcess = null; selected = null; items = new Map(); focusKey = null;
+    events = []; model = null; view = null; cursor = '0'; sites = null; partial = false; loadedAt = 0; chosenProcess = null; selected = null; items = new Map(); focusKey = null;
     canvas.replaceChildren(); detailText.textContent = ''; detailFollow.hidden = true; setBanner('');
     processSelect.replaceChildren(); processSelect.hidden = true;
   }
@@ -394,7 +420,7 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
         open.style.left = `${X(from)}px`; open.style.width = `${Math.max(2, X(to) - X(from))}px`; open.style.top = `${mid - 1}px`;
         open.title = track.start && track.settle ? 'Open from its start record to its settle record' : flowTrackOutcome(track);
         line.append(open);
-        if (track.start && track.settle && (track.settle.via === 1 || track.settle.via === 2)) {
+        if (track.start && track.settle && FLOW_SYNC_VIA.has(track.settle.via)) {
           const run = make('span', 'flow-tl-run'); run.style.left = `${X(track.start.seq)}px`; run.style.width = `${Math.max(4, X(track.settle.seq) - X(track.start.seq))}px`; run.style.top = `${mid - 5}px`;
           run.title = 'Ran synchronously: it returned or threw before any other record of this renderer';
           line.append(run);
@@ -616,5 +642,5 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
 }
 
 if (typeof module === 'object' && module?.exports) {
-  module.exports = {FLOW_TIMELINE_TYPES, FLOW_TIMELINE_LIMITS, flowSeq, flowValueLabel, flowTimelineModel, flowTimelineAxis, flowTrackOutcome, createFlowTimeline};
+  module.exports = {FLOW_TIMELINE_TYPES, FLOW_TIMELINE_LIMITS, flowSeq, flowValueLabel, flowTimelineModel, flowTimelineLabel, flowTimelineAxis, flowTrackOutcome, flowTrackName, createFlowTimeline};
 }

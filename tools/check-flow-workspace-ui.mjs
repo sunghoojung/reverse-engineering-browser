@@ -26,18 +26,20 @@ const base = (type, extra = {}) => ({type, process_id: 41, sequence_number: Stri
 const wasm = (selector, invocation, state = 2, type = 'wasm_dispatch_observation', offset = 69) => base(type, {artifact_id: '4',
   wasm_observation: {status: 'decoded', function_index: 1, module_byte_offset: offset, selector, table_count: 3, sample_index: seq % 16, js_invocation_state: state, js_invocation_id: state === 2 ? invocation : 0}});
 const js = (type, fields) => base(type, {js_invocation: {status: 'decoded', ...fields}});
+// The decode's own shape (protocol/native-js-invocation-v1.md): names, not stored integers.
+const SITE_SHA = 'a'.repeat(64);
 function sessionRecords({decoded = true} = {}) {
   seq = 100;
   const strip = event => { if (!decoded && event.js_invocation) { const {js_invocation: _drop, ...rest} = event; return rest; } return event; };
   return [
-    js('js_invocation_start', {kind: 'start', site_slot: 0, invocation_id: 12, parent_invocation_id: 0, parent_unknown: false, argument_count: 2}),
+    js('js_invocation_start', {kind: 'start', site_slot: 0, invocation_id: 12, parent_invocation_id: 0, parent_unknown: false, argument_count: 2, source_sha256: SITE_SHA, anchor_offset: 2380}),
     js('js_invocation_request', {kind: 'request', invocation_id: 12, inside: true, request_id: '71'}),
-    js('js_invocation_start', {kind: 'start', site_slot: 0, invocation_id: 13, parent_invocation_id: 0, parent_unknown: false, argument_count: 2}),
+    js('js_invocation_start', {kind: 'start', site_slot: 0, invocation_id: 13, parent_invocation_id: 0, parent_unknown: false, argument_count: 2, source_sha256: SITE_SHA, anchor_offset: 2380}),
     wasm(3, 12), wasm(0, 12), wasm(3, 12),
-    js('js_invocation_settle', {kind: 'settle', site_slot: 0, invocation_id: 12, fulfilled: true, value_kind: 3, value_length: 2148, via: 3}),
+    js('js_invocation_settle', {kind: 'settle', site_slot: 0, invocation_id: 12, fulfilled: true, value_kind: 'string', value_length: 2148, via: 'promise'}),
     wasm(1, 13), wasm(3, 13),
     js('js_invocation_request', {kind: 'request', invocation_id: 13, inside: true, request_id: '73'}),
-    js('js_invocation_settle', {kind: 'settle', site_slot: 0, invocation_id: 13, fulfilled: true, value_kind: 5, value_length: 0, via: 1}),
+    js('js_invocation_settle', {kind: 'settle', site_slot: 0, invocation_id: 13, fulfilled: true, value_kind: 'undefined', value_length: 0, via: 'sync_return'}),
     wasm(null, 0, 1, 'wasm_indirect_observation', 90),
     js('js_invocation_request', {kind: 'request', invocation_id: null, inside: false, request_id: '73'})
   ].map(strip);
@@ -54,7 +56,18 @@ function sessionRecords({decoded = true} = {}) {
   assert.equal(call12.start.seq, 101n); assert.equal(call12.settle.seq, 107n);
   assert.equal(timeline.flowTrackOutcome(call12), 'fulfilled · string · 2,148 UTF-16 units', 'a settle names kind and length, never content');
   assert.equal(timeline.flowTrackOutcome(call13), 'fulfilled · undefined');
-  assert.equal(call13.settle.via, 1, 'a synchronous settle is kept so the span can be drawn as running');
+  assert.equal(call13.settle.via, 'sync_return', 'a synchronous settle is kept so the span can be drawn as running');
+  assert.equal(timeline.flowValueLabel('array_buffer_view', 4), 'typed array · 4 bytes', 'decoded kind names read as the panel words');
+  assert.ok(timeline.flowValueLabel('bigint', null).startsWith('BigInt'));
+  assert.ok(timeline.flowValueLabel(8, null).startsWith('BigInt'), 'the stored integer still reads for an older decode');
+  // Armed sites name a track only where the start names that exact site.
+  timeline.flowTimelineLabel(model, [{source_sha256: SITE_SHA, anchor_offset: 2380, label: 'hsw'}]);
+  assert.equal(timeline.flowTrackName(call12), 'hsw #12');
+  const other = timeline.flowTimelineModel(sessionRecords());
+  timeline.flowTimelineLabel(other, [{source_sha256: 'b'.repeat(64), anchor_offset: 2380, label: 'elsewhere'}]);
+  assert.equal(timeline.flowTrackName(other.processes[0].tracks[0]), 'call #12', 'a site that does not match the start leaves the slot unnamed');
+  timeline.flowTimelineLabel(other, [{source_sha256: SITE_SHA, anchor_offset: 2380, label: 'Unlabeled function'}]);
+  assert.equal(timeline.flowTrackName(other.processes[0].tracks[0]), 'call #12', 'the backend default label adds nothing');
   assert.deepEqual(call12.samples.map(sample => sample.selector), [3, 0, 3]);
   assert.deepEqual(call12.requests.map(request => request.request), ['71']);
   assert.equal(view.outside.length, 1, 'a sample outside any tracked call is kept in its own lane, not dropped');

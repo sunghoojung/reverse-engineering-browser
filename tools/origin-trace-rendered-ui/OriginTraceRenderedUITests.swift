@@ -1893,6 +1893,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertTrue(text.contains("https://hcaptcha.test/glue.js"), "each site names its script")
       try await assertLayout(ui, "#session-panel", "start panel with saved functions")
       try await assertInert(ui, "start panel with saved functions")
+      try await ui.reveal("#session-panel .session-panel-site-list", block: "end")
       try await ui.screenshot("start-panel-tracking")
       try await ui.click("#session-panel .session-panel-mode[data-mode='metadata']")
       text = try await panelText(ui)
@@ -1906,6 +1907,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let sites = (try JSONSerialization.jsonObject(with: Data(file.utf8)) as? [String: Any])?["sites"] as? [Any]
       XCTAssertEqual(sites?.count, 1, "Remove rewrites the saved site file at once")
       try await assertLayout(ui, "#session-panel", "start panel after Remove")
+      try await ui.reveal("#session-panel .session-panel-site-list", block: "end")
       try await ui.screenshot("start-panel-tracking-removed")
       try await ui.click("#session-panel .session-panel-mode[data-mode='content']")
       try await ui.click("#session-panel-offline")
@@ -2838,7 +2840,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
           let stop = try await focus()
           stops.append(stop["id"] as? String ?? "\(stop["element"] ?? "?")")
           XCTAssertEqual(stop["focusVisible"] as? Bool, true, "\(name): \(stop)")
-          XCTAssertNotEqual(stop["indicator"] as? String, "none", "\(name): \(stop)")
+          // A mode or Keychain input draws its ring on the whole option card.
+          let ring = try await ui.value("""
+            (() => { const focused = document.activeElement;
+              const shown = getComputedStyle(focused.closest('.session-panel-mode, .session-panel-check') ?? focused);
+              return shown.outlineStyle !== 'none' && parseFloat(shown.outlineWidth) > 0; })()
+            """) as? Bool
+          XCTAssertEqual(ring, true, "\(name): a focus ring shows around \(stop)")
           XCTAssertEqual(stop["inViewport"] as? Bool, true, "\(name): \(stop)")
           if stops.last?.hasPrefix("session-panel-mode-") == true { break }
         }

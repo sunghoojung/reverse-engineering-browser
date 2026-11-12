@@ -421,17 +421,49 @@ enum NodeKey {
     },
 }
 
+/// A node as it is built. `detail` holds what describes its function or sink;
+/// the rest is written when the answer is.
 struct Node {
     key: NodeKey,
     context: usize,
-    value: Value,
+    kind: &'static str,
+    detail: Value,
+    /// Tasks the function scheduled, from `async_task_stack` records.
+    schedules: BTreeMap<&'static str, u64>,
+    chain_cut: bool,
     hits: u64,
     entries: u64,
     leaves: u64,
 }
 
+impl Node {
+    fn json(self, id: usize) -> Value {
+        let mut value = self.detail;
+        value["id"] = json!(id);
+        value["kind"] = json!(self.kind);
+        value["context"] = json!(self.context);
+        value["hits"] = json!(self.hits);
+        value["entries"] = json!(self.entries);
+        value["leaves"] = json!(self.leaves);
+        if !self.schedules.is_empty() {
+            value["schedules"] = json!(self.schedules);
+        }
+        if self.chain_cut {
+            value["chain_cut"] = json!(true);
+        }
+        value
+    }
+}
+
+/// An edge's identity: from, to, kind and, for a task edge, the task kind.
+type EdgeKey = (usize, usize, &'static str, Option<&'static str>);
+
 struct Edge {
-    value: Value,
+    from: usize,
+    to: usize,
+    kind: &'static str,
+    task: Option<&'static str>,
+    crosses: Vec<&'static str>,
     count: u64,
     stacks: u64,
     sites: BTreeSet<(u64, u64)>,
@@ -441,12 +473,59 @@ struct Edge {
     omitted: Option<u32>,
 }
 
+impl Edge {
+    fn json(self) -> Value {
+        let sites: Vec<Value> = self
+            .sites
+            .iter()
+            .map(|&(line, column)| {
+                if line == 0 {
+                    json!({"module_offset": column})
+                } else {
+                    json!({"line": line, "column": column})
+                }
+            })
+            .collect();
+        let mut value = json!({
+            "from": self.from,
+            "to": self.to,
+            "kind": self.kind,
+            "crosses": self.crosses,
+            "count": self.count,
+            "stacks": self.stacks,
+            "sites": sites,
+        });
+        if let Some(task) = self.task {
+            value["task"] = json!(task);
+        }
+        if !self.via.is_empty() {
+            value["via"] = json!(self.via);
+        }
+        if !self.labels.is_empty() {
+            value["label"] = json!(self.labels.into_iter().collect::<Vec<_>>().join(" / "));
+        }
+        if let Some(omitted) = self.omitted {
+            value["omitted"] = json!(omitted);
+        }
+        value
+    }
+}
+
 /// What one stack says about an edge beyond its endpoints.
 #[derive(Default)]
 struct Detail {
+    site: Option<(u64, u64)>,
     via: Vec<&'static str>,
     label: Option<&'static str>,
     omitted: Option<u32>,
+}
+
+/// One stack being added: its process, how many records it stands for, and
+/// the edges it has walked.
+struct Visit {
+    process: u32,
+    weight: u64,
+    path: BTreeSet<usize>,
 }
 
 /// What one script's retained bytes resolved: positions and names by offset.
@@ -468,6 +547,29 @@ struct Context {
     kinds: BTreeMap<&'static str, u64>,
 }
 
+impl Context {
+    fn json(&self, id: usize) -> Value {
+        let mut origins: Vec<(&String, &u64)> = self.origins.iter().collect();
+        origins.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        let mut frames: Vec<(&u64, &u64)> = self
+            .frame_votes
+            .iter()
+            .filter(|(frame, _)| **frame != 0)
+            .collect();
+        frames.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        json!({
+            "id": id,
+            "process_id": self.process,
+            "execution_context_id": (self.realm != 0).then(|| self.realm.to_string()),
+            "origin": origins.first().map(|(origin, _)| origin),
+            "origins": origins.iter().take(8).map(|(origin, functions)| json!({"origin": origin, "functions": functions})).collect::<Vec<_>>(),
+            "frame_ids": frames.iter().take(8).map(|(frame, stacks)| json!({"frame_id": frame.to_string(), "stacks": stacks})).collect::<Vec<_>>(),
+            "tab_ids": self.tabs.iter().take(16).collect::<Vec<_>>(),
+            "counts": self.kinds,
+        })
+    }
+}
+
 struct Builder<'a> {
     scan: &'a Scan,
     resolved: &'a HashMap<[u8; 32], Resolved>,
@@ -476,7 +578,7 @@ struct Builder<'a> {
     nodes: Vec<Node>,
     node_index: HashMap<NodeKey, usize>,
     edges: Vec<Edge>,
-    edge_index: HashMap<(usize, usize, &'static str, Option<&'static str>), usize>,
+    edge_index: HashMap<EdgeKey, usize>,
     paths: Vec<Value>,
     path_refs: usize,
     nodes_cut: u64,
@@ -500,7 +602,34 @@ fn combinator(frame: &Frame) -> &'static str {
     }
 }
 
+/// Whether a node's code is Wasm (true) or JavaScript (false); None for a sink.
+fn language(kind: &str) -> Option<bool> {
+    match kind {
+        "wasm" => Some(true),
+        "javascript" | "eval" => Some(false),
+        _ => None,
+    }
+}
+
 impl<'a> Builder<'a> {
+    fn new(scan: &'a Scan, resolved: &'a HashMap<[u8; 32], Resolved>) -> Self {
+        Self {
+            scan,
+            resolved,
+            contexts: Vec::new(),
+            context_index: HashMap::new(),
+            nodes: Vec::new(),
+            node_index: HashMap::new(),
+            edges: Vec::new(),
+            edge_index: HashMap::new(),
+            paths: Vec::new(),
+            path_refs: 0,
+            nodes_cut: 0,
+            edges_cut: 0,
+            paths_cut: 0,
+        }
+    }
+
     fn identity(&self, process: u32, script: u32) -> Option<&'a Identity> {
         self.scan.identities.get(&process)?.get(&script)
     }
@@ -522,6 +651,37 @@ impl<'a> Builder<'a> {
             })
     }
 
+    /// The node for `key`, added with the context, kind and detail `describe`
+    /// gives when it is new, or None past the node budget.
+    fn node(
+        &mut self,
+        key: NodeKey,
+        describe: impl FnOnce(&mut Self) -> (usize, &'static str, Value),
+    ) -> Option<usize> {
+        if let Some(&index) = self.node_index.get(&key) {
+            return Some(index);
+        }
+        if self.nodes.len() == MAX_NODES {
+            self.nodes_cut += 1;
+            return None;
+        }
+        let (context, kind, detail) = describe(self);
+        *self.contexts[context].kinds.entry(kind).or_default() += 1;
+        self.node_index.insert(key.clone(), self.nodes.len());
+        self.nodes.push(Node {
+            key,
+            context,
+            kind,
+            detail,
+            schedules: BTreeMap::new(),
+            chain_cut: false,
+            hits: 0,
+            entries: 0,
+            leaves: 0,
+        });
+        Some(self.nodes.len() - 1)
+    }
+
     /// The node for one frame, or None past the node budget. Combinator frames
     /// are labels on the await edge, never nodes.
     fn function(&mut self, process: u32, frame: &Frame) -> Option<usize> {
@@ -529,114 +689,94 @@ impl<'a> Builder<'a> {
         let realm = identity.map_or(0, |identity| identity.realm);
         let wasm = frame.kind == 2;
         let top_level = !wasm && frame.flags & 2 != 0;
-        let function = if wasm {
-            frame.detail
-        } else if top_level {
-            u32::MAX
-        } else {
-            frame.detail
-        };
-        let code = identity
-            .and_then(|identity| identity.sha256)
-            .map_or(Code::Script(frame.script_id), Code::Sha);
         let key = NodeKey::Function {
             process,
             realm,
-            code,
+            code: identity
+                .and_then(|identity| identity.sha256)
+                .map_or(Code::Script(frame.script_id), Code::Sha),
             wasm,
-            function,
+            function: if top_level { u32::MAX } else { frame.detail },
         };
-        if let Some(index) = self.node_index.get(&key) {
-            return Some(*index);
-        }
-        if self.nodes.len() == MAX_NODES {
-            self.nodes_cut += 1;
-            return None;
-        }
-        let context = self.context(process, realm);
-        let eval = identity.as_ref().is_some_and(|identity| identity.eval);
-        let kind = if wasm {
-            "wasm"
-        } else if eval {
-            "eval"
-        } else {
-            "javascript"
-        };
-        let mut value = json!({
-            "kind": kind,
-            "context": context,
-            "script_id": frame.script_id,
-            "status": "unresolved",
-        });
+        self.node(key, |builder| {
+            let context = builder.context(process, realm);
+            let kind = if wasm {
+                "wasm"
+            } else if identity.is_some_and(|identity| identity.eval) {
+                "eval"
+            } else {
+                "javascript"
+            };
+            let detail = builder.function_detail(context, frame, identity, top_level);
+            (context, kind, detail)
+        })
+    }
+
+    /// Where a function node's frame is and what it is called, or why its
+    /// source does not say.
+    fn function_detail(
+        &mut self,
+        context: usize,
+        frame: &Frame,
+        identity: Option<&'a Identity>,
+        top_level: bool,
+    ) -> Value {
+        let mut detail = json!({"script_id": frame.script_id, "status": "unresolved"});
         let sources = self.resolved;
         let source = request_stack::find_source(identity, |_, sha| sources.get(sha));
         let reason = match source {
             Ok((_, resolved)) => resolved.reason,
             Err(reason) => Some(reason),
         };
-        let resolved = source.ok().map(|(_, resolved)| resolved);
-        if let Some(resolved) = resolved {
-            value["artifact_id"] = resolved.artifact_id.clone();
-            value["url"] = resolved.url.clone();
+        if let Ok((_, resolved)) = source {
+            detail["artifact_id"] = resolved.artifact_id.clone();
+            detail["url"] = resolved.url.clone();
             if let Some(origin) = resolved.url.as_str().and_then(origin) {
                 *self.contexts[context].origins.entry(origin).or_default() += 1;
             }
         }
-        if wasm {
-            value["function_index"] = json!(frame.detail);
-            if let Some(name) = resolved.and_then(|resolved| resolved.names.get(&frame.detail)) {
-                value["name"] = json!(name);
+        let usable = source.ok().filter(|_| reason.is_none());
+        if frame.kind == 2 {
+            detail["function_index"] = json!(frame.detail);
+            if let Ok((_, resolved)) = source
+                && let Some(name) = resolved.names.get(&frame.detail)
+            {
+                detail["name"] = json!(name);
             }
-            if resolved.is_some() && reason.is_none() {
-                value["status"] = json!("resolved");
+            if usable.is_some() {
+                detail["status"] = json!("resolved");
             }
         } else {
-            value["top_level"] = json!(top_level);
-            value["function_position"] = json!(if top_level {
-                Value::Null
-            } else {
-                json!(frame.detail)
-            });
-            let at = if top_level { None } else { Some(frame.detail) };
-            if let (Some(resolved), Some(identity)) = (resolved, identity.as_ref())
-                && reason.is_none()
-            {
-                value["status"] = json!("resolved");
+            let at = (!top_level).then_some(frame.detail);
+            detail["top_level"] = json!(top_level);
+            detail["function_position"] = json!(at);
+            if let Some((identity, resolved)) = usable {
+                detail["status"] = json!("resolved");
                 if let Some(&(line, column)) = at.and_then(|at| resolved.lines.get(&at)) {
                     // Sources numbers the artifact itself; line and column
                     // add the script's start in its document.
                     let (document_line, document_column) = identity.document_position(line, column);
-                    value["artifact_line"] = json!(line);
-                    value["artifact_column"] = json!(column);
-                    value["line"] = json!(document_line);
-                    value["column"] = json!(document_column);
+                    detail["artifact_line"] = json!(line);
+                    detail["artifact_column"] = json!(column);
+                    detail["line"] = json!(document_line);
+                    detail["column"] = json!(document_column);
                 } else if top_level {
                     let (line, column) = identity.document_position(1, 1);
-                    value["line"] = json!(line);
-                    value["column"] = json!(column);
+                    detail["line"] = json!(line);
+                    detail["column"] = json!(column);
                 } else {
-                    value["status"] = json!("unresolved");
-                    value["reason"] = json!("position_outside_source");
+                    detail["status"] = json!("unresolved");
+                    detail["reason"] = json!("position_outside_source");
                 }
                 if let Some(name) = at.and_then(|at| resolved.names.get(&at)) {
-                    value["name"] = json!(name);
+                    detail["name"] = json!(name);
                 }
             }
         }
         if let Some(reason) = reason {
-            value["reason"] = json!(reason);
+            detail["reason"] = json!(reason);
         }
-        *self.contexts[context].kinds.entry(kind).or_default() += 1;
-        self.nodes.push(Node {
-            key: key.clone(),
-            context,
-            value,
-            hits: 0,
-            entries: 0,
-            leaves: 0,
-        });
-        self.node_index.insert(key, self.nodes.len() - 1);
-        Some(self.nodes.len() - 1)
+        detail
     }
 
     fn sink(&mut self, context: usize, sink: &Sink) -> Option<usize> {
@@ -644,25 +784,10 @@ impl<'a> Builder<'a> {
             context,
             sink: sink.clone(),
         };
-        if let Some(index) = self.node_index.get(&key) {
-            return Some(*index);
-        }
-        if self.nodes.len() == MAX_NODES {
-            self.nodes_cut += 1;
-            return None;
-        }
-        let value = json!({"kind": sink.kind(), "context": context, "name": sink.label(), "status": "resolved"});
-        *self.contexts[context].kinds.entry(sink.kind()).or_default() += 1;
-        self.nodes.push(Node {
-            key: key.clone(),
-            context,
-            value,
-            hits: 0,
-            entries: 0,
-            leaves: 0,
-        });
-        self.node_index.insert(key, self.nodes.len() - 1);
-        Some(self.nodes.len() - 1)
+        self.node(key, |_| {
+            let detail = json!({"name": sink.label(), "status": "resolved"});
+            (context, sink.kind(), detail)
+        })
     }
 
     /// The call position inside the caller, as a one-based line and column.
@@ -677,55 +802,44 @@ impl<'a> Builder<'a> {
         Some(identity.document_position(line, column))
     }
 
+    /// What an edge between two nodes crosses: realms, languages, or into eval
+    /// code from other code.
+    fn crosses(&self, from: usize, to: usize) -> Vec<&'static str> {
+        let (a, b) = (&self.nodes[from], &self.nodes[to]);
+        let realm = |node: &Node| self.contexts[node.context].realm;
+        let mut crosses = Vec::new();
+        if a.context != b.context && realm(a) != 0 && realm(b) != 0 {
+            crosses.push("frame");
+        }
+        if let (Some(x), Some(y)) = (language(a.kind), language(b.kind))
+            && x != y
+        {
+            crosses.push("language");
+        }
+        if b.kind == "eval" && !(a.kind == "eval" && same_code(&a.key, &b.key)) {
+            crosses.push("dynamic");
+        }
+        crosses
+    }
+
     /// Adds one stack's use of an edge. A stack that walks an edge twice (a
     /// recursion, two segments naming one scheduling stack) counts once.
-    #[allow(clippy::too_many_arguments)]
-    fn edge(
-        &mut self,
-        from: usize,
-        to: usize,
-        kind: &'static str,
-        task: Option<&'static str>,
-        weight: u64,
-        site: Option<(u64, u64)>,
-        detail: Detail,
-        path: &mut BTreeSet<usize>,
-    ) {
-        let key = (from, to, kind, task);
+    fn edge(&mut self, key: EdgeKey, weight: u64, detail: Detail, path: &mut BTreeSet<usize>) {
         let index = match self.edge_index.get(&key) {
-            Some(index) => *index,
+            Some(&index) => index,
             None if self.edges.len() == MAX_EDGES => {
                 self.edges_cut += 1;
                 return;
             }
             None => {
-                let (a, b) = (&self.nodes[from], &self.nodes[to]);
-                let mut crosses = Vec::new();
-                let (ra, rb) = (&self.contexts[a.context], &self.contexts[b.context]);
-                if a.context != b.context && ra.realm != 0 && rb.realm != 0 {
-                    crosses.push("frame");
-                }
-                let language = |node: &Node| match node.value["kind"].as_str() {
-                    Some("wasm") => Some(true),
-                    Some("javascript" | "eval") => Some(false),
-                    _ => None,
-                };
-                if let (Some(x), Some(y)) = (language(a), language(b))
-                    && x != y
-                {
-                    crosses.push("language");
-                }
-                if b.value["kind"] == "eval"
-                    && !(a.value["kind"] == "eval" && same_code(&a.key, &b.key))
-                {
-                    crosses.push("dynamic");
-                }
-                let mut value = json!({"from": from, "to": to, "kind": kind, "crosses": crosses});
-                if let Some(task) = task {
-                    value["task"] = json!(task);
-                }
+                let (from, to, kind, task) = key;
+                let crosses = self.crosses(from, to);
                 self.edges.push(Edge {
-                    value,
+                    from,
+                    to,
+                    kind,
+                    task,
+                    crosses,
                     count: 0,
                     stacks: 0,
                     sites: BTreeSet::new(),
@@ -742,83 +856,117 @@ impl<'a> Builder<'a> {
             edge.count += weight;
             edge.stacks += 1;
         }
-        if let Some(site) = site
+        if let Some(site) = detail.site
             && edge.sites.len() < MAX_SITES
         {
             edge.sites.insert(site);
         }
         edge.via.extend(detail.via);
         edge.labels.extend(detail.label);
-        if let Some(omitted) = detail.omitted {
-            edge.omitted = Some(edge.omitted.map_or(omitted, |known| known.max(omitted)));
-        }
+        edge.omitted = edge.omitted.max(detail.omitted);
     }
 
     /// Call edges of one synchronous run, innermost first; returns its nodes.
     fn run(
         &mut self,
-        process: u32,
+        visit: &mut Visit,
         frames: &[Frame],
         omitted_after: Option<(usize, u32)>,
-        weight: u64,
-        path: &mut BTreeSet<usize>,
     ) -> Vec<Option<usize>> {
         let nodes: Vec<Option<usize>> = frames
             .iter()
-            .map(|frame| self.function(process, frame))
+            .map(|frame| self.function(visit.process, frame))
             .collect();
-        for index in 0..frames.len().saturating_sub(1) {
-            let (Some(callee), Some(caller)) = (nodes[index], nodes[index + 1]) else {
+        for (index, pair) in nodes.windows(2).enumerate() {
+            let &[Some(callee), Some(caller)] = pair else {
                 continue;
             };
-            match omitted_after {
-                Some((at, omitted)) if at == index => {
-                    let detail = Detail {
+            let (kind, detail) = match omitted_after {
+                Some((at, omitted)) if at == index => (
+                    "omitted",
+                    Detail {
                         omitted: Some(omitted),
                         ..Detail::default()
-                    };
-                    self.edge(caller, callee, "omitted", None, weight, None, detail, path);
-                }
-                _ => {
-                    let site = self.site(process, &frames[index + 1]);
-                    self.edge(
-                        caller,
-                        callee,
-                        "call",
-                        None,
-                        weight,
-                        site,
-                        Detail::default(),
-                        path,
-                    );
-                }
-            }
+                    },
+                ),
+                _ => (
+                    "call",
+                    Detail {
+                        site: self.site(visit.process, &frames[index + 1]),
+                        ..Detail::default()
+                    },
+                ),
+            };
+            self.edge(
+                (caller, callee, kind, None),
+                visit.weight,
+                detail,
+                &mut visit.path,
+            );
         }
         nodes
     }
 
     fn add(&mut self, walk: &Walk, decoded: &Decoded) {
-        let (process, weight) = (walk.process, walk.occurrences);
-        let mut path = BTreeSet::new();
+        let mut visit = Visit {
+            process: walk.process,
+            weight: walk.occurrences,
+            path: BTreeSet::new(),
+        };
         // A stack deeper than 1,024 keeps the innermost and outermost 512.
-        let omitted_after = (decoded.omitted != 0).then_some((511usize, decoded.omitted));
-        let sync = self.run(process, &decoded.sync, omitted_after, weight, &mut path);
+        let omitted_after = (decoded.omitted != 0).then_some((511, decoded.omitted));
+        let sync = self.run(&mut visit, &decoded.sync, omitted_after);
         let innermost = sync.first().copied().flatten();
         let outermost = sync.last().copied().flatten();
-        // The frame that began this task: the last awaiter of the await chain,
-        // else the outermost synchronous frame. None when it is not known, so
-        // no task edge enters a frame that was not the task's first.
-        let mut root = if decoded.retained && !decoded.bounded {
-            outermost
-        } else {
-            None
+        // A walk that stopped at 256 frames did not reach its task's first frame.
+        let mut cut_at = outermost.filter(|_| decoded.retained && decoded.bounded);
+        let first = self.await_chain(&mut visit, decoded, outermost, &mut cut_at);
+        let entry = self.task_chain(&mut visit, decoded, first, &mut cut_at);
+        if let Some(at) = cut_at {
+            self.nodes[at].chain_cut = true;
+        }
+        let sinks = match innermost {
+            Some(innermost) => self.innermost_records(&mut visit, walk, innermost),
+            None => Vec::new(),
         };
-        let mut cut_at = if decoded.retained && decoded.bounded {
-            outermost
-        } else {
-            None
-        };
-        // The await chain: each async frame awaited the one before it.
+        // Each node of this stack counts its occurrences once.
+        let members: BTreeSet<usize> = sync
+            .iter()
+            .flatten()
+            .copied()
+            .chain(
+                visit
+                    .path
+                    .iter()
+                    .flat_map(|&edge| [self.edges[edge].from, self.edges[edge].to]),
+            )
+            .filter(|node| !sinks.contains(node))
+            .collect();
+        for &node in &members {
+            self.nodes[node].hits += visit.weight;
+        }
+        if let Some(innermost) = innermost {
+            self.nodes[innermost].leaves += visit.weight;
+        }
+        // Only a known first frame is an entry; an undecoded or cut stack names none.
+        if let Some(entry) = entry {
+            self.nodes[entry].entries += visit.weight;
+        }
+        self.keep_path(walk, decoded.retained, visit.path, members, sinks);
+    }
+
+    /// The await chain, each async frame awaited by the next. Returns the
+    /// frame that began this task: the last awaiter, else the outermost
+    /// synchronous frame. None when it is not known, so no task edge enters a
+    /// frame that was not its task's first.
+    fn await_chain(
+        &mut self,
+        visit: &mut Visit,
+        decoded: &Decoded,
+        outermost: Option<usize>,
+        cut_at: &mut Option<usize>,
+    ) -> Option<usize> {
+        let mut first = outermost.filter(|_| decoded.retained && !decoded.bounded);
         let mut target = outermost;
         let mut label = None;
         for frame in &decoded.asyncs {
@@ -826,69 +974,71 @@ impl<'a> Builder<'a> {
                 label = Some(combinator(frame));
                 continue;
             }
-            let Some(node) = self.function(process, frame) else {
-                // A node past the budget is a gap, never bridged.
-                root = None;
-                target = None;
-                break;
-            };
+            // A node past the budget is a gap, never bridged.
+            let node = self.function(visit.process, frame)?;
             if let Some(to) = target {
                 let detail = Detail {
+                    site: self.site(visit.process, frame),
                     label: label.take(),
                     ..Detail::default()
                 };
-                let site = self.site(process, frame);
-                self.edge(node, to, "await", None, weight, site, detail, &mut path);
+                self.edge(
+                    (node, to, "await", None),
+                    visit.weight,
+                    detail,
+                    &mut visit.path,
+                );
             }
             target = Some(node);
-            root = root.map(|_| node);
+            first = first.map(|_| node);
         }
         if decoded.asyncs_truncated {
             // The await chain continues past 32 frames: its first awaiter is unknown.
-            cut_at = cut_at.or(target);
-            root = None;
+            *cut_at = cut_at.or(target);
+            return None;
         }
-        // The task chain, nearest first: a segment's innermost frame scheduled
-        // the task whose first frame is `target`.
-        let mut target = root;
+        first
+    }
+
+    /// The task chain, nearest first: a segment's innermost frame scheduled
+    /// the task whose first frame is the target, which starts as this task's
+    /// first frame. Returns the first frame of the earliest task reached.
+    fn task_chain(
+        &mut self,
+        visit: &mut Visit,
+        decoded: &Decoded,
+        first: Option<usize>,
+        cut_at: &mut Option<usize>,
+    ) -> Option<usize> {
+        let mut target = first;
         let mut via: Vec<&'static str> = Vec::new();
         let mut cut = decoded.chain_cut || decoded.chain_truncated;
         for (segment, frames) in &decoded.segments {
-            if target.is_none() {
+            let Some(to) = target else {
                 break;
-            }
+            };
             let task = request_stack::task_kind(segment.kind);
-            match frames {
+            match frames.as_deref() {
                 Some(frames) if !frames.is_empty() => {
-                    let nodes = self.run(process, frames, None, weight, &mut path);
-                    if let (Some(from), Some(to)) = (nodes[0], target) {
+                    let nodes = self.run(visit, frames, None);
+                    if let Some(from) = nodes[0] {
                         let detail = Detail {
+                            site: self.site(visit.process, &frames[0]),
                             via: std::mem::take(&mut via),
                             ..Detail::default()
                         };
-                        let site = self.site(process, &frames[0]);
-                        self.edge(
-                            from,
-                            to,
-                            "task",
-                            Some(task),
-                            weight,
-                            site,
-                            detail,
-                            &mut path,
-                        );
+                        let key = (from, to, "task", Some(task));
+                        self.edge(key, visit.weight, detail, &mut visit.path);
                     } else {
                         // The scheduling frame is past the node budget.
-                        cut_at = cut_at.or(target);
+                        *cut_at = cut_at.or(target);
                     }
                     let outer = nodes.last().copied().flatten();
                     if segment.flags & 1 != 0 || nodes[0].is_none() || outer.is_none() {
                         // The walk stopped at 256 frames, or a node is past the
                         // budget: that task's first frame is not known.
-                        cut_at = cut_at.or(outer).or(nodes[0]);
-                        target = None;
-                        cut = false;
-                        break;
+                        *cut_at = cut_at.or(outer).or(nodes[0]);
+                        return None;
                     }
                     target = outer;
                 }
@@ -902,82 +1052,63 @@ impl<'a> Builder<'a> {
         if let Some(at) = target
             && (cut || !via.is_empty())
         {
-            cut_at = cut_at.or(Some(at));
+            *cut_at = cut_at.or(Some(at));
         }
-        if let Some(at) = cut_at {
-            self.nodes[at].value["chain_cut"] = json!(true);
-        }
-        let mut sink_nodes = Vec::new();
-        if let Some(innermost) = innermost {
-            let context = self.nodes[innermost].context;
-            for (sink, count) in &walk.sinks {
-                if let Some(node) = self.sink(context, sink) {
-                    self.edge(
-                        innermost,
-                        node,
-                        sink.kind(),
-                        None,
-                        *count,
-                        None,
-                        Detail::default(),
-                        &mut path,
-                    );
-                    self.nodes[node].hits += count;
-                    sink_nodes.push(node);
-                }
+        target
+    }
+
+    /// What the records naming this stack say about its innermost frame: an
+    /// edge to each sink they reached, the tasks it scheduled, and the frames
+    /// and tabs of its realm. Returns the sink nodes.
+    fn innermost_records(
+        &mut self,
+        visit: &mut Visit,
+        walk: &Walk,
+        innermost: usize,
+    ) -> Vec<usize> {
+        let context = self.nodes[innermost].context;
+        let mut sinks = Vec::new();
+        for (sink, &count) in &walk.sinks {
+            if let Some(node) = self.sink(context, sink) {
+                let key = (innermost, node, sink.kind(), None);
+                self.edge(key, count, Detail::default(), &mut visit.path);
+                self.nodes[node].hits += count;
+                sinks.push(node);
             }
-            if !walk.schedules.is_empty() {
-                let node = &mut self.nodes[innermost].value;
-                let schedules = node["schedules"].as_object().cloned().unwrap_or_default();
-                let mut schedules: BTreeMap<String, u64> = schedules
-                    .into_iter()
-                    .map(|(k, v)| (k, v.as_u64().unwrap_or(0)))
-                    .collect();
-                for (task, count) in &walk.schedules {
-                    *schedules.entry((*task).to_owned()).or_default() += count;
-                }
-                node["schedules"] = json!(schedules);
-            }
-            let context = &mut self.contexts[context];
-            for (frame, votes) in &walk.frame_votes {
-                *context.frame_votes.entry(*frame).or_default() += votes;
-            }
-            context.tabs.extend(walk.tabs.iter().copied());
         }
-        // Each node of this stack counts its occurrences once.
-        let mut members: Vec<usize> = sync.iter().flatten().copied().collect();
-        for &edge in &path {
-            members.push(self.edges[edge].value["from"].as_u64().unwrap() as usize);
-            members.push(self.edges[edge].value["to"].as_u64().unwrap() as usize);
+        let schedules = &mut self.nodes[innermost].schedules;
+        for (task, count) in &walk.schedules {
+            *schedules.entry(task).or_default() += count;
         }
-        let members: BTreeSet<usize> = members
-            .into_iter()
-            .filter(|node| !sink_nodes.contains(node))
-            .collect();
-        for &node in &members {
-            self.nodes[node].hits += weight;
+        let context = &mut self.contexts[context];
+        for (frame, votes) in &walk.frame_votes {
+            *context.frame_votes.entry(*frame).or_default() += votes;
         }
-        if let Some(innermost) = innermost {
-            self.nodes[innermost].leaves += weight;
-        }
-        // Only a known first frame is an entry; an undecoded or cut stack names none.
-        if let Some(entry) = target {
-            self.nodes[entry].entries += weight;
-        }
-        let edges = path;
-        let refs = edges.len() + members.len() + sink_nodes.len();
+        context.tabs.extend(&walk.tabs);
+        sinks
+    }
+
+    /// Keeps the stack's path for highlighting, within the path budget.
+    fn keep_path(
+        &mut self,
+        walk: &Walk,
+        retained: bool,
+        edges: BTreeSet<usize>,
+        members: BTreeSet<usize>,
+        sinks: Vec<usize>,
+    ) {
+        let refs = edges.len() + members.len() + sinks.len();
         if self.path_refs + refs > MAX_PATH_REFS {
             self.paths_cut += 1;
             return;
         }
         self.path_refs += refs;
-        let mut nodes: Vec<usize> = members.into_iter().collect();
-        nodes.extend(sink_nodes);
+        let nodes: Vec<usize> = members.into_iter().chain(sinks).collect();
         self.paths.push(json!({
-            "process_id": process,
+            "process_id": walk.process,
             "digest": hex::encode(walk.digest),
             "occurrences": walk.occurrences,
-            "retained": decoded.retained,
+            "retained": retained,
             "requests": walk.requests.iter().map(u64::to_string).collect::<Vec<_>>(),
             "nodes": nodes,
             "edges": edges,
@@ -1357,21 +1488,7 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
         &mut source_cuts,
     );
 
-    let mut builder = Builder {
-        scan: &scan,
-        resolved: &resolved,
-        contexts: Vec::new(),
-        context_index: HashMap::new(),
-        nodes: Vec::new(),
-        node_index: HashMap::new(),
-        edges: Vec::new(),
-        edge_index: HashMap::new(),
-        paths: Vec::new(),
-        path_refs: 0,
-        nodes_cut: 0,
-        edges_cut: 0,
-        paths_cut: 0,
-    };
+    let mut builder = Builder::new(&scan, &resolved);
     for (walk, decoded) in scan.walks.iter().zip(&decoded) {
         if cancel.load(Ordering::Relaxed) {
             return Err(Error::new(499, CANCELLED));
@@ -1383,65 +1500,15 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
         .contexts
         .iter()
         .enumerate()
-        .map(|(id, context)| {
-            let mut origins: Vec<(&String, &u64)> = context.origins.iter().collect();
-            origins.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-            let mut frames: Vec<(&u64, &u64)> = context.frame_votes.iter().filter(|(frame, _)| **frame != 0).collect();
-            frames.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-            json!({
-                "id": id,
-                "process_id": context.process,
-                "execution_context_id": (context.realm != 0).then(|| context.realm.to_string()),
-                "origin": origins.first().map(|(origin, _)| origin),
-                "origins": origins.iter().take(8).map(|(origin, functions)| json!({"origin": origin, "functions": functions})).collect::<Vec<_>>(),
-                "frame_ids": frames.iter().take(8).map(|(frame, stacks)| json!({"frame_id": frame.to_string(), "stacks": stacks})).collect::<Vec<_>>(),
-                "tab_ids": context.tabs.iter().take(16).collect::<Vec<_>>(),
-                "counts": context.kinds,
-            })
-        })
+        .map(|(id, context)| context.json(id))
         .collect();
     let nodes: Vec<Value> = builder
         .nodes
         .into_iter()
         .enumerate()
-        .map(|(id, node)| {
-            let mut value = node.value;
-            value["id"] = json!(id);
-            value["hits"] = json!(node.hits);
-            value["entries"] = json!(node.entries);
-            value["leaves"] = json!(node.leaves);
-            value
-        })
+        .map(|(id, node)| node.json(id))
         .collect();
-    let edges: Vec<Value> = builder
-        .edges
-        .into_iter()
-        .map(|edge| {
-            let mut value = edge.value;
-            value["count"] = json!(edge.count);
-            value["stacks"] = json!(edge.stacks);
-            if !edge.via.is_empty() {
-                value["via"] = json!(edge.via);
-            }
-            if !edge.labels.is_empty() {
-                value["label"] = json!(edge.labels.into_iter().collect::<Vec<_>>().join(" / "));
-            }
-            if let Some(omitted) = edge.omitted {
-                value["omitted"] = json!(omitted);
-            }
-            value["sites"] = json!(
-                edge.sites
-                    .iter()
-                    .map(|(line, column)| if *line == 0 {
-                        json!({"module_offset": column})
-                    } else {
-                        json!({"line": line, "column": column})
-                    })
-                    .collect::<Vec<_>>()
-            );
-            value
-        })
-        .collect();
+    let edges: Vec<Value> = builder.edges.into_iter().map(Edge::json).collect();
     let occurrences: u64 = scan.walks.iter().map(|walk| walk.occurrences).sum();
     // Complete means nothing was cut: no deadline, no budget and no table
     // that forgot entries.

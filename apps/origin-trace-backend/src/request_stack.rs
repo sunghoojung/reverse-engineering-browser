@@ -1669,6 +1669,191 @@ pub fn observation_document(
     Ok(document)
 }
 
+/// Distinct observation sites one event page resolves. A read can return
+/// 5,000 records, and each distinct site can load a 16 MiB source.
+pub const PAGE_SITES: usize = 32;
+
+/// An observation's own frame before a read resolves it: its raw identity and
+/// why this read did not. `eval` comes from the script identity, so it is
+/// absent rather than guessed.
+fn deferred_site(site: &[u8; FRAME], reason: &str) -> Value {
+    let frame = Frame::read(site);
+    let mut value = frame_value(
+        0,
+        &frame,
+        false,
+        (0, Scope::DOCUMENT),
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    if let Some(object) = value.as_object_mut() {
+        object.remove("eval");
+    }
+    value["resolution"] = json!({"status": "deferred", "reason": reason});
+    value
+}
+
+/// For one decoded observation record (types 40 to 45): its own frame (the
+/// listener, the timer callback or the throw site) as `site`, unresolved until
+/// `resolve_observation_sites` reads it and null when the record names none,
+/// and the `get_request_stack` arguments that resolve its whole stack.
+pub(crate) fn observation_reads(event: &Value) -> (Value, Value) {
+    let kind = event["type"].as_str().unwrap_or("");
+    let site = payload(event)
+        .and_then(|payload| observation_site(kind, &payload))
+        .map_or(Value::Null, |site| deferred_site(&site, "polling_window"));
+    let sequence = event["sequence_number"].as_str().unwrap_or("0");
+    let process = event["process_id"].as_u64().unwrap_or(0);
+    let session = event["session_id"].as_str().unwrap_or("0");
+    let read = (process != 0 && sequence != "0" && session != "0").then(|| {
+        json!({"operation": "get_request_stack", "session_id": session, "process_id": process,
+            "observation_sequence": sequence})
+    });
+    (site, read.unwrap_or(Value::Null))
+}
+
+/// Resolves the `site` of each decoded observation of one event page as
+/// `observation_document` resolves a single record's: through the renderer's
+/// script identities, read once per renderer, and the retained sources the
+/// sites name, read once each. At most `PAGE_SITES` distinct sites resolve;
+/// the others keep their raw identity with reason `site_limit`.
+pub fn resolve_observation_sites(
+    store: &Path,
+    artifacts_root: &Path,
+    requests: &Mutex<RequestIndex>,
+    events: &mut [Value],
+) -> Result<()> {
+    struct Wanted {
+        session: String,
+        process: u64,
+        site: [u8; FRAME],
+        events: Vec<usize>,
+    }
+    let mut wanted: Vec<Wanted> = Vec::new();
+    for (at, event) in events.iter_mut().enumerate() {
+        if event["debugger_observation"]["site"].is_null() {
+            continue;
+        }
+        let kind = event["type"].as_str().unwrap_or("");
+        let Some(site) = payload(event).and_then(|payload| observation_site(kind, &payload)) else {
+            continue;
+        };
+        let (session, process) = (
+            event["session_id"].as_str().unwrap_or("").to_owned(),
+            event["process_id"].as_u64().unwrap_or(0),
+        );
+        if let Some(same) = wanted
+            .iter_mut()
+            .find(|w| w.session == session && w.process == process && w.site == site)
+        {
+            same.events.push(at);
+        } else if wanted.len() < PAGE_SITES {
+            wanted.push(Wanted {
+                session,
+                process,
+                site,
+                events: vec![at],
+            });
+        } else {
+            event["debugger_observation"]["site"]["resolution"]["reason"] = json!("site_limit");
+        }
+    }
+    let mut identities = HashMap::new();
+    let mut complete: HashMap<(String, u64), bool> = HashMap::new();
+    for want in &wanted {
+        let renderer = (want.session.clone(), want.process);
+        if complete.contains_key(&renderer) {
+            continue;
+        }
+        let (found, known) = stored_identities(
+            store,
+            requests,
+            &json!({"session_id": want.session}),
+            want.process,
+        )?;
+        identities.extend(found);
+        complete.insert(renderer, known);
+    }
+    // Only the sources the sites name; observation records are the document
+    // main thread's (a version 1 stack summary), whose isolate key is zero.
+    let digests: BTreeSet<String> = wanted
+        .iter()
+        .filter_map(|want| {
+            let key = identity_key(
+                (want.process as u32, Scope::DOCUMENT),
+                u32_at(&want.site, 4),
+            );
+            identities.get(&key)?.sha256.map(hex::encode)
+        })
+        .collect();
+    let sessions: BTreeSet<&str> = wanted.iter().map(|want| want.session.as_str()).collect();
+    let artifacts = if digests.is_empty() {
+        Vec::new()
+    } else {
+        evidence::select_artifacts(artifacts_root, |a| {
+            a["session_id"]
+                .as_str()
+                .is_some_and(|s| sessions.contains(s))
+                && matches!(a["kind"].as_str(), Some("javascript" | "wasm"))
+                && a["sha256"]
+                    .as_str()
+                    .is_some_and(|sha| digests.contains(sha))
+        })?
+    };
+    let sources = std::cell::RefCell::new(HashMap::<String, Vec<u8>>::new());
+    let read = |artifact: &Value, limit: usize| -> Result<Vec<u8>> {
+        let key = artifact["sha256"].as_str().unwrap_or("").to_owned();
+        if let Some(bytes) = sources.borrow().get(&key) {
+            return Ok(bytes.clone());
+        }
+        let bytes = evidence::content(artifacts_root, artifact, limit)?;
+        let mut kept = sources.borrow_mut();
+        if kept.values().map(Vec::len).sum::<usize>() + bytes.len() <= 4 * MAX_SOURCE {
+            kept.insert(key, bytes.clone());
+        }
+        Ok(bytes)
+    };
+    for want in wanted {
+        let renderer = json!({"session_id": want.session, "process_id": want.process});
+        let mut alone = resolve_call(
+            &renderer,
+            Scope::DOCUMENT,
+            &want.site,
+            None,
+            &identities,
+            &artifacts,
+            &read,
+        );
+        if !complete[&(want.session, want.process)] {
+            mark_identities_outside_scan(&mut alone);
+        }
+        let site = alone["frames"][0].take();
+        for at in want.events {
+            events[at]["debugger_observation"]["site"] = site.clone();
+        }
+    }
+    Ok(())
+}
+
+/// The page's sites, or, when the identities or the manifest cannot be read,
+/// each left with its raw identity and reason `site_read_failed`: a failed
+/// resolution never costs the records themselves.
+pub fn annotate_observation_sites(
+    store: &Path,
+    artifacts_root: &Path,
+    requests: &Mutex<RequestIndex>,
+    events: &mut [Value],
+) {
+    if resolve_observation_sites(store, artifacts_root, requests, events).is_err() {
+        for event in events {
+            let site = &mut event["debugger_observation"]["site"];
+            if site["resolution"]["status"] == "deferred" {
+                site["resolution"]["reason"] = json!("site_read_failed");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -2121,6 +2306,122 @@ pub(crate) mod tests {
         // A request stack is never answered as an observation.
         assert_eq!(read(1)["status"], "not_recorded");
         assert_eq!(read(9)["status"], "not_recorded");
+
+        // The same records on an event page, as get_events and wait_for_events
+        // return them: the object get_native_debugger lists, plus a site that
+        // stays raw until the page's sites are resolved, and the stack's read.
+        let mut page: Vec<Value> = std::fs::read_to_string(&store)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        event_query::annotate_events(&mut page);
+        let deferred = page[1].clone();
+        let decoded = &deferred["debugger_observation"];
+        let listed = crate::debugger_observation::decode(&page[1]).unwrap();
+        for (key, value) in listed.as_object().unwrap() {
+            assert_eq!(decoded[key], *value, "{key}");
+        }
+        assert_eq!(decoded["status"], "decoded");
+        assert_eq!(
+            decoded["site"]["resolution"],
+            json!({"status": "deferred", "reason": "polling_window"})
+        );
+        assert_eq!(
+            (&decoded["site"]["script_id"], &decoded["site"]["position"]),
+            (&json!(7), &json!(start))
+        );
+        assert!(
+            decoded["site"].get("eval").is_none(),
+            "eval is the identity's to say"
+        );
+        assert_eq!(
+            decoded["stack_read"],
+            json!({"operation": "get_request_stack", "session_id": "9", "process_id": 42,
+                "observation_sequence": "2"})
+        );
+        assert_eq!(page[2]["debugger_observation"]["site"], Value::Null);
+        assert_eq!(
+            page[3]["debugger_observation"],
+            json!({"status": "invalid"})
+        );
+        assert!(page[0].get("debugger_observation").is_none());
+        for annotation in [&page[1], &page[2], &page[3]] {
+            crate::validation::schema(
+                "DebuggerObservationDecode",
+                &annotation["debugger_observation"],
+                500,
+            )
+            .unwrap();
+        }
+        resolve_observation_sites(&store, &artifacts, &index, &mut page).unwrap();
+        let site = &page[1]["debugger_observation"]["site"];
+        assert_eq!(
+            *site, tap["observation"]["site"],
+            "one resolver for both reads"
+        );
+        assert_eq!(
+            (
+                &site["resolution"]["url"],
+                &site["resolution"]["line"],
+                &site["resolution"]["column"]
+            ),
+            (
+                &json!("https://app.example.test/app.js"),
+                &json!(2),
+                &json!(source.lines().nth(1).unwrap().find("(event)").unwrap() + 1)
+            )
+        );
+        crate::validation::schema(
+            "DebuggerObservationDecode",
+            &page[1]["debugger_observation"],
+            500,
+        )
+        .unwrap();
+
+        // More distinct sites than one page resolves keep their raw identity;
+        // a repeated site shares the resolution of its first record.
+        let mut many: Vec<Value> = (0..=PAGE_SITES as u32)
+            .map(|n| {
+                let mut event = page[1].clone();
+                let payload = observation(&listener(&frame(1, 0, 7, start + n, start)));
+                event["payload"] = json!(hex::encode(&payload));
+                event["sequence_number"] = json!((100 + n).to_string());
+                event
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("debugger_observation");
+                event
+            })
+            .collect();
+        many.push(many[0].clone());
+        event_query::annotate_events(&mut many);
+        resolve_observation_sites(&store, &artifacts, &index, &mut many).unwrap();
+        let status = |event: &Value| event["debugger_observation"]["site"]["resolution"].clone();
+        assert_eq!(status(&many[0])["status"], "resolved");
+        // Read, and past the end of the source: a reason, never a guess.
+        assert_eq!(
+            status(&many[PAGE_SITES - 1]),
+            json!({"status": "unresolved", "reason": "position_outside_source"})
+        );
+        assert_eq!(
+            status(&many[PAGE_SITES]),
+            json!({"status": "deferred", "reason": "site_limit"})
+        );
+        assert_eq!(status(&many[PAGE_SITES + 1]), status(&many[0]));
+        // An unreadable manifest leaves the records and names why.
+        std::fs::write(artifacts.join("manifest.jsonl"), "not json\n").unwrap();
+        let mut failed = page[..2].to_vec();
+        failed[1]["debugger_observation"]["site"] = decoded["site"].clone();
+        annotate_observation_sites(&store, &artifacts, &index, &mut failed);
+        assert_eq!(
+            status(&failed[1]),
+            json!({"status": "deferred", "reason": "site_read_failed"})
+        );
+        assert_eq!(
+            failed[1]["debugger_observation"]["detail"]["event_type"],
+            "click"
+        );
     }
 
     #[test]

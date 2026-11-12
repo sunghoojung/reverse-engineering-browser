@@ -884,10 +884,11 @@ impl App {
                 });
                 // json! serializes borrowed values; move the retained window instead
                 // of allocating a second complete evidence tree on every refresh.
-                let mut events = window.events;
+                let (mut events, mut network) = (window.events, window.network_events);
                 event_query::annotate_events(&mut events);
+                event_query::annotate_events(&mut network);
                 result["events"] = Value::Array(events);
-                result["network_events"] = Value::Array(window.network_events);
+                result["network_events"] = Value::Array(network);
                 self.event_state(&mut result, capture);
                 if capture.mode == CaptureMode::Demo {
                     result["canvas_render_captures"] =
@@ -1578,8 +1579,12 @@ impl App {
         if matches_etag(headers, Some(&etag)) {
             return Ok(not_modified(&etag));
         }
-        let path = self.options.store.clone();
-        let (page, tally, filter) = self
+        let (path, artifacts, requests) = (
+            self.options.store.clone(),
+            self.options.artifacts.clone(),
+            self.requests.clone(),
+        );
+        let mut document = self
             .blocking(move || {
                 let mut tally = event_query::Tally::default();
                 let page = event_query::read_page(
@@ -1590,10 +1595,12 @@ impl App {
                     event_query::DAMAGED_LINE_BYTES,
                     event_query::event_visitor(&filter, &mut tally),
                 )?;
-                Ok((page, tally, filter))
+                let mut document =
+                    event_query::events_document(&page, &tally, &filter, cursor, limit);
+                observation_sites(&path, &artifacts, &requests, &mut document);
+                Ok(document)
             })
             .await?;
-        let mut document = event_query::events_document(&page, &tally, &filter, cursor, limit);
         self.event_state(&mut document, capture);
         let mut response = axum::Json(document).into_response();
         response
@@ -1688,6 +1695,23 @@ impl App {
         };
         let cursor = event_query::Cursor::After(origin);
         let mut document = event_query::events_document(&page, &tally, &filter, cursor, limit);
+        if document["events"].as_array().is_some_and(|events| {
+            events
+                .iter()
+                .any(|e| e.get("debugger_observation").is_some())
+        }) {
+            let (store, artifacts, requests) = (
+                self.options.store.clone(),
+                self.options.artifacts.clone(),
+                self.requests.clone(),
+            );
+            document = self
+                .blocking(move || {
+                    observation_sites(&store, &artifacts, &requests, &mut document);
+                    Ok(document)
+                })
+                .await?;
+        }
         self.event_state(&mut document, self.capture_view());
         document["wait"] = json!({
             "timed_out": timed_out,
@@ -2229,6 +2253,19 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
 }
 /// `get_native_debugger` filters: one observation type, one native frame
 /// named by all three identities, and a backward byte cursor.
+/// Resolves the own frames of the debugger observations on a filtered or
+/// waiting event page (protocol/native-debugger-observation-v1.md).
+fn observation_sites(
+    store: &Path,
+    artifacts: &Path,
+    requests: &Mutex<RequestIndex>,
+    document: &mut Value,
+) {
+    if let Some(events) = document["events"].as_array_mut() {
+        crate::request_stack::annotate_observation_sites(store, artifacts, requests, events);
+    }
+}
+
 fn native_debugger_query(q: &Query) -> Result<crate::debugger_observation::Query> {
     use crate::debugger_observation::{PAGE, Query as Observations, RECENT, TYPES, Thread};
     q.only(

@@ -797,11 +797,13 @@ pub fn events_document(
     document
 }
 
-/// Puts the decoded Wasm observation or JavaScript invocation object beside
-/// each payload of an event page, as every page that returns events shows it.
+/// Puts the decoded Wasm observation, JavaScript invocation or debugger
+/// observation object beside each payload of an event page, as every page
+/// that returns events shows it.
 pub(crate) fn annotate_events(events: &mut [Value]) {
     crate::vm_opcode::annotate_wasm_observations(events);
     crate::js_invocation::annotate(events);
+    crate::debugger_observation::annotate(events);
 }
 
 /// The waiting read stops at this many concurrent callers rather than queue.

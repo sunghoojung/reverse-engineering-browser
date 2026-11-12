@@ -2149,7 +2149,7 @@
       "get": {
         "operationId": "get_events",
         "summary": "Read native events, optionally filtered and paged",
-        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; response_body (33), in those sessions only, says whether each response body was retained, partial, refused or never observed, names its response_body artifact and joins its response_started parent; select one request with request_id. request_headers (30) and response_headers (31) summarize each header block in those sessions; read them with get_request_headers. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. Each also includes js_invocation beside the hex (JsInvocationDecode): status decoded with kind start, settle or request, never a value digest; status invalid has no fields. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. A sample refused by a function, module, call-site, or the 16-record stream budget is wasm_dispatch_overflow (28) or wasm_indirect_overflow (29): a compact identity, not a full observation. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0.  wasm_dispatch_overflow and wasm_indirect_overflow include wasm_overflow beside that hex. status decoded names kind identity or omitted. An identity names ring_index, function_index, and module_byte_offset, plus selector and arm_count, or table_index, slot, and resolution. An omitted record names omitted_count and no site. status invalid carries no fields. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
+        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; response_body (33), in those sessions only, says whether each response body was retained, partial, refused or never observed, names its response_body artifact and joins its response_started parent; select one request with request_id. request_headers (30) and response_headers (31) summarize each header block in those sessions; read them with get_request_headers. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. Each also includes js_invocation beside the hex (JsInvocationDecode): status decoded with kind start, settle or request, never a value digest; status invalid has no fields. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. A sample refused by a function, module, call-site, or the 16-record stream budget is wasm_dispatch_overflow (28) or wasm_indirect_overflow (29): a compact identity, not a full observation. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0.  wasm_dispatch_overflow and wasm_indirect_overflow include wasm_overflow beside that hex. status decoded names kind identity or omitted. An identity names ring_index, function_index, and module_byte_offset, plus selector and arm_count, or table_index, slot, and resolution. An omitted record names omitted_count and no site. status invalid carries no fields. Debugger observations, request_watch_match (40) through dom_mutation (45), include debugger_observation beside that hex (DebuggerObservationDecode): status decoded carries the fields get_native_debugger lists, site (the listener, timer callback or throw site, resolved to the retained script's url, line, column and function name, or a reason with its raw script_id and position; any filter or cursor resolves up to 32 distinct sites per page, and the unfiltered window leaves them deferred) and stack_read, the get_request_stack arguments that resolve its stack; status invalid has no fields. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
         "tags": [
           "events"
         ],
@@ -2740,7 +2740,7 @@
       "get": {
         "operationId": "wait_for_events",
         "summary": "Wait for matching events",
-        "description": "Waits up to timeout_ms for the first events after a cursor that match the same filters as get_events, then returns them in the filtered get_events shape plus a wait object. wasm_dispatch_observation and wasm_indirect_observation include wasm_observation. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. status invalid has no fields. A payload version other than 1 or 2 is invalid in full. The record is protocol 3, category vm, and flags 0. js_invocation_start, js_invocation_settle and js_invocation_request include js_invocation with kind start, settle or request (JsInvocationDecode); status invalid has no fields. Without after, only events written after the call count, so take a cursor first (timeout_ms 1) and then act: session_action open_url or click, or a Console evaluate. On timeout it returns no events, wait.timed_out true and query.next_after for the next wait. Waiting does not change the browser or the stores. At most eight waits run at once.",
+        "description": "Waits up to timeout_ms for the first events after a cursor that match the same filters as get_events, then returns them in the filtered get_events shape plus a wait object. wasm_dispatch_observation and wasm_indirect_observation include wasm_observation. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. status invalid has no fields. A payload version other than 1 or 2 is invalid in full. The record is protocol 3, category vm, and flags 0. js_invocation_start, js_invocation_settle and js_invocation_request include js_invocation with kind start, settle or request (JsInvocationDecode); status invalid has no fields. Debugger observations (types 40 to 45) include debugger_observation with its site resolved and stack_read (DebuggerObservationDecode): wait with type request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation or dom_mutation to break on one without pausing. Such a wait can time out with nothing missing from the store, because rules match only the main thread of the one document they were armed on (workers, other frames and same-process iframes never match), navigation clears them, and they cannot be armed ahead of a page load, so a new page records nothing until native_console_action watch arms it; get_native_debugger watch says what is armed. A renderer refuses records past 1,024 per capture configuration and leaves one debugger_observation_budget gap. Without after, only events written after the call count, so take a cursor first (timeout_ms 1) and then act: session_action open_url or click, or a Console evaluate. On timeout it returns no events, wait.timed_out true and query.next_after for the next wait. Waiting does not change the browser or the stores. At most eight waits run at once.",
         "tags": [
           "events"
         ],
@@ -5307,7 +5307,7 @@
       "get": {
         "operationId": "get_native_debugger",
         "summary": "Read Phase 1 threads, watch rules and observations, and the pausing debugger state",
-        "description": "Phase 1 is served: threads lists Console documents, recorded workers and the native frames observation records came from (observed), watch is what the renderer confirmed armed through the Console watch command, and observations are the newest decoded records; wait on them with wait_for_events. type, the thread scope (session_id, process_id and frame_id together, an observed frame) and before select and page the observations; observations_query echoes the read and its byte scope. observation_budget_gaps names renderers that refused later records after 1,024 in one capture configuration. The pausing fields come from the debugger peer: a state command that never pauses, steps, resumes or renews a lease, which is why this read carries a state-dependent browser-control effect, like get_live_wasm. availability unsupported means no peer answered; its reason says which case. That is not an empty breakpoint list, and no document, frames, scopes or values are invented. See protocol/native-debugger-pause-v1.md.",
+        "description": "Phase 1 is served: threads lists Console documents, recorded workers and the native frames observation records came from (observed), watch is what the renderer confirmed armed through the Console watch command (rules match only that document's main thread and its navigation clears them), and observations are the newest decoded records; wait on them with wait_for_events, which decodes them the same way. type, the thread scope (session_id, process_id and frame_id together, an observed frame) and before select and page the observations; observations_query echoes the read and its byte scope. observation_budget_gaps names renderers that refused later records after 1,024 in one capture configuration. The pausing fields come from the debugger peer: a state command that never pauses, steps, resumes or renews a lease, which is why this read carries a state-dependent browser-control effect, like get_live_wasm. availability unsupported means no peer answered; its reason says which case. That is not an empty breakpoint list, and no document, frames, scopes or values are invented. See protocol/native-debugger-pause-v1.md.",
         "tags": [
           "native-debugger"
         ],
@@ -18368,13 +18368,16 @@
       "Event": {
         "type": "object",
         "additionalProperties": true,
-        "description": "Native event record validated before HTTP delivery for protocol version, canonical identifiers, process ID, and bounded hexadecimal payload consistency. Additional native record fields remain extensible; see protocol/README.md. This schema does not yet describe every native event field. wasm_dispatch_observation and wasm_indirect_observation responses from get_events and wait_for_events include wasm_observation, and js_invocation_start, js_invocation_settle and js_invocation_request responses include js_invocation. The payload hex remains.",
+        "description": "Native event record validated before HTTP delivery for protocol version, canonical identifiers, process ID, and bounded hexadecimal payload consistency. Additional native record fields remain extensible; see protocol/README.md. This schema does not yet describe every native event field. wasm_dispatch_observation and wasm_indirect_observation responses from get_events and wait_for_events include wasm_observation, js_invocation_start, js_invocation_settle and js_invocation_request responses include js_invocation, and the six debugger observation types (40 to 45) include debugger_observation. The payload hex remains.",
         "properties": {
           "wasm_observation": {
             "$ref": "#/components/schemas/WasmObservationDecode"
           },
           "js_invocation": {
             "$ref": "#/components/schemas/JsInvocationDecode"
+          },
+          "debugger_observation": {
+            "$ref": "#/components/schemas/DebuggerObservationDecode"
           }
         }
       },
@@ -24234,6 +24237,471 @@
           }
         }
       },
+      "DebuggerObservationStack": {
+        "description": "A record's bytes 0 to 79, the request_initiator_stack summary with its states (protocol/native-debugger-observation-v1.md). get_request_stack with observation_sequence resolves its frames.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "state",
+          "total_depth",
+          "recorded",
+          "async_frames",
+          "digest",
+          "innermost"
+        ],
+        "properties": {
+          "state": {
+            "enum": [
+              "captured",
+              "no_script",
+              "unsupported_thread",
+              "not_retained_artifact_unavailable",
+              "not_retained_budget",
+              "not_walked_thread_limit"
+            ]
+          },
+          "total_depth": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "recorded": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "async_frames": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "digest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "innermost": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "script_id",
+                  "position",
+                  "detail"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2
+                  },
+                  "script_id": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "position": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "detail": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "DebuggerObservationDetail": {
+        "description": "The per-type bytes 80 to 127 of a debugger observation record, decoded: identities, kinds, positions and names only, never a value.",
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "rule": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 15
+          },
+          "method_matched": {
+            "type": "boolean"
+          },
+          "target": {
+            "enum": [
+              "element",
+              "document",
+              "window",
+              "node",
+              "other"
+            ]
+          },
+          "node_type": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "listener": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "script_id",
+                  "position",
+                  "function_start"
+                ],
+                "properties": {
+                  "script_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4294967295
+                  },
+                  "position": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  },
+                  "function_start": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  }
+                }
+              }
+            ]
+          },
+          "callback": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "script_id",
+                  "position",
+                  "function_start"
+                ],
+                "properties": {
+                  "script_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4294967295
+                  },
+                  "position": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  },
+                  "function_start": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  }
+                }
+              }
+            ]
+          },
+          "site": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "script_id",
+                  "position",
+                  "function_start"
+                ],
+                "properties": {
+                  "script_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4294967295
+                  },
+                  "position": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  },
+                  "function_start": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  }
+                }
+              }
+            ]
+          },
+          "event_type": {
+            "type": "string",
+            "pattern": "^[!-~]{1,27}$"
+          },
+          "phase": {
+            "enum": [
+              "scheduled",
+              "fired"
+            ]
+          },
+          "kind": {
+            "enum": [
+              "timeout",
+              "interval",
+              "uncaught",
+              "caught",
+              "unhandled_rejection",
+              "attribute",
+              "subtree",
+              "removal"
+            ]
+          },
+          "string_callback": {
+            "type": "boolean"
+          },
+          "timer_id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "delay_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "directive": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "directive_value": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "disposition": {
+            "enum": [
+              "enforce",
+              "report"
+            ]
+          },
+          "blocked_host": {
+            "type": "string",
+            "pattern": "^[!-~]{0,45}$"
+          },
+          "node_slot": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "attribute": {
+            "type": "string",
+            "pattern": "^[!-~]{0,32}$"
+          }
+        }
+      },
+      "DebuggerObservationDecode": {
+        "description": "Read-path decode of one debugger observation record (types 40 to 45, protocol/native-debugger-observation-v1.md), placed beside the unchanged payload hex by get_events and wait_for_events. status decoded has the fields get_native_debugger lists for the record, its own frame as site and stack_read; status invalid means the core would refuse the record, and no field is returned. Identities, kinds, positions and names only: never a value, a URL path or source text.",
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "type",
+              "session_id",
+              "process_id",
+              "frame_id",
+              "sequence_number",
+              "parent_event_id",
+              "request_id",
+              "monotonic_time_ns",
+              "stack",
+              "detail",
+              "site",
+              "stack_read"
+            ],
+            "properties": {
+              "status": {
+                "const": "decoded"
+              },
+              "type": {
+                "enum": [
+                  "request_watch_match",
+                  "listener_dispatch",
+                  "timer_observation",
+                  "csp_violation",
+                  "exception_observation",
+                  "dom_mutation"
+                ]
+              },
+              "session_id": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$"
+              },
+              "process_id": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "frame_id": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$"
+              },
+              "sequence_number": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$"
+              },
+              "parent_event_id": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$"
+              },
+              "request_id": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$"
+              },
+              "monotonic_time_ns": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$"
+              },
+              "stack": {
+                "$ref": "#/components/schemas/DebuggerObservationStack"
+              },
+              "detail": {
+                "$ref": "#/components/schemas/DebuggerObservationDetail"
+              },
+              "site": {
+                "description": "The record's own frame: the listener of a listener_dispatch, the callback of a timer_observation or the throw site of an exception_observation, resolved alone as get_request_stack resolves a frame, to the retained script's url, one-based line and UTF-16 column and the function name, or a reason with the raw script_id and position. Null for the other three types, for an object or native listener and for a rejection. A filtered or cursor read of get_events and every wait_for_events resolve up to 32 distinct sites per page; the unfiltered polling window leaves each deferred.",
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/RequestStackFrame"
+                  },
+                  {
+                    "type": "object",
+                    "description": "The site's raw identity, not resolved by this read; get_request_stack with stack_read resolves it.",
+                    "required": [
+                      "index",
+                      "kind",
+                      "async",
+                      "script_id",
+                      "resolution"
+                    ],
+                    "properties": {
+                      "index": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "kind": {
+                        "const": "javascript"
+                      },
+                      "async": {
+                        "type": "boolean"
+                      },
+                      "script_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 4294967295
+                      },
+                      "position": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "function_position": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "constructor": {
+                        "type": "boolean"
+                      },
+                      "top_level": {
+                        "type": "boolean"
+                      },
+                      "resolution": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "status",
+                          "reason"
+                        ],
+                        "properties": {
+                          "status": {
+                            "const": "deferred"
+                          },
+                          "reason": {
+                            "enum": [
+                              "polling_window",
+                              "site_limit",
+                              "site_read_failed"
+                            ],
+                            "description": "polling_window: the unfiltered get_events polling window does not resolve sites; any filter or cursor does. site_limit: the page named more than 32 distinct sites and this one was past them. site_read_failed: the script identities or the artifact manifest could not be read."
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "stack_read": {
+                "description": "The get_request_stack arguments that read this record's whole stack, resolved like a request's, with its site again under observation.",
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "operation",
+                      "session_id",
+                      "process_id",
+                      "observation_sequence"
+                    ],
+                    "properties": {
+                      "operation": {
+                        "const": "get_request_stack"
+                      },
+                      "session_id": {
+                        "$ref": "#/components/schemas/NonzeroUint64String"
+                      },
+                      "process_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 4294967295
+                      },
+                      "observation_sequence": {
+                        "$ref": "#/components/schemas/NonzeroUint64String"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "invalid"
+              }
+            }
+          }
+        ]
+      },
       "NativeDebuggerState": {
         "type": "object",
         "additionalProperties": false,
@@ -24629,273 +25097,10 @@
                   "pattern": "^(0|[1-9][0-9]{0,19})$"
                 },
                 "stack": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "state",
-                    "total_depth",
-                    "recorded",
-                    "async_frames",
-                    "digest",
-                    "innermost"
-                  ],
-                  "properties": {
-                    "state": {
-                      "enum": [
-                        "captured",
-                        "no_script",
-                        "unsupported_thread",
-                        "not_retained_artifact_unavailable",
-                        "not_retained_budget",
-                        "not_walked_thread_limit"
-                      ]
-                    },
-                    "total_depth": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    "recorded": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    "async_frames": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    "digest": {
-                      "type": [
-                        "string",
-                        "null"
-                      ],
-                      "pattern": "^[0-9a-f]{64}$"
-                    },
-                    "innermost": {
-                      "oneOf": [
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "object",
-                          "additionalProperties": false,
-                          "required": [
-                            "kind",
-                            "script_id",
-                            "position",
-                            "detail"
-                          ],
-                          "properties": {
-                            "kind": {
-                              "type": "integer",
-                              "minimum": 1,
-                              "maximum": 2
-                            },
-                            "script_id": {
-                              "type": "integer",
-                              "minimum": 1
-                            },
-                            "position": {
-                              "type": "integer",
-                              "minimum": 0
-                            },
-                            "detail": {
-                              "type": "integer",
-                              "minimum": 0
-                            }
-                          }
-                        }
-                      ]
-                    }
-                  }
+                  "$ref": "#/components/schemas/DebuggerObservationStack"
                 },
                 "detail": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "rule": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 15
-                    },
-                    "method_matched": {
-                      "type": "boolean"
-                    },
-                    "target": {
-                      "enum": [
-                        "element",
-                        "document",
-                        "window",
-                        "node",
-                        "other"
-                      ]
-                    },
-                    "node_type": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 65535
-                    },
-                    "listener": {
-                      "oneOf": [
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "object",
-                          "additionalProperties": false,
-                          "required": [
-                            "script_id",
-                            "position",
-                            "function_start"
-                          ],
-                          "properties": {
-                            "script_id": {
-                              "type": "integer",
-                              "minimum": 1,
-                              "maximum": 4294967295
-                            },
-                            "position": {
-                              "type": "integer",
-                              "minimum": 0,
-                              "maximum": 4294967295
-                            },
-                            "function_start": {
-                              "type": "integer",
-                              "minimum": 0,
-                              "maximum": 4294967295
-                            }
-                          }
-                        }
-                      ]
-                    },
-                    "callback": {
-                      "oneOf": [
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "object",
-                          "additionalProperties": false,
-                          "required": [
-                            "script_id",
-                            "position",
-                            "function_start"
-                          ],
-                          "properties": {
-                            "script_id": {
-                              "type": "integer",
-                              "minimum": 1,
-                              "maximum": 4294967295
-                            },
-                            "position": {
-                              "type": "integer",
-                              "minimum": 0,
-                              "maximum": 4294967295
-                            },
-                            "function_start": {
-                              "type": "integer",
-                              "minimum": 0,
-                              "maximum": 4294967295
-                            }
-                          }
-                        }
-                      ]
-                    },
-                    "site": {
-                      "oneOf": [
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "object",
-                          "additionalProperties": false,
-                          "required": [
-                            "script_id",
-                            "position",
-                            "function_start"
-                          ],
-                          "properties": {
-                            "script_id": {
-                              "type": "integer",
-                              "minimum": 1,
-                              "maximum": 4294967295
-                            },
-                            "position": {
-                              "type": "integer",
-                              "minimum": 0,
-                              "maximum": 4294967295
-                            },
-                            "function_start": {
-                              "type": "integer",
-                              "minimum": 0,
-                              "maximum": 4294967295
-                            }
-                          }
-                        }
-                      ]
-                    },
-                    "event_type": {
-                      "type": "string",
-                      "pattern": "^[!-~]{1,27}$"
-                    },
-                    "phase": {
-                      "enum": [
-                        "scheduled",
-                        "fired"
-                      ]
-                    },
-                    "kind": {
-                      "enum": [
-                        "timeout",
-                        "interval",
-                        "uncaught",
-                        "caught",
-                        "unhandled_rejection",
-                        "attribute",
-                        "subtree",
-                        "removal"
-                      ]
-                    },
-                    "string_callback": {
-                      "type": "boolean"
-                    },
-                    "timer_id": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 4294967295
-                    },
-                    "delay_ms": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 4294967295
-                    },
-                    "directive": {
-                      "type": "string",
-                      "maxLength": 32
-                    },
-                    "directive_value": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 255
-                    },
-                    "disposition": {
-                      "enum": [
-                        "enforce",
-                        "report"
-                      ]
-                    },
-                    "blocked_host": {
-                      "type": "string",
-                      "pattern": "^[!-~]{0,45}$"
-                    },
-                    "node_slot": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 3
-                    },
-                    "attribute": {
-                      "type": "string",
-                      "pattern": "^[!-~]{0,32}$"
-                    }
-                  }
+                  "$ref": "#/components/schemas/DebuggerObservationDetail"
                 }
               }
             }
@@ -25888,7 +26093,7 @@
           {
             "type": "object",
             "additionalProperties": false,
-            "description": "Arms non-pausing observation rules on the selected document, replacing any earlier set; protocol/native-debugger-observation-v1.md. Records arrive through get_events and wait_for_events. Nothing pauses and no value is read.",
+            "description": "Arms non-pausing observation rules on the selected document, replacing any earlier set; protocol/native-debugger-observation-v1.md. Records arrive through get_events and wait_for_events. Nothing pauses and no value is read. Rules match only this document's main thread: workers, other frames and same-process iframes never match, and one document is armed at a time (stop disarms it before another is connected). Navigation, a new capture configuration, unwatch or stop disarms them. A rule cannot be armed ahead of a page load: arm after the page loaded, and what ran while it loaded is not observed. Without an active capture session nothing is armed.",
             "properties": {
               "operation": {
                 "type": "string",

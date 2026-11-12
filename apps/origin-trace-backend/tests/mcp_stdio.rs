@@ -2365,6 +2365,385 @@ fn ending_its_own_session_returns_a_connection_to_where_it_started() {
     );
 }
 
+/// The rendered fixture's debugger evidence (tools/origin-trace-rendered-ui/
+/// evidence-fixture.mjs, `debuggerObservations`): one renderer, frame 200,
+/// and a retained compiled script whose handlers the records name.
+const DEBUGGER_SOURCE: &str = "// Debugger fixture: the handlers observation records name.\n\
+document.querySelector('#go').addEventListener('click', function onTap(event) {\n  \
+event.preventDefault();\n  setTimeout(function later() { fetch('/api/x'); }, 100);\n});\n";
+
+/// Writes protocol/native-debugger-observation-v1.md records into a test
+/// backend's store, one line per call, as the broker appends them.
+struct ObservationStore {
+    path: std::path::PathBuf,
+    sequence: u64,
+}
+impl ObservationStore {
+    const PROCESS: u64 = 4747;
+    fn append(&mut self, category: &str, kind: &str, fields: Value, payload: &[u8]) -> String {
+        self.sequence += 1;
+        let mut event = json!({"protocol_version": 3, "session_id": "1",
+            "sequence_number": self.sequence.to_string(), "monotonic_time_ns": (1000 * self.sequence).to_string(),
+            "navigation_id": "0", "frame_id": "200", "artifact_id": "0", "parent_event_id": "0",
+            "request_id": "0", "process_id": Self::PROCESS, "thread_id": Self::PROCESS, "tab_id": 0,
+            "category": category, "type": kind, "flags": 0, "status_code": 0, "error_code": 0,
+            "encoded_data_length": "0", "decoded_body_length": "0", "resource_type": 0,
+            "initiator_process_id": 0, "initiator_request_id": 0, "payload_encoding": "hex",
+            "payload": hex::encode(payload), "payload_size": payload.len(), "payload_truncated": false});
+        for (key, value) in fields.as_object().unwrap() {
+            event[key] = value.clone();
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&self.path)
+            .unwrap();
+        writeln!(file, "{event}").unwrap();
+        self.sequence.to_string()
+    }
+}
+
+/// A native artifact of the debugger fixture: a compiled script or a stack.
+fn native_artifact(server: &Server, id: &str, kind: &str, url: &str, creator: &str, body: &[u8]) {
+    use sha2::{Digest, Sha256};
+    let hash = hex::encode(Sha256::digest(body));
+    let origin = if kind == "stack" {
+        "request_stack"
+    } else {
+        "compiled_script"
+    };
+    let artifact = json!({
+        "protocol_version": 1, "artifact_id": id, "session_id": "1", "navigation_id": "0",
+        "frame_id": "200", "parent_artifact_id": "0", "creator_event_id": creator,
+        "execution_context_id": "99", "capture_origin": origin, "kind": kind, "url": url,
+        "mime_type": if kind == "stack" { "application/octet-stream" } else { "text/javascript" },
+        "byte_size": body.len(), "sha256": hash,
+        "sensitive": false, "content_path": format!("blobs/{hash}.bin"),
+    });
+    let artifacts = server._root.path().join("artifacts");
+    std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
+    std::fs::write(artifacts.join(format!("blobs/{hash}.bin")), body).unwrap();
+    let mut manifest = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(artifacts.join("manifest.jsonl"))
+        .unwrap();
+    writeln!(manifest, "{artifact}").unwrap();
+}
+
+/// One MCP tool call's structured result, which must not be an error.
+fn tool_call(mcp: &mut Mcp, name: &str, arguments: Value) -> Value {
+    let response = mcp.request("tools/call", json!({"name": name, "arguments": arguments}));
+    assert_eq!(response["result"]["isError"], false, "{name}: {response}");
+    response["result"]["structuredContent"].clone()
+}
+
+/// Takes a cursor, lets the page act, then waits on a cursor filtered to
+/// `kind` at each permission level. Returns the decoded record after checking
+/// that omitting content withheld the payload hex and no decoded field.
+fn wait_for_observation(
+    levels: &mut [Mcp],
+    schema: &jsonschema::Validator,
+    store: &mut ObservationStore,
+    kind: &str,
+    act: impl FnOnce(&mut ObservationStore),
+) -> Value {
+    let cursor = tool_call(&mut levels[0], "wait_for_events", json!({"timeout_ms": 1}));
+    assert_eq!(cursor["wait"]["timed_out"], true);
+    let after = cursor["query"]["next_after"].as_str().unwrap().to_owned();
+    act(store);
+    let mut seen: Vec<Value> = levels
+        .iter_mut()
+        .map(|mcp| {
+            let page = tool_call(
+                mcp,
+                "wait_for_events",
+                json!({"type": kind, "after": after, "timeout_ms": 10000, "limit": 5}),
+            );
+            assert!(schema.is_valid(&page), "{kind}: {page}");
+            assert_eq!(page["wait"]["timed_out"], false, "{kind}");
+            assert_eq!(page["events"].as_array().unwrap().len(), 1, "{page}");
+            page["events"][0].clone()
+        })
+        .collect();
+    assert!(seen[0]["payload"]["omitted"].is_string(), "{}", seen[0]);
+    assert!(seen[1]["payload"].is_string());
+    assert_eq!(
+        seen[0]["debugger_observation"], seen[1]["debugger_observation"],
+        "{kind}"
+    );
+    for source_text in ["preventDefault", "querySelector", "setTimeout"] {
+        assert!(
+            !seen[0].to_string().contains(source_text),
+            "{kind} carries source text"
+        );
+    }
+    seen.remove(0)["debugger_observation"].take()
+}
+
+/// A kind 1 frame: a JavaScript position inside the function starting at `start`.
+fn js_frame(position: usize, start: usize) -> Vec<u8> {
+    let mut bytes = vec![1, 0, 0, 0];
+    for value in [7u32, position as u32, start as u32] {
+        bytes.extend(value.to_le_bytes());
+    }
+    bytes
+}
+
+/// A version 1 stack summary (bytes 0 to 79), walked when `frames` is given,
+/// followed by an observation tail.
+fn stack_summary(frames: Option<(&[u8], [u8; 32])>, tail: &[u8]) -> Vec<u8> {
+    let mut payload = match frames {
+        None => vec![1, 0, 128, 0, 2, 0x08, 0, 0],
+        Some((innermost, digest)) => {
+            let mut p = vec![1, 0, 128, 0, 1, 0x08, 0, 0];
+            for value in [1u32, 1, 0] {
+                p.extend(value.to_le_bytes());
+            }
+            p.extend([0; 4]);
+            p.extend(0u32.to_le_bytes());
+            p.extend(1u32.to_le_bytes());
+            p.extend(digest);
+            p.extend(innermost);
+            p
+        }
+    };
+    payload.resize(80, 0);
+    payload.extend(tail);
+    payload.resize(128, 0);
+    payload
+}
+
+/// Phase 1 acceptance (#434) through the agent surface, on the rendered
+/// fixture's records: an agent waits on a filtered cursor for the next fetch
+/// to a watched path and reads its stack, for the next click handler and
+/// reads the listener's file, line and column, and for the next CSP
+/// violation. The decoded fields carry nothing the content levels withhold.
+#[test]
+fn an_agent_waits_on_observation_records_and_reads_their_positions() {
+    use sha2::{Digest, Sha256};
+    let server = Server::start();
+    let mut store = ObservationStore {
+        path: server._root.path().join("events.jsonl"),
+        sequence: 0,
+    };
+    let mut identity = vec![1, 0, 128, 0, 1, 0x02, 0, 0];
+    for value in [7u32, 0, 0, 0] {
+        identity.extend(value.to_le_bytes());
+    }
+    identity.extend(99u64.to_le_bytes());
+    identity.extend((DEBUGGER_SOURCE.len() as u64).to_le_bytes());
+    identity.extend(Sha256::digest(DEBUGGER_SOURCE));
+    identity.resize(128, 0);
+    let named = store.append("network", "script_identity", json!({}), &identity);
+    let url = "https://app.debugger.test/handlers.js";
+    native_artifact(
+        &server,
+        "360",
+        "javascript",
+        url,
+        &named,
+        DEBUGGER_SOURCE.as_bytes(),
+    );
+    // The fetch runs inside `later`, which a timer called: one frame.
+    let fetch_at = DEBUGGER_SOURCE.find("fetch('/api/x')").unwrap();
+    let later = DEBUGGER_SOURCE.find("() { fetch").unwrap();
+    let tap = DEBUGGER_SOURCE.find("(event) {").unwrap();
+    // One-based line and column of a byte offset in the ASCII source.
+    let place = |offset: usize| {
+        let before = &DEBUGGER_SOURCE[..offset];
+        let line = before.matches('\n').count() + 1;
+        (
+            json!(line),
+            json!(offset - before.rfind('\n').map_or(0, |at| at + 1) + 1),
+        )
+    };
+    let innermost = js_frame(fetch_at, later);
+    let mut frames = 0x4b53_4252u32.to_le_bytes().to_vec();
+    frames.extend(1u16.to_le_bytes());
+    frames.extend([32, 0, 16, 0, 0, 0]);
+    for value in [1u32, 1, 0] {
+        frames.extend(value.to_le_bytes());
+    }
+    frames.extend([0; 8]);
+    frames.extend(&innermost);
+    let digest: [u8; 32] = Sha256::digest(&frames).into();
+    native_artifact(
+        &server,
+        "361",
+        "stack",
+        "https://app.debugger.test/",
+        &named,
+        &frames,
+    );
+
+    let mut levels: Vec<Mcp> = ["read-only", "full"]
+        .into_iter()
+        .map(|level| {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_reb-api"));
+            command
+                .args(["mcp", "--base-url", &server.url, "--permission", level])
+                .args(["--timeout", "15"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            Mcp::from_command(&mut command)
+        })
+        .collect();
+    let spec = specification();
+    let events_schema = |name: &str| {
+        let definition = spec["paths"]
+            .as_object()
+            .unwrap()
+            .values()
+            .flat_map(|item| item.as_object().unwrap().values())
+            .find(|operation| operation["operationId"] == name)
+            .unwrap();
+        jsonschema::validator_for(&response_schema(&spec, definition)).unwrap()
+    };
+    let (get_events, waited) = (
+        events_schema("get_events"),
+        events_schema("wait_for_events"),
+    );
+
+    // 1. The next fetch to the watched path, and its stack.
+    let watched = wait_for_observation(
+        &mut levels,
+        &waited,
+        &mut store,
+        "request_watch_match",
+        |store| {
+            let started = store.append(
+                "network",
+                "request_initiated",
+                json!({"request_id": "5100", "loader_kind": 16}),
+                b"GET watch.debugger.test",
+            );
+            store.append(
+                "network",
+                "request_initiator_stack",
+                json!({"request_id": "5100", "parent_event_id": started}),
+                &stack_summary(Some((&innermost, digest)), &[]),
+            );
+            store.append(
+                "network",
+                "request_watch_match",
+                json!({"request_id": "5100", "parent_event_id": started}),
+                &stack_summary(Some((&innermost, digest)), &[0, 1]),
+            );
+        },
+    );
+    assert_eq!(watched["status"], "decoded");
+    assert_eq!(
+        watched["detail"],
+        json!({"rule": 0, "method_matched": true})
+    );
+    assert_eq!(watched["request_id"], "5100");
+    assert_eq!(watched["stack"]["state"], "captured");
+    assert_eq!(
+        watched["site"],
+        Value::Null,
+        "a request has no frame of its own"
+    );
+    let mut arguments = watched["stack_read"].clone();
+    assert_eq!(arguments["operation"], "get_request_stack");
+    arguments.as_object_mut().unwrap().remove("operation");
+    let read = tool_call(&mut levels[0], "get_request_stack", arguments);
+    assert_eq!(read["status"], "recorded", "{read}");
+    assert_eq!(read["observation"]["type"], "request_watch_match");
+    let frame = &read["frames"][0]["resolution"];
+    assert_eq!(frame["status"], "resolved", "{read}");
+    assert_eq!(
+        (&frame["url"], &frame["function_name"]),
+        (&json!(url), &json!("later"))
+    );
+    assert_eq!(
+        (frame["line"].clone(), frame["column"].clone()),
+        place(fetch_at)
+    );
+
+    // 2. The next click handler, and its listener's file, line and column.
+    let clicked = wait_for_observation(
+        &mut levels,
+        &waited,
+        &mut store,
+        "listener_dispatch",
+        |store| {
+            let mut tail = vec![0, 1, 1, 0];
+            tail.extend(js_frame(tap, tap));
+            tail.push(5);
+            tail.extend(b"click");
+            store.append(
+                "runtime",
+                "listener_dispatch",
+                json!({}),
+                &stack_summary(None, &tail),
+            );
+        },
+    );
+    assert_eq!(clicked["detail"]["event_type"], "click");
+    assert_eq!(clicked["stack"]["state"], "no_script");
+    let site = &clicked["site"]["resolution"];
+    assert_eq!(site["status"], "resolved", "{clicked}");
+    assert_eq!(
+        (&site["url"], &site["artifact_id"]),
+        (&json!(url), &json!("360"))
+    );
+    assert_eq!((site["line"].clone(), site["column"].clone()), place(tap));
+    assert_eq!(site["function_name"], "onTap");
+
+    // 3. The next CSP violation: its directive and blocked host, never a path.
+    let blocked =
+        wait_for_observation(&mut levels, &waited, &mut store, "csp_violation", |store| {
+            let mut tail = vec![19, 1, 16];
+            tail.extend(b"cdn.blocked.test");
+            store.append(
+                "runtime",
+                "csp_violation",
+                json!({}),
+                &stack_summary(None, &tail),
+            );
+        });
+    assert_eq!(
+        blocked["detail"],
+        json!({"directive": "script-src", "directive_value": 19, "disposition": "enforce",
+            "blocked_host": "cdn.blocked.test"})
+    );
+
+    // The same records in a filtered get_events page, and the unfiltered
+    // polling window, which leaves sites to a filtered read.
+    let page = tool_call(
+        &mut levels[0],
+        "get_events",
+        json!({"type": "listener_dispatch,csp_violation", "limit": 10}),
+    );
+    assert!(get_events.is_valid(&page), "{page}");
+    // Records in store order: the listener, then the violation.
+    assert_eq!(
+        page["events"][0]["debugger_observation"]["site"], clicked["site"],
+        "{page}"
+    );
+    let window = tool_call(&mut levels[1], "get_events", json!({}));
+    assert!(get_events.is_valid(&window), "{window}");
+    let find = |list: &str, kind: &str| {
+        window[list]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == kind)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        find("events", "listener_dispatch")["debugger_observation"]["site"]["resolution"],
+        json!({"status": "deferred", "reason": "polling_window"})
+    );
+    assert_eq!(
+        find("network_events", "request_watch_match")["debugger_observation"]["detail"]["rule"],
+        0
+    );
+}
+
 /// The pausing debugger through the projection. Every pausing action controls
 /// the browser, so the action tool is hidden without `--allow-effects`, and
 /// the read sends one command to the peer, so it is classified like

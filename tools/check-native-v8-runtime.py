@@ -618,7 +618,9 @@ def main():
         receipt["gn_script_executable"] = str(Path(script_python).resolve())
         run([str(gn_binary), "gen", "out/native-runtime", "--fail-on-unused-args",
              "--script-executable=" + receipt["gn_script_executable"], "--args=" + gn_args], v8)
-        run(["ninja", "-C", "out/native-runtime", "-j", str(args.jobs), "d8", "cctest"], v8)
+        # -k 0 keeps compiling past a failed object, so one run reports every
+        # patch that no longer builds instead of only the first.
+        run(["ninja", "-C", "out/native-runtime", "-k", "0", "-j", str(args.jobs), "d8", "cctest"], v8)
         binary = v8 / "out/native-runtime/cctest"
         listed = run([str(binary), "--list"], v8, True)
         for name in TEST_NAMES:

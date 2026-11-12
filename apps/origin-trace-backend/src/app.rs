@@ -880,8 +880,7 @@ impl App {
                 // json! serializes borrowed values; move the retained window instead
                 // of allocating a second complete evidence tree on every refresh.
                 let mut events = window.events;
-                crate::vm_opcode::annotate_wasm_observations(&mut events);
-                crate::js_invocation::annotate(&mut events);
+                event_query::annotate_events(&mut events);
                 result["events"] = Value::Array(events);
                 result["network_events"] = Value::Array(window.network_events);
                 self.event_state(&mut result, capture);

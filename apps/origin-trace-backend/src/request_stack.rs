@@ -1473,7 +1473,15 @@ fn resolve_stored(
     }
     let mut document = resolve(stack, record, &identities, &artifacts, &read);
     let site = site.map(|site| {
-        let mut alone = resolve_call(stack, site, None, &identities, &artifacts, &read);
+        let mut alone = resolve_call(
+            stack,
+            record.scope,
+            site,
+            None,
+            &identities,
+            &artifacts,
+            &read,
+        );
         if !known {
             mark_identities_outside_scan(&mut alone);
         }
@@ -2051,13 +2059,13 @@ pub(crate) mod tests {
                 1,
                 "network",
                 "script_identity",
-                identity_bytes(1, 0x10, 7, 0, 0, source.as_bytes()),
+                identity_bytes(1, 0x10, 7, (0, 0), 99, source.as_bytes()),
             ),
             (
                 2,
                 "runtime",
                 "listener_dispatch",
-                observation(&listener(&frame(1, 7, start, start))),
+                observation(&listener(&frame(1, 0, 7, start, start))),
             ),
             (3, "network", "request_watch_match", observation(&[0, 1])),
             // A listener record whose event type is cut is refused.

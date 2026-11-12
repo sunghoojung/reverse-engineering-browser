@@ -119,6 +119,12 @@ enum class NativeProbeType : std::uint16_t {
   kScriptCompiled = 51,
   // A load Blink answered from a resource it held; see protocol/native-network-v3.md.
   kMemoryCacheReuse = 52,
+  // What the pausing debugger did, never what it saw. Numbers 70 to 75 stay
+  // reserved for it. See protocol/native-debugger-pause-v1.md.
+  kDebuggerAttached = 66,
+  kDebuggerPaused = 67,
+  kDebuggerResumed = 68,
+  kDebuggerBreakpoint = 69,
 };
 
 enum class NativeProbeFlag : std::uint16_t {

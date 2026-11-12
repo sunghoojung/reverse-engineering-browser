@@ -1,0 +1,68 @@
+// Copyright (c) 2026 The Brave Authors. All rights reserved.
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this file,
+// You can obtain one at https://mozilla.org/MPL/2.0/.
+
+module reb.mojom;
+
+import "mojo/public/mojom/base/unguessable_token.mojom";
+
+// protocol/native-debugger-pause-v1.md. Three interfaces, because a paused
+// renderer main thread cannot serve a frame-associated call:
+//
+//  - the browser binds the broker while the page runs, on the frame's own
+//    task runner, and the broker hands back an agent receiver the renderer
+//    binds on its IO thread, as DevTools binds DevToolsSession::IOSession;
+//  - the renderer keeps an observer remote and tells the browser a page
+//    stopped before it blocks, so the deadline starts at the pause and the
+//    browser can end it with no client in sight.
+interface NativeDebuggerPauseBroker {
+  // Called once, before any pause. `target_id` is the Console document id,
+  // which is itself one document generation; the renderer only echoes it
+  // back in its state. Attaching again replaces an earlier attachment, which
+  // is what lets the same frame be selected after a navigation.
+  Attach(pending_receiver<NativeDebuggerPauseAgent> agent,
+         pending_remote<NativeDebuggerPauseObserver> observer,
+         uint64 target_id);
+};
+
+// Received on the renderer IO thread and handed to the frame's
+// InspectorTaskRunner, whose task type is unpausable, so a command reaches
+// the main thread even while it is stopped in a nested pause loop.
+interface NativeDebuggerPauseAgent {
+  // `document` is the exact document the backend selected; a navigated frame
+  // refuses the command rather than running it in the replacement page.
+  // `operation` and `status` are the codes in native_debugger_pause.h, and
+  // `command` and `result` are that contract's JSON bodies. A refusal still
+  // carries a result body, so the backend never has to guess what happened.
+  // `expires_at_monotonic_us` is the same deadline the socket thread waits
+  // on, carried into the renderer as the Console carries its own: a command
+  // whose outcome the backend has already reported unknown does not run.
+  Command(mojo_base.mojom.UnguessableToken document,
+          uint16 operation,
+          uint64 lease_id,
+          uint64 expires_at_monotonic_us,
+          string command) => (uint16 status,
+                              bool paused,
+                              bool resumed,
+                              string result);
+};
+
+// Implemented in the browser process, which is never paused. The renderer
+// sends Paused from inside the inspector's pause notification, before the
+// main thread enters the nested loop: V8 delivers Debugger.paused to the
+// channel and only then calls runMessageLoopOnPause, so this message is
+// written to the pipe while the thread can still write.
+interface NativeDebuggerPauseObserver {
+  Paused(uint64 lease_id,
+         uint8 reason,
+         uint64 breakpoint_id,
+         uint32 frames_recorded,
+         uint32 async_frames,
+         bool frames_truncated);
+  Resumed(uint64 lease_id, uint8 end, uint32 paused_ms);
+  // The authorization ended in the renderer: a navigation, a release, a
+  // replacement, or a lost connection. The browser answers a later state
+  // read from this rather than asking a session that no longer exists.
+  Cleared(uint8 reason, uint32 breakpoints_dropped);
+};

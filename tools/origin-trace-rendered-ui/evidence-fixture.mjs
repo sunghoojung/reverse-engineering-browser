@@ -595,7 +595,8 @@ function serviceWorkerRegistrantRequest(template, firstSequence, firstTime) {
 // sites name a retained compiled script. Workers come from request records
 // with loader kinds 17 to 19. No budget gap is written: a runtime gap would
 // mark Fingerprinting coverage partial, which test14 rules out for this store.
-// REB_RENDERED_UI_DEBUGGER_RECORDS raises the count.
+// Runtime records also count as Fingerprinting activity, so the default stays
+// well under its 500-event window. REB_RENDERED_UI_DEBUGGER_RECORDS raises it.
 export const DEBUGGER_PROCESS = 4747;
 export const DEBUGGER_FRAME = '200';
 // At most 27 printable bytes, the event type bound; it would load an image if parsed as HTML.
@@ -606,7 +607,7 @@ export const DEBUGGER_SOURCE = "// Debugger fixture: the handlers observation re
   "  setTimeout(function later() { fetch('/api/x'); }, 100);\n" +
   "});\n";
 export const DEBUGGER_ARTIFACT_ID = '360';
-export async function debuggerObservations(template, artifactsRoot, {records = Number(process.env.REB_RENDERED_UI_DEBUGGER_RECORDS ?? 600),
+export async function debuggerObservations(template, artifactsRoot, {records = Number(process.env.REB_RENDERED_UI_DEBUGGER_RECORDS ?? 120),
   frames = ['200', '7101', '7102', '7103', '7104', '7105'], workers = 3} = {}) {
   assert(Number.isSafeInteger(records) && records >= 8 && records <= 20000, 'REB_RENDERED_UI_DEBUGGER_RECORDS must be 8 to 20000');
   const source = Buffer.from(DEBUGGER_SOURCE, 'utf8');

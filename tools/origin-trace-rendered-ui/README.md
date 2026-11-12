@@ -121,9 +121,11 @@ reports with no pausing control, only rows near the view may mount, Tab from
 the focused Threads pane must reach the list with a visible indicator, frame
 200 must scope the Sources tree and Observations, a listener record must open
 `onTap` in Sources at line 2, column 71, and the light theme must pass the
-layout checks. Escape must return to the toggle, and a closed sidebar must
-make no read for 4.5 seconds. `REB_RENDERED_UI_DEBUGGER_RECORDS` (8 to 20,000,
-default 600) sets how many records the fixture writes. `test6RemovedFeaturesAreAbsent`
+layout checks. Escape must return to the toggle, or to **More** while a docked
+sidebar has moved the toggle into that menu, and a closed sidebar must make no
+read for 4.5 seconds. `REB_RENDERED_UI_DEBUGGER_RECORDS` (8 to 20,000, default
+120) sets how many records the fixture writes; they also count as
+Fingerprinting activity. `test6RemovedFeaturesAreAbsent`
 reads Sources with the sidebar open, without the availability statement, and
 compares that statement with `/api/native-debugger`.
 

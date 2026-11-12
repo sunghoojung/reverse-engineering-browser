@@ -1265,7 +1265,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       if screen == "sources" {
         XCTAssertEqual(read["statement"] as? String, read["reported"] as? String, "the pausing state is the reported availability: \(read)")
         XCTAssertEqual(read["controls"] as? Int, 0, "the pausing state offers no control")
-        try await ui.click("#source-debugger-toggle")
+        // Docked, the sidebar narrows the editor and Debugger may move into More.
+        try await ui.click("#debugger-sidebar .debugger-sidebar-close")
       }
     }
     for id in ["websocket-inspector", "runtime-hook-traffic", "request-memory-pivot", "screen-memory", "screen-experiments",
@@ -1363,12 +1364,16 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.screenshot("debugger-sidebar-light-\(size.name)")
       try await ui.click("#theme-toggle")
 
-      // Escape returns to the toggle; closing stops every read.
+      // Escape returns to the toggle, or to More while the toggle sits in its
+      // menu (a docked sidebar narrows the toolbar); closing stops every read.
       try await ui.click("#debugger-threads .debugger-list-row[data-key$='\(frameKey)']")
       try await ui.key(53, "\u{1B}")
-      try await ui.waitUntil("document.activeElement?.id === 'source-debugger-toggle'", "\(size.name): Escape did not return to the toggle")
+      try await ui.waitUntil("""
+        (() => { const toggle = document.querySelector('#source-debugger-toggle'), menu = toggle.closest('details');
+          return document.activeElement === toggle || Boolean(menu) && document.activeElement === menu.querySelector('summary'); })()
+        """, "\(size.name): Escape did not return to the toggle")
       if try await ui.value("document.querySelector('#debugger-sidebar').hidden") as? Bool == false {
-        try await ui.click("#source-debugger-toggle")
+        try await ui.click("#debugger-sidebar .debugger-sidebar-close")
       }
       let reads = "performance.getEntriesByType('resource').filter(entry => entry.name.includes('/api/native-debugger')).length"
       let before = try await ui.value(reads) as? Int ?? -1

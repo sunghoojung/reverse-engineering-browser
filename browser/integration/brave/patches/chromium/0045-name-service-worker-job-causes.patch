@@ -92,32 +92,33 @@ index cb73937..6700a55 100644
    registration->ExecuteUpdate(std::move(outside_fetch_client_settings_object),
                                std::move(callback));
 diff --git a/content/browser/service_worker/service_worker_register_job.cc b/content/browser/service_worker/service_worker_register_job.cc
-index 394de6a..8981245 100644
+index 394de6a..78c2d75 100644
 --- a/content/browser/service_worker/service_worker_register_job.cc
 +++ b/content/browser/service_worker/service_worker_register_job.cc
-@@ -55,14 +55,25 @@ typedef ServiceWorkerRegisterJobBase::RegistrationJobType RegistrationJobType;
+@@ -55,14 +55,28 @@ typedef ServiceWorkerRegisterJobBase::RegistrationJobType RegistrationJobType;
  
  namespace {
  
 -// The register() caller, else the clients of the version being updated.
--reb::NativeFactoryOwner NativeScriptOwner(const GlobalRenderFrameHostId& frame,
 +// The register() caller, else the frame scoped while the job was created: a
 +// page calling registration.update() or a page a payment app is installed for.
-+reb::NativeFactoryOwner NativeJobCause(const GlobalRenderFrameHostId& frame) {
++GlobalRenderFrameHostId NativeJobCause(const GlobalRenderFrameHostId& frame) {
 +  if (frame) {
-+    return {frame.child_id.GetUnsafeValue(), frame.frame_routing_id};
++    return frame;
 +  }
 +  const reb::NativeFactoryOwner scoped = reb::CurrentNativeFactoryOwner();
-+  return {scoped.frame_process_id, scoped.frame_routing_id};
++  return scoped.frame_process_id >= 0
++             ? GlobalRenderFrameHostId(scoped.frame_process_id,
++                                       scoped.frame_routing_id)
++             : GlobalRenderFrameHostId();
 +}
 +
 +// The job's cause, else the clients of the version being updated.
-+reb::NativeFactoryOwner NativeScriptOwner(const reb::NativeFactoryOwner& cause,
+ reb::NativeFactoryOwner NativeScriptOwner(const GlobalRenderFrameHostId& frame,
                                            ServiceWorkerRegistration* registration) {
    const ServiceWorkerVersion* const active =
        registration ? registration->active_version() : nullptr;
--  return {frame.child_id.GetUnsafeValue(), frame.frame_routing_id,
-+  return {cause.frame_process_id, cause.frame_routing_id,
+   return {frame.child_id.GetUnsafeValue(), frame.frame_routing_id,
            active ? active->version_id()
 -                 : blink::mojom::kInvalidServiceWorkerVersionId};
 +                 : blink::mojom::kInvalidServiceWorkerVersionId,
@@ -125,7 +126,7 @@ index 394de6a..8981245 100644
  }
  
  }  // namespace
-@@ -107,7 +118,8 @@ ServiceWorkerRegisterJob::ServiceWorkerRegisterJob(
+@@ -107,7 +121,8 @@ ServiceWorkerRegisterJob::ServiceWorkerRegisterJob(
                 .has_value())
                ? base::UnguessableToken::Create()
                : network::GetNoOpNetworkRestrictionsId()),
@@ -135,7 +136,7 @@ index 394de6a..8981245 100644
    CHECK(context_);
    CHECK(outside_fetch_client_settings_object_);
    CHECK(outside_fetch_client_settings_object_->policy_container_policies);
-@@ -159,7 +171,8 @@ ServiceWorkerRegisterJob::ServiceWorkerRegisterJob(
+@@ -159,7 +174,8 @@ ServiceWorkerRegisterJob::ServiceWorkerRegisterJob(
                 .has_value())
                ? base::UnguessableToken::Create()
                : network::GetNoOpNetworkRestrictionsId()),
@@ -145,7 +146,7 @@ index 394de6a..8981245 100644
    CHECK(context_);
    CHECK(outside_fetch_client_settings_object_);
    CHECK(outside_fetch_client_settings_object_->policy_container_policies);
-@@ -574,7 +587,7 @@ void ServiceWorkerRegisterJob::StartScriptFetchForNewWorker(
+@@ -574,7 +590,7 @@ void ServiceWorkerRegisterJob::StartScriptFetchForNewWorker(
    // The network restrictions of the creator (e.g., frame) must be
    // enforced for service worker script fetches.
    std::optional<reb::ScopedNativeFactoryOwner> native_owner(
@@ -154,7 +155,7 @@ index 394de6a..8981245 100644
    scoped_refptr<network::SharedURLLoaderFactory> loader_factory =
        context_->wrapper()->GetLoaderFactoryForMainScriptFetch(
            version->scope(), version->version_id(),
-@@ -661,6 +674,10 @@ void ServiceWorkerRegisterJob::StartWorkerForUpdate(
+@@ -661,6 +677,10 @@ void ServiceWorkerRegisterJob::StartWorkerForUpdate(
    // "Let worker be a new ServiceWorker object..." and start the worker.
    set_new_version(std::move(version));
    new_version()->set_force_bypass_cache_for_scripts(force_bypass_cache_);
@@ -165,7 +166,7 @@ index 394de6a..8981245 100644
  
    if (GetContentClient()
            ->browser()
-@@ -695,7 +712,7 @@ void ServiceWorkerRegisterJob::UpdateAndContinue() {
+@@ -695,7 +715,7 @@ void ServiceWorkerRegisterJob::UpdateAndContinue() {
    // The network restrictions of the creator (e.g., frame) must be
    // enforced for service worker script fetches.
    std::optional<reb::ScopedNativeFactoryOwner> native_owner(
@@ -175,23 +176,15 @@ index 394de6a..8981245 100644
        context_->wrapper()->GetLoaderFactoryForUpdateCheck(
            scope_,
 diff --git a/content/browser/service_worker/service_worker_register_job.h b/content/browser/service_worker/service_worker_register_job.h
-index 0ba6796..b752206 100644
+index 0ba6796..e18ef75 100644
 --- a/content/browser/service_worker/service_worker_register_job.h
 +++ b/content/browser/service_worker/service_worker_register_job.h
-@@ -12,6 +12,7 @@
- 
- #include "base/memory/raw_ptr.h"
- #include "base/memory/weak_ptr.h"
-+#include "brave/components/reverse_engineering_browser/common/native_factory_owner_hook.h"
- #include "content/browser/service_worker/service_worker_register_job_base.h"
- #include "content/browser/service_worker/service_worker_registration.h"
- #include "content/browser/service_worker/service_worker_update_checker.h"
-@@ -235,6 +236,8 @@ class ServiceWorkerRegisterJob : public ServiceWorkerRegisterJobBase {
+@@ -235,6 +235,8 @@ class ServiceWorkerRegisterJob : public ServiceWorkerRegisterJobBase {
  
    const base::UnguessableToken creator_network_restrictions_id_;
    const base::UnguessableToken network_restrictions_id_;
 +  // The frame that caused the job, for protocol/native-network-v3.md.
-+  const reb::NativeFactoryOwner native_cause_;
++  const GlobalRenderFrameHostId native_cause_;
  
    base::WeakPtrFactory<ServiceWorkerRegisterJob> weak_factory_{this};
  };

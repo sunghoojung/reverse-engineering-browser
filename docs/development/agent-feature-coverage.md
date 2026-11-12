@@ -173,7 +173,7 @@ Every option is off unless the start names it, and none is inherited.
 | Console document-start scripts | `native_console_action` `arm_document_start`, `clear_document_start`; `get_native_console_document_start` | A | Covered |
 | Console snippets, filter, command history | none | none | Not exposed: editor state of the panel; the agent evaluates any source directly |
 | Live Wasm memory and calls | `get_live_wasm`, `live_wasm_action` | A | Covered; a current Brave has no peer, so it reports unsupported |
-| Native debugger (breakpoints, stepping) | `get_native_debugger`, `native_debugger_action` | A | Covered; reports unsupported until a pausing debugger ships |
+| Native debugger (breakpoints, stepping, scopes, watch) | `get_native_debugger`, `native_debugger_action` | A | Covered; a current Brave has no peer, so it reports the pausing debugger unsupported and refuses every action |
 | Agent dock (provider, model, transcript, permission) | none | none | Not exposed: the agent's own controls stay with the researcher |
 
 ## Workspace chrome

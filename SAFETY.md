@@ -226,20 +226,36 @@ it.
   mutation. A Wasm execution deadline only records that an instrumented call
   is still running. Interrupting that call is a separate explicit action: it
   traps the call so the host can continue. The deadline does not do that.
-- Origin Trace has no Chrome DevTools Protocol path. The browser debugger,
-  runtime hooks, live objects, element screenshots and the CDP live Wasm
-  inspection routes used it and were removed with it; those retired contracts
+- Origin Trace exposes no Chrome DevTools Protocol endpoint and opens no
+  remote debugging port. The browser debugger, runtime hooks, live objects,
+  element screenshots and the CDP live Wasm inspection routes used a protocol
+  connection to the browser and were removed with it; those retired contracts
   remain only as history. Confirmed live Wasm memory and call commands are a
   separate local socket (`get_live_wasm`, `live_wasm_action`). They stay behind
   the existing effect and confirmation gates, do not replace dispatch capture,
   and report the command unavailable when no peer is configured. They do not
-  invent memory bytes or return values. A current Brave build does not implement
-  that peer. Other Wasm evidence comes from native capture and stored artifacts.
-  The owned VM debugger controls only the project's own native fixture helper.
-  A pausing page debugger is proposed in
-  [Native debugger v1](docs/product/native-debugger-v1.md) and is not policy
-  until a maintainer approves that wording here; `get_native_debugger` reports
-  it unsupported.
+  invent memory bytes or return values. A current Brave build does not
+  implement that peer. Other Wasm evidence comes from native capture and stored
+  artifacts. The owned VM debugger controls only the project's own native
+  fixture helper. Confirmed pausing debugger commands are a third local
+  socket (`get_native_debugger`, `native_debugger_action`), behind the same
+  effect, confirmation and content gates: a selection needs explicit
+  confirmation, every pausing action is effectful, and values read out of a
+  paused page, with the page-derived names they are keyed by, reach a model
+  only at Full access. No Brave build implements that peer. Without one the
+  state is `availability: unsupported` and every action is refused before
+  anything is sent, so nothing pauses, steps or resumes and no frames, scopes
+  or values are invented. What a browser implementation must do, and what it
+  can and cannot confine, is written in
+  [Native debugger pause v1](protocol/native-debugger-pause-v1.md) and
+  [Native debugger v1](docs/product/native-debugger-v1.md): a pause stops a
+  whole renderer main thread, a lease the browser itself holds ends it, and
+  an authorization ends on navigation, replacement, a lost renderer
+  connection or five minutes without a command. Those rules become policy
+  here only when a compiled, live-verified browser half lands with maintainer
+  approval; until then they are a specification, not a description of this
+  product. Pausing would be detectable, and hiding it from the page is a
+  non-goal.
 - An agent starts, drives and ends a live capture session only through the
   session tools: `start_live_session` or `reb-api session start`, and
   `session_action` with `open_url` or `end`. They stay hidden until the
@@ -288,7 +304,8 @@ it.
   and requires explicit reselection or reconnection. Never select an execution
   target by URL, remap automatically, retry a command, or fall back to a disposable
   browser without an explicit mode change. The console
-  cannot set breakpoints, step, or inspect paused frames. Expressions and
+  cannot set breakpoints, step, or inspect paused frames; those
+  belong to the pausing debugger commands above, never to a console command. Expressions and
   primitive results may contain sensitive values; they stay in bounded,
   ephemeral panel memory and are not automatically captured, redacted, logged,
   exported, or added to evidence. Clear output before sharing the interface.

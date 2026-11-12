@@ -3364,4 +3364,85 @@ final class OriginTraceRenderedUITests: XCTestCase {
     XCTAssertEqual(offline, true, "after Continue Offline a reopen starts nothing for the run")
     try await ui.screenshot("launch-offline-after-reopen")
   }
+
+  // The paused-state sections in the sidebar while no browser serves the
+  // pausing debugger: the statement names them, and every control they draw
+  // is really disabled, so nothing here can be operated against a debugger
+  // that is not there.
+  func test32PausingSections() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-debugger-toggle")
+      try await ui.waitUntil("document.querySelector('#debugger-sidebar [data-debugger-native=\"availability\"]') !== null",
+        "\(size.name): the Pausing statement did not render")
+      // Every pausing section starts expanded; a closed one is opened the way
+      // a researcher would, through its own disclosure.
+      for id in ["pause", "breakpoints", "call-stack", "scope", "watch"] {
+        let closed = try await ui.value("""
+          (() => { const node = document.querySelector('#debugger-sidebar [data-debugger-section="\(id)"]');
+            return Boolean(node) && node.tagName === 'DETAILS' && !node.open; })()
+          """) as? Bool
+        if closed == true { try await ui.click("#debugger-sidebar [data-debugger-section=\"\(id)\"] summary") }
+      }
+      try await ui.waitUntil("document.querySelectorAll('#debugger-sidebar .debugger-section[data-debugger-native=\"pausing\"] > .debugger-section-body').length === 5",
+        "\(size.name): the five pausing sections did not render")
+      let state = try await ui.json("""
+        (() => {
+          const sidebar = document.querySelector('#debugger-sidebar');
+          const sections = [...sidebar.querySelectorAll('[data-debugger-section]')].map(node => node.dataset.debuggerSection);
+          const pausing = [...sidebar.querySelectorAll('[data-debugger-native="pausing"]')].map(node => node.dataset.debuggerSection);
+          // A section's own body, not the sidebar's disclosure chrome around
+          // it: the registry's contract is about what the section draws.
+          const bodies = [...sidebar.querySelectorAll('.debugger-section[data-debugger-native="pausing"] > .debugger-section-body')];
+          const within = selector => bodies.flatMap(body => [...body.querySelectorAll(selector)]);
+          const controls = within('button, input, select, textarea');
+          const reachable = within('a[href], [tabindex], summary, [role=button], [role=option], [role=checkbox], [role=tab], [contenteditable]');
+          return {sections, pausing, controls: controls.length,
+            enabled: controls.filter(control => !control.disabled).map(control => control.innerText || control.placeholder || control.type),
+            reachable: reachable.length,
+            said: bodies.filter(body => body.innerText.includes('No browser serves the pausing debugger')).length,
+            statement: document.querySelector('[data-debugger-native="availability"]').innerText.replace(/\\s+/g, ' '),
+            availability: document.querySelector('[data-debugger-native="availability"]').dataset.availability};
+        })()
+        """)
+      print("RENDERED_UI_PAUSING \(size.name) \(state)")
+      XCTAssertEqual(state["availability"] as? String, "unsupported", "\(size.name): \(state)")
+      XCTAssertEqual(state["pausing"] as? [String], ["pause", "breakpoints", "call-stack", "scope", "watch"],
+        "\(size.name): the five pausing sections are registered and marked: \(state)")
+      XCTAssertEqual(Array((state["sections"] as? [String] ?? []).prefix(4)), ["threads", "watch-rules", "observations", "pausing"],
+        "\(size.name): they follow the phase 1 sections: \(state)")
+      // While no browser serves the debugger each section says so and draws
+      // no control at all: there is no document to operate on, so there is
+      // nothing to disable either.
+      XCTAssertEqual(state["said"] as? Int, 5, "\(size.name): every section says why it has nothing: \(state)")
+      XCTAssertEqual(state["controls"] as? Int, 0, "\(size.name): no control is drawn: \(state)")
+      XCTAssertEqual(state["enabled"] as? [String], [],
+        "\(size.name): nothing operable while the debugger is unsupported: \(state)")
+      XCTAssertEqual(state["reachable"] as? Int, 0,
+        "\(size.name): nothing that cannot be disabled is drawn: \(state)")
+      let statement = state["statement"] as? String ?? ""
+      XCTAssertTrue(statement.contains("No Brave build serves the pausing debugger"), "\(size.name): \(statement)")
+      XCTAssertTrue(statement.contains("stay disabled"), "\(size.name): the statement says the controls are disabled: \(statement)")
+      for title in ["Pause", "Breakpoints", "Call stack", "Scope", "Watch"] {
+        XCTAssertTrue(statement.contains(title), "\(size.name): the statement names \(title): \(statement)")
+      }
+      try await assertInert(ui, "\(size.name) pausing sections")
+      try await assertLayout(ui, "#debugger-sidebar", "\(size.name) pausing sections")
+      // The phase 1 sections fill the pane, so the photograph is of what this
+      // test is about: the five pausing sections, scrolled to.
+      _ = try await ui.value("""
+        (() => { document.querySelector('#debugger-sidebar [data-debugger-section="pause"]')
+          ?.scrollIntoView({block: 'start'}); return true; })()
+        """)
+      try await ui.waitUntil("""
+        (() => { const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections');
+          const first = document.querySelector('#debugger-sidebar [data-debugger-section="pause"]');
+          if (!pane || !first) return false;
+          return first.getBoundingClientRect().top < pane.getBoundingClientRect().bottom; })()
+        """, "\(size.name): the pausing sections did not come into view")
+      try await ui.screenshot("debugger-pausing-sections-\(size.name)")
+      try await lightScreenshot(ui, "debugger-pausing-sections", size.name)
+    }
+  }
 }

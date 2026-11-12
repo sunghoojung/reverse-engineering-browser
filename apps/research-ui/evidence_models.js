@@ -39,7 +39,8 @@
           'script_identity', 'capture_exclusion', 'tab_set', 'request_tab_link', 'navigation_initiator_stack',
           'navigation_initiator_link', 'async_task_stack',
           'request_extension_link', 'request_watch_match', 'listener_dispatch', 'timer_observation',
-          'csp_violation', 'exception_observation', 'dom_mutation', 'memory_cache_reuse'
+          'csp_violation', 'exception_observation', 'dom_mutation', 'memory_cache_reuse',
+          'debugger_attached', 'debugger_paused', 'debugger_resumed', 'debugger_breakpoint'
         ])
       };
       // Scheme classes of protocol/native-network-v3.md; absent means 0.

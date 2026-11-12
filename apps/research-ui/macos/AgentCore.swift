@@ -1009,7 +1009,21 @@ final class AgentSession {
 
   // Rows the panel shows, written as it shows them. 512 KiB fits the largest
   // row: a 128 KiB tool result with its arguments, escaped.
+  // Tools that read values out of a paused page. Their results are allowed
+  // to reach the model at Full access, but they are not written to this
+  // file: SAFETY.md says a paused value is ephemeral, and a transcript
+  // outlives the pause by design. The row itself is kept, so the turn still
+  // shows which command ran and what it answered about.
+  private static let pausedValueTools: Set<String> = [
+    "get_native_debugger", "native_debugger_action",
+  ]
+
   func appendTranscript(_ row: [String: Any]) throws {
+    var row = row
+    if let name = row["name"] as? String, Self.pausedValueTools.contains(name),
+       row["result"] != nil {
+      row["result"] = "(paused page values are not written to the transcript)"
+    }
     guard let data = try? JSONSerialization.data(withJSONObject: row), data.count <= 512 * 1024 else {
       throw AgentFailure(message: "This transcript row is malformed or larger than 512 KiB.")
     }

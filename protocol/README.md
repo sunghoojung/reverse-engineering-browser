@@ -33,6 +33,13 @@ document-start script experiment: exact origin and frame-kind rules, main-world
 injection before a new document's own scripts, and bounded page-JavaScript
 output that never becomes evidence.
 
+[Native debugger pause v1](native-debugger-pause-v1.md) defines the pausing
+debugger: its command socket, the one confirmed document, breakpoints,
+stepping, bounded ephemeral paused values, the visible lease that resumes a
+page it would otherwise leave stopped, and what a browser implementation has
+to do. No browser implements that peer yet, so the backend reports it
+unsupported and refuses every action.
+
 [Private cookie import v1](cookie-import-v1.md) defines the user-operated explicit
 Chrome/Firefox export workflow, strict semantic refusals, separate off-record
 browser context and confirmation/clear/disposal boundaries.
@@ -448,6 +455,10 @@ use the names.
 | 50 | `request_extension_link` | `include/reb/tab_link.hpp` | [native network v3](native-network-v3.md#request_extension_link-type-50) |
 | 51 | `script_compiled` | `include/reb/compiled_script.hpp` | [native compiled scripts](native-compiled-scripts-v1.md) |
 | 52 | `memory_cache_reuse` | `include/reb/network_scope.hpp` | [native network v3](native-network-v3.md#memory_cache_reuse-type-52) |
+| 66 | `debugger_attached` | `include/reb/debugger_pause.hpp` | [native debugger pause v1](native-debugger-pause-v1.md) |
+| 67 | `debugger_paused` | `include/reb/debugger_pause.hpp` | [native debugger pause v1](native-debugger-pause-v1.md) |
+| 68 | `debugger_resumed` | `include/reb/debugger_pause.hpp` | [native debugger pause v1](native-debugger-pause-v1.md) |
+| 69 | `debugger_breakpoint` | `include/reb/debugger_pause.hpp` | [native debugger pause v1](native-debugger-pause-v1.md) |
 
 `wasm_indirect_observation` payloads are version 2 and `wasm_guest_invocation`
 version 4: each adds the JavaScript invocation context in previously reserved

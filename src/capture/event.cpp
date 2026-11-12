@@ -1,6 +1,7 @@
 #include "reb/event.hpp"
 #include "reb/compiled_script.hpp"
 #include "reb/debugger_observation.hpp"
+#include "reb/debugger_pause.hpp"
 #include "reb/js_dispatch.hpp"
 #include "reb/js_invocation.hpp"
 #include "reb/network_cookies.hpp"
@@ -107,6 +108,10 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kAsyncTaskStack:
     case EventType::kScriptCompiled:
     case EventType::kMemoryCacheReuse:
+    case EventType::kDebuggerAttached:
+    case EventType::kDebuggerPaused:
+    case EventType::kDebuggerResumed:
+    case EventType::kDebuggerBreakpoint:
       return true;
     case EventType::kUnknown:
       return false;
@@ -214,6 +219,9 @@ bool IsValidEvent(const EventRecord& event) noexcept {
     return false;
   if (event.header.type >= EventType::kRequestWatchMatch &&
       event.header.type <= EventType::kDomMutation && !IsValidObservationEvent(event))
+    return false;
+  if (event.header.type >= EventType::kDebuggerAttached &&
+      event.header.type <= EventType::kDebuggerBreakpoint && !IsValidDebuggerPauseEvent(event))
     return false;
   if ((event.header.type == EventType::kRequestHeaders ||
        event.header.type == EventType::kResponseHeaders) &&
@@ -475,6 +483,14 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "script_compiled";
     case EventType::kMemoryCacheReuse:
       return "memory_cache_reuse";
+    case EventType::kDebuggerAttached:
+      return "debugger_attached";
+    case EventType::kDebuggerPaused:
+      return "debugger_paused";
+    case EventType::kDebuggerResumed:
+      return "debugger_resumed";
+    case EventType::kDebuggerBreakpoint:
+      return "debugger_breakpoint";
     case EventType::kUnknown:
       return "unknown";
   }

@@ -15,6 +15,7 @@
     <link rel="stylesheet" href="agent_panel.css">
     <link rel="stylesheet" href="session_panel.css">
     <link rel="stylesheet" href="debugger_sidebar.css">
+    <link rel="stylesheet" href="debugger_pause.css">
   </head>
   <body>
     <div class="app">
@@ -962,6 +963,9 @@
     <script src="investigation_notebook.js"></script>
     <script src="evidence_names.js"></script>
     <script src="invocation_sites.js"></script>
+    <!-- The paused-state sections register with the Sources debugger
+         sidebar; without that registry they add nothing. -->
+    <script src="debugger_pause.js"></script>
     <script src="entropy_map.js"></script>
 
     <script src="app.js"></script>

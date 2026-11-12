@@ -13,6 +13,7 @@ use crate::{
     live_browser::LiveBrowser,
     live_wasm::LiveWasm,
     native_console::NativeConsole,
+    native_debugger_pause::NativeDebuggerPause,
     origin_trace,
     owned_vm_debugger::OwnedVmDebugger,
     request_cookies, request_headers,
@@ -38,7 +39,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 69] = [
+const UI_ASSETS: [&str; 71] = [
     "index.html",
     "block_graph.css",
     "block_graph.js",
@@ -76,6 +77,8 @@ const UI_ASSETS: [&str; 69] = [
     "evidence_names.js",
     "invocation_sites.js",
     "request_stack.js",
+    "debugger_pause.js",
+    "debugger_pause.css",
     "traffic_view.js",
     "network_scope.js",
     "request_tabs.js",
@@ -164,6 +167,7 @@ pub struct App {
     instance_id: String,
     native_console: NativeConsole,
     live_wasm: LiveWasm,
+    native_debugger_pause: NativeDebuggerPause,
     owned_vm_debugger: OwnedVmDebugger,
     vm_experiments: crate::vm_experiment::Experiments,
     /// The live capture lifecycle; `capture` serializes stop and clear.
@@ -218,6 +222,8 @@ impl App {
     pub async fn new(options: Options, port: u16) -> Arc<Self> {
         let native_console = NativeConsole::new(&options);
         let live_wasm = LiveWasm::new(options.live_wasm_socket.clone());
+        let native_debugger_pause =
+            NativeDebuggerPause::new(options.native_debugger_socket.clone());
         let invocation_sites = Arc::new(js_invocation_sites::Store::new(
             options.js_invocation_site_store.clone(),
         ));
@@ -254,6 +260,7 @@ impl App {
             ),
             native_console,
             live_wasm,
+            native_debugger_pause,
             owned_vm_debugger: OwnedVmDebugger::new(options.worker(
                 &options.owned_vm_fixture,
                 "OriginTraceOwnedVmFixture",
@@ -530,8 +537,10 @@ impl App {
                 let console = self.native_console.state().await;
                 let watch = self.native_console.watch();
                 let store = self.options.store.clone();
+                // The peer exchange blocks, like the live Wasm read.
+                let pause = self.native_debugger_pause.clone();
                 tokio::task::spawn_blocking(move || {
-                    crate::native_debugger::state(&store, &console, watch, &query)
+                    crate::native_debugger::state(&store, &console, watch, &query, &pause)
                 })
                 .await
                 .map_err(|_| Error::new(500, "Native debugger state read failed"))??
@@ -1835,7 +1844,17 @@ impl App {
                 _ => Err(Error::bad("Analyst workspace action is invalid")),
             },
             "/api/live-wasm/actions" => self.live_wasm.action(value),
-            "/api/native-debugger/actions" => crate::native_debugger::action(value),
+            "/api/native-debugger/actions" => {
+                // The command blocks on the peer socket, so it does not run
+                // on an async worker.
+                let pause = self.native_debugger_pause.clone();
+                let command = value.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::native_debugger::action(&command, &pause)
+                })
+                .await
+                .map_err(|_| Error::new(500, "Native debugger command failed"))?
+            }
             "/api/native-console/actions" => self.native_console.action(value).await,
             "/api/js-invocation-sites/actions" => {
                 validation::schema("JsInvocationSiteAction", value, 400)?;

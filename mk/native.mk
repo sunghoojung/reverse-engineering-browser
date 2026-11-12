@@ -190,7 +190,7 @@ $(REQUEST_STACK_TEST): $(BUILD_DIR)/tests/request_stack_test.o $(BUILD_DIR)/src/
 	$(BUILD_DIR)/src/evidence/artifact.o $(BUILD_DIR)/src/evidence/origin_trace.o
 $(BUILD_DIR)/tests/debugger_observation_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
 $(DEBUGGER_OBSERVATION_TEST): $(BUILD_DIR)/tests/debugger_observation_test.o $(BUILD_DIR)/src/capture/event.o \
-	$(BUILD_DIR)/src/evidence/origin_trace.o
+	$(BUILD_DIR)/src/evidence/event_broker.o $(BUILD_DIR)/src/evidence/origin_trace.o
 NATIVE_JS_DISPATCH_GOLDEN := $(BUILD_DIR)/reb-native-js-dispatch-golden
 .PHONY: native-js-dispatch-golden
 native-js-dispatch-golden: $(NATIVE_JS_DISPATCH_GOLDEN)

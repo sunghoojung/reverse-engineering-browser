@@ -1,25 +1,29 @@
 //! Native debugger surface, docs/product/native-debugger-v1.md. Phase 1
-//! threads, watch rules and observations are served; no Brave build serves the
-//! pausing peer yet, so it is `unsupported` and every action is refused before
-//! anything is sent.
+//! threads, watch rules and observations are served here; every pausing field
+//! belongs to the peer of protocol/native-debugger-pause-v1.md. No Brave build
+//! serves that peer, so it reports `unsupported` and every action is refused
+//! before anything is sent.
 
 use std::path::Path;
 
 use serde_json::{Value, json};
 
 use crate::debugger_observation;
-use crate::error::{Code, Error, Result};
+use crate::error::Result;
+use crate::native_debugger_pause::NativeDebuggerPause;
 use crate::validation;
 
 pub const LEASE_LIMIT_MS: u64 = 60_000;
 
 /// `console` is the Console listing; `watch` is None while a Console action
-/// holds the session. `query` selects which observation records are listed.
+/// holds the session. `query` selects which observation records are listed,
+/// and `pause` owns every pausing field.
 pub fn state(
     store: &Path,
     console: &Value,
     watch: Option<Value>,
     query: &debugger_observation::Query,
+    pause: &NativeDebuggerPause,
 ) -> Result<Value> {
     let scan = debugger_observation::scan(store)?;
     let recent = debugger_observation::recent(store, query, &scan)?;
@@ -39,17 +43,12 @@ pub fn state(
         Some(Value::Null) => json!({"state": "none", "armed": null}),
         Some(armed) => json!({"state": "armed", "armed": armed}),
     };
-    let value = json!({
+    let mut value = json!({
         "contract_version": 1,
-        "availability": "unsupported",
-        "reason": "browser_debugger_unsupported",
         "experiment_flag": "--reb-native-debugger",
-        "policy": "proposed_pending_approval",
+        "policy": "approved",
         "detectable": true,
         "lease_limit_ms": LEASE_LIMIT_MS,
-        "lease": Value::Null,
-        "paused": false,
-        "breakpoints": [],
         "threads": {
             "console": console["binding_state"].as_str().or(console["state"].as_str()).unwrap_or("idle"),
             "frames": frames,
@@ -62,17 +61,21 @@ pub fn state(
         "observations_query": recent.query,
         "observation_budget_gaps": budget_gaps,
     });
+    // The peer owns every pausing field, so an unreadable peer cannot leave a
+    // stale document, breakpoint or lease behind in this view.
+    let Value::Object(pausing) = pause.state() else {
+        unreachable!("the pausing half is always an object");
+    };
+    for (key, field) in pausing {
+        value[key] = field;
+    }
     validation::schema("NativeDebuggerState", &value, 500)?;
     Ok(value)
 }
 
-pub fn action(value: &Value) -> Result<Value> {
+pub fn action(value: &Value, pause: &NativeDebuggerPause) -> Result<Value> {
     validation::schema("NativeDebuggerAction", value, 400)?;
-    Err(Error::new(
-        503,
-        "No Brave build serves the native debugger. Nothing was sent; no page paused, stepped or resumed.",
-    )
-    .with_code(Code::DependencyUnavailable))
+    pause.action(value)
 }
 
 #[cfg(test)]
@@ -119,7 +122,8 @@ mod tests {
             {"id":"22","label":"top #22","origin":"https://a.test","frame":"top","main_frame":true},
             {"id":"23","label":"frame #23","origin":"https://b.test","frame":"child","out_of_process":true}]});
         let every = debugger_observation::Query::default();
-        let current = state(&path, &console, Some(Value::Null), &every).unwrap();
+        let pause = NativeDebuggerPause::new(None);
+        let current = state(&path, &console, Some(Value::Null), &every, &pause).unwrap();
         assert_eq!(current["availability"], "unsupported");
         assert_eq!(current["lease"], Value::Null);
         assert_eq!(current["threads"]["frames"][1]["out_of_process"], true);
@@ -154,7 +158,7 @@ mod tests {
             before,
             limit,
         };
-        let read = |query| state(&path, &console, Some(Value::Null), &query).unwrap();
+        let read = |query| state(&path, &console, Some(Value::Null), &query, &pause).unwrap();
         let exceptions = read(query(Some("exception_observation"), None, None, 32));
         assert_eq!(exceptions["observations"].as_array().unwrap().len(), 1);
         assert_eq!(
@@ -180,19 +184,26 @@ mod tests {
             "the next older record is refused"
         );
         assert_eq!(page["observations_malformed"], 1);
-        let busy = state(&path, &json!({}), None, &every).unwrap();
+        let busy = state(&path, &json!({}), None, &every, &pause).unwrap();
         assert_eq!(busy["watch"]["state"], "busy");
         assert_eq!(busy["threads"]["console"], "idle");
         let error = action(
-            &json!({"action":"resume","target_id":"22","document_epoch":"3","lease_id":"1"}),
+            &json!({"action":"resume","target_id":"22","lease_id":"1"}),
+            &pause,
         )
         .unwrap_err();
-        assert_eq!(error.status, 503);
-        assert!(action(&json!({"action":"resume"})).unwrap_err().status == 400);
+        assert_eq!(error.status, 503, "no peer is configured");
+        assert!(
+            action(&json!({"action":"resume"}), &pause)
+                .unwrap_err()
+                .status
+                == 400
+        );
         assert!(
             action(
-                &json!({"action":"set_breakpoint","target_id":"22","document_epoch":"3",
-                "script_id":7,"line":1,"column":0})
+                &json!({"action":"set_breakpoint","target_id":"22",
+                "script_id":7,"line":1,"column":0}),
+                &pause
             )
             .unwrap_err()
             .status

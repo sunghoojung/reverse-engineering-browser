@@ -28,6 +28,7 @@ mod js_invocation_sites;
 pub mod live_wasm;
 mod native_console;
 mod native_debugger;
+pub mod native_debugger_pause;
 mod native_guest_binding;
 mod origin_trace;
 mod owned_vm_debugger;

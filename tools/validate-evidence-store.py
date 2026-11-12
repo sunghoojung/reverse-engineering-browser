@@ -117,6 +117,10 @@ EVENT_TYPES = {
     "csp_violation",
     "exception_observation",
     "dom_mutation",
+    "debugger_attached",
+    "debugger_paused",
+    "debugger_resumed",
+    "debugger_breakpoint",
     "request_redirected",
     "request_started",
     "request_target",
@@ -382,6 +386,51 @@ def valid_observation(event: dict, payload: bytes) -> bool:
         return t[0] in (1, 2, 3) and not any(t[1:4]) and optional_js_frame(t[4:20]) and not any(t[20:])
     return (t[0] in (1, 2, 3) and t[1] < 4 and ascii_name(t[5:37], t[4], t[0] == 1)
             and (t[0] == 1 or t[4] == 0) and not any(t[37:]))
+
+
+PAUSE_TYPES = frozenset((
+    "debugger_attached", "debugger_paused", "debugger_resumed", "debugger_breakpoint"))
+
+
+def valid_debugger_pause(event: dict, payload: bytes) -> bool:
+    """Types 66-69, protocol/native-debugger-pause-v1.md."""
+    kind = event["type"]
+    if (not observation_envelope(event, payload, False)
+            or payload[:4] != b"\x01\x00\x80\x00" or payload[6:8] != b"\0\0"
+            or event["request_id"] != "0" or event["frame_id"] == "0"
+            or int(event["parent_event_id"]) != 0
+            or not valid_stack_summary(payload)):
+        return False
+    t = payload[80:]
+
+    def number(at: int, size: int) -> int:
+        return int.from_bytes(t[at:at + size], "little")
+
+    def word(at: int) -> int:
+        return number(at, 2)
+
+    def long(at: int) -> int:
+        return number(at, 4)
+
+    def wide(at: int) -> int:
+        return number(at, 8)
+    if kind == "debugger_attached":
+        attach = t[0] == 1
+        return (t[0] in (1, 2) and not any(t[2:4]) and not any(t[8:])
+                and (t[1] == 0 and long(4) == 0 if attach else 1 <= t[1] <= 5))
+    if kind == "debugger_paused":
+        # 1 breakpoint, 2 exception, 3 step, 4 pause, 5 the page's own
+        # debugger statement; 6 to 9 are reserved for a later phase.
+        return (1 <= t[0] <= 5 and t[1] & ~1 == 0 and word(2) <= 1024 and word(4) <= 32
+                and not any(t[6:8]) and wide(8) != 0 and not any(t[20:])
+                and (long(16) == 0 or t[0] == 1))
+    if kind == "debugger_resumed":
+        # 6 is a stop in another document of the group, ended at once; 7 is a
+        # pause something else continued.
+        return 1 <= t[0] <= 7 and not any(t[1:4]) and wide(8) != 0 and not any(t[16:])
+    refused = t[0] == 3
+    return (1 <= t[0] <= 3 and 1 <= t[1] <= 3 and not any(t[2:4]) and not any(t[16:])
+            and (long(12) == 0) == refused)
 
 
 def valid_stack_summary(payload: bytes) -> bool:
@@ -1177,6 +1226,8 @@ def validate_event(event: object, line_number: int) -> None:
         raise ValueError(f"line {line_number}: native async task stack record is invalid")
     if event["type"] in OBSERVATION_TYPES and not valid_observation(event, payload):
         raise ValueError(f"line {line_number}: native debugger observation record is invalid")
+    if event["type"] in PAUSE_TYPES and not valid_debugger_pause(event, payload):
+        raise ValueError(f"line {line_number}: native debugger pause record is invalid")
     if event["type"].startswith("js_invocation_") and not valid_js_invocation(event, payload):
         raise ValueError(f"line {line_number}: native JavaScript invocation record is invalid")
     if event["type"] in ("wasm_guest_dispatch", "wasm_guest_invocation"):

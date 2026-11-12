@@ -379,7 +379,7 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
 // renderer (another process) and an event scheduled with no script. Script 7
 // is a different script in each isolate, so a wrong scope would mis-resolve.
 export const WORKER_STACK_HOST = 'w.stack.test';
-export const WORKER_STACK_PROCESSES = [4242, 4243];
+export const WORKER_STACK_PROCESSES = [5151, 5152];
 const WORKER_KEY = 0x77n;
 async function workerStackRequest(template, firstTime, artifactsRoot) {
   const [workerProcess, pageProcess] = WORKER_STACK_PROCESSES;
@@ -579,6 +579,10 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
   const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, ...withBodies.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
+  for (const process of WORKER_STACK_PROCESSES) {
+    assert.equal(retained.filter(event => event.process_id === process).length,
+      workerStack.events.filter(event => event.process_id === process).length, 'worker stack renderers must be their own');
+  }
   const vm = demoEvents.find(event => event.category === 'vm');
   assert(vm, 'demo store must contain a native vm event');
   const events = [...retained, ...namedBudgetGaps(vm, retained)];

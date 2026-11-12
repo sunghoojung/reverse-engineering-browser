@@ -105,7 +105,7 @@ the mode and Keychain choice made by keyboard (so native received them), and
 focus Retry; Return on Retry must fail afresh, and Continue Offline must close
 the panel and return focus to the workspace.
 
-`test28WorkerInitiatorStack` opens the synthetic request a dedicated worker
+`test30WorkerInitiatorStack` opens the synthetic request a dedicated worker
 started (two synthetic renderer processes, version 3 stack records,
 [native network v3](../../protocol/native-network-v3.md)). At both sizes the
 Initiator column must name the worker's frame, and the Initiator tab must

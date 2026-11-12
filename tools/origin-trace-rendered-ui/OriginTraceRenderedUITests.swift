@@ -2819,7 +2819,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // in the worker, a MessagePort post from another renderer, and a task
   // scheduled with no script, with the callers still not shown listed.
   @MainActor
-  func test28WorkerInitiatorStack() async throws {
+  func test30WorkerInitiatorStack() async throws {
     let expected = try Expectations.load()
     for size in windowSizes {
       let ui = try await prepare(size)

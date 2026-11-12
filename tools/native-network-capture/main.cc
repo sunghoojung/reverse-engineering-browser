@@ -131,9 +131,12 @@ void HeaderBlocks() {
   reb::NotifyNativeNetworkHeaders(kRaw, id, Raw({{"cookie", "sid=1"}}));
   assert(CountType(reb::NativeProbeType::kRequestHeaders) == 0 && !request.devtools_request_id &&
          artifacts.header_calls.empty());
+  // So patch 0058 gives factories no agentless DevTools observer either.
+  assert(!reb::NativeNetworkHeadersObserved());
 
   // Provisional request headers at start, retained as one block.
   sink.SetEmitter(Emit, 30, mask, 200, true);
+  assert(reb::NativeNetworkHeadersObserved());
   events.clear();
   start(500);
   assert(request.devtools_request_id == id && AllValid());
@@ -366,15 +369,16 @@ void HeaderBlocks() {
   assert(Headers(over_budget).state ==
          static_cast<std::uint8_t>(HeaderState::kNotCapturedSessionBudget));
 
-  // Ending the session removes the hook observer.
+  // Ending the session removes the hook observer, and with it the factory gate.
   sink.SetEmitter(nullptr, 0, 0, 0, true);
   events.clear();
   reb::NotifyNativeNetworkHeaders(kRaw, "reb-0000000000000257", Raw({{"a", "b"}}));
-  assert(events.empty());
+  assert(events.empty() && !reb::NativeNetworkHeadersObserved());
   std::cout << "PASS native header blocks: metadata-only none, provisional/network/response over "
                "two redirect hops, out-of-order raw request, early hints, pseudo-headers, "
                "200 KiB retained whole, network headers before rewrite, sharing, unattributed "
-               "count, DevTools-owned ID, block limit, unavailable/refused/URL, session budget\n";
+               "count, DevTools-owned ID, block limit, unavailable/refused/URL, session budget, "
+               "factory observer gate only in content sessions\n";
 }
 
 void RequestContent() {

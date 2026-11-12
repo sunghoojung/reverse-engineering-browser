@@ -260,8 +260,13 @@ sessions also record request and response header blocks per hop
 names each admitted request for the network service's raw header notifications
 and keeps the network's response headers before Brave's rewrite, and Chromium
 patch `0025` forwards those notifications, with their sent and received cookie
-lists, to the overlay. Chromium patch `0028` records `document.cookie` and
-Cookie Store API calls in the renderer for the same sessions.
+lists, to the overlay. Chromium patch `0058` gives the factories Chromium
+builds without a DevTools observer (shared-worker subresources, worker and
+service-worker main scripts, early-hints and browser prefetches) an agentless
+one in those sessions only, so their sent headers and cookies are reported
+too; downloads are left out on purpose. Chromium patch `0028` records
+`document.cookie` and Cookie Store API calls in the renderer for the same
+sessions, naming each cookie a read returns.
 Renderer events use a bounded shared-memory queue with Mojo lifecycle control
 and coalesced wake-ups. The browser process
 authenticates to the event broker with a session identifier and a mode-0600

@@ -60,6 +60,8 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | `memory_cache_reuse` payload version 2 | flag bit 2 `source_named` | Request scope and tabs |
 | `response_body` payload version 2 | flag bit 7 `snapshots_withheld` | Response bodies |
 | Chromium patch 0062 | `name-memory-cache-reuse-sources` | Request scope and tabs |
+| Chromium patch 0058 | `observe-network-headers-without-devtools-observers` | Headers and cookies |
+| `script_cookie` version 3, flag bit 4 | a `document.cookie` read named per cookie | Headers and cookies |
 
 Traffic detail tabs, in order: General, Headers, Payload, Preview, Response,
 Cookies, Initiator, Timing, Signals, Evidence.
@@ -1442,9 +1444,57 @@ ID the ID `reb-<request_id as 16 hex digits>`, and Chromium patch
 `0025-forward-native-network-headers.patch` forwards the two notifications to
 the `network_headers_hook` component before DevTools dispatch. The ID changes
 no request bytes. It does make the network service send SSL info and
-transfer-size updates to the loader client, as with DevTools open. Requests
-whose factory has no observer get no `network` block, and the UI shows their
-provisional headers as such. Unknown IDs, such as CORS preflights, are ignored.
+transfer-size updates to the loader client, as with DevTools open. Unknown IDs,
+such as CORS preflights, are ignored.
+
+A request whose factory has no observer gets no `network` block and no cookie
+list. At the pin these are the factories the proxy sees, and the observer each
+gets:
+
+| Factory | Where Chromium builds its observer | Observer at the pin | With patch 0058 |
+| --- | --- | --- | --- |
+| Navigation | `NavigationRequest` passes `NetworkServiceDevToolsObserver::MakeSelfOwned(frame_tree_node_)` as the request's `TrustedParams::devtools_observer` | Yes | Unchanged |
+| Document subresources, isolated worlds, keepalive and `fetchLater` | `URLLoaderFactoryParamsHelper::CreateForFrame` and `CreateForIsolatedWorld` (the frame tree node); `KeepAliveURLLoaderService` binds the frame's `subresource_proxying_factory_bundle` | Yes | Unchanged |
+| Dedicated worker subresources | `DedicatedWorkerHost` uses `CreateForFrame` of its ancestor frame | Yes | Unchanged |
+| Service worker subresources and imported scripts | `EmbeddedWorkerInstance::CreateFactoryBundle`: `MakeSelfOwned(devtools_worker_token)` | Yes | Unchanged |
+| Speculation-rules prefetch from a live document | `MaybeMakeSelfOwnedNetworkServiceDevToolsObserverForPrefetch`, per request | Yes | Unchanged |
+| Dedicated and shared worker main scripts | `WorkerScriptFetcher::CreateScriptLoader`, only when `RenderFrameDevToolsAgentHost::GetFor` finds a host for the ancestor frame, so only while DevTools is attached to it | No | Agentless observer |
+| Shared worker subresources | `SharedWorkerHost::CreateNetworkFactoryParamsForSubresources` passes `mojo::NullRemote()` | No | Agentless observer |
+| Service worker main script and update check | `ServiceWorkerContextWrapper::GetLoaderFactoryForBrowserInitiatedRequest`: `StoragePartitionImpl::CreateURLLoaderFactoryParams` sets none | No | Agentless observer, except through a header client (below) |
+| Early-hints preloads | `URLLoaderFactoryParamsHelper::CreateForEarlyHintsPreload` passes `mojo::NullRemote()` | No | Agentless observer |
+| Browser-initiated prefetch, or one whose initiating document is gone | `MaybeMakeSelfOwnedNetworkServiceDevToolsObserverForPrefetch` returns `mojo::NullRemote()` | No | Agentless observer |
+| Downloads | `CreatePendingSharedURLLoaderFactory` wraps the storage partition's browser-process factory, whose params set none | No | Not changed (below) |
+| CORS preflights | The network service's `PreflightController`, with `credentials_mode = kOmit`: it sends no cookie and stores none | Reported through `OnCorsPreflightRequest`, not hooked | No Traffic row |
+
+Chromium patch `0058-observe-network-headers-without-devtools-observers.patch`
+gives each "No" factory above, except downloads, an agentless observer:
+`NetworkServiceDevToolsObserver::MakeSelfOwned(std::string())`. Every method
+of that class resolves its DevTools agent from its ID or frame tree node and
+returns when there is none; the empty ID names no agent, so DevTools dispatch
+is unchanged and only the hook (patch 0025, before that lookup) sees the raw
+notifications. It is created only while `reb::NativeNetworkHeadersObserved()`
+says a content session registered the hook observer, and on the UI thread, so
+a factory built without such a session is built exactly as stock. Content
+capture is a launch option and the session starts in `PreProfileInit`, before
+any owned-profile factory exists; a factory created after a session ended
+keeps no observer.
+
+Not built, with the reason:
+
+- Downloads load through the storage partition's single browser-process
+  factory, which every browser-internal fetch of every profile shares and
+  which is created once. Giving it an observer would put one on all browser
+  traffic to reach requests that save a file rather than load a page. A
+  download keeps its provisional headers and says so.
+- A service worker script fetched while an extension's `webRequest` listener
+  with `extraHeaders`, or DevTools' Fetch interception, attached a header
+  client: `NavigationURLLoaderImpl::CreateURLLoaderFactoryWithHeaderClient`
+  builds those params itself, and the capture profile has no such extension.
+  Such a request reads as having no network block, with the reason below.
+
+Every request with a provisional block and no `network` block says why on its
+Headers and Cookies tabs and is counted in the session summary (see
+[missing final blocks](#missing-final-blocks)).
 
 #### Hop attribution
 
@@ -1775,8 +1825,9 @@ provenance. Values are inserted as text after a size and SHA-256 check.
 
 ### Bounds and hot path
 
-- Disabled or metadata-only: unchanged. The proxy adds no ID, and the hook
-  costs one atomic load per DevTools raw notification.
+- Disabled or metadata-only: unchanged. The proxy adds no ID, the hook
+  costs one atomic load per DevTools raw notification, and patch 0058's
+  factories cost one atomic load each and are built as stock.
 - 320 KiB per block: Chromium's 256 KiB response header bound
   (`HttpStreamParser::kMaxHeaderBufSize`, `kSpdyMaxHeaderListSize`) plus the
   byte `: ` normalization can add to a line of at least 4 bytes. Request blocks

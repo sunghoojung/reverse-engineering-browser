@@ -46,6 +46,13 @@ using NativeNetworkHeadersObserver =
 COMPONENT_EXPORT(REB_NETWORK_HEADERS_HOOK)
 void SetNativeNetworkHeadersObserver(NativeNetworkHeadersObserver observer) noexcept;
 
+// Whether a content-capture session registered an observer; one atomic load.
+// Chromium patch 0058 gives a loader factory that Chromium creates without a
+// DevTools observer an agentless one only then, so a factory created while no
+// session captures headers is built exactly as without the patch.
+COMPONENT_EXPORT(REB_NETWORK_HEADERS_HOOK)
+bool NativeNetworkHeadersObserved() noexcept;
+
 // One atomic load when no observer is registered.
 COMPONENT_EXPORT(REB_NETWORK_HEADERS_HOOK)
 void NotifyNativeNetworkHeaders(NativeNetworkHeadersKind kind,

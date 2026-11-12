@@ -185,6 +185,10 @@ patch `0025-forward-native-network-headers` forwards content's DevToolsObserver
 calls to the `network_headers_hook` component before DevTools dispatch. The
 same calls carry the sent and received cookie lists with each cookie's
 inclusion status; the sink records one `cookie_list` per hop and direction.
+Chromium patch `0058-observe-network-headers-without-devtools-observers` asks
+the hook's `NativeNetworkHeadersObserved` before giving a factory Chromium
+builds without an observer an agentless one, so stock factories are built
+unchanged outside content sessions.
 Header blocks and cookie lists take shares of the same in-flight pool. In the
 renderer, `renderer/native_script_cookie_sink.h` records `document.cookie` and
 Cookie Store API calls from Chromium patch `0028-record-script-cookie-access`,

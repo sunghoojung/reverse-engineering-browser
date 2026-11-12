@@ -17,6 +17,10 @@ void SetNativeNetworkHeadersObserver(const NativeNetworkHeadersObserver observer
   g_observer.store(observer, std::memory_order_release);
 }
 
+bool NativeNetworkHeadersObserved() noexcept {
+  return g_observer.load(std::memory_order_acquire) != nullptr;
+}
+
 void NotifyNativeNetworkHeaders(const NativeNetworkHeadersKind kind,
                                 const std::string_view devtools_request_id,
                                 const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers,

@@ -1946,7 +1946,9 @@ and the Cookies tab lists each such hop with it.
   (any request of a metadata-only session) has no final block to miss and is
   never counted there.
 
-The Traffic footer shows the same counts for the loaded rows, with reasons.
+The Traffic footer shows the same counts for the loaded rows as one item,
+"N header gaps", whose breakdown lists each count with its reason, so the
+footer stays one item however many reasons there are.
 
 ### Consumers
 

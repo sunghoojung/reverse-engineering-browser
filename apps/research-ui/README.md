@@ -1581,10 +1581,12 @@ covers `chrome:`, `devtools:` and other internal schemes
 ([native network v3](../../protocol/native-network-v3.md)), and the footer
 reports what capture excluded, including memory-cache reuses past a renderer's
 budget ("N memory-cache reuses not recorded") and, apart, those in SVG images
-or popups that no tab owns. It also counts, for the loaded rows, header blocks
-and cookie lists that were not retained (with each reason: size limit,
+or popups that no tab owns. Header and cookie gaps of the loaded rows are one
+footer button, **N header gaps**, so the footer keeps its size: it opens a
+breakdown below it (Space or Return; Escape closes it and returns focus) of
+header blocks and cookie lists not retained (with each reason: size limit,
 session budget, queue, channel or URL), network blocks that arrived after
-their request ended, so no row shows them ("late header records"), and requests that
+their request ended ("late header records on no row"), and requests that
 ended with only provisional headers, by reason (HTTP cache, service worker,
 download, failed, not reported); `get_session_summary` has the same counts
 over the newest 64 MiB. Sources reads retained artifact bytes only. A failed

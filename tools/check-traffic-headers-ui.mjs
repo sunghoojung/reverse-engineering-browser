@@ -33,7 +33,7 @@ const context = createContext({
   }
 });
 runInContext(`${source};globalThis.api={trafficHeaderLines, trafficHeaderHops, renderTrafficHeaders,
-  trafficHeaderCoverage, trafficHeaderCoverageNotice};`, context);
+  trafficHeaderCoverage, trafficHeaderCoverageNotice, trafficHeaderGapCount};`, context);
 const {api} = context;
 const panel = document.getElementById('panel');
 const sha = text => createHash('sha256').update(text).digest('hex');
@@ -175,8 +175,11 @@ assert.equal(panel.querySelector('pre')?.textContent, 'Location: /final\r\nSet-C
   assert.deepEqual(Object.fromEntries(coverage.missing), {from_cache: 2, failed: 1, download: 1, service_worker: 2, not_reported: 1});
   assert.equal(api.trafficHeaderCoverageNotice(coverage),
     '2 header blocks not retained (1 session budget, 1 size limit) · 1 cookie list not retained (queue refused) · ' +
-    '3 late header records · 7 requests without final headers (2 HTTP cache, 1 failed, 1 download, 2 service worker, 1 not reported)');
+    '3 late header records on no row · 7 requests without final headers (2 HTTP cache, 1 failed, 1 download, 2 service worker, 1 not reported)');
   assert.equal(api.trafficHeaderCoverageNotice(api.trafficHeaderCoverage([sent])), '', 'a complete row adds nothing');
+  // The footer shows one count for all of them.
+  assert.equal(api.trafficHeaderGapCount(coverage), 3 + 3 + 7);
+  assert.equal(api.trafficHeaderGapCount(api.trafficHeaderCoverage([sent])), 0);
 }
 
 // Integrity failure, refusal and every not-retained state read as sentences.

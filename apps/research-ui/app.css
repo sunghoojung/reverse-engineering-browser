@@ -1174,6 +1174,11 @@ var(--panel);
       .source-internal-toggle { margin-left: 6px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--muted); font: inherit; }
       .source-internal-toggle:hover, .source-internal-toggle[aria-pressed="true"] { color: var(--text); }
       .request-window #request-unresolved { color: var(--red); }
+      .request-window #request-header-gaps { color: var(--amber); }
+      .request-window #request-header-gaps[aria-expanded="true"] { text-decoration: underline; }
+      /* The breakdown takes its own full-width line only while it is open. */
+      .request-window > .request-header-gaps-detail { flex: 1 0 100%; }
+      .request-header-gaps-list { margin: 0; padding-left: 16px; font: 10px/1.5 var(--mono); overflow-wrap: anywhere; }
       .request-window #request-unresolved[aria-pressed="true"] { text-decoration: underline; }
       .source-health {
         max-height: 96px;

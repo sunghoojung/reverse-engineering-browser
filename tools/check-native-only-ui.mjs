@@ -254,10 +254,33 @@ runInContext(`state.headerCoverage = trafficHeaderCoverage([{headerBlocks: [
   events: [{category: 'network', type: 'response_started', flags: 2, browser_context_id_high: '1', browser_context_id_low: '2'},
     {category: 'network', type: 'request_completed', flags: 0, browser_context_id_high: '1', browser_context_id_low: '2'}]}]);
   renderTrafficWindowStatus(1, 1, false);`, context);
-assert.match(document.getElementById('request-window-status').textContent,
-  /1 header block not retained \(session budget\) · 1 late header record · 1 request without final headers \(HTTP cache\)/);
+// One footer item, whatever the number of reasons: a button whose breakdown
+// opens below it and closes with Escape, returning focus to the button.
+assert.doesNotMatch(document.getElementById('request-window-status').textContent, /not retained|final headers|header gap/);
+const gapsButton = document.getElementById('request-header-gaps');
+const gapsDetail = document.getElementById('request-header-gaps-detail');
+assert.equal(gapsButton.hidden, false);
+assert.equal(gapsButton.textContent, '3 header gaps');
+assert.equal(gapsButton.getAttribute('aria-controls'), 'request-header-gaps-detail');
+assert.equal(gapsButton.getAttribute('aria-expanded'), 'false');
+assert.equal(gapsDetail.hidden, true);
+gapsButton.dispatchEvent(new window.Event('click'));
+assert.equal(gapsButton.getAttribute('aria-expanded'), 'true');
+assert.equal(gapsDetail.hidden, false);
+assert.deepEqual([...gapsDetail.querySelectorAll('li')].map(item => item.textContent),
+  ['1 header block not retained (session budget)', '1 late header record on no row', '1 request without final headers (HTTP cache)']);
+{
+  let focused = null;
+  const focus = window.HTMLElement.prototype.focus;
+  window.HTMLElement.prototype.focus = function focusTracked() { focused = this; };
+  gapsDetail.dispatchEvent(Object.assign(new window.Event('keydown', {bubbles: true}), {key: 'Escape'}));
+  window.HTMLElement.prototype.focus = focus;
+  assert.equal(gapsDetail.hidden, true, 'Escape closes the breakdown');
+  assert.equal(gapsButton.getAttribute('aria-expanded'), 'false');
+  assert.equal(focused, gapsButton, 'Escape returns focus to the button');
+}
 runInContext('state.headerCoverage = null; renderTrafficWindowStatus(1, 1, false);', context);
-assert.doesNotMatch(document.getElementById('request-window-status').textContent, /not retained|final headers/);
+assert.equal(gapsButton.hidden, true, 'no gap, no button');
 // Payload reads the native body record and target only, never a CDP exchange.
 runInContext(`state.inspectorTab = 'payload'; renderInspector();`, context);
 const payload = document.getElementById('payload-inspector');

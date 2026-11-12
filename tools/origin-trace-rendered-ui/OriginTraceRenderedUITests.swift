@@ -3557,14 +3557,48 @@ final class OriginTraceRenderedUITests: XCTestCase {
     for size in windowSizes {
       let ui = try await prepare(size)
       try await show(ui, "traffic")
-      try await ui.waitUntil(
-        "(document.querySelector('#request-window-status')?.textContent ?? '').includes('without final headers')",
-        "\(size.name): the footer did not count requests without final headers")
-      let footer = try await ui.value("document.querySelector('#request-window-status').textContent") as? String ?? ""
-      XCTAssertTrue(footer.contains("1 header block not retained (session budget)"),
-        "\(size.name): the footer names the refused block and its reason: \(footer)")
-      XCTAssertTrue(footer.contains("1 request without final headers (HTTP cache)"),
-        "\(size.name): the footer names the request and why: \(footer)")
+      // The header and cookie gaps are one footer item: the footer is as
+      // tall as without it and nothing in it is cut off, and its breakdown
+      // opens with Space and closes with Escape.
+      try await ui.waitUntil("document.querySelector('#request-header-gaps')?.hidden === false",
+        "\(size.name): the footer did not show its header gaps")
+      let footer = try await ui.json("""
+        (() => { const bar = document.querySelector('#screen-traffic .request-window');
+          const pane = bar.closest('.request-pane');
+          const gaps = document.querySelector('#request-header-gaps');
+          const height = bar.getBoundingClientRect().height;
+          gaps.hidden = true;
+          const without = bar.getBoundingClientRect().height;
+          gaps.hidden = false;
+          const box = bar.getBoundingClientRect(), view = pane.getBoundingClientRect();
+          return {label: gaps.textContent, status: document.querySelector('#request-window-status').textContent,
+            grows: height - without, cut: box.bottom > view.bottom + 1 || box.top < view.top - 1}; })()
+        """)
+      XCTAssertEqual(footer["label"] as? String, "2 header gaps", "\(size.name): \(footer)")
+      XCTAssertEqual((footer["grows"] as? NSNumber)?.doubleValue ?? -1, 0,
+        "\(size.name): the gaps item adds no footer line: \(footer)")
+      XCTAssertEqual(footer["cut"] as? Bool, false, "\(size.name): the footer is not cut off: \(footer)")
+      XCTAssertFalse((footer["status"] as? String ?? "").contains("not retained"),
+        "\(size.name): the reasons are in the breakdown, not the status: \(footer)")
+      try await assertLayout(ui, "#screen-traffic .request-window", "\(size.name) header gaps item")
+      _ = try await ui.value("document.querySelector('#request-header-gaps').focus()")
+      try await ui.key(49, " ")
+      try await ui.waitUntil("document.querySelector('#request-header-gaps-detail')?.hidden === false",
+        "\(size.name): Space did not open the header gaps")
+      let breakdown = try await ui.json("""
+        ({expanded: document.querySelector('#request-header-gaps').getAttribute('aria-expanded'),
+          items: [...document.querySelectorAll('#request-header-gaps-detail li')].map(item => item.textContent)})
+        """)
+      XCTAssertEqual(breakdown["expanded"] as? String, "true", "\(size.name): \(breakdown)")
+      XCTAssertEqual(breakdown["items"] as? [String] ?? [],
+        ["1 header block not retained (session budget)", "1 request without final headers (HTTP cache)"],
+        "\(size.name): the breakdown names each gap and why: \(breakdown)")
+      try await ui.screenshot("traffic-header-gaps-\(size.name)")
+      try await ui.key(53, "\u{1b}")
+      try await ui.waitUntil("""
+        document.querySelector('#request-header-gaps-detail')?.hidden === true &&
+          document.activeElement === document.querySelector('#request-header-gaps')
+        """, "\(size.name): Escape did not close the header gaps and return focus")
       try await ui.click("#screen-traffic .request-row", containing: expected.cachedHeadersHost)
       try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
       try await ui.click("#inspector-tab-headers")

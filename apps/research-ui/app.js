@@ -3093,9 +3093,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const bytes = value => trafficBytesLabel(value).replace(' ', '\u00a0');
         const sizes = totals?.sizes ? ` · ${bytes(totals.sizes.transferred)} transferred · ${bytes(totals.sizes.resources)} resources` : '';
         const hidden = totals?.hiddenInternal ? ` · ${totals.hiddenInternal.toLocaleString('en-US')} browser-internal hidden` : '';
-        const excluded = [globalThis.RebNetworkScope?.captureExclusionNotice(state.captureExclusions) ?? '',
-          typeof trafficHeaderCoverageNotice === 'function' ? trafficHeaderCoverageNotice(state.headerCoverage) : '']
-          .filter(Boolean).join(' · ');
+        const excluded = globalThis.RebNetworkScope?.captureExclusionNotice(state.captureExclusions) ?? '';
         // A null total is a session nothing has been read from yet: no counts, the note leads.
         const counts = totalCount === null ? '' : `${visibleCount === null ? '' : `${visibleCount.toLocaleString('en-US')} / `}${totalCount.toLocaleString('en-US')} requests${sizes}${hidden}`;
         const rest = `${excluded ? ` · ${excluded}` : ''}${outside ? ' · Selection outside filter' : ''}${note ? ` · ${note}` : ''}`;
@@ -3107,6 +3105,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         errors.hidden = unresolved === 0;
         errors.textContent = globalThis.RebRequestTabs?.unresolvedNotice(unresolved) ?? '';
         errors.setAttribute('aria-pressed', String(state.requestTabId === 'unresolved'));
+        // Header and cookie gaps are one footer item, with their reasons a click away.
+        if (typeof renderTrafficHeaderGaps === 'function') {
+          renderTrafficHeaderGaps(document.querySelector('#request-header-gaps'),
+            document.querySelector('#request-header-gaps-detail'), state.headerCoverage);
+        }
       }
 
       // The waterfall spans the selected time range, else the timeline of every matching start.
@@ -9276,6 +9279,25 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         setTimeout(() => { elements.requestCopyUrl.textContent = 'Copy URL'; }, 1800);
       });
+      {
+        const gaps = document.querySelector('#request-header-gaps');
+        const gapsDetail = document.querySelector('#request-header-gaps-detail');
+        gaps?.addEventListener('click', () => {
+          if (typeof setTrafficHeaderGapsOpen === 'function') {
+            setTrafficHeaderGapsOpen(gaps, gapsDetail, gaps.getAttribute('aria-expanded') !== 'true');
+          }
+        });
+        // Escape closes the breakdown and returns focus to its button.
+        for (const node of [gaps, gapsDetail]) {
+          node?.addEventListener('keydown', event => {
+            if (event.key !== 'Escape' || gaps.getAttribute('aria-expanded') !== 'true') return;
+            event.preventDefault();
+            event.stopPropagation();
+            setTrafficHeaderGapsOpen(gaps, gapsDetail, false);
+            gaps.focus();
+          });
+        }
+      }
       document.querySelector('#request-unresolved').addEventListener('click', () => {
         state.requestTabId = state.requestTabId === 'unresolved' ? 'all' : 'unresolved';
         state.requestDomain = 'all';

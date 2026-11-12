@@ -174,8 +174,10 @@ inert.
 `test35MissingFinalHeaders` opens a content-session request the HTTP cache
 answered, which has only a provisional request block that the session budget
 refused ([missing final blocks](../../protocol/native-network-v3.md#missing-final-blocks)).
-At both sizes the Traffic footer must count the refused block and the request
-without final headers, each with its reason; the Headers tab must say the HTTP
+At both sizes the Traffic footer must show one **2 header gaps** item that adds
+no footer line and leaves nothing cut off; Space must open its breakdown with
+the refused block and the request without final headers, each with its reason,
+and Escape must close it and return focus. The Headers tab must say the HTTP
 cache answered without sending a request and that the block was not retained;
 and the Cookies tab must list the hop with the same reason in place of a bare
 "No cookie list was retained", with nothing clipped and captured text inert.

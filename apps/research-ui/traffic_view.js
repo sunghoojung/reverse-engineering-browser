@@ -890,9 +890,10 @@ function trafficReasonList(reasons, labels) {
     : `(${reasons.map(([reason, value]) => `${value} ${label(reason)}`).join(', ')})`;
 }
 
-// The Traffic footer's part: what was not retained or joined, and why.
-function trafficHeaderCoverageNotice(coverage) {
-  if (!coverage) return '';
+// What was not retained or joined, and why: one line each for the footer's
+// breakdown.
+function trafficHeaderCoverageParts(coverage) {
+  if (!coverage) return [];
   const parts = [];
   for (const [kind, noun] of [['headers', 'header block'], ['cookies', 'cookie list']]) {
     const reasons = [...coverage.notRetained].filter(([key]) => key.startsWith(`${kind}:`))
@@ -903,13 +904,50 @@ function trafficHeaderCoverageNotice(coverage) {
   }
   // Network blocks and lists that arrived after their request ended: on no row.
   const late = coverage.unattributedBlocks + coverage.unattributedLists;
-  if (late) parts.push(`${late} late header ${late === 1 ? 'record' : 'records'}`);
+  if (late) parts.push(`${late} late header ${late === 1 ? 'record' : 'records'} on no row`);
   const missing = [...coverage.missing];
   const total = missing.reduce((sum, [, value]) => sum + value, 0);
   if (total) {
     parts.push(`${total} ${total === 1 ? 'request' : 'requests'} without final headers ${trafficReasonList(missing, TRAFFIC_MISSING_LABELS)}`);
   }
-  return parts.join(' · ');
+  return parts;
+}
+
+function trafficHeaderCoverageNotice(coverage) {
+  return trafficHeaderCoverageParts(coverage).join(' · ');
+}
+
+// Every block and list not retained, late record and request without final
+// headers: the one count the footer shows.
+function trafficHeaderGapCount(coverage) {
+  if (!coverage) return 0;
+  const sum = values => [...values].reduce((total, value) => total + value, 0);
+  return sum(coverage.notRetained.values()) + coverage.unattributedBlocks + coverage.unattributedLists +
+    sum(coverage.missing.values());
+}
+
+// The footer keeps one item, "N header gaps", a button that opens its
+// breakdown below it, so the footer stays the size it was however many
+// reasons there are; the breakdown is text only.
+function renderTrafficHeaderGaps(button, detail, coverage) {
+  if (!button || !detail) return;
+  const count = trafficHeaderGapCount(coverage);
+  const label = `${count.toLocaleString('en-US')} header ${count === 1 ? 'gap' : 'gaps'}`;
+  button.hidden = count === 0;
+  if (button.textContent !== label) button.textContent = label;
+  if (count === 0) setTrafficHeaderGapsOpen(button, detail, false);
+  const parts = trafficHeaderCoverageParts(coverage);
+  const key = JSON.stringify(parts);
+  if (detail.dataset.renderKey === key) return;
+  detail.dataset.renderKey = key;
+  const list = trafficNode('ul', 'request-header-gaps-list');
+  list.append(...parts.map(part => trafficNode('li', '', part)));
+  detail.replaceChildren(list);
+}
+
+function setTrafficHeaderGapsOpen(button, detail, open) {
+  button.setAttribute('aria-expanded', String(open));
+  detail.hidden = !open;
 }
 
 // Reuse the explicit export-copy policy from the offline client-project command.

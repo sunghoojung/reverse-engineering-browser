@@ -215,7 +215,9 @@ calling thread, which runs the script and is inside the fetch owner scope that
   JavaScript invocation request, the `request_initiator_stack` and a Console
   request watch match. So the start names the document's frame (loader kind
   16) or the worker's token (17 to 19), and the stack is walked where the
-  script runs; on the document main thread it has frames like any request.
+  script runs, so it has frames like any request on the document main thread
+  and, with Chromium patch `0046-record-worker-request-stacks`, on a
+  dedicated or shared worker's thread, whose version 3 scope names the worker.
 - `SyncLoadContext::StartAsyncWithWaitableEvent` carries that request ID and
   the recorded start to the pool thread's `ResourceRequestSender`, whose
   `SendAsync` sends with that ID and records nothing more at the start.
@@ -741,8 +743,9 @@ Still required before declaring this browser-ready:
 8. With Chromium patches `0038-record-synchronous-requests-on-calling-thread`,
    `0039-finish-service-worker-ends` and `0040-record-memory-cache-reuse`: a
    synchronous XHR from a page script and from a dedicated worker lands on its
-   tab with its document frame or worker owner, and the page's has its call
-   stack in Initiator. A controlled page whose service worker answers
+   tab with its document frame or worker owner, and each has its call stack
+   in Initiator (the worker's with `0046-record-worker-request-stacks`). A
+   controlled page whose service worker answers
    `Response.error()`, rejects `respondWith`, and stalls until the page aborts
    the fetch shows three failed rows, none Pending. A `race-network-and-fetch-handler`
    route whose worker answers `Response.error()` before the network shows one
@@ -1451,8 +1454,10 @@ no values, no debugger.
 - The renderer walks, for a request whose `request_initiated` record was
   admitted, on the document main thread and on each dedicated, shared and
   service worker thread ([threads](#threads)), up to 32 workers with tables
-  per renderer. Worklets, the background loader thread and the pool thread
-  synchronous XHR uses have no tables and record `unsupported_thread`.
+  per renderer. Worklets and the background loader thread have no tables and
+  record `unsupported_thread`. A synchronous XHR's start is recorded and walked
+  on its calling thread, not on the pool thread that sends it
+  ([synchronous requests](#synchronous-requests)).
 - V8 flag `--reb-promise-stacks`, off by default everywhere including the
   packaged app, adds [promise registrations](#promise-registrations). The
   launcher adds it for `REB_NATIVE_PROMISE_STACKS=1` with request stacks on.

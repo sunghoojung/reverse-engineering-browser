@@ -3087,6 +3087,65 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.trafficSort, state.trafficSortDirection, state.trafficFlags, range && `${range.from}:${range.to}`]);
       }
 
+      // Bodies and full URLs a content session listed but did not keep because
+      // a budget was used, counted over the loaded rows. Each budget names its
+      // size from the session's address, the unique bytes kept against it from
+      // the session summary, and the start panel control for the next session.
+      const TRAFFIC_BUDGETS = [
+        {key: 'request_content_budget_mib', category: 'request', control: 'Request content budget',
+          one: 'request body or URL', many: 'request bodies or URLs',
+          refused: request => request.body?.state === 'not_captured_session_budget' || request.fullTarget?.retention === 'not_retained_session_budget'},
+        {key: 'response_body_budget_mib', category: 'response', control: 'Response body budget',
+          one: 'response body', many: 'response bodies', refused: request => request.responseBody?.state === 'not_captured_session_budget'},
+      ];
+      function renderTrafficBudget() {
+        const notice = document.querySelector('#request-budget');
+        if (!notice) return;
+        const counts = TRAFFIC_BUDGETS.map(() => 0);
+        for (const request of state.requests) TRAFFIC_BUDGETS.forEach((budget, index) => { if (budget.refused(request)) counts[index] += 1; });
+        const used = TRAFFIC_BUDGETS.filter((_, index) => counts[index] > 0);
+        notice.hidden = used.length === 0;
+        if (!used.length) { notice.textContent = ''; return; }
+        refreshTrafficBudgetUse();
+        // In the budget's own unit, MiB, rather than the row sizes' decimal units.
+        const amount = bytes => bytes >= 104858
+          ? `${(bytes / 1048576).toLocaleString('en-US', {minimumFractionDigits: 1, maximumFractionDigits: 1})} MiB`
+          : `${Math.ceil(bytes / 1024).toLocaleString('en-US')} KiB`;
+        const parts = TRAFFIC_BUDGETS.map((budget, index) => {
+          if (!counts[index]) return '';
+          const size = state.sessionContentLimits?.[budget.key] ?? state.trafficBudgetUse?.use?.[budget.category]?.budget ?? null;
+          const kept = state.trafficBudgetUse?.use?.[budget.category];
+          return `${budget.control}${size ? ` (${size.toLocaleString('en-US')} MiB)` : ''} used`
+            + `${kept ? `, ${kept.complete ? '' : 'at least '}${amount(kept.retained)} kept` : ''}: `
+            + `${counts[index].toLocaleString('en-US')} ${counts[index] === 1 ? budget.one : budget.many} not kept`;
+        }).filter(Boolean);
+        const text = `${parts.join(' · ')} · Raise ${parts.length === 1 ? 'it' : 'them'} in New Live Session… for the next session.`;
+        if (notice.textContent !== text) notice.textContent = text;
+      }
+
+      // The unique bytes kept against each budget, from the session summary's
+      // budget checks: read once a refusal shows, then at most every 30 s.
+      function refreshTrafficBudgetUse() {
+        const use = state.trafficBudgetUse;
+        if (typeof fetch !== 'function' || use?.pending || (use && Date.now() - use.at < 30000)) return;
+        state.trafficBudgetUse = {at: Date.now(), pending: true, use: use?.use ?? null};
+        fetch('/api/session/summary', {cache: 'no-store'})
+          .then(response => response.ok ? response.json() : null)
+          .then(summary => {
+            // A refused or malformed read keeps the last answer.
+            if (!Array.isArray(summary?.checks)) throw new Error('No session summary');
+            const next = {};
+            for (const check of summary.checks) {
+              if (check?.code !== 'request_content_not_retained' || !/^(0|[1-9][0-9]{0,19})$/.test(check.retained_bytes ?? '')) continue;
+              next[check.category === 'response_body' ? 'response' : 'request'] = {retained: Number(check.retained_bytes),
+                complete: check.retained_complete === true, budget: Number.isSafeInteger(check.budget_mib) ? check.budget_mib : null};
+            }
+            state.trafficBudgetUse = {at: Date.now(), pending: false, use: next};
+          })
+          .catch(() => { state.trafficBudgetUse = {at: Date.now(), pending: false, use: state.trafficBudgetUse?.use ?? null}; })
+          .finally(renderTrafficBudget);
+      }
+
       // A null visible count is a query the request index has not answered yet.
       // `totals`: the index's matching sizes, hidden browser-internal rows and rows without a tab.
       function renderTrafficWindowStatus(visibleCount, totalCount, outside, note = '', totals = null) {
@@ -3110,6 +3169,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           renderTrafficHeaderGaps(document.querySelector('#request-header-gaps'),
             document.querySelector('#request-header-gaps-detail'), state.headerCoverage);
         }
+        renderTrafficBudget();
       }
 
       // The waterfall spans the selected time range, else the timeline of every matching start.

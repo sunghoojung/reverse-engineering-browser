@@ -58,6 +58,14 @@ function trafficByteCount(value) {
   return `${count.toLocaleString('en-US')} ${count === 1n ? 'byte' : 'bytes'}`;
 }
 
+// A budget a refusal met: its size when this live session's address names it
+// (app_state.js), and the start panel control that sets it for the next session.
+function trafficBudgetUsed(name, key, control) {
+  const budget = typeof sessionContentLimits === 'undefined' ? null : sessionContentLimits?.[key] ?? null;
+  return `this session had used its ${budget ? `${budget.toLocaleString('en-US')} MiB ` : ''}${name}. `
+    + `Raise ${control} in New Live Session… for the next session.`;
+}
+
 // What happened to the bytes, in the record's own terms.
 function trafficBodyCapture(body) {
   if (body === null || body === undefined) {
@@ -75,7 +83,7 @@ function trafficBodyCapture(body) {
     not_captured_artifact_unavailable: 'Not captured: the artifact channel was unavailable.',
     not_captured_transfer_refused: 'Not captured: the bounded in-flight memory or artifact transfer queue refused it.',
     not_captured_url: 'Not captured: the URL is not HTTP(S), or in older captures longer than 8 KiB.',
-    not_captured_session_budget: 'Not captured: this session had used its request body budget.',
+    not_captured_session_budget: `Not captured: ${trafficBudgetUsed('request content budget', 'request_content_budget_mib', 'Request content budget')}`,
     not_captured_credential_form: 'Not captured: password form submission. Bytes and digest are withheld.',
     not_captured_read_incomplete: 'Not captured: a file, blob or stream part was not read whole. It changed or failed, the upload was cancelled, or capture ended first.'
   }[body.state] ?? 'Unknown capture state.';
@@ -187,7 +195,6 @@ function createTrafficArtifactLookup({fetcher = (input, init) => fetch(input, in
 const TRAFFIC_TARGET_RETENTION = Object.freeze({
   not_retained_artifact_unavailable: 'the artifact channel was unavailable',
   not_retained_transfer_refused: 'the bounded in-flight memory or artifact transfer queue refused it',
-  not_retained_session_budget: 'this session had used its request content budget',
   not_retained_url: 'the URL has no HTTP(S) or WebSocket origin or exceeds the URL limit'
 });
 function trafficRequestUrl(request, view) {
@@ -201,6 +208,9 @@ function trafficRequestUrl(request, view) {
       : view.status === 'refused' ? `the artifact receiver did not retain the full target (${view.reason || 'unknown reason'})`
         : view.status === 'missing' ? `the full target artifact is ${view.unknown ? 'not in the scanned range of the artifact manifest' : 'not in the artifact manifest'}`
           : view.status === 'error' ? `the full target could not be read: ${view.error}` : 'the full target is not readable here'})`;
+  }
+  if (retention === 'not_retained_session_budget') {
+    return `${prefix}; the full target was not retained: ${trafficBudgetUsed('request content budget', 'request_content_budget_mib', 'Request content budget').replace(/\.$/, '')})`;
   }
   return TRAFFIC_TARGET_RETENTION[retention] ? `${prefix}; the full target was not retained: ${TRAFFIC_TARGET_RETENTION[retention]})` : `${prefix})`;
 }

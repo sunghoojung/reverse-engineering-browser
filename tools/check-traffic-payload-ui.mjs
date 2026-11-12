@@ -303,13 +303,37 @@ for (const [body, pattern] of [
   [record({kind: 'file', state: 'not_captured_body_kind', lengthPartial: true, sha256: null, capturedLength: '0', artifactId: '0'}), /file upload parts were described, not read/],
   [record({kind: 'chunked_data_pipe', state: 'not_captured_read_incomplete', lengthPartial: true, read: true, sha256: null, capturedLength: '0', artifactId: '0'}), /a file, blob or stream part was not read whole/],
   [record({state: 'not_captured_artifact_unavailable', capturedLength: '0', artifactId: '0'}), /artifact channel was unavailable/],
-  [record({state: 'not_captured_session_budget', capturedLength: '0', artifactId: '0'}), /request body budget/],
+  [record({state: 'not_captured_session_budget', capturedLength: '0', artifactId: '0'}),
+    /Not captured: this session had used its request content budget\. Raise Request content budget in New Live Session… for the next session\./],
   [record({state: 'not_captured_credential_form', sha256: null, capturedLength: '0', artifactId: '0'}), /password form submission\. Bytes and digest are withheld/],
 ]) {
   render(body === undefined ? {...request(null), origin: 'sample'} : request(body), null);
   assert.match(text('[data-section="payload"]'), pattern);
   assert.equal(panel.querySelector('.traffic-payload-view'), null, 'no payload view without retained bytes');
   assert.equal(panel.querySelector('.traffic-payload-tools'), null, 'no find or copy without content');
+}
+// A live content session's address names its budget, so the refusal says which.
+context.sessionContentLimits = {request_content_budget_mib: 1024, response_body_budget_mib: 512, response_media: false};
+render(request(record({state: 'not_captured_session_budget', capturedLength: '0', artifactId: '0'})), null);
+assert.match(text('[data-section="payload"]'),
+  /Not captured: this session had used its 1,024 MiB request content budget\. Raise Request content budget in New Live Session… for the next session\./);
+assert.doesNotMatch(text('[data-section="payload"]'), /REB_/);
+delete context.sessionContentLimits;
+// app_state.js reads the limits from the launcher's workspace address; a value
+// outside the launcher's bounds is unknown, and a metadata session has none.
+{
+  const appState = await readFile(new URL('app_state.js', ui), 'utf8');
+  const start = appState.indexOf('      const requestContentCaptureEnabled'), end = appState.indexOf('      const sampleRequests');
+  assert(start >= 0 && end > start, 'app_state.js reads request_content and the limits together');
+  const limitsOf = search => runInContext(`${appState.slice(start, end)}; sessionContentLimits`,
+    createContext({URLSearchParams, location: {search}}));
+  assert.deepEqual({...limitsOf('?native=1&request_content=1&request_content_budget_mib=1024&response_body_budget_mib=16384&response_media=1')},
+    {request_content_budget_mib: 1024, response_body_budget_mib: 16384, response_media: true});
+  assert.deepEqual({...limitsOf('?request_content=1&request_content_budget_mib=4097&response_body_budget_mib=0512&response_media=yes')},
+    {request_content_budget_mib: null, response_body_budget_mib: null, response_media: false});
+  assert.deepEqual({...limitsOf('?request_content=1')}, {request_content_budget_mib: null, response_body_budget_mib: null, response_media: false},
+    'an address from before the limits names none');
+  assert.equal(limitsOf('?request_content=0&request_content_budget_mib=64'), null, 'a metadata session has no limits');
 }
 render(jsonRequest, ready(json));
 const details = panel.querySelector('details.traffic-payload-details');

@@ -846,7 +846,13 @@ ui_endpoint="$(tr -d '\r\n' < "${ui_endpoint_path}")"
 readonly ui_endpoint
 # The UI labels the session from these; they describe what this launch passed
 # to Brave and grant nothing.
-readonly live_ui_url="${ui_endpoint}/?native=1&canvas_images=${capture_canvas_images}&request_content=${capture_request_content}"
+live_ui_query="native=1&canvas_images=${capture_canvas_images}&request_content=${capture_request_content}"
+# A content session's limits, so the workspace can name the budget a refusal met.
+if [[ "${capture_request_content}" == 1 ]]; then
+  live_ui_query+="&request_content_budget_mib=${request_content_budget_mib}&response_body_budget_mib=${response_body_budget_mib}"
+  live_ui_query+="&response_media=${capture_response_media}"
+fi
+readonly live_ui_url="${ui_endpoint}/?${live_ui_query}"
 
 # The backend writes this after the console socket is listening. Absence is not
 # fatal: capture still starts, and no second browser profile is launched.

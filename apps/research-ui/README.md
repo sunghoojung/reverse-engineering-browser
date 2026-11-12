@@ -1540,6 +1540,19 @@ selects or moves a bucket, Shift+Arrow grows or shrinks the range, and Escape
 or **Clear range** removes it. The footer reads `N / M requests · X transferred
 · Y resources` for the matching requests of the whole session.
 
+When a content session's budget runs out, the browser lists each later body or
+URL and names it as not kept. The footer then adds a line naming each budget
+that refused something in the loaded rows, for example `Response body budget
+(512 MiB) used, 511.8 MiB kept: 2 response bodies not kept · Raise it in New
+Live Session… for the next session.` The budget comes from the
+live session's address (`app_state.js`); the bytes kept are the unique bytes of
+that budget's artifacts, read from `get_session_summary` once a refusal shows
+and again at most every 30 s, and a failed read keeps the last figure. The
+Payload tab and the Request URL row name the request content budget the same
+way, and the Response tab names **Response body budget** and **Capture media and
+fonts**; each remedy applies to the next session. A session the address does
+not describe (a stored or older one) names the budget without its size.
+
 The filter box matches the method, URL or host and status as literal,
 case-insensitive text. `-text` excludes rows that contain it. `domain:` (with
 `*` wildcards), `method:`, `status-code:`, `larger-than:` (transferred bytes; `k`

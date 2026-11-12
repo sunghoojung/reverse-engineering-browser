@@ -16,7 +16,7 @@ const part = (source, first, last) => {
   return source.slice(start, end);
 };
 
-function fixture(appSource = app, trafficSource = traffic, count = 5000) {
+function fixture(appSource = app, trafficSource = traffic, count = 5000, extra = {}) {
   const stats = {};
   const clearStats = () => {
     for (const name of ['created', 'geometryReads', 'scrollWrites', 'attributeWrites', 'moves', 'searches', 'sorts', 'scopes', 'inspector', 'profiles', 'history']) stats[name] = 0;
@@ -105,7 +105,7 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
       return id === undefined ? [] : [{id: `request-${id}`, method: 'GET', path: `https://fixture.invalid/item-${id}`, status: 200, time: 1,
         type: 'xhr', origin, tabId: '1', firstTimestamp: 1n, operation: 'authored_fixture', events, details: []}];
     },
-    setImmediate};
+    setImmediate, ...extra};
   const instrument = `
     const search = trafficSearchRequests;
     trafficSearchRequests = (...args) => { stats.searches++; return search(...args); };
@@ -118,7 +118,7 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
   const rebuild = appSource.includes('      function rebuildTrafficRequests(') ? part(appSource, '      function rebuildTrafficRequests(', '      function renderShellStatus(') : '';
   const api = runInNewContext(trafficSource + '\n' +
     part(appSource, '      function requestDomain(', '      function requestTraceRoot(') + rebuild + instrument +
-    `;({renderRequests, selectRequest, moveRequestSelection, remountTrafficRows, ${added.map(name => `${name}: typeof ${name} === 'function' ? ${name} : undefined`).join(', ')}})`, context);
+    `;({renderRequests, selectRequest, moveRequestSelection, remountTrafficRows, renderTrafficBudget: typeof renderTrafficBudget === 'function' ? renderTrafficBudget : undefined, ${added.map(name => `${name}: typeof ${name} === 'function' ? ${name} : undefined`).join(', ')}})`, context);
   const rows = () => elements.requestRows.querySelectorAll('.request-row');
   return {state, elements, document, stats, clearStats, api, rows, nodes};
 }
@@ -520,6 +520,66 @@ for (const change of [
   api.useStandalonePreview(); assert.equal(state.trafficRenderedView, null); assert.equal(state.requests.length, 0);
 }
 console.log('PASS Traffic selection reuses rendered search/sort/window; only rows in view plus overscan mount with list positions for assistive technology; no geometry reads, remounts or scroll writes on selection; keyboard across unmounted rows, focus hand-off and return, filters, exact-identity refusal, mutation refresh, partial/empty/evicted selection (controller/DOM model, not rendered UI)');
+
+// The Traffic footer names budget refusals in the loaded rows: the budget in
+// force from the session's address, the bytes kept from the session summary,
+// and the start panel control for the next session. Nothing shows without one.
+{
+  const reads = [];
+  let reply = {checks: [{code: 'request_content_not_retained', category: 'response_body', reason: 'not_captured_session_budget',
+    count: '2', budget_mib: null, retained_bytes: String(511 * 1048576), retained_complete: true},
+  {code: 'request_content_not_retained', category: 'request_body', reason: 'not_captured_session_budget',
+    count: '1', budget_mib: null, retained_bytes: '1048576', retained_complete: false}]};
+  const fetch = async (url, options) => { reads.push([url, options?.cache]); return {ok: true, json: async () => reply}; };
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  const clock = {now: 1_000_000};
+  const t = fixture(app, traffic, 40, {fetch, Date: {now: () => clock.now}});
+  const notice = t.nodes.get('#request-budget') ?? t.document.querySelector('#request-budget');
+  t.api.renderTrafficBudget();
+  assert.equal(notice.hidden, true, 'no refusal, no notice');
+  assert.equal(notice.textContent, '');
+  assert.deepEqual(reads, [], 'no refusal reads no summary');
+  t.state.requests[3].responseBody = {state: 'not_captured_session_budget'};
+  t.state.requests[4].responseBody = {state: 'not_captured_session_budget'};
+  t.state.requests[5].body = {state: 'not_captured_session_budget'};
+  t.state.requests[6].fullTarget = {retention: 'not_retained_session_budget'};
+  t.state.requests[7].responseBody = {state: 'captured'};
+  t.state.sessionContentLimits = {request_content_budget_mib: 256, response_body_budget_mib: 512, response_media: false};
+  t.api.renderTrafficBudget();
+  assert.equal(notice.hidden, false);
+  assert.equal(notice.textContent, 'Request content budget (256 MiB) used: 2 request bodies or URLs not kept · '
+    + 'Response body budget (512 MiB) used: 2 response bodies not kept · Raise them in New Live Session… for the next session.');
+  await settle(); await settle();
+  assert.deepEqual(reads, [['/api/session/summary', 'no-store']], 'a refusal reads the summary once');
+  assert.equal(notice.textContent, 'Request content budget (256 MiB) used, at least 1.0 MiB kept: 2 request bodies or URLs not kept · '
+    + 'Response body budget (512 MiB) used, 511.0 MiB kept: 2 response bodies not kept · Raise them in New Live Session… for the next session.');
+  assert.doesNotMatch(notice.textContent, /REB_/);
+  // A stored session's address names no budget; the summary's, when known, is used.
+  t.state.sessionContentLimits = null;
+  t.api.renderTrafficBudget();
+  await settle(); await settle();
+  assert.equal(reads.length, 1, 'within 30 s the summary is not read again');
+  clock.now += 30_000;
+  reply = {checks: [{code: 'request_content_not_retained', category: 'response_body', reason: 'not_captured_session_budget',
+    count: '2', budget_mib: 1024, retained_bytes: '0', retained_complete: true}]};
+  t.api.renderTrafficBudget();
+  await settle(); await settle();
+  assert.equal(reads.length, 2, 'a later render rereads the summary once its 30 s pass');
+  assert.match(notice.textContent, /^Request content budget used: 2 request bodies or URLs not kept · /);
+  assert.match(notice.textContent, / · Response body budget \(1,024 MiB\) used, 0 KiB kept: 2 response bodies not kept · Raise them/);
+  // One budget: one remedy for it.
+  t.state.requests[5].body = null; t.state.requests[6].fullTarget = null;
+  t.api.renderTrafficBudget();
+  assert.equal(notice.textContent, 'Response body budget (1,024 MiB) used, 0 KiB kept: 2 response bodies not kept · Raise it in New Live Session… for the next session.');
+  // A failed read keeps the last answer; nothing throws.
+  reply = null;
+  clock.now += 30_000;
+  t.api.renderTrafficBudget();
+  await settle(); await settle();
+  assert.equal(reads.length, 3);
+  assert.match(notice.textContent, /Response body budget \(1,024 MiB\) used, 0 KiB kept/, 'a failed read keeps the last answer');
+}
+console.log('PASS Traffic footer budget notice: hidden without a refusal, counts request and response refusals in loaded rows, names the budget in force, the bytes kept from one bounded summary read and the start panel control for the next session');
 
 const baseline = process.argv.find(value => value.startsWith('--baseline-ref='))?.slice('--baseline-ref='.length);
 if (baseline) {

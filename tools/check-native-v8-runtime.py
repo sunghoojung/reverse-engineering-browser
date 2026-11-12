@@ -2,8 +2,8 @@
 """Build the pinned native V8 runtime tests, not a Brave/browser acceptance run.
 
 This independent system-Clang profile does not fetch Chromium's binary
-toolchains. Authored C++ patches are unchanged and Brave-specific GN wiring
-is omitted.
+toolchains or hermetic Python. Authored C++ patches are unchanged and
+Brave-specific GN wiring is omitted.
 """
 
 import argparse
@@ -562,7 +562,14 @@ def main():
         run(["node", str(fixture / "check-native-hook-loader.mjs"), str(public_inputs)], ROOT)
         receipt["public_fixture_inputs"] = json.loads((public_inputs / "input-receipt.json").read_text())
         save_receipt()
-        run([str(gn_binary), "gen", "out/native-runtime", "--fail-on-unused-args", "--args=" + gn_args], v8)
+        # V8's .gn runs GN scripts with the CIPD CPython this job never
+        # fetches; the system interpreter runs them instead.
+        script_python = shutil.which("python3", path=base_path)
+        if script_python is None:
+            raise RuntimeError("Missing python3 for GN scripts")
+        receipt["gn_script_executable"] = str(Path(script_python).resolve())
+        run([str(gn_binary), "gen", "out/native-runtime", "--fail-on-unused-args",
+             "--script-executable=" + receipt["gn_script_executable"], "--args=" + gn_args], v8)
         run(["ninja", "-C", "out/native-runtime", "-j", str(args.jobs), "d8", "cctest"], v8)
         binary = v8 / "out/native-runtime/cctest"
         listed = run([str(binary), "--list"], v8, True)

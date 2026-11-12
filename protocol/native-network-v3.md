@@ -1859,6 +1859,44 @@ their byte length: like request bodies, they stay in the binary artifact, which
 MCP never inlines. Withholding goes by name, so another value, such as a
 `Location` query, is returned as captured.
 
+### Missing final blocks
+
+A content session records a `browser` request block for every hop, so a hop
+with one and no `network` block is a request the network service did not
+report. Its reason comes from the request's own browser records (those with a
+browser context), decided in this order:
+
+| Reason | When | Meaning |
+| --- | --- | --- |
+| `in_progress` | The final hop, before `request_completed` or `request_failed` | Not an outcome yet; never counted |
+| `download` | `request_started` has loader kind 2 | Downloads use the browser-process factory, which has no observer ([binding](#network-service-binding-at-the-pinned-chromium)) |
+| `service_worker` | The final hop's `response_started` has flag 4 | A service worker answered; nothing reached the network |
+| `from_cache` | The final hop's `response_started` has flag 2 | The HTTP cache answered without sending a request, so there are no sent headers or cookies; DevTools shows provisional headers too |
+| `failed` | The final hop ended with `request_failed` and no response | It failed before the network service reported what it sent |
+| `not_reported` | Anything else, and every earlier hop without a block | No observer on its factory, or the block arrived for a request the sink no longer tracked (the unattributed count) |
+
+`get_request_headers` gives each hop `network_block_missing` and
+`get_request_cookies` gives each hop `sent_missing` and, for a hop with a sent
+list but no received one, `received_missing` (`in_progress`, `failed` or
+`not_reported`, since the received list comes with the response headers).
+Origin Trace's Headers tab adds the reason to "Provisional headers are shown",
+and the Cookies tab lists each such hop with it.
+
+`get_session_summary` counts, over the newest 64 MiB of events:
+
+- every header block and cookie list in states 4 to 8, as
+  `request_content_not_retained` with category `request_headers`,
+  `response_headers` or `cookie_list` and the state as its reason;
+- the unattributed blocks and lists, the newest count each producer carried,
+  as `network_headers_unattributed`;
+- the requests whose final hop ended without a `network` block, one
+  `final_headers_missing` check per reason: `info` for `download`,
+  `service_worker`, `from_cache` and `failed`, `warning` for `not_reported`.
+  It follows at most 131,072 browser requests; records of later ones are
+  counted as `final_headers_untracked`.
+
+The Traffic footer shows the same counts for the loaded rows, with reasons.
+
 ### Consumers
 
 - The broker accepts types 30 and 31 only when `IsValidEvent` does. The
@@ -1867,8 +1905,9 @@ MCP never inlines. Withholding goes by name, so another value, such as a
 - Origin Trace's **Headers** tab shows General (URL, method, status, remote
   address, referrer policy), Response headers and Request headers per hop. A
   hop with only a `browser` request block reads "Provisional headers are
-  shown". Each section collapses and has a Raw view and copy actions. Values
-  are inserted as text after a size and SHA-256 check.
+  shown" with its [reason](#missing-final-blocks). Each section collapses and
+  has a Raw view and copy actions. Values are inserted as text after a size
+  and SHA-256 check.
 
 ### Validation
 
@@ -1882,9 +1921,16 @@ drives the renderer cookie sink: disabled, metadata-only, writes, read
 aggregation, a full table and the configuration-end remainder, and per-name
 reads: the page's split, a name held twice, the empty jar, the 360-name bound,
 a table that fills during a read, unrecorded names in the remainder, and reads
-that allocate nothing.
+that allocate nothing. The capture check also asserts that
+`NativeNetworkHeadersObserved`, the gate of patch 0058, is set only while a
+content session registered the observer.
 `make native-tests` and `make network-request-wire-check` compare the C++
-verdicts with the Python validator and the shipped decoders.
+verdicts with the Python validator and the shipped decoders. The backend's
+`request_headers`, `request_cookies` and `session_summary` tests and
+`tools/check-traffic-headers-ui.mjs`, `check-traffic-cookies-ui.mjs` and
+`check-native-only-ui.mjs` check each missing-block reason, the per-name read
+coverage, the refusal counts and the footer. Patch 0058 was replayed after
+patch 0036 on the pinned sources; it has not been compiled.
 
 ### Acceptance
 
@@ -1901,6 +1947,13 @@ Still required before declaring this browser-ready:
    SameSite and Secure variants, compare the sent, received and blocked
    cookies with what the server saw, and link the JavaScript write to its
    script position.
+5. On the same fixture, read `document.cookie` from two script positions and
+   confirm each cookie's provenance lists both reads with their counts.
+6. Fetch a cookie-carrying URL from a shared worker's subresource, a
+   dedicated and a shared worker's main script, a service worker's main script
+   and update check, and an early-hints preload, and confirm each has a
+   `network` block and both cookie lists, with DevTools closed and then open
+   (DevTools must show what it showed before patch 0058).
 
 ## Request initiator stacks
 

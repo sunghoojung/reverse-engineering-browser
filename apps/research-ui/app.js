@@ -3093,7 +3093,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const bytes = value => trafficBytesLabel(value).replace(' ', '\u00a0');
         const sizes = totals?.sizes ? ` · ${bytes(totals.sizes.transferred)} transferred · ${bytes(totals.sizes.resources)} resources` : '';
         const hidden = totals?.hiddenInternal ? ` · ${totals.hiddenInternal.toLocaleString('en-US')} browser-internal hidden` : '';
-        const excluded = globalThis.RebNetworkScope?.captureExclusionNotice(state.captureExclusions) ?? '';
+        const excluded = [globalThis.RebNetworkScope?.captureExclusionNotice(state.captureExclusions) ?? '',
+          typeof trafficHeaderCoverageNotice === 'function' ? trafficHeaderCoverageNotice(state.headerCoverage) : '']
+          .filter(Boolean).join(' · ');
         // A null total is a session nothing has been read from yet: no counts, the note leads.
         const counts = totalCount === null ? '' : `${visibleCount === null ? '' : `${visibleCount.toLocaleString('en-US')} / `}${totalCount.toLocaleString('en-US')} requests${sizes}${hidden}`;
         const rest = `${excluded ? ` · ${excluded}` : ''}${outside ? ' · Selection outside filter' : ''}${note ? ` · ${note}` : ''}`;
@@ -8896,6 +8898,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.nativeRequests = requestsFromEvents(body.network_events ?? state.events, eventOrigin);
           globalThis.RebRequestTabs?.attachRequestTabs(state.nativeRequests, body.network_events ?? state.events);
           state.captureExclusions = globalThis.RebNetworkScope?.captureExclusionTotals(body.network_events ?? state.events) ?? null;
+          // Header blocks and cookie lists not retained or joined, and requests without final headers.
+          state.headerCoverage = typeof trafficHeaderCoverage === 'function' ? trafficHeaderCoverage(state.nativeRequests) : null;
           rebuildTrafficRequests();
           state.trafficIndex?.invalidate();
           let selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);

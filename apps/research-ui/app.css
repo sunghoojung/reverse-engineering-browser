@@ -2370,6 +2370,9 @@ var(--panel);
       .traffic-headers-section > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
       .traffic-headers-count { margin-left: 6px; color: var(--muted); font-weight: 400; }
       .traffic-headers-note { margin: 6px 0 0; color: var(--muted); font: 12px/1.5 var(--sans); }
+      /* A hop the network reported no cookie list for, with why. */
+      .traffic-cookie-missing { padding: 8px 12px; border-bottom: 1px solid var(--line); }
+      .traffic-cookie-missing > h3 { margin: 0; font: 600 12px/20px var(--sans); }
       .traffic-headers-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
       .traffic-headers-status { color: var(--muted); font: 11px var(--sans); }
       .traffic-header-row { display: grid; grid-template-columns: minmax(80px, 30%) minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 3px 0; border-bottom: 1px solid var(--line-soft); font: 11px/16px var(--mono); }

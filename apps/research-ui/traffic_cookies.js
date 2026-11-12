@@ -509,6 +509,13 @@ function renderTrafficCookies(container, request, rerender, context = {}) {
     rerender?.();
   };
   const hops = trafficCookieHops(request);
+  // A hop the content session saw (it has a provisional header block) but
+  // the network never reported has no list, and says why.
+  const finals = typeof trafficFinalBlocks === 'function' ? trafficFinalBlocks(request) : null;
+  for (const [hop, blocks] of finals?.hops ?? []) {
+    if (blocks.provisional && !hops.some(known => known.hop === hop)) hops.push({hop, sent: [], received: []});
+  }
+  hops.sort((left, right) => left.hop - right.hop);
   const parts = [];
   const malformed = (request.cookieLists ?? []).filter(list => list.malformed).length;
   let message = '';
@@ -519,12 +526,25 @@ function renderTrafficCookies(container, request, rerender, context = {}) {
   else if (!hops.length && !malformed) message = request.hostOnly
     ? 'Cookies are recorded only in content capture sessions.' : 'No cookie list was retained for this request.';
   if (malformed) message = `${message} ${malformed} cookie record${malformed === 1 ? ' is' : 's are'} malformed and not shown.`.trim();
+  const missingNote = (hop, title, reason) => {
+    const section = trafficNode('section', 'traffic-cookie-missing');
+    section.dataset.reason = reason;
+    section.append(trafficNode('h3', '', `${title}${hops.length > 1 ? ` · hop ${hop}` : ''}`),
+      trafficNode('p', 'traffic-headers-note', `The network stack reported no cookie list for this hop. ${TRAFFIC_MISSING_REASONS[reason]}`));
+    return {section, key: `missing|${title}|${hop}|${reason}`};
+  };
   for (const hop of [...hops].reverse()) {
     const suffix = hops.length > 1 ? ` · hop ${hop.hop}` : '';
+    const counted = finals?.hops.get(hop.hop)?.provisional === true;
+    const last = hop.hop === finals?.last;
     hop.received.forEach((list, index) => parts.push(trafficCookieSection(`received-${hop.hop}-${index}`,
       `Response cookies${suffix}`, list, rerender, {received: true, onProvenance})));
+    if (counted && hop.sent.length && !hop.received.length) {
+      parts.push(missingNote(hop.hop, 'Response cookies', trafficMissingReceivedReason(finals.life, last)));
+    }
     hop.sent.forEach((list, index) => parts.push(trafficCookieSection(`sent-${hop.hop}-${index}`,
       `Request cookies${suffix}`, list, rerender, {received: false, onProvenance})));
+    if (counted && !hop.sent.length) parts.push(missingNote(hop.hop, 'Request cookies', trafficMissingReason(finals.life, last)));
   }
   if (trafficCookieOptions.provenance !== null) {
     const sessionId = (request.cookieLists ?? []).find(list => list.sessionId)?.sessionId ?? null;

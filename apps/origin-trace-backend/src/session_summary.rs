@@ -7,7 +7,8 @@ use crate::{
     artifact_query::{self, MANIFEST_RECORD_BYTES},
     error::Result,
     event_query::{self, Cursor, EVENT_RECORD_BYTES, SCAN_BYTES, Tally},
-    event_window,
+    event_window, request_cookies,
+    request_headers::{self, Lifecycle},
     request_tabs::RequestTabs,
     session_context,
 };
@@ -23,6 +24,9 @@ const FRAME_TYPES: usize = 8;
 const SESSIONS: usize = 16;
 const ARTIFACTS: usize = 32;
 const REFUSAL_REASONS: usize = 32;
+/// Browser requests followed for a final header block, as many as the
+/// request index holds; the rest are counted as untracked.
+const HEADER_REQUESTS: usize = 131_072;
 
 /// Live state the backend knows outside the stores.
 pub struct CaptureState<'a> {
@@ -198,6 +202,25 @@ impl Refusals {
                     *self.content.entry(("request_target", reason)).or_default() += 1;
                 }
             }
+            (Some("network"), Some(kind @ ("request_headers" | "response_headers"))) => {
+                if let Some(reason) = request_headers::block_facts(event)
+                    .and_then(|facts| header_refusal(facts.state))
+                {
+                    let kind = if kind == "request_headers" {
+                        "request_headers"
+                    } else {
+                        "response_headers"
+                    };
+                    *self.content.entry((kind, reason)).or_default() += 1;
+                }
+            }
+            (Some("network"), Some("cookie_list")) => {
+                if let Some(reason) =
+                    request_cookies::list_facts(event).and_then(|(state, _)| header_refusal(state))
+                {
+                    *self.content.entry(("cookie_list", reason)).or_default() += 1;
+                }
+            }
             (Some("network"), Some("response_body")) => {
                 if let Some(reason) = payload()
                     .filter(|b| b.len() == 128 && (b[0] == 1 || b[0] == 2))
@@ -209,6 +232,137 @@ impl Refusals {
             _ => {}
         }
     }
+}
+
+/// Header block and cookie list states that retained no bytes (native-network-v3.md).
+fn header_refusal(state: u8) -> Option<&'static str> {
+    Some(match state {
+        4 => "not_captured_block_limit",
+        5 => "not_captured_artifact_unavailable",
+        6 => "not_captured_transfer_refused",
+        7 => "not_captured_session_budget",
+        8 => "not_captured_url",
+        _ => return None,
+    })
+}
+
+/// One browser request's header blocks and how it ended.
+#[derive(Default)]
+struct RequestHeaderFacts {
+    /// Hops (bit n for hop n) with a provisional or a `network` request block.
+    provisional: u64,
+    network: u64,
+    lifecycle: Lifecycle,
+}
+
+/// Header blocks and cookie lists no row shows, and the requests of content
+/// sessions that ended without a `network` request block, with the reason
+/// ("Missing final blocks" in protocol/native-network-v3.md).
+#[derive(Default)]
+struct HeaderCoverage {
+    /// The newest unattributed count per producer: each record carries its
+    /// configuration's count so far.
+    unattributed_blocks: BTreeMap<(u64, u64), u64>,
+    unattributed_lists: BTreeMap<(u64, u64), u64>,
+    requests: HashMap<(u64, u64, u64), RequestHeaderFacts>,
+    untracked: u64,
+}
+impl HeaderCoverage {
+    fn record(&mut self, event: &Value) {
+        if event["category"] != "network" {
+            return;
+        }
+        let number = |key: &str| event_window::unsigned(&event[key]).unwrap_or(0);
+        let producer = (number("session_id"), number("process_id"));
+        let key = (producer.0, producer.1, number("request_id"));
+        match event["type"].as_str() {
+            Some("request_headers" | "response_headers") => {
+                let Some(facts) = request_headers::block_facts(event) else {
+                    return;
+                };
+                let newest = self.unattributed_blocks.entry(producer).or_default();
+                *newest = (*newest).max(u64::from(facts.unattributed));
+                if facts.response || facts.hop >= 64 {
+                    return;
+                }
+                if let Some(request) = self.request(key) {
+                    if facts.source == 1 {
+                        request.provisional |= 1 << facts.hop;
+                    } else {
+                        request.network |= 1 << facts.hop;
+                    }
+                }
+            }
+            Some("cookie_list") => {
+                if let Some((_, unattributed)) = request_cookies::list_facts(event) {
+                    let newest = self.unattributed_lists.entry(producer).or_default();
+                    *newest = (*newest).max(u64::from(unattributed));
+                }
+            }
+            // Browser lifecycle records; a renderer row has no header block.
+            Some(
+                "request_started" | "response_started" | "request_completed" | "response_completed"
+                | "request_failed",
+            ) if event["browser_context_id_high"].as_str().unwrap_or("0") != "0"
+                || event["browser_context_id_low"].as_str().unwrap_or("0") != "0" =>
+            {
+                if let Some(request) = self.request(key) {
+                    request.lifecycle.record(event);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn request(&mut self, key: (u64, u64, u64)) -> Option<&mut RequestHeaderFacts> {
+        if key.2 == 0 {
+            return None;
+        }
+        if !self.requests.contains_key(&key) && self.requests.len() >= HEADER_REQUESTS {
+            self.untracked += 1;
+            return None;
+        }
+        Some(self.requests.entry(key).or_default())
+    }
+    /// Requests that ended without a `network` block on their final hop.
+    fn missing(&self) -> BTreeMap<&'static str, u64> {
+        let mut missing = BTreeMap::new();
+        for request in self.requests.values() {
+            if request.provisional == 0 {
+                continue;
+            }
+            let last = 63 - request.provisional.leading_zeros();
+            if request.network & (1 << last) != 0 {
+                continue;
+            }
+            let reason = request.lifecycle.missing_reason(true);
+            if reason != "in_progress" {
+                *missing.entry(reason).or_default() += 1;
+            }
+        }
+        missing
+    }
+}
+
+fn missing_check(reason: &str, count: u64) -> Value {
+    // A request that failed, or that the cache, a service worker or a
+    // download answered, has no final headers by design; the rest are gaps.
+    let severity = if reason == "not_reported" {
+        "warning"
+    } else {
+        "info"
+    };
+    let mut item = check(
+        "final_headers_missing",
+        severity,
+        format!(
+            "{count} {} of a content session ended with only provisional headers and no cookie lists: {}.",
+            if count == 1 { "request" } else { "requests" },
+            request_headers::missing_meaning(reason)
+        ),
+    );
+    item["reason"] = json!(reason);
+    item["count"] = json!(count.to_string());
+    item
 }
 
 /// request_body states that keep less than the whole body (native-network-v2.md).
@@ -253,9 +407,28 @@ fn content_meaning(category: &str, reason: &str, count: u64) -> String {
     let what = match category {
         "request_body" => "request bodies",
         "response_body" => "response bodies",
+        "request_headers" => "request header blocks",
+        "response_headers" => "response header blocks",
+        "cookie_list" => "cookie lists",
         _ => "full request targets",
     };
+    let headers = matches!(
+        category,
+        "request_headers" | "response_headers" | "cookie_list"
+    );
     let why = match reason {
+        "not_captured_block_limit" if category == "cookie_list" => {
+            "were longer than the 2 MiB list limit, so only their counts and size are recorded"
+        }
+        "not_captured_block_limit" => {
+            "were longer than the 320 KiB block limit, so only their header count and size are recorded"
+        }
+        "not_captured_session_budget" if headers => {
+            "arrived after the configuration retained 64 MiB of header blocks and cookie lists. Start a new session for a fresh budget"
+        }
+        "not_captured_url" if headers => {
+            "had no HTTP(S) URL, a URL longer than 8 KiB, or a hop the capture no longer tracked"
+        }
         "captured_truncated" => "were longer than 16 MiB, so only their first 16 MiB is retained",
         "not_captured_type" => {
             "were images, audio, video or fonts that page elements load, which are kept only with REB_CAPTURE_RESPONSE_MEDIA=1"
@@ -412,6 +585,7 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
     let mut exclusions = Exclusions::default();
     let mut request_tabs = RequestTabs::default();
     let mut refusals = Refusals::default();
+    let mut header_coverage = HeaderCoverage::default();
     let mut tally = Tally::default();
     let event_page = event_query::read_page(
         store,
@@ -428,6 +602,7 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
             exclusions.record(&event);
             request_tabs.record(&event);
             refusals.record(&event);
+            header_coverage.record(&event);
             Ok(None)
         },
     )?;
@@ -511,6 +686,35 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         item["category"] = json!(category);
         item["reason"] = json!(reason);
         item["count"] = json!(count.to_string());
+        checks.push(item);
+    }
+    let blocks: u64 = header_coverage.unattributed_blocks.values().sum();
+    let lists: u64 = header_coverage.unattributed_lists.values().sum();
+    if blocks > 0 || lists > 0 {
+        let mut item = check(
+            "network_headers_unattributed",
+            "warning",
+            format!(
+                "{blocks} network header blocks and {lists} cookie lists arrived for requests the capture no longer tracked (ended, or past 4,096 in flight), so they are on no row."
+            ),
+        );
+        item["blocks"] = json!(blocks.to_string());
+        item["lists"] = json!(lists.to_string());
+        checks.push(item);
+    }
+    for (reason, count) in header_coverage.missing() {
+        checks.push(missing_check(reason, count));
+    }
+    if header_coverage.untracked > 0 {
+        let mut item = check(
+            "final_headers_untracked",
+            "info",
+            format!(
+                "{} header and lifecycle records belong to requests past the {HEADER_REQUESTS} this summary follows, so whether those requests have final headers is not counted.",
+                header_coverage.untracked
+            ),
+        );
+        item["count"] = json!(header_coverage.untracked.to_string());
         checks.push(item);
     }
     let (drops, _) = tally.queue_drops();
@@ -945,6 +1149,219 @@ mod tests {
         assert_eq!(summary["artifacts"]["total"], "0");
         let text = summary.to_string();
         assert!(!text.contains(&hex::encode("native_wasm")));
+    }
+
+    /// A `request_headers` (or `response_headers`) record of request 17 + n.
+    fn header(
+        sequence: u64,
+        parent: u64,
+        request: u64,
+        response: bool,
+        source: u8,
+        state: u8,
+        hop: u32,
+        unattributed: u32,
+    ) -> Value {
+        let mut payload = vec![0u8; 128];
+        payload[0] = 1;
+        payload[2] = 128;
+        payload[4] = source;
+        payload[5] = state;
+        payload[6] = if !response && source == 1 { 4 } else { 0 };
+        let (count, length): (u32, u32) = match state {
+            3 => (0, 0),
+            4 => (1, 400 * 1024),
+            _ => (1, 10),
+        };
+        payload[8..12].copy_from_slice(&count.to_le_bytes());
+        payload[12..16].copy_from_slice(&length.to_le_bytes());
+        payload[16..20].copy_from_slice(&hop.to_le_bytes());
+        if response {
+            payload[20..22].copy_from_slice(&200u16.to_le_bytes());
+        }
+        payload[40..44].copy_from_slice(&unattributed.to_le_bytes());
+        if state != 4 {
+            payload[48..80].fill(0x5a);
+        }
+        let kind = if response {
+            "response_headers"
+        } else {
+            "request_headers"
+        };
+        let mut event = lifecycle(sequence, kind, request);
+        event["payload"] = json!(hex::encode(&payload));
+        event["payload_size"] = json!(128);
+        event["parent_event_id"] = json!(parent.to_string());
+        event["artifact_id"] = json!("0");
+        event["status_code"] = json!(0);
+        event
+    }
+
+    /// A browser lifecycle record of `request`.
+    fn lifecycle(sequence: u64, kind: &str, request: u64) -> Value {
+        let mut event = event(sequence, "network", kind, 3, "");
+        event["request_id"] = json!(request.to_string());
+        event["process_id"] = json!(1);
+        event["navigation_id"] = json!("0");
+        event["browser_context_id_high"] = json!("5");
+        event["browser_context_id_low"] = json!("6");
+        for key in [
+            "parent_event_id",
+            "encoded_data_length",
+            "decoded_body_length",
+        ] {
+            event[key] = json!("0");
+        }
+        for key in ["status_code", "error_code", "resource_type", "flags"] {
+            event[key] = json!(0);
+        }
+        event["payload_truncated"] = json!(false);
+        event
+    }
+
+    #[test]
+    fn header_refusals_and_missing_final_blocks_are_counted_with_reasons() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("events.jsonl");
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let mut sequence = 0;
+        let mut next = || {
+            sequence += 1;
+            sequence
+        };
+        let mut events = Vec::new();
+        // One request per case: request 1 has its final block; 2 came from the
+        // cache; 3 failed before sending; 4 is a download; 5 is still open; 6
+        // was answered without a block nobody explains; 7 redirected, and only
+        // its first hop has a network block.
+        for request in 1..=7u64 {
+            let start = next();
+            let mut started = lifecycle(start, "request_started", request);
+            if request == 4 {
+                started["loader_kind"] = json!(2);
+            }
+            events.push(started);
+            events.push(header(next(), start, request, false, 1, 3, 0, 0));
+            if matches!(request, 1 | 7) {
+                events.push(header(next(), start, request, false, 2, 3, 0, 0));
+            }
+            if request == 7 {
+                let redirect = next();
+                events.push(lifecycle(redirect, "request_redirected", request));
+                events.push(header(next(), redirect, request, false, 1, 3, 1, 0));
+            }
+            if request == 3 {
+                events.push(lifecycle(next(), "request_failed", request));
+                continue;
+            }
+            if request == 5 {
+                continue;
+            }
+            let mut response = lifecycle(next(), "response_started", request);
+            if request == 2 {
+                response["flags"] = json!(2);
+            }
+            events.push(response);
+            events.push(lifecycle(next(), "request_completed", request));
+        }
+        // Blocks and lists not retained, with their reasons, and late blocks.
+        let start = next();
+        events.push(lifecycle(start, "request_started", 8));
+        events.push(header(next(), start, 8, false, 1, 7, 0, 2));
+        events.push(header(next(), start, 8, true, 1, 4, 0, 3));
+        let mut list = vec![0u8; 128];
+        list[0] = 1;
+        list[2] = 128;
+        list[4] = 1;
+        list[5] = 6;
+        list[8] = 1;
+        list[16] = 80;
+        list[24] = 4;
+        list[32..64].fill(0x5a);
+        let mut cookie = lifecycle(next(), "cookie_list", 8);
+        cookie["payload"] = json!(hex::encode(&list));
+        cookie["payload_size"] = json!(128);
+        cookie["parent_event_id"] = json!(start.to_string());
+        cookie["artifact_id"] = json!("0");
+        events.push(cookie);
+        let lines: Vec<String> = events.iter().map(Value::to_string).collect();
+        std::fs::write(&store, lines.join("\n") + "\n").unwrap();
+        let state = CaptureState {
+            instance_id: "1:2",
+            capture_mode: "live",
+            broker_connected: true,
+            capture_stopped: false,
+            artifact_receiver_configured: false,
+            artifact_receiver_connected: false,
+        };
+        let summary = build(&store, &artifacts, &state).unwrap();
+        let checks = summary["checks"].as_array().unwrap();
+        let find = |code: &str| {
+            checks
+                .iter()
+                .filter(|check| check["code"] == code)
+                .map(|check| {
+                    (
+                        check["reason"].as_str().unwrap_or("").to_owned(),
+                        check.clone(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let missing = find("final_headers_missing");
+        assert_eq!(
+            missing.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["download", "failed", "from_cache", "not_reported"]
+        );
+        for reason in ["download", "failed", "from_cache"] {
+            assert_eq!(missing[reason]["count"], "1");
+            assert_eq!(missing[reason]["severity"], "info");
+        }
+        // Request 6 and request 7's final hop: the gaps nobody explains.
+        assert_eq!(missing["not_reported"]["count"], "2");
+        assert_eq!(missing["not_reported"]["severity"], "warning");
+        assert!(
+            missing["from_cache"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("HTTP cache")
+        );
+        let refused = checks
+            .iter()
+            .filter(|check| check["code"] == "request_content_not_retained")
+            .map(|check| {
+                (
+                    check["category"].as_str().unwrap().to_owned(),
+                    check["reason"].as_str().unwrap().to_owned(),
+                    check["count"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            refused,
+            vec![
+                (
+                    "cookie_list".into(),
+                    "not_captured_transfer_refused".into(),
+                    "1".into()
+                ),
+                (
+                    "request_headers".into(),
+                    "not_captured_session_budget".into(),
+                    "1".into()
+                ),
+                (
+                    "response_headers".into(),
+                    "not_captured_block_limit".into(),
+                    "1".into()
+                ),
+            ]
+        );
+        let late = &find("network_headers_unattributed")[""];
+        assert_eq!(late["blocks"], "3");
+        assert_eq!(late["lists"], "4");
+        assert!(find("final_headers_untracked").is_empty());
     }
 
     #[test]

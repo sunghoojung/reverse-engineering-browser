@@ -778,5 +778,122 @@ function trafficCaptureDocument(request, mode = 'raw') {
   };
 }
 
+// Why a content session's hop has a provisional request block and no
+// `network` one ("Missing final blocks" in protocol/native-network-v3.md),
+// decided from the row's browser records exactly as get_request_headers does.
+const TRAFFIC_MISSING_REASONS = Object.freeze({
+  in_progress: 'The request has not ended, so the network stack may still report what it sent.',
+  download: 'Downloads load through the browser\'s own factory, which has no DevTools observer at the pinned Chromium.',
+  service_worker: 'A service worker answered it, so no request reached the network.',
+  from_cache: 'The HTTP cache answered it without sending a request, so there are no sent headers or cookies.',
+  failed: 'It failed before the network stack reported the headers it sent.',
+  not_reported: 'The network stack reported no sent headers for this hop: its factory had no DevTools observer, or the block arrived after the capture stopped tracking the request.'
+});
+const TRAFFIC_MISSING_LABELS = Object.freeze({download: 'download', service_worker: 'service worker',
+  from_cache: 'HTTP cache', failed: 'failed', not_reported: 'not reported'});
+
+function trafficRequestLifecycle(request) {
+  const life = {ended: false, failed: false, responded: false, fromCache: false, fromServiceWorker: false, download: false};
+  for (const event of request?.events ?? []) {
+    // Renderer records of the row are not the browser loader's.
+    if (event?.category !== 'network' || ((event.browser_context_id_high ?? '0') === '0' &&
+        (event.browser_context_id_low ?? '0') === '0')) continue;
+    if (event.type === 'request_started') life.download ||= event.loader_kind === 2;
+    else if (event.type === 'response_started') {
+      life.responded = true;
+      life.fromCache ||= (event.flags & 2) !== 0;
+      life.fromServiceWorker ||= (event.flags & 4) !== 0;
+    } else if (['request_completed', 'response_completed'].includes(event.type)) life.ended = true;
+    else if (event.type === 'request_failed') Object.assign(life, {ended: true, failed: true});
+  }
+  return life;
+}
+
+function trafficMissingReason(life, last) {
+  if (last && !life.ended) return 'in_progress';
+  if (life.download) return 'download';
+  if (last && life.fromServiceWorker) return 'service_worker';
+  if (last && life.fromCache) return 'from_cache';
+  if (last && life.failed && !life.responded) return 'failed';
+  return 'not_reported';
+}
+
+// A sent cookie list without a received one: Chromium reports both with the
+// raw notifications, the received list with the response headers.
+function trafficMissingReceivedReason(life, last) {
+  if (last && !life.ended) return 'in_progress';
+  if (last && life.failed && !life.responded) return 'failed';
+  return 'not_reported';
+}
+
+// Each hop of a row with a provisional block and whether the network
+// reported it; the last such hop is the one its response belongs to.
+function trafficFinalBlocks(request) {
+  const hops = new Map();
+  for (const block of request?.headerBlocks ?? []) {
+    if (block.malformed || block.kind !== 'request') continue;
+    const hop = hops.get(block.hop) ?? {provisional: false, network: false};
+    if (block.source === 'browser') hop.provisional = true;
+    if (block.source === 'network') hop.network = true;
+    hops.set(block.hop, hop);
+  }
+  const provisional = [...hops].filter(([, hop]) => hop.provisional).map(([hop]) => hop);
+  const last = provisional.length ? Math.max(...provisional) : null;
+  return {hops, last, life: trafficRequestLifecycle(request)};
+}
+
+// What the loaded rows did not retain or could not join: header blocks and
+// cookie lists in states 4 to 8, late network blocks, and requests that ended
+// without a final block, each by reason. Counts only; it reads no block.
+function trafficHeaderCoverage(requests) {
+  const notRetained = new Map(), missing = new Map();
+  let unattributedBlocks = 0, unattributedLists = 0;
+  const count = (map, key) => map.set(key, (map.get(key) ?? 0) + 1);
+  for (const request of Array.isArray(requests) ? requests : []) {
+    for (const block of request.headerBlocks ?? []) {
+      if (block.malformed) continue;
+      if (/^not_captured_/.test(block.state ?? '')) count(notRetained, `headers:${block.state}`);
+      unattributedBlocks = Math.max(unattributedBlocks, block.unattributedBlocks ?? 0);
+    }
+    for (const list of request.cookieLists ?? []) {
+      if (list.malformed) continue;
+      if (/^not_captured_/.test(list.state ?? '')) count(notRetained, `cookies:${list.state}`);
+      unattributedLists = Math.max(unattributedLists, list.unattributedLists ?? 0);
+    }
+    const {hops, last, life} = trafficFinalBlocks(request);
+    if (last === null || hops.get(last).network) continue;
+    const reason = trafficMissingReason(life, true);
+    if (reason !== 'in_progress') count(missing, reason);
+  }
+  return {notRetained, missing, unattributedBlocks, unattributedLists};
+}
+
+const TRAFFIC_NOT_RETAINED_LABELS = Object.freeze({not_captured_block_limit: 'over the size limit',
+  not_captured_artifact_unavailable: 'no artifact channel', not_captured_transfer_refused: 'queue refused',
+  not_captured_session_budget: 'session budget used', not_captured_url: 'no HTTP(S) URL or untracked hop'});
+
+// The Traffic footer's part: what was not retained or joined, and why.
+function trafficHeaderCoverageNotice(coverage) {
+  if (!coverage) return '';
+  const parts = [];
+  for (const [kind, noun] of [['headers', 'header block'], ['cookies', 'cookie list']]) {
+    const reasons = [...coverage.notRetained].filter(([key]) => key.startsWith(`${kind}:`))
+      .map(([key, total]) => [key.slice(kind.length + 1), total]);
+    const total = reasons.reduce((sum, [, value]) => sum + value, 0);
+    if (!total) continue;
+    parts.push(`${total} ${noun}${total === 1 ? '' : 's'} not retained (${reasons
+      .map(([reason, value]) => `${value} ${TRAFFIC_NOT_RETAINED_LABELS[reason] ?? reason.replaceAll('_', ' ')}`).join(', ')})`);
+  }
+  const late = coverage.unattributedBlocks + coverage.unattributedLists;
+  if (late) parts.push(`${late} late header ${late === 1 ? 'record' : 'records'} on no row`);
+  const missing = [...coverage.missing];
+  const total = missing.reduce((sum, [, value]) => sum + value, 0);
+  if (total) {
+    parts.push(`${total} ${total === 1 ? 'request' : 'requests'} without final headers (${missing
+      .map(([reason, value]) => `${value} ${TRAFFIC_MISSING_LABELS[reason] ?? reason}`).join(', ')})`);
+  }
+  return parts.join(' · ');
+}
+
 // Reuse the explicit export-copy policy from the offline client-project command.
 if (typeof module === 'object' && module?.exports && typeof require === 'function') module.exports = {trafficCaptureDocument};

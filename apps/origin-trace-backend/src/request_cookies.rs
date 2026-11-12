@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::evidence;
-use crate::request_headers::{STATES, child_payload, le};
+use crate::request_headers::{STATES, child_payload, le, lifecycle_of, provisional_hops};
 use crate::request_stack;
 
 const LIST_LIMIT: usize = 2 * 1024 * 1024;
@@ -269,6 +269,11 @@ fn describe_cookie(cookie: &Cookie) -> Value {
     out
 }
 
+/// A valid cookie list record's state and unattributed count.
+pub(crate) fn list_facts(event: &Value) -> Option<(u8, u32)> {
+    decode_list(event).map(|list| (list.state, list.unattributed))
+}
+
 /// The verified cookies of a retained list, or the reason none are shown.
 fn read_list(
     event: &Value,
@@ -403,9 +408,31 @@ pub fn build(
             entry.1.push(described);
         }
     }
+    // A content session records a provisional block for every hop; a hop
+    // the network never reported has no list, and says why.
+    let (provisional, process) = provisional_hops(events, session, request);
+    let lifecycle = lifecycle_of(events, session, request, process);
+    let last = provisional.iter().next_back().copied();
+    for hop in &provisional {
+        hops.entry(*hop).or_default();
+    }
     let hops: Vec<Value> = hops
         .into_iter()
-        .map(|(hop, (sent, received))| json!({"hop": hop, "sent": sent, "received": received}))
+        .map(|(hop, (sent, received))| {
+            let counted = provisional.contains(&hop);
+            let sent_missing = if counted && sent.is_empty() {
+                json!(lifecycle.missing_reason(Some(hop) == last))
+            } else {
+                Value::Null
+            };
+            let received_missing = if counted && !sent.is_empty() && received.is_empty() {
+                json!(lifecycle.missing_received_reason(Some(hop) == last))
+            } else {
+                Value::Null
+            };
+            json!({"hop": hop, "sent": sent, "received": received,
+                "sent_missing": sent_missing, "received_missing": received_missing})
+        })
         .collect();
     json!({
         "session_id": session,
@@ -983,6 +1010,31 @@ mod tests {
         );
         assert_eq!(unparsed["line_bytes"], 6);
         assert!(!result.to_string().contains("token-"));
+        assert_eq!(hop["sent_missing"], Value::Null);
+        assert_eq!(hop["received_missing"], Value::Null);
+        // A content session's hop with only a provisional block has no list,
+        // and says why; so does a sent list without a received one.
+        let mut provisional = vec![0u8; 128];
+        provisional[0] = 1;
+        provisional[2] = 128;
+        provisional[4] = 1;
+        provisional[5] = 3;
+        provisional[6] = 4;
+        provisional[16] = 1;
+        provisional[48..80].fill(0x5a);
+        let mut hops = events.clone();
+        hops.push(json!({"session_id":"7","request_id":"17","category":"network",
+            "type":"request_redirected","process_id":42,"sequence_number":"20","monotonic_time_ns":"20"}));
+        hops.push(record("request_headers", 21, 20, &provisional, "0"));
+        provisional[16] = 0;
+        hops.push(record("request_headers", 22, 11, &provisional, "0"));
+        hops.push(json!({"session_id":"7","request_id":"17","category":"network",
+            "type":"request_failed","process_id":42,"sequence_number":"23","monotonic_time_ns":"23","flags":0}));
+        let missing = build(&hops, &artifacts, &root, "7", "17");
+        assert_eq!(missing["hops"][1]["hop"], 1);
+        assert_eq!(missing["hops"][1]["sent_missing"], "failed");
+        assert_eq!(missing["hops"][1]["received_missing"], Value::Null);
+        assert_eq!(missing["hops"][0]["sent_missing"], Value::Null);
 
         let origin = provenance(&events, &artifacts, &root, "7", "_abck", &no_index);
         assert_eq!(

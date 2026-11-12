@@ -363,6 +363,29 @@ assert.equal(panel.querySelectorAll('img').length, 0, 'captured markup is still 
   await settle();
 }
 
+// A hop the content session saw but the network never reported has no list,
+// and says why; so does a sent list without a received one.
+{
+  const browser = (type, extra = {}) => ({category: 'network', type, flags: 0, browser_context_id_high: '5',
+    browser_context_id_low: '6', ...extra});
+  const missingRow = {id: 'missing', origin: 'live', method: 'GET', path: 'https://echo.test/m', status: 'failed',
+    cookieLists: [record('sent', [sentCookies[1]])],
+    headerBlocks: [{kind: 'request', source: 'browser', state: 'captured', hop: 0},
+      {kind: 'request', source: 'network', state: 'captured', hop: 0},
+      {kind: 'request', source: 'browser', state: 'captured', hop: 1}],
+    events: [browser('request_started'), browser('request_redirected'), browser('request_failed')]};
+  const view = document.createElement('div');
+  api.renderTrafficCookies(view, missingRow, () => {}, {});
+  await settle();
+  const notes = [...view.querySelectorAll('.traffic-cookie-missing')].map(node =>
+    [node.querySelector('h3').textContent, node.dataset.reason, node.textContent]);
+  assert.deepEqual(notes.map(([title, reason]) => [title, reason]),
+    [['Request cookies · hop 1', 'failed'], ['Response cookies · hop 0', 'not_reported']]);
+  assert.match(notes[0][2], /reported no cookie list for this hop\. It failed before the network stack reported the headers it sent/);
+  // A row without header blocks (metadata-only, legacy) adds no hop of its own.
+  assert.equal(panel.querySelectorAll('.traffic-cookie-missing').length, 0);
+}
+
 // Integrity failure, refusal and not-retained states read as sentences.
 const wrong = record('sent', [sentCookies[1]]);
 blobs.set(wrong.artifactId, list('sent', [sentCookies[0]]));
@@ -390,10 +413,10 @@ api.renderTrafficCookies(panel, {id: 'm', origin: 'live', method: 'GET', path: '
 assert.match(panel.textContent, /recorded only in content capture sessions/);
 api.renderTrafficCookies(panel, {id: 'l', origin: 'sample', method: 'GET', path: 'x', status: 200}, () => {});
 assert.match(panel.textContent, /no native cookie record/);
-assert.equal(reads.filter(url => url.startsWith('/api/artifacts/')).length, 6,
+assert.equal(reads.filter(url => url.startsWith('/api/artifacts/')).length, 7,
   'one read per distinct retained list, including the store-refresh block; refused and not-retained lists are not read');
 assert.equal(reads.filter(url => url.startsWith('/api/cookie-provenance?session_id=7&name=sid')).length, 2, 'a failed position read retries once');
 console.log('PASS Traffic Cookies tab: hops newest first, filtered-out request cookies and reasons, every response attribute ' +
   'and block reason, unparsed line, sort, tooltip and copy, provenance to response, script write at its resolved position and later request, ' +
-  'document.cookie reads by name with their read coverage, ' +
+  'document.cookie reads by name with their read coverage, hops without a list and why, ' +
   'size and SHA-256 checked reads, refusal and not-retained states, metadata-only and legacy rows (DOM model; not rendered QA)');

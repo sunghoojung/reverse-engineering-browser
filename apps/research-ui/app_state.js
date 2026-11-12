@@ -120,6 +120,7 @@
         requestDomain: 'all',
         hideBrowserInternal: false,
         captureExclusions: null,
+        headerCoverage: null,
         trafficKnownIds: null,
         trafficPendingCount: 0,
         trafficFilterKey: null,

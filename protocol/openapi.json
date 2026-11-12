@@ -330,7 +330,7 @@
       "get": {
         "operationId": "get_session_summary",
         "summary": "Summarize what this capture recorded",
-        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget, Wasm compiled without a stored module, each artifact capture failure reason, or request bodies and full targets a content session did not retain (budget, pool, channel or kind) with counts, counted browser-internal exclusions, requests without a browser tab, and every request's response body case (retained, or why not: served by a service worker, reused from the memory cache, 304, redirected, aborted, cancelled, empty and the rest). Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
+        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget, Wasm compiled without a stored module, each artifact capture failure reason, or request bodies, full targets, header blocks and cookie lists a content session did not retain (budget, block limit, pool, channel, URL or kind) with counts, network header blocks and cookie lists that arrived for requests no longer tracked (network_headers_unattributed), requests that ended with only provisional headers (final_headers_missing, one check per reason: download, service_worker, from_cache, failed or not_reported), counted browser-internal exclusions, requests without a browser tab, and every request's response body case (retained, or why not: served by a service worker, reused from the memory cache, 304, redirected, aborted, cancelled, empty and the rest). Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
         "tags": [
           "health"
         ],
@@ -10663,6 +10663,7 @@
               "required": [
                 "hop",
                 "provisional",
+                "network_block_missing",
                 "request",
                 "response"
               ],
@@ -10675,6 +10676,18 @@
                 "provisional": {
                   "type": "boolean",
                   "description": "Only browser request blocks: headers before the network stack added Cookie, Host and the rest."
+                },
+                "network_block_missing": {
+                  "enum": [
+                    "in_progress",
+                    "download",
+                    "service_worker",
+                    "from_cache",
+                    "failed",
+                    "not_reported",
+                    null
+                  ],
+                  "description": "Why a hop with a provisional block has no network block, from the request's own browser records (\"Missing final blocks\" in protocol/native-network-v3.md): in_progress (not ended), download (the browser factory has no DevTools observer), service_worker or from_cache (no request reached the network), failed (before the network service reported sent headers), not_reported (no observer on its factory, or the block arrived for a request no longer tracked; see unattributed_blocks). Null when the hop has a network block or no provisional one."
                 },
                 "request": {
                   "type": "array",
@@ -10877,7 +10890,9 @@
               "required": [
                 "hop",
                 "sent",
-                "received"
+                "received",
+                "sent_missing",
+                "received_missing"
               ],
               "properties": {
                 "hop": {
@@ -10896,6 +10911,30 @@
                   "items": {
                     "$ref": "#/components/schemas/RequestCookieList"
                   }
+                },
+                "sent_missing": {
+                  "enum": [
+                    "in_progress",
+                    "download",
+                    "service_worker",
+                    "from_cache",
+                    "failed",
+                    "not_reported",
+                    null
+                  ],
+                  "description": "Why a hop with a provisional header block has no sent cookie list, with the reasons of the headers' network_block_missing; null otherwise."
+                },
+                "received_missing": {
+                  "enum": [
+                    "in_progress",
+                    "download",
+                    "service_worker",
+                    "from_cache",
+                    "failed",
+                    "not_reported",
+                    null
+                  ],
+                  "description": "Why a hop with a sent list has no received one: in_progress, failed or not_reported; null otherwise."
                 }
               }
             }
@@ -35660,6 +35699,9 @@
                     "wasm_without_artifacts",
                     "artifact_capture_failed",
                     "request_content_not_retained",
+                    "network_headers_unattributed",
+                    "final_headers_missing",
+                    "final_headers_untracked",
                     "queue_drops",
                     "sequence_gaps",
                     "named_gap",
@@ -35692,6 +35734,14 @@
                 },
                 "count": {
                   "$ref": "#/components/schemas/Uint64String"
+                },
+                "blocks": {
+                  "$ref": "#/components/schemas/Uint64String",
+                  "description": "network_headers_unattributed: network header blocks that arrived for a request no longer tracked."
+                },
+                "lists": {
+                  "$ref": "#/components/schemas/Uint64String",
+                  "description": "network_headers_unattributed: cookie lists that arrived for a request no longer tracked."
                 }
               }
             }

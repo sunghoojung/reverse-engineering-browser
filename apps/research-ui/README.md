@@ -1273,8 +1273,12 @@ answer decides.
 policy), then response and request headers per redirect hop, newest first.
 Each section collapses and has **Raw** and **Copy all**; each header has
 **Copy**. A hop the network stack never reported reads "Provisional headers
-are shown". Blocks load after a size and SHA-256 check and are inserted as
-text. **Cookies** shows each hop's Response cookies (every attribute and the
+are shown" and says why: the request is still in progress, the HTTP cache or
+a service worker answered it, it is a download, it failed first, or the
+network stack reported nothing for it ([missing final blocks](../../protocol/native-network-v3.md#missing-final-blocks)).
+The Cookies tab lists such a hop with the same reason, and a hop with sent
+cookies but no response list with its own. Blocks load after a size and
+SHA-256 check and are inserted as text. **Cookies** shows each hop's Response cookies (every attribute and the
 reason a `Set-Cookie` was blocked) and Request cookies, with **Show filtered out
 request cookies** for excluded ones and their reasons. Columns sort, values
 truncate with the full value as a tooltip, and each row has **Copy**. A name
@@ -1577,7 +1581,13 @@ covers `chrome:`, `devtools:` and other internal schemes
 ([native network v3](../../protocol/native-network-v3.md)), and the footer
 reports what capture excluded, including memory-cache reuses past a renderer's
 budget ("N memory-cache reuses not recorded") and, apart, those in SVG images
-or popups that no tab owns. Sources reads retained artifact bytes only. A failed
+or popups that no tab owns. It also counts, for the loaded rows, header blocks
+and cookie lists that were not retained (with each reason: size limit,
+session budget, queue, channel or URL), network blocks that arrived after
+their request ended ("late header records on no row") and requests that
+ended with only provisional headers, by reason (HTTP cache, service worker,
+download, failed, not reported); `get_session_summary` has the same counts
+over the newest 64 MiB. Sources reads retained artifact bytes only. A failed
 refresh preserves the last valid catalog, and a detached pending load is
 cancelled and cannot restore obsolete source text. Artifact loads have a
 10-second deadline, including body reads; a timed-out load can be retried

@@ -345,6 +345,7 @@ struct Expectations: Decodable {
   let responseBodyMarker: String
   let headerValueMarker: String
   let cookieValueMarker: String
+  let cachedHeadersHost: String
   let invocationArtifactId: String
   let minifiedArtifactId: String
   let memoryCacheHost: String
@@ -3543,6 +3544,56 @@ final class OriginTraceRenderedUITests: XCTestCase {
         """, "\(size.name): the pausing sections did not come into view")
       try await ui.screenshot("debugger-pausing-sections-\(size.name)")
       try await lightScreenshot(ui, "debugger-pausing-sections", size.name)
+    }
+  }
+
+  // "Missing final blocks" in protocol/native-network-v3.md: a content-session
+  // request the HTTP cache answered has only provisional headers. The Headers
+  // and Cookies tabs say why, and the Traffic footer counts it with the
+  // header block the session budget refused.
+  @MainActor
+  func test35MissingFinalHeaders() async throws {
+    let expected = try Expectations.load()
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      try await ui.waitUntil(
+        "(document.querySelector('#request-window-status')?.textContent ?? '').includes('without final headers')",
+        "\(size.name): the footer did not count requests without final headers")
+      let footer = try await ui.value("document.querySelector('#request-window-status').textContent") as? String ?? ""
+      XCTAssertTrue(footer.contains("1 header block not retained (1 session budget used)"),
+        "\(size.name): the footer names the refused block and its reason: \(footer)")
+      XCTAssertTrue(footer.contains("1 request without final headers (1 HTTP cache)"),
+        "\(size.name): the footer names the request and why: \(footer)")
+      try await ui.click("#screen-traffic .request-row", containing: expected.cachedHeadersHost)
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      try await ui.click("#inspector-tab-headers")
+      try await ui.waitUntil(
+        "(document.querySelector('#headers-inspector')?.innerText ?? '').includes('Provisional headers are shown')",
+        "\(size.name): the provisional notice did not render")
+      let headers = try await ui.value("document.querySelector('#headers-inspector').innerText") as? String ?? ""
+      XCTAssertTrue(headers.contains("The HTTP cache answered it without sending a request"),
+        "\(size.name): the Headers tab says why the sent headers are missing: \(headers)")
+      XCTAssertTrue(headers.contains("already retained 64 MiB of header blocks"),
+        "\(size.name): the refused block reads as not retained: \(headers)")
+      try await assertInert(ui, "\(size.name) missing final headers")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) missing final headers")
+      try await ui.screenshot("traffic-missing-final-headers-\(size.name)")
+      try await ui.click("#inspector-tab-cookies")
+      try await ui.waitUntil("document.querySelector('#cookies-inspector .traffic-cookie-missing') !== null",
+        "\(size.name): the Cookies tab did not list the hop without a list")
+      let cookies = try await ui.json("""
+        ({text: document.querySelector('#cookies-inspector').innerText,
+          reasons: [...document.querySelectorAll('#cookies-inspector .traffic-cookie-missing')].map(node => node.dataset.reason)})
+        """)
+      XCTAssertEqual(cookies["reasons"] as? [String] ?? [], ["from_cache"], "\(size.name): \(cookies)")
+      let cookieText = cookies["text"] as? String ?? ""
+      XCTAssertTrue(cookieText.contains("reported no cookie list for this hop") && cookieText.contains("The HTTP cache answered it"),
+        "\(size.name): the Cookies tab says why: \(cookieText)")
+      XCTAssertFalse(cookieText.contains("No cookie list was retained"), "\(size.name): the reason replaces the bare absence")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) missing final cookies")
+      try await ui.screenshot("traffic-missing-final-cookies-\(size.name)")
+      try await ui.click("#inspector-tab-general")
     }
   }
 }

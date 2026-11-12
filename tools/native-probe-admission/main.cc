@@ -2267,6 +2267,9 @@ int main() {
   Run<&NativeAsyncSegmentNotAdmitted>();
   Run<&NativeAsyncSegmentArtifactRefused>();
   Run<&NativeRefusedStackBudgets>();
+  Run<&NativeWorkerRequestStacks>();
+  Run<&NativeMessageOrigins>();
+  Run<&NativePromiseRegistrations>();
   Run<&NativeDebuggerObservations>();
   Run<&DispatchSampleAdmission>();
   Run<&DispatchEmitFailureReleasesBudget>();

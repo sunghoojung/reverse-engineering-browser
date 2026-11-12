@@ -1,0 +1,58 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index 5d6c5d0..8ccf47e 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -976,6 +976,32 @@ reb::NativeRequestStackWalkResult WalkNativeRequestStack(
+              : reb::NativeRequestStackWalkResult::kNoScript;
+ }
+ 
++// REB promise registrations (--reb-promise-stacks); see
++// protocol/native-network-v3.md. Installed on every isolate; each call
++// reaches only the calling thread's tables, and does nothing on a thread
++// without them.
++static_assert(static_cast<int>(v8::NativePromiseRegistration::kThen) ==
++                  static_cast<int>(reb::NativePromiseRegistration::kThen) &&
++              static_cast<int>(v8::NativePromiseRegistration::kAwait) ==
++                  static_cast<int>(reb::NativePromiseRegistration::kAwait));
++bool NativePromiseRegistrationActive() {
++  return reb::NativeRequestStackWalk::PromiseRegistrationActive();
++}
++void NativePromiseRegistered(const uint32_t task_id,
++                             const v8::NativePromiseRegistration kind) {
++  reb::NativeRequestStackWalk::RecordPromiseRegistration(
++      task_id, static_cast<reb::NativePromiseRegistration>(kind));
++}
++void NativePromiseReactionStarted(const uint32_t task_id) {
++  reb::NativeRequestStackWalk::PromiseReactionStarted(task_id);
++}
++void NativePromiseReactionFinished(const uint32_t task_id) {
++  reb::NativeRequestStackWalk::PromiseReactionFinished(task_id);
++}
++constexpr v8::NativePromiseCallbacks kNativePromiseCallbacks{
++    &NativePromiseRegistrationActive, &NativePromiseRegistered,
++    &NativePromiseReactionStarted, &NativePromiseReactionFinished};
++
+ std::uint8_t PollNativeWasmExecution() {
+   // No V8 handles and no document walk. The stack check calls this.
+   return static_cast<std::uint8_t>(
+@@ -2228,10 +2254,20 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+     // Installed only with --reb-request-stacks, so a request start without
+     // it costs the sink one atomic load.
+     if (v8::IsNativeStackCaptureEnabled()) {
++      // Before any thread attaches, so each keeps a registration ring.
++      if (v8::IsNativePromiseStackCaptureEnabled()) {
++        reb::NativeRequestStackWalk::EnablePromiseRegistrations();
++      }
+       reb::request_stack_blink::AttachMainThread();
+       reb::NativeRequestStackWalk::SetProvider(WalkNativeRequestStack);
+     }
+   }
++  // Every isolate, workers included. V8 then takes its promise-hook path for
++  // every promise operation; see the contract's hot path.
++  if (v8::IsNativeStackCaptureEnabled() &&
++      v8::IsNativePromiseStackCaptureEnabled()) {
++    v8::SetNativePromiseCallbacks(isolate, &kNativePromiseCallbacks);
++  }
+   // Every isolate, including workers. The worker br_table gap is recorded
+   // from the dispatch callback; this one names jitless and left-Liftoff.
+   isolate->SetWasmDispatchScopeCallback(NoteWasmDispatchScope);

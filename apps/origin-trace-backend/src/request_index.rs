@@ -811,11 +811,11 @@ fn initiator(row: &Row) -> Option<&'static str> {
     if row.worker_started {
         Some("worker")
     } else if row.renderer && (2..=4).contains(&row.stack_thread) && row.stack_state != 3 {
-        // A version 3 stack walked in a worker's isolate (protocol/native-network-v3.md).
-        Some(if row.stack_state == 2 {
-            "worker_loader"
-        } else {
-            "worker_script"
+        // A version 3 stack from a worker's isolate (protocol/native-network-v3.md).
+        Some(match row.stack_state {
+            2 => "worker_loader",
+            6 => "worker_unwalked",
+            _ => "worker_script",
         })
     } else if row.navigation_script || (row.renderer && matches!(row.stack_state, 1 | 4 | 5)) {
         // A walked request_initiator_stack (protocol/native-network-v3.md).
@@ -835,6 +835,7 @@ fn initiator_label(row: &Row) -> Option<&'static str> {
         "worker" => "Service worker",
         "worker_script" => "Worker script",
         "worker_loader" => "Worker loader",
+        "worker_unwalked" => "Worker, not walked",
         "script" => "Script",
         "parser" => "Parser",
         "renderer" => "Renderer",
@@ -2808,6 +2809,17 @@ mod tests {
             &loader,
             json!({"parent_event_id": loader_initiated}),
         );
+        // A worker past the renderer's stack table limit walked nothing.
+        let limited_initiated = store.push(41, 5, "request_initiated", b"GET u.test", json!({}));
+        let mut limited = loader.clone();
+        limited[4] = 6;
+        store.push(
+            41,
+            5,
+            "request_initiator_stack",
+            &limited,
+            json!({"parent_event_id": limited_initiated}),
+        );
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
         let document = page(&mut index, "sort=capture&order=asc");
@@ -2828,6 +2840,11 @@ mod tests {
                 "identity": hex::encode(&worker_identity)})
         );
         assert_eq!(loader["initiator"], "worker_loader");
+        let limited = &document["requests"][4];
+        assert_eq!(
+            (&limited["initiator"], &limited["initiator_frame"]),
+            (&json!("worker_unwalked"), &Value::Null)
+        );
         // Identities of the same script ID stay apart per isolate.
         let (identities, _) = index.identities("1", 41).unwrap();
         assert_eq!(identities.len(), 2);

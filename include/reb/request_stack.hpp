@@ -54,6 +54,9 @@ enum class RequestStackState : std::uint8_t {
   kUnsupportedThread = 3,
   kNotRetainedArtifactUnavailable = 4,
   kNotRetainedBudget = 5,
+  // Version 3: a worker found the renderer's stack tables all in use, so
+  // nothing was walked; the scope is carried.
+  kNotWalkedThreadLimit = 6,
 };
 inline constexpr std::uint8_t kRequestStackArtifactQueued = 1U << 0U;
 inline constexpr std::uint8_t kRequestStackFramesOmitted = 1U << 1U;
@@ -70,7 +73,13 @@ inline constexpr std::uint8_t kTaskKindLimit = 12;
 inline constexpr std::uint8_t kTaskSegmentNotRecorded = 6;
 // Version 3: scheduled while no script ran; the chain ends here.
 inline constexpr std::uint8_t kTaskSegmentNoScript = 7;
+// Version 3, kinds 10 to 12: the received message's task origin did not
+// validate, so the sender is not known; the chain ends here.
+inline constexpr std::uint8_t kTaskSegmentOriginRejected = 8;
 inline constexpr std::uint8_t kTaskSegmentBounded = 1U << 0U;
+// Version 3, kind 9 not_recorded: promise registration stacks were on, but
+// no registration was remembered for the reaction.
+inline constexpr std::uint8_t kTaskSegmentRegistrationsOn = 1U << 1U;
 // Promise registrations, version 3 kind 9: then, catch, finally, await.
 inline constexpr std::uint8_t kPromiseRegistrationLimit = 4;
 
@@ -329,6 +338,9 @@ template <std::size_t N>
     return false;
   }
   const auto state = static_cast<RequestStackState>(v.state);
+  if (state == RequestStackState::kNotWalkedThreadLimit && !scoped) {
+    return false;
+  }
   // Version 3: a thread with no worker or document isolate has no scope.
   if (scoped && (!IsZeroAfterStackScope(v.reserved1) ||
                  (state == RequestStackState::kUnsupportedThread
@@ -336,7 +348,8 @@ template <std::size_t N>
                       : !IsValidStackScope(StackScopeOf(v.reserved1))))) {
     return false;
   }
-  if (state == RequestStackState::kNoScript || state == RequestStackState::kUnsupportedThread) {
+  if (state == RequestStackState::kNoScript || state == RequestStackState::kUnsupportedThread ||
+      state == RequestStackState::kNotWalkedThreadLimit) {
     const std::uint8_t allowed = tasks ? 0 : kRequestStackTaskCallersNotCaptured;
     return (v.flags & ~allowed) == 0 && v.task_segments == 0 && v.total_depth == 0 &&
            v.recorded == 0 && v.omitted == 0 && v.async_frames == 0 && v.async_segments == 0 &&
@@ -372,7 +385,10 @@ template <std::size_t N>
     const std::uint16_t artifact_version = kStackArtifactTaskVersion) noexcept {
   using request_stack_detail::AllZero;
   const bool scoped = artifact_version == kStackArtifactScopeVersion;
-  if (!AllZero(s.reserved1) || (s.flags & ~kTaskSegmentBounded) != 0) {
+  const bool microtask = s.kind == kTaskKindMicrotask;
+  const std::uint8_t known_flags =
+      kTaskSegmentBounded | (scoped && microtask ? kTaskSegmentRegistrationsOn : 0);
+  if (!AllZero(s.reserved1) || (s.flags & ~known_flags) != 0) {
     return false;
   }
   const bool walked = s.state == 1 || s.state == 4 || s.state == 5;
@@ -381,18 +397,22 @@ template <std::size_t N>
            ((s.flags & kTaskSegmentBounded) == 0 || s.recorded == limit) && !AllZero(s.digest);
   };
   const bool empty = s.flags == 0 && s.recorded == 0 && AllZero(s.digest);
-  if (s.kind == kTaskKindMicrotask) {
+  if (microtask) {
     if (s.state == kTaskSegmentNotRecorded) {
-      return s.registration == 0 && empty;
+      return s.registration == 0 && (s.flags & ~kTaskSegmentRegistrationsOn) == 0 &&
+             s.recorded == 0 && AllZero(s.digest);
     }
     return scoped && s.registration >= 1 && s.registration <= kPromiseRegistrationLimit &&
-           frames(kPromiseRegistrationFrameLimit);
+           (s.flags & kTaskSegmentRegistrationsOn) == 0 && frames(kPromiseRegistrationFrameLimit);
   }
   if (s.registration != 0 || s.kind < 1 || s.kind > (scoped ? kTaskKindLimit : 8)) {
     return false;
   }
   if (s.state == kTaskSegmentNoScript) {
     return scoped && empty;
+  }
+  if (s.state == kTaskSegmentOriginRejected) {
+    return scoped && empty && s.kind >= kTaskKindMessagePort;
   }
   return frames(kAsyncTaskFrameLimit);
 }
@@ -617,10 +637,12 @@ template <std::size_t N>
   for (std::size_t i = 0; i < header.task_segments; ++i) {
     segments[i] = request_stack_detail::Decode<TaskSegment>(
         content.subspan(chain + i * kTaskSegmentSize, kTaskSegmentSize));
-    // A segment scheduled with no script ends the chain: nothing follows it
-    // and the chain is neither cut nor truncated there.
+    // A segment scheduled with no script, or received with a rejected
+    // origin, ends the chain: nothing follows it and the chain is neither
+    // cut nor truncated there.
     if (!IsValidTaskSegment(segments[i], header.version) ||
-        (segments[i].state == kTaskSegmentNoScript &&
+        ((segments[i].state == kTaskSegmentNoScript ||
+          segments[i].state == kTaskSegmentOriginRejected) &&
          (i + 1 != header.task_segments ||
           (header.flags & (kRequestStackTaskChainCut | kRequestStackTaskChainTruncated)) != 0))) {
       return false;

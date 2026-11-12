@@ -38,10 +38,15 @@ const ASYNC_NOT_SHOWN_V1: [&str; 4] = [
 ];
 /// Version 2 records predate message origins.
 const ASYNC_NOT_SHOWN_V2: [&str; 1] = ["MessagePort and worker messages"];
-/// Version 3: message kinds that carry no task origin.
-const ASYNC_NOT_SHOWN: [&str; 2] = [
+/// Version 3: callers no record carries, stated with every version 3 stack.
+const ASYNC_NOT_SHOWN: [&str; 5] = [
     "ServiceWorker.postMessage and Client.postMessage",
     "window.postMessage to or from another process",
+    "MessagePort.postMessage from a worklet, which has no stack tables",
+    "the task a promise reaction in a worker continues: Blink tracks task attribution only on the \
+     document main thread",
+    "promise reactions a builtin registered (Promise.all, race, any, allSettled and the like): V8 \
+     tags them for neither DevTools nor REB",
 ];
 
 /// The isolate a stack's script IDs belong to: script IDs are unique only
@@ -186,7 +191,9 @@ impl Segment {
             digest: bytes[16..48].try_into().unwrap(),
         };
         let scoped = version == 3;
-        let reserved = bytes[8..16].iter().all(|b| *b == 0) && segment.flags & !1 == 0;
+        // Bit 1: a version 3 not_recorded microtask recorded with promise stacks on.
+        let known = if scoped && segment.kind == 9 { 3 } else { 1 };
+        let reserved = bytes[8..16].iter().all(|b| *b == 0) && segment.flags & !known == 0;
         let empty =
             segment.flags == 0 && segment.recorded == 0 && segment.digest.iter().all(|b| *b == 0);
         let frames = |limit: u32| {
@@ -197,10 +204,14 @@ impl Segment {
         };
         let shape = if segment.kind == 9 {
             if segment.state == 6 {
-                segment.registration == 0 && empty
+                segment.registration == 0
+                    && segment.flags & !2 == 0
+                    && segment.recorded == 0
+                    && segment.digest.iter().all(|b| *b == 0)
             } else {
                 scoped
                     && (1..=4).contains(&segment.registration)
+                    && segment.flags & 2 == 0
                     && frames(REGISTRATION_FRAME_LIMIT)
             }
         } else if segment.registration != 0
@@ -209,6 +220,9 @@ impl Segment {
             false
         } else if segment.state == 7 {
             scoped && empty
+        } else if segment.state == 8 {
+            // A received message whose origin was rejected: kinds 10 to 12.
+            scoped && empty && segment.kind >= 10
         } else {
             frames(TASK_FRAME_LIMIT)
         };
@@ -216,6 +230,10 @@ impl Segment {
     }
     fn has_frames(&self) -> bool {
         self.digest.iter().any(|b| *b != 0)
+    }
+    /// No script was running, or the message's origin was rejected: the chain ends here.
+    fn ends_chain(&self) -> bool {
+        matches!(self.state, 7 | 8)
     }
 }
 
@@ -279,6 +297,11 @@ pub fn decode_record(payload: &[u8]) -> Option<Record> {
         innermost: Frame::read(&payload[64..80]),
     };
     let frames = u64::from(record.recorded) + u64::from(record.async_frames);
+    let unwalked = || {
+        record.flags & !(if tasks { 0 } else { 0x08 }) == 0
+            && record.task_segments == 0
+            && payload[8..80].iter().all(|b| *b == 0)
+    };
     let chain = if tasks {
         record.task_segments <= TASK_LIMIT
             && record.async_segments == record.async_frames + record.task_segments
@@ -287,11 +310,9 @@ pub fn decode_record(payload: &[u8]) -> Option<Record> {
         record.async_segments <= record.async_frames
     };
     let valid = match record.state {
-        2 | 3 => {
-            record.flags & !(if tasks { 0 } else { 0x08 }) == 0
-                && record.task_segments == 0
-                && payload[8..80].iter().all(|b| *b == 0)
-        }
+        // 6, version 3: a worker past the renderer's stack table limit.
+        2 | 3 => unwalked(),
+        6 if scoped => unwalked(),
         1 | 4 | 5 => {
             (1..=SYNC_LIMIT).contains(&record.recorded)
                 && u64::from(record.recorded) + u64::from(record.omitted) == u64::from(record.total)
@@ -372,11 +393,12 @@ pub fn decode_artifact(
         .iter()
         .map(|chunk| Segment::read(chunk, version))
         .collect();
-    // A segment scheduled with no script ends the chain, neither cut nor truncated.
+    // A segment scheduled with no script, or received with a rejected origin,
+    // ends the chain, neither cut nor truncated.
     let terminal = segments.as_ref().is_some_and(|segments| {
         segments
             .iter()
-            .position(|segment| segment.state == 7)
+            .position(Segment::ends_chain)
             .is_none_or(|at| at + 1 == segments.len() && record.flags & 0x18 == 0)
     });
     let valid = terminal
@@ -799,13 +821,19 @@ fn state_name(state: u8) -> &'static str {
         2 => "no_script",
         3 => "unsupported_thread",
         4 => "not_retained_artifact_unavailable",
-        _ => "not_retained_budget",
+        5 => "not_retained_budget",
+        _ => "not_walked_thread_limit",
     }
+}
+
+/// A record state with no walk, so no digest, frames or segments.
+fn unwalked_state(state: u8) -> bool {
+    matches!(state, 2 | 3 | 6)
 }
 
 /// A record's summary without its frames: state, depth, digest and innermost frame.
 pub fn summary(record: &Record) -> Value {
-    let walked = record.state != 2 && record.state != 3;
+    let walked = !unwalked_state(record.state);
     let f = &record.innermost;
     json!({
         "state": state_name(record.state),
@@ -841,6 +869,7 @@ fn segment_state(state: u8) -> &'static str {
         4 => "not_retained_artifact_unavailable",
         5 => "not_retained_budget",
         7 => "no_script",
+        8 => "origin_rejected",
         _ => "not_recorded",
     }
 }
@@ -1004,12 +1033,12 @@ pub fn resolve(
         },
         "scope": (record.scope.thread != 0).then(|| record.scope.to_json()),
         "wasm_frames": record.wasm_frames,
-        "digest": (record.state != 2 && record.state != 3).then_some(&digest),
+        "digest": (!unwalked_state(record.state)).then_some(&digest),
         "frames_retained": false,
         "frames": [],
         "task_segments": [],
     });
-    if record.state == 2 || record.state == 3 {
+    if unwalked_state(record.state) {
         return document;
     }
     let decoded = newest(artifacts, session, |a| {
@@ -1077,6 +1106,8 @@ pub fn resolve(
                 "registration": registration_name(segment.registration),
                 "recorded": segment.recorded,
                 "bounded": segment.flags & 1 != 0,
+                // A not_recorded microtask: whether promise stacks were on.
+                "promise_stacks_on": (segment.kind == 9).then_some(segment.flags & 2 != 0),
                 "digest": segment.has_frames().then(|| hex::encode(segment.digest)),
                 "frames_retained": frames.is_some(),
                 "scope": scope.map(|(segment_process, segment_scope)| {
@@ -1372,7 +1403,7 @@ fn resolve_stored(
     record: &Record,
     process_id: u64,
 ) -> Result<Value> {
-    let (mut identities, mut known) = if record.state != 2 && record.state != 3 {
+    let (mut identities, mut known) = if !unwalked_state(record.state) {
         stored_identities(store, requests, stack, process_id)?
     } else {
         (HashMap::new(), true)
@@ -2312,12 +2343,14 @@ pub(crate) mod tests {
             (&json!("event"), &json!("no_script"), &Value::Null)
         );
         assert_eq!(doc["task_chain_cut"], false);
-        assert_eq!(
-            doc["async_callers_not_shown"],
-            json!([
-                "ServiceWorker.postMessage and Client.postMessage",
-                "window.postMessage to or from another process"
-            ])
+        assert_eq!(doc["async_callers_not_shown"], json!(ASYNC_NOT_SHOWN));
+        assert!(
+            ASYNC_NOT_SHOWN.iter().any(|line| line.contains("worklet"))
+                && ASYNC_NOT_SHOWN
+                    .iter()
+                    .any(|line| line.contains("promise reaction in a worker"))
+                && ASYNC_NOT_SHOWN.iter().any(|line| line.contains("builtin")),
+            "version 3 states what it cannot show"
         );
         // An artifact naming another isolate does not belong to this record.
         let foreign = scoped_artifact(4, 2, 0x78, std::slice::from_ref(&work), &segments, 0);
@@ -2356,6 +2389,90 @@ pub(crate) mod tests {
         assert!(
             decode_record(&pool).is_none(),
             "unsupported_thread names no isolate"
+        );
+
+        // A worker past the renderer's table limit: its scope, nothing walked.
+        let mut limited = loader.clone();
+        limited[4] = 6;
+        let limited_record = decode_record(&limited).expect("thread-limit record");
+        let limited_doc = resolve(&event, &limited_record, &identities, &artifacts, &read);
+        assert_eq!(
+            (
+                &limited_doc["state"],
+                &limited_doc["digest"],
+                &limited_doc["frames"],
+                &limited_doc["scope"]["thread"]
+            ),
+            (
+                &json!("not_walked_thread_limit"),
+                &Value::Null,
+                &json!([]),
+                &json!("shared_worker")
+            )
+        );
+        assert_eq!(summary(&limited_record)["digest"], Value::Null);
+        let mut unscoped = limited.clone();
+        unscoped[80..96].fill(0);
+        assert!(decode_record(&unscoped).is_none(), "it names its worker");
+        let mut version_2 = unscoped.clone();
+        version_2[0] = 2;
+        assert!(decode_record(&version_2).is_none(), "only version 3 has it");
+
+        // A received message whose origin was rejected ends the chain at a
+        // segment of the receiving kind, and nothing follows it.
+        let rejected = segment_bytes(11, 8, 0, 0, [0; 32]);
+        assert!(Segment::read(&rejected, 3).is_some());
+        assert!(Segment::read(&rejected, 2).is_none());
+        assert!(Segment::read(&segment_bytes(1, 8, 0, 0, [0; 32]), 3).is_none());
+        assert!(Segment::read(&segment_bytes(11, 8, 0, 1, [1; 32]), 3).is_none());
+        let chain_of = |segments: &[Vec<u8>], flags: u8| {
+            let artifact =
+                scoped_artifact(4, 2, 0x77, std::slice::from_ref(&work), segments, flags);
+            let mut bytes = bytes.clone();
+            let count = segments.len() as u16;
+            bytes[5] = flags;
+            bytes[6..8].copy_from_slice(&count.to_le_bytes());
+            bytes[22..24].copy_from_slice(&count.to_le_bytes());
+            bytes[32..64].copy_from_slice(&Sha256::digest(&artifact));
+            (artifact, decode_record(&bytes).unwrap())
+        };
+        let (ended, ended_record) = chain_of(&[segments[1].clone(), rejected.clone()], 0);
+        let (_, decoded) =
+            decode_artifact(&ended, &ended_record, 4).expect("ends at the rejection");
+        assert_eq!(segment_state(decoded[1].state), "origin_rejected");
+        let (after, after_record) = chain_of(&[rejected.clone(), segments[1].clone()], 0);
+        assert!(decode_artifact(&after, &after_record, 4).is_none());
+        let (cut, cut_record) = chain_of(std::slice::from_ref(&rejected), 0x08);
+        assert!(decode_artifact(&cut, &cut_record, 4).is_none());
+
+        // A microtask with nothing remembered says whether promise stacks were on.
+        let mut remembered_none = segment_bytes(9, 6, 0, 0, [0; 32]);
+        remembered_none[2] = 2;
+        assert!(Segment::read(&remembered_none, 3).is_some());
+        assert!(Segment::read(&remembered_none, 2).is_none());
+        let mut captured_on = segments[0].clone();
+        captured_on[2] = 2;
+        assert!(Segment::read(&captured_on, 3).is_none());
+        let mut port_on = segments[1].clone();
+        port_on[2] = 2;
+        assert!(Segment::read(&port_on, 3).is_none());
+        let (flagged, flagged_record) =
+            chain_of(&[remembered_none, segment_bytes(9, 6, 0, 0, [0; 32])], 0);
+        let flagged_artifacts = vec![artifact("6", "stack", &flagged)];
+        let flagged_read = |_: &Value, _limit: usize| Ok(flagged.clone());
+        let flagged_doc = resolve(
+            &event,
+            &flagged_record,
+            &identities,
+            &flagged_artifacts,
+            &flagged_read,
+        );
+        assert_eq!(
+            (
+                &flagged_doc["task_segments"][0]["promise_stacks_on"],
+                &flagged_doc["task_segments"][1]["promise_stacks_on"]
+            ),
+            (&json!(true), &json!(false))
         );
     }
 

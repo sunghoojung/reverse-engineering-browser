@@ -392,7 +392,9 @@ def valid_stack_summary(payload: bytes) -> bool:
     digest, innermost = payload[32:64], payload[64:80]
     if flags & ~(0x1F if tasks else 0x0F) or (not tasks and task_segments):
         return False
-    if state in (2, 3):
+    # Version 3 adds not_walked_thread_limit (6): a worker past the renderer's
+    # stack table limit, nothing walked.
+    if state in (2, 3) or (state == 6 and payload[0] == 3):
         return (flags & ~(0 if tasks else 0x08) == 0 and task_segments == 0
                 and not any(payload[8:80]))
     if state not in (1, 4, 5):

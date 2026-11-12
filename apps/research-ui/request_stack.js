@@ -2,12 +2,14 @@
  * and the request initiator chain. Frames come from get_request_stack;
  * captured names and URLs are inserted as text only. */
 const REQUEST_STACK_STATES = Object.freeze({1: 'captured', 2: 'no_script', 3: 'unsupported_thread',
-  4: 'not_retained_artifact_unavailable', 5: 'not_retained_budget'});
+  4: 'not_retained_artifact_unavailable', 5: 'not_retained_budget', 6: 'not_walked_thread_limit'});
 
+// Budgets are per thread: the document main thread and each worker keep their own.
 const REQUEST_STACK_NOTES = Object.freeze({
   unsupported_thread: 'Stacks are recorded on the document main thread and in dedicated, shared and service workers. This request started on another thread: a worklet, or a loader thread that runs no script.',
   not_retained_artifact_unavailable: 'The stack was walked but its frames were not retained: the Artifact category was off.',
-  not_retained_budget: 'The stack was walked but its frames were not retained: this renderer already sent 1,024 stacks in this capture.'
+  not_retained_budget: 'The stack was walked but its frames were not retained: this thread already sent 1,024 stacks for requests, navigations, cookie writes and debugger observations in this capture.',
+  not_walked_thread_limit: 'No stack was walked: 32 workers in this renderer already had stack tables, so this one had none until another worker shut down.'
 });
 
 const REQUEST_STACK_REASONS = Object.freeze({
@@ -68,7 +70,9 @@ function decodeRequestStackRecord(event) {
   const state = REQUEST_STACK_STATES[bytes[4]];
   if ((version !== 1 && !tasks) || view.getUint16(2, true) !== 128 || (!tasks && taskSegments !== 0) ||
       bytes.subarray(scoped ? 96 : 80).some(Boolean)) return null;
-  // A thread with no worker or document isolate (state 3) names no scope.
+  // A thread with no worker or document isolate (state 3) names no scope;
+  // only version 3 has the thread limit (state 6), which names its worker.
+  if (state === 'not_walked_thread_limit' && !scoped) return null;
   const thread = scoped && state !== 'unsupported_thread' ? requestStackScope(bytes, 80) : null;
   if (scoped && (state === 'unsupported_thread' ? bytes.subarray(80, 96).some(Boolean) : !thread)) return null;
   const flags = bytes[5];
@@ -79,7 +83,7 @@ function decodeRequestStackRecord(event) {
   const record = {state, thread, total, recorded, omitted, asyncFrames, segments, wasm, taskSegments,
     framesOmitted: Boolean(flags & 2), asyncTruncated: Boolean(flags & 4),
     chainCut: tasks && Boolean(flags & 8), chainTruncated: Boolean(flags & 16)};
-  if (state === 'no_script' || state === 'unsupported_thread') {
+  if (state === 'no_script' || state === 'unsupported_thread' || state === 'not_walked_thread_limit') {
     return (flags & ~(tasks ? 0 : 8)) === 0 && taskSegments === 0 && !bytes.subarray(8, 80).some(Boolean) ? record : null;
   }
   const frames = recorded + asyncFrames;
@@ -149,12 +153,23 @@ const REQUEST_STACK_REGISTRATIONS = Object.freeze({then: 'Promise.then', catch: 
   finally: 'Promise.finally', await: 'await'});
 
 const REQUEST_STACK_TASK_NOTES = Object.freeze({
-  not_recorded: 'the call that registered it is not recorded; REB_NATIVE_PROMISE_STACKS=1 records it',
+  not_recorded: 'the call that registered it is not recorded: promise registration stacks were off (REB_NATIVE_PROMISE_STACKS=1 records them)',
+  not_recorded_promise_stacks_on: 'the call that registered it is not recorded: promise registration stacks were on, but this thread remembered no registration for it (a builtin such as Promise.all registered it, capture was off when it was registered, or 2,048 later registrations replaced it)',
   no_script: 'scheduled while no script ran (the browser, the parser or a native callback); the chain ends here',
+  origin_rejected: 'its task origin did not validate (forged, damaged or longer than 1,544 bytes), so the sender is not known; the chain ends here',
   not_retained_artifact_unavailable: 'frames not retained: the Artifact category was off',
-  not_retained_budget: 'frames not retained: this renderer already sent 1,024 scheduling stacks',
+  not_retained_budget: 'frames not retained: this thread already sent 1,024 scheduling stacks in this capture',
+  not_retained_budget_registration: 'frames not retained: this thread already sent 1,024 promise registration stacks in this capture',
   artifact_missing: 'frames artifact missing'
 });
+
+/* The note for a task segment without retained frames, or null. */
+function requestStackTaskNote(segment) {
+  if (segment.state === 'captured') return segment.frames_retained ? null : REQUEST_STACK_TASK_NOTES.artifact_missing;
+  if (segment.state === 'not_recorded' && segment.promise_stacks_on) return REQUEST_STACK_TASK_NOTES.not_recorded_promise_stacks_on;
+  if (segment.state === 'not_retained_budget' && segment.kind === 'microtask') return REQUEST_STACK_TASK_NOTES.not_retained_budget_registration;
+  return REQUEST_STACK_TASK_NOTES[segment.state] ?? null;
+}
 
 const REQUEST_STACK_NAVIGATIONS = Object.freeze({location: 'a location assignment', form_submission: 'a form submission',
   window_open: 'window.open', other_script: 'script'});
@@ -231,7 +246,7 @@ function createRequestStackPanel({open, refresh, load = null}) {
         : '';
       list.append(row(`${label}${where}`, 'request-stack-separator'));
       const frames = segment.frames ?? [];
-      const reason = REQUEST_STACK_TASK_NOTES[segment.state === 'captured' && !segment.frames_retained ? 'artifact_missing' : segment.state];
+      const reason = requestStackTaskNote(segment);
       if (reason && (!frames.length || !segment.frames_retained)) list.append(row(reason, 'request-stack-note'));
       for (const frame of frames) list.append(frameItem(frame));
       if (segment.bounded) {
@@ -332,6 +347,10 @@ function createRequestStackPanel({open, refresh, load = null}) {
     }
     if (record.state === 'unsupported_thread') {
       nodes.push(note(REQUEST_STACK_NOTES[record.state]));
+      return nodes;
+    }
+    if (record.state === 'not_walked_thread_limit') {
+      nodes.push(note(`Started in ${REQUEST_STACK_THREAD_NAMES[record.thread]}.`), note(REQUEST_STACK_NOTES[record.state]));
       return nodes;
     }
     const key = [stackEvent.session_id, stackEvent.process_id, stackEvent.request_id, stackEvent.sequence_number].join(':');

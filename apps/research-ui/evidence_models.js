@@ -1647,7 +1647,9 @@
           // Version 3 names the thread whose isolate walked it: 2-4 are workers.
           const thread = typeof stack?.payload === 'string' && stack.payload.startsWith('03')
             ? Number.parseInt(stack.payload.slice(160, 162), 16) : 0;
-          if (thread >= 2 && thread <= 4 && stackState !== 3) row.initiator = stackState === 2 ? 'worker_loader' : 'worker_script';
+          if (thread >= 2 && thread <= 4 && stackState !== 3) {
+            row.initiator = stackState === 2 ? 'worker_loader' : stackState === 6 ? 'worker_unwalked' : 'worker_script';
+          }
           else if ([1, 4, 5].includes(stackState)) row.initiator = 'script';
           else if (stackState === 2) row.initiator = 'parser';
         }

@@ -269,6 +269,31 @@ void CheckStackRecords() {
   Check(!valid(v3), "unsupported_thread names no isolate");
   v3.state = static_cast<std::uint8_t>(reb::NativeRequestStackState::kNoScript);
   Check(valid(v3), "a worker request with no script on its stack");
+  // A worker past the renderer's table limit: no walk, its scope named.
+  v3.state = static_cast<std::uint8_t>(reb::NativeRequestStackState::kNotWalkedThreadLimit);
+  Check(valid(v3), "a worker past the thread limit names its scope");
+  {
+    auto limited = Event(reb::EventType::kRequestInitiatorStack, reb::EventCategory::kNetwork,
+                         reb::EncodeNativeRequestStackRecord(v3));
+    golden.emplace_back("stack record thread limit", limited);
+    Check(reb::IsValidEvent(limited), "a thread-limit stack record is a valid event");
+    auto unscoped = v3;
+    unscoped.reserved1 = {};
+    Check(!valid(unscoped), "a thread-limit record names its scope");
+    auto walked = v3;
+    walked.recorded = 1;
+    walked.total_depth = 1;
+    Check(!valid(walked), "a thread-limit record carries no frames");
+    auto v2_limited = v3;
+    v2_limited.protocol_version = reb::kNativeRequestStackTaskPayloadVersion;
+    v2_limited.reserved1 = {};
+    Check(!valid(v2_limited), "only version 3 has the thread limit state");
+    auto bad = Event(reb::EventType::kRequestInitiatorStack, reb::EventCategory::kNetwork,
+                     reb::EncodeNativeRequestStackRecord(v2_limited));
+    golden.emplace_back("stack record version 2 thread limit", bad);
+    Check(!reb::IsValidEvent(bad), "a version 2 thread-limit record is not a valid event");
+  }
+  v3.state = static_cast<std::uint8_t>(reb::NativeRequestStackState::kNoScript);
 
   auto event = Event(reb::EventType::kRequestInitiatorStack, reb::EventCategory::kNetwork,
                      reb::EncodeNativeRequestStackRecord(Captured(40, 1)));
@@ -677,15 +702,51 @@ void CheckScopedArtifactsAndOrigins() {
             scope.thread == 1 && scope.isolate_key == 0,
         "a document artifact has no isolate key");
 
-  // Message origins: the posting segment first, at most 32, validated whole.
+  // A received message whose origin was rejected ends the chain at a
+  // segment of the receiving kind; kind 9 says when promise stacks were on.
+  const auto rejected = Segment(Kind::kBroadcastChannel, State::kOriginRejected, 0, 0);
+  Check(reb::IsValidNativeTaskSegment(rejected, reb::kNativeStackArtifactScopeVersion) &&
+            !reb::IsValidNativeTaskSegment(rejected) &&
+            !reb::IsValidNativeTaskSegment(Segment(Kind::kSetTimeout, State::kOriginRejected, 0, 0),
+                                           reb::kNativeStackArtifactScopeVersion),
+        "origin_rejected is a version 3 message segment");
+  Check(reb::DecodeStackArtifact(ScopedArtifact({port, rejected}), header, frames, count, chain,
+                                 &segments) &&
+            segments == 2 && chain[1].state == reb::kTaskSegmentOriginRejected,
+        "a rejected origin ends a decoded chain");
+  Check(!reb::DecodeStackArtifact(ScopedArtifact({rejected, port}), header, frames, count, chain,
+                                  &segments),
+        "nothing follows a rejected origin");
+  Check(!reb::DecodeStackArtifact(ScopedArtifact({rejected}, reb::kNativeRequestStackTaskChainCut),
+                                  header, frames, count, chain, &segments),
+        "a chain that ends at a rejected origin is not cut");
+  auto remembered_none = Segment(Kind::kMicrotask, State::kNotRecorded, 0, 0);
+  remembered_none.flags = reb::kNativeTaskSegmentRegistrationsOn;
+  Check(reb::IsValidNativeTaskSegment(remembered_none, reb::kNativeStackArtifactScopeVersion) &&
+            !reb::IsValidNativeTaskSegment(remembered_none),
+        "a version 3 microtask says promise stacks were on");
+  Check(reb::DecodeStackArtifact(ScopedArtifact({remembered_none}), header, frames, count, chain,
+                                 &segments) &&
+            chain[0].flags == reb::kTaskSegmentRegistrationsOn,
+        "the core decodes the promise stacks flag");
+  auto on_then = then;
+  on_then.flags = reb::kNativeTaskSegmentRegistrationsOn;
+  auto on_port = port;
+  on_port.flags = reb::kNativeTaskSegmentRegistrationsOn;
+  for (const auto& segment : {on_then, on_port}) {
+    Check(!reb::IsValidNativeTaskSegment(segment, reb::kNativeStackArtifactScopeVersion) &&
+              !reb::DecodeStackArtifact(ScopedArtifact({segment}), header, frames, count, chain,
+                                        &segments),
+          "only a not_recorded microtask carries the promise stacks flag");
+  }
+
+  // Message origins: an 8-byte header, then the posting segment first, at
+  // most 32, validated whole. Nothing names a process, thread or table.
   const auto origin = [](const std::vector<reb::NativeTaskSegment>& carried,
-                         const std::uint64_t serial, const std::uint8_t flags = 0) {
+                         const std::uint8_t flags = 0) {
     reb::NativeTaskOriginHeader head;
     head.count = static_cast<std::uint8_t>(carried.size());
     head.flags = flags;
-    head.process_id = 41;
-    head.table = 3;
-    head.serial = serial;
     std::vector<std::uint8_t> bytes(sizeof(head));
     std::memcpy(bytes.data(), &head, sizeof(head));
     for (const auto& segment : carried) {
@@ -694,30 +755,60 @@ void CheckScopedArtifactsAndOrigins() {
     }
     return bytes;
   };
+  static_assert(sizeof(reb::NativeTaskOriginHeader) == 8);
   reb::NativeTaskOriginHeader head;
   std::array<reb::NativeTaskSegment, reb::kNativeTaskSegmentLimit> carried{};
   const auto timeout = Segment(Kind::kSetTimeout, State::kCaptured, 4, 0x23);
-  Check(reb::DecodeNativeTaskOrigin(origin({port, then, timeout}, 9), head, carried) &&
-            head.count == 3 && carried[2].kind == 1,
+  Check(reb::DecodeNativeTaskOrigin(origin({port, then, timeout}), head, carried) &&
+            head.version == 2 && head.count == 3 && carried[2].kind == 1,
         "a message origin carries the posting segment and the sender's chain");
-  Check(reb::DecodeNativeTaskOrigin(
-            origin({Segment(Kind::kWorkerMessage, State::kNoScript, 0, 0)}, 0), head, carried),
+  Check(reb::DecodeNativeTaskOrigin(origin({Segment(Kind::kWorkerMessage, State::kNoScript, 0, 0)}),
+                                    head, carried),
         "a message posted with no script running");
-  Check(!reb::DecodeNativeTaskOrigin(origin({port}, 0), head, carried),
-        "a recorded posting segment names its serial");
-  Check(!reb::DecodeNativeTaskOrigin(origin({timeout}, 9), head, carried),
+  Check(reb::DecodeNativeTaskOrigin(origin({port, timeout}, reb::kNativeTaskOriginCut), head,
+                                    carried),
+        "a sender's chain cut after its carried segments");
+  std::vector<reb::NativeTaskSegment> full(32, timeout);
+  full[0] = port;
+  Check(reb::DecodeNativeTaskOrigin(origin(full, reb::kNativeTaskOriginTruncated), head, carried),
+        "a sender's chain that went on past 32 segments");
+  Check(!reb::DecodeNativeTaskOrigin(origin({port, timeout}, reb::kNativeTaskOriginTruncated), head,
+                                     carried),
+        "only 32 carried segments can be truncated");
+  Check(
+      !reb::DecodeNativeTaskOrigin(
+          origin(full, reb::kNativeTaskOriginCut | reb::kNativeTaskOriginTruncated), head, carried),
+      "a chain is cut or truncated, not both");
+  Check(!reb::DecodeNativeTaskOrigin(origin({timeout}), head, carried),
         "the first carried segment is a message kind");
-  Check(!reb::DecodeNativeTaskOrigin(origin({}, 9), head, carried), "an empty origin");
-  Check(!reb::DecodeNativeTaskOrigin(origin({port}, 9, 2), head, carried), "unknown origin flag");
+  Check(!reb::DecodeNativeTaskOrigin(origin({}), head, carried), "an empty origin");
+  Check(!reb::DecodeNativeTaskOrigin(origin({port}, 4), head, carried), "unknown origin flag");
+  Check(!reb::DecodeNativeTaskOrigin(origin({port, rejected}), head, carried),
+        "a sender never carries a rejected origin");
+  Check(!reb::DecodeNativeTaskOrigin(origin({Segment(Kind::kWorkerMessage, State::kNoScript, 0, 0)},
+                                            reb::kNativeTaskOriginCut),
+                                     head, carried),
+        "a no-script end is neither cut nor truncated");
   std::vector<reb::NativeTaskSegment> many(33, port);
-  auto too_many = origin(many, 9);
-  Check(!reb::DecodeNativeTaskOrigin(too_many, head, carried), "33 carried segments");
-  auto truncated = origin({port, timeout}, 9);
+  Check(!reb::DecodeNativeTaskOrigin(origin(many), head, carried), "33 carried segments");
+  auto truncated = origin({port, timeout});
   truncated.pop_back();
   Check(!reb::DecodeNativeTaskOrigin(truncated, head, carried), "a short origin");
-  auto foreign = origin({port}, 9);
-  foreign[4] = foreign[5] = foreign[6] = foreign[7] = 0;
-  Check(!reb::DecodeNativeTaskOrigin(foreign, head, carried), "an origin names its process");
+  for (std::size_t at = 4; at < 8; ++at) {
+    auto named = origin({port});
+    named[at] = 1;
+    Check(!reb::DecodeNativeTaskOrigin(named, head, carried),
+          "an origin's reserved header bytes are zero");
+  }
+  auto version_one = origin({port});
+  version_one[0] = 1;
+  Check(!reb::DecodeNativeTaskOrigin(version_one, head, carried),
+        "the version 1 origin that named a process and table is refused");
+  const std::vector<std::uint8_t> oversize{reb::kNativeTaskOriginOversize};
+  Check(!reb::DecodeNativeTaskOrigin(oversize, head, carried),
+        "the marker the Mojo traits leave for an oversize origin never validates");
+  std::vector<std::uint8_t> too_long(reb::kNativeTaskOriginMaxBytes + 1, 0);
+  Check(!reb::DecodeNativeTaskOrigin(too_long, head, carried), "an origin above 1,544 bytes");
 }
 
 void CheckStackArtifacts() {

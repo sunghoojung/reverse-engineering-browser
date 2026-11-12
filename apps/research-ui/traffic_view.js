@@ -247,7 +247,7 @@ function trafficSizeCell(request) {
 }
 
 const TRAFFIC_INITIATOR_LABELS = Object.freeze({script: 'Script', parser: 'Parser', renderer: 'Renderer', worker: 'Service worker',
-  browser: 'Browser', worker_script: 'Worker script', worker_loader: 'Worker loader'});
+  browser: 'Browser', worker_script: 'Worker script', worker_loader: 'Worker loader', worker_unwalked: 'Worker, not walked'});
 const TRAFFIC_INITIATOR_TITLES = Object.freeze({
   script: 'JavaScript or WebAssembly was running when the renderer started this request. The Initiator tab shows its call stack.',
   parser: 'No script was on the stack when the renderer started this request: the HTML parser, a preload, or a deferred start.',
@@ -255,6 +255,7 @@ const TRAFFIC_INITIATOR_TITLES = Object.freeze({
   worker: 'A service worker started this request.',
   worker_script: 'JavaScript or WebAssembly was running in a dedicated, shared or service worker when it started this request. The Initiator tab shows its call stack.',
   worker_loader: 'A dedicated, shared or service worker started this request with no script on its stack: its script or module loader, or a deferred start.',
+  worker_unwalked: 'A dedicated, shared or service worker started this request, but the renderer\'s 32 worker stack tables were in use, so no stack was walked.',
   browser: 'The browser process started this request, such as a navigation; no renderer record names it.'});
 function trafficInitiatorLabel(request) {
   return Object.hasOwn(TRAFFIC_INITIATOR_LABELS, request?.initiator ?? '') ? TRAFFIC_INITIATOR_LABELS[request.initiator] : null;

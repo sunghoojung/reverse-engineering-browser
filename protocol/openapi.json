@@ -1997,7 +1997,7 @@
       "get": {
         "operationId": "get_request_stack",
         "summary": "Read the JavaScript and Wasm call stack that started one renderer request or script navigation",
-        "description": "Newest request_initiator_stack record (34) inside the bytes the request index names for one renderer request (or the newest 64 MiB of events when it names none), named by the renderer's process_id and request_id as its request_initiated record carries them, or with navigation_sequence the navigation_initiator_stack record (46) a browser navigation_initiator_link (47) names, with every recorded frame innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact of any capture origin (network, stack_script, compiled_script or dynamic_javascript), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Await frames follow the synchronous ones. A version 2 record adds task_segments, nearest first: each async task (timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or observer) with the stack that scheduled it, resolved from its async_task_stack (48) artifact, and microtask hops linked through task attribution. A version 3 record adds scope, the isolate the stack was walked in (the document main thread or a dedicated, shared or service worker), message segments (MessagePort, BroadcastChannel and worker postMessage) whose frames resolve in the posting thread's or renderer's isolate, a microtask segment's promise registration (then, catch, finally or await) when promise stacks were recorded, and a no_script segment that ends the chain where a task was scheduled with no script running. task_chain_cut says an earlier caller was not recorded; async_callers_not_shown lists the callers this record version cannot show. status is not_recorded when the read covered the request's indexed bytes or the whole store and found no stack record, and outside_scan when it did not reach all of them; coverage says what was read. A frame keeps reason script_identity_outside_scan when its identity was not found and not every identity was read. See protocol/native-network-v3.md.",
+        "description": "Newest request_initiator_stack record (34) inside the bytes the request index names for one renderer request (or the newest 64 MiB of events when it names none), named by the renderer's process_id and request_id as its request_initiated record carries them, or with navigation_sequence the navigation_initiator_stack record (46) a browser navigation_initiator_link (47) names, with every recorded frame innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact of any capture origin (network, stack_script, compiled_script or dynamic_javascript), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Await frames follow the synchronous ones. A version 2 record adds task_segments, nearest first: each async task (timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or observer) with the stack that scheduled it, resolved from its async_task_stack (48) artifact, and microtask hops linked through task attribution. A version 3 record adds scope, the isolate the stack was walked in (the document main thread or a dedicated, shared or service worker), message segments (MessagePort, BroadcastChannel and worker postMessage) whose frames resolve in the posting thread's or renderer's isolate, a microtask segment's promise registration (then, catch, finally or await) when promise stacks were recorded, a no_script segment that ends the chain where a task was scheduled with no script running, and an origin_rejected segment that ends it where a received message's task origin did not validate. task_chain_cut says an earlier caller was not recorded; async_callers_not_shown lists the callers this record version cannot show. status is not_recorded when the read covered the request's indexed bytes or the whole store and found no stack record, and outside_scan when it did not reach all of them; coverage says what was read. A frame keeps reason script_identity_outside_scan when its identity was not found and not every identity was read. See protocol/native-network-v3.md.",
         "tags": [
           "events"
         ],
@@ -10146,8 +10146,10 @@
               "no_script",
               "unsupported_thread",
               "not_retained_artifact_unavailable",
-              "not_retained_budget"
-            ]
+              "not_retained_budget",
+              "not_walked_thread_limit"
+            ],
+            "description": "not_retained_budget: this thread's own budget of 1,024 stack artifacts per configuration for requests, navigations, cookie writes and debugger observations. not_walked_thread_limit, version 3: a worker found 32 other workers in its renderer holding stack tables, so nothing was walked; scope names it."
           },
           "scope": {
             "type": [
@@ -10280,8 +10282,17 @@
                     "not_retained_artifact_unavailable",
                     "not_retained_budget",
                     "not_recorded",
-                    "no_script"
-                  ]
+                    "no_script",
+                    "origin_rejected"
+                  ],
+                  "description": "not_retained_budget: the thread's budget of 1,024 scheduling stacks, or for a microtask of 1,024 promise registration stacks, per configuration. no_script and origin_rejected (a message whose task origin did not validate, so its sender is not known) end the chain."
+                },
+                "promise_stacks_on": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ],
+                  "description": "Microtask only, else null: whether promise registration stacks were on. True with not_recorded means they were on but the thread remembered no registration for the reaction."
                 },
                 "registration": {
                   "enum": [
@@ -18588,6 +18599,9 @@
               "parser",
               "renderer",
               "worker",
+              "worker_script",
+              "worker_loader",
+              "worker_unwalked",
               "browser",
               null
             ],
@@ -23665,7 +23679,8 @@
                         "no_script",
                         "unsupported_thread",
                         "not_retained_artifact_unavailable",
-                        "not_retained_budget"
+                        "not_retained_budget",
+                        "not_walked_thread_limit"
                       ]
                     },
                     "total_depth": {

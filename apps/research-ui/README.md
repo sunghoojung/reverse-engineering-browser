@@ -281,7 +281,8 @@ Threads and Observations mount only the rows in view, and captured names such
 as event types and hosts are inserted as text.
 
 Sections come from one registry, so a later change adds its own; the pausing
-debugger adds its sections here:
+debugger adds its sections here. `debugger_sidebar.js` loads right after
+`command_palette.js`, so `addSection` exists while any later script evaluates:
 
 ```js
 const remove = globalThis.RebDebuggerSidebar.addSection({
@@ -289,6 +290,7 @@ const remove = globalThis.RebDebuggerSidebar.addSection({
   title: 'Breakpoints',  // the pane's summary, at most 64 characters
   order: 50,             // Threads 10, Watch rules 20, Observations 30, Pausing 40
   collapsed: false,      // optional: start collapsed
+  native: 'pausing',     // optional: it presents the pausing debugger get_native_debugger reports
   summary(view) { return String(view.document?.breakpoints.length ?? ''); },  // optional count
   render(body, view) { /* fill body; called after every read while the pane is open */ },
   release(body) { /* optional: drop rows and timers when collapsed or closed */ }
@@ -300,8 +302,13 @@ const remove = globalThis.RebDebuggerSidebar.addSection({
 null), `error`, `updatedAt`, the selected `thread`, `selectThread(thread)` and
 `refresh()`. A section that throws shows the error in its own pane only.
 `addSection` throws a `TypeError` for a malformed section and returns a
-function that removes exactly that registration. `make native-only-check`
-drives the production sidebar in a DOM model and `test28DebuggerSidebar` in
+function that removes exactly that registration. Only a `native: 'pausing'`
+section (marked `data-debugger-native="pausing"`) and the Pausing statement may
+use the paused-state vocabulary; while the backend reports the debugger
+unsupported, any step, resume, pause or breakpoint button there must be
+disabled. The built-in ids are `threads`, `watch-rules`, `observations` and
+`pausing`; registering `pausing` again replaces the phase 1 statement. `make native-only-check`
+drives the production sidebar in a DOM model and `test31DebuggerSidebar` in
 the packaged app.
 
 ## Local passive security report

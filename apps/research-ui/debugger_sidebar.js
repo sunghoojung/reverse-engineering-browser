@@ -25,14 +25,14 @@ const DEBUGGER_STACK_STATES = Object.freeze({captured: 'stack captured', no_scri
   not_retained_budget: 'stack not retained (budget)'});
 const DEBUGGER_ID = /^(0|[1-9][0-9]{0,19})$/;
 
-// The registry is ready before the sidebar mounts, so a later script can add
-// sections whenever it evaluates.
+// The registry is ready before the sidebar mounts: index.html loads this file
+// second, so any later script can add sections whenever it evaluates.
 const debuggerSidebarSections = new Map();
 let debuggerSidebarController = null;
 
 function debuggerSidebarSection(section) {
   if (!section || typeof section !== 'object') throw new TypeError('A debugger sidebar section is an object');
-  const {id, title, order, render, summary = null, release = null, collapsed = false} = section;
+  const {id, title, order, render, summary = null, release = null, collapsed = false, native = null} = section;
   if (typeof id !== 'string' || !/^[a-z][a-z0-9-]{0,31}$/.test(id)) throw new TypeError('Section id must be 1 to 32 lowercase letters, digits or dashes');
   if (typeof title !== 'string' || !title.trim() || title.length > 64) throw new TypeError('Section title must be 1 to 64 characters');
   if (!Number.isFinite(order)) throw new TypeError('Section order must be a finite number');
@@ -40,7 +40,10 @@ function debuggerSidebarSection(section) {
   if (summary !== null && typeof summary !== 'function') throw new TypeError('Section summary must be a function');
   if (release !== null && typeof release !== 'function') throw new TypeError('Section release must be a function');
   if (typeof collapsed !== 'boolean') throw new TypeError('Section collapsed must be true or false');
-  return Object.freeze({id, title, order, render, summary, release, collapsed});
+  // `pausing`: the section presents the pausing debugger get_native_debugger
+  // reports, the only place the paused-state vocabulary belongs.
+  if (native !== null && native !== 'pausing') throw new TypeError('Section native must be pausing when given');
+  return Object.freeze({id, title, order, render, summary, release, collapsed, native});
 }
 
 globalThis.RebDebuggerSidebar = Object.freeze({
@@ -510,6 +513,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
       if (!entry) {
         const details = debuggerNode('details', 'debug-pane debugger-section');
         details.dataset.debuggerSection = section.id;
+        if (section.native) details.dataset.debuggerNative = section.native;
         details.open = !section.collapsed;
         const summary = debuggerNode('summary');
         const name = debuggerNode('span', 'debugger-section-title', section.title);
@@ -761,7 +765,7 @@ function debuggerWatchSection() {
     }
   }
   return {
-    id: 'watch', title: 'Watch rules', order: 20,
+    id: 'watch-rules', title: 'Watch rules', order: 20,
     summary: view => view.document?.watch?.state ?? '',
     render(body, view) {
       const unread = debuggerUnread(view);

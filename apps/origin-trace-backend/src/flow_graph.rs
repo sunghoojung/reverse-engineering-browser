@@ -195,8 +195,9 @@ impl Scan {
         Some(walk)
     }
 
+    /// Folds in one record of the session; false when its decoder refuses it.
     fn record(&mut self, event: &Value) -> bool {
-        let Some(kind) = event["type"]
+        let Some(&kind) = event["type"]
             .as_str()
             .and_then(|kind| TYPES.iter().find(|t| **t == kind))
         else {
@@ -206,125 +207,145 @@ impl Scan {
             return false;
         };
         *self.records.entry(kind).or_default() += 1;
-        let process = number(event, "process_id") as u32;
-        match *kind {
-            "script_identity" => {
-                let Some((script, identity)) = request_stack::decode_identity(&bytes) else {
-                    return false;
-                };
-                let table = self.identities.entry(process).or_default();
-                if !table.contains_key(&script) && self.identity_count == MAX_IDENTITIES {
-                    self.identities_dropped += 1;
-                } else {
-                    self.identity_count += usize::from(table.insert(script, identity).is_none());
-                }
-            }
+        match kind {
+            "script_identity" => self.identity(event, &bytes),
             "request_initiated" => {
-                let text = request_index::payload_text(&bytes);
-                let Some((method, host)) = request_index::network_target(&text, kind) else {
-                    return true;
-                };
-                if self.labels.len() == MAX_REQUEST_LABELS {
-                    // Stacks follow their request closely; forgetting old
-                    // labels costs only a host on a very old stack.
-                    self.labels.clear();
-                    self.labels_dropped = true;
-                }
-                let label = match method {
-                    Some(method) => format!("{method} {host}"),
-                    None => host,
-                };
-                let id = match self.label_ids.get(&label) {
-                    Some(id) => *id,
-                    None if self.label_text.len() < MAX_LABEL_TEXTS => {
-                        self.label_text.push(label.clone());
-                        self.label_ids
-                            .insert(label, (self.label_text.len() - 1) as u32);
-                        (self.label_text.len() - 1) as u32
-                    }
-                    None => {
-                        self.labels_dropped = true;
-                        return true;
-                    }
-                };
-                self.labels
-                    .insert((process, number(event, "request_id")), id);
+                self.request_label(event, &bytes);
+                true
             }
-            "request_initiator_stack" => {
-                let Some(record) = request_stack::decode_record(&bytes) else {
-                    return false;
-                };
-                if matches!(record.state, 2 | 3) {
-                    let reason = if record.state == 2 {
-                        "no_script"
-                    } else {
-                        "unsupported_thread"
-                    };
-                    *self.not_walked.entry(reason).or_default() += 1;
-                    return true;
-                }
-                let label = self
-                    .labels
-                    .get(&(process, number(event, "request_id")))
-                    .map(|id| self.label_text[*id as usize].clone())
-                    .unwrap_or_else(|| "request".to_owned());
-                let (digest, innermost, unretained) =
-                    (record.digest, record.innermost, record.state != 1);
-                let request = number(event, "request_id");
-                let room = self.request_refs < MAX_REQUEST_REFS;
-                let mut kept = false;
-                if let Some(walk) = self.walk(event, digest, Shape::Record(record), innermost) {
-                    walk.unretained |= unretained;
-                    *walk.sinks.entry(Sink::Request(label)).or_default() += 1;
-                    if room {
-                        walk.requests.push(request);
-                        kept = true;
-                    }
-                }
-                if kept {
-                    self.request_refs += 1;
-                } else {
-                    self.request_refs_dropped += 1;
-                }
+            "request_initiator_stack" => self.request_stack(event, &bytes),
+            "navigation_initiator_stack" => self.navigation_stack(event, &bytes),
+            "async_task_stack" => self.scheduling_stack(event, &bytes),
+            _ => self.cookie_write(event),
+        }
+    }
+
+    fn identity(&mut self, event: &Value, bytes: &[u8]) -> bool {
+        let Some((script, identity)) = request_stack::decode_identity(bytes) else {
+            return false;
+        };
+        let process = number(event, "process_id") as u32;
+        let table = self.identities.entry(process).or_default();
+        if !table.contains_key(&script) && self.identity_count == MAX_IDENTITIES {
+            self.identities_dropped += 1;
+        } else {
+            self.identity_count += usize::from(table.insert(script, identity).is_none());
+        }
+        true
+    }
+
+    /// Keeps a request's `METHOD host` for the stack record that follows it.
+    fn request_label(&mut self, event: &Value, bytes: &[u8]) {
+        let text = request_index::payload_text(bytes);
+        let Some((method, host)) = request_index::network_target(&text, "request_initiated") else {
+            return;
+        };
+        if self.labels.len() == MAX_REQUEST_LABELS {
+            // Stacks follow their request closely; forgetting old
+            // labels costs only a host on a very old stack.
+            self.labels.clear();
+            self.labels_dropped = true;
+        }
+        let label = match method {
+            Some(method) => format!("{method} {host}"),
+            None => host,
+        };
+        let id = match self.label_ids.get(&label) {
+            Some(id) => *id,
+            None if self.label_text.len() < MAX_LABEL_TEXTS => {
+                self.label_text.push(label.clone());
+                self.label_ids
+                    .insert(label, (self.label_text.len() - 1) as u32);
+                (self.label_text.len() - 1) as u32
             }
-            "navigation_initiator_stack" => {
-                let Some((record, kind, _target)) = request_stack::decode_navigation(&bytes) else {
-                    return false;
-                };
-                let (digest, innermost, unretained) =
-                    (record.digest, record.innermost, record.state != 1);
-                if let Some(walk) = self.walk(event, digest, Shape::Record(record), innermost) {
-                    walk.unretained |= unretained;
-                    *walk.sinks.entry(Sink::Navigation(kind)).or_default() += 1;
-                }
+            None => {
+                self.labels_dropped = true;
+                return;
             }
-            "async_task_stack" => {
-                let Some((task, recorded, digest, innermost)) = decode_scheduling(&bytes) else {
-                    return false;
-                };
-                let bounded = bytes[5] & 1 != 0;
-                if let Some(walk) = self.walk(event, digest, Shape::Scheduling(recorded), innermost)
-                {
-                    walk.bounded |= bounded;
-                    *walk.schedules.entry(task).or_default() += 1;
+        };
+        let process = number(event, "process_id") as u32;
+        self.labels
+            .insert((process, number(event, "request_id")), id);
+    }
+
+    fn request_stack(&mut self, event: &Value, bytes: &[u8]) -> bool {
+        let Some(record) = request_stack::decode_record(bytes) else {
+            return false;
+        };
+        if matches!(record.state, 2 | 3) {
+            let reason = if record.state == 2 {
+                "no_script"
+            } else {
+                "unsupported_thread"
+            };
+            *self.not_walked.entry(reason).or_default() += 1;
+            return true;
+        }
+        let (process, request) = (
+            number(event, "process_id") as u32,
+            number(event, "request_id"),
+        );
+        let label = self.labels.get(&(process, request)).map_or_else(
+            || "request".to_owned(),
+            |id| self.label_text[*id as usize].clone(),
+        );
+        let room = self.request_refs < MAX_REQUEST_REFS;
+        let (digest, innermost, unretained) = (record.digest, record.innermost, record.state != 1);
+        let kept = match self.walk(event, digest, Shape::Record(record), innermost) {
+            Some(walk) => {
+                walk.unretained |= unretained;
+                *walk.sinks.entry(Sink::Request(label)).or_default() += 1;
+                if room {
+                    walk.requests.push(request);
                 }
+                room
             }
-            "script_cookie" => {
-                let Some(script) = request_cookies::decode_script(event) else {
-                    return false;
-                };
-                // Only a write walks the stack (flags bits 1 and 2); a read
-                // keeps one frame.
-                if !matches!(script.api, 1 | 3 | 6) || script.flags & 0x06 != 0x06 {
-                    return true;
-                }
-                let api = request_cookies::APIS[usize::from(script.api)];
-                let innermost = Frame::read(&script.frame);
-                if let Some(walk) = self.walk(event, script.stack, Shape::Alone, innermost) {
-                    *walk.sinks.entry(Sink::Cookie(api)).or_default() += 1;
-                }
+            None => false,
+        };
+        if kept {
+            self.request_refs += 1;
+        } else {
+            self.request_refs_dropped += 1;
+        }
+        true
+    }
+
+    fn navigation_stack(&mut self, event: &Value, bytes: &[u8]) -> bool {
+        let Some((record, kind, _target)) = request_stack::decode_navigation(bytes) else {
+            return false;
+        };
+        let (digest, innermost, unretained) = (record.digest, record.innermost, record.state != 1);
+        if let Some(walk) = self.walk(event, digest, Shape::Record(record), innermost) {
+            walk.unretained |= unretained;
+            *walk.sinks.entry(Sink::Navigation(kind)).or_default() += 1;
+        }
+        true
+    }
+
+    fn scheduling_stack(&mut self, event: &Value, bytes: &[u8]) -> bool {
+        let Some((task, recorded, digest, innermost)) = decode_scheduling(bytes) else {
+            return false;
+        };
+        let bounded = bytes[5] & 1 != 0;
+        if let Some(walk) = self.walk(event, digest, Shape::Scheduling(recorded), innermost) {
+            walk.bounded |= bounded;
+            *walk.schedules.entry(task).or_default() += 1;
+        }
+        true
+    }
+
+    fn cookie_write(&mut self, event: &Value) -> bool {
+        let Some(script) = request_cookies::decode_script(event) else {
+            return false;
+        };
+        // Only a write walks the stack (flags bits 1 and 2); a read keeps one
+        // frame.
+        if matches!(script.api, 1 | 3 | 6) && script.flags & 0x06 == 0x06 {
+            let api = request_cookies::APIS[usize::from(script.api)];
+            let innermost = Frame::read(&script.frame);
+            if let Some(walk) = self.walk(event, script.stack, Shape::Alone, innermost) {
+                *walk.sinks.entry(Sink::Cookie(api)).or_default() += 1;
             }
-            _ => {}
         }
         true
     }

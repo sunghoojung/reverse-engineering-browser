@@ -48,7 +48,9 @@ window and reading once in the stored-evidence window, and never pauses.
 - **Pausing** states the availability `get_native_debugger` reports and offers
   no control. Phase 3 adds its paused-state sections through the sidebar's
   section registry (`RebDebuggerSidebar.addSection` with `native: 'pausing'`);
-  they replace the statement (id `pausing`) or follow it, and it names them.
+  they follow the statement (ids of their own, order 50 and above), which
+  names them, and keep every control disabled while the debugger is not
+  available or the last read is not ready.
 
 ## Phase 2: proposed policy (for maintainer approval)
 

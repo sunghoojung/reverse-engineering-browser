@@ -240,11 +240,13 @@ native observation records that never pause the page, read from
 `get_native_debugger` ([native debugger observation v1](../../protocol/native-debugger-observation-v1.md)).
 The header says "Observes, never pauses" and the status line says what the
 sidebar reads and when it last read; only a change of that state is
-announced, not the time of each read. In a live window, while it is open and
+announced, not the time of each read or the interval. In a live window, while it is open and
 Sources is showing, it reads every 2 seconds, or four times as long as the
 last read took, up to 30 seconds. The stored-evidence window (`reb://`)
 answers the same reads from its fixed store, so it reads once when opened and
-again only on **Read again**. A window without a backend (`file:`) sends
+again only on **Read again**; its reads wait up to 45 seconds, since the
+bundled backend may take 15 seconds to start before it scans the newest
+64 MiB. A window without a backend (`file:`) sends
 nothing and says it cannot read. Closed or behind another workspace, the
 sidebar runs no timer and sends nothing. One read is in flight at a time: a
 newer read, closing, leaving Sources or a cleared or replaced store aborts it.
@@ -284,17 +286,24 @@ Each section is a collapsible pane:
   the rows were read from: the whole store, or its newest bytes and why the
   read stopped. An empty list says that no record exists only when the whole
   store was read. Each row names the kind, what happened, its monotonic time,
-  category, renderer process, frame, sequence and request. Selecting a row
-  brings its details into view, lists every identifier and resolves its own
+  category, renderer process, frame, sequence and request. Choosing a row
+  (a click, or the arrow keys) marks it at once, brings its details into view,
+  and again once its positions resolve, lists every identifier and resolves its own
   frame (listener, timer callback or throw site) and its stack with
   `get_request_stack`. Enter or **Open …** opens that position in Sources; a
   watched request opens its Traffic row on the Initiator tab through Traffic's
   own row selection, after locating it in the request index when it is
-  outside the block Traffic holds. Once older pages are loaded, each read adds
+  outside the block Traffic holds. Its link says it is working, and a newer
+  click, closing the sidebar or leaving Sources cancels it, so Traffic never
+  opens after the researcher moved on. Until the researcher has a place, the
+  list follows the newest page. Once a row is selected, the list is scrolled
+  from its top or older pages are loaded, the rows are kept: each read adds
   the records written since, reading at most two more pages to reach them,
-  and keeps the scroll position and selection. When more was written, or the
-  list holds 4,096 records, the list stays as it is, names the byte span it
-  does not hold, and **Show newest** returns to the newest page. Malformed
+  and keeps the scroll position and selection. When more was written than
+  that, the list stays as it is, names the byte span it does not hold, and
+  **Show newest** returns to the newest page. Past 4,096 rows the oldest are
+  dropped, and the list says how many. A failed read changes neither the rows
+  nor their note. Malformed
   records, a renderer's `debugger_observation_budget` gap and store sequence
   gaps are stated above the list, which is as tall as its rows up to a cap.
 - **Pausing**: one statement of the availability `get_native_debugger` reports.
@@ -314,11 +323,11 @@ debugger adds its sections here. `debugger_sidebar.js` loads right after
 const remove = globalThis.RebDebuggerSidebar.addSection({
   id: 'breakpoints',     // 1 to 32 lowercase letters, digits or dashes; the same id replaces
   title: 'Breakpoints',  // the pane's summary, at most 64 characters
-  order: 50,             // Threads 10, Watch rules 20, Observations 30, Pausing 40
+  order: 50,             // 50 and above: Threads 10, Watch rules 20, Observations 30, Pausing 40
   collapsed: false,      // optional: start collapsed
-  native: 'pausing',     // optional: it presents the pausing debugger get_native_debugger reports
-  summary(view) { return String(view.document?.breakpoints.length ?? ''); },  // optional count
-  render(body, view) { /* fill body; called after every read while the pane is open */ },
+  native: 'pausing',     // required for a section of the pausing debugger
+  summary(view) { return String(view.document?.breakpoints?.length ?? ''); },  // optional count
+  render(body, view) { /* fill body from view; called after every read while the pane is open */ },
   release(body) { /* optional: drop rows and timers when collapsed or closed */ }
 });
 ```
@@ -326,23 +335,40 @@ const remove = globalThis.RebDebuggerSidebar.addSection({
 `view` holds `status` (`loading`, `ready`, `disconnected`, `malformed` or
 `unavailable`), `document` (the last valid `get_native_debugger` answer, or
 null), `error`, `updatedAt`, the selected `thread`, `selectThread(thread)`,
-`refresh()`, `repaint()` and `nativeSections()`. `refresh()` reads again; called
-while sections render it does nothing, because a render follows a read and a
-section that refreshed from `render` would otherwise read back to back.
-`repaint()` renders again from the last read without a read. A section whose
-`summary` throws keeps its body, and one whose `render` throws shows the error
-in its own pane only. `addSection` throws a `TypeError` for a malformed section
-and returns a function that removes exactly that registration.
+`refresh()`, `repaint()` and `nativeSections()`. `refresh()` asks for a read
+soon: from a render, or anything a render queued, it does nothing; while a
+read is in flight it runs one more afterwards; otherwise it reads once a
+second has passed since the last read started. `repaint()` renders again from
+the last read without a read. A section whose `summary` throws keeps its
+body, and one whose `render` throws shows the error in its own pane only.
+`addSection` throws a `TypeError` for a malformed section and returns a
+function that removes exactly that registration.
 
-Only a `native: 'pausing'` section (marked `data-debugger-native="pausing"`)
-and the Pausing statement (`data-debugger-native="availability"`) may use the
-paused-state vocabulary, and only inside `#debugger-sidebar`; the guards treat
-a marker anywhere else, or with another value, as a failure. While the backend
-reports the debugger unsupported, every control in such a section must be
-disabled. Such a section either replaces the Pausing statement, by
-registering the id `pausing`, or follows it with its own id and an order above
-40; `nativeSections()` lists the others, and the statement names them. The
-built-in ids are `threads`, `watch-rules`, `observations` and `pausing`.
+The contract for a later section, which `make native-only-check` and the
+rendered suite enforce:
+
+- A section of the pausing debugger sets `native: 'pausing'` (marked
+  `data-debugger-native="pausing"`). Only such sections and the Pausing
+  statement (`data-debugger-native="availability"`), and only inside
+  `#debugger-sidebar`, may use the paused-state words (breakpoint, paused
+  frame, call stack, step over, step into, resume); every other removed
+  feature fails there too, and a marker anywhere else, or with another value,
+  is a failure.
+- While `view.document?.availability` is not `available`, and while
+  `view.status` is not `ready`, every control in such a section is a form
+  control (`button`, `input`, `select`, `textarea`) with `disabled` set.
+  `aria-disabled` does not count, and a `summary`, a link, a `role` of
+  button, option, checkbox or tab, a `tabindex` or an editable region cannot
+  be disabled, so none may appear then.
+- `render` handles `view.document === null` (before the first read, and in a
+  window without a backend).
+- Ids other than the built-in `threads`, `watch-rules`, `observations` and
+  `pausing`, which cannot be replaced, and an order of 50 or above, so the
+  section follows the Pausing statement; `nativeSections()` lists it and the
+  statement names it.
+- Never call `view.refresh()` from inside `render`, directly or deferred; the
+  sidebar reads on its own after every change it makes.
+
 `make native-only-check` drives the production sidebar in DOM models
 (`tools/check-native-only-ui.mjs`, and `tools/check-debugger-sidebar.mjs` with
 real timers and a stub backend) and `test31DebuggerSidebar` drives it in the

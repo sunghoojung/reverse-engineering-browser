@@ -113,7 +113,7 @@ index 0000000..0665eec
 +
 +#endif  // INCLUDE_V8_NATIVE_STACK_H_
 diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
-index a712c80..2ff7e71 100644
+index a712c80..e2c43eb 100644
 --- a/src/execution/isolate.cc
 +++ b/src/execution/isolate.cc
 @@ -22,6 +22,7 @@
@@ -136,7 +136,7 @@ index a712c80..2ff7e71 100644
    while (!builder->Full()) {
      // Check that the {promise} is not settled.
      if (promise->status() != Promise::kPending) return;
-@@ -1742,6 +1745,213 @@ DirectHandle<StackTraceInfo> GetDetailedStackTraceFromCallSiteInfos(
+@@ -1742,6 +1745,212 @@ DirectHandle<StackTraceInfo> GetDetailedStackTraceFromCallSiteInfos(
    return isolate->factory()->NewStackTraceInfo(frames);
  }
  
@@ -250,11 +250,10 @@ index a712c80..2ff7e71 100644
 +      out.context = Utils::ToLocal(contexts_[i]);
 +      out.name = Utils::ToLocal(direct_handle(script->name(), isolate_));
 +#if V8_ENABLE_WEBASSEMBLY
-+      // Keeps the wire bytes alive for the callback.
-+      Managed<wasm::NativeModule>::Ptr module;
 +      if (script->type() == Script::Type::kWasm) {
 +        out.is_wasm = true;
-+        module = script->wasm_native_module();
++        // Keeps the wire bytes alive for the callback.
++        auto module = script->wasm_native_module();
 +        base::Vector<const uint8_t> bytes = module->wire_bytes();
 +        out.wire_bytes = bytes.begin();
 +        out.wire_bytes_size = bytes.size();
@@ -350,7 +349,7 @@ index a712c80..2ff7e71 100644
  }  // namespace
  
  MaybeDirectHandle<JSObject> Isolate::CaptureAndSetErrorStack(
-@@ -8739,4 +8949,16 @@ void Isolate::PrintNumberStringCacheStats(const char* comment,
+@@ -8739,4 +8948,16 @@ void Isolate::PrintNumberStringCacheStats(const char* comment,
  }
  
  }  // namespace internal

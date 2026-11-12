@@ -140,7 +140,7 @@ index 0ae57d5a162b02a8a51d751e34ef6ba277547741..8a16bc6caddabb3585235a88193bd7a2
     * Enables the host application to provide a mechanism for recording
     * statistics counters.
 diff --git a/src/api/api.cc b/src/api/api.cc
-index 36868fd7c8f27a75757b09d35e9907a7a264fe16..15b196bc9233115ca91255329cadf28d04e70c67 100644
+index d2763e8ab74d19521cc876abc1d2fda123b16cdd..94facc5123de18c8f630aae206c34988a8817fc3 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
 @@ -10831,6 +10831,11 @@ void Isolate::SetUseCounterCallback(UseCounterCallback callback) {
@@ -1223,7 +1223,7 @@ index b14d5b515f190d529e6a3dbe258346ef4327c59a..ef1027c9398899af7fe2298e1fc77b48
      return SerializedCodeSanityCheckResult::kInvalidHeader;
    }
 diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
-index 8749b774f891ebc5969933dde548d2e8434c1440..1c329aef0b7ce7269a4d15cb3a630cc24d2cc86a 100644
+index 8749b774f891ebc5969933dde548d2e8434c1440..2e1b7f10345bbadfad1faa9adf3b68ce310fe703 100644
 --- a/test/cctest/test-api.cc
 +++ b/test/cctest/test-api.cc
 @@ -27,15 +27,19 @@
@@ -1270,7 +1270,7 @@ index 8749b774f891ebc5969933dde548d2e8434c1440..1c329aef0b7ce7269a4d15cb3a630cc2
  #include "src/utils/utils.h"
  #include "test/cctest/heap/heap-tester.h"
  #include "test/cctest/heap/heap-utils.h"
-@@ -32669,3 +32676,712 @@ TEST(IsolateFree) {
+@@ -32669,3 +32676,731 @@ TEST(IsolateFree) {
    v8::Isolate::Free(isolate1);
    v8::Isolate::Free(isolate2);
  }
@@ -1422,6 +1422,25 @@ index 8749b774f891ebc5969933dde548d2e8434c1440..1c329aef0b7ce7269a4d15cb3a630cc2
 +           handler_table_length == other.handler_table_length;
 +  }
 +};
++
++// Prints both arrays before failing, so a mismatch shows which bytes moved.
++void CheckSameRebBytecode(const RebBytecode& actual,
++                          const RebBytecode& expected) {
++  if (actual.SameAs(expected)) return;
++  printf("RebBytecode mismatch: length %zu/%zu registers %d/%d parameters %d/%d "
++         "constants %d/%d handlers %d/%d\n",
++         actual.bytes.size(), expected.bytes.size(), actual.register_count,
++         expected.register_count, actual.parameter_count,
++         expected.parameter_count, actual.constant_count,
++         expected.constant_count, actual.handler_table_length,
++         expected.handler_table_length);
++  for (const RebBytecode* side : {&actual, &expected}) {
++    printf("%s:", side == &actual ? "actual" : "expected");
++    for (uint8_t byte : side->bytes) printf(" %02x", byte);
++    printf("\n");
++  }
++  CHECK(actual.SameAs(expected));
++}
 +
 +RebBytecode RebBytecodeOf(const char* name) {
 +  // A local scope, so no handle keeps the bytecode alive across a later GC.
@@ -1781,7 +1800,7 @@ index 8749b774f891ebc5969933dde548d2e8434c1440..1c329aef0b7ce7269a4d15cb3a630cc2
 +  {
 +    LocalContext plain;
 +    CompileRun(source.c_str());
-+    CHECK(RebBytecodeOf("rebFlush").SameAs(regenerated));
++    CheckSameRebBytecode(RebBytecodeOf("rebFlush"), regenerated);
 +  }
 +  CHECK_EQ(4u, capture.embedder().observations.size());
 +}

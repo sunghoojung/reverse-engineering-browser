@@ -294,7 +294,8 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   const record = (index, type, detail, extra = {}) => ({type, session_id: '1', process_id: 42, frame_id: index % 2 ? '7101' : '200',
     sequence_number: String(5000 - index), parent_event_id: '0', request_id: '0', monotonic_time_ns: String(1e9 + index), detail,
     stack: {state: 'no_script', total_depth: 0, recorded: 0, async_frames: 0, digest: null, innermost: null}, ...extra});
-  const records = Array.from({length: 128}, (_, index) => index === 3
+  // One row fails the sidebar's own checks: it is counted, never shown.
+  const records = Array.from({length: 128}, (_, index) => index === 9 ? record(index, 'timer_observation', {}, {sequence_number: 'x'}) : index === 3
     ? record(index, 'listener_dispatch', {rule: 0, target: 'element', node_type: 1, listener: site, event_type: '<img/src=x/onerror=f()>'})
     : index === 5 ? record(index, 'request_watch_match', {rule: 0, method_matched: true}, {request_id: '77', parent_event_id: '4000'})
       : record(index, 'timer_observation', {phase: 'fired', kind: 'timeout', string_callback: false, timer_id: index, delay_ms: 0, callback: site}));
@@ -341,10 +342,10 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   assert.deepEqual([...sidebar.querySelectorAll('.debugger-section')].map(node => node.dataset.debuggerSection), ['threads', 'watch', 'observations', 'pausing']);
   const rows = [...sidebar.querySelectorAll('#debugger-observations .debugger-list-row')];
   assert(rows.length > 0 && rows.length < 40, `only rows in view mount: ${rows.length} of 128`);
-  assert.equal(rows[0].getAttribute('aria-setsize'), '128');
+  assert.equal(rows[0].getAttribute('aria-setsize'), '127');
   assert(rows.some(row => row.textContent.includes('<img/src=x/onerror=f()> listener on element')), 'a captured event type renders as text');
   assert.equal(sidebar.querySelector('img'), null, 'captured names never become elements');
-  for (const text of [/2 records in the newest read were malformed/, /Renderer 42 reached 1,024 observation records in frame 7101/]) {
+  for (const text of [/3 records in the newest read were malformed/, /Renderer 42 reached 1,024 observation records in frame 7101/]) {
     assert.match(sidebar.querySelector('.debugger-observation-notes').textContent, text);
   }
   const threadRows = sidebar.querySelectorAll('#debugger-threads .debugger-list-row');
@@ -376,6 +377,14 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   open.click();
   assert.equal(JSON.stringify(context.__opened), JSON.stringify([['350', 1, {column: 8}]]), 'Sources opens at the one-based resolved line and column');
   runInContext(`selectArtifact = __selectArtifact;`, context);
+  // A failed stack read says why and is not retried until its pause has passed.
+  context.__stackAnswer = () => new Error('store offline');
+  const stackReads = () => context.__debuggerRequests.filter(url => url.startsWith('/api/request-stack')).length;
+  const readsBefore = stackReads();
+  click(sidebar.querySelector('#debugger-observations .debugger-list-row[data-kind="timer_observation"]'));
+  await settle();
+  assert.equal(stackReads(), readsBefore + 1, 'one read per record, not a loop');
+  assert.match(sidebar.querySelector('.debugger-detail').textContent, /Positions unavailable: store offline/);
   // A watched request opens its Traffic row only when that exact row is loaded.
   click(sidebar.querySelector('#debugger-observations .debugger-list-row[data-kind="request_watch_match"]'));
   await settle();

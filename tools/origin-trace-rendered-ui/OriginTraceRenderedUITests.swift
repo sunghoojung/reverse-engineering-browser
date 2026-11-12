@@ -405,6 +405,23 @@ final class OriginTraceRenderedUITests: XCTestCase {
     XCTAssertEqual(clipped, [], "\(context): clipped text in \(scope)", file: file, line: line)
   }
 
+  // The same state in the light theme, set the way the theme toggle sets it,
+  // without a click that could close an overlaid sidebar.
+  @MainActor
+  private func lightScreenshot(_ ui: Harness, _ name: String, _ size: String) async throws {
+    _ = try await ui.value("""
+      (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null;
+        document.documentElement.dataset.theme = 'light';
+        await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+      """)
+    try await assertLayout(ui, "#debugger-sidebar", "\(size) \(name) light")
+    try await ui.screenshot("\(name)-light-\(size)")
+    _ = try await ui.value("""
+      (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
+        else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme; return true; })()
+      """)
+  }
+
   @MainActor
   private func assertInert(_ ui: Harness, _ context: String, file: StaticString = #filePath, line: UInt = #line) async throws {
     let inert = try await ui.json("__rebUiProbe.inertness([])")
@@ -1261,6 +1278,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
           const allowed = new Set(document.querySelectorAll(exempt));
           const stray = [...document.querySelectorAll('[data-debugger-native]')].filter(node => !allowed.has(node)).map(node => node.outerHTML.slice(0, 80));
           const native = [...root.querySelectorAll(exempt)];
+          const pausedFree = text => text.replace(/breakpoint|paused frame|call stack|step over|step into|resume/gi, ' ');
+          const nativeText = native.map(node => pausedFree(node.innerText)).join(' ');
           native.forEach(node => { node.hidden = true; });
           const text = `${root.innerText} ${nativeText}`;
           native.forEach(node => { node.hidden = false; });
@@ -1281,8 +1300,6 @@ final class OriginTraceRenderedUITests: XCTestCase {
       }
       if screen == "sources" {
         XCTAssertEqual(read["statement"] as? String, read["reported"] as? String, "the pausing state is the reported availability: \(read)")
-          const pausedFree = text => text.replace(/breakpoint|paused frame|call stack|step over|step into|resume/gi, ' ');
-          const nativeText = native.map(node => pausedFree(node.innerText)).join(' ');
         XCTAssertEqual(read["controls"] as? Int, 0, "the pausing state offers no control")
         if read["reported"] as? String != "available" || read["ready"] as? Bool != true {
           XCTAssertEqual(read["enabled"] as? [String], [], "no pausing control is enabled while the debugger is unsupported or unread")
@@ -1370,10 +1387,23 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("[...document.querySelectorAll('#debugger-observations .debugger-list-row')].every(row => row.dataset.kind === 'listener_dispatch')",
         "\(size.name): the Listeners filter did not apply")
       try await ui.click("#debugger-observations .debugger-list-row", containing: "click listener")
+      // The chosen row is marked at once, not at the next read.
+      let marked = try await ui.json("""
+        ({selected: [...document.querySelectorAll('#debugger-observations .debugger-list-row[aria-selected="true"]')].map(row => row.innerText)})
+        """)
+      XCTAssertEqual((marked["selected"] as? [String] ?? []).count, 1, "\(size.name): the chosen row is marked at once: \(marked)")
+      XCTAssertTrue((marked["selected"] as? [String] ?? []).first?.contains("click listener") == true, "\(size.name): \(marked)")
       try await ui.waitUntil("(document.querySelector('.debugger-open-source')?.innerText ?? '').includes('onTap @ handlers.js:2:71')",
         "\(size.name): the listener's site did not resolve")
+      // Once resolved, the action row is brought into view: the button sits wholly inside the pane.
+      try await ui.waitUntil("""
+        (() => { const button = document.querySelector('.debugger-open-source').getBoundingClientRect();
+          const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections').getBoundingClientRect();
+          return button.top >= pane.top - 0.5 && button.bottom <= pane.bottom + 0.5; })()
+        """, timeout: 3, "\(size.name): the Open button is not wholly inside the sidebar pane")
       try await assertLayout(ui, "#debugger-sidebar", "\(size.name) debugger record")
       try await ui.screenshot("debugger-sidebar-record-\(size.name)")
+      try await lightScreenshot(ui, "debugger-sidebar-record", size.name)
       try await ui.click(".debugger-open-source")
       try await ui.waitUntil("(document.querySelector('#source-position')?.textContent ?? '').includes('line 2, Column 71')",
         "\(size.name): Sources did not open at the listener")
@@ -1399,6 +1429,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
         (() => { const list = document.querySelector('#debugger-observations'), rows = [...list.querySelectorAll('.debugger-list-row')];
           const active = list.querySelector('.debugger-list-row[data-active="true"]'), detail = document.querySelector('.debugger-detail');
           if (document.activeElement !== list || !active || rows.indexOf(active) !== 1 || !detail || detail.hidden) return false;
+          const marked = list.querySelectorAll('.debugger-list-row[aria-selected="true"]');
+          if (marked.length !== 1 || marked[0] !== active) return false;
           const box = detail.getBoundingClientRect(), view = document.querySelector('.debugger-sidebar-sections').getBoundingClientRect();
           return detail.innerText.includes(`sequence ${active.dataset.key.split(':').at(-1)}`) && box.top < view.bottom - 24 && box.bottom > view.top; })()
         """, "\(size.name): the arrow did not move to the next record with its details in view")
@@ -1447,7 +1479,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
             document.querySelectorAll('#debugger-observations .debugger-list-row').length > 0
           """, "\(size.name): the sidebar did not keep stale rows after: \(status)")
         try await assertLayout(ui, "#debugger-sidebar", "\(size.name) debugger stale")
-        try await ui.screenshot("debugger-sidebar-stale-\(status.hasPrefix("Disconnected") ? "disconnected" : "malformed")-\(size.name)")
+        let stale = "debugger-sidebar-stale-\(status.hasPrefix("Disconnected") ? "disconnected" : "malformed")"
+        try await ui.screenshot("\(stale)-\(size.name)")
+        try await lightScreenshot(ui, stale, size.name)
       }
       _ = try await ui.value("(() => { window.fetch = window.__rebDebuggerFetch; delete window.__rebDebuggerFetch; return true; })()")
       try await ui.waitUntil("""

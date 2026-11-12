@@ -204,11 +204,15 @@ async fn lay_out_all(graphs: Vec<Graph>, deadline: Duration) -> Vec<Outcome> {
         .filter(|&index| outcomes[index].is_none())
         .collect::<Vec<_>>();
     if !pending.is_empty() {
-        let jobs = pending
-            .iter()
-            .map(|&index| &graphs[index])
-            .collect::<Vec<_>>();
-        let replies = in_worker(&jobs, deadline).await;
+        let replies = match encode(graphs, pending.clone()).await {
+            Some(jobs) => in_worker(&jobs, deadline).await,
+            None => vec![
+                Outcome::Failed {
+                    reason: "The layout request could not be encoded".to_owned(),
+                };
+                pending.len()
+            ],
+        };
         for (index, reply) in pending.into_iter().zip(replies) {
             outcomes[index] = Some(reply);
         }
@@ -243,6 +247,44 @@ fn empty() -> Outcome {
     }
 }
 
+/// One graph as the worker reads it, with the counts its result must match.
+struct Job {
+    nodes: usize,
+    edges: usize,
+    json: Vec<u8>,
+}
+
+impl Job {
+    /// Measured Triskel time grows with the square of the node count (about 2
+    /// µs times n squared on a loaded machine); four times that, and at least
+    /// 1 s, separates a slow layout from one that will never finish.
+    fn budget(&self) -> Duration {
+        let nodes = self.nodes as u64;
+        Duration::from_secs(1) + Duration::from_nanos(8_000 * nodes * nodes)
+    }
+}
+
+/// The pending graphs encoded for the worker, off the async runtime: a request
+/// holds up to 8 MiB of numbers.
+async fn encode(graphs: Vec<Graph>, pending: Vec<usize>) -> Option<Vec<Job>> {
+    tokio::task::spawn_blocking(move || {
+        pending
+            .iter()
+            .map(|&index| {
+                let graph = &graphs[index];
+                Some(Job {
+                    nodes: graph.nodes.len(),
+                    edges: graph.edges.len(),
+                    json: serde_json::to_vec(graph).ok()?,
+                })
+            })
+            .collect()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Why one worker stopped before every graph it was given had a result.
 enum Stop {
     Complete,
@@ -261,7 +303,7 @@ enum Stop {
 /// budget inside the request deadline: a graph that overruns it, crashes the
 /// worker or exhausts its memory gets `timeout` or `failed`, and a new worker
 /// continues with the graphs after it.
-async fn in_worker(jobs: &[&Graph], deadline: Duration) -> Vec<Outcome> {
+async fn in_worker(jobs: &[Job], deadline: Duration) -> Vec<Outcome> {
     let mut outcomes = Vec::with_capacity(jobs.len());
     let _slot = WORKERS.acquire().await;
     let end = tokio::time::Instant::now() + deadline;
@@ -295,14 +337,6 @@ async fn in_worker(jobs: &[&Graph], deadline: Duration) -> Vec<Outcome> {
     outcomes
 }
 
-/// Measured Triskel time grows with the square of the node count (about 2 µs
-/// times n squared on a loaded machine); four times that, and at least 1 s,
-/// separates a slow layout from one that will never finish.
-fn budget(graph: &Graph) -> Duration {
-    let nodes = graph.nodes.len() as u64;
-    Duration::from_secs(1) + Duration::from_nanos(8_000 * nodes * nodes)
-}
-
 /// A contained worker in its own process group, which is killed with it.
 fn start_worker() -> Option<(Child, Option<crate::worker::ProcessGroup>)> {
     let mut command =
@@ -325,11 +359,8 @@ fn start_worker() -> Option<(Child, Option<crate::worker::ProcessGroup>)> {
 }
 
 /// One worker for `jobs`; each result that arrives is pushed to `outcomes`.
-async fn exchange(jobs: &[&Graph], end: tokio::time::Instant, outcomes: &mut Vec<Outcome>) -> Stop {
+async fn exchange(jobs: &[Job], end: tokio::time::Instant, outcomes: &mut Vec<Outcome>) -> Stop {
     let not_started = || Stop::Abandon("The layout worker could not start".to_owned());
-    let Ok(input) = serde_json::to_vec(jobs) else {
-        return Stop::Abandon("The layout request could not be encoded".to_owned());
-    };
     // The group guard kills the worker's whole process group on every return path.
     let Some((mut child, _group)) = start_worker() else {
         return not_started();
@@ -338,25 +369,37 @@ async fn exchange(jobs: &[&Graph], end: tokio::time::Instant, outcomes: &mut Vec
         return not_started();
     };
     let mut started = tokio::time::Instant::now();
-    // The worker reads its whole request before it replies. One that exits
-    // early breaks the pipe, and its exit status says why.
+    // The worker reads its whole request, one JSON array of the graphs,
+    // before it replies. One that exits early breaks the pipe, and its exit
+    // status says why.
     let written = tokio::time::timeout_at(end, async move {
-        let _ = stdin.write_all(&input).await;
+        for (index, job) in jobs.iter().enumerate() {
+            stdin
+                .write_all(if index == 0 { b"[" } else { b"," })
+                .await?;
+            stdin.write_all(&job.json).await?;
+        }
+        stdin.write_all(b"]").await
     });
     if written.await.is_err() {
         return Stop::RequestDeadline;
     }
     let mut reader = BufReader::new(stdout);
-    let mut line = Vec::new();
     for job in jobs {
-        let budget = budget(job);
+        let budget = job.budget();
         let until = end.min(started + budget);
-        let reply = match tokio::time::timeout_at(until, next_reply(&mut reader, &mut line)).await {
+        let reply = async {
+            match next_reply(&mut reader).await? {
+                Some(line) => parse_reply(line, job).await.map(Some),
+                None => Ok(None),
+            }
+        };
+        let reply = match tokio::time::timeout_at(until, reply).await {
             Err(_) if until < end => return Stop::Budget(budget),
             Err(_) => return Stop::RequestDeadline,
             Ok(reply) => reply,
         };
-        match reply.and_then(|reply| reply.map(|outcome| checked(outcome, job)).transpose()) {
+        match reply {
             Ok(Some(outcome)) => outcomes.push(outcome),
             Ok(None) => {
                 return match tokio::time::timeout_at(end, child.wait()).await {
@@ -371,16 +414,17 @@ async fn exchange(jobs: &[&Graph], end: tokio::time::Instant, outcomes: &mut Vec
     Stop::Complete
 }
 
-/// The next reply line, or `None` at the end of the worker's output.
+/// The next reply line, prefix and newline included, or `None` at the end of
+/// the worker's output.
 async fn next_reply(
     reader: &mut BufReader<ChildStdout>,
-    line: &mut Vec<u8>,
-) -> std::result::Result<Option<Outcome>, &'static str> {
+) -> std::result::Result<Option<Vec<u8>>, &'static str> {
+    let mut line = Vec::new();
     loop {
         line.clear();
         let read = (&mut *reader)
             .take(MAX_REPLY_LINE + 1)
-            .read_until(b'\n', line)
+            .read_until(b'\n', &mut line)
             .await
             .map_err(|_| INVALID)?;
         if line.last() != Some(&b'\n') {
@@ -391,19 +435,36 @@ async fn next_reply(
                 Ok(None)
             };
         }
-        let text = &line[..line.len() - 1];
-        if let Some(json) = text.strip_prefix(REPLY) {
-            return serde_json::from_slice(json).map(Some).map_err(|_| INVALID);
+        if line.starts_with(REPLY) {
+            return Ok(Some(line));
         }
         // libtest prints this banner before a re-executed test worker runs.
+        let text = &line[..line.len() - 1];
         if !(cfg!(test) && (text.is_empty() || text == b"running 1 test")) {
             return Err(INVALID);
         }
     }
 }
 
+/// Parses and checks one reply line off the async runtime: a reply runs to
+/// tens of MiB of coordinates.
+async fn parse_reply(line: Vec<u8>, job: &Job) -> std::result::Result<Outcome, &'static str> {
+    let (nodes, edges) = (job.nodes, job.edges);
+    tokio::task::spawn_blocking(move || {
+        let json = &line[REPLY.len()..line.len() - 1];
+        let outcome = serde_json::from_slice(json).map_err(|_| INVALID)?;
+        checked(outcome, nodes, edges)
+    })
+    .await
+    .map_err(|_| INVALID)?
+}
+
 /// The server trusts the worker's code but not what Triskel computed.
-fn checked(outcome: Outcome, graph: &Graph) -> std::result::Result<Outcome, &'static str> {
+fn checked(
+    outcome: Outcome,
+    node_count: usize,
+    edge_count: usize,
+) -> std::result::Result<Outcome, &'static str> {
     match &outcome {
         Outcome::LaidOut {
             nodes,
@@ -412,8 +473,8 @@ fn checked(outcome: Outcome, graph: &Graph) -> std::result::Result<Outcome, &'st
             height,
             ..
         } => {
-            let valid = nodes.len() == graph.nodes.len()
-                && edges.len() == graph.edges.len()
+            let valid = nodes.len() == node_count
+                && edges.len() == edge_count
                 && edges.iter().all(|edge| edge.len() % 2 == 0)
                 && nodes
                     .iter()

@@ -74,16 +74,38 @@ function flowTrailCrumbs(selection) {
 }
 const flowSelectionKey = selection => JSON.stringify([selection.request?.id ?? null, selection.call?.key ?? null, selection.fn?.key ?? null, selection.site?.offset ?? null, selection.sample?.key ?? null, selection.step ?? null, selection.graphKey ?? null]);
 
-/** The workspace's own chords, which the flow graph canvas leaves to it
- * (its hostKeys option): Shift+C, Shift+L and Shift+T toggle panes,
- * Shift+Backspace walks the trail forward, Z toggles focus mode and 1 to 4
- * switch panes, none with Command, Control or Option. */
-function flowWorkspaceKey(event) {
-  if (event.metaKey || event.ctrlKey || event.altKey) return false;
-  const key = event.key, code = event.code ?? '';
-  if (event.shiftKey) return ['KeyC', 'KeyL', 'KeyT'].includes(code) || ['C', 'L', 'T', 'Backspace'].includes(key);
-  return code === 'KeyZ' || key === 'z' || key === 'Z' || /^Digit[1-4]$/.test(code) || /^[1-4]$/.test(key);
+/** The workspace chord a key is, or null, never with Command, Control or
+ * Option: 1 to 4 a pane, Z focus mode, Shift with C, L or T a pane toggle,
+ * Backspace and Shift+Backspace back and forward along the trail, Enter
+ * (with Shift too) follow, and J and K the next and previous sample. A letter or digit
+ * matches by its physical key or by what it types, so a layout that moves
+ * it keeps the chord. */
+function flowWorkspaceChord(event) {
+  if (event.metaKey || event.ctrlKey || event.altKey) return null;
+  const physical = /^(?:Key|Digit)(\w)$/.exec(event.code ?? '')?.[1].toLowerCase();
+  const typed = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+  const is = name => physical === name || typed === name;
+  if (event.shiftKey) {
+    if (is('c')) return 'toggle-cfg';
+    if (is('l')) return 'toggle-lineage';
+    if (is('t')) return 'toggle-timeline';
+    if (is('Backspace')) return 'forward';
+    if (is('Enter')) return 'follow';
+    return null;
+  }
+  const pane = ['1', '2', '3', '4'].findIndex(is);
+  if (pane >= 0) return FLOW_PANES[pane];
+  if (is('z')) return 'focus';
+  if (is('Backspace')) return 'back';
+  if (is('Enter')) return 'follow';
+  if (is('j')) return 'next-sample';
+  if (is('k')) return 'previous-sample';
+  return null;
 }
+/* The chords the flow graph canvas leaves to the workspace (its hostKeys);
+ * its own Enter, Backspace, J and K stay the graph's. */
+const FLOW_HOST_CHORDS = new Set([...FLOW_PANES, 'focus', 'toggle-cfg', 'toggle-lineage', 'toggle-timeline', 'forward']);
+const flowWorkspaceKey = event => FLOW_HOST_CHORDS.has(flowWorkspaceChord(event));
 
 /* A lineage link's colour says what it is, from the step's relation; its
  * line style says how sure it is, from the confidence, which reads as shared
@@ -128,7 +150,8 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   const cfgHost = $('#flow-cfg-host'), cfgEmpty = $('#flow-cfg-empty'), cfgSamples = $('#flow-cfg-samples'), cfgMeta = $('#flow-cfg-meta'), cfgHead = $('#flow-cfg-head');
   const graphMeta = $('#flow-graph-meta'), requestMeta = $('#flow-request-meta'), requestTag = $('#flow-request-tag');
   const lineageSelected = $('#flow-lineage-selected');
-  const timelineRoot = $('#flow-timeline'), timelineMeta = $('#flow-timeline-meta'), timelineSlot = $('#flow-timeline-process'), timelineRefresh = $('#flow-timeline-refresh'), timelineOpenButton = $('#flow-timeline-open');
+  const timelineRoot = $('#flow-timeline'), timelineMeta = $('#flow-timeline-meta'), timelineSlot = $('#flow-timeline-process');
+  const timelineRefresh = $('#flow-timeline-refresh'), timelineOpenButton = $('#flow-timeline-open');
   const status = $('#flow-status');
 
   // Layout state. `split` is what the split shows; focus mode and the narrow
@@ -175,7 +198,8 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     cfg.runner = createBlockGraphRunner();
     // The view's own head is the pane head: the identity mark, Sources and focus.
     const head = cfg.view.tools.parentElement;
-    const mark = flowElement('span', 'flow-pane-mark'); mark.setAttribute('aria-hidden', 'true'); head.prepend(mark); head.dataset.flowHead = 'cfg';
+    head.prepend(flowElement('span', 'flow-pane-mark', '', {'aria-hidden': 'true'}));
+    head.dataset.flowHead = 'cfg';
     const open = flowButton('source-tool block-graph-tool flow-cfg-source', 'Sources', 'Open this function in Sources');
     open.title = 'Open the module in Sources at this function';
     open.addEventListener('click', () => { if (cfg.fn) openSource({artifact_id: cfg.fn.artifact_id, offset: cfgFirstByte()}); });
@@ -198,12 +222,17 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     for (let block = 0; block < graph.count; block += 1) if (first === null || graph.offsets[block] < first) first = graph.offsets[block];
     return first;
   }
+  /** A block the researcher picked: the site is that block, unless it is the
+   * block that holds the picked sample, which then stays. */
   function cfgPicked(offset, block, graphDoc) {
     const start = graphDoc?.offsets?.[block] ?? offset;
     const keepSample = selection.sample && selection.site && flowBlockAt(graphDoc, selection.site.offset) === block;
-    setSelection({site: {offset: keepSample ? selection.site.offset : start, kind: keepSample ? selection.site.kind : 'block', label: keepSample ? selection.site.label : `loc_${Number(start).toString(16)}`},
-      sample: keepSample ? selection.sample : null});
-    if (!keepSample) graph.setMark(cfg.fn ? {artifact_id: cfg.fn.artifact_id, function_index: cfg.fn.function_index, offset: start} : null);
+    if (keepSample) {
+      setSelection({site: selection.site, sample: selection.sample});
+    } else {
+      setSelection({site: {offset: start, kind: 'block', label: `loc_${Number(start).toString(16)}`}, sample: null});
+      graph.setMark(cfg.fn ? {artifact_id: cfg.fn.artifact_id, function_index: cfg.fn.function_index, offset: start} : null);
+    }
     renderCfgSamples();
   }
   /** Function names from the module's name section, read once per module as
@@ -417,6 +446,12 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   }
 
   // Graph pane.
+  /** The site a Wasm card's chosen row names when its call site is a module
+   * offset (`+0x2f`), else null. */
+  function rowSite(row) {
+    if (!/^\+0x[0-9a-f]+$/i.test(row?.site ?? '')) return null;
+    return {offset: Number.parseInt(row.site.slice(3), 16), kind: row.op ?? 'site', label: `${row.site} ${row.op ?? ''}`.trim()};
+  }
   /** What the graph selects, shown in the Related rail and the pane head. */
   function graphShown(info) {
     graphInfo = info ?? null;
@@ -437,13 +472,13 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     // Clearing the card clears its own crumbs; a sample's stay.
     if (!info) { setSelection(selection.graphKey ? {graphKey: null, fn: null, site: null} : {graphKey: null}); renderRelated(); return; }
     if (info.kind === 'wasm' && isWasmFn(info)) {
-      const fn = fnFor(info.artifact_id, info.function_index);
-      const site = /^\+0x[0-9a-f]+$/i.test(info.row?.site ?? '') ? {offset: Number.parseInt(info.row.site.slice(3), 16), kind: info.row.op ?? 'site', label: `${info.row.site} ${info.row.op ?? ''}`.trim()} : null;
+      const fn = fnFor(info.artifact_id, info.function_index), site = rowSite(info.row);
       setSelection({...noCrumbs, graphKey: info.key ?? null, fn, site});
       showCfg(fn, site?.offset ?? null, {open: true, wait: !followed});
       if (followed) reveal('cfg', {focus: true});
     } else {
-      setSelection({...noCrumbs, graphKey: info.key ?? null, fn: info.key ? {key: info.key, artifact_id: null, function_index: null, name: info.name ?? null, label: info.name || info.kind || 'card'} : null});
+      const fn = info.key ? {key: info.key, artifact_id: null, function_index: null, name: info.name ?? null, label: info.name || info.kind || 'card'} : null;
+      setSelection({...noCrumbs, graphKey: info.key ?? null, fn});
       if (followed && info.request) reveal('lineage', {focus: true});
     }
     renderRelated();
@@ -564,8 +599,17 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     }, {record: false});
     renderTrail(); renderHistoryButtons(); renderCfgSamples(); renderLineageSelected(); renderRelated();
   }
-  function back() { if (cursor <= 0) { flash('This is the start of the trail.'); return false; } cursor -= 1; restore(history[cursor]); return true; }
-  function forward() { if (cursor >= history.length - 1) { flash('This is the end of the trail.'); return false; } cursor += 1; restore(history[cursor]); return true; }
+  /** Walks the trail one entry back (-1) or forward (1). */
+  function walk(direction) {
+    const next = cursor + direction;
+    if (next < 0 || next >= history.length) {
+      flash(direction < 0 ? 'This is the start of the trail.' : 'This is the end of the trail.');
+      return;
+    }
+    cursor = next;
+    restore(history[cursor]);
+  }
+  const back = () => walk(-1), forward = () => walk(1);
   backButton.addEventListener('click', back);
   forwardButton.addEventListener('click', forward);
 
@@ -580,7 +624,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
       if (last) item.setAttribute('aria-current', 'true');
       item.addEventListener('click', () => jump(crumb));
       nodes.push(item);
-      if (!last) { const separator = flowElement('span', 'flow-crumb-separator', '›'); separator.setAttribute('aria-hidden', 'true'); nodes.push(separator); }
+      if (!last) nodes.push(flowElement('span', 'flow-crumb-separator', '›', {'aria-hidden': 'true'}));
     });
     trail.replaceChildren(...nodes);
     // The most specific crumb stays in view when the trail scrolls.
@@ -720,10 +764,12 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     const before = active;
     if (layout === 'compact') singlePane = name;
     else if (mode === 'focus') focusPane = name;
-    else {
-      if (name === 'cfg') { split.cfg = true; cfgUserHidden = false; if (layout === 'laptop') sideTab = 'cfg'; }
-      if (name === 'lineage') { split.lineage = true; if (layout === 'laptop') sideTab = 'lineage'; }
-      if (name === 'timeline') { split.timeline = true; timelineOpen = true; }
+    else if (name !== 'graph') {
+      // The split shows the pane, and in the laptop split its side tab.
+      split[name] = true;
+      if (name === 'cfg') cfgUserHidden = false;
+      if (name === 'timeline') timelineOpen = true;
+      else if (layout === 'laptop') sideTab = name;
     }
     active = name;
     applyLayout();
@@ -758,9 +804,16 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     return name !== 'lineage' || currentSideTab() !== 'cfg';
   }
   function setMode(next, pane = active) {
-    if (layout === 'compact') { flash('One pane at a time at this width; 1 to 4 switch panes.'); return; }
-    if (next === 'focus') { if (mode !== 'focus') returnPane = active; focusPane = FLOW_PANES.includes(pane) ? pane : 'graph'; mode = 'focus'; active = focusPane; }
-    else mode = 'split';
+    if (layout === 'compact') {
+      flash('One pane at a time at this width; 1 to 4 switch panes.');
+      return;
+    }
+    if (next === 'focus') {
+      if (mode !== 'focus') returnPane = active;
+      focusPane = FLOW_PANES.includes(pane) ? pane : 'graph';
+      active = focusPane;
+    }
+    mode = next;
     applyLayout();
     // Back in the split, the pane focus mode showed may be one the split hides:
     // focus goes to the pane focused before focus mode, else the graph.
@@ -853,100 +906,122 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
       timeline.selection()?.key ?? null, timeline.summary(), cfg.fn?.key ?? null, cfg.fn?.label ?? null]);
     if (key === relatedKey) return;
     relatedKey = key;
-    const sections = [];
-    const section = (title, pane, entries, action) => {
-      const block = flowElement('section', 'flow-related-section');
-      block.dataset.pane = pane;
-      const head = flowElement('div', 'flow-related-head');
-      const name = flowElement('h3', '', title); name.prepend(flowElement('span', 'flow-pane-mark'));
-      head.append(name);
-      if (action) {
-        const open = flowButton('flow-related-open', action.label, action.aria);
-        open.append(flowElement('kbd', '', action.key));
-        open.addEventListener('click', action.run);
-        head.append(open);
-      }
-      block.append(head, ...entries);
-      sections.push(block);
-    };
-    const entry = (text, note, run, className = '') => {
-      const item = flowButton(`flow-related-item ${className}`.trim(), '');
-      item.append(flowElement('span', 'flow-related-text', text));
-      if (note) item.append(flowElement('span', 'flow-related-note', note));
-      item.addEventListener('click', run);
-      return item;
-    };
     const title = selection.sample?.label ? `${selection.site?.label ?? ''} ${selection.sample.label}`.trim() : selection.site?.label ?? selection.fn?.label ?? selection.request?.label ?? 'nothing yet';
     const heading = flowElement('p', 'flow-related-title', 'Related to ');
     heading.append(flowElement('b', '', title));
-    // Lineage of the selected request.
-    const steps = lineageModels.filter(model => model.step).slice(0, FLOW_WORKSPACE_LIMITS.related);
-    if (lineageModels.length) {
-      const entries = steps.map(model => {
-        // A link here is picked as its Lineage row is.
-        const item = entry(model.title, model.confidence, () => { if (selectTraceRow(model)) lineagePicked(model); reveal('lineage', {focus: true}); }, 'flow-related-link');
-        const sample = flowElement('span', 'flow-link-line'); sample.setAttribute('aria-hidden', 'true');
-        Object.assign(sample.dataset, flowLinkKind(model));
-        item.prepend(sample);
-        return item;
-      });
-      const more = lineageModels.filter(model => model.step).length - steps.length;
-      if (more > 0) entries.push(flowElement('p', 'flow-more', `${more} more steps in Lineage`));
-      section(`Lineage${selection.request?.renderer ? ` · #${selection.request.renderer}` : ''}`, 'lineage', entries, {label: 'Open', key: '3', aria: 'Open Lineage', run: () => reveal('lineage', {focus: true})});
-    }
-    // Samples of the selected call, or at the selected site.
-    const chosen = timeline.selection();
-    const sampleList = chosen?.type === 'sample' ? chosen.site.samples : chosen?.track ? chosen.track.samples : [];
-    if (sampleList.length) {
-      const strip = flowElement('div', 'flow-related-strip');
-      strip.setAttribute('role', 'group'); strip.setAttribute('aria-label', 'Samples');
-      for (const sample of sampleList.slice(0, FLOW_WORKSPACE_LIMITS.relatedSamples)) {
-        const dot = flowButton('flow-related-sample', sample.kind === 'br_table' ? String(sample.selector ?? '?') : 'ci', `Sample ${sample.ordinal}${sample.kind === 'br_table' ? `, selector ${sample.selector}` : ''}${sample.invocation ? `, call #${sample.invocation}` : ''}`);
-        dot.setAttribute('aria-pressed', String(chosen?.sample?.key === sample.key));
-        dot.addEventListener('click', () => timeline.select(`sample:${sample.key}`, {silent: false}));
-        strip.append(dot);
-      }
-      const entries = [strip];
-      if (sampleList.length > FLOW_WORKSPACE_LIMITS.relatedSamples) entries.push(flowElement('p', 'flow-more', `${sampleList.length - FLOW_WORKSPACE_LIMITS.relatedSamples} more samples in Timeline`));
-      section(`Timeline · ${chosen.type === 'sample' ? chosen.count : chosen.label}`, 'timeline', entries,
-        {label: 'Open', key: '4', aria: 'Open Timeline', run: () => { timelineOpen = true; reveal('timeline', {focus: true}); }});
-    }
-    // Sampled sites of the selected function.
-    if (cfg.fn) {
-      const sites = timeline.samplesFor(cfg.fn.artifact_id, cfg.fn.function_index);
-      if (sites.length) section(`CFG · ${cfg.fn.label}`, 'cfg', sites.slice(0, FLOW_WORKSPACE_LIMITS.related).map(site => entry(`${flowHex(site.offset)} ${site.kind}`, `×${site.samples.length}`, () => {
-        setSelection({site: {offset: site.offset, kind: site.kind, label: `${flowHex(site.offset)} ${site.kind}`}});
-        showCfg(cfg.fn, site.offset); reveal('cfg', {focus: true});
-      })), {label: 'Open', key: '2', aria: 'Open CFG', run: () => reveal('cfg', {focus: true})});
-    }
-    // The graph card: its row, and its callers and callees when the graph says.
-    if (graphInfo) {
-      // Each card entry is a pick: the graph selects it and the workspace
-      // follows. A graph still laying out selects it once drawn, as the host's.
-      const pickCard = key => change(() => {
-        const info = key ? graph.select(key) : null;
-        if (info) graphPicked(info);
-        else if (key) flash('The graph has not drawn this card yet; it is selected once the graph is drawn.');
-        reveal('graph', {focus: true});
-      });
-      const entries = [entry(graphInfo.name || graphInfo.kind || 'card', [graphInfo.kind, graphInfo.location].filter(Boolean).join(' · '), () => pickCard(graphInfo.key))];
-      if (graphInfo.row) entries.push(entry(`${graphInfo.row.op ?? 'call'} ${graphInfo.row.target ?? ''}`.trim(), graphInfo.row.site ?? '', () => reveal('graph', {focus: true})));
-      for (const [label, list] of [['called by', graphInfo.callers], ['calls', graphInfo.callees]]) {
-        if (!Array.isArray(list)) continue;
-        for (const item of list.slice(0, 4)) entries.push(entry(`${label} ${item.name ?? item.key ?? ''}`.trim(), item.note ?? '', () => pickCard(item.key)));
-      }
-      if (graphInfo.request) {
-        const known = findRendererRequest(graphInfo.request.process, graphInfo.request.request);
-        entries.push(entry(known?.label ?? `request #${graphInfo.request.request}`, known ? 'trace its lineage' : 'not in the request list', () => {
-          // The card made this request, so its crumbs stay beside it.
-          if (known) change(() => { setSelection(requestPatch(showAppRequest(known.id), known.id)); reveal('lineage', {focus: true}); });
-          else flash('This request is not in the captured request list.');
-        }));
-      }
-      section('Graph', 'graph', entries, {label: 'In graph', key: '1', aria: 'Open the graph', run: () => reveal('graph', {focus: true})});
-    }
+    const sections = [relatedLineage(), relatedSamples(), relatedSites(), relatedCard()].filter(Boolean);
     if (!sections.length) sections.push(flowElement('p', 'flow-related-empty', 'Select a request, a card or a sample; what links to it is listed here, one key or click away.'));
     related.replaceChildren(heading, ...sections);
+  }
+  /** One section of the rail: its pane's mark and title, an Open button
+   * that shows the pane, and its entries. */
+  function relatedSection(title, pane, entries, {label = 'Open', key, aria}) {
+    const block = flowElement('section', 'flow-related-section');
+    block.dataset.pane = pane;
+    const name = flowElement('h3', '', title);
+    name.prepend(flowElement('span', 'flow-pane-mark'));
+    const open = flowButton('flow-related-open', label, aria);
+    open.append(flowElement('kbd', '', key));
+    open.addEventListener('click', () => {
+      if (pane === 'timeline') timelineOpen = true;
+      reveal(pane, {focus: true});
+    });
+    const head = flowElement('div', 'flow-related-head');
+    head.append(name, open);
+    block.append(head, ...entries);
+    return block;
+  }
+  function relatedEntry(text, note, run, className = '') {
+    const item = flowButton(`flow-related-item ${className}`.trim());
+    item.append(flowElement('span', 'flow-related-text', text));
+    if (note) item.append(flowElement('span', 'flow-related-note', note));
+    item.addEventListener('click', run);
+    return item;
+  }
+  /** The selected request's lineage links; each is picked as its row is. */
+  function relatedLineage() {
+    if (!lineageModels.length) return null;
+    const links = lineageModels.filter(model => model.step);
+    const entries = links.slice(0, FLOW_WORKSPACE_LIMITS.related).map(model => {
+      const item = relatedEntry(model.title, model.confidence, () => {
+        if (selectTraceRow(model)) lineagePicked(model);
+        reveal('lineage', {focus: true});
+      }, 'flow-related-link');
+      const sample = flowElement('span', 'flow-link-line', '', {'aria-hidden': 'true'});
+      Object.assign(sample.dataset, flowLinkKind(model));
+      item.prepend(sample);
+      return item;
+    });
+    const more = links.length - entries.length;
+    if (more > 0) entries.push(flowElement('p', 'flow-more', `${more} more steps in Lineage`));
+    return relatedSection(`Lineage${selection.request?.renderer ? ` · #${selection.request.renderer}` : ''}`, 'lineage', entries, {key: '3', aria: 'Open Lineage'});
+  }
+  /** The samples at the picked sample's site, or of the picked call. */
+  function relatedSamples() {
+    const chosen = timeline.selection();
+    const samples = chosen?.type === 'sample' ? chosen.site.samples : chosen?.track ? chosen.track.samples : [];
+    if (!samples.length) return null;
+    const strip = flowElement('div', 'flow-related-strip');
+    strip.setAttribute('role', 'group');
+    strip.setAttribute('aria-label', 'Samples');
+    for (const sample of samples.slice(0, FLOW_WORKSPACE_LIMITS.relatedSamples)) {
+      const br = sample.kind === 'br_table';
+      const dot = flowButton('flow-related-sample', br ? String(sample.selector ?? '?') : 'ci', `Sample ${sample.ordinal}${br ? `, selector ${sample.selector}` : ''}${sample.invocation ? `, call #${sample.invocation}` : ''}`);
+      dot.setAttribute('aria-pressed', String(chosen.sample?.key === sample.key));
+      dot.addEventListener('click', () => timeline.select(`sample:${sample.key}`, {silent: false}));
+      strip.append(dot);
+    }
+    const entries = [strip];
+    const more = samples.length - FLOW_WORKSPACE_LIMITS.relatedSamples;
+    if (more > 0) entries.push(flowElement('p', 'flow-more', `${more} more samples in Timeline`));
+    return relatedSection(`Timeline · ${chosen.type === 'sample' ? chosen.count : chosen.label}`, 'timeline', entries, {key: '4', aria: 'Open Timeline'});
+  }
+  /** The sampled sites of the CFG's function; each marks its block. */
+  function relatedSites() {
+    if (!cfg.fn) return null;
+    const sites = timeline.samplesFor(cfg.fn.artifact_id, cfg.fn.function_index);
+    if (!sites.length) return null;
+    const entries = sites.slice(0, FLOW_WORKSPACE_LIMITS.related).map(site => {
+      const label = `${flowHex(site.offset)} ${site.kind}`;
+      return relatedEntry(label, `×${site.samples.length}`, () => {
+        setSelection({site: {offset: site.offset, kind: site.kind, label}});
+        showCfg(cfg.fn, site.offset);
+        reveal('cfg', {focus: true});
+      });
+    });
+    return relatedSection(`CFG · ${cfg.fn.label}`, 'cfg', entries, {key: '2', aria: 'Open CFG'});
+  }
+  /** The graph's card: its row, its callers and callees when the graph
+   * says, and the request it made. */
+  function relatedCard() {
+    if (!graphInfo) return null;
+    const entries = [relatedEntry(graphInfo.name || graphInfo.kind || 'card', [graphInfo.kind, graphInfo.location].filter(Boolean).join(' · '), () => pickCard(graphInfo.key))];
+    if (graphInfo.row) entries.push(relatedEntry(`${graphInfo.row.op ?? 'call'} ${graphInfo.row.target ?? ''}`.trim(), graphInfo.row.site ?? '', () => reveal('graph', {focus: true})));
+    for (const [label, list] of [['called by', graphInfo.callers], ['calls', graphInfo.callees]]) {
+      for (const item of (list ?? []).slice(0, 4)) entries.push(relatedEntry(`${label} ${item.name ?? item.key ?? ''}`.trim(), item.note ?? '', () => pickCard(item.key)));
+    }
+    if (graphInfo.request) {
+      const known = findRendererRequest(graphInfo.request.process, graphInfo.request.request);
+      entries.push(relatedEntry(known?.label ?? `request #${graphInfo.request.request}`, known ? 'trace its lineage' : 'not in the request list', () => {
+        if (!known) { flash('This request is not in the captured request list.'); return; }
+        // The card made this request, so its crumbs stay beside it.
+        change(() => {
+          setSelection(requestPatch(showAppRequest(known.id), known.id));
+          reveal('lineage', {focus: true});
+        });
+      }));
+    }
+    return relatedSection('Graph', 'graph', entries, {label: 'In graph', key: '1', aria: 'Open the graph'});
+  }
+  /** A card entry is a pick: the graph selects the card and the workspace
+   * follows. A graph still laying out selects it once drawn, as the host's. */
+  function pickCard(key) {
+    change(() => {
+      const info = key ? graph.select(key) : null;
+      if (info) graphPicked(info);
+      else if (key) flash('The graph has not drawn this card yet; it is selected once the graph is drawn.');
+      reveal('graph', {focus: true});
+    });
   }
 
   // Dividers: drag, arrow keys (Shift for a larger step), Home or double-click resets.
@@ -988,16 +1063,17 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     handle.addEventListener('pointercancel', () => finish(false));
     const reset = () => { set(FLOW_SIZE_DEFAULTS[sizeName()]); savePrefs(); };
     handle.addEventListener('dblclick', reset);
+    // Left (or Up) grows the pane after the divider; Shift takes larger steps.
+    const grow = axis === 'x' ? {ArrowLeft: 1, ArrowRight: -1} : {ArrowUp: 1, ArrowDown: -1};
     handle.addEventListener('keydown', event => {
-      if (event.key === 'Escape' && drag) { event.preventDefault(); event.stopPropagation(); finish(false); return; }
-      if (event.key === 'Home') { event.preventDefault(); event.stopPropagation(); reset(); return; }
-      const keys = axis === 'x' ? ['ArrowRight', 'ArrowLeft'] : ['ArrowDown', 'ArrowUp'];
-      const direction = keys.indexOf(event.key);
-      if (direction < 0) return;
-      event.preventDefault(); event.stopPropagation();
-      // Left (or Up) grows the pane after the divider.
-      set(sizes[sizeName()] + (direction ? 1 : -1) * (event.shiftKey ? 50 : 10));
-      savePrefs();
+      if (event.key === 'Escape' && drag) finish(false);
+      else if (event.key === 'Home') reset();
+      else if (grow[event.key]) {
+        set(sizes[sizeName()] + grow[event.key] * (event.shiftKey ? 50 : 10));
+        savePrefs();
+      } else return;
+      event.preventDefault();
+      event.stopPropagation();
     });
   }
   function savePrefs() {
@@ -1028,27 +1104,93 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   // come from the page itself and the sidebar while Flow is shown; docks such
   // as the Console and the agent keep their own keys.
   const inScope = target => !target || target === doc.body || target === doc.documentElement || root.contains(target) || Boolean(target.closest?.('.sidebar'));
+  /** Whether a key is the workspace's to read: Flow is shown, the key comes
+   * from Flow, the page or the sidebar, nothing handled it, and no one is
+   * typing or holding a modal dialog. */
+  function ownsKey(event) {
+    if (!visible || root.hidden || event.defaultPrevented || event.isComposing) return false;
+    if (!inScope(event.target) || typing(event.target)) return false;
+    return !doc.querySelector('dialog:modal');
+  }
+  /** Acts on a chord; false leaves the key to whoever else reads it. */
+  function runChord(chord, event) {
+    switch (chord) {
+      case 'graph': case 'cfg': case 'lineage': case 'timeline':
+        reveal(chord, {focus: true});
+        return true;
+      case 'focus':
+        if (event.repeat) return false;
+        focusOrReturn(active);
+        return true;
+      case 'toggle-cfg': case 'toggle-lineage': case 'toggle-timeline':
+        if (event.repeat) return false;
+        togglePane(chord.slice('toggle-'.length));
+        return true;
+      case 'back':
+        back();
+        return true;
+      case 'forward':
+        forward();
+        return true;
+      case 'follow':
+        // Enter on a control, a tab or a canvas stays that element's.
+        if (event.target.closest?.('button, a, summary, [role="tab"], canvas, [role="application"]')) return false;
+        follow();
+        return true;
+      case 'next-sample': case 'previous-sample':
+        if (!event.target.closest?.('#flow-pane-cfg')) return false;
+        if (!timeline.stepSample(chord === 'next-sample' ? 1 : -1)) flash('No sample to step: pick one in the timeline.');
+        return true;
+      default:
+        return false;
+    }
+  }
   doc.addEventListener('keydown', event => {
-    if (!visible || root.hidden || !inScope(event.target)) return;
-    if (event.defaultPrevented || event.isComposing || event.metaKey || event.ctrlKey || event.altKey || typing(event.target)) return;
-    // A modal dialog keeps the keyboard.
-    if (doc.querySelector('dialog:modal')) return;
-    const key = event.key, code = event.code ?? '';
-    const digit = /^Digit([1-4])$/.exec(code)?.[1] ?? (/^[1-4]$/.test(key) ? key : null);
-    let handled = true;
-    if (digit && !event.shiftKey) {
-      const name = FLOW_PANES[Number(digit) - 1];
-      reveal(name, {focus: true});
-    } else if ((code === 'KeyZ' || key === 'z' || key === 'Z') && !event.shiftKey && !event.repeat) focusOrReturn(active);
-    else if (event.shiftKey && !event.repeat && (code === 'KeyC' || key === 'C')) togglePane('cfg');
-    else if (event.shiftKey && !event.repeat && (code === 'KeyL' || key === 'L')) togglePane('lineage');
-    else if (event.shiftKey && !event.repeat && (code === 'KeyT' || key === 'T')) togglePane('timeline');
-    else if (key === 'Backspace') { if (event.shiftKey) forward(); else back(); }
-    else if (key === 'Enter' && !event.target?.closest?.('button, a, summary, [role="tab"], canvas, [role="application"]')) follow();
-    else if ((key === 'j' || key === 'k' || key === 'J' || key === 'K') && !event.shiftKey && event.target?.closest?.('#flow-pane-cfg')) { if (!timeline.stepSample(key.toLowerCase() === 'j' ? 1 : -1)) flash('No sample to step: pick one in the timeline.'); }
-    else handled = false;
-    if (handled) { event.preventDefault(); event.stopPropagation(); }
+    if (!ownsKey(event) || !runChord(flowWorkspaceChord(event), event)) return;
+    event.preventDefault();
+    event.stopPropagation();
   });
+
+  // The app's side: the session, its selected request and its request card.
+  /** A new session: nothing of the old one's selection, trail or CFG stays,
+   * and the app's request in it is a pick of its own. */
+  function startSession(next) {
+    session = next ? String(next) : null;
+    loadPrefs(session);
+    forgetCfg();
+    history = [];
+    cursor = -1;
+    requestRevision = null;
+    graphInfo = null;
+    selection = {...FLOW_EMPTY_SELECTION};
+  }
+  /** Follows the app's request. A revision the app made while the workspace
+   * changed something is that change's own; any other is the app's pick,
+   * unless it chose the request the trail already shows. */
+  function syncRequest(request, revision) {
+    const crumb = requestCrumb(request);
+    const fresh = revision !== requestRevision;
+    requestRevision = revision;
+    if (fresh && !changing && crumb?.id !== selection.request?.id) {
+      // Nothing below the old request is a recorded relationship of the new one.
+      if (selection.sample) { timeline.clear(); graph.setMark(null); }
+      setSelection({...noCrumbs, request: crumb, step: null}, {record: Boolean(crumb)});
+      return;
+    }
+    if (!crumb || crumb.id !== selection.request?.id) return;
+    if (crumb.label === selection.request.label && crumb.renderer === selection.request.renderer) return;
+    // The same request, named afresh: no pick, so no trail entry; the entry
+    // that holds it takes the new name too.
+    selection = {...selection, request: crumb};
+    if (history[cursor]?.selection.request?.id === crumb.id) history[cursor] = {...history[cursor], selection: {...history[cursor].selection, request: crumb}};
+    renderTrail(); renderTabs();
+  }
+  function renderRequestCard(request) {
+    requestTag.hidden = !request;
+    const parts = !request ? [] : [request.renderer ? `#${request.renderer.request}` : null, request.status ? String(request.status) : null, request.renderer ? `renderer ${request.renderer.process}` : null];
+    requestMeta.textContent = parts.filter(Boolean).join(' · ');
+    requestMeta.hidden = !requestMeta.textContent;
+  }
 
   new ResizeObserver(() => { if (visible) applyLayout(); }).observe(body);
   applyLayout();
@@ -1061,35 +1203,14 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     sync({visible: shown, session: nextSession = null, request = null, revision = null, stacks = null}) {
       const wasVisible = visible;
       visible = Boolean(shown);
-      if (!visible) { graph.hide(); if (wasVisible) releaseCfg(); return; }
-      if (String(nextSession ?? '') !== String(session ?? '')) {
-        session = nextSession ? String(nextSession) : null;
-        loadPrefs(session);
-        forgetCfg();
-        // The app's request in this session is a pick of its own.
-        history = []; cursor = -1; requestRevision = null; graphInfo = null;
-        selection = {...FLOW_EMPTY_SELECTION};
+      if (!visible) {
+        graph.hide();
+        if (wasVisible) releaseCfg();
+        return;
       }
-      const crumb = requestCrumb(request);
-      // A revision the app made while the workspace changed something is
-      // that change's own; any other is the app's pick, unless it chose the
-      // request the trail already shows.
-      const fresh = revision !== requestRevision;
-      requestRevision = revision;
-      if (fresh && !changing && crumb?.id !== selection.request?.id) {
-        // Nothing below the old request is a recorded relationship of the new one.
-        if (selection.sample) { timeline.clear(); graph.setMark(null); }
-        setSelection({...noCrumbs, request: crumb, step: null}, {record: Boolean(crumb)});
-      } else if (crumb && crumb.id === selection.request?.id && (crumb.label !== selection.request.label || crumb.renderer !== selection.request.renderer)) {
-        // The same request, named afresh: no pick, so no trail entry; the
-        // entry that holds it takes the new name too.
-        selection = {...selection, request: crumb};
-        if (history[cursor]?.selection.request?.id === crumb.id) history[cursor] = {...history[cursor], selection: {...history[cursor].selection, request: crumb}};
-        renderTrail(); renderTabs();
-      }
-      requestTag.hidden = !request;
-      const parts = request ? [request.renderer?.request ? `#${request.renderer.request}` : null, request.status ? String(request.status) : null, request.renderer ? `renderer ${request.renderer.process}` : null].filter(Boolean) : [];
-      requestMeta.textContent = parts.join(' · '); requestMeta.hidden = !parts.length;
+      if (String(nextSession ?? '') !== String(session ?? '')) startSession(nextSession);
+      syncRequest(request, revision);
+      renderRequestCard(request);
       graph.show({session, request: request?.renderer ?? null, stacks});
       timeline.sync(session);
       if (!wasVisible) applyLayout();

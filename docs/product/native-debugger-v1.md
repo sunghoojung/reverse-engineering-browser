@@ -20,8 +20,14 @@ description of shipped code.
 
 Implemented by [native debugger observation v1](../../protocol/native-debugger-observation-v1.md).
 An agent arms rules on a selected live document with the Console `watch`
-command and waits on a filtered `wait_for_events` cursor. Nothing pauses, no
-value is read, and records carry identities, kinds and positions only.
+command and waits on a filtered `wait_for_events` cursor, whose records carry
+`debugger_observation`: the decoded record, its own frame resolved to file,
+line and column, and the `get_request_stack` arguments for its stack
+([recipe 25](../development/agent-cookbook.md#25-break-on-a-request-a-click-handler-or-a-csp-violation-without-pausing)).
+Nothing pauses, no value is read, and records carry identities, kinds and
+positions only. Rules see only the armed document's main thread, its
+navigation clears them, and they cannot be armed ahead of a page load; every
+place that arms a rule or waits on one says so.
 
 | DevTools feature | Phase 1 equivalent |
 | --- | --- |
@@ -54,7 +60,9 @@ window and reading once in the stored-evidence window, and never pauses.
 - **Observations** lists the newest records per kind, with their identities,
   says how much of the store they were read from, and opens a record's own
   frame (`get_request_stack` with `observation_sequence`) in Sources, or a
-  watched request in Traffic through Traffic's own row selection.
+  watched request in Traffic through Traffic's own row selection. Traffic
+  marks a watched request on its row and in General, with its rule, and
+  links back to this record (`RebDebuggerSidebar.showObservation`).
 - **Pausing** states the availability `get_native_debugger` reports and offers
   no control. Phase 3 adds its paused-state sections through the sidebar's
   section registry (`RebDebuggerSidebar.addSection` with `native: 'pausing'`);
@@ -289,7 +297,11 @@ attestation waits for the sidebar to land.
 
 - Phase 1 on a live fixture: wait for the next fetch to `/api/x` and read its
   stack; the next click handler and its position; the next CSP violation; and
-  measure that disarmed probes cost one atomic load.
+  measure that disarmed probes cost one atomic load. The agent half of these
+  waits passes on the deterministic fixture records through `reb-api mcp`
+  (`an_agent_waits_on_observation_records_and_reads_their_positions` in
+  `apps/origin-trace-backend/tests/mcp_stdio.rs`); a Brave build from these
+  inputs has to produce the records.
 - Phase 3 on an owned fixture, on a Brave built from these inputs: a
   conditional breakpoint, scopes, step and resume; navigation clears
   authorization; a pause nobody asks about is resumed by the browser's own

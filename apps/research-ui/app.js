@@ -4407,7 +4407,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
       /** Captured requests a script started, which carry the stacks the Flow
        * graph draws: an empty graph asks again only when this grows. */
-      const flowGraphStackCount = () => state.requests.reduce((count, request) => count + (request.initiator === 'script' ? 1 : 0), 0);
+      function flowGraphStackCount() {
+        return state.requests.reduce((count, request) => count + (request.initiator === 'script' ? 1 : 0), 0);
+      }
       /** The renderer request a Flow graph path names, from the row's request_initiated record. */
       function flowGraphRequestKey() {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId) ?? null;

@@ -200,7 +200,7 @@ impl Refusals {
             }
             (Some("network"), Some("response_body")) => {
                 if let Some(reason) = payload()
-                    .filter(|b| b.len() == 128 && b[0] == 1)
+                    .filter(|b| b.len() == 128 && (b[0] == 1 || b[0] == 2))
                     .and_then(|b| response_refusal(b[4]))
                 {
                     *self.content.entry(("response_body", reason)).or_default() += 1;
@@ -736,7 +736,8 @@ pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Valu
         Ok(counts) => counts,
         Err(reason) => {
             summary["response_bodies"] = json!({"available": false, "reason": reason,
-                "complete": false, "requests": "0", "unindexed_records": "0", "cases": []});
+                "complete": false, "requests": "0", "unindexed_records": "0",
+                "snapshots_withheld": "0", "cases": []});
             return;
         }
     };
@@ -763,8 +764,26 @@ pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Valu
     summary["response_bodies"] = json!({
         "available": true, "reason": null,
         "complete": counts["complete"], "requests": counts["requests"],
-        "unindexed_records": counts["unindexed_records"], "cases": cases,
+        "unindexed_records": counts["unindexed_records"],
+        "snapshots_withheld": counts["snapshots_withheld"].as_str().unwrap_or("0"), "cases": cases,
     });
+    let withheld = counts["snapshots_withheld"]
+        .as_str()
+        .and_then(|count| count.parse::<u64>().ok())
+        .unwrap_or(0);
+    if withheld > 0 {
+        let mut item = check(
+            "response_snapshots_withheld",
+            "info",
+            format!(
+                "{withheld} response bodies had a snapshot withheld while they arrived: their own snapshot allowance, the session's snapshot quarter of the response body budget, or the budget was used, so their newest snapshot is older than the schedule would make it. Raise REB_RESPONSE_BODY_BUDGET_MIB for a new session."
+            ),
+        );
+        item["count"] = json!(withheld.to_string());
+        if let Some(checks) = summary["checks"].as_array_mut() {
+            checks.push(item);
+        }
+    }
     if worker + reused + local > 0 {
         let mut item = check(
             "response_bodies_not_observed",
@@ -791,11 +810,19 @@ mod tests {
         add_response_bodies(
             &mut summary,
             Ok(
-                json!({"complete": true, "requests": "6", "unindexed_records": "0",
+                json!({"complete": true, "requests": "6", "unindexed_records": "0", "snapshots_withheld": "3",
                 "cases": {"captured": "2", "memory_cache": "1", "service_worker": "2", "renderer_answered": "1"}}),
             ),
         );
         assert_eq!(summary["response_bodies"]["available"], true);
+        assert_eq!(summary["response_bodies"]["snapshots_withheld"], "3");
+        let withheld = summary["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == "response_snapshots_withheld")
+            .unwrap();
+        assert_eq!(withheld["count"], "3");
         let cases = summary["response_bodies"]["cases"].as_array().unwrap();
         assert_eq!(cases.len(), 4);
         let worker = cases
@@ -804,8 +831,12 @@ mod tests {
             .unwrap();
         assert_eq!(worker["count"], "2");
         assert!(worker["meaning"].as_str().unwrap().contains("never sees"));
-        let check = &summary["checks"][0];
-        assert_eq!(check["code"], "response_bodies_not_observed");
+        let check = summary["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == "response_bodies_not_observed")
+            .unwrap();
         assert_eq!(check["count"], "4");
         assert!(
             check["message"]

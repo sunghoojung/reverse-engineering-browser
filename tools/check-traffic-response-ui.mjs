@@ -149,6 +149,8 @@ for (const [name, pattern] of Object.entries(states)) {
 }
 assert.match(capture({responseBody: record(null, {state: 'aborted', capturedLength: '0'})}, true), /before any byte/);
 
+let withheldBytes = null;
+const snapshotBytesFor = () => withheldBytes ??= retain('data: w\n\n', 'text/event-stream');
 // The join: a record's own artifact by creator, a shared one by ID, scripts by response creator.
 const json = '{"challenge":"c1","answers":[1,2,{"deep":[true,null]}],"html":"<b>x</b>"}';
 const jsonArtifact = retain(json, 'application/json');
@@ -488,6 +490,11 @@ await showLinked({...answered, id: 'S7:R42:954', target: undefined, hostOnly: tr
 assert.match(panel.textContent, /has no path to match \(a metadata-only session records the host alone\)/);
 assert.deepEqual(searches, [], 'nothing is searched without a path');
 
+// Response bodies version 2 bit 7: a byte bound withheld a snapshot the spacing allowed.
+await showLinked(request(record(snapshotBytesFor(), {state: 'partial', partialIndex: 2, snapshotsWithheld: true})));
+assert.match(panel.textContent, /Snapshots.*A snapshot the schedule allowed was withheld: this body's snapshot allowance/s);
+await showLinked(request(record(snapshotBytesFor(), {state: 'partial', partialIndex: 2})));
+assert.doesNotMatch(panel.textContent, /was withheld/);
 // A refused end does not hide a snapshot of the same response that is retained.
 const snapshotBytes = retain('data: kept\n\n', 'text/event-stream');
 const refusedEnd = request(record(null, {state: 'not_captured_session_budget', bodyLength: '90', capturedLength: '0', artifactId: '0'}),

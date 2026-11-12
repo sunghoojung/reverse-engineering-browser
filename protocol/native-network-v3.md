@@ -58,6 +58,7 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | Chromium patch 0038 | `record-synchronous-requests-on-calling-thread` | Request scope and tabs |
 | Chromium patch 0039, 0040 | `finish-service-worker-ends`, `record-memory-cache-reuse` | Request scope and tabs |
 | `memory_cache_reuse` payload version 2 | flag bit 2 `source_named` | Request scope and tabs |
+| `response_body` payload version 2 | flag bit 7 `snapshots_withheld` | Response bodies |
 | Chromium patch 0062 | `name-memory-cache-reuse-sources` | Request scope and tabs |
 
 Traffic detail tabs, in order: General, Headers, Payload, Preview, Response,
@@ -1012,6 +1013,24 @@ all of these hold:
    copy fits what is left of the budget. Snapshots are charged to the budget;
    a receiver refusal refunds them.
 
+A snapshot the spacing holds back is not left waiting for the next chunk: the
+first chunk that arrives too soon posts one delayed task on the capture's
+sequence for the time the spacing allows, which takes the snapshot then if the
+body is still open and the byte bounds allow it. The task finds the body by
+key and capture ID, as the completion wait does, so a body that ended or a new
+configuration leaves it nothing to do. A burst followed by silence is therefore
+published within the spacing.
+
+A snapshot the spacing allows but a byte bound withholds (the body's
+allowance, the session's quarter, or the budget) is not taken, and the
+session quarter goes to whichever bodies asked first. That is a counted limit:
+every later record of that body carries flag bit 7, `snapshots_withheld`
+(payload version 2), Traffic says the newest snapshot is older than the
+schedule would make it, and `get_session_summary` counts such bodies in
+`response_bodies.snapshots_withheld` with a `response_snapshots_withheld`
+check. The receiver keeps every snapshot it accepted, so a superseded one
+cannot be released to make room.
+
 A body whose kept prefix reaches the 16 MiB limit is sealed: those bytes can no
 longer change, so its stream ends there and a `partial` record names that
 artifact at once, without a copy. Later bytes are counted, and every later
@@ -1023,14 +1042,18 @@ about 3.6 KB/s (two 1.3 KB events a second); a chat completion streams 1 to
 20 KB/s for under a minute, and a notification channel sends a heartbeat of a
 few bytes every 15 to 30 s. In a one-hour session with the default budget:
 
-| Stream | Snapshots | Copied | How old the newest snapshot can be |
+| Stream | Snapshots | Copied | Newest snapshot at most |
 | --- | ---: | ---: | --- |
-| 60 KB/s | about 33, then sealed after 4.7 min | about 63 MiB | 90 s, until the seal |
-| 3.6 KB/s | about 95 | about 63 MiB | 1 min in the first 5 min, 15 min later |
-| 10 KB/s for 60 s | about 50 | under 13 MiB | 2 s |
-| a heartbeat every 15 s | about 95 | a few KiB | 2 min |
+| 60 KB/s | 33 | 58 MiB | 82 s old, then sealed after 279 s |
+| 3.6 KB/s | 93 | 57 MiB | 810 s old |
+| 10 KB/s for 60 s | 50 | 12 MiB | 1 s old |
+| a heartbeat every 15 s | 84 | 0 MiB | 105 s old |
 
-These come from replaying those rates through the schedule in 250 ms steps.
+Snapshots count `partial` records, the seal included; copied counts the
+receiver checkpoints, so not the seal. `make native-artifact-capture-check`
+replays these streams through the capture itself (chunks every 250 ms for the
+fast and chat streams, every 500 ms for the medium one, posted timers run as
+the clock passes them) and fails when this table differs from the replay.
 
 A larger budget (`REB_RESPONSE_BODY_BUDGET_MIB`) keeps a medium stream
 fresher, because its allowance grows with it; the 1 MiB minimum budget leaves
@@ -1049,7 +1072,7 @@ time is when the body ended or was snapshotted. Little endian:
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `1` |
+| 0 | 2 | payload version, `2` (`1` in older captures) |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | state |
 | 5 | 1 | flags |
@@ -1082,7 +1105,9 @@ Flags: bit 0 `shared`, identical bytes were already retained in this
 configuration and `artifact_id` names that earlier artifact; bit 1 served from
 the HTTP cache; bit 2 served by a service worker; bit 3 bytes still encoded
 (client-side decoding); bit 4 more than four codings, the rest not recorded;
-bit 5 completion not observed; bit 6 content type present. Other bits are zero.
+bit 5 completion not observed; bit 6 content type present; bit 7, in version 2
+only, a snapshot the schedule's spacing allowed was withheld by a byte bound
+([partial bodies](#partial-bodies)). Version 1 records stay valid without it.
 
 Codings: 1 `gzip` (and `x-gzip`), 2 `deflate`, 3 `br`, 4 `zstd`, 5 `dcb`,
 6 `dcz`, 7 `compress`, 15 any other token. `identity` is not a coding.

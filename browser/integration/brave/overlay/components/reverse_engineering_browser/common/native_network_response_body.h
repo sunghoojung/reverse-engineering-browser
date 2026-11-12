@@ -24,7 +24,8 @@ namespace reb {
 
 // Producer half of the response_body record in protocol/native-network-v3.md.
 // include/reb/network_response_body.hpp decodes and validates the same bytes.
-inline constexpr std::uint16_t kNativeResponseBodyPayloadVersion = 1;
+// Version 2 adds flag bit 7, kNativeResponseBodySnapshotsWithheld.
+inline constexpr std::uint16_t kNativeResponseBodyPayloadVersion = 2;
 inline constexpr std::size_t kNativeResponseBodyCodingSlots = 4;
 inline constexpr std::uint64_t kNativeResponseBodyCaptureBytes = kNativeArtifactMaxContentBytes;
 // Partial snapshots of an open body ("Partial bodies" in native-network-v3.md).
@@ -77,6 +78,9 @@ inline constexpr std::uint8_t kNativeResponseBodyStillEncoded = 1U << 3U;
 inline constexpr std::uint8_t kNativeResponseBodyCodingsOmitted = 1U << 4U;
 inline constexpr std::uint8_t kNativeResponseBodyCompletionUnobserved = 1U << 5U;
 inline constexpr std::uint8_t kNativeResponseBodyContentTypePresent = 1U << 6U;
+// A snapshot the spacing allowed was withheld by a byte bound; every later
+// record of the body carries it ("Partial bodies" in native-network-v3.md).
+inline constexpr std::uint8_t kNativeResponseBodySnapshotsWithheld = 1U << 7U;
 
 struct NativeResponseBodyPolicy final {
   // Content sessions only (--reb-capture-request-content).

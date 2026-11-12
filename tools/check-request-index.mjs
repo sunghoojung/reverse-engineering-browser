@@ -37,6 +37,8 @@ golden.rows.forEach((row, index) => {
       `${expected.id} body artifact`);
     assert.equal(row.response_body.record_sequence, expected.responseBody.sequenceNumber, `${expected.id} newest body record`);
   }
+  assert.equal(row.response_body.snapshots_withheld, Boolean(expected.responseBody && !expected.responseBody.malformed &&
+    expected.responseBody.snapshotsWithheld), `${expected.id} snapshots withheld`);
   // A newest record without bytes names the snapshot of the same response still retained.
   assert.equal(row.response_body.earlier_snapshot?.artifact_id ?? null, expected.responseBodyEarlier?.artifactId ?? null,
     `${expected.id} earlier snapshot`);
@@ -84,6 +86,7 @@ for (const [id, kind] of [['S1:R62:9', 'failed_before_response'], ['S1:R62:10', 
   assert.equal(byId.get(id), kind, `${id} after a redirect`);
 }
 assert(golden.rows.some(row => row.response_body.earlier_snapshot?.artifact_id === '85'), 'a refused end keeps its snapshot');
+assert(golden.rows.some(row => row.response_body.snapshots_withheld), 'the fixture has a body whose snapshots were withheld');
 for (const [sort, orders] of Object.entries(golden.orders)) {
   for (const [direction, sign] of [['asc', 1], ['desc', -1]]) {
     assert.deepEqual(orders[direction], view.trafficSortedRequests(model, sort, sign).map(request => request.id), `${sort} ${direction}`);

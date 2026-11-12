@@ -1243,7 +1243,7 @@ rechecked by SHA-256. Hex shows 256 KiB at a time with **Previous** and
 **Next**, paged to the end of the retained body; a window past the loaded
 bytes reads the next range itself, and Copy copies the window shown. A body
 still arriving says how many bytes had arrived, when, and whether it was sealed
-at the 16 MiB limit. Preview reads every remaining range itself. Text that is
+at the 16 MiB limit, and a body whose snapshot a byte bound withheld says so. Preview reads every remaining range itself. Text that is
 not valid UTF-8 shows with replacement characters and a notice, and a cut,
 partial, aborted or cancelled body may end inside a character without reading
 as binary. Preview shows the

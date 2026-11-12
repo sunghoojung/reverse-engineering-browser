@@ -1250,11 +1250,13 @@ fn decode_response_body(event: &Value) -> Option<BodyRecord> {
     let mut halves = content_type.splitn(2, |byte| *byte == b'/');
     let well_typed = !typed
         || matches!((halves.next(), halves.next()), (Some(kind), Some(sub)) if token(kind) && token(sub));
-    if u16_at(0) != 1
+    // Version 2 adds bit 7, snapshots withheld by a byte bound.
+    let version = u16_at(0);
+    if !(version == 1 || version == 2)
         || u16_at(2) != 128
         || u16_at(30) != 0
         || !(1..=12).contains(&state)
-        || flags & !0x7f != 0
+        || flags & !(if version == 2 { 0xff } else { 0x7f }) != 0
         || type_length > 64
         || typed != (type_length != 0)
         || bytes[64 + usize::from(type_length.min(64))..]
@@ -1397,6 +1399,8 @@ fn body_document(row: &Row) -> Value {
         "captured_length": record.map(|(_, record)| record.captured.to_string()),
         "partial_index": record.map(|(_, record)| record.partial_index),
         "shared": record.is_some_and(|(_, record)| record.flags & 1 != 0),
+        // Version 2 bit 7: a byte bound withheld a snapshot the spacing allowed.
+        "snapshots_withheld": record.is_some_and(|(_, record)| record.flags & 0x80 != 0),
         "sha256": record.and_then(|(_, record)| record.sha256.clone()),
         "record_sequence": body.map(|body| body.sequence.to_string()),
         "record_time_ns": body.map(|body| body.time.to_string()),
@@ -2620,13 +2624,20 @@ impl RequestIndex {
         self.refresh()?;
         let state = self.state.as_ref().expect("index state");
         let mut cases = BTreeMap::<&str, u64>::new();
+        let mut withheld = 0u64;
         for row in &state.rows {
-            *cases.entry(body_case(row).0).or_default() += 1;
+            let (case, body) = body_case(row);
+            *cases.entry(case).or_default() += 1;
+            withheld += u64::from(
+                body.and_then(|body| body.record.as_ref())
+                    .is_some_and(|record| record.flags & 0x80 != 0),
+            );
         }
         Ok(json!({
             "complete": self.caught_up(state.indexed_to),
             "requests": state.rows.len().to_string(),
             "unindexed_records": state.unindexed.to_string(),
+            "snapshots_withheld": withheld.to_string(),
             "cases": cases.into_iter().map(|(case, count)| (case.to_owned(), json!(count.to_string())))
                 .collect::<serde_json::Map<_, _>>(),
         }))
@@ -3452,6 +3463,10 @@ mod tests {
         answered(3, body(4, 10, 10, 0), "83", 200);
         answered(4, body(5, 0, 0, 0), "0", 200);
         answered(5, body(6, 0, 0, 0), "0", 200);
+        // Version 2 bit 7: a byte bound withheld a snapshot the spacing allowed.
+        let mut withheld = body(3, 30, 30, 1);
+        (withheld[0], withheld[5]) = (2, 0x80);
+        answered(12, withheld, "88", 200);
         // A refused end keeps the snapshot the receiver holds beside it.
         let refused = answered(6, body(3, 30, 30, 1), "85", 200);
         store.push(
@@ -4647,7 +4662,7 @@ mod tests {
                 "no_response=1",
                 "not_captured_session_budget=1",
                 "not_modified=2",
-                "partial=2",
+                "partial=3",
                 "pending=2",
                 "redirected=1",
                 "service_worker=1",
@@ -4664,6 +4679,15 @@ mod tests {
         assert_eq!(refused["earlier_snapshot"]["captured_length"], "30");
         assert_eq!(refused["earlier_snapshot"]["partial_index"], 1);
         assert!(row("S1:R62:1")["response_body"]["earlier_snapshot"].is_null());
+        assert_eq!(
+            row("S1:R62:12")["response_body"]["snapshots_withheld"],
+            true
+        );
+        assert_eq!(
+            row("S1:R62:1")["response_body"]["snapshots_withheld"],
+            false
+        );
+        assert_eq!(counts["snapshots_withheld"], "1");
         // A redirect then a failure, a cancel or no end is never redirected.
         for (id, case) in [
             ("S1:R62:9", "failed_before_response"),

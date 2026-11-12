@@ -34843,6 +34843,7 @@
             "captured_length",
             "partial_index",
             "shared",
+            "snapshots_withheld",
             "sha256",
             "record_sequence",
             "record_time_ns",
@@ -34913,6 +34914,10 @@
             "shared": {
               "type": "boolean",
               "description": "Identical bytes were retained earlier and the artifact is that earlier one."
+            },
+            "snapshots_withheld": {
+              "type": "boolean",
+              "description": "The record has response_body version 2 flag bit 7: a snapshot the schedule's spacing allowed was withheld by a byte bound."
             },
             "sha256": {
               "type": [
@@ -35507,7 +35512,8 @@
                 "complete",
                 "requests",
                 "unindexed_records",
-                "cases"
+                "cases",
+                "snapshots_withheld"
               ],
               "properties": {
                 "available": {
@@ -35579,6 +35585,10 @@
                       }
                     }
                   }
+                },
+                "snapshots_withheld": {
+                  "$ref": "#/components/schemas/Uint64String",
+                  "description": "Rows whose newest body record says a byte bound withheld a snapshot (response_body flag bit 7)."
                 }
               }
             },
@@ -35612,6 +35622,7 @@
                     "no_tab_traffic_excluded",
                     "memory_cache_reuse_not_recorded",
                     "response_bodies_not_observed",
+                    "response_snapshots_withheld",
                     "network_tab_unresolved",
                     "network_tab_no_document",
                     "bounded_scope"

@@ -721,8 +721,10 @@
         const contentType = String.fromCharCode(...typeBytes.slice(0, Math.min(typeLength, 64)));
         const has = bit => (flags & bit) !== 0;
         const typePresent = has(0x40);
-        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || view.getUint16(30, true) !== 0 ||
-            stateCode < 1 || stateCode > 12 || (flags & ~0x7f) !== 0 || typeLength > 64 ||
+        // Version 2 adds bit 7, snapshots withheld by a byte bound.
+        const version = view.getUint16(0, true);
+        if (![1, 2].includes(version) || view.getUint16(2, true) !== 128 || view.getUint16(30, true) !== 0 ||
+            stateCode < 1 || stateCode > 12 || (flags & ~(version === 2 ? 0xff : 0x7f)) !== 0 || typeLength > 64 ||
             typePresent !== (typeLength !== 0) || typeBytes.slice(typeLength).some(byte => byte !== 0) ||
             (typePresent && !requestTokenCharacters.test(contentType)) || codingCount > 4 ||
             (has(0x10) && codingCount !== 4) ||
@@ -740,7 +742,7 @@
         if (!valid) return null;
         return {
           state: responseBodyStates[stateCode], shared: has(1), fromCache: has(2), serviceWorker: has(4),
-          stillEncoded: has(8), codingsOmitted: has(0x10), completionUnobserved: has(0x20),
+          stillEncoded: has(8), codingsOmitted: has(0x10), completionUnobserved: has(0x20), snapshotsWithheld: has(0x80),
           contentType: typePresent ? contentType : null,
           codings: codings.slice(0, codingCount).map(coding => responseCodings.get(coding)),
           bodyLength: String(bodyLength), capturedLength: String(captured), partialIndex,

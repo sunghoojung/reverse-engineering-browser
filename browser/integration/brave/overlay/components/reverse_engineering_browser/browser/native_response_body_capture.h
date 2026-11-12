@@ -102,6 +102,8 @@ class NativeResponseBodyCapture final {
     std::uint64_t started_ns = 0;
     std::uint64_t snapshot_ns = 0;
     std::uint64_t snapshot_size = 0;
+    // A delayed task will retry a snapshot the spacing held back.
+    bool snapshot_timer = false;
     // Bytes every snapshot of this body copied, against its allowance.
     std::uint64_t copied = 0;
     // The kept prefix reached the capture limit, so the stream was published
@@ -121,9 +123,16 @@ class NativeResponseBodyCapture final {
   void OnCompletionTimeout(Key key, std::uint64_t capture_id);
   // Ends the stream and records the body; an open body becomes partial.
   void Finish(std::map<Key, Body>::iterator found);
-  [[nodiscard]] bool SnapshotDue(const Body& body,
-                                 std::uint64_t size,
-                                 std::uint64_t now) const noexcept;
+  // Whether a snapshot of `size` kept bytes may be taken now.
+  enum class SnapshotGate : std::uint8_t { kUnchanged, kTooSoon, kWithheld, kReady };
+  [[nodiscard]] SnapshotGate SnapshotDue(const Body& body,
+                                         std::uint64_t size,
+                                         std::uint64_t now) const noexcept;
+  // The earliest time the spacing allows the next snapshot.
+  [[nodiscard]] static std::uint64_t NextSnapshotNs(const Body& body) noexcept;
+  // Takes the snapshot, waits for the spacing, or marks it withheld.
+  void TrySnapshot(std::map<Key, Body>::iterator found, std::uint64_t now);
+  void OnSnapshotTimer(Key key, std::uint64_t capture_id);
   void Snapshot(std::map<Key, Body>::iterator found);
   void Seal(std::map<Key, Body>::iterator found);
   // Ends `stream` as an artifact, or names an earlier one with its digest.

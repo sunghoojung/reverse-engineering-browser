@@ -172,6 +172,8 @@ function trafficResponseRows(record) {
   const codings = record.codings.map(coding => TRAFFIC_RESPONSE_CODINGS[coding] ?? coding).join(', ');
   const notes = [record.fromCache && 'served from the HTTP cache', record.serviceWorker && 'served by a service worker',
     record.completionUnobserved && 'the loader reported no completion, so the end is unconfirmed'].filter(Boolean);
+  // Version 2 bit 7 (protocol/native-network-v3.md "Partial bodies").
+  const withheld = record.snapshotsWithheld ? [['Snapshots', 'A snapshot the schedule allowed was withheld: this body\'s snapshot allowance, the session\'s snapshot share or the response body budget was used, so the newest snapshot is older than the schedule would make it.', 'prose']] : [];
   return [
     ['Content type', record.contentType ?? 'Not a bounded media type; not recorded', record.contentType ? 'value' : 'prose'],
     ['Content encoding', codings ? `${codings}${record.codingsOmitted ? ', more not recorded' : ''} · ${record.stillEncoded
@@ -179,7 +181,8 @@ function trafficResponseRows(record) {
     ['Body length', record.bodyLength === '0' && record.state !== 'empty'
       ? 'Not observed' : `${trafficResponseBytes(record.bodyLength)} decoded`, 'value'],
     ['SHA-256', record.sha256 ?? 'No retained bytes', record.sha256 ? 'value' : 'prose'],
-    ...(notes.length ? [['Delivery', notes.join('; '), 'prose']] : [])
+    ...(notes.length ? [['Delivery', notes.join('; '), 'prose']] : []),
+    ...withheld
   ];
 }
 

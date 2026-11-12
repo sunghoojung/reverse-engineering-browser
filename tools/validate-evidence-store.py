@@ -558,16 +558,18 @@ def valid_request_body(event: dict, payload: bytes) -> bool:
 
 def valid_response_body(event: dict, payload: bytes) -> bool:
     """Every rule of the native-network-v3.md response_body record, mirrored from the C++ core."""
-    if not valid_request_child(event, payload):
+    if not valid_request_child(event, payload, (1, 2)):
         return False
     state, flags, type_length, coding_count = payload[4], payload[5], payload[6], payload[7]
+    # Version 2 adds bit 7, snapshots withheld by a byte bound.
+    known = 0xFF if payload[0] == 2 else 0x7F
     body_length = int.from_bytes(payload[8:16], "little")
     captured = int.from_bytes(payload[16:24], "little")
     codings, partial_index = payload[24:28], int.from_bytes(payload[28:30], "little")
     digest, content_type = payload[32:64], payload[64:128]
     media = content_type[:type_length]
     type_present = bool(flags & 0x40)
-    if (not 1 <= state <= 12 or flags & ~0x7F or any(payload[30:32]) or type_length > 64
+    if (not 1 <= state <= 12 or flags & ~known or any(payload[30:32]) or type_length > 64
             or type_present != (type_length != 0) or any(content_type[type_length:])
             or (type_present and (media.count(b"/") != 1 or media.startswith(b"/")
                                   or media.endswith(b"/")

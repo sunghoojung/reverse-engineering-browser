@@ -233,26 +233,84 @@ void NativeResponseBodyCapture::OnData(const Key key,
   // Every open body is retained as it arrives, whether or not it declared a
   // length. At the capture limit its kept bytes are final, so it is sealed
   // instead of copied again.
-  const std::uint64_t size = stream.kept();
-  if (size == kNativeResponseBodyCaptureBytes) {
+  if (stream.kept() == kNativeResponseBodyCaptureBytes) {
     Seal(found);
-  } else if (SnapshotDue(body, size, now)) {
-    Snapshot(found);
+  } else {
+    TrySnapshot(found, now);
   }
 }
 
-bool NativeResponseBodyCapture::SnapshotDue(const Body& body,
-                                            const std::uint64_t size,
-                                            const std::uint64_t now) const noexcept {
+void NativeResponseBodyCapture::TrySnapshot(const std::map<Key, Body>::iterator found,
+                                            const std::uint64_t now) {
+  Body& body = found->second;
+  switch (SnapshotDue(body, body.stream.kept(), now)) {
+    case SnapshotGate::kReady:
+      Snapshot(found);
+      return;
+    case SnapshotGate::kWithheld:
+      // Every later record of the body says a byte bound withheld one.
+      body.summary.flags |= kNativeResponseBodySnapshotsWithheld;
+      return;
+    case SnapshotGate::kTooSoon:
+      break;
+    case SnapshotGate::kUnchanged:
+      return;
+  }
+  // A burst followed by silence is still published once the spacing allows:
+  // one delayed task per body, which finds the body by key and capture ID as
+  // the completion wait does, so a body that ended or a new configuration
+  // leaves it nothing to do.
+  if (body.snapshot_timer || !base::SequencedTaskRunner::HasCurrentDefault()) {
+    return;
+  }
+  body.snapshot_timer = true;
+  const std::uint64_t due = NextSnapshotNs(body);
+  base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
+      FROM_HERE,
+      base::BindOnce([](Key key, std::uint64_t id) { Get().OnSnapshotTimer(key, id); },
+                     found->first, body.capture_id),
+      base::Nanoseconds(static_cast<std::int64_t>(due > now ? due - now : 0)));
+}
+
+void NativeResponseBodyCapture::OnSnapshotTimer(const Key key, const std::uint64_t capture_id) {
+  const auto found = bodies_.find(key);
+  if (found == bodies_.end() || found->second.capture_id != capture_id) {
+    return;
+  }
+  Body& body = found->second;
+  body.snapshot_timer = false;
+  const std::uint64_t now = Now();
+  // A body whose tee ended waits for its record; past expiry nothing is sent.
+  if (body.tee_done || body.sealed || body.refused || !body.stream.is_open() ||
+      now >= expires_at_monotonic_ns_) {
+    return;
+  }
+  TrySnapshot(found, now);
+}
+
+std::uint64_t NativeResponseBodyCapture::NextSnapshotNs(const Body& body) noexcept {
+  // The first t with t - last >= max(1 s, (t - start) / 32): at least a
+  // second after the last, and (32 * (last - start)) / 31 after the start.
+  const std::uint64_t last = body.snapshot_ns - body.started_ns;
+  const std::uint64_t spaced =
+      (last * kNativeResponseBodySnapshotAgeDivisor + kNativeResponseBodySnapshotAgeDivisor - 2) /
+      (kNativeResponseBodySnapshotAgeDivisor - 1);
+  return body.started_ns + std::max(last + kNativeResponseBodySnapshotFirstNs, spaced);
+}
+
+NativeResponseBodyCapture::SnapshotGate NativeResponseBodyCapture::SnapshotDue(
+    const Body& body,
+    const std::uint64_t size,
+    const std::uint64_t now) const noexcept {
   // The partial index is 16 bits; the age spacing keeps a body far below it.
   if (size <= body.snapshot_size ||
       body.partials >= std::numeric_limits<std::uint16_t>::max() - 1) {
-    return false;
+    return SnapshotGate::kUnchanged;
   }
   const std::uint64_t age = now - body.started_ns;
   if (now - body.snapshot_ns <
       std::max(kNativeResponseBodySnapshotFirstNs, age / kNativeResponseBodySnapshotAgeDivisor)) {
-    return false;
+    return SnapshotGate::kTooSoon;
   }
   // A snapshot copies all `size` kept bytes. A body may spend a quarter of its
   // allowance at once, and the rest as the larger of the share of the session
@@ -268,8 +326,10 @@ bool NativeResponseBodyCapture::SnapshotDue(const Body& body,
       allowance / 4 +
       static_cast<std::uint64_t>(static_cast<double>(allowance - allowance / 4) * share);
   return body.copied + size <= paced &&
-         snapshot_used_ + size <= budget_ / kNativeResponseBodySnapshotSessionDivisor &&
-         size <= budget_ - std::min(budget_, used_);
+                 snapshot_used_ + size <= budget_ / kNativeResponseBodySnapshotSessionDivisor &&
+                 size <= budget_ - std::min(budget_, used_)
+             ? SnapshotGate::kReady
+             : SnapshotGate::kWithheld;
 }
 
 void NativeResponseBodyCapture::OnEnd(const Key key,

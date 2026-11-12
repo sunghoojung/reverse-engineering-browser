@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/js_based_event_listener.cc b/third_party/blink/renderer/bindings/core/v8/js_based_event_listener.cc
-index 4444382..5b53a56 100644
+index fb937b6..7cbbe26 100644
 --- a/third_party/blink/renderer/bindings/core/v8/js_based_event_listener.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/js_based_event_listener.cc
 @@ -4,6 +4,7 @@
@@ -43,7 +43,7 @@ index 4444382..5b53a56 100644
  // Implements step 2. of "inner invoke".
  // https://dom.spec.whatwg.org/#concept-event-listener-inner-invoke
  void JSBasedEventListener::Invoke(
-@@ -184,6 +211,11 @@ void JSBasedEventListener::Invoke(
+@@ -203,6 +230,11 @@ void JSBasedEventListener::Invoke(
        task_attribution_resource_timing_scope = SetTaskStateVariable(
            resource_timing_context_, execution_context_of_event_target);
      }
@@ -56,7 +56,7 @@ index 4444382..5b53a56 100644
      // and handle errors if thrown.
      InvokeInternal(*event->currentTarget(), *event, js_event);
 diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
-index 3308cff..56e8ccd 100644
+index 04b76db..04477c0 100644
 --- a/third_party/blink/renderer/core/BUILD.gn
 +++ b/third_party/blink/renderer/core/BUILD.gn
 @@ -261,6 +261,7 @@ component("core") {
@@ -68,7 +68,7 @@ index 3308cff..56e8ccd 100644
      "core_initializer.cc",
      "core_initializer.h",
 diff --git a/third_party/blink/renderer/core/scheduler/dom_timer.cc b/third_party/blink/renderer/core/scheduler/dom_timer.cc
-index a9757ec..a255a6f 100644
+index dde2659..7b3e677 100644
 --- a/third_party/blink/renderer/core/scheduler/dom_timer.cc
 +++ b/third_party/blink/renderer/core/scheduler/dom_timer.cc
 @@ -25,6 +25,7 @@
@@ -86,17 +86,17 @@ index a9757ec..a255a6f 100644
 +#include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation_blink.h"
  #include "third_party/blink/public/common/features.h"
  #include "third_party/blink/public/platform/task_type.h"
- #include "third_party/blink/renderer/bindings/core/v8/v8_union_string_trustedhtml.h"
-@@ -43,6 +45,7 @@
+ #include "third_party/blink/renderer/bindings/core/v8/v8_function.h"
+@@ -44,6 +46,7 @@
  #include "third_party/blink/renderer/core/inspector/inspector_trace_events.h"
  #include "third_party/blink/renderer/core/probe/core_probes.h"
  #include "third_party/blink/renderer/core/scheduler/scheduled_action.h"
 +#include "third_party/blink/renderer/platform/bindings/callback_function_base.h"
  #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
  #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
- #include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
-@@ -165,6 +168,30 @@ bool IsAllowed(ExecutionContext& context, bool is_eval, const String& source) {
-   return true;
+@@ -191,6 +194,30 @@ probe::AsyncTaskContext::StackOptions GetStackOptionsForHandler(
+   return probe::AsyncTaskContext::StackOptions::kScan;
  }
  
 +// A Console timer watch; see protocol/native-debugger-observation-v1.md.
@@ -126,7 +126,7 @@ index a9757ec..a255a6f 100644
  }  // namespace
  
  int DOMTimer::setTimeout(ScriptState* script_state,
-@@ -353,6 +380,10 @@ DOMTimer::DOMTimer(ExecutionContext& context,
+@@ -379,6 +406,10 @@ DOMTimer::DOMTimer(ExecutionContext& context,
    DEVTOOLS_TIMELINE_TRACE_EVENT_INSTANT(
        "TimerInstall", inspector_timer_install_event::Data, &context,
        timeout_id_, timeout, single_shot);
@@ -135,9 +135,9 @@ index a9757ec..a255a6f 100644
 +                       timeout);
 +  }
    const char* name = single_shot ? "setTimeout" : "setInterval";
-   async_task_context_.Schedule(&context, name, scan_for_ads);
+   async_task_context_.Schedule(&context, name, stack_options);
    probe::BreakableLocation(&context, name);
-@@ -407,6 +438,10 @@ void DOMTimer::Fired() {
+@@ -433,6 +464,10 @@ void DOMTimer::Fired() {
    DEVTOOLS_TIMELINE_TRACE_EVENT("TimerFire", inspector_timer_fire_event::Data,
                                  context, timeout_id_);
    const bool is_interval = RepeatInterval().has_value();

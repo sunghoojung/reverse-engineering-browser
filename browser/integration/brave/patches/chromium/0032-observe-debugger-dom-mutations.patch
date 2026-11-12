@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/core/dom/container_node.cc b/third_party/blink/renderer/core/dom/container_node.cc
-index d33adc4..1519a12 100644
+index 8b323b0..2d1d302 100644
 --- a/third_party/blink/renderer/core/dom/container_node.cc
 +++ b/third_party/blink/renderer/core/dom/container_node.cc
 @@ -23,6 +23,7 @@
@@ -8,7 +8,7 @@ index d33adc4..1519a12 100644
  
 +#include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation_blink.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_get_html_options.h"
- #include "third_party/blink/renderer/bindings/core/v8/v8_union_sethtmlunsafeoptions_trustedparseroptions.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_union_sethtmlunsafeoptions_trustedhtmlparseroptions.h"
  #include "third_party/blink/renderer/core/accessibility/ax_object_cache.h"
 @@ -34,6 +35,7 @@
  #include "third_party/blink/renderer/core/dom/child_frame_disconnector.h"
@@ -59,7 +59,7 @@ index d33adc4..1519a12 100644
  // This class is helpful to detect necessity of
  // RecheckNodeInsertionStructuralPrereq() after removeChild*() inside
  // InsertBefore(), AppendChild(), and ReplaceChild().
-@@ -391,6 +427,10 @@ void ContainerNode::InsertNodeVector(
+@@ -398,6 +434,10 @@ void ContainerNode::InsertNodeVector(
      const Functor& mutator,
      NodeVector& post_insertion_notification_targets) {
    probe::WillInsertDOMNode(this);
@@ -70,7 +70,7 @@ index d33adc4..1519a12 100644
    {
      EventDispatchForbiddenScope assert_no_event_dispatch;
      ScriptForbiddenScope forbid_script;
-@@ -859,6 +899,9 @@ void ContainerNode::WillRemoveChild(Node& child) {
+@@ -870,6 +910,9 @@ void ContainerNode::WillRemoveChild(Node& child) {
    ChildListMutationScope(*this).WillRemoveChild(child);
    child.NotifyMutationObserversNodeWillDetach();
    probe::WillRemoveDOMNode(&child);
@@ -80,7 +80,7 @@ index d33adc4..1519a12 100644
  
    // Only disconnect subframes in the non-state-preserving-atomic-move case,
    // i.e., the traditional case where we intend to *fully* remove a node from
-@@ -900,6 +943,9 @@ void ContainerNode::WillRemoveChildren() {
+@@ -911,6 +954,9 @@ void ContainerNode::WillRemoveChildren() {
      mutation.WillRemoveChild(child);
      child.NotifyMutationObserversNodeWillDetach();
      probe::WillRemoveDOMNode(&child);
@@ -90,7 +90,7 @@ index d33adc4..1519a12 100644
    }
  
    // Only disconnect subframes in the non-state-preserving-atomic-move case,
-@@ -1083,6 +1129,9 @@ void ContainerNode::ParserRemoveChild(Node& old_child) {
+@@ -1093,6 +1139,9 @@ void ContainerNode::ParserRemoveChild(Node& old_child) {
    old_child.NotifyMutationObserversNodeWillDetach();
  
    probe::WillRemoveDOMNode(&old_child);
@@ -98,29 +98,21 @@ index d33adc4..1519a12 100644
 +    ObserveNativeDomMutation(*this, old_child, true);
 +  }
  
-   HTMLFrameOwnerElement::PluginDisposeSuspendScope suspend_plugin_dispose;
    TreeOrderedMap::RemoveScope tree_remove_scope;
+   StyleEngine& engine = GetDocument().GetStyleEngine();
 diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/renderer/core/dom/element.cc
-index 5227c6b..5c85b35 100644
+index 755950a..f7d1d6c 100644
 --- a/third_party/blink/renderer/core/dom/element.cc
 +++ b/third_party/blink/renderer/core/dom/element.cc
 @@ -34,6 +34,7 @@
+ #include <utility>
  
- #include "base/containers/adapters.h"
  #include "base/feature_list.h"
 +#include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation_blink.h"
  #include "cc/input/snap_selection_strategy.h"
  #include "components/viz/common/surfaces/tracked_element_rects.h"
  #include "third_party/blink/public/common/features.h"
-@@ -119,6 +120,7 @@
- #include "third_party/blink/renderer/core/dom/document.h"
- #include "third_party/blink/renderer/core/dom/document_fragment.h"
- #include "third_party/blink/renderer/core/dom/document_lifecycle.h"
-+#include "third_party/blink/renderer/core/dom/dom_node_ids.h"
- #include "third_party/blink/renderer/core/dom/dom_token_list.h"
- #include "third_party/blink/renderer/core/dom/element_animation_trigger_data.h"
- #include "third_party/blink/renderer/core/dom/element_data_cache.h"
-@@ -11924,6 +11926,19 @@ void Element::WillModifyAttribute(const QualifiedName& name,
+@@ -12386,6 +12387,19 @@ void Element::WillModifyAttribute(const QualifiedName& name,
          MutationRecord::CreateAttributes(this, name, old_value));
    }
    probe::WillModifyDOMAttr(this, old_value, new_value);

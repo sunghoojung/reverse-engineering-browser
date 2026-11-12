@@ -1282,7 +1282,11 @@ opens its provenance: the responses that set it, the `document.cookie` and
 Cookie Store calls that used it with their script position (file, line and
 function from `get_cookie_provenance`, with **Show in Sources**, when the
 script's source was retained), and the requests that sent it, linked by value
-digest to the script write. Loaded requests are read first, then the store's
+digest to the script write. A `document.cookie` read is listed under each
+cookie name it returned, with how many reads that script position made; a read
+recorded before reads named cookies, or with names past the 360-name bound or
+a full table, is counted in a note, since it may hold the name without naming
+it. Loaded requests are read first, then the store's
 answer adds what the newest retained records hold beyond them. An empty group
 reads "Not in the scanned range" unless that answer covered the whole session. Traffic has no
 comparison or content-search views; General states the capture coverage.

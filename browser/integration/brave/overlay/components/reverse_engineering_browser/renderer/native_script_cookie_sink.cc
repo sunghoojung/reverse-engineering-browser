@@ -33,6 +33,48 @@ std::uint32_t Clamp32(const std::size_t value) noexcept {
       std::min<std::size_t>(value, std::numeric_limits<std::uint32_t>::max()));
 }
 
+std::uint32_t SaturatingAdd(const std::uint32_t value, const std::uint32_t add) noexcept {
+  return value > std::numeric_limits<std::uint32_t>::max() - add
+             ? std::numeric_limits<std::uint32_t>::max()
+             : value + add;
+}
+
+// FNV-1a, over the fields of a read key.
+class KeyHash final {
+ public:
+  void Add(const std::uint64_t value, const std::size_t width) noexcept {
+    for (std::size_t i = 0; i < width; ++i) {
+      hash_ = (hash_ ^ ((value >> (8U * i)) & 0xffU)) * 0x100000001b3ULL;
+    }
+  }
+  [[nodiscard]] std::uint64_t value() const noexcept { return hash_; }
+
+ private:
+  std::uint64_t hash_ = 0xcbf29ce484222325ULL;
+};
+
+// Each cookie name of a document.cookie string, in order. Chromium writes
+// `name=value` or, for an empty name, the bare value, joined by "; "
+// (CanonicalCookie::BuildCookieLine); neither part can hold ';'. This splits
+// as the page would: at ';', then at the first '=', whitespace trimmed.
+template <class Visit>
+void ForEachCookieName(const std::string_view cookie_string, Visit&& visit) noexcept {
+  std::size_t start = 0;
+  while (start <= cookie_string.size()) {
+    std::size_t end = cookie_string.find(';', start);
+    if (end == std::string_view::npos) {
+      end = cookie_string.size();
+    }
+    const std::string_view entry = Trim(cookie_string.substr(start, end - start));
+    // A cookie has a name or a value, so an empty entry is no cookie.
+    if (!entry.empty()) {
+      const std::size_t equals = entry.find('=');
+      visit(equals == std::string_view::npos ? std::string_view() : Trim(entry.substr(0, equals)));
+    }
+    start = end + 1;
+  }
+}
+
 }  // namespace
 
 NativeScriptCookieSink& NativeScriptCookieSink::Get() {
@@ -49,36 +91,51 @@ void NativeScriptCookieSink::Configure(const bool capture_content,
   const std::uint64_t generation = sink.config_generation_.load(std::memory_order_acquire);
   const bool active = capture_content && provider && (generation & 1U) == 0 &&
                       sink.emitter_.load(std::memory_order_acquire);
+  if (active) {
+    // Allocated here, on the transport sequence, so a read never allocates
+    // and a session without content capture holds no table.
+    auto table = std::make_unique<ReadTable>();
+    base::AutoLock lock(reads_lock_);
+    reads_ = std::move(table);
+  }
   provider_.store(active ? provider : nullptr, std::memory_order_relaxed);
   generation_.store(active ? generation : 0, std::memory_order_release);
 }
 
 void NativeScriptCookieSink::Flush() noexcept {
   const std::uint64_t generation = generation_.exchange(0, std::memory_order_acq_rel);
-  base::AutoLock lock(reads_lock_);
-  if (generation != 0) {
-    for (std::size_t index = 0; index < read_keys_; ++index) {
-      const ReadEntry& entry = reads_[index];
-      if (entry.unreported == 0) {
-        continue;
-      }
-      NativeScriptCookieSummary summary;
-      summary.api = entry.key.api;
-      summary.count = entry.unreported;
-      summary.name_length = entry.key.name_length;
-      summary.name_prefix = entry.key.name_prefix;
-      summary.string_length = entry.string_length;
-      summary.frame = entry.key.frame;
-      summary.thread = entry.key.thread;
-      summary.flags = static_cast<std::uint8_t>(
-          (entry.key.name_length > kNativeScriptCookieNamePrefixBytes
-               ? kNativeScriptCookieNameTruncated
-               : 0) |
-          (entry.key.frame.kind != 0 ? kNativeScriptCookieFrameRecorded : 0));
-      static_cast<void>(Emit(summary, entry.key.frame_id, generation));
-    }
+  std::unique_ptr<ReadTable> table;
+  {
+    // A call that took the lock before this sees the old generation and
+    // finishes first; one after it finds no table.
+    base::AutoLock lock(reads_lock_);
+    table = std::move(reads_);
   }
-  read_keys_ = 0;
+  if (generation == 0 || !table) {
+    return;
+  }
+  for (std::size_t index = 0; index < table->used; ++index) {
+    const ReadEntry& entry = table->entries[index];
+    if (entry.unreported == 0) {
+      continue;
+    }
+    NativeScriptCookieSummary summary;
+    summary.api = entry.key.api;
+    summary.count = entry.unreported;
+    summary.name_length = entry.key.name_length;
+    summary.name_prefix = entry.key.name_prefix;
+    summary.string_length = entry.string_length;
+    summary.unrecorded_names = entry.unrecorded_names;
+    summary.frame = entry.key.frame;
+    summary.thread = entry.key.thread;
+    summary.flags = static_cast<std::uint8_t>(
+        (entry.key.name_length > kNativeScriptCookieNamePrefixBytes
+             ? kNativeScriptCookieNameTruncated
+             : 0) |
+        (entry.key.frame.kind != 0 ? kNativeScriptCookieFrameRecorded : 0) |
+        (entry.key.read_record ? kNativeScriptCookieReadRecord : 0));
+    static_cast<void>(Emit(summary, entry.key.frame_id, generation));
+  }
 }
 
 NativeScriptCookieSummary NativeScriptCookieSink::Summary(
@@ -127,14 +184,86 @@ void NativeScriptCookieSink::RecordDocumentCookieSet(const std::string_view cook
   Record(summary, frame_id, value);
 }
 
-void NativeScriptCookieSink::RecordDocumentCookieGet(const std::size_t string_length,
+void NativeScriptCookieSink::RecordDocumentCookieGet(const std::string_view cookie_string,
                                                      const std::uint64_t frame_id) noexcept {
   if (!IsEnabled()) [[likely]] {
     return;
   }
-  NativeScriptCookieSummary summary = Summary(NativeScriptCookieApi::kDocumentCookieGet, {});
-  summary.string_length = Clamp32(string_length);
-  RecordRead(summary, frame_id);
+  const std::uint64_t generation = generation_.load(std::memory_order_acquire);
+  if (generation == 0) {
+    return;
+  }
+  NativeScriptCookieSummary read = Summary(NativeScriptCookieApi::kDocumentCookieGet, {});
+  read.string_length = Clamp32(cookie_string.size());
+  const std::uint64_t calling_frame = CallingFrameId(frame_id);
+  ReadKey key{calling_frame,
+              read.thread,
+              NativeScriptCookieApi::kDocumentCookieGet,
+              false,
+              read.frame,
+              0,
+              {}};
+  base::AutoLock lock(reads_lock_);
+  if (generation_.load(std::memory_order_acquire) != generation || !reads_) {
+    return;
+  }
+  const std::uint64_t this_read = ++reads_->reads;
+  // Names first, so a table that fills during this read still counts them.
+  std::size_t names = 0;
+  std::uint32_t unrecorded = 0;
+  ForEachCookieName(cookie_string, [&](const std::string_view name) {
+    if (names++ >= kNativeScriptCookieReadNames) {
+      ++unrecorded;
+      return;
+    }
+    key.name_length = Clamp32(name.size());
+    key.name_prefix = {};
+    std::transform(
+        name.begin(),
+        name.begin() + static_cast<std::ptrdiff_t>(std::min(name.size(), key.name_prefix.size())),
+        key.name_prefix.begin(), [](const char c) { return static_cast<std::uint8_t>(c); });
+    ReadEntry* const entry = FindOrInsert(key);
+    if (!entry) {
+      ++unrecorded;
+      return;
+    }
+    if (entry->last_read == this_read) {
+      return;
+    }
+    entry->last_read = this_read;
+    if (!CountRead(*entry, read.string_length)) {
+      return;
+    }
+    NativeScriptCookieSummary named = read;
+    named.name_length = key.name_length;
+    named.name_prefix = key.name_prefix;
+    if (key.name_length > kNativeScriptCookieNamePrefixBytes) {
+      named.flags |= kNativeScriptCookieNameTruncated;
+    }
+    named.count = entry->unreported;
+    entry->unreported = 0;
+    static_cast<void>(Emit(named, calling_frame, generation));
+  });
+  // The read itself, with the names no name record counted.
+  key.read_record = true;
+  key.name_length = 0;
+  key.name_prefix = {};
+  read.flags |= kNativeScriptCookieReadRecord;
+  if (ReadEntry* const entry = FindOrInsert(key)) {
+    entry->unrecorded_names = SaturatingAdd(entry->unrecorded_names, unrecorded);
+    if (!CountRead(*entry, read.string_length)) {
+      return;
+    }
+    read.count = entry->unreported;
+    read.unrecorded_names = entry->unrecorded_names;
+    entry->unreported = 0;
+    entry->unrecorded_names = 0;
+  } else {
+    read.flags |= kNativeScriptCookieTableFull;
+    read.count = 1;
+    read.unrecorded_names = unrecorded;
+  }
+  static_cast<void>(Emit(read, calling_frame, generation));
 }
 
 void NativeScriptCookieSink::RecordCookieStore(const NativeScriptCookieApi api,
@@ -206,39 +335,75 @@ void NativeScriptCookieSink::RecordRead(NativeScriptCookieSummary summary,
     return;
   }
   frame_id = CallingFrameId(frame_id);
-  const ReadKey key{
-      frame_id,   summary.thread, summary.frame, summary.name_length, summary.name_prefix,
-      summary.api};
+  const ReadKey key{frame_id,      summary.thread,      summary.api,        false,
+                    summary.frame, summary.name_length, summary.name_prefix};
   base::AutoLock lock(reads_lock_);
   // A configuration that ended while this call ran no longer owns the table.
-  if (generation_.load(std::memory_order_acquire) != generation) {
+  if (generation_.load(std::memory_order_acquire) != generation || !reads_) {
     return;
   }
-  ReadEntry* const begin = reads_.data();
-  ReadEntry* const end = begin + read_keys_;
-  ReadEntry* const found =
-      std::find_if(begin, end, [&key](const ReadEntry& entry) { return entry.key == key; });
-  if (found != end) {
-    found->string_length = summary.string_length;
-    ++found->unreported;
-    if (found->reads != std::numeric_limits<std::uint32_t>::max()) {
-      ++found->reads;
-    }
-    // Powers of two bound a hot key to log2(reads) records.
-    if (!std::has_single_bit(found->reads) &&
-        found->unreported != std::numeric_limits<std::uint32_t>::max()) {
+  if (ReadEntry* const entry = FindOrInsert(key)) {
+    if (!CountRead(*entry, summary.string_length)) {
       return;
     }
-    summary.count = found->unreported;
-    found->unreported = 0;
-  } else if (read_keys_ < reads_.size()) {
-    reads_[read_keys_++] = ReadEntry{key, summary.string_length, 1, 0};
-    summary.count = 1;
+    summary.count = entry->unreported;
+    entry->unreported = 0;
   } else {
     summary.flags |= kNativeScriptCookieTableFull;
     summary.count = 1;
   }
   static_cast<void>(Emit(summary, frame_id, generation));
+}
+
+NativeScriptCookieSink::ReadEntry* NativeScriptCookieSink::FindOrInsert(
+    const ReadKey& key) noexcept {
+  ReadTable& table = *reads_;
+  KeyHash hash;
+  hash.Add(key.frame_id, 8);
+  hash.Add(key.thread, 1);
+  hash.Add(static_cast<std::uint8_t>(key.api), 1);
+  hash.Add(key.read_record ? 1U : 0U, 1);
+  hash.Add(key.frame.kind, 1);
+  hash.Add(key.frame.flags, 1);
+  hash.Add(key.frame.script_id, 4);
+  hash.Add(key.frame.position, 4);
+  hash.Add(key.frame.function_start, 4);
+  hash.Add(key.name_length, 4);
+  for (const std::uint8_t byte : key.name_prefix) {
+    hash.Add(byte, 1);
+  }
+  constexpr std::size_t kMask = kReadSlots - 1;
+  static_assert((kReadSlots & kMask) == 0, "slot count must be a power of two");
+  // At most half the slots are used, so an empty slot ends every probe.
+  for (std::size_t slot = static_cast<std::size_t>(hash.value()) & kMask;;
+       slot = (slot + 1) & kMask) {
+    const std::uint16_t index = table.slots[slot];
+    if (index == 0) {
+      if (table.used == table.entries.size()) {
+        return nullptr;
+      }
+      ReadEntry& entry = table.entries[table.used];
+      entry = ReadEntry();
+      entry.key = key;
+      table.slots[slot] = static_cast<std::uint16_t>(++table.used);
+      return &entry;
+    }
+    if (table.entries[index - 1U].key == key) {
+      return &table.entries[index - 1U];
+    }
+  }
+}
+
+bool NativeScriptCookieSink::CountRead(ReadEntry& entry,
+                                       const std::uint32_t string_length) noexcept {
+  entry.string_length = string_length;
+  ++entry.unreported;
+  if (entry.reads != std::numeric_limits<std::uint32_t>::max()) {
+    ++entry.reads;
+  }
+  // Powers of two bound a hot key to log2(reads) records.
+  return std::has_single_bit(entry.reads) ||
+         entry.unreported == std::numeric_limits<std::uint32_t>::max();
 }
 
 bool NativeScriptCookieSink::Emit(const NativeScriptCookieSummary& summary,

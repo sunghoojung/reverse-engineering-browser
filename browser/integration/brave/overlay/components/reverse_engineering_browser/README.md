@@ -189,8 +189,11 @@ Header blocks and cookie lists take shares of the same in-flight pool. In the
 renderer, `renderer/native_script_cookie_sink.h` records `document.cookie` and
 Cookie Store API calls from Chromium patch `0028-record-script-cookie-access`,
 enabled only by the content gate `NativeProbeClient::Configure` carries, with
-the innermost script frame from `renderer/native_script_position.h`; reads are
-aggregated per key.
+the innermost script frame from `renderer/native_script_position.h`. A
+`document.cookie` read records each cookie name the returned string holds, at
+most 360 per read with the rest counted, and reads aggregate per frame, script
+position and name in a 4,096-key table allocated only for a content-capture
+configuration.
 
 Large artifact bytes use the separate 128-byte framed contract and 32-byte
 acknowledgment in `common/native_artifact_header.h`. Only the browser-process

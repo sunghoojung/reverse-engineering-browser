@@ -430,6 +430,11 @@ pub(crate) struct Script {
     /// The isolate its frame and stack are read in: version 1 is the
     /// document's; version 2 names it. None when version 2 names no thread.
     pub(crate) scope: Option<request_stack::Scope>,
+    /// A `document.cookie` read of the whole jar, with no name: every version
+    /// 1 and 2 read, and a version 3 read record (flag bit 4).
+    read_record: bool,
+    /// A version 3 read record's names that no name record counts.
+    unrecorded_names: u32,
 }
 
 /// The C++ core's rules for the renderer's script_cookie record.
@@ -462,7 +467,7 @@ pub(crate) fn decode_script(event: &Value) -> Option<Script> {
         return None;
     }
     let version = le(&bytes[0..2]);
-    if !matches!(version, 1 | 2) {
+    if !matches!(version, 1..=3) {
         return None;
     }
     let frame_id = event["frame_id"].as_str()?.parse::<u64>().ok()?;
@@ -479,18 +484,31 @@ pub(crate) fn decode_script(event: &Value) -> Option<Script> {
     } else {
         thread == 0 || scope.is_some()
     };
+    // Version 3: a document.cookie read is a nameless read record (bit 4),
+    // whose offset 16 counts unrecorded names, or one name it returned.
+    let flagged_read = bytes[5] & 16 != 0;
     let script = Script {
         api: bytes[4],
         flags: bytes[5],
         count: le(&bytes[8..12]) as u32,
         name_length: le(&bytes[12..16]) as u32,
-        value_length: le(&bytes[16..20]) as u32,
+        value_length: if flagged_read {
+            0
+        } else {
+            le(&bytes[16..20]) as u32
+        },
         string_length: le(&bytes[20..24]) as u32,
         frame: bytes[24..40].try_into().ok()?,
         stack: bytes[40..72].try_into().ok()?,
         value: bytes[72..104].try_into().ok()?,
         prefix: bytes[104..128].try_into().ok()?,
         scope,
+        read_record: bytes[4] == 2 && (version < 3 || flagged_read),
+        unrecorded_names: if flagged_read {
+            le(&bytes[16..20]) as u32
+        } else {
+            0
+        },
     };
     let zero = |slice: &[u8]| slice.iter().all(|byte| *byte == 0);
     let write = matches!(script.api, 1 | 3 | 6);
@@ -502,8 +520,17 @@ pub(crate) fn decode_script(event: &Value) -> Option<Script> {
         && frame[1] & !3 == 0;
     let recorded = script.flags & 2 != 0;
     let stacked = script.flags & 4 != 0;
+    let flag_mask = if version == 3 { 0x1f } else { 0x0f };
+    let reads_shaped = if flagged_read {
+        script.api == 2 && script.name_length == 0
+    } else {
+        version < 3
+            || script.api != 2
+            || (script.flags & 8 == 0 && script.string_length >= script.name_length)
+    };
     let valid = (1..=6).contains(&script.api)
-        && script.flags & !0x0f == 0
+        && script.flags & !flag_mask == 0
+        && reads_shaped
         && scoped
         && bytes[7] == 0
         && (script.scope.is_some() || !recorded)
@@ -549,6 +576,8 @@ fn describe_script(event: &Value, script: &Script) -> Value {
         "value_sha256": if matches!(script.api, 1 | 3 | 6) { json!(hex::encode(script.value)) } else { Value::Null },
         "string_bytes": script.string_length,
         "table_full": script.flags & 8 != 0,
+        "read_record": script.read_record,
+        "unrecorded_names": script.unrecorded_names,
         "script_frame": if script.flags & 2 != 0 {
             json!({"kind": if frame[0] == 2 { "wasm" } else { "javascript" },
                 "constructor": frame[1] & 1 != 0, "script_id": le(&frame[4..8]),
@@ -611,6 +640,11 @@ pub fn provenance(
     let mut stacks: HashMap<(u64, request_stack::Scope, [u8; 16], [u8; 32]), Value> =
         HashMap::new();
     let mut stacks_unresolved = 0u64;
+    // document.cookie reads that returned the jar without naming each cookie
+    // in it: they may include this name, so `script` is then not complete.
+    let mut whole_jar_reads = 0u64;
+    let mut unrecorded_reads = 0u64;
+    let mut unrecorded_names = 0u64;
     let mut ordered: Vec<&Value> = events
         .iter()
         .filter(|event| event["session_id"] == session && event["category"] == "network")
@@ -624,6 +658,14 @@ pub fn provenance(
     for event in ordered {
         match event["type"].as_str() {
             Some("script_cookie") => match decode_script(event) {
+                Some(script) if script.read_record => {
+                    if script.flags & 16 == 0 {
+                        whole_jar_reads += u64::from(script.count);
+                    } else if script.unrecorded_names != 0 {
+                        unrecorded_reads += u64::from(script.count);
+                        unrecorded_names += u64::from(script.unrecorded_names);
+                    }
+                }
                 Some(script) if names_match(&script, wanted) => {
                     let mut item = describe_script(event, &script);
                     if let (true, Some(scope)) = (script.flags & 2 != 0, script.scope) {
@@ -724,6 +766,12 @@ pub fn provenance(
         "lists_read": lists.len(),
         "lists_unread": unread.len(),
         "stacks_unresolved": stacks_unresolved,
+        "read_coverage": {
+            "complete": whole_jar_reads == 0 && unrecorded_reads == 0,
+            "whole_jar_reads": whole_jar_reads,
+            "reads_with_unrecorded_names": unrecorded_reads,
+            "unrecorded_names": unrecorded_names,
+        },
         "malformed_records": malformed,
     })
 }
@@ -956,6 +1004,104 @@ mod tests {
         assert_eq!(none["sent_with"][0]["blocked"], true);
         assert_eq!(none["script"], json!([]));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A `document.cookie` read: version 3 with `name`, else the whole jar.
+    fn read_payload(
+        version: u8,
+        name: &[u8],
+        read_record: bool,
+        count: u32,
+        unrecorded: u32,
+    ) -> Vec<u8> {
+        let mut out = script_payload(2, name, b"");
+        out[0] = version;
+        out[6] = if version >= 2 { 1 } else { 0 };
+        out[5] = 2 | if read_record { 16 } else { 0 };
+        out[8..12].copy_from_slice(&count.to_le_bytes());
+        out[16..20].copy_from_slice(&unrecorded.to_le_bytes());
+        out[20..24].copy_from_slice(&40u32.to_le_bytes());
+        out[72..104].fill(0);
+        out
+    }
+
+    #[test]
+    fn document_cookie_reads_join_provenance_by_name() {
+        let root = std::env::temp_dir().join(format!("reb-cookie-reads-{}", std::process::id()));
+        let events = vec![
+            record(
+                "script_cookie",
+                5,
+                0,
+                &read_payload(3, b"_abck", false, 4, 0),
+                "0",
+            ),
+            record(
+                "script_cookie",
+                6,
+                0,
+                &read_payload(3, b"pref", false, 1, 0),
+                "0",
+            ),
+            record(
+                "script_cookie",
+                7,
+                0,
+                &read_payload(3, b"", true, 2, 3),
+                "0",
+            ),
+            record(
+                "script_cookie",
+                8,
+                0,
+                &read_payload(3, b"", true, 1, 0),
+                "0",
+            ),
+            record(
+                "script_cookie",
+                9,
+                0,
+                &read_payload(2, b"", false, 5, 0),
+                "0",
+            ),
+        ];
+        let origin = provenance(&events, &[], &root, "7", "_abck", &no_index);
+        assert_eq!(origin["malformed_records"], json!([]));
+        assert_eq!(origin["script"].as_array().unwrap().len(), 1);
+        let read = &origin["script"][0];
+        assert_eq!(read["api"], "document.cookie get");
+        assert_eq!(read["count"], 4);
+        assert_eq!(read["read_record"], false);
+        assert_eq!(read["script_frame"]["position"], 1234);
+        assert_eq!(read["value_sha256"], Value::Null);
+        assert_eq!(
+            origin["read_coverage"],
+            json!({"complete": false, "whole_jar_reads": 5, "reads_with_unrecorded_names": 2,
+                "unrecorded_names": 3})
+        );
+        // Only reads that named every cookie leave the coverage complete.
+        let named = provenance(&events[..2], &[], &root, "7", "_abck", &no_index);
+        assert_eq!(named["read_coverage"]["complete"], true);
+        // A read record has no name, and a name read is never recorded alone.
+        assert!(
+            decode_script(&record(
+                "script_cookie",
+                5,
+                0,
+                &read_payload(3, b"a", true, 1, 0),
+                "0"
+            ))
+            .is_none()
+        );
+        let mut full = read_payload(3, b"a", false, 1, 0);
+        full[5] |= 8;
+        assert!(decode_script(&record("script_cookie", 5, 0, &full, "0")).is_none());
+        let mut unrecorded = read_payload(3, b"a", false, 1, 0);
+        unrecorded[16] = 1;
+        assert!(decode_script(&record("script_cookie", 5, 0, &unrecorded, "0")).is_none());
+        let mut legacy_flag = read_payload(2, b"", true, 1, 0);
+        legacy_flag[16] = 0;
+        assert!(decode_script(&record("script_cookie", 5, 0, &legacy_flag, "0")).is_none());
     }
 
     #[test]

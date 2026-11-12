@@ -1639,15 +1639,15 @@ its own requests and the isolate key of its [stack scope](#stack-scope).
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `2`; readers also accept `1` |
+| 0 | 2 | payload version, `3`; readers also accept `1` and `2` |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | API: 1 `document.cookie` set, 2 `document.cookie` get, 3 `cookieStore.set`, 4 `cookieStore.get`, 5 `cookieStore.getAll`, 6 `cookieStore.delete` |
 | 5 | 1 | flags |
-| 6 | 1 | version 2: the stack thread of the calling isolate, 1 to 4 as in the [stack scope](#stack-scope), or 0 when the thread was never named; version 1: zero |
+| 6 | 1 | versions 2 and 3: the stack thread of the calling isolate, 1 to 4 as in the [stack scope](#stack-scope), or 0 when the thread was never named; version 1: zero |
 | 7 | 1 | reserved, zero |
 | 8 | 4 | count: 1 for a write; for a read, reads since this key's previous record |
 | 12 | 4 | name length in UTF-8 bytes |
-| 16 | 4 | value length in UTF-8 bytes; 0 for a read |
+| 16 | 4 | value length in UTF-8 bytes; 0 for a read, except a version 3 read record (flag bit 4), where it counts the names those reads returned that no name record counts |
 | 20 | 4 | `document.cookie` string length, set or returned; 0 for the Cookie Store API |
 | 24 | 16 | innermost script frame, in the frame layout of `request_initiator_stack` |
 | 40 | 32 | stack digest, the `request_initiator_stack` digest of this call's stack, or zero |
@@ -1656,19 +1656,24 @@ its own requests and the isolate key of its [stack scope](#stack-scope).
 
 Flags: bit 0 the name is longer than 24 bytes; bit 1 a script frame was
 recorded; bit 2 a stack digest was recorded; bit 3 a read recorded alone
-because the aggregation table was full.
+because the aggregation table was full; bit 4, version 3 only, the read record
+of a `document.cookie` read.
 
 Rules: API 1 to 6; writes (1, 3, 6) have count 1 and a nonzero value digest,
-reads have value length 0 and a zero digest; count is nonzero; bit 0 if and
-only if the name is longer than 24 bytes, and name bytes past the name are
-zero; for API 1 the string length is at least name plus value length, and for
-3 to 6 it is 0; bit 1 if and only if the frame's kind is 1 or 2 with a nonzero
-script ID, its combinator 0 and only frame flag bits 0 and 1, and without bit
-1 the frame is zero; bit 2 if and
+reads have a zero digest and value length 0, except a version 3 read record;
+count is nonzero; bit 0 if and only if the name is longer than 24 bytes, and
+name bytes past the name are zero; for API 1 the string length is at least
+name plus value length, and for 3 to 6 it is 0; bit 1 if and only if the
+frame's kind is 1 or 2 with a nonzero script ID, its combinator 0 and only
+frame flag bits 0 and 1, and without bit 1 the frame is zero; bit 2 if and
 only if the stack digest is nonzero, and only with bit 1; bit 3 only for a
-read; reserved bytes are zero. Version 2: byte 6 is 0 to 4; with 0, bits 1
-and 2 are clear, since no frame could be read in a known isolate; with 2 to 4,
-`frame_id` is nonzero.
+read; reserved bytes are zero. Versions 2 and 3: byte 6 is 0 to 4; with 0,
+bits 1 and 2 are clear, since no frame could be read in a known isolate; with
+2 to 4, `frame_id` is nonzero. Version 3: bit 4 only with API 2 and a name
+length of 0; an API 2 record without bit 4 is a name record, which never has
+bit 3 and whose string length is at least its name length. Versions 1 and 2
+have no bit 4: their API 2 records are whole reads with no name, which is why
+version 3 exists.
 
 The script frame and the stack are read in the isolate byte 6 names, with the
 worker's context ID as its key: script IDs are unique only per isolate, so a
@@ -1693,11 +1698,33 @@ sequence is reserved before the walk, so the stack artifact's
 `creator_event_id` and the new `script_identity` records' parent are the
 `script_cookie` record. Reads stay one-frame.
 
+A `document.cookie` read records each cookie name the returned string holds,
+so a cookie's provenance finds the scripts that read it. The sink splits the
+string as the page would: at `;`, then at the first `=`, whitespace trimmed;
+an entry with no `=` is the empty name, as `CanonicalCookie::BuildCookieLine`
+writes a nameless cookie as its bare value, and an empty entry is no cookie. A
+name the jar holds twice (another path or domain) counts once per read. Each
+read is one read record (bit 4, no name) after one name record per name:
+names only, never a value or a value digest, since a read is frequent and its
+values are already in the request's sent cookie list. A read parses at most
+360 names, the most Chromium returns to one read at the pin: 180 cookies per
+eTLD+1 (`CookieMonster::kDomainMaxCookies`) and 180 partitioned ones
+(`kPerPartitionDomainMaxCookies`). Every name past them, and every name the
+table below cannot hold, is counted at offset 16 of the read record, so an
+absent name record is never silent.
+
 Reads are frequent, so each renderer aggregates them per frame, thread, API,
-script frame and name in a 256-entry table per configuration. A key records its 1st,
-2nd, 4th, 8th and later power-of-two reads, each with the reads since the
-previous record, and its remainder when the configuration ends. A new key
-while the table is full is recorded alone with bit 3.
+script frame, name and read record in a 4,096-key table per configuration:
+one script position reading a jar of 100 cookies uses 101 keys. A key records
+its 1st, 2nd, 4th, 8th and later power-of-two reads, each with the reads since
+the previous record (and, for a read record, the unrecorded names since then),
+and its remainder when the configuration ends. A new read record or Cookie
+Store read while the table is full is recorded alone with bit 3; a new name
+then is counted on its read record instead. The table is open-addressed at
+most half full, so a lookup is a hash and a few probes; it is allocated when a
+content-capture configuration starts, on the transport sequence (336 KiB),
+and freed when it ends, so a read never allocates and a metadata-only session
+holds none.
 
 #### Cookie bounds
 
@@ -1709,6 +1736,10 @@ while the table is full is recorded alone with bit 3.
   and one per read past the table; each is one 320-byte record, one SHA-256 of
   the value and a one-frame stack capture. With request stacks on, a write
   walks its stack instead, inside the request stack bounds.
+- A `document.cookie` read: one pass over the returned string, at most 360
+  table lookups and at most 361 records (its first read). The configuration
+  end records at most 4,096 remainders into the renderer's 8,192-record ring;
+  a full ring counts them as drops, as for any record.
 
 #### Cookie agent access and UI
 
@@ -1728,7 +1759,12 @@ most 64 distinct positions per answer, the rest counted in
 `stacks_unresolved`.
 Cookie values are withheld as `value_withheld: true` with their byte length
 and SHA-256, like credential headers; a script write links to a sent cookie
-when their value digests are equal.
+when their value digests are equal. A `document.cookie` read joins a name by
+its version 3 name record. `read_coverage` counts the reads that may hold the
+name without naming it: `whole_jar_reads` (version 1 and 2 reads, recorded
+before names were) and `reads_with_unrecorded_names` with their
+`unrecorded_names`; `complete` is true only when both are zero, so an absent
+read is proof only then.
 
 Origin Trace's **Cookies** tab shows Request cookies, with "Show filtered out
 request cookies" listing excluded ones and each reason, and Response cookies
@@ -1792,7 +1828,10 @@ out-of-order raw notifications, early hints, pseudo-headers, sharing, a
 It also drives sent and received cookie lists with blocked cookies, an
 unparsed `Set-Cookie`, sharing and late lists. `make native-probe-admission-check`
 drives the renderer cookie sink: disabled, metadata-only, writes, read
-aggregation, a full table and the configuration-end remainder.
+aggregation, a full table and the configuration-end remainder, and per-name
+reads: the page's split, a name held twice, the empty jar, the 360-name bound,
+a table that fills during a read, unrecorded names in the remainder, and reads
+that allocate nothing.
 `make native-tests` and `make network-request-wire-check` compare the C++
 verdicts with the Python validator and the shipped decoders.
 

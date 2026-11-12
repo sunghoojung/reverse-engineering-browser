@@ -310,6 +310,59 @@ await settle();
 }
 assert.equal(panel.querySelectorAll('img').length, 0, 'captured markup is still text');
 
+// Version 3 reads: a name record joins its name; a nameless read record never
+// joins one, even the empty name, and reads that did not name every cookie
+// make an absent read unproven.
+{
+  const read = (version, name, readRecord, count, unrecorded, sequence) => {
+    const bytes = Buffer.alloc(128);
+    bytes.writeUInt16LE(version, 0); bytes.writeUInt16LE(128, 2);
+    bytes[4] = 2; bytes[5] = 2 | (readRecord ? 16 : 0); bytes[6] = version >= 2 ? 1 : 0;
+    bytes.writeUInt32LE(count, 8); bytes.writeUInt32LE(Buffer.byteLength(name), 12);
+    bytes.writeUInt32LE(unrecorded, 16); bytes.writeUInt32LE(40, 20);
+    bytes[24] = 1; bytes.writeUInt32LE(77, 28); bytes.writeUInt32LE(99, 32);
+    bytes.write(name, 104, 'latin1');
+    return {...scriptEvent, sequence_number: String(sequence), payload: bytes.toString('hex')};
+  };
+  const readEvents = [read(3, 'token', false, 3, 0, 40), read(3, '', true, 3, 5, 41), read(2, '', false, 1, 0, 42),
+    read(3, '', false, 2, 0, 43)];
+  assert(readEvents.every(event => decodeScriptCookieRecord(event)), 'the fixture read records are valid');
+  const readRequest = {id: 'reads', origin: 'live', method: 'GET', path: 'https://echo.test/r', status: 200,
+    cookieLists: [record('sent', [{strings: ['token', 'v', 'echo.test', '/', '', ''], flags: 1},
+      {strings: ['', 'bare', 'echo.test', '/', '', ''], flags: 1}])]};
+  const readUi = {requests: [readRequest], events: readEvents};
+  const draw = () => api.renderTrafficCookies(panel, readRequest, draw, readUi);
+  provenanceAnswer = null;
+  draw();
+  await settle();
+  [...panel.querySelectorAll('.traffic-cookie-name')].find(node => node.textContent === 'token')
+    .dispatchEvent(new window.Event('click'));
+  await settle();
+  let text = panel.querySelector('.traffic-cookie-provenance').textContent;
+  assert.match(text, /Script access \(1\)document\.cookie get × 3 in frame 31, script 77 at character 99/);
+  assert.match(text, /4 document\.cookie reads did not name every cookie they returned \(1 recorded before reads named cookies; 5 names past the 360-name bound or a full table\), so a read of token may have no record/);
+  // The store's answer covers more than the loaded window, so it decides.
+  provenanceAnswer = {set_by: [], sent_with: [], script: [], lists_read: 1, lists_unread: 0, stacks_unresolved: 0,
+    malformed_records: [], coverage: {complete: true},
+    read_coverage: {complete: false, whole_jar_reads: 0, reads_with_unrecorded_names: 6, unrecorded_names: 9}};
+  await new Promise(resolve => setTimeout(resolve, 2100));
+  draw();
+  await settle();
+  text = panel.querySelector('.traffic-cookie-provenance').textContent;
+  assert.match(text, /6 document\.cookie reads did not name every cookie they returned \(9 names past the 360-name bound or a full table\)/);
+  assert.doesNotMatch(text, /malformed record/, 'an empty malformed list is no note');
+  panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
+  await settle();
+  // The nameless cookie: its name record only, not the jar's read records.
+  [...panel.querySelectorAll('.traffic-cookie-name')].find(node => node.textContent === '')
+    .dispatchEvent(new window.Event('click'));
+  await settle();
+  text = panel.querySelector('.traffic-cookie-provenance').textContent;
+  assert.match(text, /Script access \(1\)document\.cookie get × 2 in frame 31/);
+  panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
+  await settle();
+}
+
 // Integrity failure, refusal and not-retained states read as sentences.
 const wrong = record('sent', [sentCookies[1]]);
 blobs.set(wrong.artifactId, list('sent', [sentCookies[0]]));
@@ -337,9 +390,10 @@ api.renderTrafficCookies(panel, {id: 'm', origin: 'live', method: 'GET', path: '
 assert.match(panel.textContent, /recorded only in content capture sessions/);
 api.renderTrafficCookies(panel, {id: 'l', origin: 'sample', method: 'GET', path: 'x', status: 200}, () => {});
 assert.match(panel.textContent, /no native cookie record/);
-assert.equal(reads.filter(url => url.startsWith('/api/artifacts/')).length, 5,
+assert.equal(reads.filter(url => url.startsWith('/api/artifacts/')).length, 6,
   'one read per distinct retained list, including the store-refresh block; refused and not-retained lists are not read');
 assert.equal(reads.filter(url => url.startsWith('/api/cookie-provenance?session_id=7&name=sid')).length, 2, 'a failed position read retries once');
 console.log('PASS Traffic Cookies tab: hops newest first, filtered-out request cookies and reasons, every response attribute ' +
   'and block reason, unparsed line, sort, tooltip and copy, provenance to response, script write at its resolved position and later request, ' +
+  'document.cookie reads by name with their read coverage, ' +
   'size and SHA-256 checked reads, refusal and not-retained states, metadata-only and legacy rows (DOM model; not rendered QA)');

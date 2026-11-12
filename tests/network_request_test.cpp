@@ -91,6 +91,8 @@ static_assert(reb::kScriptCookieNamePrefixBytes == reb::kNativeScriptCookieNameP
 static_assert(static_cast<std::uint8_t>(reb::ScriptCookieApi::kCookieStoreDelete) ==
               static_cast<std::uint8_t>(reb::NativeScriptCookieApi::kCookieStoreDelete));
 static_assert(reb::kScriptCookieTableFull == reb::kNativeScriptCookieTableFull);
+static_assert(reb::kScriptCookieReadRecord == reb::kNativeScriptCookieReadRecord);
+static_assert(reb::kScriptCookiePayloadVersion == reb::kNativeScriptCookiePayloadVersion);
 
 reb::NativeRequestBodySummary Summary(const reb::NativeRequestBodyKind kind,
                                       const reb::NativeRequestBodyState state,
@@ -800,10 +802,37 @@ void CheckCookies() {
   value.stack_digest.fill(0x11);
   value.flags |= reb::kNativeScriptCookieStackRecorded;
   add("script cookie with stack", script_event(value), true);
-  value = get;
+  // Version 3: a document.cookie read is a nameless read record, whose offset
+  // 16 counts the names no name record counts, plus one record per name.
+  const auto read_record = [&get] {
+    auto read = get;
+    read.name_length = 0;
+    read.name_prefix = {};
+    read.flags |= reb::kNativeScriptCookieReadRecord;
+    read.unrecorded_names = 7;
+    return read;
+  }();
+  event = script_event(read_record);
+  add("script cookie read record", event, true);
+  reb::ScriptCookiePayload decoded;
+  Check(reb::DecodeScriptCookiePayload(event.inline_payload, decoded) &&
+            decoded.value_length == 7 && reb::IsScriptCookieReadRecord(decoded),
+        "a read record carries its unrecorded names at offset 16");
+  value = read_record;
   value.flags |= reb::kNativeScriptCookieTableFull;
   value.count = 1;
   add("script cookie read table full", script_event(value), true);
+  value = get;
+  value.name_length = 0;
+  value.name_prefix = {};
+  add("script cookie empty name read", script_event(value), true);
+  // Version 1 and 2 reads were the whole jar, with no name record.
+  event = script_event(get);
+  event.inline_payload[0] = std::byte{2};
+  add("script cookie version 2 read", event, true);
+  event = script_event(read_record);
+  event.inline_payload[0] = std::byte{2};
+  add("script cookie version 2 read record flag", event, false);
   // Version 2 names the isolate: a service worker's cookieStore write names
   // the worker by its context ID as frame_id.
   value = script(reb::NativeScriptCookieApi::kCookieStoreSet);
@@ -858,7 +887,15 @@ void CheckCookies() {
       {"stack flag without digest", set,
        [](auto& v) { v.flags |= reb::kNativeScriptCookieStackRecorded; }},
       {"table full write", set, [](auto& v) { v.flags |= reb::kNativeScriptCookieTableFull; }},
-      {"unknown flag", set, [](auto& v) { v.flags |= 0x10; }},
+      {"unknown flag", set, [](auto& v) { v.flags |= 0x20; }},
+      {"read record on a write", set,
+       [](auto& v) { v.flags |= reb::kNativeScriptCookieReadRecord; }},
+      {"read record on a store read", script(reb::NativeScriptCookieApi::kCookieStoreGet),
+       [](auto& v) { v.flags |= reb::kNativeScriptCookieReadRecord; }},
+      {"read record with a name", get,
+       [](auto& v) { v.flags |= reb::kNativeScriptCookieReadRecord; }},
+      {"name read table full", get, [](auto& v) { v.flags |= reb::kNativeScriptCookieTableFull; }},
+      {"name read shorter than its name", get, [](auto& v) { v.string_length = 2; }},
       {"thread five", set, [](auto& v) { v.thread = 5; }},
       {"frame without thread", set, [](auto& v) { v.thread = 0; }},
   };

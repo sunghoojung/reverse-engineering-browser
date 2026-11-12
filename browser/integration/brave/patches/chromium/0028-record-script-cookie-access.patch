@@ -44,7 +44,7 @@ diff --git a/third_party/blink/renderer/core/loader/cookie_jar.cc b/third_party/
    }
 +  if (::reb::NativeScriptCookieSink::Get().IsEnabled()) [[unlikely]] {
 +    ::reb::NativeScriptCookieSink::Get().RecordDocumentCookieGet(
-+        last_cookies_.Utf8().size(), NativeScriptCookieFrameId(*document_));
++        last_cookies_.Utf8(), NativeScriptCookieFrameId(*document_));
 +  }
    return last_cookies_;
  }

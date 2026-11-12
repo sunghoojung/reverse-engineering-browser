@@ -859,13 +859,18 @@
         // Version 2 byte 6 names the isolate: 0 none (no frame or stack), 1 the
         // document, 2 to 4 a worker, whose context ID is the record's frame_id.
         const version = view.getUint16(0, true), thread = bytes[6];
-        if (![1, 2].includes(version) || view.getUint16(2, true) !== 128 || api < 1 || api > 6 ||
-            (flags & ~0x0f) !== 0 || bytes[7] !== 0 || count === 0 ||
+        if (![1, 2, 3].includes(version) || view.getUint16(2, true) !== 128 || api < 1 || api > 6 ||
+            (flags & ~(version === 3 ? 0x1f : 0x0f)) !== 0 || bytes[7] !== 0 || count === 0 ||
             (version === 1 ? thread !== 0 : thread > 4 || (thread === 0 && (flags & 6) !== 0)) ||
             (thread >= 2 && !isCanonicalInteger(event.frame_id, 1n, uint64Max))) return null;
+        // Version 3: a document.cookie read is a nameless read record (bit 4),
+        // whose offset 16 counts unrecorded names, or one name it returned.
+        const readRecord = Boolean(flags & 16);
+        if (readRecord ? api !== 2 || nameLength !== 0
+          : version === 3 && api === 2 && ((flags & 8) !== 0 || stringLength < nameLength)) return null;
         const write = [1, 3, 6].includes(api), truncated = nameLength > 24;
         if (truncated !== Boolean(flags & 1) || (!truncated && !zero(prefix.slice(nameLength)))) return null;
-        if (write ? count !== 1 || zero(value) || (flags & 8) : valueLength !== 0 || !zero(value)) return null;
+        if (write ? count !== 1 || zero(value) || (flags & 8) : (valueLength !== 0 && !readRecord) || !zero(value)) return null;
         if (api === 1 ? stringLength < nameLength + valueLength : api !== 2 && stringLength !== 0) return null;
         const recorded = Boolean(flags & 2), stacked = Boolean(flags & 4);
         const framed = [1, 2].includes(frame.kind) && frame.scriptId !== 0 && frame.combinator === 0 && (frame.flags & ~3) === 0;
@@ -876,7 +881,11 @@
           api: scriptCookieApis[api], write, count, nameLength, nameTruncated: truncated,
           namePrefix: new TextDecoder('utf-8', {fatal: false}).decode(prefix.slice(0, Math.min(nameLength, 24))),
           namePrefixHex: hex(prefix.slice(0, Math.min(nameLength, 24))),
-          valueLength, stringLength, frame: recorded ? frame : null, stackDigest: stacked ? hex(stack) : null,
+          valueLength: readRecord ? 0 : valueLength, stringLength, frame: recorded ? frame : null,
+          stackDigest: stacked ? hex(stack) : null,
+          // A version 1 or 2 document.cookie get is the whole read, with no name.
+          readRecord: api === 2 && (version < 3 || readRecord), unrecordedNames: readRecord ? valueLength : 0,
+          wholeJar: api === 2 && version < 3,
           valueSha256: write ? hex(value) : null, tableFull: Boolean(flags & 8), frameId: event.frame_id,
           thread: version === 1 ? 'document' : (['', 'document', 'dedicated_worker', 'shared_worker', 'service_worker'][thread] || null),
           sessionId: event.session_id, processId: event.process_id, sequenceNumber: event.sequence_number,

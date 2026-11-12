@@ -3392,8 +3392,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
           const sidebar = document.querySelector('#debugger-sidebar');
           const sections = [...sidebar.querySelectorAll('[data-debugger-section]')].map(node => node.dataset.debuggerSection);
           const pausing = [...sidebar.querySelectorAll('[data-debugger-native="pausing"]')].map(node => node.dataset.debuggerSection);
-          const controls = [...sidebar.querySelectorAll('[data-debugger-native="pausing"] button, [data-debugger-native="pausing"] input, [data-debugger-native="pausing"] select, [data-debugger-native="pausing"] textarea')];
-          const reachable = [...sidebar.querySelectorAll('[data-debugger-native="pausing"] a[href], [data-debugger-native="pausing"] [tabindex], [data-debugger-native="pausing"] summary, [data-debugger-native="pausing"] [role=button], [data-debugger-native="pausing"] [contenteditable]')];
+          // A section's own body, not the sidebar's disclosure chrome around
+          // it: the registry's contract is about what the section draws.
+          const bodies = [...sidebar.querySelectorAll('.debugger-section[data-debugger-native="pausing"] > .debugger-section-body')];
+          const within = selector => bodies.flatMap(body => [...body.querySelectorAll(selector)]);
+          const controls = within('button, input, select, textarea');
+          const reachable = within('a[href], [tabindex], summary, [role=button], [role=option], [role=checkbox], [role=tab], [contenteditable]');
           return {sections, pausing, controls: controls.length,
             enabled: controls.filter(control => !control.disabled).map(control => control.innerText || control.placeholder || control.type),
             reachable: reachable.length,
@@ -3407,7 +3411,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
         "\(size.name): the five pausing sections are registered and marked: \(state)")
       XCTAssertEqual(Array((state["sections"] as? [String] ?? []).prefix(4)), ["threads", "watch-rules", "observations", "pausing"],
         "\(size.name): they follow the phase 1 sections: \(state)")
-      XCTAssertGreaterThan(state["controls"] as? Int ?? 0, 5, "\(size.name): the sections draw their controls: \(state)")
+      // Unsupported draws what it can honestly draw: the Watch form, which
+      // is the shape of the interface, and no step or breakpoint control at
+      // all. Whatever is drawn is disabled.
+      XCTAssertGreaterThan(state["controls"] as? Int ?? 0, 0, "\(size.name): the sections draw their controls: \(state)")
       XCTAssertEqual(state["enabled"] as? [String], [],
         "\(size.name): every control is disabled while the debugger is unsupported: \(state)")
       XCTAssertEqual(state["reachable"] as? Int, 0,

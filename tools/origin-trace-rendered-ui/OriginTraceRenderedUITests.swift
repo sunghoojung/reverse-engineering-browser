@@ -3961,4 +3961,103 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#inspector-tab-general")
     }
   }
+
+  // #434 phase 1: a request a watch rule matched is marked on its Traffic row
+  // and in General with its rule, and Show in debugger opens its observation
+  // in the Sources debugger sidebar, chosen and focused. Where rules are armed
+  // the sidebar says what they cannot observe.
+  @MainActor
+  func test33WatchedRequestInTrafficAndDebugger() async throws {
+    let expected = try Expectations.load()
+    let host = "watch.debugger.test"
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      _ = try await ui.value("""
+        (() => { const filter = document.querySelector('#request-filter'); filter.value = '\(host)';
+          filter.dispatchEvent(new Event('input', {bubbles: true})); return true; })()
+        """)
+      try await ui.waitUntil("""
+        [...document.querySelectorAll('#screen-traffic .request-row')].some(row => row.innerText.includes('\(host)') && row.querySelector('.request-watched'))
+        """, "\(size.name): the watched request is not marked on its row")
+      let row = try await ui.json("""
+        (() => { const row = [...document.querySelectorAll('#screen-traffic .request-row')].find(node => node.innerText.includes('\(host)'));
+          const chip = row.querySelector('.request-watched'), name = row.querySelector('.request-name');
+          const a = chip.getBoundingClientRect(), b = name.getBoundingClientRect();
+          return {chip: chip.innerText, title: chip.title, label: row.getAttribute('aria-label'),
+            inside: a.left >= b.left - 0.5 && a.right <= b.right + 0.5 && a.top >= b.top - 0.5 && a.bottom <= b.bottom + 0.5 && a.width > 0,
+            clipped: chip.scrollWidth > chip.clientWidth + 1,
+            others: [...document.querySelectorAll('#screen-traffic .request-row')].filter(node => node !== row && node.querySelector('.request-watched')).length}; })()
+        """)
+      print("RENDERED_UI_WATCHED_ROW \(size.name) \(row)")
+      XCTAssertEqual(row["chip"] as? String, "Watched", "\(size.name): \(row)")
+      XCTAssertEqual(row["inside"] as? Bool, true, "\(size.name): the chip sits inside the Name cell: \(row)")
+      XCTAssertEqual(row["clipped"] as? Bool, false, "\(size.name): the chip is not clipped: \(row)")
+      XCTAssertEqual(row["others"] as? Int, 0, "\(size.name): only the watched row is marked: \(row)")
+      XCTAssertTrue((row["label"] as? String ?? "").contains("Request watch rule 1 matched, method too"), "\(size.name): \(row)")
+      XCTAssertTrue((row["title"] as? String ?? "").contains("Request watch rule 1 matched"), "\(size.name): \(row)")
+
+      try await ui.click("#screen-traffic .request-row", containing: host)
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden && Boolean(document.querySelector('#exchange-inspector .traffic-watch'))",
+        "\(size.name): General did not show the debugger watch")
+      let general = try await ui.json("""
+        (() => { const section = document.querySelector('#exchange-inspector .traffic-watch');
+          return {text: section.innerText.replace(/\\s+/g, ' '), record: section.querySelector('.traffic-watch-record').innerText,
+            selected: state.selectedRequestId}; })()
+        """)
+      print("RENDERED_UI_WATCHED_GENERAL \(size.name) \(general)")
+      let text = general["text"] as? String ?? ""
+      XCTAssertTrue(text.contains("Debugger watch") && text.contains("Request watch rule 1 matched, method too"), "\(size.name): \(general)")
+      let record = general["record"] as? String ?? ""
+      XCTAssertTrue(record.contains("renderer \(expected.debuggerProcess) · frame \(expected.debuggerFrame)"), "\(size.name): \(general)")
+      XCTAssertTrue((general["selected"] as? String ?? "").hasSuffix(":R\(expected.debuggerProcess):5100"), "\(size.name): \(general)")
+      let sequence = record.split(separator: "#").last?.split(separator: " ").first.map(String.init) ?? ""
+      XCTAssertFalse(sequence.isEmpty, "\(size.name): the record names its sequence: \(record)")
+      try await assertInert(ui, "\(size.name) watched request")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) watched request general")
+      try await ui.screenshot("traffic-watched-request-\(size.name)")
+
+      try await ui.click(".traffic-watch-open")
+      try await ui.waitUntil("""
+        (() => { const chosen = document.querySelector('#debugger-observations .debugger-list-row[aria-selected="true"]');
+          return !document.querySelector('#screen-sources').hidden && !document.querySelector('#debugger-sidebar').hidden &&
+            chosen?.dataset.key.endsWith(':\(expected.debuggerProcess):\(sequence)') && document.activeElement?.id === 'debugger-observations'; })()
+        """, "\(size.name): Show in debugger did not choose the observation with focus on its list")
+      let shown = try await ui.json("""
+        (() => { const detail = document.querySelector('#debugger-sidebar .debugger-detail'), box = detail.getBoundingClientRect();
+          const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections').getBoundingClientRect();
+          return {kind: document.querySelector('.debugger-kind[aria-pressed="true"]')?.dataset.kind ?? '',
+            detail: detail.innerText.replace(/\\s+/g, ' '), inView: !detail.hidden && box.top < pane.bottom - 24 && box.bottom > pane.top,
+            focus: __rebUiProbe.focusState()}; })()
+        """)
+      print("RENDERED_UI_WATCHED_SHOWN \(size.name) \(shown)")
+      XCTAssertEqual(shown["kind"] as? String, "request_watch_match", "\(size.name): the Requests kind is listed: \(shown)")
+      XCTAssertEqual(shown["inView"] as? Bool, true, "\(size.name): its details are in view: \(shown)")
+      XCTAssertTrue((shown["detail"] as? String ?? "").contains("request 5100"), "\(size.name): \(shown)")
+      XCTAssertNotEqual((shown["focus"] as? [String: Any])?["indicator"] as? String, "none", "\(size.name): the list shows its focus: \(shown)")
+      try await assertLayout(ui, "#debugger-sidebar", "\(size.name) shown observation")
+      try await ui.screenshot("debugger-shown-observation-\(size.name)")
+      try await lightScreenshot(ui, "debugger-shown-observation", size.name)
+
+      // Arming: a live Console document draws the form, which states what a rule cannot observe.
+      _ = try await ui.value("""
+        (() => { window.__rebConsole = window.RebNativeConsole;
+          window.RebNativeConsole = {liveDocument: () => ({session_id: '5', target_id: '21', label: 'top #21'}), watch: async () => ({status: 'ok'})};
+          return true; })()
+        """)
+      try await ui.waitUntil("Boolean(document.querySelector('#debugger-sidebar .debugger-watch-limits'))", timeout: 8,
+        "\(size.name): the arming form did not render")
+      let limits = try await ui.value("""
+        (() => { const note = document.querySelector('#debugger-sidebar .debugger-watch-limits');
+          note.closest('.debugger-watch-form').scrollIntoView({block: 'start'}); return note.innerText; })()
+        """) as? String ?? ""
+      for said in ["only this document's main thread", "workers, other frames or same-process iframes", "navigation clears the rules",
+                   "cannot be armed ahead of a page load"] {
+        XCTAssertTrue(limits.contains(said), "\(size.name): the form says \(said): \(limits)")
+      }
+      try await assertLayout(ui, "#debugger-sidebar", "\(size.name) watch limits")
+      try await ui.screenshot("debugger-watch-limits-\(size.name)")
+      _ = try await ui.value("(() => { window.RebNativeConsole = window.__rebConsole; delete window.__rebConsole; return true; })()")
+    }
+  }
 }

@@ -33,12 +33,6 @@ std::uint32_t Clamp32(const std::size_t value) noexcept {
       std::min<std::size_t>(value, std::numeric_limits<std::uint32_t>::max()));
 }
 
-std::uint32_t SaturatingAdd(const std::uint32_t value, const std::uint32_t add) noexcept {
-  return value > std::numeric_limits<std::uint32_t>::max() - add
-             ? std::numeric_limits<std::uint32_t>::max()
-             : value + add;
-}
-
 // FNV-1a, over the fields of a read key.
 class KeyHash final {
  public:
@@ -125,7 +119,6 @@ void NativeScriptCookieSink::Flush() noexcept {
     summary.name_length = entry.key.name_length;
     summary.name_prefix = entry.key.name_prefix;
     summary.string_length = entry.string_length;
-    summary.unrecorded_names = entry.unrecorded_names;
     summary.frame = entry.key.frame;
     summary.thread = entry.key.thread;
     summary.flags = static_cast<std::uint8_t>(
@@ -244,24 +237,23 @@ void NativeScriptCookieSink::RecordDocumentCookieGet(const std::string_view cook
     entry->unreported = 0;
     static_cast<void>(Emit(named, calling_frame, generation));
   });
-  // The read itself, with the names no name record counted.
+  // The read itself. A read with names no name record counted is recorded at
+  // once, so a name it held is never only in the renderer: a provenance that
+  // sees no such record can trust that every name was recorded.
   key.read_record = true;
   key.name_length = 0;
   key.name_prefix = {};
   read.flags |= kNativeScriptCookieReadRecord;
+  read.unrecorded_names = unrecorded;
   if (ReadEntry* const entry = FindOrInsert(key)) {
-    entry->unrecorded_names = SaturatingAdd(entry->unrecorded_names, unrecorded);
-    if (!CountRead(*entry, read.string_length)) {
+    if (!CountRead(*entry, read.string_length) && unrecorded == 0) {
       return;
     }
     read.count = entry->unreported;
-    read.unrecorded_names = entry->unrecorded_names;
     entry->unreported = 0;
-    entry->unrecorded_names = 0;
   } else {
     read.flags |= kNativeScriptCookieTableFull;
     read.count = 1;
-    read.unrecorded_names = unrecorded;
   }
   static_cast<void>(Emit(read, calling_frame, generation));
 }

@@ -87,8 +87,6 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeScriptCookieSink final {
     std::uint32_t string_length = 0;
     std::uint32_t reads = 0;
     std::uint32_t unreported = 0;
-    // A read record's names no name record counted since its last record.
-    std::uint32_t unrecorded_names = 0;
     // The document.cookie read that last counted this key, so a name the
     // jar returns twice (other path or domain) counts once per read.
     std::uint64_t last_read = 0;

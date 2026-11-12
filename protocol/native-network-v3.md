@@ -1803,8 +1803,11 @@ Reads are frequent, so each renderer aggregates them per frame, thread, API,
 script frame, name and read record in a 4,096-key table per configuration:
 one script position reading a jar of 100 cookies uses 101 keys. A key records
 its 1st, 2nd, 4th, 8th and later power-of-two reads, each with the reads since
-the previous record (and, for a read record, the unrecorded names since then),
-and its remainder when the configuration ends. A new read record or Cookie
+the previous record, and its remainder when the configuration ends. A read
+record is also recorded at every read that had unrecorded names, with that
+read's count of them, so a name no record counts never waits in the renderer:
+when no read record counts unrecorded names, every name a read held has its
+name record. A new read record or Cookie
 Store read while the table is full is recorded alone with bit 3; a new name
 then is counted on its read record instead. The table is open-addressed at
 most half full, so a lookup is a hash and a few probes; it is allocated when a
@@ -1819,7 +1822,8 @@ holds none.
 - A sent and a received list per hop, at most 2 MiB each, sharing the header
   table and budget.
 - Script cookie records: one per write, at most 2 + log2(reads) per read key,
-  and one per read past the table; each is one 320-byte record, one SHA-256 of
+  one per read past the table, and one read record per read with unrecorded
+  names; each is one 320-byte record, one SHA-256 of
   the value and a one-frame stack capture. With request stacks on, a write
   walks its stack instead, inside the request stack bounds.
 - A `document.cookie` read: one pass over the returned string, at most 360
@@ -1956,8 +1960,8 @@ unparsed `Set-Cookie`, sharing and late lists. `make native-probe-admission-chec
 drives the renderer cookie sink: disabled, metadata-only, writes, read
 aggregation, a full table and the configuration-end remainder, and per-name
 reads: the page's split, a name held twice, the empty jar, the 360-name bound,
-a table that fills during a read, unrecorded names in the remainder, and reads
-that allocate nothing. The capture check also asserts that
+a table that fills during a read, a read with unrecorded names recorded at once
+(also past its powers of two), and reads that allocate nothing. The capture check also asserts that
 `NativeNetworkHeadersObserved`, the gate of patch 0058, holds only for a
 current content session with the Network category before its expiry.
 `tools/check-header-observer-patch.py` refuses an agentless observer outside

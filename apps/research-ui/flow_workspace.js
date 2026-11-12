@@ -14,16 +14,18 @@ const FLOW_WORKSPACE_LIMITS = Object.freeze({history: 64, sessions: 16, related:
 const FLOW_SIZE_BOUNDS = Object.freeze({cfg: [280, 1400], lineage: [280, 640], timeline: [120, 720]});
 const FLOW_SIZE_DEFAULTS = Object.freeze({cfg: 460, lineage: 340, timeline: 280});
 const FLOW_GRAPH_MIN = 320;
-
-const flowIsObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-const flowHexOffset = value => `+0x${Number(value).toString(16)}`;
+/* The selection, pane by pane: the app's request and its lineage step, and
+ * the tracked call, function, site, sample and graph card picked under it. */
+const FLOW_EMPTY_SELECTION = Object.freeze({request: null, call: null, fn: null, site: null, sample: null, step: null, graphKey: null});
+/** Whether a function crumb or graph card names a Wasm function of a known module, which has a CFG. */
+const isWasmFn = fn => Boolean(fn?.artifact_id) && String(fn.artifact_id) !== '0' && Number.isSafeInteger(fn.function_index);
 
 /** Saved pane sizes and toggles per evidence session; a bounded local preference. */
 function flowWorkspacePrefs(storage) {
   try {
     const value = JSON.parse(storage?.getItem?.(FLOW_WORKSPACE_STORAGE) ?? 'null');
-    if (!flowIsObject(value) || value.version !== 1 || !flowIsObject(value.sessions)) return {version: 1, sessions: {}, last: null};
-    return {version: 1, sessions: value.sessions, last: flowIsObject(value.last) ? value.last : null};
+    if (!isPlainObject(value) || value.version !== 1 || !isPlainObject(value.sessions)) return {version: 1, sessions: {}, last: null};
+    return {version: 1, sessions: value.sessions, last: isPlainObject(value.last) ? value.last : null};
   } catch { return {version: 1, sessions: {}, last: null}; }
 }
 function flowWorkspaceSavePrefs(storage, prefs) {
@@ -65,7 +67,7 @@ function flowTrailCrumbs(selection) {
   const crumbs = [];
   if (selection.request) crumbs.push({kind: 'request', pane: 'lineage', label: selection.request.label});
   if (selection.call) crumbs.push({kind: 'call', pane: 'timeline', label: selection.call.label});
-  if (selection.fn) crumbs.push({kind: 'fn', pane: selection.fn.function_index !== null && selection.fn.function_index !== undefined && selection.fn.artifact_id ? 'cfg' : 'graph', label: selection.fn.label});
+  if (selection.fn) crumbs.push({kind: 'fn', pane: isWasmFn(selection.fn) ? 'cfg' : 'graph', label: selection.fn.label});
   if (selection.site) crumbs.push({kind: 'site', pane: 'cfg', label: selection.site.label});
   if (selection.sample) crumbs.push({kind: 'sample', pane: 'timeline', label: selection.sample.label});
   return crumbs;
@@ -108,8 +110,6 @@ function flowLinkKind(model) {
 function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, getRequest, selectRequest, findRendererRequest, selectTraceRow, focusTraceRow, openSource}) {
   const doc = document;
   const $ = selector => root.querySelector(selector);
-  const make = (tag, className = '', text = '') => { const element = doc.createElement(tag); if (className) element.className = className; if (text) element.textContent = text; return element; };
-  const button = (className, text, label) => { const element = make('button', className, text); element.type = 'button'; if (label) element.setAttribute('aria-label', label); return element; };
   const graph = createFlowGraphPanel({
     host: $('#flow-graph-host'), open: openFrame, available: graphAvailable,
     onSelect: (info, {cause}) => graphPicked(info, {cause}),
@@ -139,7 +139,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   let returnPane = 'graph';
   let sizes = {...FLOW_SIZE_DEFAULTS}, prefs = flowWorkspacePrefs(storage);
   // Selection, trail and history.
-  let selection = {request: null, call: null, fn: null, site: null, sample: null, step: null, graphKey: null};
+  let selection = {...FLOW_EMPTY_SELECTION};
   let history = [], cursor = -1, graphInfo = null, lineageModels = [];
   // Above zero while the workspace makes a change of its own: a pick that
   // changes several things, which is one trail entry, or a trail entry being
@@ -175,8 +175,8 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     cfg.runner = createBlockGraphRunner();
     // The view's own head is the pane head: the identity mark, Sources and focus.
     const head = cfg.view.tools.parentElement;
-    const mark = make('span', 'flow-pane-mark'); mark.setAttribute('aria-hidden', 'true'); head.prepend(mark); head.dataset.flowHead = 'cfg';
-    const open = button('source-tool block-graph-tool flow-cfg-source', 'Sources', 'Open this function in Sources');
+    const mark = flowElement('span', 'flow-pane-mark'); mark.setAttribute('aria-hidden', 'true'); head.prepend(mark); head.dataset.flowHead = 'cfg';
+    const open = flowButton('source-tool block-graph-tool flow-cfg-source', 'Sources', 'Open this function in Sources');
     open.title = 'Open the module in Sources at this function';
     open.addEventListener('click', () => { if (cfg.fn) openSource({artifact_id: cfg.fn.artifact_id, offset: cfgFirstByte()}); });
     cfg.view.tools.append(open, focusButton('cfg'));
@@ -234,6 +234,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
    * `offset`. In the split the pane opens beside the graph when `open`,
    * unless the researcher hid it; `wait` delays the read for a graph pick. */
   function showCfg(fn, offset = null, {open = false, wait = false} = {}) {
+    if (!isWasmFn(fn)) return;
     const opened = open && !cfgUserHidden && !split.cfg;
     if (opened) { split.cfg = true; savePrefs(); }
     // Only the shown function's read runs: another one in flight stops.
@@ -328,24 +329,22 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     const nodes = [];
     if (chosen?.type === 'sample' && chosen.sample.function_index === cfg.fn.function_index && chosen.sample.artifact_id === cfg.fn.artifact_id) {
       const sample = chosen.sample;
-      const text = make('span', 'flow-cfg-sample-text');
-      text.append(make('b', '', chosen.count ?? `sample ${sample.ordinal} of ${chosen.site.samples.length} read`),
-        make('span', '', [chosen.track ? `call #${chosen.track.invocation}` : 'outside a tracked call', `seq ${sample.seq.toLocaleString('en-US')}`,
-          sample.kind === 'br_table' ? `selector ${sample.selector ?? 'unknown'}` : `callee ${sample.resolution === 'resolved' ? `func ${sample.callee}` : sample.resolution ?? 'unknown'}`].join(' · ')));
-      const keys = make('span', 'flow-keys'); keys.append(make('kbd', '', 'K'), make('kbd', '', 'J'), make('span', '', 'step samples'));
-      const previous = button('secondary-button', 'Previous', 'Previous sample at this site'); previous.disabled = sample.ordinal <= 1;
-      const next = button('secondary-button', 'Next', 'Next sample at this site'); next.disabled = sample.ordinal >= chosen.site.samples.length;
+      const text = flowElement('span', 'flow-cfg-sample-text');
+      text.append(flowElement('b', '', chosen.count), flowElement('span', '', flowSampleLine(chosen)));
+      const keys = flowElement('span', 'flow-keys'); keys.append(flowElement('kbd', '', 'K'), flowElement('kbd', '', 'J'), flowElement('span', '', 'step samples'));
+      const previous = flowButton('secondary-button', 'Previous', 'Previous sample at this site'); previous.disabled = sample.ordinal <= 1;
+      const next = flowButton('secondary-button', 'Next', 'Next sample at this site'); next.disabled = sample.ordinal >= chosen.site.samples.length;
       previous.addEventListener('click', () => timeline.stepSample(-1));
       next.addEventListener('click', () => timeline.stepSample(1));
       nodes.push(text, keys, previous, next);
     } else {
-      nodes.push(make('span', 'flow-cfg-sample-text', 'Sampled here:'));
+      nodes.push(flowElement('span', 'flow-cfg-sample-text', 'Sampled here:'));
       for (const site of sites.slice(0, 6)) {
-        const jump = button('flow-chip', `${flowHexOffset(site.offset)} ${site.kind} ×${site.samples.length}`, `Pick the first ${site.kind} sample at ${flowHexOffset(site.offset)}`);
+        const jump = flowButton('flow-chip', `${flowHex(site.offset)} ${site.kind} ×${site.samples.length}`, `Pick the first ${site.kind} sample at ${flowHex(site.offset)}`);
         jump.addEventListener('click', () => { const first = site.samples[0]; if (first) timeline.select(`sample:${first.key}`, {silent: false}); });
         nodes.push(jump);
       }
-      if (sites.length > 6) nodes.push(make('span', 'flow-more', `${sites.length - 6} more sites`));
+      if (sites.length > 6) nodes.push(flowElement('span', 'flow-more', `${sites.length - 6} more sites`));
     }
     cfgSamples.replaceChildren(...nodes);
   }
@@ -378,7 +377,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
       const fn = fnFor(sample.artifact_id, sample.function_index);
       // The selected graph card stays only when it is the sample's function.
       const sameCard = graphInfo?.key && graphInfo.key === selection.graphKey && String(graphInfo.artifact_id) === String(sample.artifact_id) && graphInfo.function_index === sample.function_index;
-      setSelection({...noCrumbs, call: callCrumb, fn, site: {offset: sample.offset, kind: sample.kind, label: `${flowHexOffset(sample.offset)} ${sample.kind}`}, sample: {key: info.key, label: `sample ${sample.ordinal}`},
+      setSelection({...noCrumbs, call: callCrumb, fn, site: {offset: sample.offset, kind: sample.kind, label: `${flowHex(sample.offset)} ${sample.kind}`}, sample: {key: info.key, label: `sample ${sample.ordinal}`},
         graphKey: sameCard ? selection.graphKey : null});
       graph.setMark({artifact_id: sample.artifact_id, function_index: sample.function_index, offset: sample.offset});
       showCfg(fn, sample.offset, {open: true});
@@ -437,8 +436,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     if (info && selection.sample) { timeline.clear(); graph.setMark(null); }
     // Clearing the card clears its own crumbs; a sample's stay.
     if (!info) { setSelection(selection.graphKey ? {graphKey: null, fn: null, site: null} : {graphKey: null}); renderRelated(); return; }
-    const wasm = info.kind === 'wasm' && info.artifact_id && Number.isSafeInteger(info.function_index);
-    if (wasm) {
+    if (info.kind === 'wasm' && isWasmFn(info)) {
       const fn = fnFor(info.artifact_id, info.function_index);
       const site = /^\+0x[0-9a-f]+$/i.test(info.row?.site ?? '') ? {offset: Number.parseInt(info.row.site.slice(3), 16), kind: info.row.op ?? 'site', label: `${info.row.site} ${info.row.op ?? ''}`.trim()} : null;
       setSelection({...noCrumbs, graphKey: info.key ?? null, fn, site});
@@ -485,10 +483,9 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     const chosen = timeline.selection();
     if (chosen?.type !== 'sample') { lineageSelected.hidden = true; lineageSelected.replaceChildren(); return; }
     const {sample, site} = chosen;
-    const heading = make('h3', '', 'Selected');
-    heading.append(make('span', 'flow-lineage-selected-site', ` · func ${sample.function_index} ${flowHexOffset(sample.offset)} ${sample.kind}`));
-    const line = make('p', 'flow-lineage-selected-line', [chosen.count ?? `sample ${sample.ordinal} of ${site.samples.length} read`, chosen.track ? `call #${chosen.track.invocation}` : 'outside a tracked call',
-      sample.kind === 'br_table' ? `selector ${sample.selector ?? 'unknown'}` : `callee ${sample.resolution === 'resolved' ? `func ${sample.callee}` : sample.resolution ?? 'unknown'}`].join(' · '));
+    const heading = flowElement('h3', '', 'Selected');
+    heading.append(flowElement('span', 'flow-lineage-selected-site', ` · func ${sample.function_index} ${flowHex(sample.offset)} ${sample.kind}`));
+    const line = flowElement('p', 'flow-lineage-selected-line', `${chosen.count} · ${flowSampleLine(chosen)}`);
     const nodes = [heading, line];
     if (sample.kind === 'br_table' && site.histogram.size) nodes.push(selectorHistogram(site, sample.selector));
     lineageSelected.replaceChildren(...nodes);
@@ -498,15 +495,15 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   function selectorHistogram(site, chosen) {
     const entries = [...site.histogram.entries()].sort((a, b) => a[0] - b[0]);
     const top = Math.max(1, ...entries.map(([, count]) => count));
-    const list = make('ol', 'flow-histogram');
-    list.setAttribute('aria-label', `Selector counts at ${flowHexOffset(site.offset)}: ${entries.map(([value, count]) => `${value} ×${count}`).join(', ')}`);
+    const list = flowElement('ol', 'flow-histogram');
+    list.setAttribute('aria-label', `Selector counts at ${flowHex(site.offset)}: ${entries.map(([value, count]) => `${value} ×${count}`).join(', ')}`);
     for (const [value, count] of entries.slice(0, 24)) {
-      const item = make('li', value === chosen ? 'flow-histogram-on' : '');
-      const bar = make('span', 'flow-histogram-bar'); bar.style.height = `${Math.max(3, Math.round(count / top * 44))}px`;
-      item.append(make('span', 'flow-histogram-count', String(count)), bar, make('span', 'flow-histogram-value', String(value)));
+      const item = flowElement('li', value === chosen ? 'flow-histogram-on' : '');
+      const bar = flowElement('span', 'flow-histogram-bar'); bar.style.height = `${Math.max(3, Math.round(count / top * 44))}px`;
+      item.append(flowElement('span', 'flow-histogram-count', String(count)), bar, flowElement('span', 'flow-histogram-value', String(value)));
       list.append(item);
     }
-    if (entries.length > 24) list.append(make('li', 'flow-more', `+${entries.length - 24}`));
+    if (entries.length > 24) list.append(flowElement('li', 'flow-more', `+${entries.length - 24}`));
     return list;
   }
 
@@ -560,7 +557,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
       if (target.sample) timeline.select(target.sample.key);
       else if (target.call) timeline.select(target.call.key);
       else timeline.clear();
-      if (target.fn?.function_index !== null && target.fn?.function_index !== undefined && target.fn.artifact_id) showCfg(target.fn, target.site?.offset ?? null);
+      if (isWasmFn(target.fn)) showCfg(target.fn, target.site?.offset ?? null);
       if (target.graphKey) graphShown(graphAnswer(graph.select(target.graphKey)));
       graph.setMark(target.sample && target.fn?.artifact_id ? {artifact_id: target.fn.artifact_id, function_index: target.fn.function_index, offset: target.site?.offset ?? null} : null);
       reveal(entry.pane, {focus: true, record: false});
@@ -574,16 +571,16 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
 
   function renderTrail() {
     const crumbs = flowTrailCrumbs(selection);
-    if (!crumbs.length) { trail.replaceChildren(make('span', 'flow-trail-empty', 'Select a request, card or sample')); return; }
+    if (!crumbs.length) { trail.replaceChildren(flowElement('span', 'flow-trail-empty', 'Select a request, card or sample')); return; }
     const nodes = [];
     crumbs.forEach((crumb, index) => {
       const last = index === crumbs.length - 1;
-      const item = button(`flow-crumb flow-crumb-${crumb.kind}`, crumb.label, `${crumb.label}: show it in ${FLOW_PANE_NAMES[crumb.pane]}`);
+      const item = flowButton(`flow-crumb flow-crumb-${crumb.kind}`, crumb.label, `${crumb.label}: show it in ${FLOW_PANE_NAMES[crumb.pane]}`);
       item.title = `${crumb.label} · ${FLOW_PANE_NAMES[crumb.pane]}`;
       if (last) item.setAttribute('aria-current', 'true');
       item.addEventListener('click', () => jump(crumb));
       nodes.push(item);
-      if (!last) { const separator = make('span', 'flow-crumb-separator', '›'); separator.setAttribute('aria-hidden', 'true'); nodes.push(separator); }
+      if (!last) { const separator = flowElement('span', 'flow-crumb-separator', '›'); separator.setAttribute('aria-hidden', 'true'); nodes.push(separator); }
     });
     trail.replaceChildren(...nodes);
     // The most specific crumb stays in view when the trail scrolls.
@@ -601,7 +598,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
 
   /** Enter: follow the selection into the pane that explains it. */
   function follow() {
-    if (selection.sample || (selection.fn?.artifact_id && Number.isSafeInteger(selection.fn.function_index))) {
+    if (selection.sample || isWasmFn(selection.fn)) {
       if (selection.fn) showCfg(selection.fn, selection.site?.offset ?? null);
       reveal('cfg', {focus: true});
       return 'cfg';
@@ -656,8 +653,8 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     for (const name of FLOW_PANES) {
       const pane = panes[name];
       pane.dataset.shown = String(shown.has(name));
-      pane.toggleAttribute('data-active', name === active && effectiveMode === 'split');
     }
+    markActive(active);
     // Lineage and Details are tabs of one column; in the laptop split CFG joins them.
     const lineageSide = side === 'cfg' ? 'cfg' : lineageTab;
     for (const [name, tab] of Object.entries(sideTabs)) {
@@ -745,6 +742,10 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     // Focus never stays on the page itself.
     const focused = doc.activeElement;
     if ((!focused || focused === doc.body) && name !== 'graph') { focusPaneContent('graph'); return; }
+    markActive(name);
+  }
+  /** The pane the keyboard or pointer works in; the split marks it. */
+  function markActive(name) {
     active = name;
     for (const pane of FLOW_PANES) panes[pane].toggleAttribute('data-active', pane === name && body.dataset.mode === 'split');
   }
@@ -765,7 +766,8 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     // focus goes to the pane focused before focus mode, else the graph.
     focusPaneContent(mode === 'focus' ? focusPane : paneVisible(active) ? active : paneVisible(returnPane) ? returnPane : 'graph');
   }
-  const toggleFocus = (pane = active) => setMode(mode === 'focus' ? 'split' : 'focus', pane);
+  /** Opens a pane on its own, or returns to the split when it is the one shown. */
+  const focusOrReturn = name => setMode(mode === 'focus' && focusPane === name ? 'split' : 'focus', name);
   function togglePane(name) {
     if (mode !== 'split' || layout === 'compact') { flash('Pane toggles change the split; press Z to return to it.'); return; }
     if (layout === 'laptop' && name === 'cfg' && split.cfg && currentSideTab() !== 'cfg') { sideTab = 'cfg'; applyLayout(); return; }
@@ -781,10 +783,10 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   for (const [name, toggle] of Object.entries(toggles)) toggle.addEventListener('click', () => togglePane(name));
   splitButton.addEventListener('click', () => setMode('split'));
   function focusButton(name) {
-    const element = button('flow-focus-button', '', `Open ${FLOW_PANE_NAMES[name]} on its own`);
+    const element = flowButton('flow-focus-button', '', `Open ${FLOW_PANE_NAMES[name]} on its own`);
     element.dataset.focus = name; element.title = `Open ${FLOW_PANE_NAMES[name]} on its own, or return to the split (Z)`;
     element.append(flowIcon('M3 8V3h5M12 3h5v5M17 12v5h-5M8 17H3v-5'));
-    element.addEventListener('click', () => (mode === 'focus' && focusPane === name ? setMode('split') : setMode('focus', name)));
+    element.addEventListener('click', () => focusOrReturn(name));
     return element;
   }
   function flowIcon(path) {
@@ -795,8 +797,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   }
   for (const element of root.querySelectorAll('.flow-focus-button[data-focus]')) {
     element.addEventListener('click', () => {
-      const name = element.dataset.focus === 'side' ? (currentSideTab() === 'cfg' ? 'cfg' : 'lineage') : element.dataset.focus;
-      if (mode === 'focus' && focusPane === name) setMode('split'); else setMode('focus', name);
+      focusOrReturn(element.dataset.focus === 'side' ? (currentSideTab() === 'cfg' ? 'cfg' : 'lineage') : element.dataset.focus);
     });
   }
   // Double-clicking a pane head opens that pane on its own, or returns.
@@ -804,7 +805,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     const head = event.target?.closest?.('.flow-pane-head, [data-flow-head]');
     if (!head || event.target.closest('button, select, input, a')) return;
     const pane = head.closest('.flow-pane')?.dataset.pane;
-    if (pane) toggleFocus(pane === 'lineage' && currentSideTab() === 'cfg' ? 'cfg' : pane);
+    if (pane) focusOrReturn(pane === 'lineage' && currentSideTab() === 'cfg' ? 'cfg' : pane);
   });
   // Focus mode tabs and the narrow pane switch share one tab bar.
   tabs.addEventListener('click', event => { const tab = event.target?.closest?.('[role="tab"][data-pane]'); if (tab) reveal(tab.dataset.pane, {focus: false}); });
@@ -835,7 +836,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   // The active pane is the one the keyboard or pointer last worked in.
   root.addEventListener('focusin', event => {
     const pane = event.target?.closest?.('.flow-pane')?.dataset.pane;
-    if (pane && pane !== active) { active = pane; for (const name of FLOW_PANES) panes[name].toggleAttribute('data-active', name === pane && body.dataset.mode === 'split'); }
+    if (pane && pane !== active) markActive(pane);
   });
   root.addEventListener('pointerdown', event => {
     const pane = event.target?.closest?.('.flow-pane')?.dataset.pane;
@@ -854,14 +855,14 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     relatedKey = key;
     const sections = [];
     const section = (title, pane, entries, action) => {
-      const block = make('section', 'flow-related-section');
+      const block = flowElement('section', 'flow-related-section');
       block.dataset.pane = pane;
-      const head = make('div', 'flow-related-head');
-      const name = make('h3', '', title); name.prepend(make('span', 'flow-pane-mark'));
+      const head = flowElement('div', 'flow-related-head');
+      const name = flowElement('h3', '', title); name.prepend(flowElement('span', 'flow-pane-mark'));
       head.append(name);
       if (action) {
-        const open = button('flow-related-open', action.label, action.aria);
-        open.append(make('kbd', '', action.key));
+        const open = flowButton('flow-related-open', action.label, action.aria);
+        open.append(flowElement('kbd', '', action.key));
         open.addEventListener('click', action.run);
         head.append(open);
       }
@@ -869,52 +870,52 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
       sections.push(block);
     };
     const entry = (text, note, run, className = '') => {
-      const item = button(`flow-related-item ${className}`.trim(), '');
-      item.append(make('span', 'flow-related-text', text));
-      if (note) item.append(make('span', 'flow-related-note', note));
+      const item = flowButton(`flow-related-item ${className}`.trim(), '');
+      item.append(flowElement('span', 'flow-related-text', text));
+      if (note) item.append(flowElement('span', 'flow-related-note', note));
       item.addEventListener('click', run);
       return item;
     };
     const title = selection.sample?.label ? `${selection.site?.label ?? ''} ${selection.sample.label}`.trim() : selection.site?.label ?? selection.fn?.label ?? selection.request?.label ?? 'nothing yet';
-    const heading = make('p', 'flow-related-title', 'Related to ');
-    heading.append(make('b', '', title));
+    const heading = flowElement('p', 'flow-related-title', 'Related to ');
+    heading.append(flowElement('b', '', title));
     // Lineage of the selected request.
     const steps = lineageModels.filter(model => model.step).slice(0, FLOW_WORKSPACE_LIMITS.related);
     if (lineageModels.length) {
       const entries = steps.map(model => {
         // A link here is picked as its Lineage row is.
         const item = entry(model.title, model.confidence, () => { if (selectTraceRow(model)) lineagePicked(model); reveal('lineage', {focus: true}); }, 'flow-related-link');
-        const sample = make('span', 'flow-link-line'); sample.setAttribute('aria-hidden', 'true');
+        const sample = flowElement('span', 'flow-link-line'); sample.setAttribute('aria-hidden', 'true');
         Object.assign(sample.dataset, flowLinkKind(model));
         item.prepend(sample);
         return item;
       });
       const more = lineageModels.filter(model => model.step).length - steps.length;
-      if (more > 0) entries.push(make('p', 'flow-more', `${more} more steps in Lineage`));
+      if (more > 0) entries.push(flowElement('p', 'flow-more', `${more} more steps in Lineage`));
       section(`Lineage${selection.request?.renderer ? ` · #${selection.request.renderer}` : ''}`, 'lineage', entries, {label: 'Open', key: '3', aria: 'Open Lineage', run: () => reveal('lineage', {focus: true})});
     }
     // Samples of the selected call, or at the selected site.
     const chosen = timeline.selection();
     const sampleList = chosen?.type === 'sample' ? chosen.site.samples : chosen?.track ? chosen.track.samples : [];
     if (sampleList.length) {
-      const strip = make('div', 'flow-related-strip');
+      const strip = flowElement('div', 'flow-related-strip');
       strip.setAttribute('role', 'group'); strip.setAttribute('aria-label', 'Samples');
       for (const sample of sampleList.slice(0, FLOW_WORKSPACE_LIMITS.relatedSamples)) {
-        const dot = button('flow-related-sample', sample.kind === 'br_table' ? String(sample.selector ?? '?') : 'ci', `Sample ${sample.ordinal}${sample.kind === 'br_table' ? `, selector ${sample.selector}` : ''}${sample.invocation ? `, call #${sample.invocation}` : ''}`);
+        const dot = flowButton('flow-related-sample', sample.kind === 'br_table' ? String(sample.selector ?? '?') : 'ci', `Sample ${sample.ordinal}${sample.kind === 'br_table' ? `, selector ${sample.selector}` : ''}${sample.invocation ? `, call #${sample.invocation}` : ''}`);
         dot.setAttribute('aria-pressed', String(chosen?.sample?.key === sample.key));
         dot.addEventListener('click', () => timeline.select(`sample:${sample.key}`, {silent: false}));
         strip.append(dot);
       }
       const entries = [strip];
-      if (sampleList.length > FLOW_WORKSPACE_LIMITS.relatedSamples) entries.push(make('p', 'flow-more', `${sampleList.length - FLOW_WORKSPACE_LIMITS.relatedSamples} more samples in Timeline`));
-      section(chosen?.type === 'sample' ? `Timeline · ${chosen.count ?? `sample ${chosen.sample.ordinal} of ${chosen.site.samples.length} read`}` : `Timeline · ${chosen.label}`, 'timeline', entries,
+      if (sampleList.length > FLOW_WORKSPACE_LIMITS.relatedSamples) entries.push(flowElement('p', 'flow-more', `${sampleList.length - FLOW_WORKSPACE_LIMITS.relatedSamples} more samples in Timeline`));
+      section(`Timeline · ${chosen.type === 'sample' ? chosen.count : chosen.label}`, 'timeline', entries,
         {label: 'Open', key: '4', aria: 'Open Timeline', run: () => { timelineOpen = true; reveal('timeline', {focus: true}); }});
     }
     // Sampled sites of the selected function.
     if (cfg.fn) {
       const sites = timeline.samplesFor(cfg.fn.artifact_id, cfg.fn.function_index);
-      if (sites.length) section(`CFG · ${cfg.fn.label}`, 'cfg', sites.slice(0, FLOW_WORKSPACE_LIMITS.related).map(site => entry(`${flowHexOffset(site.offset)} ${site.kind}`, `×${site.samples.length}`, () => {
-        setSelection({site: {offset: site.offset, kind: site.kind, label: `${flowHexOffset(site.offset)} ${site.kind}`}});
+      if (sites.length) section(`CFG · ${cfg.fn.label}`, 'cfg', sites.slice(0, FLOW_WORKSPACE_LIMITS.related).map(site => entry(`${flowHex(site.offset)} ${site.kind}`, `×${site.samples.length}`, () => {
+        setSelection({site: {offset: site.offset, kind: site.kind, label: `${flowHex(site.offset)} ${site.kind}`}});
         showCfg(cfg.fn, site.offset); reveal('cfg', {focus: true});
       })), {label: 'Open', key: '2', aria: 'Open CFG', run: () => reveal('cfg', {focus: true})});
     }
@@ -944,7 +945,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
       }
       section('Graph', 'graph', entries, {label: 'In graph', key: '1', aria: 'Open the graph', run: () => reveal('graph', {focus: true})});
     }
-    if (!sections.length) sections.push(make('p', 'flow-related-empty', 'Select a request, a card or a sample; what links to it is listed here, one key or click away.'));
+    if (!sections.length) sections.push(flowElement('p', 'flow-related-empty', 'Select a request, a card or a sample; what links to it is listed here, one key or click away.'));
     related.replaceChildren(heading, ...sections);
   }
 
@@ -985,10 +986,11 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     };
     handle.addEventListener('pointerup', () => finish(true));
     handle.addEventListener('pointercancel', () => finish(false));
-    handle.addEventListener('dblclick', () => { sizes[sizeName()] = FLOW_SIZE_DEFAULTS[sizeName()]; applySizes(); describeHandle(); savePrefs(); graph.resize(); });
+    const reset = () => { set(FLOW_SIZE_DEFAULTS[sizeName()]); savePrefs(); };
+    handle.addEventListener('dblclick', reset);
     handle.addEventListener('keydown', event => {
       if (event.key === 'Escape' && drag) { event.preventDefault(); event.stopPropagation(); finish(false); return; }
-      if (event.key === 'Home') { event.preventDefault(); event.stopPropagation(); sizes[sizeName()] = FLOW_SIZE_DEFAULTS[sizeName()]; applySizes(); describeHandle(); savePrefs(); return; }
+      if (event.key === 'Home') { event.preventDefault(); event.stopPropagation(); reset(); return; }
       const keys = axis === 'x' ? ['ArrowRight', 'ArrowLeft'] : ['ArrowDown', 'ArrowUp'];
       const direction = keys.indexOf(event.key);
       if (direction < 0) return;
@@ -1037,7 +1039,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     if (digit && !event.shiftKey) {
       const name = FLOW_PANES[Number(digit) - 1];
       reveal(name, {focus: true});
-    } else if ((code === 'KeyZ' || key === 'z' || key === 'Z') && !event.shiftKey && !event.repeat) toggleFocus();
+    } else if ((code === 'KeyZ' || key === 'z' || key === 'Z') && !event.shiftKey && !event.repeat) focusOrReturn(active);
     else if (event.shiftKey && !event.repeat && (code === 'KeyC' || key === 'C')) togglePane('cfg');
     else if (event.shiftKey && !event.repeat && (code === 'KeyL' || key === 'L')) togglePane('lineage');
     else if (event.shiftKey && !event.repeat && (code === 'KeyT' || key === 'T')) togglePane('timeline');
@@ -1066,7 +1068,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
         forgetCfg();
         // The app's request in this session is a pick of its own.
         history = []; cursor = -1; requestRevision = null; graphInfo = null;
-        selection = {request: null, call: null, fn: null, site: null, sample: null, step: null, graphKey: null};
+        selection = {...FLOW_EMPTY_SELECTION};
       }
       const crumb = requestCrumb(request);
       // A revision the app made while the workspace changed something is

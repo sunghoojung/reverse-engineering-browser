@@ -29,8 +29,26 @@ function flowSeq(value) {
   return seq <= 18446744073709551615n ? seq : null;
 }
 const flowSeqOrder = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+/* Helpers the Flow workspace shares; flow_workspace.js loads after this file. */
+/** An element with a class and text; captured values only ever go in as text. */
+function flowElement(tag, className = '', text = '') {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (text) element.textContent = text;
+  return element;
+}
+/** A button with a class, text and, when given, an accessible name. */
+function flowButton(className, text = '', label = '') {
+  const element = flowElement('button', className, text);
+  element.type = 'button';
+  if (label) element.setAttribute('aria-label', label);
+  return element;
+}
 const flowNumber = value => Number(value).toLocaleString('en-US');
 const flowHex = value => `+0x${Number(value).toString(16)}`;
+/** `one` for a count of one (a number or a BigInt), else `many`. */
+const flowPlural = (count, one, many = `${one}s`) => (Number(count) === 1 ? one : many);
 
 /** What a settle returned, from its kind and length; never its content. */
 function flowValueLabel(kind, length) {
@@ -210,10 +228,10 @@ function flowGapNotes(gaps) {
     const tally = gaps.overflow[kind], parts = [];
     if (tally.identities) parts.push(`${flowNumber(tally.identities)} named in overflow records`);
     if (tally.omitted) parts.push(`at least ${flowNumber(tally.omitted)} more omitted`);
-    if (tally.undecoded) parts.push(`${flowNumber(tally.undecoded)} overflow ${tally.undecoded === 1 ? 'record' : 'records'} this backend does not decode`);
+    if (tally.undecoded) parts.push(`${flowNumber(tally.undecoded)} overflow ${flowPlural(tally.undecoded, 'record')} this backend does not decode`);
     if (parts.length) notes.push(`${kind} executions the sample budget refused: ${parts.join(', ')}`);
   }
-  if (gaps.dropped > 0n) notes.push(`${gaps.dropped.toLocaleString('en-US')} ${gaps.dropped === 1n ? 'record' : 'records'} dropped by a full queue`);
+  if (gaps.dropped > 0n) notes.push(`${gaps.dropped.toLocaleString('en-US')} ${flowPlural(gaps.dropped, 'record')} dropped by a full queue`);
   return notes;
 }
 
@@ -254,7 +272,7 @@ function flowTimelineProcess(owner) {
     for (const site of byPlace.get(`${item.function_index}:${item.offset}:${item.kind}`) ?? []) site.refused = (site.refused ?? 0) + 1;
   }
   for (const site of sites.values()) {
-    site.shortfall = site.refused ? `${flowNumber(site.refused)} more ${site.refused === 1 ? 'execution' : 'executions'} at this offset refused`
+    site.shortfall = site.refused ? `${flowNumber(site.refused)} more ${flowPlural(site.refused, 'execution')} at this offset refused`
       : gaps.streams[site.kind] ? `the ${site.kind} stream has refused or lost samples`
         : gaps.dropped > 0n ? 'records of this renderer were dropped' : null;
   }
@@ -332,12 +350,21 @@ function flowSampleCount(sample, site) {
   const base = `sample ${sample.ordinal} of ${site?.samples.length ?? '?'} read`;
   return site?.shortfall ? `${base}, ${site.refused ? 'more refused here' : 'not every execution'}` : base;
 }
+/** A sample's value: the br_table selector, marked when it takes the
+ * default arm, or the call_indirect callee. */
+function flowSampleValue(sample) {
+  if (sample.kind === 'br_table') return `selector ${sample.selector ?? 'unknown'}${sample.tableCount !== null && sample.selector !== null && sample.selector >= sample.tableCount ? ' (default)' : ''}`;
+  return `callee ${sample.resolution === 'resolved' && sample.callee !== null ? `func ${sample.callee}` : sample.resolution ?? 'unknown'}`;
+}
+/** What the CFG and Lineage say beside a picked sample's count: its call,
+ * its value and its sequence. */
+function flowSampleLine(chosen) {
+  return [chosen.track ? flowTrackName(chosen.track) : 'outside a tracked call', flowSampleValue(chosen.sample), `seq ${chosen.sample.seq.toLocaleString('en-US')}`].join(' · ');
+}
 function flowSampleLabel(sample, site) {
   const where = `func ${sample.function_index} ${flowHex(sample.offset)} ${sample.kind}`;
-  const value = sample.kind === 'br_table' ? `selector ${sample.selector ?? 'unknown'}${sample.tableCount !== null && sample.selector !== null && sample.selector >= sample.tableCount ? ' (default)' : ''}`
-    : `callee ${sample.resolution === 'resolved' && sample.callee !== null ? `func ${sample.callee}` : sample.resolution ?? 'unknown'}`;
   const count = `${sample.kind} sample ${sample.ordinal} of ${site?.samples.length ?? '?'} read${site?.shortfall ? ` (${site.shortfall})` : ''}`;
-  return `${count} at ${where}, ${value}, sequence ${sample.seq.toLocaleString('en-US')}`;
+  return `${count} at ${where}, ${flowSampleValue(sample)}, sequence ${sample.seq.toLocaleString('en-US')}`;
 }
 
 /** One gap mark's tooltip: the reason, the refused execution, or the drop. */
@@ -346,7 +373,7 @@ function flowGapMarkText(gap) {
   if (gap.kind && gap.undecoded) return `${gap.kind} overflow record this backend does not decode`;
   if (gap.kind && gap.omitted) return `at least ${flowNumber(gap.omitted)} ${gap.kind} executions the sample budget omitted`;
   if (gap.kind) return `${gap.kind} execution the sample budget refused at func ${gap.function_index} ${flowHex(gap.offset)}`;
-  return `${gap.weight.toLocaleString('en-US')} ${gap.weight === 1n ? 'record' : 'records'} dropped by a full queue`;
+  return `${gap.weight.toLocaleString('en-US')} ${flowPlural(gap.weight, 'record')} dropped by a full queue`;
 }
 
 /** One page of the filtered event read, parsed, within the page byte budget. */
@@ -366,30 +393,29 @@ async function flowTimelinePage(url, signal) {
  */
 function createFlowTimeline({root, onSelect, onFollow, onPartial, describeRequest}) {
   const limits = FLOW_TIMELINE_LIMITS;
-  const make = (tag, className = '', text = '') => { const element = document.createElement(tag); if (className) element.className = className; if (text) element.textContent = text; return element; };
   root.classList.add('flow-timeline');
-  const banner = make('div', 'flow-tl-banner'); banner.hidden = true; banner.setAttribute('role', 'status');
-  const bannerText = make('span', 'flow-tl-banner-text');
-  const bannerAction = make('button', 'secondary-button flow-tl-banner-action'); bannerAction.type = 'button'; bannerAction.hidden = true;
+  const banner = flowElement('div', 'flow-tl-banner'); banner.hidden = true; banner.setAttribute('role', 'status');
+  const bannerText = flowElement('span', 'flow-tl-banner-text');
+  const bannerAction = flowButton('secondary-button flow-tl-banner-action'); bannerAction.hidden = true;
   banner.append(bannerText, bannerAction);
   // Refusals and losses stay stated apart from the read banner, so a refresh
   // notice never replaces them.
-  const gapNotice = make('p', 'flow-tl-gaps'); gapNotice.hidden = true; gapNotice.setAttribute('role', 'note');
+  const gapNotice = flowElement('p', 'flow-tl-gaps'); gapNotice.hidden = true; gapNotice.setAttribute('role', 'note');
   // A long notice scrolls, so it takes a tab stop of its own.
   gapNotice.tabIndex = 0;
-  const state = make('div', 'flow-tl-state'); state.setAttribute('role', 'status'); state.setAttribute('aria-live', 'polite');
-  const stateTitle = make('strong', '', ''), stateText = make('p', '', '');
-  const stateRetry = make('button', 'secondary-button', 'Retry'); stateRetry.type = 'button'; stateRetry.hidden = true;
+  const state = flowElement('div', 'flow-tl-state'); state.setAttribute('role', 'status'); state.setAttribute('aria-live', 'polite');
+  const stateTitle = flowElement('strong', '', ''), stateText = flowElement('p', '', '');
+  const stateRetry = flowButton('secondary-button', 'Retry'); stateRetry.hidden = true;
   state.append(stateTitle, stateText, stateRetry);
-  const scroll = make('div', 'flow-tl-scroll');
-  const canvas = make('div', 'flow-tl-canvas'); canvas.setAttribute('role', 'group'); canvas.setAttribute('aria-label', 'Tracked calls in record order');
+  const scroll = flowElement('div', 'flow-tl-scroll');
+  const canvas = flowElement('div', 'flow-tl-canvas'); canvas.setAttribute('role', 'group'); canvas.setAttribute('aria-label', 'Tracked calls in record order');
   scroll.append(canvas);
-  const detail = make('div', 'flow-tl-detail'); detail.setAttribute('aria-live', 'polite');
-  const detailText = make('span', 'flow-tl-detail-text', '');
-  const detailFollow = make('button', 'secondary-button flow-tl-follow', 'Open in CFG'); detailFollow.type = 'button'; detailFollow.hidden = true;
+  const detail = flowElement('div', 'flow-tl-detail'); detail.setAttribute('aria-live', 'polite');
+  const detailText = flowElement('span', 'flow-tl-detail-text', '');
+  const detailFollow = flowButton('secondary-button flow-tl-follow', 'Open in CFG'); detailFollow.hidden = true;
   detail.append(detailText, detailFollow);
   root.append(banner, gapNotice, state, scroll, detail);
-  const processSelect = make('select', 'flow-tl-process'); processSelect.setAttribute('aria-label', 'Renderer process'); processSelect.hidden = true;
+  const processSelect = flowElement('select', 'flow-tl-process'); processSelect.setAttribute('aria-label', 'Renderer process'); processSelect.hidden = true;
 
   let session = null, events = [], model = null, view = null, cursor = '0', partial = false, status = 'idle', error = null;
   let generation = 0, controller = null, loadedAt = 0, chosenProcess = null, selected = null, items = new Map();
@@ -475,7 +501,7 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
   function render() {
     const processes = model?.processes ?? [];
     const options = processes.map(item => {
-      const option = make('option', '', `renderer ${item.process} · ${item.tracks.length} ${item.tracks.length === 1 ? 'call' : 'calls'}${item.gaps.records ? ' · gaps' : ''}`);
+      const option = flowElement('option', '', `renderer ${item.process} · ${item.tracks.length} ${flowPlural(item.tracks.length, 'call')}${item.gaps.records ? ' · gaps' : ''}`);
       option.value = String(item.process); return option;
     });
     processSelect.replaceChildren(...options);
@@ -485,12 +511,12 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
     const counts = model?.counts;
     const notes = [];
     if (partial) notes.push(`Read the first ${flowNumber(events.length)} records; later records were not read.`);
-    if (view?.hidden.tracks) notes.push(`${view.hidden.tracks} more ${view.hidden.tracks === 1 ? 'call' : 'calls'} not drawn.`);
-    if (view?.hidden.samples) notes.push(`${view.hidden.samples} more ${view.hidden.samples === 1 ? 'sample' : 'samples'} not drawn.`);
-    if (view?.hidden.requests) notes.push(`${view.hidden.requests} more ${view.hidden.requests === 1 ? 'request' : 'requests'} not drawn.`);
-    if (counts?.undecoded) notes.push(`${counts.undecoded} invocation ${counts.undecoded === 1 ? 'record' : 'records'} not decoded by this backend, so calls are grouped from Wasm samples only and have no start or settle.`);
-    if (counts?.invalid) notes.push(`${counts.invalid} malformed ${counts.invalid === 1 ? 'record' : 'records'} skipped.`);
-    if (counts?.conflicts) notes.push(`${counts.conflicts} repeated start or settle ${counts.conflicts === 1 ? 'record' : 'records'} kept apart.`);
+    if (view?.hidden.tracks) notes.push(`${view.hidden.tracks} more ${flowPlural(view.hidden.tracks, 'call')} not drawn.`);
+    if (view?.hidden.samples) notes.push(`${view.hidden.samples} more ${flowPlural(view.hidden.samples, 'sample')} not drawn.`);
+    if (view?.hidden.requests) notes.push(`${view.hidden.requests} more ${flowPlural(view.hidden.requests, 'request')} not drawn.`);
+    if (counts?.undecoded) notes.push(`${counts.undecoded} invocation ${flowPlural(counts.undecoded, 'record')} not decoded by this backend, so calls are grouped from Wasm samples only and have no start or settle.`);
+    if (counts?.invalid) notes.push(`${counts.invalid} malformed ${flowPlural(counts.invalid, 'record')} skipped.`);
+    if (counts?.conflicts) notes.push(`${counts.conflicts} repeated start or settle ${flowPlural(counts.conflicts, 'record')} kept apart.`);
     setBanner(notes.join(' '), partial && events.length < limits.maxRecords ? 'Read more' : null, partial ? () => load(session, {more: true}) : null);
     renderGaps(processes);
     if (!view) {
@@ -517,10 +543,10 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
     const lines = flowGapNotes(view?.gaps);
     if (lines.length) parts.push(`Gaps in renderer ${view.process}: ${lines.join('; ')}.`);
     const others = processes.filter(item => item !== view && item.gaps.records).map(item => item.process);
-    if (others.length) parts.push(`${others.length === 1 ? 'Renderer' : 'Renderers'} ${others.join(', ')} also ${others.length === 1 ? 'has' : 'have'} gaps.`);
+    if (others.length) parts.push(`${flowPlural(others.length, 'Renderer')} ${others.join(', ')} also ${flowPlural(others.length, 'has', 'have')} gaps.`);
     const counted = [];
-    if (scan.sequence > 0n) counted.push(`${scan.sequence.toLocaleString('en-US')}${scan.sequenceSaturated ? ' or more' : ''} sequence ${scan.sequence === 1n ? 'number' : 'numbers'} missing`);
-    if (scan.drops > 0n) counted.push(`${scan.drops.toLocaleString('en-US')}${scan.dropsSaturated ? ' or more' : ''} ${scan.drops === 1n ? 'record' : 'records'} dropped by a full queue`);
+    if (scan.sequence > 0n) counted.push(`${scan.sequence.toLocaleString('en-US')}${scan.sequenceSaturated ? ' or more' : ''} sequence ${flowPlural(scan.sequence, 'number')} missing`);
+    if (scan.drops > 0n) counted.push(`${scan.drops.toLocaleString('en-US')}${scan.dropsSaturated ? ' or more' : ''} ${flowPlural(scan.drops, 'record')} dropped by a full queue`);
     if (counted.length) parts.push(`In the store range read, across every session and record type: ${counted.join(', ')}.`);
     gapNotice.textContent = parts.join(' ');
     gapNotice.hidden = !parts.length;
@@ -547,15 +573,15 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
     items = new Map();
     const width = G.label + G.left + axis.width + G.right;
     // Axis: tick labels at record positions, and a mark where records were compressed.
-    const axisRow = make('div', 'flow-tl-axis'); axisRow.style.width = `${width}px`;
+    const axisRow = flowElement('div', 'flow-tl-axis'); axisRow.style.width = `${width}px`;
     for (const tick of axis.ticks) {
-      const label = make('span', 'flow-tl-tick', tick.seq.toLocaleString('en-US')); label.style.left = `${X(tick.seq)}px`; axisRow.append(label);
-      const rule = make('span', 'flow-tl-rule'); rule.style.left = `${X(tick.seq)}px`; nodes.push(rule);
+      const label = flowElement('span', 'flow-tl-tick', tick.seq.toLocaleString('en-US')); label.style.left = `${X(tick.seq)}px`; axisRow.append(label);
+      const rule = flowElement('span', 'flow-tl-rule'); rule.style.left = `${X(tick.seq)}px`; nodes.push(rule);
     }
     for (const item of axis.breaks) {
-      const mark = make('span', 'flow-tl-break', '≈'); mark.style.left = `${G.label + G.left + item.x}px`;
+      const mark = flowElement('span', 'flow-tl-break', '≈'); mark.style.left = `${G.label + G.left + item.x}px`;
       // The skipped numbers are not all records: some may never have been stored.
-      mark.title = `${item.skipped.toLocaleString('en-US')} sequence ${item.skipped === 1n ? 'number' : 'numbers'} between ${item.after.toLocaleString('en-US')} and ${item.before.toLocaleString('en-US')} hold no record drawn here: records of other types, or numbers with no stored record; this read cannot tell which`;
+      mark.title = `${item.skipped.toLocaleString('en-US')} sequence ${flowPlural(item.skipped, 'number')} between ${item.after.toLocaleString('en-US')} and ${item.before.toLocaleString('en-US')} hold no record drawn here: records of other types, or numbers with no stored record; this read cannot tell which`;
       axisRow.append(mark);
     }
     nodes.push(axisRow);
@@ -576,57 +602,57 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
     }
     for (const row of rows) {
       const height = row.type === 'track' ? G.track : row.type === 'requests' ? 10 + levels * 32 : row.type === 'gaps' ? 30 : G.lane;
-      const line = make('div', `flow-tl-row flow-tl-row-${row.type}`); line.style.top = `${top}px`; line.style.height = `${height}px`; line.style.width = `${width}px`;
-      const labelCell = make('div', 'flow-tl-label');
+      const line = flowElement('div', `flow-tl-row flow-tl-row-${row.type}`); line.style.top = `${top}px`; line.style.height = `${height}px`; line.style.width = `${width}px`;
+      const labelCell = flowElement('div', 'flow-tl-label');
       if (row.type === 'track') {
         const {track} = row;
         line.dataset.track = track.key;
-        const name = make('button', 'flow-tl-call', flowTrackName(track)); name.type = 'button'; name.dataset.key = `call:${track.key}`; name.dataset.seq = String(track.first); name.tabIndex = -1;
+        const name = flowButton('flow-tl-call', flowTrackName(track)); name.dataset.key = `call:${track.key}`; name.dataset.seq = String(track.first); name.tabIndex = -1;
         name.setAttribute('aria-label', `${flowTrackName(track)}, ${flowTrackOutcome(track)}, ${track.samples.length} samples, ${track.requests.length} requests`);
         name.addEventListener('click', () => choose({type: 'call', key: `call:${track.key}`}));
         items.set(`call:${track.key}`, name);
-        const outcome = make('span', 'flow-tl-meta', flowTrackOutcome(track)); outcome.title = flowTrackOutcome(track);
+        const outcome = flowElement('span', 'flow-tl-meta', flowTrackOutcome(track)); outcome.title = flowTrackOutcome(track);
         labelCell.append(name, outcome);
         const mid = height / 2;
         const from = track.start?.seq ?? track.first, to = track.settle?.seq ?? track.last;
-        const open = make('span', `flow-tl-open${track.start ? '' : ' flow-tl-open-uncut'}${track.settle ? '' : ' flow-tl-open-unsettled'}`);
+        const open = flowElement('span', `flow-tl-open${track.start ? '' : ' flow-tl-open-uncut'}${track.settle ? '' : ' flow-tl-open-unsettled'}`);
         open.style.left = `${X(from)}px`; open.style.width = `${Math.max(2, X(to) - X(from))}px`; open.style.top = `${mid - 1}px`;
         open.title = track.start && track.settle ? 'Open from its start record to its settle record' : flowTrackOutcome(track);
         line.append(open);
         if (track.start && track.settle && FLOW_SYNC_VIA.has(track.settle.via)) {
-          const run = make('span', 'flow-tl-run'); run.style.left = `${X(track.start.seq)}px`; run.style.width = `${Math.max(4, X(track.settle.seq) - X(track.start.seq))}px`; run.style.top = `${mid - 5}px`;
+          const run = flowElement('span', 'flow-tl-run'); run.style.left = `${X(track.start.seq)}px`; run.style.width = `${Math.max(4, X(track.settle.seq) - X(track.start.seq))}px`; run.style.top = `${mid - 5}px`;
           // Records between start and settle are made while the call ran (the
           // samples and requests on this track among them), so the span is
           // not "nothing else happened".
           run.title = 'Settled synchronously: it returned or threw without a promise, so it ran without yielding from its start record to its settle record. Samples and requests on this track were recorded inside it; other records in that range can come from other threads.';
           line.append(run);
         }
-        if (track.start) { const mark = make('span', 'flow-tl-start'); mark.style.left = `${X(track.start.seq)}px`; mark.style.top = `${mid - 12}px`; mark.title = `start · sequence ${track.start.seq.toLocaleString('en-US')}${track.start.argumentCount !== null ? ` · ${track.start.argumentCount} arguments` : ''}`; line.append(mark); }
-        if (track.settle) { const mark = make('span', `flow-tl-settle${track.settle.fulfilled ? '' : ' flow-tl-rejected'}`); mark.style.left = `${X(track.settle.seq)}px`; mark.style.top = `${mid - 12}px`; mark.title = `${flowTrackOutcome(track)} · sequence ${track.settle.seq.toLocaleString('en-US')}`; line.append(mark); }
-        for (const request of track.requests) { const mark = make('span', 'flow-tl-request-mark'); mark.style.left = `${X(request.seq)}px`; mark.style.top = `${mid + 6}px`; mark.title = `request #${request.request} started inside this call`; line.append(mark); }
+        if (track.start) { const mark = flowElement('span', 'flow-tl-start'); mark.style.left = `${X(track.start.seq)}px`; mark.style.top = `${mid - 12}px`; mark.title = `start · sequence ${track.start.seq.toLocaleString('en-US')}${track.start.argumentCount !== null ? ` · ${track.start.argumentCount} arguments` : ''}`; line.append(mark); }
+        if (track.settle) { const mark = flowElement('span', `flow-tl-settle${track.settle.fulfilled ? '' : ' flow-tl-rejected'}`); mark.style.left = `${X(track.settle.seq)}px`; mark.style.top = `${mid - 12}px`; mark.title = `${flowTrackOutcome(track)} · sequence ${track.settle.seq.toLocaleString('en-US')}`; line.append(mark); }
+        for (const request of track.requests) { const mark = flowElement('span', 'flow-tl-request-mark'); mark.style.left = `${X(request.seq)}px`; mark.style.top = `${mid + 6}px`; mark.title = `request #${request.request} started inside this call`; line.append(mark); }
         for (const sample of track.drawnSamples) line.append(sampleButton(sample, X, mid));
         if (track.drawnSamples.length < track.samples.length) {
-          const more = make('span', 'flow-tl-more', `+${track.samples.length - track.drawnSamples.length} not drawn`);
+          const more = flowElement('span', 'flow-tl-more', `+${track.samples.length - track.drawnSamples.length} not drawn`);
           more.style.left = `${X(track.last) + 12}px`; more.style.top = `${mid - 8}px`; line.append(more);
         }
       } else if (row.type === 'gaps') {
-        labelCell.append(make('span', 'flow-tl-lane-name', 'Gaps'), make('span', 'flow-tl-meta', `${view.gaps.records} refused or lost${view.hidden.gaps ? `, ${view.hidden.gaps} not drawn` : ''}`));
+        labelCell.append(flowElement('span', 'flow-tl-lane-name', 'Gaps'), flowElement('span', 'flow-tl-meta', `${view.gaps.records} refused or lost${view.hidden.gaps ? `, ${view.hidden.gaps} not drawn` : ''}`));
         for (const gap of view.drawnGaps) {
-          const mark = make('span', 'flow-tl-gap'); mark.style.left = `${X(gap.seq)}px`; mark.style.top = `${height / 2 - 9}px`;
+          const mark = flowElement('span', 'flow-tl-gap'); mark.style.left = `${X(gap.seq)}px`; mark.style.top = `${height / 2 - 9}px`;
           mark.title = `${flowGapMarkText(gap)} · sequence ${gap.seq.toLocaleString('en-US')}`;
           line.append(mark);
         }
       } else if (row.type === 'outside') {
-        labelCell.append(make('span', 'flow-tl-lane-name', 'Not in a tracked call'), make('span', 'flow-tl-meta', 'no call, or call unknown'));
+        labelCell.append(flowElement('span', 'flow-tl-lane-name', 'Not in a tracked call'), flowElement('span', 'flow-tl-meta', 'no call, or call unknown'));
         for (const sample of view.drawnOutside) line.append(sampleButton(sample, X, height / 2));
       } else {
-        labelCell.append(make('span', 'flow-tl-lane-name', 'Requests'), make('span', 'flow-tl-meta', crowded ? `${crowded} more overlap, not drawn` : `issued in renderer ${view.process}`));
+        labelCell.append(flowElement('span', 'flow-tl-lane-name', 'Requests'), flowElement('span', 'flow-tl-meta', crowded ? `${crowded} more overlap, not drawn` : `issued in renderer ${view.process}`));
         for (const request of view.drawnRequests) {
           if (!chipLevels.has(request.key)) continue;
           const known = describeRequest(view.process, request.request);
-          const chip = make('button', `flow-tl-chip${request.invocation ? '' : ' flow-tl-chip-unknown'}`); chip.type = 'button'; chip.tabIndex = -1;
+          const chip = flowButton(`flow-tl-chip${request.invocation ? '' : ' flow-tl-chip-unknown'}`); chip.tabIndex = -1;
           chip.dataset.key = `request:${request.key}`; chip.dataset.seq = String(request.seq);
-          chip.append(make('span', 'flow-tl-chip-name', known?.label ?? `request #${request.request}`), make('span', 'flow-tl-chip-meta', request.invocation ? `in #${request.invocation}` : 'call unknown'));
+          chip.append(flowElement('span', 'flow-tl-chip-name', known?.label ?? `request #${request.request}`), flowElement('span', 'flow-tl-chip-meta', request.invocation ? `in #${request.invocation}` : 'call unknown'));
           chip.style.left = `${X(request.seq)}px`; chip.style.top = `${6 + chipLevels.get(request.key) * 32}px`; chip.style.width = `${G.chip}px`;
           chip.setAttribute('aria-label', `${known?.label ?? `Renderer request ${request.request}`}, ${request.invocation ? `started inside call #${request.invocation}` : 'started while a call was open, which one is unknown'}, sequence ${request.seq.toLocaleString('en-US')}`);
           chip.addEventListener('click', () => choose({type: 'request', key: `request:${request.key}`}));
@@ -644,10 +670,10 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
   }
   function sampleButton(sample, X, mid) {
     const site = view.sites.get(sample.site);
-    const button = make('button', `flow-tl-sample flow-tl-${sample.kind}`); button.type = 'button'; button.tabIndex = -1;
+    const button = flowButton(`flow-tl-sample flow-tl-${sample.kind}`); button.tabIndex = -1;
     button.dataset.key = `sample:${sample.key}`; button.dataset.seq = String(sample.seq);
     button.style.left = `${X(sample.seq) - 9}px`; button.style.top = `${mid - 21}px`;
-    button.append(make('span', 'flow-tl-tick-mark'), make('span', 'flow-tl-value', sample.kind === 'br_table' ? String(sample.selector ?? '?') : 'ci'));
+    button.append(flowElement('span', 'flow-tl-tick-mark'), flowElement('span', 'flow-tl-value', sample.kind === 'br_table' ? String(sample.selector ?? '?') : 'ci'));
     button.setAttribute('aria-label', flowSampleLabel(sample, site));
     button.title = flowSampleLabel(sample, site);
     button.addEventListener('click', () => choose({type: 'sample', key: `sample:${sample.key}`}));
@@ -716,7 +742,7 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
     if (info.type === 'sample') {
       const sample = info.sample;
       detailText.textContent = [`${sample.kind} ${info.count}`, info.track ? `${flowTrackName(info.track)} · ${sample.callOrdinal} of ${info.track.samples.length}` : `outside a tracked call (${FLOW_INVOCATION_STATES[sample.state] ?? 'unknown'})`,
-        `func ${sample.function_index} ${flowHex(sample.offset)}`, sample.kind === 'br_table' ? `selector ${sample.selector ?? 'unknown'}` : `callee ${sample.resolution === 'resolved' ? `func ${sample.callee}` : sample.resolution ?? 'unknown'}`,
+        `func ${sample.function_index} ${flowHex(sample.offset)}`, flowSampleValue(sample),
         `seq ${sample.seq.toLocaleString('en-US')} · renderer ${sample.process}`, notDrawn(info)].filter(Boolean).join(' · ');
       detailFollow.hidden = false;
     } else if (info.type === 'call') {
@@ -832,7 +858,7 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
       if (status === 'error') return 'read failed';
       if (!view) return model ? 'none recorded' : '';
       const samples = view.tracks.reduce((sum, track) => sum + track.samples.length, 0) + view.outside.length;
-      return `${view.tracks.length} ${view.tracks.length === 1 ? 'call' : 'calls'} · ${samples} ${samples === 1 ? 'sample' : 'samples'} · renderer ${view.process} record order${partial ? ' · partial' : ''}${view.gaps.records ? ' · gaps' : ''}`;
+      return `${view.tracks.length} ${flowPlural(view.tracks.length, 'call')} · ${samples} ${flowPlural(samples, 'sample')} · renderer ${view.process} record order${partial ? ' · partial' : ''}${view.gaps.records ? ' · gaps' : ''}`;
     },
     /** The tracked call whose start or settle record is `record`
      * ("process:sequence"), described as select() describes it, or null. */

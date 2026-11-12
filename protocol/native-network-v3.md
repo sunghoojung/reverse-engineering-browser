@@ -1323,14 +1323,17 @@ applied or covered, and a cover is counted; none is lost unseen. The order:
 
 1. Before `CaptureGeneratedArtifact` sends an artifact, the walk adds its
    creator sequence, digest and budget to the thread's queued index and
-   writes the table's ordinal into an 8,192-slot owner ring slot (a seqlock:
-   creator cleared, table stored, creator published with release).
+   stores one word, the creator sequence and the table's ordinal together,
+   into the 8,192-slot owner ring with release. One word is one writer's
+   pair, so two writers that claimed the same slot 8,192 claims apart replace
+   each other's word and never mix one's creator with the other's table. A
+   creator of 2^44 or more, or an ordinal above 2^20 - 1, stores no word.
 2. The browser refuses only an artifact it received, so the refusal follows
-   step 1. Under the registry lock it goes to the table the owner ring names
-   (creator read with acquire, table read, creator read again after an
-   acquire fence). When 8,192 newer artifacts reused the slot, it goes to
-   every table with a scope instead; each looks the creator up in its own
-   queued index, so only the owner acts on it.
+   step 1. Under the registry lock it goes to the table whose word holds its
+   creator (read with acquire). When no word holds it (the slot was reused, or
+   the pair did not fit), it goes to every table with a scope instead; each
+   looks the creator up in its own queued index, so only the owner acts on
+   it.
 3. Each table's mailbox is a 256-entry single-producer, single-consumer ring
    that never overwrites: the producer reads the consumer's published tail with
    acquire and stores an entry only into a free slot (entry relaxed, head with
@@ -1511,7 +1514,7 @@ records.
   the registration ring with `--reb-promise-stacks`. Allocated by the thread's
   first walk while capture is active, never when it is named, and freed when a
   worker stops; at most 32 workers per renderer have them
-  ([threads](#threads)). The owner ring is 128 KiB of process-static storage,
+  ([threads](#threads)). The owner ring is 64 KiB of process-static storage,
   untouched until a stack artifact is queued.
 
 ### Validation

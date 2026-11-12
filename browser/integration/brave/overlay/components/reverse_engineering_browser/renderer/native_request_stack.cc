@@ -198,17 +198,23 @@ NativeRequestStackTables* g_registry = nullptr;
 
 // Which table queued the stack artifact a creator sequence names, so its
 // refusal goes to that table alone. Any walking thread writes a slot it
-// claimed from g_owner_next; the transport's sequence reads. Each slot is a
-// seqlock: the writer clears creator, stores table, then publishes creator
-// with release; the reader loads creator with acquire, reads table, and
-// accepts it only if creator is unchanged after an acquire fence. A slot
-// reused 8,192 artifacts later fails that check, and the refusal then goes
-// to every attached table, whose queued index finds its owner.
-struct QueuedOwner final {
-  std::atomic<std::uint64_t> creator{0};
-  std::atomic<std::uint64_t> table{0};
-};
-std::array<QueuedOwner, kNativeStackOwnerRing> g_owners{};
+// claimed from g_owner_next; the transport's sequence reads. A slot is one
+// atomic word holding both the creator and the table, so it is always one
+// writer's pair: two writers that claimed the same slot 8,192 claims apart
+// can only replace each other's word, never mix a creator with another
+// table. A refusal whose creator no slot holds goes to every attached table,
+// whose queued index finds its owner.
+constexpr unsigned kOwnerTableBits = 20;
+constexpr std::uint64_t kOwnerTableMask = (1ULL << kOwnerTableBits) - 1;
+// The creator and table of a word, or 0 when either does not fit, which the
+// reader never matches: such a refusal takes the every-table path.
+std::uint64_t OwnerWord(const std::uint64_t creator, const std::uint64_t table) noexcept {
+  return creator != 0 && creator < (1ULL << (64U - kOwnerTableBits)) && table != 0 &&
+                 table <= kOwnerTableMask
+             ? (creator << kOwnerTableBits) | table
+             : 0;
+}
+std::array<std::atomic<std::uint64_t>, kNativeStackOwnerRing> g_owners{};
 std::atomic<std::uint64_t> g_owner_next{0};
 
 std::uint64_t MonotonicNs() noexcept {
@@ -1576,12 +1582,8 @@ void NativeRequestStackWalk::QueueStackArtifact(
                        !async_task_walk()                              ? Budget::kRequest
                        : task_kind_ == NativeAsyncTaskKind::kMicrotask ? Budget::kPromise
                                                                        : Budget::kTask});
-  QueuedOwner& owner =
-      g_owners[g_owner_next.fetch_add(1, std::memory_order_relaxed) & (kNativeStackOwnerRing - 1)];
-  owner.creator.store(0, std::memory_order_relaxed);
-  std::atomic_thread_fence(std::memory_order_release);
-  owner.table.store(state.ordinal, std::memory_order_relaxed);
-  owner.creator.store(stack_sequence_, std::memory_order_release);
+  g_owners[g_owner_next.fetch_add(1, std::memory_order_relaxed) & (kNativeStackOwnerRing - 1)]
+      .store(OwnerWord(stack_sequence_, state.ordinal), std::memory_order_release);
   sink.CaptureGeneratedArtifact(
       NativeArtifactKind::kStack, NativeArtifactCaptureOrigin::kRequestStack, stack_sequence_,
       execution_context_id_, frame_id_, std::string_view(url.data(), url.size()), content);
@@ -1607,14 +1609,10 @@ void NativeRequestStackWalk::StackArtifactRefused(const std::uint64_t creator_se
   std::uint64_t table = 0;
   const std::uint64_t newest = g_owner_next.load(std::memory_order_relaxed);
   for (std::uint64_t back = 1; back <= kNativeStackOwnerRing && back <= newest; ++back) {
-    const QueuedOwner& owner = g_owners[(newest - back) & (kNativeStackOwnerRing - 1)];
-    if (owner.creator.load(std::memory_order_acquire) != creator_sequence) {
-      continue;
-    }
-    const std::uint64_t candidate = owner.table.load(std::memory_order_relaxed);
-    std::atomic_thread_fence(std::memory_order_acquire);
-    if (owner.creator.load(std::memory_order_relaxed) == creator_sequence) {
-      table = candidate;
+    const std::uint64_t word =
+        g_owners[(newest - back) & (kNativeStackOwnerRing - 1)].load(std::memory_order_acquire);
+    if (word != 0 && word >> kOwnerTableBits == creator_sequence) {
+      table = word & kOwnerTableMask;
       break;
     }
   }

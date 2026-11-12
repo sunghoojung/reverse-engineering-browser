@@ -1,32 +1,34 @@
 diff --git a/content/browser/preloading/prefetch/prefetch_url_loader_factory_utils.cc b/content/browser/preloading/prefetch/prefetch_url_loader_factory_utils.cc
-index dd86dce..e8a78ba 100644
+index 2d60d44..5405014 100644
 --- a/content/browser/preloading/prefetch/prefetch_url_loader_factory_utils.cc
 +++ b/content/browser/preloading/prefetch/prefetch_url_loader_factory_utils.cc
-@@ -4,12 +4,16 @@
+@@ -4,7 +4,10 @@
  
  #include "content/browser/preloading/prefetch/prefetch_url_loader_factory_utils.h"
  
 +#include <optional>
 +
+ #include "base/check_is_test.h"
 +#include "brave/components/reverse_engineering_browser/common/native_factory_owner_hook.h"
  #include "content/browser/loader/url_loader_factory_utils.h"
  #include "content/browser/preloading/prefetch/prefetch_request.h"
  #include "content/browser/renderer_host/render_frame_host_impl.h"
- #include "content/public/browser/child_process_host.h"
+@@ -13,6 +16,7 @@
  #include "content/public/browser/content_browser_client.h"
  #include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/storage_partition.h"
 +#include "content/public/browser/web_contents.h"
  #include "net/base/isolation_info.h"
  #include "services/network/public/cpp/constants.h"
  #include "services/network/public/cpp/shared_url_loader_factory.h"
-@@ -70,6 +74,20 @@ scoped_refptr<network::SharedURLLoaderFactory> CreatePrefetchURLLoaderFactory(
- 
-   bool bypass_redirect_checks = false;
- 
+@@ -118,6 +122,19 @@ scoped_refptr<network::SharedURLLoaderFactory> CreatePrefetchURLLoaderFactory(
+     const PrefetchRequest& prefetch_request,
+     scoped_refptr<network::SharedURLLoaderFactory>
+         pre_prefetch_url_loader_factory) {
 +  // A browser-initiated prefetch has no referring frame: name the page it was
 +  // started for, or say there is none (protocol/native-network-v3.md).
 +  std::optional<reb::ScopedNativeFactoryOwner> native_owner;
-+  if (!referring_render_frame_host) {
++  if (!prefetch_request.GetRendererInitiatorInfo()) {
 +    WebContents* const contents = prefetch_request.referring_web_contents().get();
 +    RenderFrameHost* const page =
 +        contents ? contents->GetPrimaryMainFrame() : nullptr;
@@ -36,7 +38,16 @@ index dd86dce..e8a78ba 100644
 +             : reb::NativeFactoryOwner{
 +                   .cause = reb::NativeFactoryOwnerCause::kPrefetchWithoutPage});
 +  }
-+
-   url_loader_factory::TerminalParams terminal_params = [&]() {
-     // If this is for PrePrefetch-promoted request, serve from the PrePrefetched
-     // result.
+   return CreatePrefetchURLLoaderFactory<
+       scoped_refptr<network::SharedURLLoaderFactory>>(
+       network_context, prefetch_request.browser_context(),
+@@ -146,6 +163,9 @@ CreatePrePrefetchURLLoaderFactoryOnUI(BrowserContext* browser_context) {
+     // - Always browser-initiated.
+     // - Referring origin is always `std::nullopt` (see
+     //   `BrowserContext::StartBrowserPrefetchRequest()`).
++    // With no referring page, say so (protocol/native-network-v3.md).
++    reb::ScopedNativeFactoryOwner native_owner(reb::NativeFactoryOwner{
++        .cause = reb::NativeFactoryOwnerCause::kPrefetchWithoutPage});
+     return CreatePrefetchURLLoaderFactory<
+         mojo::PendingRemote<network::mojom::URLLoaderFactory>>(
+         network_context, browser_context,

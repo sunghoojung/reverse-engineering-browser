@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
-index 08de5bd..5f7d7f2 100644
+index 4a433ce..c4e2bc4 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
 +++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
 @@ -118,12 +118,43 @@ bool RedirectRequiresLoaderRestart(const GURL& original_url,
@@ -46,9 +46,9 @@ index 08de5bd..5f7d7f2 100644
  void ResourceRequestSender::SendSync(
      std::unique_ptr<network::ResourceRequest> request,
      const net::NetworkTrafficAnnotationTag& traffic_annotation,
-@@ -143,6 +174,12 @@ void ResourceRequestSender::SendSync(
+@@ -142,6 +173,12 @@ void ResourceRequestSender::SendSync(
+ 
    DCHECK(loader_options & network::mojom::kURLLoadOptionSynchronous);
-   DCHECK(request->load_flags & net::LOAD_IGNORE_LIMITS);
  
 +  // The pool thread below sends the request, but this thread runs the script
 +  // and owns the fetch, so the request's start is recorded here.
@@ -59,7 +59,7 @@ index 08de5bd..5f7d7f2 100644
    std::unique_ptr<network::PendingSharedURLLoaderFactory> pending_factory =
        url_loader_factory->Clone();
    base::WaitableEvent redirect_or_response_event(
-@@ -172,7 +209,8 @@ void ResourceRequestSender::SendSync(
+@@ -171,7 +208,8 @@ void ResourceRequestSender::SendSync(
                            CrossThreadUnretained(terminate_sync_load_event),
                            timeout, std::move(download_to_blob_registry),
                            cors_exempt_header_list,
@@ -69,7 +69,7 @@ index 08de5bd..5f7d7f2 100644
  
    // `redirect_or_response_event` will signal when each redirect completes, and
    // when the final response is complete.
-@@ -278,23 +316,11 @@ int ResourceRequestSender::SendAsync(
+@@ -277,23 +315,11 @@ int ResourceRequestSender::SendAsync(
                        weak_factory_.GetWeakPtr()));
    used_code_cache_fetcher_ = !!code_cache_fetcher_;
  
@@ -99,10 +99,10 @@ index 08de5bd..5f7d7f2 100644
    request_info_ = std::make_unique<PendingRequestInfo>(
        std::move(client), request->destination, KURL(request->url),
 diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h
-index f8d5249..5fa6443 100644
+index b714354..82960b1 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h
 +++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h
-@@ -120,6 +120,12 @@ class BLINK_PLATFORM_EXPORT ResourceRequestSender {
+@@ -121,6 +121,12 @@ class BLINK_PLATFORM_EXPORT ResourceRequestSender {
        base::RepeatingCallback<void(size_t)>
            did_buffer_load_while_in_bfcache_callback);
  
@@ -115,7 +115,7 @@ index f8d5249..5fa6443 100644
    // Cancels the current request and `request_info_` will be released.
    virtual void Cancel(scoped_refptr<base::SequencedTaskRunner> task_runner);
  
-@@ -252,6 +258,9 @@ class BLINK_PLATFORM_EXPORT ResourceRequestSender {
+@@ -253,6 +259,9 @@ class BLINK_PLATFORM_EXPORT ResourceRequestSender {
  
    // Native capture state of this request; see protocol/native-network-v3.md.
    reb::NativeRendererRequest reb_request_;
@@ -126,10 +126,10 @@ index f8d5249..5fa6443 100644
    scoped_refptr<base::SequencedTaskRunner> loading_task_runner_;
  
 diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context.cc
-index 27408c1..3988035 100644
+index 0bac72c..9101329 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context.cc
 +++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context.cc
-@@ -114,11 +114,16 @@ void SyncLoadContext::StartAsyncWithWaitableEvent(
+@@ -115,11 +115,16 @@ void SyncLoadContext::StartAsyncWithWaitableEvent(
      mojo::PendingRemote<mojom::blink::BlobRegistry> download_to_blob_registry,
      const Vector<String>& cors_exempt_header_list,
      std::unique_ptr<ResourceLoadInfoNotifierWrapper>
@@ -148,10 +148,10 @@ index 27408c1..3988035 100644
        std::move(request), std::move(loading_task_runner), traffic_annotation,
        loader_options, cors_exempt_header_list, context,
 diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context.h b/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context.h
-index c13b69a..57474be 100644
+index 3710477..0497b92 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context.h
 +++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context.h
-@@ -57,6 +57,9 @@ class BLINK_PLATFORM_EXPORT SyncLoadContext : public ResourceRequestClient {
+@@ -58,6 +58,9 @@ class BLINK_PLATFORM_EXPORT SyncLoadContext : public ResourceRequestClient {
    // If |download_to_blob_registry| is not null, it is used to
    // redirect the download to a blob, with the resulting blob populated in
    // |response|.
@@ -161,7 +161,7 @@ index c13b69a..57474be 100644
    static void StartAsyncWithWaitableEvent(
        std::unique_ptr<network::ResourceRequest> request,
        scoped_refptr<base::SingleThreadTaskRunner> loading_task_runner,
-@@ -73,7 +76,9 @@ class BLINK_PLATFORM_EXPORT SyncLoadContext : public ResourceRequestClient {
+@@ -74,7 +77,9 @@ class BLINK_PLATFORM_EXPORT SyncLoadContext : public ResourceRequestClient {
        mojo::PendingRemote<mojom::blink::BlobRegistry> download_to_blob_registry,
        const Vector<String>& cors_exempt_header_list,
        std::unique_ptr<ResourceLoadInfoNotifierWrapper>

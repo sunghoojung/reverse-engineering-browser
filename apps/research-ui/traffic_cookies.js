@@ -423,18 +423,27 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
   unknownAbsence('No retained response set it.'));
   const frames = answered ? read.frames : null;
   // Reads that may hold this name without naming it: recorded before names
-  // were, or with names past the 360-name bound or a full table.
-  const loadedCoverage = decoded.filter(record => record.readRecord).reduce((total, record) => ({
-    whole_jar_reads: total.whole_jar_reads + (record.wholeJar ? record.count : 0),
-    reads_with_unrecorded_names: total.reads_with_unrecorded_names + (record.unrecordedNames ? record.count : 0),
-    unrecorded_names: total.unrecorded_names + record.unrecordedNames}),
-  {whole_jar_reads: 0, reads_with_unrecorded_names: 0, unrecorded_names: 0});
+  // were, with names past the 360-name bound or a full table, or a Cookie
+  // Store get or getAll with no name; and records a full queue dropped.
+  const plural = (count, noun) => `${count} ${noun}${count === 1 ? '' : 's'}`;
+  const loadedCoverage = decoded.reduce((total, record) => ({
+    whole_jar_reads: total.whole_jar_reads + (record.readRecord && record.wholeJar ? record.count : 0),
+    reads_with_unrecorded_names: total.reads_with_unrecorded_names + (record.readRecord && record.unrecordedNames ? record.count : 0),
+    unrecorded_names: total.unrecorded_names + (record.readRecord ? record.unrecordedNames : 0),
+    unnamed_store_reads: total.unnamed_store_reads +
+      (['cookieStore.get', 'cookieStore.getAll'].includes(record.api) && record.nameLength === 0 ? record.count : 0),
+    records_dropped: total.records_dropped}),
+  {whole_jar_reads: 0, reads_with_unrecorded_names: 0, unrecorded_names: 0, unnamed_store_reads: 0,
+    records_dropped: events.reduce((sum, event) => sum + trafficCookieDropWeight(event), 0)});
   const coverage = answered && read.readCoverage ? read.readCoverage : loadedCoverage;
-  const unnamedReads = coverage.whole_jar_reads + coverage.reads_with_unrecorded_names;
-  const unnamedNote = unnamedReads ? `${unnamedReads} document.cookie read${unnamedReads === 1 ? '' : 's'} did not name every cookie ` +
-    `${unnamedReads === 1 ? 'it' : 'they'} returned (${[coverage.whole_jar_reads ? `${coverage.whole_jar_reads} recorded before reads named cookies` : '',
-      coverage.reads_with_unrecorded_names ? `${coverage.unrecorded_names} name${coverage.unrecorded_names === 1 ? '' : 's'} past the 360-name bound or a full table` : '']
-      .filter(Boolean).join('; ')}), so a read of ${name} may have no record.` : '';
+  const unnamedReads = coverage.whole_jar_reads + coverage.reads_with_unrecorded_names + (coverage.unnamed_store_reads ?? 0);
+  const unnamedNote = [unnamedReads ? `${plural(unnamedReads, 'read')} did not name every cookie ` +
+    `${unnamedReads === 1 ? 'it' : 'they'} returned (${[coverage.whole_jar_reads ? `${plural(coverage.whole_jar_reads, 'document.cookie read')} from before reads named cookies` : '',
+      coverage.reads_with_unrecorded_names ? `${plural(coverage.unrecorded_names, 'name')} past the 360-name bound or a full table` : '',
+      coverage.unnamed_store_reads ? `${plural(coverage.unnamed_store_reads, 'Cookie Store read')} with no name` : '']
+      .filter(Boolean).join('; ')}), so a read of ${name} may have no record.` : '',
+  coverage.records_dropped ? `${plural(coverage.records_dropped, 'network record')} ${coverage.records_dropped === 1 ? 'was' : 'were'} lost to a full queue, so a call that named it may be missing.` : '']
+    .filter(Boolean).join(' ');
   group('Script access', scripts.map(record => {
     const resolved = record.frame ? frames?.get(`${record.processId}:${record.sequenceNumber}`) : null;
     const item = entry(`${record.api}${record.count > 1 ? ` × ${record.count}` : ''} ${trafficCookieCallPlace(record.thread, record.frameId)}` +
@@ -450,7 +459,7 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
   }).concat(beyondScripts(read, scripts).map(call => entry(`${call.api}${call.count > 1 ? ` × ${call.count}` : ''} ${trafficCookieCallPlace(call.thread, call.frame_id)}` +
     `${call.script_frame ? `, script ${call.script_frame.script_id} at character ${call.script_frame.position}` : ', no script position'}` +
     `${call.stack_digest ? `, stack ${call.stack_digest.slice(0, 12)}` : ''}${call.name_prefix_only ? ' (name matched by its first 24 bytes)' : ''}`))),
-  unnamedReads && answered && read.complete ? 'No recorded document.cookie or Cookie Store call named it.'
+  unnamedNote && answered && read.complete ? 'No recorded document.cookie or Cookie Store call named it.'
     : unknownAbsence('No recorded document.cookie or Cookie Store call used this name.'));
   const writes = new Map(scripts.filter(record => record.write).map(record => [record.valueSha256, record]));
   group('Sent with requests', sentWith.map(({request, list, cookie}) => {
@@ -477,6 +486,16 @@ const TRAFFIC_COOKIE_WORKERS = Object.freeze({dedicated_worker: 'a dedicated wor
   shared_worker: 'a shared worker', service_worker: 'a service worker'});
 function trafficCookieCallPlace(thread, frameId) {
   return Object.hasOwn(TRAFFIC_COOKIE_WORKERS, thread ?? '') ? `in ${TRAFFIC_COOKIE_WORKERS[thread]} ${frameId}` : `in frame ${frameId}`;
+}
+
+// A network gap record's drop count, as the backend weighs it: a named gap
+// (an identifier) is a reason, not a loss; any other gap counts at least one.
+function trafficCookieDropWeight(event) {
+  if (event?.type !== 'gap' || event.category !== 'network') return 0;
+  const hex = typeof event.payload === 'string' && /^(?:[0-9a-f]{2})*$/i.test(event.payload) ? event.payload : '';
+  const text = (hex.match(/../g) ?? []).map(byte => String.fromCharCode(Number.parseInt(byte, 16))).join('');
+  if (/^[a-z][a-z0-9_]{0,63}$/.test(text)) return 0;
+  return /^[0-9]+$/.test(text) && Number(text) > 0 ? Number(text) : 1;
 }
 
 // Script calls the store read beyond the event window the view already decoded.

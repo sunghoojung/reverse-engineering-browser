@@ -1852,9 +1852,12 @@ and SHA-256, like credential headers; a script write links to a sent cookie
 when their value digests are equal. A `document.cookie` read joins a name by
 its version 3 name record. `read_coverage` counts the reads that may hold the
 name without naming it: `whole_jar_reads` (version 1 and 2 reads, recorded
-before names were) and `reads_with_unrecorded_names` with their
-`unrecorded_names`; `complete` is true only when both are zero, so an absent
-read is proof only then.
+before names were), `reads_with_unrecorded_names` with their
+`unrecorded_names`, and `unnamed_store_reads` (`cookieStore.get` or `getAll`
+with no name, which read every cookie they can); and `records_dropped`, the
+drop counts of network gap records in the window, since a lost record may
+have named it. `complete` is true only when all are zero, so an absent read is
+proof only then.
 
 Origin Trace's **Cookies** tab shows Request cookies, with "Show filtered out
 request cookies" listing excluded ones and each reason, and Response cookies

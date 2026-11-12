@@ -11277,13 +11277,15 @@
               "complete",
               "whole_jar_reads",
               "reads_with_unrecorded_names",
-              "unrecorded_names"
+              "unrecorded_names",
+              "unnamed_store_reads",
+              "records_dropped"
             ],
-            "description": "document.cookie reads in the records read that may hold this name without naming it. An absent read of the name is proof only when complete is true.",
+            "description": "Reads in the records read that may hold this name without naming it, and network records lost to a full queue. An absent read of the name is proof only when complete is true.",
             "properties": {
               "complete": {
                 "type": "boolean",
-                "description": "True when no read below exists."
+                "description": "True when every count below is zero."
               },
               "whole_jar_reads": {
                 "type": "integer",
@@ -11299,6 +11301,16 @@
                 "type": "integer",
                 "minimum": 0,
                 "description": "Names those reads held past the 360-name bound or a full table."
+              },
+              "unnamed_store_reads": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "cookieStore.get or getAll calls with no name, summed by count: each may have read this cookie."
+              },
+              "records_dropped": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Network records lost to a full queue in the records read (gap records with a drop count); one may have named this cookie."
               }
             }
           },

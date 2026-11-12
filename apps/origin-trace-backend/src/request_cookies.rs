@@ -10,6 +10,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::event_window;
 use crate::evidence;
 use crate::request_headers::{STATES, child_payload, le, lifecycle_of, provisional_hops};
 use crate::request_stack;
@@ -672,6 +673,10 @@ pub fn provenance(
     let mut whole_jar_reads = 0u64;
     let mut unrecorded_reads = 0u64;
     let mut unrecorded_names = 0u64;
+    // cookieStore.get or getAll with no name reads every cookie it can, and
+    // a record a full queue dropped may have named this one.
+    let mut unnamed_store_reads = 0u64;
+    let mut records_dropped = 0u64;
     let mut ordered: Vec<&Value> = events
         .iter()
         .filter(|event| event["session_id"] == session && event["category"] == "network")
@@ -693,7 +698,16 @@ pub fn provenance(
                         unrecorded_names += u64::from(script.unrecorded_names);
                     }
                 }
-                Some(script) if names_match(&script, wanted) => {
+                Some(script)
+                    if names_match(&script, wanted)
+                        || (matches!(script.api, 4 | 5) && script.name_length == 0) =>
+                {
+                    if matches!(script.api, 4 | 5) && script.name_length == 0 {
+                        unnamed_store_reads += u64::from(script.count);
+                        if !names_match(&script, wanted) {
+                            continue;
+                        }
+                    }
                     let mut item = describe_script(event, &script);
                     if let (true, Some(scope)) = (script.flags & 2 != 0, script.scope) {
                         let process = event["process_id"].as_u64().unwrap_or(0);
@@ -734,6 +748,9 @@ pub fn provenance(
                 Some(_) => {}
                 None => malformed.push(event["sequence_number"].clone()),
             },
+            Some("gap") if event_window::named_gap(event).is_none() => {
+                records_dropped = records_dropped.saturating_add(event_window::drop_weight(event));
+            }
             Some("cookie_list") => {
                 let Some(list) = decode_list(event) else {
                     malformed.push(event["sequence_number"].clone());
@@ -794,10 +811,15 @@ pub fn provenance(
         "lists_unread": unread.len(),
         "stacks_unresolved": stacks_unresolved,
         "read_coverage": {
-            "complete": whole_jar_reads == 0 && unrecorded_reads == 0,
+            "complete": whole_jar_reads == 0
+                && unrecorded_reads == 0
+                && unnamed_store_reads == 0
+                && records_dropped == 0,
             "whole_jar_reads": whole_jar_reads,
             "reads_with_unrecorded_names": unrecorded_reads,
             "unrecorded_names": unrecorded_names,
+            "unnamed_store_reads": unnamed_store_reads,
+            "records_dropped": records_dropped,
         },
         "malformed_records": malformed,
     })
@@ -1129,11 +1151,43 @@ mod tests {
         assert_eq!(
             origin["read_coverage"],
             json!({"complete": false, "whole_jar_reads": 5, "reads_with_unrecorded_names": 2,
-                "unrecorded_names": 3})
+                "unrecorded_names": 3, "unnamed_store_reads": 0, "records_dropped": 0})
         );
         // Only reads that named every cookie leave the coverage complete.
         let named = provenance(&events[..2], &[], &root, "7", "_abck", &no_index);
         assert_eq!(named["read_coverage"]["complete"], true);
+        // cookieStore.getAll() and get({url}) name no cookie, so they may have
+        // read this one; a dropped record may have named it.
+        let mut unnamed = events[..2].to_vec();
+        let mut store = script_payload(5, b"", b"");
+        store[5] = 2;
+        store[8..12].copy_from_slice(&3u32.to_le_bytes());
+        store[16..24].fill(0);
+        store[72..104].fill(0);
+        unnamed.push(record("script_cookie", 10, 0, &store, "0"));
+        let coverage = provenance(&unnamed, &[], &root, "7", "_abck", &no_index);
+        assert_eq!(coverage["malformed_records"], json!([]));
+        assert_eq!(coverage["read_coverage"]["unnamed_store_reads"], 3);
+        assert_eq!(coverage["read_coverage"]["complete"], false);
+        assert_eq!(coverage["script"].as_array().unwrap().len(), 1);
+        // ...and the empty name still lists it, as its own read.
+        let empty = provenance(&unnamed, &[], &root, "7", "", &no_index);
+        assert_eq!(empty["script"].as_array().unwrap().len(), 1);
+        let mut dropped = events[..2].to_vec();
+        let mut gap = record("gap", 11, 0, b"", "0");
+        gap["payload"] = json!(hex::encode("4"));
+        gap["payload_size"] = json!(1);
+        dropped.push(gap);
+        let lost = provenance(&dropped, &[], &root, "7", "_abck", &no_index);
+        assert_eq!(lost["read_coverage"]["records_dropped"], 4);
+        assert_eq!(lost["read_coverage"]["complete"], false);
+        // A named gap is a reason, not a lost record.
+        let mut named_gap = events[..2].to_vec();
+        let mut reason = record("gap", 11, 0, b"", "0");
+        reason["payload"] = json!(hex::encode("service_worker_end_lost"));
+        named_gap.push(reason);
+        let kept = provenance(&named_gap, &[], &root, "7", "_abck", &no_index);
+        assert_eq!(kept["read_coverage"]["complete"], true);
         // A read record has no name, and a name read is never recorded alone.
         assert!(
             decode_script(&record(

@@ -109,6 +109,10 @@ enum Shape {
 /// Script IDs are unique only per isolate (protocol/native-network-v3.md).
 type Where = (u32, u64);
 
+/// A scheduling stack's frames and where they are read, shared by every stack
+/// whose chain names it.
+type SegmentFrames = Arc<(Vec<Frame>, Where)>;
+
 /// One distinct walked stack and every record that named it.
 struct Walk {
     process: u32,
@@ -280,11 +284,11 @@ impl Scan {
         let Some(record) = request_stack::decode_record(bytes) else {
             return false;
         };
-        if matches!(record.state, 2 | 3) {
-            let reason = if record.state == 2 {
-                "no_script"
-            } else {
-                "unsupported_thread"
+        if matches!(record.state, 2 | 3 | 6) {
+            let reason = match record.state {
+                2 => "no_script",
+                3 => "unsupported_thread",
+                _ => "not_walked_thread_limit",
             };
             *self.not_walked.entry(reason).or_default() += 1;
             return true;
@@ -350,10 +354,16 @@ impl Scan {
         };
         // Only a write walks the stack (flags bits 1 and 2); a read keeps one
         // frame.
-        if matches!(script.api, 1 | 3 | 6) && script.flags & 0x06 == 0x06 {
+        // A service worker's write is read in the worker's isolate; a record
+        // that names no isolate records no frame to read.
+        if let (true, Some(scope)) = (
+            matches!(script.api, 1 | 3 | 6) && script.flags & 0x06 == 0x06,
+            script.scope,
+        ) {
             let api = request_cookies::APIS[usize::from(script.api)];
             let innermost = Frame::read(&script.frame);
-            if let Some(walk) = self.walk(event, 0, script.stack, Shape::Alone, innermost) {
+            let isolate = scope.isolate_key;
+            if let Some(walk) = self.walk(event, isolate, script.stack, Shape::Alone, innermost) {
                 *walk.sinks.entry(Sink::Cookie(api)).or_default() += 1;
             }
         }
@@ -439,7 +449,7 @@ struct Decoded {
     /// Many stacks share one scheduling stack, so its frames are shared. They
     /// are read where their own artifact says they were walked: a message
     /// carries segments from another thread or process.
-    segments: Vec<(Segment, Option<Arc<(Vec<Frame>, Where)>>)>,
+    segments: Vec<(Segment, Option<SegmentFrames>)>,
     /// Record flags bit 2, bit 3 and bit 4.
     asyncs_truncated: bool,
     chain_cut: bool,
@@ -1244,7 +1254,7 @@ fn decode(
     main: std::result::Result<Main, &'static str>,
     stacks: &HashMap<[u8; 32], Value>,
     read: &dyn Fn(&Value, usize) -> Option<Vec<u8>>,
-    segments_seen: &mut HashMap<[u8; 32], Option<Arc<(Vec<Frame>, Where)>>>,
+    segments_seen: &mut HashMap<[u8; 32], Option<SegmentFrames>>,
     missing: &mut BTreeMap<&'static str, u64>,
 ) -> Decoded {
     let (recorded, omitted, flags, mut frames, segments) = match main {
@@ -1672,8 +1682,10 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
             "scan_deadline_ms": SCAN_DEADLINE.as_millis() as u64,
         },
         "not_shown": [
-            "worker and worklet stacks (stacks are walked on the document main thread only)",
-            "MessagePort and worker messages",
+            "worklet stacks (worklets have no stack tables), and stacks of a worker past the \
+             renderer's 32 stack tables",
+            "ServiceWorker.postMessage and Client.postMessage, and window.postMessage to or from \
+             another process",
             "calls that never reached a recorded request, navigation, task or cookie write",
             "cross-process frames (an out-of-process iframe is another renderer; only its own stacks appear)",
         ],
@@ -2272,6 +2284,68 @@ mod tests {
             (Some(0), Some(0))
         );
         assert_eq!(graph["stacks"]["unresolved"]["stack_artifact_missing"], 1);
+    }
+
+    #[test]
+    fn worker_stacks_resolve_in_their_own_isolate() {
+        use crate::request_stack::tests::scoped_artifact;
+        let mut f = Fixture::new();
+        // Script 7 is a different script in the page and in the worker.
+        let page = "function post() {\n  port.postMessage(1);\n}\n";
+        let worker = "let n = 0;\nfunction inWorker() {\n  fetch('/w');\n}\n";
+        let at = |text: &str, needle: &str| text.find(needle).unwrap() as u32;
+        let post = frame(1, 0, 7, at(page, "port"), at(page, "() {"));
+        let work = frame(1, 0, 7, at(worker, "fetch"), at(worker, "() {"));
+        f.artifact("javascript", "https://app.test/page.js", page.as_bytes());
+        f.artifact(
+            "javascript",
+            "https://app.test/worker.js",
+            worker.as_bytes(),
+        );
+        let mut worker_identity = identity_bytes(1, 0x02, 7, (0, 0), 98, worker.as_bytes());
+        worker_identity[0] = 2;
+        worker_identity[72] = 2;
+        worker_identity[80..88].copy_from_slice(&0x77u64.to_le_bytes());
+        f.event(
+            "script_identity",
+            41,
+            0,
+            7,
+            &identity_bytes(1, 0x02, 7, (0, 0), 99, page.as_bytes()),
+        );
+        f.event("script_identity", 41, 0, 0x77, &worker_identity);
+        // The page posted to a port; the worker's request ran in its handler.
+        let posted = scoped_artifact(41, 1, 0, std::slice::from_ref(&post), &[], 0);
+        f.artifact("stack", "reb-stack:posted", &posted);
+        let carried = segment(10, 1, 1, &Sha256::digest(&posted));
+        let stack = scoped_artifact(41, 2, 0x77, std::slice::from_ref(&work), &[carried], 0);
+        f.artifact("stack", "reb-stack:worker", &stack);
+        let mut record = request_record(&Sha256::digest(&stack), &work, 1, 1, 0);
+        record[0] = 3;
+        record[80] = 2;
+        record[88..96].copy_from_slice(&0x77u64.to_le_bytes());
+        f.event("request_initiator_stack", 41, 90, 0x77, &record);
+        // A worker past the renderer's table limit is counted, never walked.
+        let mut limited = vec![3, 0, 128, 0, 6, 0];
+        limited.resize(128, 0);
+        limited[80] = 2;
+        limited[88..96].copy_from_slice(&0x78u64.to_le_bytes());
+        f.event("request_initiator_stack", 41, 91, 0x78, &limited);
+        let g = graph(&f);
+        assert_eq!(g["complete"], true, "{}", g["truncated"]);
+        // Named from the worker's source: the page's script 7 has no such function.
+        assert_eq!(node(&g, "inWorker")["line"], 2);
+        assert_eq!(node(&g, "post")["line"], 1);
+        let contexts = g["contexts"].as_array().unwrap();
+        let lane = |name: &str| &contexts[node(&g, name)["context"].as_u64().unwrap() as usize];
+        assert_eq!(lane("inWorker")["isolate_key"], "0000000000000077");
+        assert_eq!(lane("post")["isolate_key"], Value::Null);
+        let task = edge(&g, "post", "inWorker");
+        assert_eq!(
+            (task["kind"].as_str(), task["task"].as_str()),
+            (Some("task"), Some("message_port"))
+        );
+        assert_eq!(g["stacks"]["not_walked"]["not_walked_thread_limit"], 1);
     }
 
     #[test]

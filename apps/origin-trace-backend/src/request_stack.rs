@@ -2182,7 +2182,7 @@ pub(crate) mod tests {
     }
 
     /// A version 3 artifact: the scoped header, the frames, then the segments.
-    fn scoped_artifact(
+    pub(crate) fn scoped_artifact(
         process: u32,
         thread: u8,
         key: u64,

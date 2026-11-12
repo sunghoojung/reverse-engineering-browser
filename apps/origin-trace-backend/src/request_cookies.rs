@@ -429,7 +429,7 @@ pub(crate) struct Script {
     prefix: [u8; NAME_PREFIX],
     /// The isolate its frame and stack are read in: version 1 is the
     /// document's; version 2 names it. None when version 2 names no thread.
-    scope: Option<request_stack::Scope>,
+    pub(crate) scope: Option<request_stack::Scope>,
 }
 
 /// The C++ core's rules for the renderer's script_cookie record.

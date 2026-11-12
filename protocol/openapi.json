@@ -9788,6 +9788,14 @@
                   "type": "integer",
                   "minimum": 0
                 },
+                "isolate_key": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^[0-9a-f]{16}$",
+                  "description": "The worker's context ID as 16 hex digits, the isolate this realm's script IDs belong to; null for the document main thread."
+                },
                 "execution_context_id": {
                   "oneOf": [
                     {

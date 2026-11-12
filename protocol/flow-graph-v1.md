@@ -40,17 +40,26 @@ segments that name scheduling stacks no record here describes.
 
 ## Folding
 
-- **One decode per stack.** Records are grouped by `(process_id, digest)`. Each
-  distinct stack is decoded once and weighted by how many records named it.
+- **One decode per stack.** Records are grouped by `(process_id, isolate,
+  digest)`, the isolate being the record's
+  [stack scope](native-network-v3.md#stack-scope) (version 3 request stacks,
+  version 2 `async_task_stack`, version 2 `script_cookie`; earlier versions are
+  the document's). Each distinct stack is decoded once and weighted by how many
+  records named it.
 - **One read per source.** Every offset any frame names is gathered per script
   digest first; each retained script or module is then read once, its UTF-16
   positions resolved in one pass (as `get_request_stack` resolves them) and its
   function names read at the function start positions. One source is held at a
   time.
-- **Realms.** A context is `process_id` plus the `execution_context_id` of the
-  frame's `script_identity`. A same-process iframe is its own realm, so a call
-  between realms is a frame boundary. A frame without an identity record goes
-  to the process's unidentified realm and never claims a boundary.
+- **Realms.** A context is `process_id`, the isolate key (`isolate_key`, null
+  for the document main thread) and the `execution_context_id` of the frame's
+  `script_identity`, read in that isolate: script IDs are unique only per
+  isolate, so a worker's frames resolve to the worker's scripts and never to a
+  page script with the same ID. A task segment a message carried resolves in
+  the isolate and process its own artifact names. A same-process iframe is its
+  own realm, so a call between realms is a frame boundary. A frame without an
+  identity record goes to its isolate's unidentified realm and never claims a
+  boundary.
 - **Nodes.** A function is keyed by realm, code (the script digest, else its
   script ID) and function position (JavaScript) or index (Wasm), so the same
   code compiled twice in one realm, such as one `eval` string run twice, is one
@@ -98,11 +107,14 @@ scan stopped at its deadline or any budget or table cut something (every
 and `edges` index each other by position. The full shape is the `FlowGraph`
 schema in [openapi.json](openapi.json).
 
-`not_shown` lists what stacks cannot contain: worker and worklet stacks (walked
-on the document main thread only), `MessagePort` and worker messages,
-out-of-process frames (another renderer, whose stacks appear as their own
-realm with no edge to the page), and calls that never reached a recorded
-request, navigation, task or cookie write.
+`not_shown` lists what stacks cannot contain: worklet stacks, and those of a
+worker past the renderer's 32 stack tables; `ServiceWorker.postMessage`,
+`Client.postMessage` and `window.postMessage` to or from another process,
+which carry no task origin; out-of-process frames (another renderer, whose
+stacks appear as their own realm with no edge to the page); and calls that
+never reached a recorded request, navigation, task or cookie write. Worker
+stacks, and `MessagePort`, `BroadcastChannel` and worker message task edges,
+are shown.
 
 ## Bounds
 

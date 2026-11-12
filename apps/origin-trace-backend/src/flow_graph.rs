@@ -109,9 +109,14 @@ enum Shape {
 /// Script IDs are unique only per isolate (protocol/native-network-v3.md).
 type Where = (u32, u64);
 
-/// A scheduling stack's frames and where they are read, shared by every stack
-/// whose chain names it.
-type SegmentFrames = Arc<(Vec<Frame>, Where)>;
+/// A scheduling stack's frames, shared by every stack whose chain names it,
+/// and where this stack reads them.
+type SegmentFrames = (Arc<Vec<Frame>>, Where);
+/// A scheduling stack decoded once per digest: its frames and, for a version
+/// 3 artifact, its own scope. Without one, each stack reads the frames in its
+/// own process: identical version 1 or 2 bytes from two renderers name
+/// different scripts.
+type DecodedSegment = Option<(Arc<Vec<Frame>>, Option<request_stack::ScriptScope>)>;
 
 /// One distinct walked stack and every record that named it.
 struct Walk {
@@ -1084,7 +1089,7 @@ impl<'a> Builder<'a> {
                 break;
             };
             let task = request_stack::task_kind(segment.kind);
-            match frames.as_deref() {
+            match frames {
                 Some((frames, at)) if !frames.is_empty() => {
                     let nodes = self.run(visit, *at, frames, None);
                     if let Some(from) = nodes[0] {
@@ -1254,7 +1259,7 @@ fn decode(
     main: std::result::Result<Main, &'static str>,
     stacks: &HashMap<[u8; 32], Value>,
     read: &dyn Fn(&Value, usize) -> Option<Vec<u8>>,
-    segments_seen: &mut HashMap<[u8; 32], Option<SegmentFrames>>,
+    segments_seen: &mut HashMap<[u8; 32], DecodedSegment>,
     missing: &mut BTreeMap<&'static str, u64>,
 ) -> Decoded {
     let (recorded, omitted, flags, mut frames, segments) = match main {
@@ -1290,15 +1295,16 @@ fn decode(
                         .and_then(|content| {
                             request_stack::decode_segment_artifact(&content, segment.recorded)
                         })
-                        // A version 1 or 2 artifact is the walk's own document.
-                        .map(|(frames, scope)| {
-                            let at = scope.map_or((walk.process, 0), |(process, scope)| {
-                                (process, scope.isolate_key)
-                            });
-                            Arc::new((frames, at))
-                        })
+                        .map(|(frames, scope)| (Arc::new(frames), scope))
                 })
-                .clone();
+                .clone()
+                // A version 1 or 2 artifact is this walk's own document.
+                .map(|(frames, scope)| {
+                    let at = scope.map_or((walk.process, 0), |(process, scope)| {
+                        (process, scope.isolate_key)
+                    });
+                    (frames, at)
+                });
             if frames.is_none() {
                 *missing.entry("segment_not_retained").or_default() += 1;
             }
@@ -1559,7 +1565,7 @@ fn source_offsets(scan: &Scan, decoded: &[Decoded]) -> BTreeMap<[u8; 32], (bool,
                 decoded
                     .segments
                     .iter()
-                    .filter_map(|(_, frames)| frames.as_deref())
+                    .filter_map(|(_, frames)| frames.as_ref())
                     .flat_map(|(frames, at)| frames.iter().map(move |frame| (*at, frame))),
             );
         for (at, frame) in frames.filter(|(_, frame)| frame.script_id != 0) {
@@ -2284,6 +2290,76 @@ mod tests {
             (Some(0), Some(0))
         );
         assert_eq!(graph["stacks"]["unresolved"]["stack_artifact_missing"], 1);
+    }
+
+    /// Two renderers (two tabs of one site) record byte-identical version 1
+    /// scheduling stacks, whose script 50 is a different script in each.
+    /// Each request is drawn as scheduled in its own process: one decode of
+    /// the shared bytes never carries the first stack's process to the next.
+    #[test]
+    fn identical_older_segments_resolve_in_each_stack_own_process() {
+        let mut f = Fixture::new();
+        let first = "function go() {\n  fetch('/a');\n}\nfunction a1() {\n  setTimeout(go);\n}\n";
+        let second = "function go() {\n  fetch('/b');\n}\nfunction b1() {\n  setTimeout(go);\n}\n";
+        let at = |needle: &str| first.find(needle).unwrap() as u32;
+        let start = |name: &str| at(&format!("function {name}(")) + 9 + name.len() as u32;
+        for (process, text) in [(41, first), (42, second)] {
+            f.artifact("javascript", "https://top.test/app.js", text.as_bytes());
+            f.event(
+                "script_identity",
+                process,
+                0,
+                7,
+                &identity_bytes(1, 2, 50, (0, 0), 99, text.as_bytes()),
+            );
+        }
+        let go = frame(1, 0, 50, at("fetch"), start("go"));
+        let timer = frame(1, 0, 50, at("setTimeout"), start("a1"));
+        let scheduler = stack_artifact(1, std::slice::from_ref(&timer), &[], &[]);
+        let scheduler = hex::decode(f.artifact("stack", "reb-stack:t", &scheduler)).unwrap();
+        let stack = stack_artifact(
+            2,
+            std::slice::from_ref(&go),
+            &[],
+            &[segment(1, 1, 1, &scheduler)],
+        );
+        let stack = hex::decode(f.artifact("stack", "reb-stack:go", &stack)).unwrap();
+        for process in [41, 42] {
+            f.event(
+                "request_initiator_stack",
+                process,
+                70,
+                7,
+                &request_record(&stack, &go, 1, 1, 0),
+            );
+        }
+        let g = graph(&f);
+        let nodes = g["nodes"].as_array().unwrap();
+        let contexts = g["contexts"].as_array().unwrap();
+        let at_process = |name: &str, process: u64| {
+            nodes
+                .iter()
+                .find(|node| {
+                    node["name"] == name
+                        && contexts[node["context"].as_u64().unwrap() as usize]["process_id"]
+                            == process
+                })
+                .unwrap_or_else(|| panic!("no node {name} in process {process}"))["id"]
+                .clone()
+        };
+        let task =
+            |from: &Value, to: &Value| {
+                g["edges"].as_array().unwrap().iter().any(|edge| {
+                    edge["from"] == *from && edge["to"] == *to && edge["kind"] == "task"
+                })
+            };
+        let (go41, go42) = (at_process("go", 41), at_process("go", 42));
+        let (a1, b1) = (at_process("a1", 41), at_process("b1", 42));
+        assert!(task(&a1, &go41) && task(&b1, &go42), "{}", g["edges"]);
+        assert!(
+            !task(&a1, &go42),
+            "no edge between processes that never interacted"
+        );
     }
 
     #[test]

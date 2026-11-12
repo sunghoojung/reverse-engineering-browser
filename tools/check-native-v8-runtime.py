@@ -71,6 +71,8 @@ TEST_NAMES = [
     "test-api/RebNativeCompiledScriptCodeCacheConsumer",
     "test-api/RebNativeCompiledScriptStreaming",
     "test-api/RebNativeCompiledScriptDisabledRunsNothing",
+    "test-api/RebNativePromiseRegistrations",
+    "test-api/RebNativePromiseRegistrationsNeedTheFlag",
     "test-api/RebNativeJsDispatchLateArmingAndLazyFunctions",
     "test-api/RebNativeJsDispatchFlushRegenerationAndRearm",
     "test-api/RebNativeJsDispatchRefusesCodeCache",

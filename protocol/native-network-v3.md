@@ -1764,7 +1764,12 @@ registration in the microtask segment and in the hop of a task scheduled in a
 reaction, dedupe, the 32-frame bound, an unknown reaction, the budget and
 capture off). `make request-stack-wire-check` renders a worker stack with a
 `Promise.then` registration, a message segment from another process and a
-no-script end.
+no-script end. The standalone V8 runtime check
+(`tools/check-native-v8-runtime.py`) compiles the pinned V8 with every V8
+patch and runs `test-api/RebNativePromiseRegistrations` (one report per user
+`.then`, `.catch`, `.finally` and `await`, each reaction started and finished
+with its ID, nothing while inactive) and
+`test-api/RebNativePromiseRegistrationsNeedTheFlag`.
 
 ### Acceptance
 

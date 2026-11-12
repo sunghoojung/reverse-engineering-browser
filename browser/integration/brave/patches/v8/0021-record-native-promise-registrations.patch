@@ -221,3 +221,113 @@ index 3c5816f..076472a 100644
  DEFINE_BOOL(stack_trace_on_illegal, false,
              "print stack trace when an illegal exception is thrown")
  DEFINE_BOOL(abort_on_uncaught_exception, false,
+diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
+index 207e899..7a061de 100644
+--- a/test/cctest/test-api.cc
++++ b/test/cctest/test-api.cc
+@@ -59,6 +59,7 @@
+ #include "include/v8-initialization.h"
+ #include "include/v8-json.h"
+ #include "include/v8-locker.h"
++#include "include/v8-native-stack.h"
+ #include "include/v8-primitive-object.h"
+ #include "include/v8-regexp.h"
+ #include "include/v8-util.h"
+@@ -33381,3 +33382,97 @@ TEST(RebNativeCompiledScriptDisabledRunsNothing) {
+   CompileRun("eval('8 + 8');");
+   CHECK(reb_compiled_scripts.empty());
+ }
++
++namespace {
++
++// REB promise registrations (include/v8-native-stack.h): what V8 reported.
++struct RebPromiseLog {
++  bool active = true;
++  int active_checks = 0;
++  std::vector<std::pair<uint32_t, v8::NativePromiseRegistration>> registered;
++  std::vector<uint32_t> started;
++  std::vector<uint32_t> finished;
++};
++RebPromiseLog* reb_promise_log = nullptr;
++
++// The callbacks outlive a test's log, so each one checks it is still there.
++bool RebPromiseActive() {
++  if (!reb_promise_log) return false;
++  ++reb_promise_log->active_checks;
++  return reb_promise_log->active;
++}
++void RebPromiseRegistered(uint32_t task_id,
++                          v8::NativePromiseRegistration kind) {
++  if (reb_promise_log) reb_promise_log->registered.emplace_back(task_id, kind);
++}
++void RebPromiseStarted(uint32_t task_id) {
++  if (reb_promise_log) reb_promise_log->started.push_back(task_id);
++}
++void RebPromiseFinished(uint32_t task_id) {
++  if (reb_promise_log) reb_promise_log->finished.push_back(task_id);
++}
++constexpr v8::NativePromiseCallbacks kRebPromiseCallbacks{
++    &RebPromiseActive, &RebPromiseRegistered, &RebPromiseStarted,
++    &RebPromiseFinished};
++
++}  // namespace
++
++TEST(RebNativePromiseRegistrations) {
++  i::FlagScope<bool> promise_stacks(&i::v8_flags.reb_promise_stacks, true);
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebPromiseLog log;
++  reb_promise_log = &log;
++  v8::SetNativePromiseCallbacks(isolate, &kRebPromiseCallbacks);
++  // One registration per user call, in call order; builtins that call then
++  // internally (catch, finally) report as themselves.
++  CompileRun(
++      "var p = Promise.resolve(1);"
++      "p.then(() => {}); p.catch(() => {}); p.finally(() => {});"
++      "async function f() { await 0; } f();");
++  isolate->PerformMicrotaskCheckpoint();
++  CHECK_EQ(4u, log.registered.size());
++  CHECK(log.registered[0].second == v8::NativePromiseRegistration::kThen);
++  CHECK(log.registered[1].second == v8::NativePromiseRegistration::kCatch);
++  CHECK(log.registered[2].second == v8::NativePromiseRegistration::kFinally);
++  CHECK(log.registered[3].second == v8::NativePromiseRegistration::kAwait);
++  std::vector<uint32_t> ids;
++  for (const auto& [id, kind] : log.registered) {
++    CHECK_NE(0u, id);
++    ids.push_back(id);
++  }
++  // Each registered reaction runs between started and finished with its ID.
++  std::vector<uint32_t> started = log.started;
++  std::sort(ids.begin(), ids.end());
++  std::sort(started.begin(), started.end());
++  CHECK(std::adjacent_find(ids.begin(), ids.end()) == ids.end());
++  CHECK(ids == started);
++  CHECK(log.started == log.finished);
++
++  // Inactive: no frame scan, no ID, so no reaction is reported either.
++  log = {};
++  log.active = false;
++  CompileRun("Promise.resolve(2).then(() => {}); (async () => { await 0; })();");
++  isolate->PerformMicrotaskCheckpoint();
++  CHECK_LT(0, log.active_checks);
++  CHECK(log.registered.empty());
++  CHECK(log.started.empty());
++  reb_promise_log = nullptr;
++}
++
++TEST(RebNativePromiseRegistrationsNeedTheFlag) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebPromiseLog log;
++  reb_promise_log = &log;
++  CHECK(!v8::IsNativePromiseStackCaptureEnabled());
++  // Without --reb-promise-stacks the callbacks are not installed.
++  v8::SetNativePromiseCallbacks(isolate, &kRebPromiseCallbacks);
++  CompileRun("Promise.resolve(3).then(() => {});");
++  isolate->PerformMicrotaskCheckpoint();
++  CHECK_EQ(0, log.active_checks);
++  CHECK(log.registered.empty());
++  reb_promise_log = nullptr;
++}

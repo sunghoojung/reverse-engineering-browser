@@ -768,6 +768,49 @@ await check('returning to the top during Show older leaves no hole', async () =>
   ui.close();
 });
 
+// Round 4, 1. A Show older read that fails, or is cut short by leaving
+// Sources, added no page, so the rows follow the newest page as before.
+await check('a Show older read that adds no page leaves the rows following the newest', async () => {
+  for (const how of ['fails', 'is cut short by leaving Sources']) {
+    const store = createStore(300);
+    let failing = false, holding = false;
+    const ui = mount({store, failing: url => failing && url.includes('before='), hold: url => holding && url.includes('before=')});
+    const view = probe(ui);
+    ui.open();
+    await until(() => ui.rows('#debugger-observations').length > 0, 'rows');
+    if (how === 'fails') failing = true; else holding = true;
+    click(ui, ui.sidebar.querySelector('.debugger-older'));
+    if (how === 'fails') await until(() => view().observations.olderError, 'the older read fails');
+    else {
+      await until(() => ui.reads().some(entry => entry.url.includes('before=') && entry.release), 'the older read, held');
+      const screen = ui.document.querySelector('#screen-sources');
+      screen.hidden = true;
+      await settle();
+      screen.hidden = false;
+    }
+    failing = false; holding = false;
+    store.add(400);
+    await until(() => ui.rows('#debugger-observations')[0]?.dataset.key === '1:42:700', `${how}: the newest records`, 3 * POLL);
+    assert.equal(ui.sidebar.querySelector('.debugger-observation-pinned').hidden, true, `${how}: no place is claimed as kept`);
+    ui.close();
+  }
+});
+
+// Round 4, 5. The read a Watch action asks for does nothing from a render.
+await check('a read asked for from a render starts none', async () => {
+  const ui = mount({store: createStore(2)});
+  let renders = 0;
+  ui.context.RebDebuggerSidebar.addSection({id: 'eager-action', title: 'Eager', order: 60, render(body, view) {
+    body.textContent = 'eager';
+    renders += 1;
+    if (renders < 300) view.readAfterAction();
+  }});
+  ui.open();
+  await sleep(POLL - 400);
+  assert.equal(ui.reads().length, 1, `one read, not one per render (${renders} renders)`);
+  ui.close();
+});
+
 // Round 3, 2. Choosing another record, the kind filter or leaving Sources
 // cancels a Traffic lookup, and a cancelled lookup never switches screens.
 await check('moving on in the sidebar cancels a Traffic lookup', async () => {
@@ -860,6 +903,14 @@ await check('arming reads the confirmed set at once', async () => {
   assert.doesNotMatch(section(), /The renderer confirmed the set below/, 'before its read answers, the outcome does not point at a set not shown');
   await until(() => /Armed on Console document 22/.test(section()), 'the confirmed set, well before the next poll', 4000);
   assert.match(section(), /Armed on document 22\. The renderer confirmed the set below\./);
+  // Clearing: until its read answers, the outcome does not stand as final
+  // beside the set that was armed.
+  click(ui, [...ui.sidebar.querySelectorAll('.debugger-watch-form button')].find(button => button.textContent === 'Clear rules'));
+  await until(() => /Cleared on document 22/.test(section()), 'the clear outcome');
+  assert.match(section(), /Armed on Console document 22/, 'the read of the cleared set is still out');
+  assert.match(section(), /Cleared on document 22\. Reading the set that is left/);
+  await until(() => /No rules armed/.test(section()), 'the cleared set', 4000);
+  assert.match(section(), /Cleared on document 22\.$|Cleared on document 22\.(?! Reading)/);
   ui.close();
 });
 
@@ -900,6 +951,7 @@ await check('a busy read leaves the arm outcome', async () => {
   store.watch = {state: 'busy', armed: null};
   await until(() => /A Console action holds the session/.test(section()), 'a busy read', 2 * POLL + 1000);
   assert.match(section(), /Armed on document 22/, 'a busy read does not end the outcome');
+  assert.doesNotMatch(section(), /The renderer confirmed the set below/, 'while busy, the outcome does not point at a set not shown');
   store.watch = armed;
   await until(() => /Armed on Console document 22/.test(section()), 'armed again', 2 * POLL + 1000);
   assert.match(section(), /Armed on document 22\. The renderer confirmed the set below\./);

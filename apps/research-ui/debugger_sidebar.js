@@ -401,7 +401,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
   // section queues from render (even as a promise) is ignored.
   let rendering = false, renderTurn = false, renderTurns = 0, lastStarted = 0, refreshQueued = false, stops = 0, readsStarted = 0;
   const mounted = new Map();
-  const blankObservations = () => ({key: null, head: [], refused: 0, query: null, list: null, loadingOlder: false, olderError: null, olderController: null});
+  const blankObservations = () => ({key: null, head: [], refused: 0, query: null, list: null, loadingOlder: false, olderError: null, olderController: null, olderCreated: null});
   const view = {
     // `readSerial` numbers the read whose answer `document` is; readsStarted()
     // counts reads begun, so an action can tell which reads followed it.
@@ -454,7 +454,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     // A read for the sidebar's own Watch action: now, or right after the read
     // in flight, never only at the next poll. Not for registered sections.
     readAfterAction() {
-      if (!open) return;
+      if (!open || rendering) return;
       if (controller) refreshQueued = true;
       else read();
     },
@@ -502,7 +502,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
   function dropList() {
     const observations = view.observations;
     observations.olderController?.abort();
-    Object.assign(observations, {list: null, loadingOlder: false, olderError: null, olderController: null});
+    Object.assign(observations, {list: null, loadingOlder: false, olderError: null, olderController: null, olderCreated: null});
   }
 
   /* Without a kept list the rows are the newest page. A kept list (older
@@ -589,6 +589,14 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     }
   }
 
+  // A Show older read that added no page leaves a list it made only for
+  // itself as it found it: none, so the rows follow the newest page again.
+  function revertOlder() {
+    const observations = view.observations, base = observations.olderCreated;
+    observations.olderCreated = null;
+    if (base && observations.list === base && !base.pinned) observations.list = null;
+  }
+
   async function readOlder() {
     const observations = view.observations, key = observations.key, list = observations.list;
     const before = list ? list.bottom : observations.query?.next_before ?? null;
@@ -600,6 +608,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
       query: observations.query};
     base.followed = false;
     observations.list = base;
+    observations.olderCreated = list ? null : base;
     const own = new AbortController();
     observations.olderController = own;
     observations.loadingOlder = true;
@@ -620,9 +629,11 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
       observations.olderError = null;
     } catch (error) {
       if (observations.olderController !== own) return;
+      revertOlder();
       observations.olderError = String(error?.message ?? error);
     } finally {
       if (observations.olderController === own) {
+        observations.olderCreated = null;
         observations.loadingOlder = false;
         observations.olderController = null;
         render();
@@ -720,6 +731,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     refreshQueued = false;
     controller?.abort();
     controller = null;
+    revertOlder();
     view.observations.olderController?.abort();
     view.observations.olderController = null;
     view.observations.loadingOlder = false;
@@ -1021,9 +1033,12 @@ function debuggerWatchSection() {
         const armedThere = armed?.target_id === outcome.target;
         if ((outcome.kind === 'armed' && !armedThere) || (outcome.kind === 'cleared' && armedThere)) outcome = null;
       }
-      // Until a read after the arm answers, the confirmed set is not below yet.
-      const text = outcome?.kind === 'armed' && !(view.readSerial > outcome.after)
-        ? `Armed on document ${outcome.target}. Reading the set the renderer confirmed…` : outcome?.text ?? '';
+      // Until a read begun after the outcome answers, and while the Console
+      // holds the session, the set below is not the one the outcome names.
+      const pending = Boolean(outcome) && !(view.readSerial > outcome.after);
+      const text = outcome?.kind === 'armed' && (pending || watch.state === 'busy')
+        ? `Armed on document ${outcome.target}. Reading the set the renderer confirmed…`
+        : outcome?.kind === 'cleared' && pending ? `Cleared on document ${outcome.target}. Reading the set that is left…` : outcome?.text ?? '';
       const nodes = [];
       if (watch.state === 'busy') nodes.push(debuggerNote('A Console action holds the session, so the armed set is read again shortly.', 'warning'));
       else if (!armed) nodes.push(debuggerNote('No rules armed. Nothing is observed until a set is armed on one live document.'));

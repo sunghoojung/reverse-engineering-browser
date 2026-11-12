@@ -1,3 +1,42 @@
+diff --git a/content/browser/devtools/service_worker_devtools_agent_host.cc b/content/browser/devtools/service_worker_devtools_agent_host.cc
+index bf5a56f..a77b295 100644
+--- a/content/browser/devtools/service_worker_devtools_agent_host.cc
++++ b/content/browser/devtools/service_worker_devtools_agent_host.cc
+@@ -4,10 +4,13 @@
+ 
+ #include "content/browser/devtools/service_worker_devtools_agent_host.h"
+ 
++#include <optional>
++
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
+ #include "base/memory/ptr_util.h"
+ #include "base/memory/raw_ptr.h"
++#include "brave/components/reverse_engineering_browser/common/native_factory_owner_hook.h"
+ #include "content/browser/devtools/devtools_renderer_channel.h"
+ #include "content/browser/devtools/devtools_session.h"
+ #include "content/browser/devtools/network_service_devtools_observer.h"
+@@ -441,6 +444,20 @@ void ServiceWorkerDevToolsAgentHost::UpdateLoaderFactories(
+     return;
+   }
+ 
++  // These replace the bundles EmbeddedWorkerInstance::Start created for the
++  // same running worker, so they name it the same way: its version and
++  // ServiceWorkerToken (protocol/native-network-v3.md).
++  std::optional<reb::ScopedNativeFactoryOwner> native_owner;
++  if (const std::optional<blink::ServiceWorkerToken>& native_token =
++          version->start_worker_token()) {
++    native_owner.emplace(reb::NativeFactoryOwner{
++        .service_worker_version_id = version->version_id(),
++        .cause = reb::NativeFactoryOwnerCause::kServiceWorker,
++        .service_worker_token_high =
++            native_token->value().GetHighForSerialization(),
++        .service_worker_token_low =
++            native_token->value().GetLowForSerialization()});
++  }
+   auto script_bundle = EmbeddedWorkerInstance::CreateFactoryBundle(
+       rph, worker_route_id_, version->key(), client_security_state_.Clone(),
+       std::move(coep_reporter_for_script_loader),
 diff --git a/content/browser/payments/payment_app_installer.cc b/content/browser/payments/payment_app_installer.cc
 index c13d42c..3dda838 100644
 --- a/content/browser/payments/payment_app_installer.cc

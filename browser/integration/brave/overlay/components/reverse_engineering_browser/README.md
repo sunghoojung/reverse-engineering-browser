@@ -149,7 +149,8 @@ extension workers under their extension id with
 scopes around their creation through the `factory_owner_hook` component:
 a nested worker's ancestor document (Chromium patch
 `0036-name-frameless-script-fetch-owners`), a service-worker job's cause and
-the version it updates or a starting worker's version (`0045`), an early-hints
+the version it updates or a starting worker's version, also around the
+bundles DevTools Fetch interception replaces (`0045`), an early-hints
 navigation's main frame (`0043`) and a browser-initiated prefetch's page
 (`0044`). A job also notes the version it starts, so that version's fetches
 link to its registrant tabs, and a starting worker names its token with its

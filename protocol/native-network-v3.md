@@ -463,7 +463,7 @@ worklet, whose parent token is a fresh one, so it is told apart by its own
 | Nested dedicated worker main script | Its factory has no creator frame; `WorkerScriptFetcher::CreateScriptLoader` scopes the ancestor frame, the document at the root of the creator chain, around the factory's creation | Chromium patch `0036-name-frameless-script-fetch-owners` |
 | Service-worker main script and update check | `ServiceWorkerRegisterJob` keeps its cause: the `register()` caller (`requesting_frame_id_`), else the frame scoped while the job was created, which is the page calling `registration.update()` (`ServiceWorkerContainerHostForClient::Update`) or the page a payment app is installed for (`PaymentAppInstaller`). It scopes that cause and the registration's active version around both factory creations. The cause's tab is the factory's tab; without one, the request links to the active version's tabs | Patches 0036 and `0045-name-service-worker-job-causes`; `request_tab_link` kinds 3 to 5 naming the browser record |
 | A service-worker version's registrant | The cause's tab when the job starts the version, else the active version's tabs at that moment. `ServiceWorkerRegisterJob::StartWorkerForUpdate` notes the version and the cause; the version's install-time fetches and imported scripts link to it while it has no client. A job with a caller that starts no version notes that caller for the registration's active and waiting versions: `ContinueWithRegistrationWithSameRegistrationOptions` resolves a `register()` of the current script against an active version, and `OnUpdateCheckFinished` ends an update whose script is identical. So a page that is no controllee and calls `register()` again before messaging the installed worker is that worker's registrant | Patch 0045; kind 5 |
-| Scripts a starting service worker imports | `EmbeddedWorkerInstance` scopes its version and `ServiceWorkerToken` around both factory bundles: the browser record links to that version's tabs, and the resolver knows the worker before its first fetch can be drained. The renderer's start, with patch 0038 for `importScripts`, is the worker's own request | Patch 0045; kinds 3 to 5 |
+| Scripts a starting service worker imports | `EmbeddedWorkerInstance::Start`, and `ServiceWorkerDevToolsAgentHost::UpdateLoaderFactories` when DevTools replaces them, scope its version and `ServiceWorkerToken` around both factory bundles: the browser record links to that version's tabs, and the resolver knows the worker before its first fetch can be drained. The renderer's start, with patch 0038 for `importScripts`, is the worker's own request | Patch 0045; kinds 3 to 5 |
 | Early-hints preload | The navigating main frame's tab, recorded without changing the preload | Chromium patch `0043-record-early-hints-preloads`: `NavigationRequest::CreateNavigationEarlyHintsManagerParams` creates the factory through `ContentClientParams`, with no frame because the document has not committed, and scopes `FrameTreeNode::current_frame_host()`. Brave patch `0021-observe-early-hints-preloads-only` keeps the preloads as stock: see [below](#early-hints-are-observed-only) |
 | Browser-initiated prefetch | The referring `WebContents`' primary main frame | Chromium patch `0044-name-browser-prefetch-owners`: `CreatePrefetchURLLoaderFactory` scopes it; a prefetch with no live `WebContents` is traffic no tab caused (class 69) |
 
@@ -663,10 +663,12 @@ start on the worker's thread, inside its fetch owner scope (see
 and the worker's token, as a module worker's static imports, which load
 asynchronously, always did. Both records link to the version's tabs, or both
 are left out and the drain counts the import once, with the worker's other
-requests. A script bundle Chromium swaps in later through
-`EmbeddedWorkerInstance::UpdateLoaderFactories` is created outside patch
-0045's scope, so the proxy counts a pageless import of that bundle itself and
-the drain counts its renderer record too. A memory-cache reuse of a worker no
+requests. The only other creator of these bundles at the pin is
+`ServiceWorkerDevToolsAgentHost::UpdateLoaderFactories`, which replaces both
+of a running worker's bundles through `EmbeddedWorkerInstance::UpdateLoaderFactories`
+when a DevTools client enables Fetch interception for it. Patch 0045 scopes the
+same owner there, the version and its `start_worker_token()`, so the replaced
+bundles name, link and count their requests as the originals did. A memory-cache reuse of a worker no
 page used is counted as class 68 by the drain, like its requests. Classes 68
 and 69 have no opt-in: no tab caused them and they name no extension.
 

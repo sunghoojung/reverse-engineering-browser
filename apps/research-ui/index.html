@@ -931,6 +931,8 @@
     <script src="captured_export_formats.js"></script>
     <script src="vm_debugger.js"></script>
     <script src="vm_static.js"></script>
+    <!-- Before the graphs: the flow graph reuses its frame reasons and task names. -->
+    <script src="request_stack.js"></script>
     <!-- Loaded here as well so the page and the Worker share one script; it does work only inside the Worker. -->
     <script src="block_graph_layout.js"></script>
     <script src="block_graph.js"></script>
@@ -953,7 +955,6 @@
     <script src="investigation_notebook.js"></script>
     <script src="evidence_names.js"></script>
     <script src="invocation_sites.js"></script>
-    <script src="request_stack.js"></script>
     <script src="entropy_map.js"></script>
 
     <script src="app.js"></script>

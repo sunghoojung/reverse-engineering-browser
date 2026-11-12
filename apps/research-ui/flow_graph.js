@@ -18,17 +18,13 @@ const FLOW_GRAPH_KIND_TOKENS = Object.freeze({javascript: 'js', eval: 'eval', wa
 const FLOW_GRAPH_EDGE_FAMILIES = Object.freeze(['call', 'async', 'cross', 'sink', 'omitted']);
 /* Realm bands cycle --flow-realm-0 to -5. */
 const FLOW_GRAPH_REALM_HUES = 6;
-const FLOW_GRAPH_TASKS = Object.freeze({set_timeout: 'setTimeout', set_interval: 'setInterval', request_animation_frame: 'requestAnimationFrame',
-  request_idle_callback: 'requestIdleCallback', post_message: 'postMessage', xhr_send: 'XMLHttpRequest.send', post_task: 'scheduler.postTask',
-  event: 'event', microtask: 'microtask'});
 /* Row mnemonics: short enough to align in a column. */
 const FLOW_GRAPH_OPS = Object.freeze({call: 'call', await: 'await', omitted: 'omitted', request: 'request', navigation: 'navigate', cookie_write: 'cookie',
   set_timeout: 'setTimeout', set_interval: 'setInterval', request_animation_frame: 'rAF', request_idle_callback: 'idle', post_message: 'postMessage',
   xhr_send: 'xhr.send', post_task: 'postTask', event: 'event', microtask: 'microtask'});
-const FLOW_GRAPH_REASONS = Object.freeze({script_identity_missing: 'no script identity record', source_unavailable: 'source unavailable',
-  source_not_retained: 'source not retained', source_artifact_missing: 'source artifact missing', source_artifact_unreadable: 'source artifact unreadable',
-  source_not_utf8: 'source is not UTF-8', source_budget: 'source read budget reached', source_deadline: 'read deadline reached before this source',
-  position_outside_source: 'position outside the retained source'});
+/* Why a frame is unresolved: the request stack reasons (request_stack.js,
+ * loaded first) and the flow graph's read budgets. */
+const FLOW_GRAPH_REASONS = Object.freeze({...REQUEST_STACK_REASONS, source_budget: 'source read budget reached', source_deadline: 'read deadline reached before this source'});
 /* Record types that carry a walked stack; the others only label or resolve one. */
 const FLOW_GRAPH_STACK_RECORDS = ['request_initiator_stack', 'navigation_initiator_stack', 'async_task_stack'];
 const FLOW_GRAPH_LIMITS = 'Observed stacks only. A call that never reached a recorded request, navigation, task or cookie write is not drawn.';
@@ -49,14 +45,6 @@ const FLOW_GRAPH_SINKS = new Set(['request', 'navigation', 'cookie_write']);
  * is measured per tag. */
 const FLOW_GRAPH_CARD = Object.freeze({head: 32, location: 22, gap: 2, row: 19, foot: 9, pad: 12, radius: 8, minW: 184, maxW: 440, rows: 8});
 const FLOW_GRAPH_MEASURE = Object.freeze({row: 6.93, head: 7.53, badge: 6.32, pill: 7});
-
-function flowGraphFile(url) {
-  const text = String(url ?? '');
-  try {
-    const parsed = new URL(text);
-    return parsed.pathname.split('/').filter(Boolean).pop() || parsed.host || text;
-  } catch { return text; }
-}
 
 /** Validates a `flow-graph-v1` document into a model, or throws. Edges that
  * name a node outside the document are dropped and counted, never drawn. */
@@ -99,8 +87,8 @@ function flowGraphNodeDetail(node) {
   if (node.kind === 'chain') return `${node.members.length} functions · Space expands`;
   if (FLOW_GRAPH_SINKS.has(node.kind)) return `${node.hits.toLocaleString()} ${node.hits === 1 ? 'time' : 'times'}`;
   if (node.status !== 'resolved') return FLOW_GRAPH_REASONS[node.reason] ?? node.reason ?? 'unresolved';
-  if (node.kind === 'wasm') return `func ${node.function_index} · ${flowGraphFile(node.url)}`;
-  const file = node.kind === 'eval' ? `VM${node.script_id}` : flowGraphFile(node.url);
+  if (node.kind === 'wasm') return `func ${node.function_index} · ${requestStackFile(node.url)}`;
+  const file = node.kind === 'eval' ? `VM${node.script_id}` : requestStackFile(node.url);
   return node.line ? `${file}:${node.line}:${node.column}` : file;
 }
 
@@ -1494,7 +1482,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     fact('Distinct stacks', (cards?.[selected]?.stacks ?? 0).toLocaleString());
     if (node.entries) fact('Task entry', `${node.entries.toLocaleString()} ${node.entries === 1 ? 'time' : 'times'}`);
     if (node.leaves) fact('Innermost', `${node.leaves.toLocaleString()} ${node.leaves === 1 ? 'time' : 'times'}`);
-    if (node.schedules) fact('Scheduled', Object.entries(node.schedules).map(([task, count]) => `${FLOW_GRAPH_TASKS[task] ?? task} ×${count}`).join(', '));
+    if (node.schedules) fact('Scheduled', Object.entries(node.schedules).map(([task, count]) => `${REQUEST_STACK_TASKS[task] ?? task} ×${count}`).join(', '));
     if (node.status !== 'resolved') fact('Unresolved', FLOW_GRAPH_REASONS[node.reason] ?? node.reason);
     inspector.append(facts);
     if (node.chain_cut) inspector.append(make('p', 'flow-inspector-note', 'Earlier async callers were not recorded: a scheduling stack in its task chain was not retained, or a microtask hop names no recorded task.'));
@@ -1519,7 +1507,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
         const link = make('button', 'flow-inspector-link', flowGraphNodeName(display.nodes[other])); link.type = 'button';
         link.addEventListener('click', () => { select(other); canvas.focus({preventScroll: true}); });
         const sites = flowGraphEdgeSites(model, edge);
-        const meta = [edge.kind === 'task' ? FLOW_GRAPH_TASKS[edge.task] ?? edge.task : edge.kind, ...edge.crosses.map(cross => ({frame: 'frame boundary', language: 'JS ↔ Wasm', dynamic: 'into eval'})[cross]),
+        const meta = [edge.kind === 'task' ? REQUEST_STACK_TASKS[edge.task] ?? edge.task : edge.kind, ...edge.crosses.map(cross => ({frame: 'frame boundary', language: 'JS ↔ Wasm', dynamic: 'into eval'})[cross]),
           ...(sites.length ? [`at ${sites.slice(0, 4).join(', ')}${sites.length > 4 ? '…' : ''}`] : []), `×${edge.count.toLocaleString()}`];
         item.append(link, make('span', 'flow-inspector-meta', meta.join(' · ')));
         list.append(item);
@@ -1602,7 +1590,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     } else {
       const edgeIndex = hover.row >= 0 ? cards[hover.node]?.rows[hover.row]?.edge : hover.edge, edge = display.edges[edgeIndex];
       if (!edge) { hideTooltip(); return; }
-      heading = `${edge.kind === 'task' ? FLOW_GRAPH_TASKS[edge.task] ?? edge.task : edge.kind}`; kind = flowGraphEdgeFamily(edge);
+      heading = `${edge.kind === 'task' ? REQUEST_STACK_TASKS[edge.task] ?? edge.task : edge.kind}`; kind = flowGraphEdgeFamily(edge);
       facts.push(['from', flowGraphNodeName(display.nodes[edge.from]), '']);
       facts.push(['to', flowGraphNodeName(display.nodes[edge.to]), '']);
       const note = flowGraphEdgeNote(model, display, edge);

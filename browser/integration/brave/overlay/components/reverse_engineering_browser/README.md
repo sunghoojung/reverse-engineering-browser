@@ -132,7 +132,10 @@ recorded http(s) starts indexed by the request ID's low 10 bits. Chromium patch
 `ResourceFetcher::DidLoadResourceFromMemoryCache` in an ordinary page as a
 `memory_cache_reuse` record once the sink admits it, 4,096 per configuration,
 with the rest counted in the queue (version 4) as class 70 and those of pages
-that are not ordinary as class 71.
+that are not ordinary as class 71. Chromium patch
+`0062-name-memory-cache-reuse-sources` passes the reused resource's
+`ResourceResponse::RequestId()`, the renderer request that loaded it, which the
+record (payload version 2) names through its initiator fields.
 See [Native network v3](../../../../../../protocol/native-network-v3.md).
 
 Each request names the tab that caused it. Brave patch

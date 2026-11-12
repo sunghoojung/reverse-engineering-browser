@@ -156,7 +156,8 @@ it.
   A load Blink answers from a resource it already holds (its memory cache, or
   a `data:` URL or MHTML archive resource it decodes itself) makes no request
   and is still recorded as one row: its host, status, decoded size, Blink
-  resource type and frame always, and its path and query only in content
+  resource type, frame and the ID of the renderer request that loaded it
+  always, and its path and query only in content
   capture and only as a 116-byte prefix, which for a `data:` URL is the start
   of the data itself. At most 4,096 are recorded per renderer configuration;
   the rest, and those in pages that are not ordinary, such as an SVG image's

@@ -746,7 +746,7 @@
           bodyLength: String(bodyLength), capturedLength: String(captured), partialIndex,
           sha256: retained ? Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') : null,
           artifactId: event.artifact_id, sequenceNumber: event.sequence_number, parentEventId: event.parent_event_id,
-          sessionId: event.session_id, processId: event.process_id
+          sessionId: event.session_id, processId: event.process_id, monotonicTimeNs: event.monotonic_time_ns
         };
       }
 
@@ -903,7 +903,8 @@
           const newest = (latest, event) => !latest || BigInt(event.sequence_number) > BigInt(latest.sequence_number) ? event : latest;
           const response = request.events.filter(event => event.type === 'response_started').reduce(newest, null);
           request.responseStarted = response ? {sequenceNumber: response.sequence_number, sessionId: response.session_id,
-            processId: response.process_id} : null;
+            processId: response.process_id, monotonicTimeNs: response.monotonic_time_ns} : null;
+          request.redirected = request.events.some(event => event.type === 'request_redirected');
           const responseBody = response ? request.details.filter(event => event.type === 'response_body' &&
             event.parent_event_id === response.sequence_number && event.session_id === response.session_id &&
             event.process_id === response.process_id).reduce(newest, null) : null;
@@ -956,7 +957,7 @@
         if (event?.type !== 'memory_cache_reuse' || event.protocol_version !== 3 || event.category !== 'network' ||
             event.flags !== 0 || event.payload_size !== 128 || typeof event.payload !== 'string' ||
             !/^[0-9a-f]{256}$/i.test(event.payload) || !(event.status_code >= 0) || event.error_code !== 0 ||
-            event.resource_type !== 0 || event.initiator_request_id !== 0 || event.initiator_process_id !== 0 ||
+            event.resource_type !== 0 ||
             !(event.process_id > 0) || !(event.scheme_class > 0) || !(event.loader_kind >= 16 && event.loader_kind <= 22) ||
             ['navigation_id', 'artifact_id', 'parent_event_id', 'encoded_data_length'].some(key => event[key] !== '0') ||
             ['browser_context_id_high', 'browser_context_id_low'].some(key => (event[key] ?? '0') !== '0') ||
@@ -964,12 +965,19 @@
             ['session_id', 'sequence_number'].some(key => typeof event[key] !== 'string' || event[key] === '0')) return null;
         const bytes = Uint8Array.from(event.payload.match(/../g), byte => Number.parseInt(byte, 16));
         const [resourceType, flags, length] = [bytes[4], bytes[5], bytes[6]];
-        if (bytes[0] !== 1 || bytes[1] !== 0 || bytes[2] !== 128 || bytes[3] !== 0 || resourceType < 1 || resourceType > 15 ||
-            (flags & ~3) !== 0 || length > 120 || bytes[7] !== 0 || ((flags & 2) !== 0 && length !== 120) ||
+        // Version 2 bit 2: the initiator fields name the renderer request whose
+        // response Blink reused, in the same process; static data has none.
+        const named = (flags & 4) !== 0;
+        if (![1, 2].includes(bytes[0]) || bytes[1] !== 0 || bytes[2] !== 128 || bytes[3] !== 0 || resourceType < 1 || resourceType > 15 ||
+            (flags & ~(bytes[0] === 2 ? 7 : 3)) !== 0 || (named && (flags & 1) !== 0) ||
+            (named ? event.initiator_process_id !== event.process_id || !(event.initiator_request_id > 0)
+              : event.initiator_request_id !== 0 || event.initiator_process_id !== 0) ||
+            length > 120 || bytes[7] !== 0 || ((flags & 2) !== 0 && length !== 120) ||
             bytes.slice(8, 8 + length).some(byte => byte < 0x21 || byte > 0x7e) ||
             bytes.slice(8 + length).some(byte => byte !== 0)) return null;
         return {resourceType, staticData: (flags & 1) !== 0, hostTruncated: (flags & 2) !== 0,
-          host: String.fromCharCode(...bytes.slice(8, 8 + length))};
+          host: String.fromCharCode(...bytes.slice(8, 8 + length)),
+          source: named ? correlatedRendererIdentity(event) : null};
       }
 
       // Native JavaScript invocation records, protocol/native-js-invocation-v1.md:
@@ -1443,7 +1451,8 @@
         const session = integerText(event, 'session_id');
         const requestId = integerText(event, 'request_id');
         if (requestId === '0') return null;
-        return event.initiator_process_id > 0
+        // A reuse's initiator fields name its source row, not a loader of its own.
+        return event.initiator_process_id > 0 && event.type !== 'memory_cache_reuse'
           ? `S${session}:R${event.initiator_process_id}:B${requestId}`
           : `S${session}:P${event.process_id}:F${integerText(event, 'frame_id')}:B${requestId}`;
       }
@@ -1688,6 +1697,9 @@
             memoryCache: Boolean(previous?.memoryCache) || event.type === 'memory_cache_reuse',
             staticData: Boolean(previous?.staticData) || Boolean(event.type === 'memory_cache_reuse' &&
               decodeMemoryCacheReuse(event)?.staticData),
+            // The row of the request whose response a version 2 reuse names.
+            memoryCacheSource: (event.type === 'memory_cache_reuse' ? decodeMemoryCacheReuse(event)?.source : null) ??
+              previous?.memoryCacheSource ?? null,
             mimeType: response ? response.mimeType : previous?.mimeType ?? null,
             protocol: response ? response.protocol : previous?.protocol ?? null,
             responseTimestamp: previous?.responseTimestamp ?? (response ? timestamp : null),

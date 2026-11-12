@@ -482,6 +482,28 @@ void MemoryCacheReuses() {
              "cdn.example.test");
   assert(target.target_length == 13 &&
          target.scheme == static_cast<std::uint8_t>(reb::RequestScheme::kHttps));
+  assert(payload.version == 2 && reuse.header.initiator_process_id == 0 &&
+         reuse.header.initiator_request_id == 0);
+
+  // The reused resource names the request that loaded it (ResourceResponse::
+  // RequestId()), as a request_tab_link names a renderer record. ID 0 is also
+  // what a response no request set carries, so it names nothing.
+  auto sourced = image;
+  sourced.source_request_id = 41;
+  record(sourced);
+  const auto named = Core(Pop(queue));
+  Pop(queue);
+  assert(named.header.initiator_process_id == named.header.process_id &&
+         named.header.initiator_request_id == 41 &&
+         (ReuseOf(named).flags & reb::kMemoryCacheReuseSourceNamed) != 0);
+  for (const std::int32_t unset : {0, -1}) {
+    sourced.source_request_id = unset;
+    record(sourced);
+    const auto unnamed = Core(Pop(queue));
+    Pop(queue);
+    assert(unnamed.header.initiator_request_id == 0 && unnamed.header.initiator_process_id == 0 &&
+           (ReuseOf(unnamed).flags & reb::kMemoryCacheReuseSourceNamed) == 0);
+  }
 
   // Static data has no host, no status of its own beyond Blink's 200, and no owner here:
   // the running script's frame stands in, as on request_initiated.
@@ -499,6 +521,14 @@ void MemoryCacheReuses() {
   assert(data.header.loader_kind == 21 && data.header.frame_id != 0 &&
          data.header.scheme_class == 5 && ReuseOf(data).flags == 1 &&
          ReuseOf(data).host_length == 0);
+  // Static data had no request, whatever ID its response carries.
+  decoded.source_request_id = 41;
+  blink::test_frame_present = true;
+  record(decoded);
+  blink::test_frame_present = false;
+  const auto static_named = Core(Pop(queue));
+  Pop(queue);
+  assert(ReuseOf(static_named).flags == 1 && static_named.header.initiator_request_id == 0);
 
   // A long host keeps 120 bytes and says so; a negative length or status is never written.
   const std::string long_host(200, 'h');

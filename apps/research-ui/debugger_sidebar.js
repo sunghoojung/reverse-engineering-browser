@@ -428,11 +428,13 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     // Paints the sections again from what was last read, without a read.
     repaint: () => render(),
     selectThread(thread) {
+      view.reveal = null;
       view.thread = thread && view.thread?.key === thread.key ? null : thread;
       hooks.refreshTree?.();
       read();
     },
     setKind(kind) {
+      view.reveal = null;
       view.kind = Object.hasOwn(DEBUGGER_OBSERVATION_KINDS, kind) ? kind : null;
       read();
     },
@@ -1406,7 +1408,13 @@ function debuggerObservationsSection() {
       list.element.hidden = !items.length;
       shown = items;
       list.set(items, {selectedKey: selected?.key ?? null});
-      if (revealing) { choose(view, revealing, 'reveal'); list.scrollTo(revealing.key); list.focus(); }
+      if (revealing) {
+        // The list into view first, then the chosen row in it; choose brings its details into view.
+        if (typeof list.element.scrollIntoView === 'function') list.element.scrollIntoView({block: 'nearest'});
+        list.scrollTo(revealing.key);
+        choose(view, revealing, 'reveal');
+        list.focus();
+      }
       const end = loaded ? loaded.bottom : observations.query?.next_before ?? null;
       controls.more.hidden = !current || end === null || items.length >= DEBUGGER_SIDEBAR.rows;
       controls.more.disabled = observations.loadingOlder;

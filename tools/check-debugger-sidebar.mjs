@@ -981,6 +981,15 @@ await check('showObservation chooses the record Traffic names', async () => {
   assert.equal(ui.context.RebDebuggerSidebar.showObservation({...target, sequence_number: '999'}), true);
   await until(() => /Observation #999 of renderer 42 is not among these requests/.test(ui.text('.debugger-observation-notes')), 'an absent record is named');
   assert.equal(ui.context.RebDebuggerSidebar.showObservation({...target, type: 'gap'}), false, 'only an observation kind');
+  // A kind the researcher picks before the read answers drops the request.
+  store.delay = 200;
+  ui.context.RebDebuggerSidebar.showObservation(target);
+  click(ui, ui.sidebar.querySelector('.debugger-kind[data-kind="timer_observation"]'));
+  await until(() => /^\d+ timers, newest first/.test(ui.text('.debugger-observation-notes')), 'the picked kind is read');
+  await settle();
+  assert.doesNotMatch(ui.text('.debugger-observation-notes'), /Observation #7/, 'an abandoned request names nothing');
+  assert.equal(list().querySelector('[aria-selected="true"]'), null, 'and chooses nothing');
+  store.delay = 0;
   ui.close();
 });
 

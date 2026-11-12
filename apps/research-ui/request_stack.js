@@ -297,7 +297,8 @@ function createRequestStackPanel({open, refresh, load = null}) {
     if (record?.asyncTruncated || stack.async_truncated) nodes.push(note('The await chain continues past 32 frames.'));
     if (stack.task_chain_truncated) nodes.push(note('The task chain continues past 32 segments.'));
     if (stack.async_callers_not_shown?.length) {
-      nodes.push(note(`Async callers not shown: ${stack.async_callers_not_shown.join(', ')}.`));
+      // Items can hold commas and colons of their own, so semicolons part them.
+      nodes.push(note(`Async callers not shown: ${stack.async_callers_not_shown.join('; ')}.`));
     }
     return nodes;
   }

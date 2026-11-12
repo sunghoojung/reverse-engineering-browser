@@ -141,7 +141,7 @@ assert.deepEqual([...tree.querySelectorAll('li')].map(item => item.textContent),
   'Event or observer',
   'scheduled while no script ran (the browser, the parser or a native callback); the chain ends here'
 ]);
-assert.match(tree.textContent, /Async callers not shown: ServiceWorker\.postMessage and Client\.postMessage, window\.postMessage to or from another process\./);
+assert.match(tree.textContent, /Async callers not shown: ServiceWorker\.postMessage and Client\.postMessage; window\.postMessage to or from another process\./);
 // Exact notes: a reaction with promise stacks on and nothing remembered, a
 // rejected message origin, and the per-thread budgets of each kind.
 let notesPending = null;

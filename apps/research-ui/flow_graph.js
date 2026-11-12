@@ -326,12 +326,13 @@ function flowGraphAlpha(color, alpha) {
  * The flow graph view: the Graph pane of the Flow workspace.
  * `open(node)` reveals a resolved function in Sources; `available()` says
  * whether this shell serves the route. `onSelect(info | null, {requested})`
- * hears every change of the selected card or row, clears included, with
- * `requested` true when the graph changed it for the host; `onFollow(info)`, when
- * given, takes Enter or a double-click on a Wasm card instead of Sources. The
- * README's Flow graph section documents `info` and the returned methods.
+ * hears every change of the selected card or row, clears included, with its
+ * cause; `onFollow(info)`, when given, takes Enter or a double-click on a Wasm
+ * card instead of Sources; `hostKeys(event)` says which keys the host owns,
+ * which the canvas then leaves to it. The README's Flow graph section
+ * documents `info` and the returned methods.
  */
-function createFlowGraphPanel({host, open = () => {}, available = () => true, onSelect = null, onFollow = null}) {
+function createFlowGraphPanel({host, open = () => {}, available = () => true, onSelect = null, onFollow = null, hostKeys = () => false}) {
   const make = (tag, className = '', text = '') => { const element = document.createElement(tag); if (className) element.className = className; if (text) element.textContent = text; return element; };
   const button = (label, action, aria, className = 'flow-graph-tool') => { const element = make('button', className, label); element.type = 'button'; element.setAttribute('aria-label', aria ?? label); element.addEventListener('click', action); return element; };
   host.classList.add('flow-graph');
@@ -1806,39 +1807,82 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     });
     if (best >= 0) selectCard(best);
   }
+  const ARROWS = Object.freeze({ArrowDown: [0, 1], ArrowUp: [0, -1], ArrowLeft: [-1, 0], ArrowRight: [1, 0]});
+  function pan(dx, dy) {
+    view = {...view, x: view.x + dx * 80 / view.z, y: view.y + dy * 80 / view.z};
+    requestDraw();
+  }
+  /** Enter: follow the chosen call, as in a disassembler; on the card itself,
+   * open the function or expand the chain. */
+  function followOrActivate() {
+    if (selectedRow >= 0 && cards[selected].rows[selectedRow]?.edge >= 0) follow(selected, selectedRow);
+    else activate(selected);
+  }
+  function openMenuAtSelection() {
+    const box = nodeBox(selected), rowY = selectedRow >= 0 ? rowTop(box, selectedRow) + FLOW_GRAPH_CARD.row : box.y + 24;
+    openMenu(selected, (box.x + Math.min(box.w, 140) - view.x) * view.z, (rowY - view.y) * view.z, selectedRow);
+  }
+  function focusFind() {
+    filter.focus();
+    filter.select();
+  }
+  function toggleMinimap() {
+    minimapOn = !minimapOn;
+    host.toggleAttribute('data-minimap-off', !minimapOn);
+    miniKey = '';
+    requestDraw();
+  }
+  function clearOrClose() {
+    if (selected >= 0 || highlight) clearSelection();
+    else setDetails(false);
+  }
+  /** What a key does on the canvas, or null when it does nothing here and
+   * goes on to the host. Letters are the same with Shift; Command, Control
+   * and Option belong to the app, except Option+Left. */
+  function keyAction(event) {
+    const key = event.key, card = selected >= 0;
+    if (key === 'ArrowLeft' && event.altKey) return back;
+    if (key === 'ContextMenu' || (key === 'F10' && event.shiftKey)) return card ? openMenuAtSelection : null;
+    if (event.metaKey || event.ctrlKey || event.altKey) return null;
+    if (ARROWS[key]) return event.shiftKey ? () => pan(...ARROWS[key]) : () => move(...ARROWS[key]);
+    switch (key.length === 1 ? key.toLowerCase() : key) {
+      case 'Backspace': return back;
+      case 'Escape': return card || highlight || detailsOpen ? clearOrClose : null;
+      case '+': case '=': return () => zoomAt(1.25);
+      case '-': case '_': return () => zoomAt(0.8);
+      case '0': return fit;
+      case '/': return focusFind;
+      case 'i': return () => setDetails(!detailsOpen);
+      case 'm': return toggleMinimap;
+      case ' ': return card ? () => toggleChain(selected) : null;
+      case 'Enter': return card ? followOrActivate : null;
+      case 'j': return card ? () => stepRow(1) : null;
+      case 'k': return card ? () => stepRow(-1) : null;
+      case 'u': return card ? () => toCaller(selected) : null;
+      case 'f': return card ? () => centerOn(selected) : null;
+      case 'o': return card && canOpen(display.nodes[selected]) ? () => open(display.nodes[selected]) : null;
+      case 's': return card && selectedRow >= 0 ? () => copy(callSite(selected, selectedRow), 'Call site') : null;
+      case 'c': return card ? () => copy(flowGraphNodeName(display.nodes[selected]), 'Name') : null;
+      case 'l': return card ? () => copy(flowGraphNodeLocation(display.nodes[selected]), 'Location') : null;
+      default: return null;
+    }
+  }
   canvas.addEventListener('keydown', event => {
-    if (!layout) return;
-    const key = event.key, panStep = 80 / view.z, plain = !event.metaKey && !event.ctrlKey && !event.altKey; let handled = true;
+    // The host's chords are its own, checked before any of the canvas's.
+    if (!layout || hostKeys(event)) return;
     hideTooltip();
     // An open key closes before Escape does anything else.
-    if (key === 'Escape' && status.hasAttribute('data-key-open')) { setKey(false); event.preventDefault(); event.stopPropagation(); return; }
-    // Shift+Backspace is left to the Flow workspace, which walks its trail forward.
-    if ((key === 'Backspace' && plain && !event.shiftKey) || (key === 'ArrowLeft' && event.altKey)) back();
-    else if (event.shiftKey && key.startsWith('Arrow')) { view.x += key === 'ArrowLeft' ? -panStep : key === 'ArrowRight' ? panStep : 0; view.y += key === 'ArrowUp' ? -panStep : key === 'ArrowDown' ? panStep : 0; requestDraw(); }
-    else if (key === 'ArrowDown') move(0, 1); else if (key === 'ArrowUp') move(0, -1); else if (key === 'ArrowLeft') move(-1, 0); else if (key === 'ArrowRight') move(1, 0);
-    else if (key === '+' || key === '=') zoomAt(1.25); else if (key === '-' || key === '_') zoomAt(0.8); else if (key === '0') fit();
-    else if (key === 'Escape' && (selected >= 0 || highlight)) clearSelection();
-    else if (key === 'Escape' && detailsOpen) setDetails(false);
-    else if (key === ' ' && selected >= 0) toggleChain(selected);
-    // Enter follows the chosen call, as in a disassembler; on the card
-    // itself it opens the function or expands the chain.
-    else if (key === 'Enter' && selected >= 0) { if (selectedRow >= 0 && cards[selected].rows[selectedRow]?.edge >= 0) follow(selected, selectedRow); else activate(selected); }
-    else if (plain && (key === 'j' || key === 'J' || key === 'k' || key === 'K') && selected >= 0) stepRow(key.toLowerCase() === 'j' ? 1 : -1);
-    else if (plain && (key === 'u' || key === 'U') && selected >= 0) toCaller(selected);
-    else if (plain && (key === 'o' || key === 'O') && selected >= 0 && canOpen(display.nodes[selected])) open(display.nodes[selected]);
-    else if (plain && (key === 's' || key === 'S') && selected >= 0 && selectedRow >= 0) copy(callSite(selected, selectedRow), 'Call site');
-    else if ((key === 'ContextMenu' || (key === 'F10' && event.shiftKey)) && selected >= 0) {
-      const box = nodeBox(selected), rowY = selectedRow >= 0 ? rowTop(box, selectedRow) + FLOW_GRAPH_CARD.row : box.y + 24;
-      openMenu(selected, (box.x + Math.min(box.w, 140) - view.x) * view.z, (rowY - view.y) * view.z, selectedRow);
+    if (event.key === 'Escape' && status.hasAttribute('data-key-open')) {
+      setKey(false);
+      event.preventDefault();
+      event.stopPropagation();
+      return;
     }
-    else if (key === '/') { filter.focus(); filter.select(); }
-    else if (plain && (key === 'i' || key === 'I')) setDetails(!detailsOpen);
-    else if (plain && (key === 'm' || key === 'M')) { minimapOn = !minimapOn; host.toggleAttribute('data-minimap-off', !minimapOn); miniKey = ''; requestDraw(); }
-    else if (plain && (key === 'f' || key === 'F') && selected >= 0) centerOn(selected);
-    else if (plain && !event.shiftKey && (key === 'c' || key === 'C') && selected >= 0) copy(flowGraphNodeName(display.nodes[selected]), 'Name');
-    else if (plain && !event.shiftKey && (key === 'l' || key === 'L') && selected >= 0) copy(flowGraphNodeLocation(display.nodes[selected]), 'Location');
-    else handled = false;
-    if (handled) { event.preventDefault(); event.stopPropagation(); }
+    const action = keyAction(event);
+    if (!action) return;
+    event.preventDefault();
+    event.stopPropagation();
+    action();
   });
 
   return {

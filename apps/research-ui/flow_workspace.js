@@ -72,6 +72,17 @@ function flowTrailCrumbs(selection) {
 }
 const flowSelectionKey = selection => JSON.stringify([selection.request?.id ?? null, selection.call?.key ?? null, selection.fn?.key ?? null, selection.site?.offset ?? null, selection.sample?.key ?? null, selection.step ?? null, selection.graphKey ?? null]);
 
+/** The workspace's own chords, which the flow graph canvas leaves to it
+ * (its hostKeys option): Shift+C, Shift+L and Shift+T toggle panes,
+ * Shift+Backspace walks the trail forward, Z toggles focus mode and 1 to 4
+ * switch panes, none with Command, Control or Option. */
+function flowWorkspaceKey(event) {
+  if (event.metaKey || event.ctrlKey || event.altKey) return false;
+  const key = event.key, code = event.code ?? '';
+  if (event.shiftKey) return ['KeyC', 'KeyL', 'KeyT'].includes(code) || ['C', 'L', 'T', 'Backspace'].includes(key);
+  return code === 'KeyZ' || key === 'z' || key === 'Z' || /^Digit[1-4]$/.test(code) || /^[1-4]$/.test(key);
+}
+
 /** Line style and colour of a lineage link, from the step's confidence and relation. */
 function flowLinkKind(model) {
   if (!model?.step) return {line: 'cut', kind: 'plain'};

@@ -43,6 +43,7 @@ const flowGraphPanel = typeof createFlowGraphPanel === 'function' && document.qu
     if (node.artifact_id) openResolvedFrame({artifact_id: node.artifact_id, artifact_line: node.artifact_line ?? null, artifact_column: node.artifact_column ?? 0});
   },
   onSelect: (info, how) => { if (typeof flowWorkspace !== 'undefined') flowWorkspace?.graphSelected(info, how); },
+  hostKeys: event => typeof flowWorkspaceKey === 'function' && flowWorkspaceKey(event),
   onFollow: info => { if (typeof flowWorkspace !== 'undefined') flowWorkspace?.graphFollowed(info); }
 }) : null;
 // The Flow workspace: Graph, CFG, Lineage and Timeline share one selection and trail.

@@ -2383,8 +2383,7 @@ steps with Enter, Shift+Enter or its arrows, and never dims a match.
 - Enter follows the chosen call. On the card itself it opens the function in
   Sources or expands a chain; a Wasm card goes to the host's `onFollow` when
   there is one.
-- Backspace or Alt+Left goes back. Shift+Backspace is left to the Flow
-  workspace, where ⇧⌫ walks the trail forward.
+- Backspace or Alt+Left goes back.
 - U goes to the caller that reached the card most often.
 - O opens the function in Sources.
 - S copies the chosen call site.
@@ -2394,9 +2393,13 @@ steps with Enter, Shift+Enter or its arrows, and never dims a match.
 - `+`, `-` and `0` zoom and fit, and Shift+arrows pan.
 - F centers the selection.
 - I toggles Details.
-- C and L copy the name and location. With Shift they are left to the Flow
-  workspace, where ⇧C and ⇧L show or hide the CFG and Lineage panes.
+- C and L copy the name and location.
 - M hides the minimap.
+- Letters do the same with Shift. Keys with Command, Control or Option are the
+  app's, except Option+Left.
+- A key the host claims through `hostKeys` is left to it. The Flow workspace
+  claims its own chords: ⇧C, ⇧L and ⇧T show or hide its panes, ⇧⌫ walks its
+  trail forward, Z toggles focus mode and 1 to 4 switch panes.
 
 The canvas announces this list through `aria-describedby`.
 
@@ -2440,6 +2443,9 @@ takes, besides `host`, `open` and `available`:
 - `onFollow(info)`, called on Enter or a double-click on a Wasm card. Without
   it a Wasm card opens in Sources, as before. Enter on a call row still
   follows the call.
+- `hostKeys(event)`, asked on every key the canvas receives before it acts;
+  `true` leaves the key to the host, unhandled. The app passes the Flow
+  workspace's `flowWorkspaceKey`.
 
 `info` is:
 

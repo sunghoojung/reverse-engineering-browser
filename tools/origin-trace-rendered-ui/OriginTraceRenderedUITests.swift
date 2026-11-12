@@ -343,6 +343,7 @@ struct Expectations: Decodable {
   let metadataBodyHost: String
   let responseBodyHost: String
   let responseBodyMarker: String
+  let budgetHost: String
   let headerValueMarker: String
   let cookieValueMarker: String
   let cachedHeadersHost: String
@@ -3329,7 +3330,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         try await openStartPanel(ui)
         try await ui.activate()
         let opened = try await ui.json(
-          "({mode: document.querySelector('#session-panel input[name=\"session-panel-mode\"]:checked')?.value, checkboxes: document.querySelectorAll('#session-panel input[type=checkbox]').length, keychain: /keychain/i.test(document.querySelector('#session-panel').innerText)})")
+          "({mode: document.querySelector('#session-panel input[name=\"session-panel-mode\"]:checked')?.value, checkboxes: document.querySelectorAll('#session-panel input[type=checkbox]:not(#session-panel-media)').length, keychain: /keychain/i.test(document.querySelector('#session-panel').innerText)})")
         XCTAssertEqual(opened["mode"] as? String, plan.from, "\(name): the panel opens with this run's last mode: \(opened)")
         XCTAssertEqual(opened["checkboxes"] as? Int, 0, "\(name): the panel has no Keychain checkbox: \(opened)")
         XCTAssertEqual(opened["keychain"] as? Bool, false, "\(name): the panel says nothing about the Keychain: \(opened)")
@@ -3356,7 +3357,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
           if stops.last?.hasPrefix("session-panel-mode-") == true { break }
         }
         print("RENDERED_UI_START_PANEL_FOCUS \(name) \(stops)")
-        XCTAssertEqual(stops, ["session-panel-offline", "session-panel-mode-\(plan.from)"],
+        // Content's limits sit between the mode and the actions; Metadata has none.
+        let limits = ["session-panel-media", "session-panel-response-budget", "session-panel-request-budget"]
+        XCTAssertEqual(stops, ["session-panel-offline"] + (plan.from == "content" ? limits : []) + ["session-panel-mode-\(plan.from)"],
           "\(name): the panel's controls in reverse order")
         try await ui.screenshot("start-panel-focus-\(name)")
         // Arrow keys choose within the mode group.
@@ -3364,8 +3367,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         let moved = try await ui.json(
           "({focus: document.activeElement?.id, text: document.querySelector('#session-panel').innerText})")
         XCTAssertEqual(moved["focus"] as? String, "session-panel-mode-\(plan.to)", "\(name): the arrow moved the choice: \(moved)")
-        try await ui.tab()
-        try await ui.tab()
+        for _ in 0..<(plan.to == "content" ? 5 : 2) { try await ui.tab() }
         let start = try await focus()
         XCTAssertEqual(start["id"] as? String, "session-panel-start", "\(name): Tab returns to Start Session: \(start)")
         try await ui.screenshot("start-panel-chosen-\(name)")
@@ -3407,6 +3409,212 @@ final class OriginTraceRenderedUITests: XCTestCase {
       throw error
     }
     try await returnToHarness(ui, harnessURL)
+  }
+
+  // The start panel's Content limits (#428, #436): only for Content, with the
+  // launcher's bounds and defaults. An out-of-bounds value is named at its
+  // field and starts nothing; native refuses one the page did not check; a
+  // raised budget and media capture reach the start, whose failure (the named
+  // Brave does not exist) names them, and they hold for the run. Keyboard
+  // entry, focus rings, both window sizes and both themes. Traffic then names
+  // each used budget, its size, what it kept and the control in its footer,
+  // and the Payload and Response tabs name the control for the next session.
+  @MainActor
+  func test36StartPanelContentLimits() async throws {
+    let ui = try await prepare(windowSizes[0])
+    let harnessURL = try XCTUnwrap(ui.webView.url)
+    let expected = try Expectations.load()
+    try await clearSavedSites(ui)
+    let focus = { try await ui.json("__rebUiProbe.focusState()") }
+    let fields = """
+      ({request: document.querySelector('#session-panel-request-budget')?.value ?? null,
+        response: document.querySelector('#session-panel-response-budget')?.value ?? null,
+        media: document.querySelector('#session-panel-media')?.checked ?? null,
+        state: document.querySelector('#session-panel')?.dataset.state,
+        error: document.querySelector('#session-panel-request-budget-error')?.textContent ?? null,
+        invalid: document.querySelector('#session-panel-request-budget')?.getAttribute('aria-invalid') ?? null})
+      """
+    // Both themes, set the way the theme toggle sets it.
+    let theme = { (light: Bool) in
+      _ = try await ui.value(light ? """
+        (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null; document.documentElement.dataset.theme = 'light';
+          await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+        """ : """
+        (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
+          else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme; return true; })()
+        """)
+    }
+    // Replaces the focused field's text, as a triple click would.
+    let selectAll = { _ = try await ui.value("(document.activeElement.select(), true)") }
+    do {
+      for (index, size) in windowSizes.enumerated() {
+        let name = size.name
+        try await ui.resize(width: size.width, height: size.height)
+        try await openStartPanel(ui)
+        try await ui.activate()
+        if try await ui.value("document.querySelector('#session-panel-mode-content').checked") as? Bool != true {
+          try await ui.click("#session-panel .session-panel-mode[data-mode='content']")
+        }
+        // Normal opens with the defaults; narrow with what normal started, held for the run.
+        let opened = try await ui.json(fields)
+        XCTAssertEqual(opened["request"] as? String, index == 0 ? "256" : "1024", "\(name): request content budget: \(opened)")
+        XCTAssertEqual(opened["response"] as? String, "512", "\(name): response body budget: \(opened)")
+        XCTAssertEqual(opened["media"] as? Bool, index == 1, "\(name): media and fonts: \(opened)")
+        let text = try await panelText(ui)
+        for phrase in ["Content limits", "Request content budget", "Response body budget", "Capture media and fonts",
+                       "1 to 4,096 MiB; default 256 MiB.", "1 to 16,384 MiB; default 512 MiB.",
+                       "They count against the response body budget.", "Both budgets stay on this Mac with the session"] {
+          XCTAssertTrue(text.contains(phrase), "\(name): the limits say \(phrase): \(text)")
+        }
+        XCTAssertNil(text.range(of: "keychain", options: .caseInsensitive), "\(name): no Keychain choice: \(text)")
+        try await assertStartPanelFits(ui, "\(name) start panel limits")
+        _ = try await ui.reveal("#session-panel .session-panel-limits", block: "start")
+        try await assertLayout(ui, "#session-panel", "\(name) start panel limits revealed")
+        try await ui.screenshot("start-panel-limits-\(name)")
+        try await theme(true)
+        try await assertLayout(ui, "#session-panel", "\(name) start panel limits light")
+        try await ui.screenshot("start-panel-limits-light-\(name)")
+        try await theme(false)
+
+        // Keyboard: each limit is a stop with a visible ring.
+        _ = try await ui.value("(document.querySelector('#session-panel-start').focus(), true)")
+        for expectedStop in ["session-panel-offline", "session-panel-media", "session-panel-response-budget", "session-panel-request-budget"] {
+          try await ui.tab(shift: true)
+          let stop = try await focus()
+          XCTAssertEqual(stop["id"] as? String, expectedStop, "\(name): \(stop)")
+          XCTAssertEqual(stop["focusVisible"] as? Bool, true, "\(name): \(stop)")
+          XCTAssertEqual(stop["inViewport"] as? Bool, true, "\(name): \(stop)")
+          let ring = try await ui.value("""
+            (() => { const shown = getComputedStyle(document.activeElement);
+              return shown.outlineStyle !== 'none' && parseFloat(shown.outlineWidth) > 0; })()
+            """) as? Bool
+          XCTAssertEqual(ring, true, "\(name): a focus ring shows around \(expectedStop)")
+        }
+        try await ui.screenshot("start-panel-limit-focus-\(name)")
+
+        // Out of bounds, typed and sent with Return: named at the field, nothing starts.
+        try await selectAll()
+        try await ui.type("5000")
+        try await ui.key(36, "\r")
+        try await ui.waitUntil("document.querySelector('#session-panel-request-budget-error') !== null", "\(name): the refusal was not named")
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        let refused = try await ui.json(fields)
+        XCTAssertEqual(refused["state"] as? String, "choose", "\(name): an out-of-bounds budget starts nothing: \(refused)")
+        XCTAssertEqual(refused["error"] as? String, "Request content budget must be a whole number from 1 to 4096 MiB.", "\(name): \(refused)")
+        XCTAssertEqual(refused["invalid"] as? String, "true", "\(name): \(refused)")
+        let refusedFocus = try await focus()
+        XCTAssertEqual(refusedFocus["id"] as? String, "session-panel-request-budget", "\(name): focus stays on the field: \(refusedFocus)")
+        try await assertLayout(ui, "#session-panel", "\(name) refused budget")
+        try await ui.screenshot("start-panel-limit-refused-\(name)")
+        // Native checks what the page sends, as the agent path checks its options.
+        let native = try await ui.json("""
+          (async () => { const ask = body => webkit.messageHandlers.rebSession.postMessage({op: 'start', ...body}).then(() => 'accepted', error => error.message);
+            return {over: await ask({mode: 'content', request_content_budget_mib: 5000, response_body_budget_mib: 512, response_media: false}),
+              fraction: await ask({mode: 'content', request_content_budget_mib: 256, response_body_budget_mib: 12.5, response_media: false}),
+              metadata: await ask({mode: 'metadata', response_media: true}),
+              missing: await ask({mode: 'content'})}; })()
+          """)
+        XCTAssertEqual(native["over"] as? String, "Request content budget must be a whole number from 1 to 4096 MiB.", "\(name): \(native)")
+        XCTAssertEqual(native["fraction"] as? String, "Response body budget must be a whole number from 1 to 16384 MiB.", "\(name): \(native)")
+        XCTAssertEqual(native["metadata"] as? String, "Budgets and media capture apply only to a Content session.", "\(name): \(native)")
+        XCTAssertEqual(native["missing"] as? String,
+          "A Content session needs a request content budget, a response body budget and the media choice.", "\(name): \(native)")
+        try await Task.sleep(nanoseconds: 500_000_000)
+        let stillOpen = try await ui.json(fields)
+        XCTAssertEqual(stillOpen["state"] as? String, "choose", "\(name): a refused start launches nothing: \(stillOpen)")
+
+        if index == 0 {
+          // A raised budget and media capture, from the keyboard.
+          _ = try await ui.value("(document.querySelector('#session-panel-request-budget').focus(), true)")
+          try await selectAll()
+          try await ui.type("1024")
+          let fixed = try await ui.json(fields)
+          XCTAssertNil(fixed["error"] as? String, "\(name): a fixed value clears its error: \(fixed)")
+          try await ui.tab()
+          try await ui.tab()
+          try await ui.key(49, " ")
+          let raised = try await ui.json(fields)
+          XCTAssertEqual(raised["media"] as? Bool, true, "\(name): Space checks media and fonts: \(raised)")
+          try await ui.tab()
+          try await ui.tab()
+          let start = try await focus()
+          XCTAssertEqual(start["id"] as? String, "session-panel-start", "\(name): \(start)")
+          try await ui.key(36, "\r")
+          try await ui.waitUntil("document.querySelector('#session-panel')?.dataset.state === 'failed'", "\(name): Start did not report its failure")
+          let failure = try await panelText(ui)
+          XCTAssertTrue(failure.contains("Retry starts a new session with the same capture mode: Content (default). "
+            + "Same limits: request content budget 1,024 MiB, response body budget 512 MiB, media and fonts kept."),
+            "\(name): native started with the limits chosen in the panel: \(failure)")
+          try await assertStartPanelFits(ui, "\(name) start failure with limits")
+          try await ui.screenshot("start-panel-limits-failure-\(name)")
+        } else {
+          // Metadata keeps no content: no limits shown, none named by its start.
+          _ = try await ui.value("(document.querySelector('#session-panel-request-budget').focus(), true)")
+          try await selectAll()
+          try await ui.type("1024")
+          try await ui.click("#session-panel .session-panel-mode[data-mode='metadata']")
+          let metadata = try await ui.json(fields)
+          XCTAssertNil(metadata["request"] as? String, "\(name): Metadata shows no request content budget: \(metadata)")
+          XCTAssertNil(metadata["media"] as? Bool, "\(name): Metadata shows no media choice: \(metadata)")
+          let metadataText = try await panelText(ui)
+          XCTAssertFalse(metadataText.contains("Content limits"), "\(name): \(metadataText)")
+          try await assertStartPanelFits(ui, "\(name) metadata start panel")
+          try await ui.screenshot("start-panel-limits-metadata-\(name)")
+          try await ui.click("#session-panel-start")
+          try await ui.waitUntil("document.querySelector('#session-panel')?.dataset.state === 'failed'", "\(name): Start did not report its failure")
+          let failure = try await panelText(ui)
+          XCTAssertTrue(failure.contains("the same capture mode: Metadata only."), "\(name): \(failure)")
+          XCTAssertFalse(failure.contains("Same limits"), "\(name): a Metadata start names no limits: \(failure)")
+        }
+        try await ui.click("#session-panel-offline")
+        try await ui.waitUntil("document.querySelector('#session-panel').hidden", "\(name): Continue Offline did not close the panel")
+      }
+    } catch {
+      try? await returnToHarness(ui, harnessURL)
+      throw error
+    }
+    try await returnToHarness(ui, harnessURL)
+
+    // Traffic: the fixture's budget row and the session's limits from its address.
+    for size in windowSizes {
+      let traffic = try await prepare(size)
+      try await show(traffic, "traffic")
+      let footer = "document.querySelector('#request-budget')"
+      try await traffic.waitUntil("!\(footer).hidden && \(footer).textContent.includes(' kept:')", "\(size.name): the footer did not name the used budgets")
+      let notice = try await traffic.value("\(footer).textContent") as? String ?? ""
+      let pattern = #"^Request content budget \(64 MiB\) used, \d+ KiB kept: 1 request body or URL not kept · "#
+        + #"Response body budget \(128 MiB\) used, \d+ KiB kept: 1 response body not kept · Raise them in New Live Session… for the next session\.$"#
+      XCTAssertNotNil(notice.range(of: pattern, options: .regularExpression), "\(size.name): footer: \(notice)")
+      try await assertLayout(traffic, "#screen-traffic .request-window", "\(size.name) budget footer")
+      try await traffic.click("#screen-traffic .request-row", containing: expected.budgetHost)
+      try await traffic.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "\(size.name): request detail did not open")
+      try await traffic.click("#inspector-tab-payload")
+      try await traffic.waitUntil("(document.querySelector('#payload-inspector')?.innerText ?? '').includes('Not captured')", "\(size.name): Payload did not say why")
+      let payload = try await traffic.value("document.querySelector('#payload-inspector').innerText") as? String ?? ""
+      XCTAssertTrue(payload.contains("Not captured: this session had used its 64 MiB request content budget. Raise Request content budget in New Live Session… for the next session."),
+        "\(size.name): Payload: \(payload)")
+      try await assertLayout(traffic, "#screen-traffic .detail-pane", "\(size.name) budget payload")
+      try await traffic.screenshot("traffic-budget-payload-\(size.name)")
+      try await traffic.click("#inspector-tab-response")
+      try await traffic.waitUntil("(document.querySelector('#response-inspector')?.innerText ?? '').includes('Not retained')", "\(size.name): Response did not say why")
+      let response = try await traffic.value("document.querySelector('#response-inspector').innerText") as? String ?? ""
+      XCTAssertTrue(response.contains("Not retained: this session had used its response body budget. Raise Response body budget in New Live Session… for the next session."),
+        "\(size.name): Response: \(response)")
+      XCTAssertFalse((payload + response + notice).contains("REB_"), "\(size.name): no environment variable is the remedy")
+      try await assertInert(traffic, "\(size.name) budget row")
+      try await assertLayout(traffic, "#screen-traffic .detail-pane", "\(size.name) budget response")
+      try await traffic.screenshot("traffic-budget-used-\(size.name)")
+      _ = try await traffic.value("""
+        (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null; document.documentElement.dataset.theme = 'light';
+          await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+        """)
+      try await assertLayout(traffic, "#screen-traffic .request-window", "\(size.name) budget footer light")
+      try await traffic.screenshot("traffic-budget-used-light-\(size.name)")
+      _ = try await traffic.value("""
+        (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
+          else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme; return true; })()
+        """)
+    }
   }
 
   // Runs only in the driver's launch pass, where the app starts as a

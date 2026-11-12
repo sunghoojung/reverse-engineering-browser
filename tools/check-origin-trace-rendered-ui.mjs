@@ -14,7 +14,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {buildEvidence, HOSTILE_BYTECODE_MARKUP, HOSTILE_SOURCE_MARKER, HOSTILE_SOURCE_URL, HOSTILE_URL, HOSTILE_URL_MARKER, NAMED_GAP_REASONS, SOURCE_LINE_COUNT,
-  SYNTHETIC_REQUEST_COUNT, REQUEST_BODY_HOST, REQUEST_BODY_TARGET, REQUEST_BODY_MARKER, METADATA_BODY_HOST, RESPONSE_BODY_HOST, RESPONSE_BODY_MARKER, HEADER_VALUE_MARKER, COOKIE_VALUE_MARKER, INVOCATION_ARTIFACT_ID, MINIFIED_ARTIFACT_ID,
+  SYNTHETIC_REQUEST_COUNT, REQUEST_BODY_HOST, REQUEST_BODY_TARGET, REQUEST_BODY_MARKER, METADATA_BODY_HOST, RESPONSE_BODY_HOST, RESPONSE_BODY_MARKER, BUDGET_HOST, HEADER_VALUE_MARKER, COOKIE_VALUE_MARKER, INVOCATION_ARTIFACT_ID, MINIFIED_ARTIFACT_ID,
   MEMORY_CACHE_HOST, MEMORY_CACHE_TARGET, SERVICE_WORKER_FAILED_HOST, SERVICE_WORKER_LOST_HOST,
   WORKER_STACK_HOST, WORKER_STACK_PROCESSES, REGISTRANT_HOST, DEBUGGER_PROCESS, DEBUGGER_FRAME, DEBUGGER_ARTIFACT_ID,
   BODY_CASE_PROCESS, REUSED_HOST, REUSED_MARKER, WORKER_ANSWER_HOST, PARTIAL_HOST, HEX_BODY_HOST, HEX_BODY_BYTES,
@@ -125,8 +125,9 @@ try {
   const endpoint = await waitForFile(endpointFile, backend);
   assert.match(endpoint, /^http:\/\/127\.0\.0\.1:\d+$/, 'The packaged backend must bind loopback only');
   // The packaged app's default content mode retains request content, so the
-  // titlebar carries its session label in every screenshot.
-  const uiURL = `${endpoint}/?native=1&canvas_images=0&request_content=1`;
+  // titlebar carries its session label in every screenshot. The launcher also
+  // writes the session's limits, which Traffic names when a budget is used.
+  const uiURL = `${endpoint}/?native=1&canvas_images=0&request_content=1&request_content_budget_mib=64&response_body_budget_mib=128&response_media=0`;
 
   // A local stand-in for the provider, so the agent's whole loop runs through
   // the packaged app with no key and no network. The real tool server answers.
@@ -243,7 +244,7 @@ fetch("/getcaptcha");
         hostileSourceMarker: HOSTILE_SOURCE_MARKER, hostileBytecodeMarkup: HOSTILE_BYTECODE_MARKUP,
         requestCount: SYNTHETIC_REQUEST_COUNT, sourceLines: SOURCE_LINE_COUNT, namedGapReasons: NAMED_GAP_REASONS,
         requestBodyHost: REQUEST_BODY_HOST, requestBodyTarget: REQUEST_BODY_TARGET, requestBodyMarker: REQUEST_BODY_MARKER,
-        metadataBodyHost: METADATA_BODY_HOST, responseBodyHost: RESPONSE_BODY_HOST, responseBodyMarker: RESPONSE_BODY_MARKER,
+        metadataBodyHost: METADATA_BODY_HOST, responseBodyHost: RESPONSE_BODY_HOST, responseBodyMarker: RESPONSE_BODY_MARKER, budgetHost: BUDGET_HOST,
         headerValueMarker: HEADER_VALUE_MARKER, cookieValueMarker: COOKIE_VALUE_MARKER, cachedHeadersHost: CACHED_HEADERS_HOST,
         invocationArtifactId: INVOCATION_ARTIFACT_ID, minifiedArtifactId: MINIFIED_ARTIFACT_ID,
         memoryCacheHost: MEMORY_CACHE_HOST, memoryCacheTarget: MEMORY_CACHE_TARGET, serviceWorkerFailedHost: SERVICE_WORKER_FAILED_HOST,

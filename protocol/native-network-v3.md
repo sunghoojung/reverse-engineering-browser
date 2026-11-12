@@ -500,11 +500,26 @@ native capture can record them, and Brave patch 0021 keeps that observational:
 `kEarlyHints` before both Brave Shields and `ChromeContentBrowserClient`, so
 neither Shields nor an extension's `webRequest` or `declarativeNetRequest` acts
 on them. While native capture runs for the owned profile it first attaches
-Brave's proxy with a request handler that answers every hook with `net::OK`
-and changes nothing; that proxy forwards each request, redirect and response
-unchanged, and its one added check, `content::IsSafeRedirectTarget` on a
-redirect, accepts every http(s) target. Without capture nothing is attached,
-and the factory is built exactly as without these patches.
+Brave's proxy with a request handler that answers every hook with `net::OK`, so
+no header, referrer, block or redirect decision changes. Capture itself still
+adds four things, none visible to the page or the server beyond timing:
+
+- In content sessions the proxy gives a preload without one a `reb-` DevTools
+  request ID (Brave patch 0018), so the network service also sends SSL info
+  with the response and transfer-size updates. `NavigationEarlyHintsManager`'s
+  `PreloadURLLoaderClient` reads only the response head's cache flags and
+  records transfer sizes to UMA.
+- In content sessions the response body is teed for artifact capture, as for
+  any request; the manager still drains its own copy.
+- Each preload's messages take an extra hop through the proxy on the UI thread.
+- A redirect `content::IsSafeRedirectTarget` refuses, to a scheme other than
+  http(s), ends the preload with `ERR_UNSAFE_REDIRECT`. Stock Chromium leaves
+  that preload stalled until the manager goes at commit, because
+  `PreloadURLLoaderClient::OnReceiveRedirect` follows nothing. An http(s)
+  redirect passes unchanged and the manager ignores it as before.
+
+Without capture nothing is attached, and the factory is built exactly as
+without these patches.
 
 The scoped owner is read by the proxy while `WillCreateURLLoaderFactory` runs
 and only for a factory without a frame. A navigation's update hint

@@ -156,7 +156,11 @@ navigation's main frame (`0043`) and a browser-initiated prefetch's page
 link to its registrant tabs, and a starting worker names its token with its
 factories. Brave patch `0021` attaches only an observing proxy, a handler that
 changes nothing, to the early-hints factory and only while capture runs, so
-Shields and extensions never act on those preloads. Chromium patch `0042`
+Shields and extensions never act on those preloads. Capture still gives them a
+`reb-` DevTools ID and a teed body in content sessions, a hop through the UI
+thread, and `ERR_UNSAFE_REDIRECT` for an unsafe redirect stock Chromium leaves
+stalled; none is visible to the page or the server beyond timing (see
+[early hints are observed only](../../../../../../protocol/native-network-v3.md#early-hints-are-observed-only)). Chromium patch `0042`
 names a worklet's creating document through `renderer/native_fetch_owner.h`.
 Chromium patch `0027-record-renderer-fetch-owners` scopes the fetch's own
 document or worker (`renderer/native_fetch_owner.h`) around `SendAsync`, so

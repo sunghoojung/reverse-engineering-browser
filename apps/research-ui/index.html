@@ -10,6 +10,8 @@
     <link rel="stylesheet" href="xrefs_view.css">
     <link rel="stylesheet" href="entropy_map.css">
     <link rel="stylesheet" href="block_graph.css">
+    <link rel="stylesheet" href="flow_graph.css">
+    <link rel="stylesheet" href="flow_workspace.css">
     <link rel="stylesheet" href="agent_panel.css">
     <link rel="stylesheet" href="session_panel.css">
   </head>
@@ -38,7 +40,7 @@
             <button class="nav-button" type="button" data-screen="sources" aria-label="Sources" aria-keyshortcuts="Meta+2 Control+2" title="Sources (⌘ / Ctrl + 2)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 5-5 5 5 5m6-10 5 5-5 5"/></svg><span class="nav-label">Sources</span><kbd class="nav-shortcut" aria-hidden="true">2</kbd></button>
             <button class="nav-button" type="button" data-screen="vm" id="nav-vm-workspace" aria-controls="screen-vm" aria-label="VM" aria-keyshortcuts="Meta+3 Control+3" title="VM (⌘ / Ctrl + 3)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 6h8v8H6zM8 3v3m4-3v3M8 14v3m4-3v3M3 8h3m-3 4h3m8-4h3m-3 4h3"/></svg><span class="nav-label">VM</span><kbd class="nav-shortcut" aria-hidden="true">3</kbd></button>
             <button class="nav-button" type="button" data-screen="signals" aria-label="Fingerprinting" aria-keyshortcuts="Meta+4 Control+4" title="Fingerprinting (⌘ / Ctrl + 4)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10a6 6 0 0 1 12 0m-9 0a3 3 0 0 1 6 0v4m-3-4v7M4 13v2m12-2v2"/></svg><span class="nav-label">Fingerprinting</span><kbd class="nav-shortcut" aria-hidden="true">4</kbd></button>
-            <button class="nav-button" type="button" data-screen="backtrace" aria-label="Backtraces" aria-keyshortcuts="Meta+5 Control+5" title="Backtraces (⌘ / Ctrl + 5)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3v9a3 3 0 0 0 3 3h9m-4-4 4 4-4 4"/></svg><span class="nav-label">Backtraces</span><kbd class="nav-shortcut" aria-hidden="true">5</kbd></button>
+            <button class="nav-button" type="button" data-screen="backtrace" aria-label="Flow" aria-keyshortcuts="Meta+5 Control+5" title="Flow (⌘ / Ctrl + 5)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3v9a3 3 0 0 0 3 3h9m-4-4 4 4-4 4"/></svg><span class="nav-label">Flow</span><kbd class="nav-shortcut" aria-hidden="true">5</kbd></button>
           </div>
           <div class="nav-group" role="group" aria-labelledby="nav-group-workbench">
             <span id="nav-group-workbench" class="nav-heading">Workbench</span>
@@ -379,32 +381,95 @@
             <section id="vm-semantics-workflow" class="vm-semantics-workflow" aria-label="VM execution workspace" hidden></section>
           </section>
 
-          <section id="screen-backtrace" class="screen" aria-label="Request origin trace" hidden>
-            <header class="screen-head">
-              <div><h1>Backtraces</h1><div id="backtrace-subtitle" class="screen-subtitle">Follow a request back to its recorded origin.</div></div>
-              <div class="screen-head-actions"><button class="secondary-button package-navigation" type="button" data-screen="evidence">Evidence</button><button class="secondary-button" type="button" data-screen="traffic">View traffic</button></div>
+          <section id="screen-backtrace" class="screen flow-screen" aria-label="Flow workspace" hidden>
+            <header class="screen-head flow-head">
+              <div class="flow-history" role="group" aria-label="Selection history">
+                <button id="flow-back" class="flow-icon-button" type="button" aria-label="Back along the selection trail" aria-keyshortcuts="Backspace" title="Back along the trail (⌫)" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12 4 6 10l6 6"/></svg></button>
+                <button id="flow-forward" class="flow-icon-button" type="button" aria-label="Forward along the selection trail" aria-keyshortcuts="Shift+Backspace" title="Forward along the trail (⇧⌫)" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 4l6 6-6 6"/></svg></button>
+              </div>
+              <h1>Flow</h1>
+              <nav id="flow-trail" class="flow-trail" aria-label="Selection trail"></nav>
+              <div class="flow-head-actions">
+                <div id="flow-pane-toggles" class="flow-pane-toggles" role="group" aria-label="Panes in the split">
+                  <span class="flow-toggles-label" aria-hidden="true">Panes</span>
+                  <button id="flow-toggle-cfg" class="flow-toggle" type="button" data-pane="cfg" aria-pressed="false" aria-keyshortcuts="Shift+C" title="Show or hide the CFG in the split (⇧C)">CFG<kbd>⇧C</kbd></button>
+                  <button id="flow-toggle-lineage" class="flow-toggle" type="button" data-pane="lineage" aria-pressed="true" aria-keyshortcuts="Shift+L" title="Show or hide Lineage in the split (⇧L)">Lineage<kbd>⇧L</kbd></button>
+                  <button id="flow-toggle-timeline" class="flow-toggle" type="button" data-pane="timeline" aria-pressed="true" aria-keyshortcuts="Shift+T" title="Show or hide the timeline in the split (⇧T)">Timeline<kbd>⇧T</kbd></button>
+                </div>
+                <button id="flow-split" class="flow-toggle" type="button" aria-keyshortcuts="Z" title="Return to the split as you left it (Z)" hidden>Split view<kbd>Z</kbd></button>
+              </div>
             </header>
-            <div class="trace-toolbar">
+            <div class="trace-toolbar flow-toolbar">
               <label for="trace-request">Request</label>
               <select id="trace-request" aria-label="Request to trace"></select>
               <button id="trace-load" class="secondary-button" type="button">Load trace</button>
               <button id="trace-evidence" class="secondary-button" type="button" data-screen="evidence" hidden>View events · <span id="evidence-link-count">0</span></button>
+              <span class="flow-toolbar-spacer"></span>
+              <button class="secondary-button package-navigation flow-toolbar-extra" type="button" data-screen="evidence">Evidence</button>
+              <button class="secondary-button flow-toolbar-extra" type="button" data-screen="traffic">View traffic</button>
             </div>
-            <div id="trace-notice" class="trace-notice" role="status" aria-live="polite" hidden></div>
-            <div id="trace-empty" class="trace-empty">
-              <h2 id="trace-empty-title">Choose a captured request</h2>
-              <p id="trace-empty-message">Select a request above to inspect its recorded events.</p>
-              <button id="trace-first-request" class="trace-button" type="button" hidden>Trace a captured request</button>
+            <div id="flow-tabs" class="flow-tabs" role="tablist" aria-label="Flow panes" hidden>
+              <button id="flow-tab-graph" class="flow-tab" type="button" role="tab" data-pane="graph" aria-controls="flow-pane-graph" aria-selected="false" tabindex="-1" aria-keyshortcuts="1"><span class="flow-pane-mark" aria-hidden="true"></span><span class="flow-tab-name">Graph</span><span class="flow-tab-meta"></span><kbd>1</kbd></button>
+              <button id="flow-tab-cfg" class="flow-tab" type="button" role="tab" data-pane="cfg" aria-controls="flow-pane-cfg" aria-selected="false" tabindex="-1" aria-keyshortcuts="2"><span class="flow-pane-mark" aria-hidden="true"></span><span class="flow-tab-name">CFG</span><span class="flow-tab-meta"></span><kbd>2</kbd></button>
+              <button id="flow-tab-lineage" class="flow-tab" type="button" role="tab" data-pane="lineage" aria-controls="flow-pane-lineage" aria-selected="false" tabindex="-1" aria-keyshortcuts="3"><span class="flow-pane-mark" aria-hidden="true"></span><span class="flow-tab-name">Lineage</span><span class="flow-tab-meta"></span><kbd>3</kbd></button>
+              <button id="flow-tab-timeline" class="flow-tab" type="button" role="tab" data-pane="timeline" aria-controls="flow-pane-timeline" aria-selected="false" tabindex="-1" aria-keyshortcuts="4"><span class="flow-pane-mark" aria-hidden="true"></span><span class="flow-tab-name">Timeline</span><span class="flow-tab-meta"></span><kbd>4</kbd></button>
+              <span class="flow-tabs-hint">1–4 switch · Z returns to the split as you left it</span>
             </div>
-            <div id="trace-content" class="trace-layout" hidden>
-              <section class="trace-list-pane" aria-label="Trace events">
-                <div class="trace-list-heading"><span>Selected request → recorded predecessors</span><span id="coverage-value" aria-live="polite"></span></div>
-                <ol id="backtrace-steps" class="backtrace" aria-label="Trace steps"></ol>
+            <div id="flow-body" class="flow-body" data-mode="split" data-cfg="off" data-lineage="on" data-timeline="on">
+              <section id="flow-pane-graph" class="flow-pane" data-pane="graph" aria-labelledby="flow-pane-graph-title" tabindex="-1">
+                <header class="flow-pane-head"><span class="flow-pane-mark" aria-hidden="true"></span><h2 id="flow-pane-graph-title">Graph</h2><span id="flow-graph-meta" class="flow-pane-meta"></span><button class="flow-focus-button" type="button" data-focus="graph" aria-label="Open the graph on its own" title="Open the graph on its own, or return to the split (Z)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 8V3h5M12 3h5v5M17 12v5h-5M8 17H3v-5"/></svg></button></header>
+                <section id="flow-graph-host" aria-label="Flow graph" hidden></section>
               </section>
-              <aside class="trace-inspector" aria-label="Selected trace step">
-                <h2>Event details</h2>
-                <div id="trace-step-details"></div>
-              </aside>
+              <section id="flow-pane-cfg" class="flow-pane" data-pane="cfg" aria-labelledby="flow-pane-cfg-title" tabindex="-1">
+                <div class="flow-divider" data-size="cfg" data-axis="x" role="separator" tabindex="0" aria-orientation="vertical" aria-label="Resize the CFG" title="Drag to resize. Arrow keys resize; Shift for a larger step; Home or double-click resets."></div>
+                <header id="flow-cfg-head" class="flow-pane-head"><span class="flow-pane-mark" aria-hidden="true"></span><h2 id="flow-pane-cfg-title">CFG</h2><span id="flow-cfg-meta" class="flow-pane-meta">no function</span><button class="flow-focus-button" type="button" data-focus="cfg" aria-label="Open the CFG on its own" title="Open the CFG on its own, or return to the split (Z)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 8V3h5M12 3h5v5M17 12v5h-5M8 17H3v-5"/></svg></button></header>
+                <div id="flow-cfg-empty" class="flow-empty" role="status">
+                  <h3>No function yet</h3>
+                  <p>Select a Wasm card in the graph, follow one with Enter, or pick a sample in the timeline. Its basic blocks open here, as in Sources, with the sampled block marked.</p>
+                </div>
+                <div id="flow-cfg-host" class="flow-cfg-host" hidden></div>
+                <div id="flow-cfg-samples" class="flow-cfg-samples" hidden></div>
+              </section>
+              <section id="flow-pane-lineage" class="flow-pane" data-pane="lineage" aria-labelledby="flow-tab-lineage-list" tabindex="-1">
+                <div class="flow-divider" data-size="lineage" data-axis="x" role="separator" tabindex="0" aria-orientation="vertical" aria-label="Resize Lineage" title="Drag to resize. Arrow keys resize; Shift for a larger step; Home or double-click resets."></div>
+                <header class="flow-pane-head flow-inspector-head">
+                  <span class="flow-pane-mark" aria-hidden="true"></span>
+                  <div class="flow-inspector-tabs" role="tablist" aria-label="Request lineage and details">
+                    <button id="flow-tab-lineage-list" class="flow-inspector-tab" type="button" role="tab" aria-controls="flow-lineage-list" aria-selected="true">Lineage</button>
+                    <button id="flow-tab-lineage-details" class="flow-inspector-tab" type="button" role="tab" aria-controls="flow-lineage-details" aria-selected="false" tabindex="-1">Details</button>
+                    <button id="flow-tab-lineage-cfg" class="flow-inspector-tab" type="button" role="tab" aria-controls="flow-pane-cfg" aria-selected="false" tabindex="-1" hidden>CFG</button>
+                  </div>
+                  <button class="flow-focus-button" type="button" data-focus="side" aria-label="Open this column on its own" title="Open this column on its own, or return to the split (Z)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 8V3h5M12 3h5v5M17 12v5h-5M8 17H3v-5"/></svg></button>
+                </header>
+                <div class="flow-request-card">
+                  <div class="flow-request-card-head"><div id="backtrace-subtitle" class="flow-request-title">Follow a request back to its recorded origin.</div><span id="flow-request-tag" class="flow-kind-tag" hidden>Request</span></div>
+                  <div id="flow-request-meta" class="flow-request-meta" hidden></div>
+                </div>
+                <div id="trace-notice" class="trace-notice" role="status" aria-live="polite" hidden></div>
+                <div id="trace-empty" class="trace-empty">
+                  <h2 id="trace-empty-title">Choose a captured request</h2>
+                  <p id="trace-empty-message">Select a request above to inspect its recorded events.</p>
+                  <button id="trace-first-request" class="trace-button" type="button" hidden>Trace a captured request</button>
+                </div>
+                <div id="trace-content" class="trace-layout" hidden>
+                  <section id="flow-lineage-list" class="trace-list-pane" role="tabpanel" aria-labelledby="flow-tab-lineage-list" aria-label="Trace events">
+                    <div class="trace-list-heading"><span>Path back from the request</span><span id="coverage-value" aria-live="polite"></span></div>
+                    <ol id="backtrace-steps" class="backtrace" aria-label="Trace steps"></ol>
+                  </section>
+                  <aside id="flow-lineage-details" class="trace-inspector" role="tabpanel" aria-labelledby="flow-tab-lineage-details" aria-label="Selected trace step" hidden>
+                    <h2>Event details</h2>
+                    <div id="trace-step-details"></div>
+                  </aside>
+                </div>
+                <div id="flow-lineage-selected" class="flow-lineage-selected" hidden></div>
+              </section>
+              <section id="flow-pane-timeline" class="flow-pane" data-pane="timeline" aria-labelledby="flow-pane-timeline-title" tabindex="-1">
+                <div class="flow-divider" data-size="timeline" data-axis="y" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="Resize the timeline" title="Drag to resize. Arrow keys resize; Shift for a larger step; Home or double-click resets."></div>
+                <header class="flow-pane-head"><span class="flow-pane-mark" aria-hidden="true"></span><h2 id="flow-pane-timeline-title">Tracked calls</h2><span id="flow-timeline-meta" class="flow-pane-meta"></span><span id="flow-timeline-process"></span><button id="flow-timeline-refresh" class="flow-head-button" type="button" title="Read the tracked-call records again">Refresh</button><button id="flow-timeline-open" class="flow-head-button" type="button" aria-controls="flow-timeline" aria-expanded="false" hidden>Open</button><button class="flow-focus-button" type="button" data-focus="timeline" aria-label="Open the timeline on its own" title="Open the timeline on its own, or return to the split (Z)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 8V3h5M12 3h5v5M17 12v5h-5M8 17H3v-5"/></svg></button></header>
+                <div id="flow-timeline" class="flow-timeline"></div>
+              </section>
+              <aside id="flow-related" class="flow-related" aria-label="Related to the selection" hidden></aside>
+              <div id="flow-status" class="flow-status" role="status" aria-live="polite" hidden></div>
             </div>
           </section>
 
@@ -412,7 +477,7 @@
             <header class="screen-head">
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to requests">←</button>
               <div><h1>Evidence</h1><div class="screen-subtitle">Inspect what was recorded and how it connects</div></div>
-              <div class="screen-head-actions"><button id="evidence-trace" class="secondary-button" type="button">Backtrace</button><button id="evidence-package-toggle" class="secondary-button" type="button" aria-expanded="false" aria-controls="evidence-package-mode">Metadata package</button></div>
+              <div class="screen-head-actions"><button id="evidence-trace" class="secondary-button" type="button">Show in Flow</button><button id="evidence-package-toggle" class="secondary-button" type="button" aria-expanded="false" aria-controls="evidence-package-mode">Metadata package</button></div>
             </header>
             <div id="evidence-investigation" class="evidence-investigation">
               <section class="evidence-context" aria-label="Investigation context">
@@ -866,9 +931,17 @@
     <script src="captured_export_formats.js"></script>
     <script src="vm_debugger.js"></script>
     <script src="vm_static.js"></script>
+    <!-- Before the graphs: the flow graph reuses its frame reasons and task names. -->
+    <script src="request_stack.js"></script>
+    <!-- The Triskel route's client, for both layout workers and the flow graph's on-thread fallback. -->
+    <script src="graph_layout_client.js"></script>
     <!-- Loaded here as well so the page and the Worker share one script; it does work only inside the Worker. -->
     <script src="block_graph_layout.js"></script>
     <script src="block_graph.js"></script>
+    <script src="flow_graph_layout.js"></script>
+    <script src="flow_graph.js"></script>
+    <script src="flow_timeline.js"></script>
+    <script src="flow_workspace.js"></script>
     <script src="vm_static_view.js"></script>
     <script src="vm_contextual.js"></script>
     <script src="vm_contextual_evidence.js"></script>
@@ -884,7 +957,6 @@
     <script src="investigation_notebook.js"></script>
     <script src="evidence_names.js"></script>
     <script src="invocation_sites.js"></script>
-    <script src="request_stack.js"></script>
     <script src="entropy_map.js"></script>
 
     <script src="app.js"></script>

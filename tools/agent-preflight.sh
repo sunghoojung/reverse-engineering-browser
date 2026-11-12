@@ -16,6 +16,8 @@ elif git rev-parse --verify --quiet main >/dev/null; then
   base="$(git merge-base HEAD main)"
 fi
 
+# Vendored third-party sources stay byte-identical to upstream; see
+# apps/origin-trace-backend/vendor/README.md.
 changed="$(mktemp)"
 trap 'rm -f "${changed}"' EXIT
 {
@@ -25,7 +27,7 @@ trap 'rm -f "${changed}"' EXIT
   git diff --name-only
   git diff --name-only --cached
   git ls-files --others --exclude-standard
-} | awk 'NF && !seen[$0]++' > "${changed}"
+} | awk 'NF && !seen[$0]++ && $0 !~ /^apps\/origin-trace-backend\/vendor\//' > "${changed}"
 
 if [[ ! -s "${changed}" ]]; then
   echo "agent-preflight: no changed files"

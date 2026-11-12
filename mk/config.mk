@@ -8,7 +8,10 @@ BUILD_DIR := build
 SANITIZE_BUILD_DIR := $(BUILD_DIR)/sanitize
 INCLUDE_DIR := include
 # Include new files and omit removed paths before changes are staged.
-FORMATTED_SOURCES := $(wildcard $(shell git ls-files --cached --others --exclude-standard '*.cc' '*.cpp' '*.h' '*.hpp'))
+# Vendored third-party sources stay byte-identical to upstream; see
+# apps/origin-trace-backend/vendor/README.md.
+VENDORED_SOURCES := apps/origin-trace-backend/vendor/%
+FORMATTED_SOURCES := $(filter-out $(VENDORED_SOURCES),$(wildcard $(shell git ls-files --cached --others --exclude-standard '*.cc' '*.cpp' '*.h' '*.hpp')))
 SHELL_SOURCES := $(wildcard $(shell git ls-files --cached --others --exclude-standard '*.sh'))
 DEMO_NETWORK_PAYLOAD_HEX := 504f535420636f6c6c6563746f722e6578616d706c652e74657374
 DEMO_WEB_AUDIO_PAYLOAD_HEX := 4f66666c696e65417564696f436f6e746578742e737461727452656e646572696e67

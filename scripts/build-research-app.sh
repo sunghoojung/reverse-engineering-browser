@@ -78,7 +78,7 @@ if application.is_dir():
 PY
 mkdir -p "${research_ui_resources}"
 # One explicit packaged copy serves both the native scheme and live HTTP UI.
-for asset in index.html app.css block_graph.css block_graph.js block_graph_layout.js entropy_map.css entropy_map.js command_palette.js app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_format.js code_view.js source_facts.js source_search.js source_tree.js traffic_view.js traffic_payload.js traffic_index.js traffic_filter.js traffic_columns.js traffic_overview.js network_scope.js request_tabs.js traffic_response.js traffic_headers.js traffic_cookies.js captured_client.js captured_export_formats.js vm_debugger.js vm_static.js vm_static_view.js vm_contextual.js vm_contextual_evidence.js vm_contextual_view.js vm_analysis_packs.js vm_opcode_ledger.js vm_opcode_ledger_view.js vm_semantics.js pane_layout.js native_console_completion.js native_console.js investigation_navigation.js investigation_notebook.js evidence_names.js invocation_sites.js request_stack.js app.js agent_panel.js agent_panel.css session_panel.js session_panel.css vm_program_workspace.js xrefs_view.js xrefs_view.css analyst_runner_core.js analyst_runner_node.js; do
+for asset in index.html app.css block_graph.css block_graph.js block_graph_layout.js graph_layout_client.js flow_graph.css flow_graph.js flow_graph_layout.js flow_timeline.js flow_workspace.css flow_workspace.js entropy_map.css entropy_map.js command_palette.js app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_format.js code_view.js source_facts.js source_search.js source_tree.js traffic_view.js traffic_payload.js traffic_index.js traffic_filter.js traffic_columns.js traffic_overview.js network_scope.js request_tabs.js traffic_response.js traffic_headers.js traffic_cookies.js captured_client.js captured_export_formats.js vm_debugger.js vm_static.js vm_static_view.js vm_contextual.js vm_contextual_evidence.js vm_contextual_view.js vm_analysis_packs.js vm_opcode_ledger.js vm_opcode_ledger_view.js vm_semantics.js pane_layout.js native_console_completion.js native_console.js investigation_navigation.js investigation_notebook.js evidence_names.js invocation_sites.js request_stack.js app.js agent_panel.js agent_panel.css session_panel.js session_panel.css vm_program_workspace.js xrefs_view.js xrefs_view.css analyst_runner_core.js analyst_runner_node.js; do
   cp "${repo_root}/apps/research-ui/${asset}" "${research_ui_resources}/${asset}"
 done
 # The agent dock's LangGraph loop: one browser bundle per provider, built from
@@ -91,6 +91,27 @@ cp "${repo_root}/build/agent-runtime/agent_runtime.LICENSES.txt" "${resources_pa
 node "${repo_root}/tools/check-agent-runtime.mjs" \
   "${research_ui_resources}/agent_runtime_claude.js" "${research_ui_resources}/agent_runtime_chatgpt.js"
 cargo build --locked --release --manifest-path "${repo_root}/apps/origin-trace-backend/Cargo.toml"
+# The backend links the vendored Triskel (MPL-2.0) and {fmt} (MIT) graph layout
+# code. Ship both notices and where Triskel's source is; see
+# apps/origin-trace-backend/vendor/README.md.
+graph_layout_vendor="${repo_root}/apps/origin-trace-backend/vendor"
+triskel_revision="196ba112eba992c1460af3097c038defcf7a7e45"
+{
+  echo "OriginTraceBackend includes these projects, unmodified, for graph layout."
+  echo
+  echo "Triskel, commit ${triskel_revision}, under the Mozilla Public License 2.0."
+  echo "Source: https://github.com/triskellib/triskel/tree/${triskel_revision}"
+  echo "The compiled files are lib/include and lib/src without lib/src/renderer and"
+  echo "lib/src/llvm, also in this application's source at"
+  echo "apps/origin-trace-backend/vendor/triskel."
+  echo
+  cat "${graph_layout_vendor}/triskel/LICENSE"
+  echo
+  echo "{fmt} 12.2.0, header only, under the MIT license."
+  echo "Source: https://github.com/fmtlib/fmt/tree/12.2.0"
+  echo
+  cat "${graph_layout_vendor}/fmt/LICENSE"
+} > "${resources_path}/GraphLayoutLicenses.txt"
 cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-backend" "${macos_path}/OriginTraceBackend"
 cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-vm" "${macos_path}/OriginTraceVMAnalyzer"
 cp "${repo_root}/apps/origin-trace-backend/target/release/reb-api" "${macos_path}/OriginTraceAPI"

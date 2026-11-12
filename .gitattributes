@@ -1,1 +1,3 @@
 *.patch -whitespace
+# Byte-identical upstream copies; see apps/origin-trace-backend/vendor/README.md.
+apps/origin-trace-backend/vendor/** -whitespace

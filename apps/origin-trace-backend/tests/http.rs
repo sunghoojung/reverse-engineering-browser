@@ -697,10 +697,12 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 58, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 60, "Review route coverage when the API changes");
     assert!(ids.contains("get_request_headers"));
     assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
     assert!(ids.contains("get_xrefs"));
+    assert!(ids.contains("get_flow_graph"));
+    assert!(ids.contains("post_graph_layout"));
     assert!(
         ids.contains("get_js_invocation_sites")
             && ids.contains("resolve_js_invocation_site")
@@ -788,7 +790,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 58);
+    assert_eq!(operation_count, 60);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -1141,6 +1143,14 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
         ),
         ("/api/wasm?artifact_id=missing", "/api/wasm", 400),
         ("/api/wasm?artifact_id=1&sections=exports", "/api/wasm", 400),
+        ("/api/flow-graph", "/api/flow-graph", 400),
+        ("/api/flow-graph?session_id=0", "/api/flow-graph", 400),
+        (
+            "/api/flow-graph?session_id=1&limit=2",
+            "/api/flow-graph",
+            400,
+        ),
+        ("/api/flow-graph?session_id=1", "/api/flow-graph", 200),
         ("/api/request-stack?request_id=3", "/api/request-stack", 400),
         (
             "/api/request-stack?process_id=0&request_id=3",
@@ -1626,6 +1636,200 @@ async fn get_events_returns_decoded_wasm_observations_without_a_workspace() {
     }));
     assert!(!server.root.path().join("artifacts/manifest.jsonl").exists());
     assert!(!server.root.path().join("analysis").exists());
+}
+
+#[tokio::test]
+async fn get_events_decodes_js_invocations_and_names_the_armed_site_key() {
+    // The session armed one site; its key is what start records carry.
+    let directory = tempfile::tempdir().unwrap();
+    let source = "window.hsw=function(aGh){return aGh};";
+    let anchor = source.find("(aGh").unwrap() as u32;
+    let units = source
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<u8>>();
+    let source_sha256: [u8; 32] = Sha256::digest(&units).into();
+    let file = format!(
+        r#"{{"sites":[{{"anchor_offset":{anchor},"artifact_id":"3","artifact_sha256":"{}","byte_offset":{anchor},"shape":"function-entry","source_length":{},"source_sha256":"{}"}}],"version":1}}"#,
+        hex::encode(Sha256::digest(source.as_bytes())),
+        units.len() / 2,
+        hex::encode(source_sha256)
+    );
+    let store = directory.path().join("js-invocation-sites-v1.json");
+    std::fs::write(&store, &file).unwrap();
+    std::fs::write(
+        directory.path().join("js-invocation-sites-v1.labels.json"),
+        json!({"version":1,"sites":[{"anchor_offset":anchor,"label":"window.hsw",
+            "session_id":"1","source_sha256":hex::encode(source_sha256),
+            "source_url":"https://example.test/source.js"}]})
+        .to_string(),
+    )
+    .unwrap();
+    let armed = directory.path().join("armed.json");
+    std::fs::write(&armed, &file).unwrap();
+    let server = Server::start_with_args(&[
+        "--js-invocation-site-store".into(),
+        store.display().to_string(),
+        "--js-invocation-session-sites".into(),
+        armed.display().to_string(),
+    ])
+    .await;
+
+    let header = |p: &mut [u8; 128]| {
+        p[0] = 1;
+        p[2] = 128;
+    };
+    let mut start = [0u8; 128];
+    header(&mut start);
+    start[6] = 1;
+    start[8..12].copy_from_slice(&17u32.to_le_bytes());
+    start[12..16].copy_from_slice(&anchor.to_le_bytes());
+    start[16..20].copy_from_slice(&((units.len() / 2) as u32).to_le_bytes());
+    start[20..24].copy_from_slice(&12u32.to_le_bytes());
+    start[28] = 3;
+    start[30] = 9;
+    start[32] = 3;
+    start[72..104].copy_from_slice(&source_sha256);
+    start[104..112].copy_from_slice(&u64::MAX.to_le_bytes());
+    let mut settle = [0u8; 128];
+    header(&mut settle);
+    (settle[5], settle[6], settle[7]) = (1, 3, 3);
+    settle[8..12].copy_from_slice(&12u32.to_le_bytes());
+    settle[12..16].copy_from_slice(&3u32.to_le_bytes());
+    (settle[16], settle[17]) = (1, 1);
+    settle[20..24].copy_from_slice(&3u32.to_le_bytes());
+    settle[24..32].copy_from_slice(&0x1234u64.to_le_bytes());
+    let value_sha256 = Sha256::digest(b"tok");
+    settle[32..64].copy_from_slice(&value_sha256);
+    settle[64..72].copy_from_slice(&u64::MAX.to_le_bytes());
+    let mut inside = [0u8; 128];
+    header(&mut inside);
+    inside[4] = 2;
+    inside[8..12].copy_from_slice(&12u32.to_le_bytes());
+    let mut unknown = [0u8; 128];
+    header(&mut unknown);
+    unknown[4] = 3;
+    let mut reserved = start;
+    reserved[120] = 1;
+    let record = |sequence, kind: &str, request: &str, payload: &[u8; 128]| {
+        let mut event = metadata_event(sequence);
+        event["category"] = json!("vm");
+        event["type"] = json!(kind);
+        event["navigation_id"] = json!("0");
+        event["frame_id"] = json!("6");
+        event["request_id"] = json!(request);
+        event["payload"] = json!(hex::encode(payload));
+        event["payload_size"] = json!(128);
+        event
+    };
+    let records = [
+        record(1, "js_invocation_start", "0", &start),
+        record(2, "js_invocation_request", "31", &inside),
+        record(3, "js_invocation_request", "32", &unknown),
+        record(4, "js_invocation_settle", "0", &settle),
+        record(5, "js_invocation_start", "0", &reserved),
+        window_event(6, "vm", "module_compiled", ""),
+    ];
+    server.file("events.jsonl", &jsonl(&records));
+    // The decoder's unit tests check every field; each page puts its object
+    // beside the stored payload.
+    let kinds = [
+        Some("start"),
+        Some("request"),
+        Some("request"),
+        Some("settle"),
+        None,
+    ];
+    let check = |page: &Value, label: &str| {
+        let events = page["events"].as_array().unwrap();
+        for (index, kind) in kinds.iter().enumerate() {
+            let sequence = (index + 1).to_string();
+            let event = events
+                .iter()
+                .find(|event| event["sequence_number"] == sequence.as_str())
+                .unwrap_or_else(|| panic!("{label} {sequence}"));
+            let decoded = &event["js_invocation"];
+            match kind {
+                Some(kind) => assert_eq!(
+                    (&decoded["status"], &decoded["kind"]),
+                    (&json!("decoded"), &json!(kind)),
+                    "{label} {sequence}"
+                ),
+                None => assert_eq!(decoded, &json!({"status": "invalid"}), "{label}"),
+            }
+            assert_eq!(event["payload"], records[index]["payload"], "{label}");
+        }
+    };
+
+    let filtered =
+        "/api/events?type=js_invocation_start,js_invocation_settle,js_invocation_request&limit=10";
+    let page: Value = serde_json::from_slice(
+        &assert_contract_response(server.get(filtered).await, "get", "/api/events", 200).await,
+    )
+    .unwrap();
+    assert_eq!(page["count"], 5);
+    assert_eq!(page["query"]["returned"], 5);
+    check(&page, "filtered");
+    let waited: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server
+                .get(&format!(
+                    "/api/events/wait?{}&after=0&timeout_ms=1",
+                    filtered.split_once('?').unwrap().1
+                ))
+                .await,
+            "get",
+            "/api/events/wait",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(waited["wait"]["timed_out"], false);
+    check(&waited, "waited");
+    // The unfiltered polling window keeps its shape and adds the same objects.
+    let window: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.get("/api/events?limit=10").await,
+            "get",
+            "/api/events",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert!(window.get("query").is_none());
+    assert_eq!(window["count"], 6);
+    check(&window, "window");
+    let other = window["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "module_compiled")
+        .unwrap();
+    assert!(other.get("js_invocation").is_none());
+
+    // A slot's label is a lookup: the armed site with the same key.
+    let sites: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.get("/api/js-invocation-sites").await,
+            "get",
+            "/api/js-invocation-sites",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    let started = &page["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["sequence_number"] == "1")
+        .unwrap()["js_invocation"];
+    let site = &sites["session"]["sites"][started["site_slot"].as_u64().unwrap() as usize];
+    assert_eq!(site["source_sha256"], started["source_sha256"]);
+    assert_eq!(site["anchor_offset"], started["anchor_offset"]);
+    assert_eq!(site["label"], "window.hsw");
 }
 
 #[tokio::test]
@@ -7021,6 +7225,99 @@ async fn source_facts_real_worker_http_and_cli() {
 fn float32_request() -> Value {
     json!({"protocol_version":1,"input":{"representation":"float32-le","channels":1,"frames":4,"source":{"kind":"bits","words":["3f800000","80000000","7fc00001","7f800000"]}},"reference":{"representation":"float32-le","channels":1,"frames":4,"source":{"kind":"bits","words":["3f800001","00000000","7fc00002","7f800000"]}},"tolerances":{"absolute":0,"relative":0,"ulps":1},"detail":{"start":0,"limit":256}})
 }
+#[tokio::test]
+async fn graph_layout_lays_out_in_order_and_refuses_bad_bodies() {
+    const ROUTE: &str = "/api/graph-layout";
+    let server = Server::start_with_helper_canaries(true).await;
+    let raw = |body: String| {
+        server
+            .client
+            .post(format!("{}{ROUTE}", server.url))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+    };
+    // A diamond with a back edge, a graph over the 2000-node limit, an
+    // empty graph and a lone node, in that order.
+    let diamond = json!({
+        "nodes": [[120, 40], [80.5, 30], [80, 30], [120, 40]],
+        "edges": [[0, 1], [0, 2], [1, 3], [2, 3], [3, 0]]
+    });
+    let oversized = json!({"nodes": vec![json!([10, 10]); 2001], "edges": []});
+    let request = json!({"graphs": [
+        diamond,
+        oversized,
+        {"nodes": [], "edges": []},
+        {"nodes": [[64, 24]], "edges": []}
+    ]});
+    let bytes =
+        assert_contract_response(server.action(ROUTE, request).await, "post", ROUTE, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["schema"], "graph-layout-v1");
+    assert_eq!(
+        result["engine"],
+        json!({"name": "triskel", "revision": "196ba112eba992c1460af3097c038defcf7a7e45"})
+    );
+    let graphs = result["graphs"].as_array().unwrap();
+    assert_eq!(graphs.len(), 4);
+    assert_eq!(graphs[0]["status"], "laid_out", "{}", graphs[0]);
+    let nodes = graphs[0]["nodes"].as_array().unwrap();
+    let edges = graphs[0]["edges"].as_array().unwrap();
+    assert_eq!((nodes.len(), edges.len()), (4, 5));
+    // Geometry is the unit tests' (graph_layout::tests::assert_sound).
+    assert_eq!(graphs[1]["status"], "too_large");
+    assert!(
+        graphs[1]["reason"].as_str().unwrap().contains("2001 nodes"),
+        "{}",
+        graphs[1]
+    );
+    assert_eq!(
+        graphs[2],
+        json!({"status": "laid_out", "nodes": [], "edges": [], "width": 0, "height": 0, "elapsed_ms": 0})
+    );
+    assert_eq!(graphs[3]["nodes"].as_array().map(Vec::len), Some(1));
+
+    let response = server
+        .client
+        .post(format!("{}{ROUTE}", server.url))
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(response, "post", ROUTE, 400).await;
+    // Each body rule is the unit tests' (requests_are_validated_before_any_layout).
+    let body = r#"{"graphs":[{"nodes":[[1,1]],"edges":[[0,1]]}]}"#.to_owned();
+    let bytes = assert_contract_response(raw(body).await.unwrap(), "post", ROUTE, 400).await;
+    let error: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("outside the graph"),
+        "{error}"
+    );
+    assert_eq!(error["code"], "invalid_request");
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["describe", "post_graph_layout"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let description: Value = serde_json::from_slice(&output.stdout).unwrap();
+    // A contained worker process, like the JavaScript formatter: listed only
+    // with --allow-effects.
+    assert_eq!(
+        description["x-reb-execution"]["effects"],
+        json!(["analysis", "process-launch"])
+    );
+}
+
 #[tokio::test]
 async fn float32_http_cli_discovery_parity_and_no_helpers() {
     const ROUTE: &str = "/api/float32/compare";

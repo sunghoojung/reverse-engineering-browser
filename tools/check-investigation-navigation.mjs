@@ -118,8 +118,9 @@ export async function checkNativeRequestBacktrace(root) {
   assert.equal(native.length,1,'Explicit initiator identifiers group the native observations');
   state.requests=native;
   api.renderBacktrace();
-  assert.deepEqual(Array.from(elements.traceRequest.children,option=>option.value),[native[0].id],
-    'The native row is a Backtraces choice');
+  assert.deepEqual(Array.from(elements.traceRequest.children,option=>option.value),['',native[0].id],
+    'The native row is a Flow request choice, under a placeholder while none is chosen');
+  assert.equal(elements.traceRequest.children[0].textContent,'Choose a request to trace');
   assert.equal(elements.traceRequest.disabled,false);
   assert.equal(elements.traceEmptyTitle.textContent,'Choose a captured request');
   state.selectedRequestId=native[0].id;
@@ -187,7 +188,7 @@ export async function checkNativeRequestBacktrace(root) {
   assert.match(elements.coverageValue.textContent,/0% trace coverage/,'Proximity must not move the coverage percentage');
   assert.match(elements.coverageValue.textContent,/1 time-adjacent record, excluded from coverage/);
   assert.match(elements.coverageValue.title,/weaker correlation class/);
-  console.log('PASS retained native Traffic row → Backtraces choice → exact session/process/sequence query; unrooted rows stay unavailable; monotonic_time_ns proximity reports as its own weaker class and stays out of coverage (production functions, not rendered QA)');
+  console.log('PASS retained native Traffic row → Flow request choice → exact session/process/sequence query; unrooted rows stay unavailable; monotonic_time_ns proximity reports as its own weaker class and stays out of coverage (production functions, not rendered QA)');
 }
 
 // Exercise the actual shared-shell switch, rather than a navigation stub.

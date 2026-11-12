@@ -38,11 +38,18 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 60] = [
+const UI_ASSETS: [&str; 67] = [
     "index.html",
     "block_graph.css",
     "block_graph.js",
     "block_graph_layout.js",
+    "graph_layout_client.js",
+    "flow_graph.css",
+    "flow_graph.js",
+    "flow_graph_layout.js",
+    "flow_timeline.js",
+    "flow_workspace.css",
+    "flow_workspace.js",
     "app.css",
     "entropy_map.css",
     "entropy_map.js",
@@ -165,6 +172,8 @@ pub struct App {
     analysis: Mutex<Option<VmDocumentsCache>>,
     /// Cursors of the current cross-reference selection; one entry only.
     xrefs: Arc<crate::xrefs::Cursors>,
+    /// The last flow graph and the store snapshot it describes.
+    flow_graph: Arc<crate::flow_graph::Cache>,
     events: Arc<Mutex<event_window::EventWindowCache>>,
     requests: Arc<Mutex<RequestIndex>>,
     initiator_frames: Arc<std::sync::Mutex<crate::request_stack::InitiatorFrames>>,
@@ -269,6 +278,7 @@ impl App {
             package_io: Arc::new(Semaphore::new(2)),
             analysis: Mutex::new(None),
             xrefs: Arc::default(),
+            flow_graph: Arc::default(),
             events: Arc::new(Mutex::new(event_window::EventWindowCache::default())),
             artifact_lookup: Arc::new(Mutex::new(ArtifactLookupCache::default())),
             event_waiters: Arc::new(Semaphore::new(event_query::MAX_WAITERS)),
@@ -871,7 +881,7 @@ impl App {
                 // json! serializes borrowed values; move the retained window instead
                 // of allocating a second complete evidence tree on every refresh.
                 let mut events = window.events;
-                crate::vm_opcode::annotate_wasm_observations(&mut events);
+                event_query::annotate_events(&mut events);
                 result["events"] = Value::Array(events);
                 result["network_events"] = Value::Array(window.network_events);
                 self.event_state(&mut result, capture);
@@ -1303,6 +1313,22 @@ impl App {
                 ));
                 value
             }
+            "/api/flow-graph" => {
+                q.only(&["session_id"], &[])?;
+                let session = q.number("session_id", None, 64, true)?;
+                let stores = crate::store_scan::Stores {
+                    events: self.options.store.clone(),
+                    artifacts: self.options.artifacts.clone(),
+                };
+                let cache = self.flow_graph.clone();
+                // A client that moved on leaves no scan running.
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let _cancel_on_drop = CancelOnDrop(cancel.clone());
+                let graph = self
+                    .blocking(move || crate::flow_graph::run(&stores, session, &cache, &cancel))
+                    .await?;
+                return Ok(bytes_response(graph, "application/json"));
+            }
             "/api/xrefs" => {
                 let query = crate::xrefs::XrefQuery::parse(&q)?;
                 // Only the analysis already cached: this route never computes
@@ -1323,7 +1349,7 @@ impl App {
                     }
                     None => None,
                 };
-                let stores = crate::xrefs::Stores {
+                let stores = crate::store_scan::Stores {
                     events: self.options.store.clone(),
                     artifacts: self.options.artifacts.clone(),
                 };
@@ -2060,6 +2086,12 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                     .await
                     .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
             }
+            // Typed parse of up to 8 MiB of numbers, never a generic JSON tree.
+            if path == "/api/graph-layout" {
+                return crate::graph_layout::route(bytes.to_vec())
+                    .await
+                    .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
+            }
             if matches!(
                 path,
                 "/api/vm-debugger/actions"
@@ -2235,8 +2267,8 @@ fn not_modified(etag: &str) -> Response {
         .insert("etag", HeaderValue::from_str(etag).unwrap());
     response
 }
-fn bytes_response(bytes: Vec<u8>, mime: &'static str) -> Response {
-    let mut response = Response::new(Body::from(bytes));
+fn bytes_response(bytes: impl Into<Body>, mime: &'static str) -> Response {
+    let mut response = Response::new(bytes.into());
     response
         .headers_mut()
         .insert("content-type", HeaderValue::from_static(mime));

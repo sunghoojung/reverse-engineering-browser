@@ -304,6 +304,8 @@ async function main() {
       assert.deepEqual(await readFile(join(resources, 'research-ui', asset)), await readFile(join(root, 'build/agent-runtime', asset)), asset);
     }
     assert((await stat(join(resources, 'AgentRuntimeLicenses.txt'))).size > 0, 'the bundled packages ship their license notices');
+    const graphLayoutLicenses = await readFile(join(resources, 'GraphLayoutLicenses.txt'), 'utf8');
+    assert(graphLayoutLicenses.includes('Mozilla Public License Version 2.0') && graphLayoutLicenses.includes('{fmt} contributors'), 'the vendored graph layout code ships its license notices');
     assert((await stat(join(resources, 'OriginTrace.icns'))).size > 0);
     await access(join(resources, 'run-live-session.sh'), constants.X_OK);
     execFileSync('codesign', ['--verify', '--deep', '--strict', app], {cwd: temporary, stdio: 'pipe'});

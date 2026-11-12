@@ -251,6 +251,17 @@ carries the context. VM Lab rows show the context as
 `none` and `unknown` are coverage limits, not evidence that the work is
 unrelated to an invocation.
 
+### Event queries
+
+`get_events` and `wait_for_events` leave each record's `payload` as the
+128-byte hex and add `js_invocation` beside it: `kind` `start`, `settle` or
+`request` with that record's fields, or `{status: invalid}` with no fields for
+a record any rule above refuses. Value kinds, `via` and the digest state are
+named. A settle's digest is never decoded. A start's `site_slot`,
+`source_sha256` and `anchor_offset` match one entry of the site file the
+session armed, which `get_js_invocation_sites` lists with its label. The field
+map is in [the HTTP API](http-api.md#filtered-and-paged-reads).
+
 ## Identity and relations
 
 An invocation is `(session_id, process_id, invocation_id)`. The broker's

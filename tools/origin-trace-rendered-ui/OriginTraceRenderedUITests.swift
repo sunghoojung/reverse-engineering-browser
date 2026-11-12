@@ -404,7 +404,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
   @MainActor
   private func show(_ ui: Harness, _ screen: String) async throws {
-    // Every workspace, Backtraces, Analyst and Tools included, is a direct sidebar entry.
+    // Every workspace, Flow, Analyst and Tools included, is a direct sidebar entry.
     try await ui.click(".primary-nav .nav-button[data-screen='\(screen)']")
     try await ui.waitUntil("!document.querySelector('#screen-\(screen)').hidden", "\(screen) screen did not open")
   }
@@ -1619,9 +1619,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
       // Coverage lives above the steps scroller, so centering the last row
       // cannot scroll it away or cover earlier rows.
       try await assertFullyVisible(ui, "#coverage-value", "\(size.name) coverage line")
-      try await assertInert(ui, "\(size.name) backtrace")
-      try await assertLayout(ui, "#screen-backtrace", "\(size.name) time-adjacent backtrace")
-      try await ui.screenshot("backtrace-time-adjacent-\(size.name)")
+      try await assertInert(ui, "\(size.name) flow lineage")
+      // The flow graph's tools float over its own canvas by design, so the
+      // layout probe covers the Flow head, toolbar and Lineage, and the pane
+      // switch where the narrow window shows one pane at a time.
+      let scopes = ["#screen-backtrace > .flow-head", "#screen-backtrace > .flow-toolbar", "#flow-pane-lineage"] + (size.name == "narrow" ? ["#flow-tabs"] : [])
+      for scope in scopes {
+        try await assertLayout(ui, scope, "\(size.name) time-adjacent lineage \(scope)")
+      }
+      try await ui.screenshot("flow-lineage-time-adjacent-\(size.name)")
     }
   }
 

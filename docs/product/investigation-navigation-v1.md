@@ -36,7 +36,7 @@ match the selected request ID and exact root session/process/sequence. Ownership
 is rechecked after fetch, including 304, and after reading the response body; a
 broker refresh can replace a root without changing the visible request row ID.
 Only one trace read owns a controller at a time. New reads, selection changes
-and leaving Backtrace abort it. A ten-second deadline includes body reads; the
+and leaving Flow abort it. A ten-second deadline includes body reads; the
 existing bounded stream reader limits the response to 1 MiB and 65,536 chunks.
 Timeouts remain explicit and preserve only a still-matching prior report. Missing,
 changed and ambiguous records leave the current workspace intact with a visible
@@ -147,7 +147,7 @@ before acceptance; passing pure checks is not rendered-browser evidence.
 ## Explicit remaining integration gaps
 
 The supported identity-aware path in this version is captured Requests, native
-Backtrace, native Evidence observations, captured Sources, verified original
+Flow lineage, native Evidence observations, captured Sources, verified original
 JavaScript ranges and Decoder
 origin navigation. Collection copy has a verified source return, but generic return to Collection
 keeps its current owner-managed draft and execution selection; it does not

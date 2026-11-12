@@ -33,6 +33,28 @@ const entropyMap = createEntropyMap({
   toolbar: document.querySelector('.source-editor-toolbar'),
   getSource: selectedSource, identityOf: sourceIdentity, reveal: revealSourceByteOffset
 });
+// The Flow workspace: Graph, CFG, Lineage and Timeline share one selection
+// and trail. Its Graph pane draws every recorded stack of the session.
+const flowWorkspace = createFlowWorkspace({
+  root: document.querySelector('#screen-backtrace'),
+  openFrame: node => {
+    if (node.artifact_id) openResolvedFrame({artifact_id: node.artifact_id, artifact_line: node.artifact_line ?? null, artifact_column: node.artifact_column ?? 0});
+  },
+  // The stored-evidence window has no flow graph route.
+  graphAvailable: () => location.protocol === 'http:' || location.protocol === 'https:',
+  storage: (() => { try { return localStorage; } catch { return null; } })(),
+  getRequest: () => flowWorkspaceRequest(),
+  selectRequest: id => flowWorkspaceSelectRequest(id),
+  findRendererRequest: (process, request) => flowWorkspaceRendererRequest(process, request),
+  selectTraceRow,
+  focusTraceRow: () => {
+    const rows = [...elements.backtraceSteps.querySelectorAll('.trace-row')];
+    const target = rows.find(row => row.dataset.traceKey === state.selectedTraceRow) ?? rows[0] ?? (elements.traceLoad.disabled ? null : elements.traceLoad);
+    if (!target || !target.getClientRects?.().length) return false;
+    target.focus({preventScroll: false, focusVisible: true}); return true;
+  },
+  openSource: target => flowWorkspaceOpenSource(target)
+});
 // The Sources status bar never cuts the cursor position, which has the full
 // text as its tooltip. When the items do not fit, it drops in turn the hash,
 // the pretty-print label (leaving "{ }"), the language, the size, a
@@ -137,7 +159,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           error: state.eventFailureKind, mode: state.sessionMode}),
         packagePanel: evidencePackagePanel,
         onTrace: () => typeof openInvestigation === 'function'
-          ? openInvestigation({kind: 'trace', identity: investigationRequestIdentity(state.requests.find(request => request.id === state.selectedRequestId))})
+          ? openRequestLineage(state.requests.find(request => request.id === state.selectedRequestId))
           : showScreen('backtrace'),
         onRequest: () => typeof openInvestigation === 'function'
           ? openInvestigation({kind: 'request', identity: investigationRequestIdentity(state.requests.find(request => request.id === state.selectedRequestId))})
@@ -1455,6 +1477,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.trafficRenderedView = null;
         state.originTraceController?.abort();
         state.trafficSelectionNotice = state.selectedRequestId === null ? '' : 'The selected request left the retained capture window. Choose another request.';
+        if (state.selectedRequestId !== null) state.requestRevision += 1;
         state.selectedRequestId = null;
         state.selectedField = null;
         state.originTrace = null;
@@ -3402,6 +3425,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.originTraceController?.abort();
         // A store read still running for another row must not select it afterwards.
         if (state.trafficLoadingId !== id) cancelTrafficLoad();
+        if (state.selectedRequestId !== id) state.requestRevision += 1;
         state.selectedRequestId = id;
         retainTrafficRequest(request);
         state.trafficDetailOpen = true;
@@ -3606,13 +3630,21 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       // The browser start, else the renderer initiation, else any event with a
-      // request ID. Backtraces need a live root; researcher names also accept
+      // request ID. Flow lineage needs a live root; researcher names also accept
       // demo rows, whose identity then records that origin.
       function requestRootEvent(request) {
         const candidates = request?.events ?? [];
         return candidates.find(event => event.type === 'request_started' && integerText(event, 'request_id') !== '0') ??
           candidates.find(event => event.type === 'request_initiated' && integerText(event, 'request_id') !== '0') ??
           candidates.find(event => integerText(event, 'request_id') !== '0') ?? null;
+      }
+
+      /** The renderer request {process, request} a captured row's
+       * request_initiated record names, which Flow's stacks are keyed by. */
+      function rendererRequestOf(request) {
+        const initiated = request?.events?.find(event => event.type === 'request_initiated');
+        const id = investigationId(initiated?.request_id);
+        return id && id !== '0' ? {process: initiated.process_id, request: id} : null;
       }
 
       function requestSignalProfileSelection() {
@@ -4321,6 +4353,21 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (sourceLink.status !== 'ready') panel.append(textElement('p', 'trace-detail-message', sourceLink.message));
       }
 
+      /** Selects a Lineage row and shows its details. A click on it is also
+       * the researcher's pick, which the click handler reports to Flow. */
+      function selectTraceRow(model) {
+        const rows = [...elements.backtraceSteps.querySelectorAll('.trace-row')];
+        if (!rows.some(row => row.dataset.traceKey === model.key)) return false;
+        state.selectedTraceRow = model.key;
+        for (const row of rows) {
+          const active = row.dataset.traceKey === model.key;
+          row.setAttribute('aria-pressed', String(active));
+          row.tabIndex = active ? 0 : -1;
+        }
+        traceStepDetails(model);
+        return true;
+      }
+
       function traceStepElement(model) {
         const item = document.createElement('li'); item.className = `trace-step${model.gap ? ' gap' : ''}`;
         const row = document.createElement('button'); row.type = 'button'; row.className = 'trace-row';
@@ -4329,15 +4376,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         row.tabIndex = state.selectedTraceRow === model.key ? 0 : -1;
         const copy = document.createElement('span'); copy.className = 'trace-row-copy';
         copy.append(textElement('span', 'step-title', model.title), textElement('span', 'step-kind', model.kind));
-        row.append(textElement('span', 'step-index', model.index), copy,
+        // Line style says how sure the link is; colour says what it is (flow_workspace.css).
+        const line = document.createElement('span'); line.className = 'trace-line'; line.setAttribute('aria-hidden', 'true');
+        Object.assign(line.dataset, flowLinkKind(model));
+        row.append(line, textElement('span', 'step-index', model.index), copy,
           textElement('span', `trace-link-type ${model.style}`, model.confidence));
         row.addEventListener('click', () => {
-          state.selectedTraceRow = model.key;
-          elements.backtraceSteps.querySelectorAll('.trace-row').forEach(candidate => {
-            const active = candidate === row;
-            candidate.setAttribute('aria-pressed', String(active)); candidate.tabIndex = active ? 0 : -1;
-          });
-          traceStepDetails(model);
+          selectTraceRow(model);
+          flowWorkspace.lineageSelected(model);
         });
         row.addEventListener('keydown', event => {
           if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
@@ -4355,19 +4401,104 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         item.append(row); return item;
       }
 
+      // A declaration, since the workspace asks for the request while it is built.
+      function flowSelectedRequest() {
+        return state.requests.find(candidate => candidate.id === state.selectedRequestId) ?? null;
+      }
+      /** The session Flow shows: the selected request's, else the first captured one's. */
+      function flowSession() {
+        let root = requestTraceRoot(flowSelectedRequest());
+        for (const candidate of state.requests) {
+          if (root) break;
+          root = requestTraceRoot(candidate);
+        }
+        const session = investigationId(root?.session_id);
+        return session && session !== '0' ? session : null;
+      }
+      /** Captured requests a script started, which carry the stacks the Flow
+       * graph draws: an empty graph asks again only when this grows. */
+      function flowGraphStackCount() {
+        return state.requests.reduce((count, request) => count + (request.initiator === 'script' ? 1 : 0), 0);
+      }
+      /** Shows the Flow workspace's panes for the selected request, or hides them. */
+      function renderFlowWorkspace() {
+        const showing = !document.querySelector('#screen-backtrace').hidden;
+        flowWorkspace.sync({visible: showing, session: flowSession(), request: showing ? flowWorkspaceRequest() : null, revision: state.requestRevision, stacks: flowGraphStackCount()});
+      }
+      /** Traffic's Trace origin and Evidence's Show in Flow: Flow with the
+       * request selected and its Lineage showing. */
+      function openRequestLineage(request, relation) {
+        if (!openInvestigation({kind: 'trace', identity: investigationRequestIdentity(request), relation})) return false;
+        flowWorkspace.reveal('lineage', {record: false});
+        return true;
+      }
+      /** How Flow names a captured request: its method and target without the
+       * scheme, cut to 48 characters. */
+      function flowRequestLabel(request) {
+        const target = String(request.path ?? '').replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
+        return `${request.method ?? ''} ${target.length > 48 ? `${target.slice(0, 47)}…` : target}`.trim();
+      }
+      /** The selected request as the workspace names it: its trail crumb and request card. */
+      function flowWorkspaceRequest() {
+        const request = flowSelectedRequest();
+        if (!request) return null;
+        const renderer = rendererRequestOf(request);
+        return {id: request.id, status: request.status ?? null, renderer, label: `${flowRequestLabel(request)}${renderer ? ` #${renderer.request}` : ''}`};
+      }
+      function flowWorkspaceSelectRequest(id) {
+        if (state.selectedRequestId === id || !state.requests.some(candidate => candidate.id === id)) return;
+        selectRequest(id);
+        refreshOriginTrace();
+      }
+      // The captured row each renderer request names, built once per request list.
+      const flowRendererIndexes = new WeakMap();
+      function flowWorkspaceRendererRequest(process, request) {
+        let index = flowRendererIndexes.get(state.requests);
+        if (!index) {
+          index = new Map();
+          for (const candidate of state.requests) {
+            const renderer = rendererRequestOf(candidate);
+            if (renderer) index.set(`${renderer.process}:${renderer.request}`, {id: candidate.id, label: flowRequestLabel(candidate)});
+          }
+          flowRendererIndexes.set(state.requests, index);
+        }
+        return index.get(`${process}:${request}`) ?? null;
+      }
+      /** Opens a Wasm module in Sources from the CFG pane, at the function's first byte. */
+      function flowWorkspaceOpenSource({artifact_id: artifactId, offset = null}) {
+        const matches = state.artifacts.filter(candidate => String(candidate.artifact_id) === String(artifactId));
+        if (matches.length !== 1) { investigationNotice('This module is not retained once in the artifact catalog, so Sources cannot open it.', 'unavailable'); return false; }
+        if (!openInvestigation({kind: 'artifact', identity: investigationArtifactIdentity(matches[0]), relation: 'Opened from the Flow CFG. The block graph is declared static flow, not observed execution.'})) return false;
+        // The byte is revealed once Sources holds the module, now or when its read lands.
+        if (Number.isSafeInteger(offset) && offset >= 0) { state.sourceReveal = {identity: sourceIdentity(matches[0]), byte: offset}; renderSources(); }
+        return true;
+      }
+
       function renderBacktrace() {
+        // Checks run this function alone, without the Flow workspace helpers.
+        if (typeof renderFlowWorkspace === 'function') renderFlowWorkspace();
         const selection = originTraceSelection();
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         const captured = state.requests.filter(candidate => requestTraceRoot(candidate));
         const choices = request && !requestTraceRoot(request) ? [request, ...captured] : captured;
-        const choiceKey = JSON.stringify(choices.map(candidate => [candidate.id, candidate.method, candidate.path]));
+        const choiceKey = JSON.stringify([Boolean(state.selectedRequestId), choices.map(candidate => [candidate.id, candidate.method, candidate.path])]);
         if (elements.traceRequest.dataset.choices !== choiceKey) {
-          elements.traceRequest.replaceChildren(...choices.map(candidate => {
-          const option = document.createElement('option'); option.value = candidate.id;
-          option.textContent = `${candidate.method} ${candidate.path}${requestTraceRoot(candidate) ? '' : candidate.origin === 'sample' ? ' (sample, no predecessor evidence)' : candidate.origin === 'demo' ? ' (demo, no predecessor evidence)' : ' (no request identifier)'}`;
-          option.selected = candidate.id === state.selectedRequestId;
-          return option;
-          }));
+          const labelOf = candidate => `${candidate.method} ${candidate.path}${requestTraceRoot(candidate) ? '' : candidate.origin === 'sample' ? ' (sample, no predecessor evidence)' : candidate.origin === 'demo' ? ' (demo, no predecessor evidence)' : ' (no request identifier)'}`;
+          // Requests to one target read alike; their renderer request ID tells them apart.
+          const repeats = new Map();
+          for (const candidate of choices) repeats.set(labelOf(candidate), (repeats.get(labelOf(candidate)) ?? 0) + 1);
+          const options = choices.map(candidate => {
+            const option = document.createElement('option'); option.value = candidate.id;
+            const label = labelOf(candidate), renderer = rendererRequestOf(candidate)?.request;
+            option.textContent = repeats.get(label) > 1 && renderer ? `${label} · #${renderer}` : label;
+            option.selected = candidate.id === state.selectedRequestId;
+            return option;
+          });
+          if (!state.selectedRequestId && choices.length) {
+            const placeholder = document.createElement('option'); placeholder.value = ''; placeholder.textContent = 'Choose a request to trace'; placeholder.selected = true;
+            options.unshift(placeholder);
+          }
+          elements.traceRequest.replaceChildren(...options);
           elements.traceRequest.dataset.choices = choiceKey;
         }
         elements.traceRequest.value = state.selectedRequestId || '';
@@ -4428,6 +4559,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         const active = models.find(model => model.key === state.selectedTraceRow);
         if (active) traceStepDetails(active); else elements.traceStepDetails.replaceChildren();
+        // Checks run this function without the workspace too.
+        if (typeof flowWorkspace !== 'undefined') flowWorkspace.setLineage(models);
         if (hasSteps) {
           const {linked_steps: linked, gap_count: gaps} = trace.coverage;
           const links = `${linked} recorded predecessor link${linked === 1 ? '' : 's'}`;
@@ -7534,7 +7667,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!investigationPassiveSource && state.sourceDeobfuscated && source?.kind === 'javascript' && !document.querySelector('#screen-sources').hidden) loadDeobfuscation(source);
         renderDeobfuscationReport(source);
         const reveal = state.sourceReveal;
-        if (reveal && source?.content !== undefined && reveal.identity === sourceIdentity(source)) {
+        if (reveal && source?.content !== undefined && reveal.identity === sourceIdentity(source) && reveal.byte !== undefined) {
+          // A module byte (the Flow CFG's function start), placed as the entropy
+          // map places one; why it cannot be shown is said in the status bar.
+          state.sourceReveal = null;
+          const problem = revealSourceByteOffset(source, reveal.byte, () => { if (typeof entropyMap !== 'undefined') entropyMap.close(); });
+          if (problem) elements.sourcePosition.textContent = problem;
+        } else if (reveal && source?.content !== undefined && reveal.identity === sourceIdentity(source)) {
           state.sourceReveal = null;
           revealOriginalLine(source, reveal.line, reveal.column);
           if (reveal.length && markSourceMatch(reveal.line, reveal.column, reveal.length)) {
@@ -8568,6 +8707,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
 
         evidenceWorkspace.setVisible(screenName === 'evidence');
+        if (screenName !== 'backtrace' && typeof flowWorkspace !== 'undefined') flowWorkspace.sync({visible: false});
         if (screenName !== 'sources') sourceFactsPanel.cancel();
         if (typeof entropyMap !== 'undefined') entropyMap.setVisible(screenName === 'sources');
         if (screenName !== 'tools') float32Panel.cancel();
@@ -8801,6 +8941,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.artifactReceiverConnected = false;
         state.artifactReceiverError = null;
         state.sourceNotice = null;
+        if (state.selectedRequestId !== null) state.requestRevision += 1;
         state.selectedRequestId = null;
         state.selectedField = null;
         state.lastUpdatedLabel = 'start a live capture';
@@ -9082,7 +9223,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       });
       elements.traceButton.addEventListener('click', () => {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
-        openInvestigation({kind: 'trace', identity: investigationRequestIdentity(request), relation: 'Captured request → recorded trace. Shared-identifier relationships and missing predecessors remain explicit.'});
+        openRequestLineage(request, 'Captured request → recorded trace. Shared-identifier relationships and missing predecessors remain explicit.');
       });
 
       elements.requestCollectionPivot.addEventListener('click', copyInvestigationRequestToCollection);

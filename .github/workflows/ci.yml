@@ -35,6 +35,17 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# The backend's vendored Triskel layout engine needs C++23 ranges from GCC 14
+# or later. ubuntu-24.04 defaults to g++ 13 and also ships g++-14 (26.04 does
+# too). The cc crate reads these target-specific names before CXX, so make's
+# native C++ keeps the image's default compiler and its sccache shim. They also
+# keep the cc crate off that shim: with RUSTC_WRAPPER=sccache it wraps its
+# compiler in sccache itself, and wrapping the shim nests sccache and fails.
+# Each job reads only its own target's name.
+env:
+  CXX_x86_64_unknown_linux_gnu: g++-14
+  CXX_aarch64_apple_darwin: clang++
+
 jobs:
   lint:
     runs-on: ubuntu-latest

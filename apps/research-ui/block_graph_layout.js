@@ -1,5 +1,6 @@
 /* Layered single-entry-region layout for basic-block graphs. Runs off the main
- * thread as a Web Worker; also loads as CommonJS for the offline checks.
+ * thread as a Web Worker; also loads as CommonJS for the offline check, which
+ * loads graph_layout_client.js first.
  *
  * A dominator subtree is entered only at its root, so each subtree becomes a
  * collapsed box laid out on its own: its members are stacked in layers, a layer
@@ -502,17 +503,63 @@ const blockGraphLayout = (() => {
     return {graph, starts, layout};
   }
 
+  /* Triskel, through graphLayoutClient, is a CFG layout engine built on
+   * single-entry single-exit regions. When the backend serves it, it lays
+   * out the function; the region layout above stays where the client says
+   * why: Triskel would draw it much wider (a dispatcher's fan, which that
+   * layout stacks into a grid) or taller, the function is past Triskel's
+   * limits, or the route is missing or fails. */
+  async function withTriskel(result, metrics) {
+    const m = {...METRICS, ...metrics}, {graph, layout} = result, n = graph.count;
+    const keep = reason => { layout.engine = {name: 'layered', reason}; return result; };
+    if (n < 2) return keep({code: 'one_block'});
+    const resolved = [];
+    for (let e = 0; e < graph.from.length; e += 1) if (graph.to[e] >= 0) resolved.push(e);
+    const {outcomes: [outcome], revision} = await graphLayoutClient.layOut([{nodes: Array.from({length: n}, (_, v) => [layout.w[v], layout.h[v]]),
+      edges: resolved.map(e => [graph.from[e], graph.to[e]]), width: layout.width - m.margin * 2, height: layout.height - m.margin * 2}]);
+    if (!outcome.result) return keep(outcome.reason);
+    const laid = outcome.result, x = new Float32Array(n), y = new Float32Array(n);
+    for (let v = 0; v < n; v += 1) { x[v] = m.margin + laid.nodes[v][0]; y[v] = m.margin + laid.nodes[v][1]; }
+    const routeOf = new Map(resolved.map((e, i) => [e, laid.edges[i]]));
+    const edgeCount = graph.from.length, pointStart = new Uint32Array(edgeCount + 1), flat = [], box = new Float32Array(edgeCount * 4), stubs = new Int32Array(n);
+    let maxX = m.margin + laid.width, maxY = m.margin + laid.height;
+    for (let e = 0; e < edgeCount; e += 1) {
+      pointStart[e] = flat.length / 2;
+      const anchor = flat.length, from = graph.from[e];
+      if (graph.to[e] < 0) {
+        // An edge with no resolved target keeps its stub under the block.
+        const slot = stubs[from]++, sx = x[from] + layout.w[from] / 2 + (slot === 0 ? 0 : (slot % 2 ? 1 : -1) * Math.ceil(slot / 2) * 28);
+        flat.push(sx, y[from] + layout.h[from], sx, y[from] + layout.h[from] + 18);
+      } else flat.push(...graphLayoutClient.routePoints(routeOf.get(e), m.margin, m.margin));
+      let minX = Infinity, minY = Infinity, hiX = -Infinity, hiY = -Infinity;
+      for (let i = anchor; i < flat.length; i += 2) { minX = Math.min(minX, flat[i]); hiX = Math.max(hiX, flat[i]); minY = Math.min(minY, flat[i + 1]); hiY = Math.max(hiY, flat[i + 1]); }
+      box[e * 4] = minX; box[e * 4 + 1] = minY; box[e * 4 + 2] = hiX; box[e * 4 + 3] = hiY;
+      maxX = Math.max(maxX, hiX); maxY = Math.max(maxY, hiY);
+    }
+    pointStart[edgeCount] = flat.length / 2;
+    result.layout = {...layout, x, y, pointStart, points: Float32Array.from(flat), box, direct: 0, width: maxX + m.margin, height: maxY + m.margin,
+      engine: {name: 'triskel', revision}};
+    return result;
+  }
+  async function runAsync(message) {
+    const result = run(message);
+    if (message.engine === 'triskel') return withTriskel(result, message.metrics);
+    result.layout.engine = {name: 'layered', reason: {code: 'not_served'}};
+    return result;
+  }
+
   const transfer = ({graph, starts, layout}) => [graph.offsets, graph.ends, graph.firstRow, graph.rowCount, graph.instructionCount, graph.flags, graph.from, graph.to, graph.kind,
     starts, layout.x, layout.y, layout.w, layout.h, layout.pointStart, layout.points, layout.box, layout.back].map(array => array.buffer);
 
-  return {METRICS, KIND, wasmGraph, rowStarts, nodeSizes, layoutGraph, run, transfer};
+  return {METRICS, wasmGraph, rowStarts, nodeSizes, layoutGraph, runAsync, withTriskel, transfer};
 })();
 
 if (typeof module === 'object' && module?.exports) module.exports = blockGraphLayout;
-else if (typeof self !== 'undefined' && typeof document === 'undefined') {
-  self.onmessage = event => {
+else if (typeof importScripts === 'function') {
+  importScripts('graph_layout_client.js');
+  self.onmessage = async event => {
     try {
-      const result = blockGraphLayout.run(event.data);
+      const result = await blockGraphLayout.runAsync(event.data);
       self.postMessage({id: event.data.id, ok: true, result}, blockGraphLayout.transfer(result));
     } catch (error) {
       self.postMessage({id: event.data.id, ok: false, error: error?.message ?? 'Layout failed.'});

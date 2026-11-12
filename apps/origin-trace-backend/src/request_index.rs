@@ -596,7 +596,7 @@ fn anchors(file: &mut File, end: u64) -> Result<(String, String)> {
 }
 
 // Matches TextDecoder (drops a leading BOM) and JavaScript's whitespace set.
-fn payload_text(bytes: &[u8]) -> String {
+pub(crate) fn payload_text(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned()
 }
@@ -844,7 +844,7 @@ fn site(domain: &str) -> Option<String> {
     Some(labels[count.saturating_sub(keep)..].join("."))
 }
 /// Port of `networkTargetFromPayload`.
-fn network_target(payload: &str, kind: &str) -> Option<(Option<String>, String)> {
+pub(crate) fn network_target(payload: &str, kind: &str) -> Option<(Option<String>, String)> {
     let source = payload.trim_matches(js_space);
     if source.is_empty() {
         return None;

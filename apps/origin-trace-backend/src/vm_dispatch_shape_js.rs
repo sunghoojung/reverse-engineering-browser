@@ -2520,6 +2520,13 @@ pub fn worker_main() -> std::io::Result<()> {
 /// Enter before an application runtime or libtest worker starts analysis.
 #[doc(hidden)]
 pub fn worker_entry() {
+    // The graph layout worker shares this hidden entry and its test harness.
+    if std::env::args().nth(1).as_deref() == Some(crate::graph_layout::WORKER_FLAG)
+        || std::env::var("REB_JS_TEST_WORKER").as_deref()
+            == Ok(crate::graph_layout::WORKER_TEST_VALUE)
+    {
+        std::process::exit(crate::graph_layout::worker_main());
+    }
     let format = std::env::args().nth(1).as_deref() == Some(crate::source_format::WORKER_FLAG)
         || std::env::var("REB_JS_TEST_WORKER").as_deref()
             == Ok(crate::source_format::WORKER_TEST_VALUE);

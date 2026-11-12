@@ -1038,11 +1038,54 @@ protocol 3, category `vm`, and flags 0, or when any other payload check
 fails. The decode reads that record only. It does not build an opcode
 workspace or open the module, so a module the detector never admits still
 has rows here. It does not recover a
-guest PC or a sample the payload does not store. The unfiltered polling
-window adds the same object. `before=OFFSET` continues backward and
-`after=OFFSET` reads forward from a record boundary. Each response adds `query`
-with the applied `filters`, `direction`, `returned`, `store_end`, `limited`,
-`budget_exhausted`, `next_before` (null at the start of the store) and
+guest PC or a sample the payload does not store.
+
+`js_invocation_start`, `js_invocation_settle` and `js_invocation_request`
+include `js_invocation` beside the hex `payload`, decoded with the rules of
+[native JavaScript invocation](native-js-invocation-v1.md#wire-contract).
+`status` `decoded` adds `kind` and that record's fields:
+
+| `kind` | Fields |
+| --- | --- |
+| `start` | `site_slot`, `invocation_id`, `parent_invocation_id` (0 for none), `parent_unknown`, `argument_count`, `script_id`, `anchor_offset` (UTF-16), `source_sha256`, `site_sample_index`, `sample_index`, `document_id` |
+| `settle` | `site_slot`, `invocation_id`, `fulfilled`, `via` (`sync_return`, `sync_throw` or `promise`), `value_kind`, `value_length`, `digest_state` (`not_requested`, `present`, `not_digestible`, `too_large` or `unavailable`), `document_id` |
+| `request` | `inside`, `invocation_id` (0 exactly when `inside` is false), `request_id` |
+
+`value_kind` names wire kinds 1 to 14 in order: `integer`, `number` (not an
+integer), `string`, `symbol`, `undefined`, `null`, `boolean`, `bigint`,
+`object` (any other object), `function`, `array`, `array_buffer`,
+`array_buffer_view` (a typed array or `DataView`) and `promise`. Integers of
+32 bits or fewer are JSON numbers, so `invocation_id` equals the
+`wasm_observation.js_invocation_id` of the Wasm records that ran inside the
+call; `document_id` and `request_id` are canonical decimal strings. An
+invocation is `(session_id, process_id, invocation_id)`. Order its records by
+`sequence_number` within that process, not by file order or time.
+`script_id` and `anchor_offset` name the called function the way a stack
+frame does. `inside: false` means a request started with no script on the
+stack while some admitted invocation had not settled, so which one is unknown.
+No settled-value digest is decoded: `digest_state` says only whether the
+session retained one, which the
+[value-flow join](native-js-invocation-v1.md#identity-and-relations) reads
+from the stored record ([sensitive capture](../SAFETY.md#sensitive-capture)).
+`status` `invalid` carries no fields. It is used when the record is not
+protocol 3, category `vm` and flags 0 with an untruncated 128-byte hex payload
+and zero artifact, parent and navigation IDs, when the payload version is not
+1, and when any other wire rule fails.
+
+Events carry no site label. `site_slot` is the index in the site file the
+session armed, and `source_sha256` with `anchor_offset` is that site's key.
+`get_js_invocation_sites` lists that file in `session.sites` in slot order,
+each entry with the same key, its `label` and its `source_url`; join on the
+key. The label comes from the saved set the backend started with, or is
+`Unlabeled function`. A backend that the session's launcher did not start,
+such as a later backend over the same store, reports `session.state`
+`not_armed` with no sites, and the slot number is the only name.
+
+The unfiltered polling window adds the same objects. `before=OFFSET`
+continues backward and `after=OFFSET` reads forward from a record boundary.
+Each response adds `query` with the applied `filters`, `direction`,
+`returned`, `store_end`, `limited`, `budget_exhausted`, `next_before` (null at
+the start of the store) and
 `next_after`. A page stops at `limit` matches or after 64 MiB of records, so
 pass the cursor on to continue. A record without its newline is still being
 written and is not returned until it is complete. `event_window.scope` is
@@ -1126,6 +1169,96 @@ response's `snapshot` to page within one list. A store scan that exceeds its
 counts cover only what was read; a malformed record is counted and skipped. The
 `filter` is a case-insensitive substring over the names on the rows and never
 reads captured source bodies.
+
+## Flow graph
+
+`get_flow_graph` (`GET /api/flow-graph?session_id=`) folds every recorded stack
+of one session (request, navigation, async scheduling and walked cookie-write
+stacks) into one observed graph: realms as contexts, JavaScript, eval and Wasm
+functions and request, navigation and cookie-write sinks as nodes, and call,
+await, task and omitted edges that name the frame, language and eval
+boundaries they cross. Each distinct stack is decoded once and each retained
+source read once; `paths` lists every stack's edges and request IDs. It is
+read-only, cached until the stores change, and stops at a 30-second deadline
+with `complete` false. A frame that does not resolve keeps its script ID and a
+reason; a lost scheduling stack is a `chain_cut`, never a bridged edge. Bounds
+and folding rules are in [flow-graph-v1.md](flow-graph-v1.md). The `reb://`
+stored-evidence workspace does not serve it.
+
+## Graph layout
+
+`post_graph_layout` (`POST /api/graph-layout`) lays out caller-supplied graphs
+for the Flow graph and the Sources Graph view with Triskel, a control flow
+graph layout engine built on SESE regions and Sugiyama layering, vendored at
+commit `196ba112eba992c1460af3097c038defcf7a7e45`
+([vendor/README.md](../apps/origin-trace-backend/vendor/README.md)). It reads
+no evidence and writes nothing; it is pure computation over the body.
+
+```json
+{"graphs": [{"nodes": [[120, 40], [80, 30]], "edges": [[0, 1], [1, 0]]}]}
+```
+
+`nodes[i]` is node `i`'s width and height, each a finite number above 0 and at
+most 100000; `edges` are `[from, to]` node indexes, self loops, duplicates and
+cycles included. The response keeps request order:
+
+```json
+{"schema": "graph-layout-v1",
+ "engine": {"name": "triskel", "revision": "196ba112eba992c1460af3097c038defcf7a7e45"},
+ "graphs": [{"status": "laid_out", "nodes": [[0, 70], [20, 250]],
+             "edges": [[60, 110, 60, 210, 60, 210, 60, 250],
+                       [73.33, 280, 73.33, 410, 220, 410, 220, 380, 220, 380, 220, 250,
+                        220, 250, 220, 210, 220, 210, 220, 70, 220, 70, 220, 30,
+                        220, 30, 220, 0, 80, 0, 80, 70]],
+             "width": 220, "height": 410, "elapsed_ms": 0}],
+ "elapsed_ms": 4}
+```
+
+The back edge `1 -> 0` leaves node 1's bottom, runs around the right side and
+enters node 0 from above, so the drawing's top is that waypoint at `y` 0 and
+node 0 starts at `y` 70.
+
+A laid-out graph gives each node's top-left corner and, for each input edge,
+Triskel's waypoints as a flat `x0, y0, x1, y1, ...` list from the source to the
+target. Values are rounded to 2 decimals and moved so the drawing, waypoints
+included, starts at `0, 0`; `width` and `height` are its extent. Separate
+weakly connected parts are laid out one at a time and packed in rows, largest
+first. Any other graph has `status` `too_large`, `failed` or `timeout` and a
+`reason`.
+
+The limits exist because Triskel's cost grows with about the square of the node
+count (measured on tree-like graphs with some back edges: 1,000 nodes 0.6 s,
+3,000 nodes 6.6 s, 8,000 nodes 85 s, and roughly three times that on a loaded
+machine):
+
+- A body holds at most 64 graphs and 8,000 nodes in all, within 8 MiB. Over
+  that, or with malformed JSON, an unknown member, a bad size or an index
+  outside its graph, the route returns 400 with an `error` and lays out
+  nothing.
+- A graph over 2,000 nodes or 8,000 edges is `too_large`; the others are still
+  laid out.
+- One request has 10 s. A graph has its own budget inside that, 1 s plus 8 µs
+  times its node count squared, so a graph Triskel never finishes costs only
+  its budget.
+
+Triskel is third-party C++ fed graphs shaped by captured pages, and this
+revision can loop forever, crash or place nodes on top of each other on some
+inputs, so it never runs in the server. Each request starts the backend
+executable again as a contained `--graph-layout-worker` process with no
+network access (on macOS no file access either) and a 2 GiB resident memory
+limit; at most two run at once and later requests wait for a slot. A graph
+whose budget passes is
+`timeout`; one that crashes the worker or reaches the memory limit is `failed`;
+either way a new worker continues with the graphs after it. When the request
+deadline passes, every graph without a result is `timeout`. A layout with
+overlapping nodes or an edge that does not reach its nodes is `failed`, so a
+`laid_out` result never has either. The worker adds a virtual root and, where a
+part has no node without out-edges, a virtual exit, both of size 0, which
+Triskel needs; neither appears in the result.
+
+The MCP projection lists it only with `--allow-effects`, like the contained
+JavaScript formatter, since it launches a worker process. The `reb://`
+stored-evidence workspace does not serve it.
 
 ## Artifact text pages and search
 

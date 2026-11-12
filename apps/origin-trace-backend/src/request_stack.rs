@@ -22,9 +22,9 @@ const TASK_FRAME_LIMIT: u32 = 256;
 const HEADER: usize = 32;
 const FRAME: usize = 16;
 const SEGMENT: usize = 48;
-const MAX_ARTIFACT: usize =
+pub(crate) const MAX_ARTIFACT: usize =
     HEADER + FRAME * (SYNC_LIMIT + ASYNC_LIMIT) as usize + SEGMENT * TASK_LIMIT as usize;
-const MAX_SOURCE: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_SOURCE: usize = 16 * 1024 * 1024;
 const IDENTITY_SCAN: usize = 4096;
 /// Version 1 records captured no task-attributed callers.
 const ASYNC_NOT_SHOWN_V1: [&str; 4] = [
@@ -37,12 +37,12 @@ const ASYNC_NOT_SHOWN: [&str; 1] = ["MessagePort and worker messages"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Frame {
-    kind: u8,
-    flags: u8,
-    combinator: u16,
-    script_id: u32,
-    position: u32,
-    detail: u32,
+    pub(crate) kind: u8,
+    pub(crate) flags: u8,
+    pub(crate) combinator: u16,
+    pub(crate) script_id: u32,
+    pub(crate) position: u32,
+    pub(crate) detail: u32,
 }
 
 pub(crate) fn u16_at(bytes: &[u8], at: usize) -> u16 {
@@ -56,7 +56,7 @@ pub(crate) fn u64_at(bytes: &[u8], at: usize) -> u64 {
 }
 
 impl Frame {
-    fn read(bytes: &[u8]) -> Self {
+    pub(crate) fn read(bytes: &[u8]) -> Self {
         Self {
             kind: bytes[0],
             flags: bytes[1],
@@ -86,11 +86,11 @@ impl Frame {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Segment {
-    kind: u8,
-    state: u8,
-    flags: u8,
-    recorded: u32,
-    digest: [u8; 32],
+    pub(crate) kind: u8,
+    pub(crate) state: u8,
+    pub(crate) flags: u8,
+    pub(crate) recorded: u32,
+    pub(crate) digest: [u8; 32],
 }
 
 impl Segment {
@@ -121,21 +121,21 @@ impl Segment {
 }
 
 /// The decoded `request_initiator_stack` payload.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     version: u16,
     task_segments: u32,
-    state: u8,
-    flags: u8,
-    total: u32,
-    recorded: u32,
-    omitted: u32,
+    pub(crate) state: u8,
+    pub(crate) flags: u8,
+    pub(crate) total: u32,
+    pub(crate) recorded: u32,
+    pub(crate) omitted: u32,
     async_frames: u32,
     async_segments: u32,
     wasm_frames: u32,
     scripts: u32,
-    digest: [u8; 32],
-    innermost: Frame,
+    pub(crate) digest: [u8; 32],
+    pub(crate) innermost: Frame,
 }
 
 pub fn decode_record(payload: &[u8]) -> Option<Record> {
@@ -244,7 +244,46 @@ pub fn decode_artifact(content: &[u8], record: &Record) -> Option<(Vec<Frame>, V
         .map(|segments| (frames, segments))
 }
 
-fn decode_segment_artifact(content: &[u8], recorded: u32) -> Option<Vec<Frame>> {
+/// The record a stack artifact's own header states, before its frames are
+/// checked against it.
+fn header_record(content: &[u8], innermost: Frame) -> Option<Record> {
+    (content.len() >= HEADER).then(|| Record {
+        version: u16_at(content, 4),
+        task_segments: u32::from(u16_at(content, 28)),
+        state: 1,
+        flags: content[10],
+        total: u32_at(content, 12),
+        recorded: u32_at(content, 16),
+        omitted: u32_at(content, 20),
+        async_frames: u32::from(u16_at(content, 24)),
+        async_segments: u32::from(u16_at(content, 26)),
+        wasm_frames: 0,
+        scripts: 0,
+        digest: [0; 32],
+        innermost,
+    })
+}
+
+/// A stack artifact read by its own header, for a digest that no stack record
+/// describes here (a `script_cookie` write's walk). The header is checked
+/// against the frames exactly as a record's would be.
+pub(crate) fn decode_artifact_alone(content: &[u8]) -> Option<(Record, Vec<Frame>, Vec<Segment>)> {
+    if content.len() < HEADER + FRAME || content[11] != 0 {
+        return None;
+    }
+    let record = header_record(content, Frame::read(&content[HEADER..HEADER + FRAME]))?;
+    let bounded = matches!(record.version, 1 | 2)
+        && (1..=SYNC_LIMIT).contains(&record.recorded)
+        && record.async_frames <= ASYNC_LIMIT
+        && record.task_segments <= TASK_LIMIT
+        && u64::from(record.recorded) + u64::from(record.omitted) == u64::from(record.total);
+    let (frames, segments) = bounded
+        .then(|| decode_artifact(content, &record))
+        .flatten()?;
+    Some((record, frames, segments))
+}
+
+pub(crate) fn decode_segment_artifact(content: &[u8], recorded: u32) -> Option<Vec<Frame>> {
     let count = recorded as usize;
     let shape = content.len() == HEADER + FRAME * count
         && u32_at(content, 0) == 0x4b53_4252
@@ -290,12 +329,45 @@ fn segment_digests(content: &[u8]) -> Vec<String> {
 /// The newest `script_identity` per script ID, from one process's records.
 #[derive(Clone, Debug)]
 pub struct Identity {
-    wasm: bool,
-    eval: bool,
-    retained: bool,
-    start_line: u32,
-    start_column: u32,
-    sha256: Option<String>,
+    pub(crate) wasm: bool,
+    pub(crate) eval: bool,
+    pub(crate) retained: bool,
+    pub(crate) start_line: u32,
+    pub(crate) start_column: u32,
+    /// The execution context ID of the script's realm: one per document,
+    /// so a stack that changes realm crossed a frame boundary.
+    pub(crate) realm: u64,
+    pub(crate) sha256: Option<[u8; 32]>,
+}
+
+impl Identity {
+    /// A one-based line and column of the script's artifact as a position in
+    /// its document: the script's start line is added, and its start column
+    /// only on its first line.
+    pub(crate) fn document_position(&self, line: u64, column: u64) -> (u64, u64) {
+        let column = if line == 1 {
+            u64::from(self.start_column) + column
+        } else {
+            column
+        };
+        (u64::from(self.start_line) + line, column)
+    }
+}
+
+/// The retained source of a frame's script, which `find` looks up by the
+/// script's identity and digest, or the first reason there is none.
+pub(crate) fn find_source<'a, T>(
+    identity: Option<&'a Identity>,
+    find: impl FnOnce(&'a Identity, &[u8; 32]) -> Option<T>,
+) -> std::result::Result<(&'a Identity, T), &'static str> {
+    let identity = identity.ok_or("script_identity_missing")?;
+    let sha = identity.sha256.as_ref().ok_or("source_unavailable")?;
+    let found = find(identity, sha).ok_or(if identity.wasm || identity.retained {
+        "source_artifact_missing"
+    } else {
+        "source_not_retained"
+    })?;
+    Ok((identity, found))
 }
 
 pub fn decode_identity(payload: &[u8]) -> Option<(u32, Identity)> {
@@ -333,7 +405,8 @@ pub fn decode_identity(payload: &[u8]) -> Option<(u32, Identity)> {
                 retained: flags & 0x02 != 0,
                 start_line: u32_at(payload, 12),
                 start_column: u32_at(payload, 16),
-                sha256: matches!(retention, 0x00 | 0x02 | 0x10).then(|| hex::encode(digest)),
+                realm: u64_at(payload, 24),
+                sha256: matches!(retention, 0x00 | 0x02 | 0x10).then(|| digest.try_into().unwrap()),
             },
         )
     })
@@ -341,7 +414,7 @@ pub fn decode_identity(payload: &[u8]) -> Option<(u32, Identity)> {
 
 /// One-based LF lines and UTF-16 columns of sorted UTF-16 offsets in text, as
 /// Sources numbers them, with each offset's UTF-8 byte position.
-fn positions(text: &str, offsets: &BTreeSet<u32>) -> HashMap<u32, (usize, u64, u64)> {
+pub(crate) fn positions(text: &str, offsets: &BTreeSet<u32>) -> HashMap<u32, (usize, u64, u64)> {
     let mut out = HashMap::new();
     let mut wanted = offsets.iter().copied().peekable();
     let (mut unit, mut line, mut column) = (0u64, 1u64, 1u64);
@@ -388,7 +461,7 @@ fn identifier_end(bytes: &[u8], mut end: usize) -> Option<(usize, usize)> {
 /// The name the source gives the function starting at byte `start`: the
 /// declaration or method name, or the binding an anonymous function or arrow
 /// is assigned to. None for an anonymous function.
-fn function_name(text: &str, start: usize) -> Option<String> {
+pub(crate) fn function_name(text: &str, start: usize) -> Option<String> {
     let bytes = text.as_bytes();
     let mut cursor = start.min(bytes.len());
     if let Some((name_start, name_end)) = identifier_end(bytes, cursor) {
@@ -445,7 +518,7 @@ fn function_name(text: &str, start: usize) -> Option<String> {
     Some(text[chain_start..chain_end].to_owned())
 }
 
-fn wasm_names(bytes: &[u8]) -> HashMap<u32, String> {
+pub(crate) fn wasm_names(bytes: &[u8]) -> HashMap<u32, String> {
     let mut names = HashMap::new();
     for payload in wasmparser::Parser::new(0).parse_all(bytes) {
         let Ok(wasmparser::Payload::CustomSection(section)) = payload else {
@@ -507,16 +580,12 @@ fn load_source(
     session: &str,
     read: &dyn Fn(&Value, usize) -> Result<Vec<u8>>,
 ) -> std::result::Result<Source, &'static str> {
-    let identity = identity.ok_or("script_identity_missing")?;
-    let sha = identity.sha256.as_deref().ok_or("source_unavailable")?;
-    let kind = if identity.wasm { "wasm" } else { "javascript" };
-    let artifact = newest(artifacts, session, |a| {
-        a["kind"] == kind && a["sha256"] == sha
-    })
-    .ok_or(if identity.wasm || identity.retained {
-        "source_artifact_missing"
-    } else {
-        "source_not_retained"
+    let (identity, artifact) = find_source(identity, |identity, sha| {
+        let kind = if identity.wasm { "wasm" } else { "javascript" };
+        let sha = hex::encode(sha);
+        newest(artifacts, session, |a| {
+            a["kind"] == kind && a["sha256"] == sha.as_str()
+        })
     })?;
     let bytes = read(artifact, MAX_SOURCE).map_err(|_| "source_artifact_unreadable")?;
     let mut source = Source {
@@ -561,7 +630,7 @@ pub fn summary(record: &Record) -> Value {
     })
 }
 
-fn task_kind(kind: u8) -> &'static str {
+pub(crate) fn task_kind(kind: u8) -> &'static str {
     match kind {
         1 => "set_timeout",
         2 => "set_interval",
@@ -662,18 +731,15 @@ fn frame_value(
                     .then(|| source.positions.get(&frame.detail))
                     .flatten()
                     .and_then(|&(byte, _, _)| function_name(text, byte));
+                let (document_line, document_column) = identity.document_position(line, column);
                 json!({
                     "status": "resolved",
                     "artifact_id": source.artifact_id,
                     "url": source.url,
                     "artifact_line": line,
                     "artifact_column": column,
-                    "line": u64::from(identity.start_line) + line,
-                    "column": if line == 1 {
-                        u64::from(identity.start_column) + column
-                    } else {
-                        column
-                    },
+                    "line": document_line,
+                    "column": document_column,
                     "function_name": name,
                 })
             }
@@ -827,14 +893,14 @@ pub fn resolve_call(
             })
         })
         .and_then(|artifact| read(artifact, MAX_ARTIFACT).ok())
-        .filter(|content| content.len() >= HEADER);
-    if let Some(content) = header {
-        record.flags |= content[10] & 0x06;
-        record.total = u32_at(&content, 12);
-        record.recorded = u32_at(&content, 16);
-        record.omitted = u32_at(&content, 20);
-        record.async_frames = u32::from(u16_at(&content, 24));
-        record.async_segments = u32::from(u16_at(&content, 26));
+        .and_then(|content| header_record(&content, record.innermost));
+    if let Some(header) = header {
+        record.flags |= header.flags & 0x06;
+        record.total = header.total;
+        record.recorded = header.recorded;
+        record.omitted = header.omitted;
+        record.async_frames = header.async_frames;
+        record.async_segments = header.async_segments;
     }
     let mut document = resolve(event, &record, identities, artifacts, read);
     if digest.is_none() {
@@ -876,7 +942,7 @@ impl InitiatorFrames {
             .iter()
             .filter_map(|row| {
                 let identity = hex::decode(row["initiator_frame"]["identity"].as_str()?).ok()?;
-                decode_identity(&identity)?.1.sha256
+                decode_identity(&identity)?.1.sha256.map(hex::encode)
             })
             .collect();
         let mut deferred = false;
@@ -943,12 +1009,15 @@ impl InitiatorFrames {
     }
 }
 
-fn payload(event: &Value) -> Option<Vec<u8>> {
-    hex::decode(event["payload"].as_str()?).ok()
+/// A stored record's payload bytes; stored payloads are hex.
+pub(crate) fn payload(event: &Value) -> Option<Vec<u8>> {
+    (event["payload_encoding"] == "hex")
+        .then(|| hex::decode(event["payload"].as_str()?).ok())
+        .flatten()
 }
 
 /// Bytes 80-127 of a `navigation_initiator_stack`: its kind and target frame.
-fn decode_navigation(payload: &[u8]) -> Option<(Record, &'static str, u64)> {
+pub(crate) fn decode_navigation(payload: &[u8]) -> Option<(Record, &'static str, u64)> {
     if payload.len() != 128
         || payload[0] != 2
         || !matches!(payload[4], 1 | 4 | 5)
@@ -1051,7 +1120,7 @@ fn resolve_stored(
     };
     let mut wanted: BTreeSet<String> = identities
         .values()
-        .filter_map(|identity| identity.sha256.clone())
+        .filter_map(|identity| identity.sha256.map(hex::encode))
         .collect();
     let digest = hex::encode(record.digest);
     wanted.insert(digest.clone());
@@ -1185,17 +1254,77 @@ pub fn navigation_document(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
 
-    fn frame(kind: u8, script: u32, position: u32, detail: u32) -> Vec<u8> {
-        let mut bytes = vec![kind, 0, 0, 0];
+    /// One 16-byte frame of a stack artifact or record.
+    pub(crate) fn frame(kind: u8, flags: u8, script: u32, position: u32, detail: u32) -> Vec<u8> {
+        let mut bytes = vec![kind, flags, 0, 0];
         for value in [script, position, detail] {
             bytes.extend(value.to_le_bytes());
         }
         bytes
     }
+
+    /// A stack artifact: synchronous frames innermost first, then the await
+    /// chain and the task segments.
+    pub(crate) fn stack_artifact(
+        version: u16,
+        sync: &[Vec<u8>],
+        asyncs: &[Vec<u8>],
+        segments: &[Vec<u8>],
+    ) -> Vec<u8> {
+        let recorded = sync.len() as u32;
+        let mut a = 0x4b53_4252u32.to_le_bytes().to_vec();
+        a.extend(version.to_le_bytes());
+        a.extend([32, 0, 16, 0, 0, 0]);
+        for value in [recorded, recorded, 0] {
+            a.extend(value.to_le_bytes());
+        }
+        for value in [
+            asyncs.len(),
+            asyncs.len() + segments.len(),
+            segments.len(),
+            0,
+        ] {
+            a.extend((value as u16).to_le_bytes());
+        }
+        for part in sync.iter().chain(asyncs).chain(segments) {
+            a.extend(part);
+        }
+        a
+    }
+
+    /// One 48-byte task segment of a version 2 stack artifact.
+    pub(crate) fn segment(kind: u8, state: u8, recorded: u32, digest: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![kind, state, 0, 0];
+        bytes.extend(recorded.to_le_bytes());
+        bytes.extend([0; 8]);
+        bytes.extend(digest);
+        bytes
+    }
+
+    /// A `script_identity` payload whose digest is that of `text`.
+    pub(crate) fn identity_bytes(
+        kind: u8,
+        flags: u8,
+        script: u32,
+        (line, column): (u32, u32),
+        realm: u64,
+        text: &[u8],
+    ) -> Vec<u8> {
+        let mut p = vec![1, 0, 128, 0, kind, flags, 0, 0];
+        for value in [script, line, column, 0] {
+            p.extend(value.to_le_bytes());
+        }
+        p.extend(realm.to_le_bytes());
+        p.extend((text.len() as u64).to_le_bytes());
+        p.extend(Sha256::digest(text));
+        p.resize(128, 0);
+        p
+    }
+
     fn record_bytes(
         state: u8,
         total: u32,
@@ -1216,41 +1345,7 @@ mod tests {
         p.extend(0u32.to_le_bytes());
         p.extend(1u32.to_le_bytes());
         p.extend(digest);
-        p.extend(frame(1, 7, 30, 21));
-        p.resize(128, 0);
-        p
-    }
-    fn artifact_bytes(total: u32, frames: &[Vec<u8>], asyncs: u16) -> Vec<u8> {
-        let recorded = frames.len() as u32 - u32::from(asyncs);
-        let mut a = 0x4b53_4252u32.to_le_bytes().to_vec();
-        a.extend([1, 0, 32, 0, 16, 0]);
-        a.extend(if total > recorded { [2u8, 0] } else { [0, 0] });
-        for value in [total, recorded, total - recorded] {
-            a.extend(value.to_le_bytes());
-        }
-        a.extend(asyncs.to_le_bytes());
-        a.extend(asyncs.to_le_bytes());
-        a.extend(0u32.to_le_bytes());
-        for f in frames {
-            a.extend(f);
-        }
-        a
-    }
-    fn identity_bytes(
-        kind: u8,
-        flags: u8,
-        script: u32,
-        line: u32,
-        column: u32,
-        text: &[u8],
-    ) -> Vec<u8> {
-        let mut p = vec![1, 0, 128, 0, kind, flags, 0, 0];
-        for value in [script, line, column, 0] {
-            p.extend(value.to_le_bytes());
-        }
-        p.extend(99u64.to_le_bytes());
-        p.extend((text.len() as u64).to_le_bytes());
-        p.extend(Sha256::digest(text));
+        p.extend(frame(1, 0, 7, 30, 21));
         p.resize(128, 0);
         p
     }
@@ -1272,11 +1367,11 @@ mod tests {
         let at = source.find("fetch").unwrap() as u32;
         let start = source.find("() {").unwrap() as u32;
         let raw = |identity: Option<Vec<u8>>| {
-            json!({"session_id": "9", "process_id": 41, "frame": hex::encode(frame(1, 7, at, start)),
+            json!({"session_id": "9", "process_id": 41, "frame": hex::encode(frame(1, 0, 7, at, start)),
                 "identity": identity.map(hex::encode)})
         };
         let mut document = json!({"requests": [
-            {"initiator_frame": raw(Some(identity_bytes(1, 0x02, 7, 0, 0, source.as_bytes())))},
+            {"initiator_frame": raw(Some(identity_bytes(1, 0x02, 7, (0, 0), 99, source.as_bytes())))},
             {"initiator_frame": Value::Null},
         ]});
         let mut frames = InitiatorFrames::default();
@@ -1293,7 +1388,8 @@ mod tests {
         frames.resolve_with(&mut again, root.path(), |_| Vec::new());
         assert_eq!(again["requests"][0]["initiator_frame"], *resolved);
         let mut missing = json!({"requests": [{"initiator_frame": raw(None)}]});
-        missing["requests"][0]["initiator_frame"]["frame"] = json!(hex::encode(frame(1, 8, 1, 0)));
+        missing["requests"][0]["initiator_frame"]["frame"] =
+            json!(hex::encode(frame(1, 0, 8, 1, 0)));
         frames.resolve_with(&mut missing, root.path(), |_| Vec::new());
         assert_eq!(
             missing["requests"][0]["initiator_frame"]["reason"],
@@ -1398,19 +1494,21 @@ mod tests {
         let frames = vec![
             frame(
                 1,
+                0,
                 7,
                 inline.find("fetch").unwrap() as u32,
                 inline.find("() {").unwrap() as u32,
             ),
-            frame(1, 8, 0, 0),
+            frame(1, 0, 8, 0, 0),
             frame(
                 1,
+                0,
                 9,
                 wrapped.find("send").unwrap() as u32,
                 wrapped.find("() {").unwrap() as u32,
             ),
         ];
-        let stack = artifact_bytes(3, &frames, 0);
+        let stack = stack_artifact(1, &frames, &[], &[]);
         let mut record = record_bytes(1, 3, 3, 0, Sha256::digest(&stack).into());
         record[64..80].copy_from_slice(&frames[0]);
 
@@ -1423,19 +1521,19 @@ mod tests {
                 1,
                 0,
                 "script_identity",
-                identity_bytes(1, 0x10, 7, 4, 0, inline.as_bytes()),
+                identity_bytes(1, 0x10, 7, (4, 0), 99, inline.as_bytes()),
             ),
             (
                 2,
                 0,
                 "script_identity",
-                identity_bytes(1, 0x11, 8, 0, 0, evaled.as_bytes()),
+                identity_bytes(1, 0x11, 8, (0, 0), 99, evaled.as_bytes()),
             ),
             (
                 3,
                 0,
                 "script_identity",
-                identity_bytes(1, 0x02, 9, 0, 0, wrapped.as_bytes()),
+                identity_bytes(1, 0x02, 9, (0, 0), 99, wrapped.as_bytes()),
             ),
             (4, 5, "request_initiated", Vec::new()),
             (5, 5, "request_initiator_stack", record),
@@ -1520,7 +1618,7 @@ mod tests {
 
     #[test]
     fn an_identity_outside_the_scan_is_not_reported_as_missing() {
-        let identity = identity_bytes(1, 0x02, 7, 1, 1, b"x");
+        let identity = identity_bytes(1, 0x02, 7, (1, 1), 99, b"x");
         let root = store_with_newer_traffic(&[
             (42, 0, "script_identity", identity),
             (42, 5, "request_initiated", Vec::new()),
@@ -1583,34 +1681,35 @@ mod tests {
         wasm.push(custom.len() as u8);
         wasm.extend(custom);
         let frames = vec![
-            frame(1, 7, fetch_at, send_at),
-            frame(2, 30, 0x2a1, 3),
-            frame(1, 8, 0, 0),
-            frame(1, 7, call_at, run_at),
-            frame(1, 40, 5, 0),
-            frame(3, 7, call_at, run_at),
+            frame(1, 0, 7, fetch_at, send_at),
+            frame(2, 0, 30, 0x2a1, 3),
+            frame(1, 0, 8, 0, 0),
+            frame(1, 0, 7, call_at, run_at),
+            frame(1, 0, 40, 5, 0),
+            frame(3, 0, 7, call_at, run_at),
             vec![4, 0, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0],
         ];
-        let stack = artifact_bytes(6, &frames, 2);
+        let stack = stack_artifact(1, &frames[..5], &frames[5..], &[]);
         let digest: [u8; 32] = Sha256::digest(&stack).into();
         let mut bytes = record_bytes(1, 5, 5, 2, digest);
         bytes[64..80].copy_from_slice(&frames[0]);
         bytes[24..28].copy_from_slice(&1u32.to_le_bytes());
         let record = decode_record(&bytes).expect("valid record");
+        let mut deeper = stack.clone();
+        deeper[12] = 6;
         assert!(
-            decode_artifact(&stack, &record).is_none(),
+            decode_artifact(&deeper, &record).is_none(),
             "depth must agree"
         );
-        let stack = artifact_bytes(5, &frames, 2);
-        let digest: [u8; 32] = Sha256::digest(&stack).into();
-        bytes[32..64].copy_from_slice(&digest);
-        let record = decode_record(&bytes).expect("valid record");
         let mut identities = HashMap::new();
         for (script, payload) in [
-            (7, identity_bytes(1, 0x02, 7, 10, 4, inline.as_bytes())),
-            (8, identity_bytes(1, 0x03, 8, 0, 0, evaled.as_bytes())),
-            (30, identity_bytes(2, 0, 30, 0, 0, &wasm)),
-            (40, identity_bytes(1, 0x11, 40, 0, 0, b"not retained")),
+            (
+                7,
+                identity_bytes(1, 0x02, 7, (10, 4), 99, inline.as_bytes()),
+            ),
+            (8, identity_bytes(1, 0x03, 8, (0, 0), 99, evaled.as_bytes())),
+            (30, identity_bytes(2, 0, 30, (0, 0), 99, &wasm)),
+            (40, identity_bytes(1, 0x11, 40, (0, 0), 99, b"not retained")),
         ] {
             let (id, identity) = decode_identity(&payload).expect("identity");
             assert_eq!(id, script);
@@ -1677,28 +1776,18 @@ mod tests {
         let source =
             "function schedule() {\n  setTimeout(send, 5);\n}\nfunction send() { fetch('/b'); }\n";
         let at = |text: &str| source.find(text).unwrap() as u32;
-        let schedule = frame(1, 7, at("setTimeout"), at("() {"));
-        let mut timer = 0x4b53_4252u32.to_le_bytes().to_vec();
-        timer.extend([1, 0, 32, 0, 16, 0, 0, 0]);
-        timer.extend([1u32, 1, 0].iter().flat_map(|v| v.to_le_bytes()));
-        timer.extend([0; 8]);
-        timer.extend(&schedule);
+        let schedule = frame(1, 0, 7, at("setTimeout"), at("() {"));
+        let timer = stack_artifact(1, std::slice::from_ref(&schedule), &[], &[]);
         let timer_digest: [u8; 32] = Sha256::digest(&timer).into();
-        let send = frame(1, 7, at("fetch"), at("() { fetch"));
-        let segment = |kind: u8, state: u8, recorded: u32, digest: [u8; 32]| {
-            let mut bytes = vec![kind, state, 0, 0];
-            bytes.extend(recorded.to_le_bytes());
-            bytes.extend([0; 8]);
-            bytes.extend(digest);
-            bytes
-        };
-        let mut stack = 0x4b53_4252u32.to_le_bytes().to_vec();
-        stack.extend([2, 0, 32, 0, 16, 0, 0x08, 0]);
-        stack.extend([1u32, 1, 0].iter().flat_map(|v| v.to_le_bytes()));
-        stack.extend([0, 0, 2, 0, 2, 0, 0, 0]);
-        stack.extend(&send);
-        stack.extend(segment(1, 1, 1, timer_digest));
-        stack.extend(segment(9, 6, 0, [0; 32]));
+        let send = frame(1, 0, 7, at("fetch"), at("() { fetch"));
+        let mut stack = stack_artifact(
+            2,
+            std::slice::from_ref(&send),
+            &[],
+            &[segment(1, 1, 1, &timer_digest), segment(9, 6, 0, &[0; 32])],
+        );
+        // The task chain was cut.
+        stack[10] = 0x08;
         let digest: [u8; 32] = Sha256::digest(&stack).into();
         let mut bytes = record_bytes(1, 1, 1, 0, digest);
         bytes[0] = 2;
@@ -1711,7 +1800,7 @@ mod tests {
         v1[0] = 1;
         assert!(decode_record(&v1).is_none(), "version 1 has no task chain");
         let (_, identity) =
-            decode_identity(&identity_bytes(1, 0x02, 7, 0, 0, source.as_bytes())).unwrap();
+            decode_identity(&identity_bytes(1, 0x02, 7, (0, 0), 99, source.as_bytes())).unwrap();
         let identities = HashMap::from([(7, identity)]);
         let artifacts = vec![
             artifact("1", "stack", &stack),

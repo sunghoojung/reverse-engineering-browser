@@ -172,7 +172,7 @@ later catalog refreshes do not silently rerun the analysis.
 On phones, expanded **Link context** uses a full-width row below Back/Forward;
 long explanations stay in the bounded navigation scroller above the workspace.
 
-A captured request opens its recorded Backtrace using its exact session,
+A captured request opens its recorded lineage in Flow using its exact session,
 process and sequence identity. Reused IDs in other sessions cannot supply its
 trace; unsafe numeric identities and ambiguous rows are rejected. **Open retained source** uses
 that step's session and artifact identity. A Facts **Original bytes** link
@@ -1037,7 +1037,7 @@ source wiring only and does not claim native runtime coverage.
 ## Workspace layout
 
 The sidebar lists every workspace in two groups. **Evidence** holds Traffic,
-Sources, VM, Fingerprinting and Backtraces; **Workbench** holds Collection,
+Sources, VM, Fingerprinting and Flow; **Workbench** holds Collection,
 Analyst and Tools. **Search** at its top opens the [command palette](#command-palette).
 Console, the investigation notebook and the theme switch sit at its foot. ⌘ or Ctrl with 1-8 opens the workspace at that position, the same
 as a click, except while a modal dialog is open. In a browser on the development
@@ -1205,8 +1205,8 @@ and summary focus survive evidence refreshes. Activity opens its details pane
 when an event is selected, or with **Details**. Decoder processing limits and
 result statistics are likewise available in expanders beside their controls.
 
-Backtraces, Analyst and Tools keep the primary task visible and secondary
-information in expandable sections. Backtraces groups correlation identifiers separately from
+Flow, Analyst and Tools keep the primary task visible and secondary
+information in expandable sections. Flow's Lineage groups correlation identifiers separately from
 relationship facts. Origin traces expose the recorded location as text; they do
 not open a source using only a possibly reused script ID or URL, because the
 trace contract lacks the execution-context/source-hash identity needed for that
@@ -1492,11 +1492,13 @@ beside the step list. JWT test-token creation is an optional disclosure below
 inspection. Use the interface font for instructions and labels, and monospace
 for captured values, code, and identifiers. Empty states explain how to begin.
 
-Backtraces lets the researcher select a captured request, load its recorded
-predecessors, and select a row to inspect event identifiers, values, and source.
-Empty traces show a next action rather than a graph or coverage meter. Gaps and
-shared-identifier matches remain explicit. Refresh failures retain the previous
-trace, and arrow keys move between trace rows.
+Flow (formerly Backtraces) lets the researcher select a captured request, load
+its recorded predecessors in the Lineage pane, and select a row to inspect event
+identifiers, values, and source under **Details**. Empty traces show a next
+action rather than a graph or coverage meter. Gaps and shared-identifier
+matches remain explicit. Refresh failures retain the previous trace, and arrow
+keys move between trace rows. The session's flow graph, the selected function's
+CFG and the tracked-call timeline sit beside it ([Flow workspace](#flow-workspace)).
 
 Fingerprinting is a first-class session workspace for Canvas, WebGL, Web Audio,
 device, layout, and WebGPU APIs, Permissions, Storage, WebRTC, and Runtime activity.
@@ -2015,22 +2017,559 @@ Keyboard: arrows move to the nearest block in that direction, `[` and `]` step
 in byte order, Home returns to the entry, Enter shows the block in the
 disassembly and hex, `+`, `-` and `0` zoom and fit, and Shift+arrows pan.
 
-The layout is a small project-authored pass in `block_graph_layout.js`, run in
-a Web Worker. It uses dominator regions: each subtree is entered once, so it
-lays out alone and only its members' sizes reach its parent. A layer of one
-continues the spine, a wider layer becomes side-by-side boxes and wraps into a
-grid past six, and arms with no way out stack on the spine. Edges leaving a box
-share a bottom port, and every back edge to a loop shares one rail. That is why a
-flattened dispatcher reads as a grid rather than a hairball. It follows the
-region idea from Triskel without linking it: this app has no C++ link into its
-web UI or backend, and no new dependency was needed.
+The layout runs in a Web Worker. When the backend serves
+`POST /api/graph-layout` ([HTTP API](../../protocol/http-api.md#graph-layout)),
+the function is laid out by [Triskel](https://github.com/triskellib/triskel), a
+CFG layout engine built on single-entry single-exit regions. It is vendored in
+the backend and runs in a separate worker process with size and time limits.
+The project-authored region layout in `block_graph_layout.js` stays in four
+cases:
+- Triskel would draw the function more than 1.6 times wider and over 1,400 px.
+  A flattened dispatcher's fan is the usual case: the region layout stacks it
+  into a grid, where Triskel puts every arm in one row.
+- The function has more than 2,000 blocks or 8,000 edges.
+- Triskel's answer does not match the function.
+- The route is missing or fails, as in the stored-evidence window.
 
-Memory: one function is decoded on demand, layout runs in a worker that is
-terminated when a job finishes or is replaced, and laid-out graphs stay in a
+The header says `Triskel layout` when Triskel was used, and hovering the counts
+says why the region layout stayed. The region layout also stays when Triskel's
+drawing would be more than 1.6 times taller and over 1,600 px taller, as nested
+loops can make it. Both layout workers reach the route through
+`graph_layout_client.js`, which holds its limits, the 20 s request budget, the
+answer check and this acceptance rule, and gives each graph it does not lay out
+a reason code that each view words for itself. Triskel's and fmt's licence
+texts ship as `Contents/Resources/GraphLayoutLicenses.txt`.
+
+The region layout uses dominator regions: each subtree is entered once, so it
+lays out alone and only its members' sizes reach its parent. A layer of one
+continues the spine. A wider layer becomes side-by-side boxes and wraps into a
+grid past six. Arms with no way out stack on the spine. Edges leaving a box
+share a bottom port, and every back edge to a loop shares one rail.
+
+Memory: one function is decoded on demand, layout runs in one worker per view
+that stays between jobs and is terminated when a job is replaced or the view
+closes, and laid-out graphs stay in a
 16 MiB least-recently-used cache that is cleared when the view closes, the
 artifact changes or the screen leaves. The canvas is one bounded backing store
 that does not grow with graph size, and only visible cards and edges are drawn.
 A byte budget cuts row text before structure and labels what it cut.
+
+## Flow workspace
+
+**Flow** (⌘5, formerly Backtraces) is one screen with four linked panes that
+share one selection. Each pane keeps its own zoom and scroll, and changing
+pane, tab or layout never changes the selection.
+
+- **Graph** (gold): the session [flow graph](#flow-graph).
+- **CFG** (iris): one Wasm function's basic blocks, read and drawn exactly as
+  Sources does ([basic-block graphs](#basic-block-graphs)), with the block that
+  holds the selected byte offset marked. It opens when a Wasm card is selected
+  or followed, or a timeline sample is picked, and names the function from the
+  module's name section. Empty, it says how to fill it. **Sources** opens the
+  module in Sources at the function's first byte (its body's start), revealed
+  the way the entropy map reveals a byte once the module's bytes are held; a
+  byte the hex view does not hold says so in the status bar. The function's
+  blocks are read only while the CFG pane is shown. A card picked in the graph
+  waits 150 ms first, so moving across cards reads only the card it stops on;
+  a function already loading is not read twice, and the last four functions
+  read or failed stay, so returning to one needs no read. A session change
+  cancels a read or layout in flight and forgets the decoded graphs and
+  names, so nothing from another session is drawn.
+- **Lineage** (rose): the selected request's recorded predecessors from
+  `/api/origin-trace`, what Steps used to show, with the event under
+  **Details**. Each link shows how sure it is by line style (solid observed,
+  dashed shared identifiers, dotted time-adjacent, a cut for a gap) and what it
+  is by colour. A picked sample's selector counts appear under **Selected**.
+- **Timeline** (pine): tracked calls in record order (below).
+
+Traffic's **Trace origin** and Evidence's **Show in Flow** open Flow with that
+request selected and Lineage showing.
+
+### Moving around
+
+The keys never act while typing in a field, never with ⌘, Ctrl or Option (the
+app's own shortcuts), and never take a key the graph or block graph canvas
+already handles while it has focus.
+- 1 to 4: Graph, CFG, Lineage, Timeline. In the split they move keyboard focus
+  to that pane, showing it if it was hidden; in focus mode and in a narrow
+  window they switch panes.
+- Z: open the active pane on its own, or return to the split exactly as it
+  was, with the same panes and sizes. Each pane's corner button and a
+  double-click on its head do the same. Returning, focus stays on the pane
+  focus mode showed when the split shows it; otherwise it goes to the pane
+  focused before focus mode, else the graph, never to the page.
+- ⇧C, ⇧L, ⇧T: show or hide CFG, Lineage and Timeline in the split. A CFG hidden
+  this way stays hidden when a function is picked; Enter still opens it.
+- Enter: follow the selection into the pane that explains it. A sample or a
+  Wasm function opens the CFG at its block; a request opens Lineage.
+- ⌫ and ⇧⌫, or the arrows beside the title: walk the trail back and forward,
+  including jumps between panes. On the graph canvas ⌫ keeps the graph's own
+  Back and ⇧⌫ still walks the trail forward. An entry restores its request in
+  the app; when it had none, or its request is no longer listed, the app keeps
+  the request it shows (a notice says so) and that is not a pick, so Forward
+  stays until another request is selected.
+- J and K: in the CFG, the previous or next sample at the selected site; in the
+  timeline, samples in record order. Arrows move along and between tracks.
+
+The **trail** in the head reads request › tracked call › function › site ›
+sample, and each crumb jumps to its item in its pane. A pick keeps only the
+crumbs that are recorded relationships of what was picked: a sample keeps its
+call, function and site; a call keeps itself; a request chip makes its request
+the request crumb and keeps the call it was issued in; a card keeps its
+function and row. A lineage step that lights a card or selects a call replaces
+the crumbs under the request with it; any other step leaves the trail alone.
+When the app selects another request the trail restarts at it, and the same
+request renamed is not a pick. In focus mode a tab bar names what each pane
+holds, and the **Related** rail lists what links to the selection: its
+lineage links, its samples, the function's sampled sites and the graph card
+with its row, callers, callees and request where the graph reports them.
+Every entry jumps. The rail is rebuilt only when what it lists changes, so an
+evidence poll leaves keyboard focus where it is.
+
+### Layout
+
+Container queries on the Flow screen decide the layout from the screen's own
+width, so a docked Console or agent narrows it as a smaller window would.
+- 1240 px and wider: every pane, with the timeline docked under them.
+- 900 to 1240 px: CFG is a tab beside Lineage and Details, and the timeline is
+  a strip that opens with **Open**, 4, or a jump to a sample.
+- Narrower, down to the 760 by 560 window minimum: one pane at a time behind
+  the Graph, CFG, Lineage and Timeline switch. A request selected on entry
+  shows Lineage first.
+
+Dividers resize CFG, Lineage and the timeline: drag, or the arrow keys (Shift
+for 50 px), and Home or a double-click resets. Sizes and pane toggles are
+remembered per evidence session, at most 16, in the local
+`origin-trace.flow-workspace.v1` preference; a store the shell blocks is
+ignored.
+
+### Tracked-call timeline
+
+The timeline reads
+`GET /api/events?session_id=…&category=vm&type=wasm_dispatch_observation,wasm_indirect_observation,wasm_dispatch_overflow,wasm_indirect_overflow,js_invocation_start,js_invocation_settle,js_invocation_request,gap`
+forward from the start of the store, 1,000 records a page, at most 4 pages a
+read and 8,000 records held; anything unread is stated, with **Read more**.
+It reads again from the start when the session changes and on **Refresh**,
+through at least as many records as it holds, so it never undoes **Read
+more**. When Flow redraws more than 15 seconds after a complete read, it
+continues quietly from where its last page stopped and adds what is new; when
+nothing is new it redraws nothing. A partial read waits for **Read more**. A
+selection the records still hold stays selected, drawn or not, and keyboard
+focus stays on the item it was on.
+
+- One track per invocation, keyed by process and invocation ID, along that
+  renderer's `sequence_number` order, never wall-clock time. A run of
+  sequence numbers nothing here draws is compressed to a break mark (≈). Its
+  tooltip counts the numbers, not records: they can be records of other types
+  or numbers that were never stored, and the read cannot tell which.
+- A track is named by its invocation (`call #12`); the detail line adds its
+  site slot. Saved site labels are not applied: `/api/js-invocation-sites`
+  lists what the backend's own launcher armed and names no session, so it
+  cannot be tied to the session the timeline reads.
+- With the backend's decoded `js_invocation` object, a track has start and
+  settle marks, a dotted line while the call is open, a solid span only when
+  it settled synchronously (returned or threw without a promise; its samples
+  and requests were recorded while it ran), the settle's outcome, value kind
+  and length (never content), and the requests started inside it. Without that object, calls are
+  grouped from the Wasm records' `js_invocation_id` alone, with no start,
+  settle or request marks, and a note says so.
+- `br_table` samples are ticks with the selector under each; `call_indirect`
+  samples are dots. Samples outside any tracked call (no call, unknown, not
+  observed) have their own lane.
+- The Requests lane holds requests started inside a call and, dashed, those
+  started while some call was open; a chip selects that request.
+- Bounds: 64 tracks, 512 samples and 128 requests per renderer, and three rows
+  of request chips; the rest are counted where they would be drawn. Several
+  renderers are one at a time, behind a renderer picker. A selection past a
+  bound, such as a sample J or K stepped to, stays selected: the detail line
+  ends with why it is not drawn, and the drawn item nearest it in record order
+  keeps the timeline's one tab stop.
+- Gaps are never silent. A notice under the banner names the shown
+  renderer's `gap` reasons with their counts and what they mean, read from
+  each reason's shape in the order the session summary reads it: a sample
+  policy filter, a refused malformed record (`limit_or_invalid`), a sampling
+  budget named as the evidence banner names it, another budget such as
+  `native_js_invocation_budget_incomplete`'s call budget, an unavailable
+  stage, missing linkage, code outside Liftoff, else a refusal. It also
+  counts the executions `wasm_dispatch_overflow` and `wasm_indirect_overflow`
+  say a sample budget refused (identities, and at least the largest omitted
+  count) and the queue-drop markers. It names other renderers that have gaps,
+  which the renderer picker also marks, and the page counters
+  `sequence_gaps` and `queue_drops`, which cover the whole scanned store
+  range, every session and type. A Gaps lane marks each record at its
+  sequence, and the pane head ends with `gaps`.
+- Sample counts read `sample 3 of 16 read`. When the stream refused or lost
+  executions they add `more refused here` (an overflow identity at that
+  function and offset) or `not every execution`.
+- States: loading, empty (with how to track calls), a failed read with Retry, a
+  failed refresh that keeps the last records under a banner, partial reads,
+  and counts of undecoded, malformed and repeated records.
+
+Picking a sample selects its call, marks its block in the CFG and its card in
+the graph, and shows its selector histogram in Lineage.
+
+### Graph selection
+
+The workspace passes `onSelect` and `onFollow` to `createFlowGraphPanel` and
+drives the panel through its `select`, `setMark`, `resize` and
+`highlightRequest`. A Wasm card
+opens its CFG; a sample marks its function's card; Back and Forward reselect
+the card a trail entry named. The graph's setters never report back as a
+pick, so nothing loops. A pick made through the workspace uses the setter's
+answer: a lineage request step lights that request's stack and the card the
+graph selects for it becomes the selection, in the same trail entry as the
+step, and a card, caller or callee in the Related rail is selected in the
+graph and followed like a click on it, with its CFG and a trail entry. What
+the graph selects for the host, reported with cause `host` or `replay` (a
+queued `select` landing, the stack of the request the app shows, a trail
+entry reselected), updates the Related rail and the pane head but is not a
+pick. A Related pick of a card the graph has not drawn yet is no pick either:
+the graph selects it once drawn and a notice says so. Every setter the
+workspace calls is silent, so only the researcher's own picks come back: the
+graph's and the block graph view's setters, the timeline's `select`, and the
+app's Lineage row selection. The app counts its request changes in
+`state.requestRevision`; a change the workspace asked for itself, during its
+own pick or while restoring a trail entry, is not an app pick.
+
+## Flow graph
+
+The Flow workspace's **Graph** pane draws every recorded stack of the session
+as one graph ([flow graph v1](../../protocol/flow-graph-v1.md)): request, navigation,
+async scheduling and walked cookie-write stacks, folded so that each distinct
+stack and each retained source is read once. It is observed evidence only; a
+call that never reached a recorded request, navigation, task or cookie write is
+not drawn, and the status bar says so. The same view is the Graph pane of the
+Flow workspace, through the API under [Workspace API](#workspace-api).
+
+### Reading the graph
+
+The view reads top to bottom like a disassembler's CFG: tall and narrow, with
+a tall minimap.
+- **Realms:** each realm is a full-width band, and the bands are stacked in
+  call order. A realm that calls or posts into another sits above it, so an
+  iframe sits below its parent; an unrelated out-of-process frame comes after
+  the group it is not part of. A call between realms runs down across the band
+  boundary.
+- **Band label:** each band has a faint tint of its own and names its realm
+  in a top corner: the scripts' origin, the realm (execution context), the
+  frame its stacks were recorded in and the process. The label takes the
+  corner no edge crosses, the right one when both are clear, so it never sits
+  on the spine. It stays pinned under the heading while its band is in view,
+  and stops short of the minimap.
+- **Rows of the graph:** inside a band they are call depth, callers above
+  callees. A band entered from another starts at its own top row.
+- **Card header:** each card is one function. The header is tinted by the
+  card's kind and gives its name, a boxed badge with the number of distinct
+  stacks that passed through it, and the kind as a pill (`JS`, `EVAL`, `WASM`,
+  `REQUEST`, `NAV`, `COOKIE` or `CHAIN`).
+- **Location line:** under the header, the card gives `file:line:column`,
+  `VM<id>` for eval code, or `func <index> · module.wasm`.
+- **Call rows:** one row per call the function made, in source order, the way
+  a block lists its instructions. Each row has:
+  - the call site: `line:column`, or `+0x<offset>` in a Wasm module;
+  - a mnemonic: `call`, `await`, `postMessage`, `setTimeout`, `rAF`, `request`,
+    `navigate` or `cookie`, in its edge's colour;
+  - the callee;
+  - a note saying what the call crosses: `→ frame.test`, `JS → Wasm`,
+    `Wasm → JS`, `into eval` or `via microtask`;
+  - how many records walked it.
+- **Requests:** a request, navigation or cookie write is a row of each function
+  that made it, not a card of its own, unless nothing recorded calls it.
+- **Row limit:** a card shows seven rows and counts the rest; Details lists
+  them all.
+- **Unresolved and cut frames:** an unresolved frame keeps its script ID and
+  reason on a dashed card. A card whose earlier async callers were not recorded
+  has a dashed stub above it.
+- **Recursion:** a recursive call is a small loop on the card's right edge.
+
+### Colour and edges
+
+Colour says what a thing is. Every colour is a custom property in
+`flow_graph.css` that aliases an `app.css` token: Rosé Pine Moon in the dark
+theme, Dawn and the light app palette in the light one.
+
+| What | Dark | Light |
+| --- | --- | --- |
+| JavaScript card | foam | Dawn foam tint, pine text |
+| Wasm card | iris | Dawn iris tint, code text |
+| eval card | gold | Dawn gold tint, amber text |
+| Request or navigation card | rose | Dawn rose tint, green text |
+| Cookie write card | love | Dawn love tint, red text |
+| Chain card | faint, muted text | faint, muted text |
+| Call edge and `call` | foam | Dawn foam edge, pine text |
+| Await or task edge | gold | amber |
+| Crossing edge: a frame change, JavaScript to Wasm or back, a call into eval | love | Dawn love edge, red text |
+| Request, navigation or cookie edge | rose | green |
+| Frames omitted | faint, dotted | faint, dotted |
+
+- **Hue and ink:** each kind has a hue (`--flow-js` and so on) for its header
+  tint, outline, pill and minimap block, and an ink (`--flow-js-ink`) for text
+  in that colour. Each edge family has a stroke (`--flow-edge-call`) and a row
+  ink (`--flow-ink-call`). Tint strengths are plain numbers
+  (`--flow-tint-head` and so on) that the canvas reads as alpha.
+- **Contrast:** every ink, and the name, badge and muted text, clears 4.5:1 on
+  the card, on its tinted header, on its pill and on a selected or marked row
+  in both themes. A hue that would not, such as Moon's pine or Dawn's gold,
+  never sets text.
+- **Line style:** every v1 edge is observed, so it is solid; only an omitted
+  run of frames is dotted. Colour is never the only carrier: a crossing, a task
+  kind and a request are written on their rows too.
+- **Lit stack:** when a request or a card is selected, the stacks it lights
+  glow, with a heavier stroke and a soft shadow of their colour, and their
+  cards keep full colour. Cards and edges off them are dimmed: a dimmed card
+  keeps its place, its fill fades toward its band, its tint and outline fade,
+  and its text turns muted, still at 4.5:1. A match of Find is never dimmed.
+  With nothing selected, nothing is dimmed.
+- **Selected card:** a 2 px outline, a soft ring and a glow in its kind's
+  colour. The selected row has a band and a bar in that colour.
+
+**Routes:**
+- Edges leave the caller's bottom and enter the callee's top in orthogonal
+  runs with rounded corners, the same shape Triskel's waypoints take. Each edge
+  is outlined against the canvas, and its width follows how many records
+  walked it.
+- A call that skips rows runs straight down between the cards it passes. A
+  back edge inside a band runs up the band's right gutter.
+- A call into a later band drops straight down when no card is in its way,
+  turning once in the gap above the callee's band. Otherwise it runs along the
+  gap under the caller's row to the nearer side gutter, which is outside every
+  band's cards, down the gutter, and into the callee from the gap above its
+  band or above its row.
+- A call back up into an earlier band runs up the right gutter.
+- No run crosses a card.
+
+**Key** in the status bar explains the edges, the row colours, the kinds, the
+card marks, the bands and the limits. It scrolls when the window is short.
+
+### Folding, selection and the request journey
+
+**Folded**, the default, folds runs of pass-through frames inside one realm
+into a stacked chain card: one call in, one call out, the same count, no
+boundary, no recursion. **Every frame** draws them all. The two form one radio
+group. Space, Enter or **Expand chain** opens one chain, and **Fold chain** on
+a member closes it again.
+
+Selecting a card lights every stack through it and marks the rows those stacks
+took.
+
+**Requests:**
+- The **Request** list opens on a placeholder. Requests to the same target
+  carry their renderer request ID.
+- Choosing a request lights only its stack and selects the row that made it.
+- The view fits that stack when it fits legibly, else it shows its top at
+  reading size.
+- The status bar names the request, the function that made it, the realm, and
+  the counts of distinct stacks and cards.
+- **Request stack** lights the chosen request again after another selection.
+
+**Hover and menu:**
+- Hovering a card, a row or an edge shows its facts beside the card: kind,
+  location, realm, call sites, distinct stacks, records, and what it crosses.
+- Right-click, the context menu key or Shift+F10 opens the menu, with each
+  item's key.
+- On a row, the menu offers **Follow call** and **Copy call site**.
+- On every card it offers **Open in Sources**, **Expand chain** or **Fold
+  chain**, **Go to caller**, **Center on card**, **Show details**, **Copy
+  name** and **Copy location**.
+
+**Details** (I) opens a side panel with:
+- the location, realm, and script ID or Wasm function index;
+- the records and distinct stacks;
+- every caller and callee, with the boundary and the call sites;
+- the requests the function made.
+
+With nothing selected it lists the realms (each jumps to its band), the
+crossings, what was not decoded, and what stacks cannot contain.
+
+**Find** matches names, files, hosts and requested hosts. It says `1 of 3`,
+steps with Enter, Shift+Enter or its arrows, and never dims a match.
+
+**Status bar and feedback:**
+- The status bar names the selection and the evidence: records, the crossings
+  by kind, the layout engine, and any budget or deadline that cut the graph.
+- Copy feedback is a toast, so a refresh-failure warning stays until Retry.
+- A refresh keeps the selection, the expanded chains, the mark and the view
+  wherever the same functions are still in the graph.
+- An empty or failed graph asks again on **Refresh** or **Retry**, when the
+  view reopens, or when the app has seen more script-started requests; an
+  evidence poll never asks again otherwise, and never restarts a read that is
+  still running.
+
+### Keyboard and zoom
+
+**Keyboard:**
+- Arrows move to the nearest card.
+- J and K step through the selected card's calls.
+- Enter follows the chosen call. On the card itself it opens the function in
+  Sources or expands a chain; a Wasm card goes to the host's `onFollow` when
+  there is one.
+- Backspace or Alt+Left goes back.
+- U goes to the caller that reached the card most often.
+- O opens the function in Sources.
+- S copies the chosen call site.
+- Space expands or folds a chain.
+- Escape clears the selection, then closes Details.
+- `/` focuses Find.
+- `+`, `-` and `0` zoom and fit, and Shift+arrows pan.
+- F centers the selection.
+- I toggles Details.
+- C and L copy the name and location.
+- M hides the minimap.
+- Letters do the same with Shift. Keys with Command, Control or Option are the
+  app's, except Option+Left.
+- A key the host claims through `hostKeys` is left to it. The Flow workspace
+  claims its own chords: ⇧C, ⇧L and ⇧T show or hide its panes, ⇧⌫ walks its
+  trail forward, Z toggles focus mode and 1 to 4 switch panes.
+
+The canvas announces this list through `aria-describedby`.
+
+**Zoom:**
+- The first view fits the whole graph when its rows stay legible. A taller or
+  wider graph opens at reading size at the top of its first band, with the
+  whole width in view when it fits, else centred on the busiest entry of that
+  band. It never opens as an unreadable overview; the minimap is the overview.
+- Rows show from 85% zoom.
+- Below that, cards sketch their rows in their rows' colours and paint their
+  names at screen size, and band names sit on plates.
+- Below 20% they are boxes filled with their kind's colour, and plain calls
+  become hairlines.
+- The minimap takes the graph's shape: a tall graph gets a tall column (up to
+  440 px, or 55% of the canvas) with bands, cards in their kinds' colours,
+  edges in theirs and the view box; a wide one a short strip. Its width
+  follows the canvas, from 72 to 170 px. It hides while the whole graph is in
+  view, in a short canvas and below 380 px, so a workspace pane keeps it.
+- Centring a card keeps it clear of the minimap and of a Details sheet.
+- In a canvas narrower than 860 px the tools drop under the heading. In a
+  narrow window Details is a sheet over the bottom 40% of the canvas.
+
+### Workspace API
+
+The Flow workspace creates this view as its Graph pane, with the app's `open`
+and `available`, and shows or hides it from its own `sync`, which the app
+calls with the session, the selected request and the stack count.
+`createFlowGraphPanel` takes, besides `host`, `open` and `available`:
+- `onSelect(info | null, {cause})`, called whenever the selected card, its
+  chosen row or the lit request changes, and with `null` when the selection
+  clears. A change to the same card and row is not reported twice. `cause`
+  says who changed it:
+  - `pick`: the researcher, in the graph (a click, a key, the menu, Details,
+    Find, **Request stack**);
+  - `host`: the graph acting for the host: the stack of the request `show`
+    names, lit on a new request or cleared when `show` names none, a new
+    session clearing the selection, a setter called with `silent: false`, or a
+    setter called before the graph was drawn, applied once it lands;
+  - `replay`: the graph putting back what it had: a refresh keeping the
+    selection or the lit request, or a layout redone after the view was
+    hidden.
+  The Flow workspace records no trail entry for `host` or `replay`.
+- `onFollow(info)`, called on Enter or a double-click on a Wasm card. Without
+  it a Wasm card opens in Sources, as before. Enter on a call row still
+  follows the call.
+- `hostKeys(event)`, asked on every key the canvas receives before it acts;
+  `true` leaves the key to the host, unhandled. The Flow workspace passes
+  its `flowWorkspaceKey`.
+
+`info` is:
+
+| Field | Value |
+| --- | --- |
+| `key` | `flowGraphNodeKey(node)`; for a chain card, its first member's key |
+| `kind` | `javascript`, `eval`, `wasm`, `chain`, `request`, `navigation` or `cookie_write` |
+| `name` | the card's name |
+| `location` | the full location (URL, line and column, or the module URL and function), or `null` for a chain or an unresolved frame |
+| `process_id` | the realm's process, from the node's context (nodes do not carry it) |
+| `execution_context_id` | the realm's execution context, from the context, or `null` for an unidentified realm |
+| `url` | the script or module URL, or `null` |
+| `artifact_id` | the script or module artifact, or `null` |
+| `function_index` | the Wasm function index, or `null` |
+| `row` | the chosen row as `{index, site, op, target}`, or `null`; `site` is the text the row shows, such as `8:3` or `+0x2f` |
+| `request` | the lit request as `{process, request}` while its stack is the highlight, else `null` |
+| `callers` | up to eight cards on drawn edges into this one, most stacks first, each `{key, name, kind, note, count}` with `note` the edge kind |
+| `callees` | the same for drawn edges out of this card |
+
+`show({session, request, stacks})` shows the view for a session and the
+renderer request the app has selected; `stacks`, when given, is how many
+captured requests a script started, so an empty graph asks again when it
+grows. `hide()` releases the canvas, the minimap and the drawing caches.
+
+The panel returns, besides `show`, `hide` and `focus`, the methods below.
+Its setters, `select`, `highlightRequest` and `setMark`, act for the host: a
+change they make is never a `pick`. By default they are silent and their
+return value is the answer; with `silent: false` the change is also reported
+with cause `host`. One called before the graph is
+drawn returns `null` and is applied once the graph lands, reported then with
+cause `host`, since the call could not answer. After a layout the first of a
+queued key, a queued or lit request and the kept card that is in the graph
+wins, in that order.
+- `select(key, {reveal = true, silent = true} = {})` selects the card that
+  holds `key`, any member's key for a chain, and centres it unless `reveal`
+  is false. It returns the card's `info`, or `null` when the key is not in
+  the graph.
+- `highlightRequest(request, {reveal = true, silent = true} = {})` lights the
+  stack of the renderer request `{process, request}` and selects the row that
+  made it. It returns that card's `info`, or `null` when the request has no
+  stack here, which clears the selection.
+- `selection()` returns the current `info`, or `null`.
+- `resize()` re-measures the stage after the host changed its size, such as
+  when a pane opens, closes or is dragged.
+- `setMark(mark | null)` marks the card a timeline sample points to, apart
+  from the selection: `mark` is `{artifact_id, function_index, offset}`. The
+  Wasm card with that module artifact and function index gets a dashed ring in
+  the mark colour, and its row whose call site is at module offset `offset`, if
+  it shows one, gets the mark's band. IDs may be numbers or strings; `offset`
+  may be `null`. It returns whether a card took the mark; `null` clears it.
+  The mark survives a refresh and shows on the minimap. It never changes the
+  selection.
+
+### Layout
+
+Layout runs in `flow_graph_layout.js` as a Web Worker, through the block
+graph's runner, or on the main thread when a shell cannot start one, with the
+same engine report either way, on card sizes measured from their text.
+
+**Layered layout:**
+- Bands are ordered callers first over the calls between realms: realms that
+  call into each other sit together, the busiest connected group first; a
+  cycle between realms takes the best ranked one first, and a call back up
+  into an earlier band is a back edge.
+- Inside each band, cycles are broken by a depth-first walk over the realm's
+  own calls, and layers are longest paths, with roots pulled down to their
+  first callee. A call from another realm never pushes a card down.
+- A band holds at most five cards per layer, more in a large band so it stays
+  near square; the rest move down, leaves first. A busy session grows tall,
+  not wide.
+- An edge longer than one layer gets a waypoint in every layer it passes, up to
+  200,000.
+- Each band and layer is ordered by its neighbours' mean position over
+  alternating sweeps, then placed by a weighted isotonic fit that keeps a single
+  chain of calls straight.
+- All bands share one width. Each band is shifted sideways inside it so the
+  calls between bands run as straight as the cards allow.
+
+**Triskel:** when the backend serves `POST /api/graph-layout`, each realm of 2
+to 2,000 cards is then sent to
+[Triskel](https://github.com/triskellib/triskel), in band order, at most 64
+realms and 8,000 cards per request; a realm past either total keeps the layered
+layout and says which total it hit. The layout worker keeps Triskel's last 64
+answers by realm, so a new layout of mostly the same realms, such as a chain
+folded or a refresh, sends only the realms that changed. A realm takes Triskel's coordinates and waypoints unless Triskel would
+draw it more than 1.6 times wider than the layered layout and over 1,400 px,
+or more than 1.6 times taller and over 1,600 px taller.
+Triskel does not stack a wide fan of calls, and a call tree's breadth would
+otherwise run off to the side. The layered layout also stays when Triskel's
+answer is missing, too large or the wrong shape. Either way the bands keep the
+layered order and are stacked, aligned and routed between the same way. The
+status bar says `Triskel layout`, or how many realms it took, and hovering it
+gives each other realm's reason.
+
+Six thousand cards lay out in well under a second. The canvas is one bounded
+backing store, released with the minimap while the view is hidden, and only
+visible bands, cards and edges are drawn. Card text is cut to its card once
+per layout, not per frame, and a selection reads per-model path indexes and
+per-display edge lists rather than walking every path; cards drop
+their lift shadow when more than 160 are in view, and the lit stack drops its
+glow past 600 edges. A refresh failure keeps the last graph under a banner.
+The `reb://` stored-evidence window has no flow graph route and says so.
 
 ## Pane sizes
 
@@ -2084,7 +2623,7 @@ session changes. A stale request is cancelled. The page keeps no artifact bytes.
 ## Evidence investigation and metadata packages
 
 Open **Evidence → Inspect observations & artifacts** in the Requests inspector,
-or **Evidence** from Backtraces. The initial view leads with the selected request,
+or **Evidence** from Flow. The initial view leads with the selected request,
 a bounded recorded-observation list and an independently scrolling record inspector.
 It separates native request records, explicit same-process parent links, matching
 nonzero session/process/navigation/frame context and unlinked retained records.

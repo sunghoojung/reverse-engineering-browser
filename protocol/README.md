@@ -127,6 +127,12 @@ the sensitive `cookie_list` artifact); and type 39 `script_cookie`
 [Request index v1](request-index-v1.md) defines the backend's one-row-per-request
 index of a whole session, its private sidecar beside the store and
 `GET /api/requests`, which Traffic pages instead of the newest network window.
+[Flow graph v1](flow-graph-v1.md) folds every recorded stack of a session into
+one graph across realms, JavaScript, eval and Wasm for the Flow workspace's Flow
+graph (`GET /api/flow-graph`).
+[Graph layout](http-api.md#graph-layout) (`graph-layout-v1`,
+`POST /api/graph-layout`) returns node corners and edge routes from the
+vendored Triskel engine for graphs the UI sends.
 
 Renderer-to-browser delivery uses exact 320-byte `EventRecord` objects in a
 bounded shared-memory queue. Mojo carries session lifecycle and coalesced
@@ -452,7 +458,9 @@ not observed, which is distinct from an unknown host caller. See
 `get_events` and `wait_for_events` return the two Wasm observation payloads
 decoded as `wasm_observation` beside the hex, and the overflow payloads
 decoded as `wasm_overflow`. See
-[event queries](native-wasm-dispatch-v1.md#event-queries).
+[event queries](native-wasm-dispatch-v1.md#event-queries). The three
+JavaScript invocation records get `js_invocation` the same way; see
+[invocation event queries](native-js-invocation-v1.md#event-queries).
 `wasm_dispatch_overflow` and `wasm_indirect_overflow` are version 1 and do not
 carry invocation or caller context: they are compact identities for samples a
 budget refused, not full observations.

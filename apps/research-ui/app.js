@@ -4017,9 +4017,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       const trafficResponse = createTrafficResponse({getArtifacts: () => state.artifacts, getEvents: () => state.events,
         contentSession: () => state.requestContentCaptureEnabled, readable: () => location.protocol !== 'file:',
         lookup: (record, request) => trafficArtifacts.lookup(record, trafficStoreOffset(request)), onChange: () => renderInspector()});
+      // get_request_stack positions are one-based; Sources reveals zero-based ones.
       function openResolvedFrame(resolution) {
-        if (selectArtifact(resolution.artifact_id, resolution.artifact_line ?? null,
-          {column: resolution.artifact_column ?? 0}) !== false) showScreen('sources');
+        const line = Number.isSafeInteger(resolution.artifact_line) && resolution.artifact_line > 0 ? resolution.artifact_line - 1 : null;
+        const column = Number.isSafeInteger(resolution.artifact_column) && resolution.artifact_column > 0 ? resolution.artifact_column - 1 : 0;
+        if (selectArtifact(resolution.artifact_id, line, {column}) !== false) showScreen('sources');
       }
       const requestStackPanel = createRequestStackPanel({
         refresh: () => { if (state.inspectorTab === 'initiator') renderInspector(); },

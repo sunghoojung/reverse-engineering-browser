@@ -21,8 +21,9 @@ pub fn state(
     watch: Option<Value>,
     query: &debugger_observation::Query,
 ) -> Result<Value> {
-    let recent = debugger_observation::recent(store, query)?;
-    let (observed, budget_gaps) = debugger_observation::observed(store)?;
+    let scan = debugger_observation::scan(store)?;
+    let recent = debugger_observation::recent(store, query, &scan)?;
+    let (observed, budget_gaps) = scan.observed();
     let frames: Vec<Value> = console["targets"]
         .as_array()
         .into_iter()

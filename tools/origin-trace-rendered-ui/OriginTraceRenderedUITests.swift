@@ -1445,7 +1445,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       }
       _ = try await ui.value("(() => { window.fetch = window.__rebDebuggerFetch; delete window.__rebDebuggerFetch; return true; })()")
       try await ui.waitUntil("""
-        (document.querySelector('#debugger-sidebar .debugger-status-state')?.textContent ?? '').startsWith('Read every') &&
+        (document.querySelector('#debugger-sidebar .debugger-status-state')?.textContent ?? '').startsWith('Live:') &&
           document.querySelector('#debugger-sidebar [data-debugger-section="observations"]').dataset.stale === 'false'
         """, "\(size.name): a good read did not clear the stale state")
 

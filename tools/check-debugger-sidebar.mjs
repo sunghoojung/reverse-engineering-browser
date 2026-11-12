@@ -4,22 +4,23 @@
 // timers, a stub backend that holds an event store of byte-addressed records,
 // and stub Traffic and Console globals. Not rendered QA: layout, focus and
 // WebKit behavior are test31 in tools/origin-trace-rendered-ui.
-// An optional argument names another copy of the script, and
-// REB_DEBUGGER_CASE runs only the cases whose name contains it, so a case can
-// be shown to fail without its fix:
-//   REB_DEBUGGER_CASE=stored node tools/check-debugger-sidebar.mjs old.js
+// An optional argument names another copy of the script (its stylesheet is
+// read from beside it), and REB_DEBUGGER_CASE runs only the cases whose name
+// contains it, so a case can be shown to fail without its fix:
+//   REB_DEBUGGER_CASE=stored node tools/check-debugger-sidebar.mjs old/debugger_sidebar.js
 // Requires: npm ci --prefix tools/ui-startup-deps --ignore-scripts --no-audit --no-fund
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
-import {join, resolve} from 'node:path';
+import {dirname, join, resolve} from 'node:path';
 import {runInNewContext} from 'node:vm';
 import {setTimeout as sleep} from 'node:timers/promises';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const script = await readFile(process.argv[2] ? resolve(process.argv[2]) : join(root, 'apps/research-ui/debugger_sidebar.js'), 'utf8');
-const css = await readFile(join(root, 'apps/research-ui/debugger_sidebar.css'), 'utf8');
+const scriptPath = process.argv[2] ? resolve(process.argv[2]) : join(root, 'apps/research-ui/debugger_sidebar.js');
+const script = await readFile(scriptPath, 'utf8');
+const css = await readFile(join(dirname(scriptPath), 'debugger_sidebar.css'), 'utf8');
 const {parseHTML} = createRequire(new URL('ui-startup-deps/', import.meta.url))('linkedom');
 // The poll interval in the script; waits below are measured against it.
 const POLL = 2000;
@@ -59,18 +60,22 @@ function createStore(count = 0) {
   return store;
 }
 
-// A fresh document with the sidebar's mount points and the app globals it uses.
-function mount({protocol = 'http:', store = createStore(), hold = null, globals = {}} = {}) {
+// A fresh document with the sidebar's mount points and the app globals it
+// uses. `hold` keeps matching requests until released or aborted, `failing`
+// fails them, and `store.delay` slows each debugger read.
+function mount({protocol = 'http:', store = createStore(), hold = null, failing = null, globals = {}} = {}) {
   const {window, document} = parseHTML(`<!doctype html><html><body>
     <section id="screen-sources"><button id="source-debugger-toggle" type="button">Debugger</button>
       <aside id="source-sidebar" hidden></aside><aside id="debugger-sidebar" hidden></aside><div id="source-tree"></div></section>
     <section id="screen-traffic" hidden></section></body></html>`);
-  const requests = [], reveals = [], errors = [];
+  const requests = [], reveals = [], errors = [], timeouts = [];
+  // Each deadline the script asks for; a request records the last one asked.
+  const signals = {timeout: ms => { timeouts.push(ms); return AbortSignal.timeout(ms); }, any: list => AbortSignal.any(list)};
   window.Element.prototype.scrollIntoView = function scrollIntoView() { reveals.push(this.className); };
   // Each request is answered at once unless `hold` keeps it until released or aborted.
   async function fetch(input, init = {}) {
     const url = String(input), parameters = new URL(url, 'http://local').searchParams;
-    const entry = {url, signal: init.signal ?? null};
+    const entry = {url, signal: init.signal ?? null, timeout: timeouts.at(-1) ?? null};
     requests.push(entry);
     // Answered on a later turn, as a network answers, so a read loop cannot starve timers.
     await new Promise(next => setImmediate(next));
@@ -80,6 +85,8 @@ function mount({protocol = 'http:', store = createStore(), hold = null, globals 
         init.signal?.addEventListener('abort', () => reject(init.signal.reason ?? new DOMException('aborted', 'AbortError')), {once: true});
       });
     }
+    if (failing?.(url)) throw new TypeError('Load failed');
+    if (store.delay && url.startsWith('/api/native-debugger')) await sleep(store.delay);
     const json = body => ({ok: true, status: 200, json: async () => structuredClone(body)});
     if (url.startsWith('/api/native-debugger')) return json(store.answer(parameters));
     if (url.startsWith('/api/request-stack')) return json({status: 'recorded', request: {sequence_number: parameters.get('observation_sequence')}, state: 'no_script', frames: [], observation: {site: null}});
@@ -87,7 +94,7 @@ function mount({protocol = 'http:', store = createStore(), hold = null, globals 
     return {ok: false, status: 404, json: async () => ({error: 'not served'})};
   }
   const location = {protocol};
-  const context = {window, document, location, fetch, console: {...console, error: (...args) => errors.push(args.map(String).join(' '))}, setTimeout, clearTimeout, AbortController, AbortSignal, DOMException,
+  const context = {window, document, location, fetch, console: {...console, error: (...args) => errors.push(args.map(String).join(' '))}, setTimeout, clearTimeout, AbortController, AbortSignal: signals, DOMException,
     URL, URLSearchParams, TextEncoder, structuredClone, MutationObserver: window.MutationObserver, Event: window.Event,
     getComputedStyle: () => ({position: 'static'}), ...globals};
   runInNewContext(script, context, {filename: 'debugger_sidebar.js'});
@@ -107,6 +114,8 @@ async function until(predicate, message, timeout = 4 * POLL) {
   }
 }
 const settle = () => sleep(30);
+// A held request can be released once the stub has reached its hold.
+const release = async entry => { await until(() => entry?.release, 'a held request'); entry.release(); };
 const event = (ui, type, init = {}) => Object.assign(new ui.window.Event(type, {bubbles: true, cancelable: true}), init);
 const click = (ui, node, detail = 1) => node.dispatchEvent(event(ui, 'click', {detail}));
 const key = (ui, node, name) => node.dispatchEvent(event(ui, 'keydown', {key: name}));
@@ -132,6 +141,17 @@ await check('one watch form per Console document, stale arming refused', async (
     await settle();
   }
   assert.equal(forms().length, 1, 'repeated renders keep one form');
+  // Collapsing and expanding the section releases and redraws it.
+  const pane = ui.sidebar.querySelector('[data-debugger-section="watch-rules"]');
+  for (let turn = 0; turn < 2; turn += 1) {
+    pane.open = false;
+    pane.dispatchEvent(event(ui, 'toggle'));
+    pane.open = true;
+    pane.dispatchEvent(event(ui, 'toggle'));
+    click(ui, ui.sidebar.querySelector('.debugger-kind[data-kind="all"]'));
+    await settle();
+  }
+  assert.equal(forms().length, 1, 'collapsing and expanding keeps one form');
   assert.equal(forms()[0].querySelector('.debugger-arm').textContent, 'Arm on document 22');
   // The Console moves to document 23; the form drawn for 22 sends nothing.
   live = {session_id: '5', target_id: '23', label: 'child #23'};
@@ -397,7 +417,11 @@ await check('pausing statement names registered pausing sections', async () => {
   const remove = ui.context.RebDebuggerSidebar.addSection({id: 'breakpoints', title: 'Breakpoints', order: 45, native: 'pausing', render(body) { body.textContent = 'list'; }});
   await settle();
   assert.match(statement(), /^Available\. A Brave build serves the pausing debugger\. Its controls are in the Breakpoints section\.$/);
-  remove();
+  const more = ['call-stack', 'scope'].map((id, index) => ui.context.RebDebuggerSidebar.addSection({id, title: ['Call stack', 'Scope'][index],
+    order: 46 + index, native: 'pausing', render(body) { body.textContent = 'list'; }}));
+  await settle();
+  assert.match(statement(), /Its controls are in the Breakpoints, Call stack and Scope sections\.$/, 'the names read as a list');
+  for (const removal of [remove, ...more]) removal();
   await settle();
   assert.match(statement(), /not part of this sidebar yet/);
   ui.close();
@@ -454,6 +478,228 @@ await check('closed or hidden sidebar stays idle', async () => {
   const closed = ui.requests.length;
   await sleep(POLL + 600);
   assert.equal(ui.requests.length, closed, 'a closed sidebar reads nothing');
+});
+
+// Round 2, 1. A chosen observation is marked at once, also where nothing polls.
+await check('a chosen observation is marked at once', async () => {
+  const ui = mount({protocol: 'reb:', store: createStore(5)});
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length === 5, 'rows');
+  const list = ui.sidebar.querySelector('#debugger-observations');
+  const marked = () => [...list.querySelectorAll('[aria-selected="true"]')].map(row => row.dataset.key);
+  click(ui, ui.rows('#debugger-observations')[0]);
+  await settle();
+  assert.deepEqual(marked(), ['1:42:5'], 'the clicked row is marked before any read');
+  key(ui, list, 'ArrowDown');
+  await sleep(250);
+  assert.deepEqual(marked(), ['1:42:4'], 'the highlight follows the arrow with the details');
+  assert.match(ui.text('.debugger-detail'), /sequence 4/);
+  assert.equal(ui.reads().length, 1, 'choosing reads nothing');
+  ui.close();
+});
+
+// Round 2, 2. Without older pages, a selection or a scrolled list keeps its
+// place as records arrive; back at the top with nothing selected, it follows.
+await check('the default list keeps the researcher place', async () => {
+  const store = createStore(300);
+  const ui = mount({store});
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length > 0, 'rows');
+  const list = ui.sidebar.querySelector('#debugger-observations');
+  const size = () => Number(ui.rows('#debugger-observations')[0]?.getAttribute('aria-setsize'));
+  assert.equal(size(), 128);
+  list.scrollTop = 44 * 115;
+  list.dispatchEvent(event(ui, 'scroll'));
+  click(ui, ui.rows('#debugger-observations').find(row => row.dataset.key === '1:42:180'));
+  await settle();
+  for (let poll = 1; poll <= 3; poll += 1) {
+    store.add(10);
+    await until(() => size() === 128 + 10 * poll, `poll ${poll} adds its records to the kept rows`, 2 * POLL + 1500);
+  }
+  assert.equal(list.querySelector('[aria-selected="true"]')?.dataset.key, '1:42:180', 'the selection stays in the list');
+  assert.equal(list.scrollTop, 44 * 145, 'the view stays on the rows it showed');
+  key(ui, list, 'ArrowDown');
+  await sleep(250);
+  assert.equal(list.querySelector('[data-active="true"]')?.dataset.key, '1:42:179', 'arrow keys continue from the selection');
+  ui.sidebar.querySelector('.debugger-detail-close').click();
+  list.scrollTop = 0;
+  list.dispatchEvent(event(ui, 'scroll'));
+  await until(() => size() === 128, 'at the top with nothing selected the list follows the newest page');
+  ui.close();
+});
+
+await check('a kept list past its bound says how many rows it dropped', async () => {
+  const store = createStore(4200);
+  const ui = mount({store});
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length > 0, 'rows');
+  const size = () => Number(ui.rows('#debugger-observations')[0]?.getAttribute('aria-setsize'));
+  for (let page = 1; size() < 4096; page += 1) {
+    click(ui, ui.sidebar.querySelector('.debugger-older'));
+    await until(() => size() === Math.min(4096, 128 * (page + 1)), `page ${page}`);
+  }
+  click(ui, ui.rows('#debugger-observations')[0]);
+  await settle();
+  store.add(10);
+  await until(() => /10 older rows were dropped/.test(ui.text('.debugger-observation-notes')), 'the bound is stated', 2 * POLL + 1500);
+  assert.equal(size(), 4096, 'the bound holds');
+  assert.equal(ui.sidebar.querySelector('#debugger-observations [aria-selected="true"]')?.dataset.key, '1:42:4200', 'the selection stays');
+  assert.doesNotMatch(ui.text('.debugger-observation-notes'), /whole event store/);
+  ui.close();
+});
+
+// Round 2, 3. How long a read took never reaches the live region.
+await check('the live region ignores how long reads take', async () => {
+  const store = createStore(3);
+  const ui = mount({store});
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length === 3, 'rows');
+  const region = ui.sidebar.querySelector('.debugger-sidebar-status [aria-live], .debugger-sidebar-status[aria-live]');
+  const first = region.textContent;
+  store.delay = 900;
+  await until(() => /every 4 seconds/.test(ui.text('.debugger-sidebar-status')), 'a slower read lengthens the interval', 3 * POLL + 2000);
+  assert.equal(region.textContent, first, 'the interval is outside the live region');
+  ui.close();
+});
+
+// Round 2, 4. A refresh a section defers from render neither loops nor hangs.
+await check('a refresh deferred from render neither loops nor hangs', async () => {
+  for (const protocol of ['http:', 'reb:']) {
+    const ui = mount({protocol, store: createStore(2)});
+    let renders = 0;
+    // The cap ends a runaway loop, so an old script fails here instead of hanging.
+    ui.context.RebDebuggerSidebar.addSection({id: 'eager-later', title: 'Eager', order: 60, render(body, view) {
+      body.textContent = 'eager';
+      renders += 1;
+      if (renders < 300) { Promise.resolve().then(view.refresh); setTimeout(view.refresh, 0); }
+    }});
+    ui.open();
+    await sleep(POLL - 400);
+    assert.equal(ui.reads().length, 1, `${protocol}: one read, not one per render (${renders} renders)`);
+    assert(renders < 10, `${protocol}: renders follow reads (${renders})`);
+    ui.close();
+  }
+});
+
+// Round 2, 6. Opening a watched request is cancelled when the researcher
+// moves on, and its link says it is working.
+await check('Open request in Traffic cancels when the researcher moves on', async () => {
+  const calls = [];
+  let holding = true;
+  const indexRow = {id: 'S1:R42:77', method: 'POST', path: '/collect'};
+  const store = createStore(0);
+  store.records.push(record(0, {type: 'request_watch_match', request_id: '77', detail: {rule: 0, method_matched: true}}));
+  const state = {requests: [], sessionMode: 'live', inspectorTab: 'general', trafficIndex: {row: () => null}};
+  const ui = mount({store, hold: url => holding && url.startsWith('/api/requests'), globals: {state,
+    showScreen: name => calls.push(['screen', name]), setConsoleTrafficView: () => {}, renderInspector: () => {},
+    selectTrafficRow: id => calls.push(['select', id]), loadTrafficRequest: row => calls.push(['load', row.id]),
+    trafficIndexRequest: (row, origin) => ({id: row.id, origin, indexRow: row}),
+    __requests: parameters => parameters.has('locate') ? {format: 'reb-request-index-v1', requests: [], located: {'S1:R42:77': 2400}}
+      : {format: 'reb-request-index-v1', requests: [indexRow]}}});
+  const lookups = () => ui.requests.filter(entry => entry.url.startsWith('/api/requests'));
+  const link = () => ui.sidebar.querySelector('.debugger-open-request');
+  const choose = async () => { click(ui, ui.rows('#debugger-observations')[0]); await settle(); };
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length === 1, 'the request record');
+  await choose();
+  click(ui, link());
+  await until(() => lookups().length === 1, 'a lookup');
+  assert.equal(link().textContent, 'Opening request in Traffic…', 'the link shows progress');
+  assert.equal(link().getAttribute('aria-busy'), 'true');
+  click(ui, link());
+  await until(() => lookups().length === 2, 'a newer lookup');
+  assert.equal(lookups()[0].signal.aborted, true, 'a newer click cancels the earlier lookup');
+  ui.close();
+  assert.equal(lookups()[1].signal.aborted, true, 'closing the sidebar cancels the lookup');
+  // Another screen chosen while the lookup runs: nothing switches.
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length === 1, 'reopened');
+  await choose();
+  click(ui, link());
+  await until(() => lookups()[2]?.release, 'a third lookup, held');
+  ui.document.querySelector('#screen-sources').hidden = true;
+  holding = false;
+  await release(lookups()[2]);
+  await sleep(100);
+  assert.deepEqual(calls, [], 'nothing switches screens after the researcher moved on');
+  ui.close();
+});
+
+// Round 2, 7. An arm outcome ends once a later read says the rules are gone.
+await check('a Watch outcome ends when the state it named is gone', async () => {
+  let live = {session_id: '5', target_id: '22', label: 'top #22'};
+  const store = createStore(1);
+  const ui = mount({store, globals: {RebNativeConsole: {liveDocument: () => live, watch: async rules => {
+    store.watch = rules ? {state: 'armed', armed: {session_id: '5', target_id: '22', rules}} : {state: 'none', armed: null};
+    return {status: 'ok'};
+  }}}});
+  const section = () => ui.text('[data-debugger-section="watch-rules"] .debugger-section-body');
+  ui.open();
+  await until(() => ui.sidebar.querySelector('.debugger-watch-form'), 'the form');
+  const form = ui.sidebar.querySelector('.debugger-watch-form');
+  form.querySelector('textarea').value = '/collect';
+  form.dispatchEvent(event(ui, 'submit'));
+  await until(() => /Armed on Console document 22/.test(section()), 'the armed set is read', 2 * POLL + 1000);
+  assert.match(section(), /Armed on document 22\. The renderer confirmed the set below\./, 'the outcome agrees with the state');
+  // A Console Stop disarms the rules and ends the connection.
+  store.watch = {state: 'none', armed: null};
+  live = null;
+  await until(() => /No rules armed/.test(section()), 'the disarmed state is read', 2 * POLL + 1000);
+  assert.doesNotMatch(section(), /Armed on document 22/, 'no outcome contradicts the state');
+  ui.close();
+});
+
+// Round 2, 8. A chosen record's details come into view again once resolved.
+await check('details come into view again once positions resolve', async () => {
+  let holding = true;
+  const store = createStore(0);
+  store.records.push(record(0, {type: 'request_watch_match', request_id: '77', detail: {rule: 0, method_matched: true}}));
+  const ui = mount({protocol: 'reb:', store, hold: url => holding && url.startsWith('/api/request-stack')});
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length === 1, 'rows');
+  click(ui, ui.rows('#debugger-observations')[0]);
+  await until(() => /Resolving positions/.test(ui.text('.debugger-detail')), 'resolving');
+  const early = ui.reveals.length;
+  assert(early > 0, 'the chosen details are revealed');
+  await release(ui.requests.find(entry => entry.url.startsWith('/api/request-stack')));
+  holding = false;
+  await until(() => !/Resolving positions/.test(ui.text('.debugger-detail')), 'resolved');
+  await settle();
+  assert(ui.reveals.length > early, 'revealed again once resolved');
+  assert(ui.reveals.includes('debugger-detail-actions'), 'the action row is brought into view');
+  ui.close();
+});
+
+// Round 2, 10. A failed bridging read changes neither rows nor their note.
+await check('a failed bridging read leaves rows and note as they were', async () => {
+  const store = createStore(300);
+  let failBefore = false;
+  const ui = mount({store, failing: url => failBefore && url.includes('before=')});
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length > 0, 'rows');
+  click(ui, ui.sidebar.querySelector('.debugger-older'));
+  const size = () => Number(ui.rows('#debugger-observations')[0]?.getAttribute('aria-setsize'));
+  await until(() => size() === 256, 'the older page');
+  const note = ui.text('.debugger-observation-notes');
+  failBefore = true;
+  store.add(300);
+  await until(() => /Disconnected: Load failed/.test(ui.text('.debugger-sidebar-status')), 'the bridging read fails', 2 * POLL + 1500);
+  assert.equal(size(), 256);
+  assert.equal(ui.text('.debugger-observation-notes'), note, 'the note still describes the rows shown');
+  ui.close();
+});
+
+await check('stored reads wait for the bundled backend', async () => {
+  const stored = mount({protocol: 'reb:', store: createStore(2)});
+  stored.open();
+  await until(() => stored.rows('#debugger-observations').length === 2, 'stored rows');
+  assert(stored.reads()[0].timeout >= 30000, `a stored read waits past a 15 s backend start: ${stored.reads()[0].timeout} ms`);
+  stored.close();
+  const live = mount({store: createStore(2)});
+  live.open();
+  await until(() => live.rows('#debugger-observations').length === 2, 'live rows');
+  assert.equal(live.reads()[0].timeout, 10000, 'a live read keeps its 10 s deadline');
+  live.close();
 });
 
 console.log(`PASS debugger sidebar: ${results.length} cases with real timers (offline DOM model; no rendered layout claimed)`);

@@ -293,9 +293,11 @@ Each section is a collapsible pane:
   `get_request_stack`. Enter or **Open …** opens that position in Sources; a
   watched request opens its Traffic row on the Initiator tab through Traffic's
   own row selection, after locating it in the request index when it is
-  outside the block Traffic holds. Its link says it is working, and a newer
-  click, closing the sidebar or leaving Sources cancels it, so Traffic never
-  opens after the researcher moved on. Until the researcher has a place, the
+  outside the block Traffic holds. Its link says it is working. A newer
+  click, choosing another record, the kind filter, **Show newest**, closing
+  the record's details or the sidebar, and leaving Sources (even when the
+  researcher comes back before the lookup answers) each cancel it, and a
+  cancelled lookup never switches to Traffic. Until the researcher has a place, the
   list follows the newest page. Once a row is selected, the list is scrolled
   from its top or older pages are loaded, the rows are kept: each read adds
   the records written since, reading at most two more pages to reach them,

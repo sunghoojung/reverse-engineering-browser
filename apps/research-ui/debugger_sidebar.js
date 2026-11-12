@@ -399,7 +399,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
   let open = false, timer = 0, generation = 0, interval = DEBUGGER_SIDEBAR.poll, controller = null;
   // `renderTurn` lasts from a render until the next task, so a refresh() a
   // section queues from render (even as a promise) is ignored.
-  let rendering = false, renderTurn = false, renderTurns = 0, lastStarted = 0, refreshQueued = false;
+  let rendering = false, renderTurn = false, renderTurns = 0, lastStarted = 0, refreshQueued = false, stops = 0;
   const mounted = new Map();
   const blankObservations = () => ({key: null, head: [], refused: 0, query: null, list: null, loadingOlder: false, olderError: null, olderController: null});
   const view = {
@@ -704,6 +704,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
 
   function stop() {
     generation += 1;
+    stops += 1;
     clearTimeout(timer);
     timer = 0;
     refreshQueued = false;
@@ -757,6 +758,8 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     view,
     setOpen,
     isOpen: () => open,
+    // Counts closes and departures from Sources, so work begun before one can tell.
+    stops: () => stops,
     sectionsChanged: () => render(),
     sourceScope() {
       const thread = view.thread;
@@ -1105,6 +1108,7 @@ function debuggerObservationsSection() {
   function choose(view, item, how) {
     if (!item) return;
     if (selected?.key !== item.key) notice = null;
+    if (opening && opening.key !== item.key) cancelOpening();
     selected = item;
     revealKey = item.key;
     list?.set(shown, {selectedKey: item.key});
@@ -1134,8 +1138,13 @@ function debuggerObservationsSection() {
       else say(view, record, 'This record has no retained script position to open.');
     });
   }
-  // One lookup at a time: a newer click, closing the sidebar or leaving
-  // Sources cancels it, and its link says it is working.
+  function cancelOpening() {
+    opening?.controller.abort();
+    opening = null;
+  }
+  // One lookup at a time: a newer click, choosing another record, the kind
+  // filter, Show newest, closing the sidebar or leaving Sources cancels it,
+  // and its link says it is working.
   function openRequest(view, record) {
     const key = debuggerRecordKey(record);
     opening?.controller.abort();
@@ -1253,7 +1262,7 @@ function debuggerObservationsSection() {
     kinds.setAttribute('role', 'group');
     kinds.setAttribute('aria-label', 'Observation kind');
     for (const [kind, text] of [[null, 'All'], ...Object.entries(DEBUGGER_OBSERVATION_KINDS).map(([kind, value]) => [kind, value.filter])]) {
-      const pill = debuggerButton(text, 'debugger-kind', () => { selected = null; view.setKind(kind); });
+      const pill = debuggerButton(text, 'debugger-kind', () => { selected = null; cancelOpening(); view.setKind(kind); });
       pill.dataset.kind = kind ?? 'all';
       kinds.append(pill);
     }
@@ -1263,6 +1272,7 @@ function debuggerObservationsSection() {
     const pinnedText = debuggerNote('', 'warning');
     pinned.append(pinnedText, debuggerButton('Show newest', 'secondary-button debugger-show-newest', () => {
       selected = null;
+      cancelOpening();
       if (list) list.element.scrollTop = 0;
       view.showNewest();
     }));
@@ -1437,7 +1447,9 @@ for (const section of [debuggerThreadsSection(), debuggerWatchSection(), debugge
     async openRequest(record, signal) {
       const app = appState(), id = `S${record.session_id}:R${record.process_id}:${record.request_id}`;
       const name = `Request ${record.request_id} of renderer ${record.process_id}`;
-      const moved = () => signal?.aborted || !debuggerSidebarController?.isOpen() || screen.hidden;
+      // Leaving Sources and coming back counts as moving on, as closing does.
+      const stopped = debuggerSidebarController?.stops() ?? 0;
+      const moved = () => signal?.aborted || !debuggerSidebarController?.isOpen() || screen.hidden || debuggerSidebarController.stops() !== stopped;
       if (!app || typeof selectTrafficRow !== 'function' || typeof showScreen !== 'function') return `${name} cannot be opened: Traffic is not available here.`;
       let located = null;
       if (!app.trafficIndex?.row?.(id) && !(app.requests ?? []).some(request => request.id === id)) {

@@ -763,6 +763,56 @@ await check('returning to the top during Show older leaves no hole', async () =>
   ui.close();
 });
 
+// Round 3, 2. Choosing another record, the kind filter or leaving Sources
+// cancels a Traffic lookup, and a cancelled lookup never switches screens.
+await check('moving on in the sidebar cancels a Traffic lookup', async () => {
+  const calls = [];
+  let holding = true;
+  const indexRow = {id: 'S1:R42:77', method: 'POST', path: '/collect'};
+  const store = createStore(0);
+  store.records.push(record(0, {type: 'request_watch_match', request_id: '77', detail: {rule: 0, method_matched: true}}));
+  store.records.push(record(1));
+  const state = {requests: [], sessionMode: 'live', inspectorTab: 'general', trafficIndex: {row: () => null}};
+  const ui = mount({store, hold: url => holding && url.startsWith('/api/requests'), globals: {state,
+    showScreen: name => calls.push(['screen', name]), setConsoleTrafficView: () => {}, renderInspector: () => {},
+    selectTrafficRow: id => calls.push(['select', id]), loadTrafficRequest: row => calls.push(['load', row.id]),
+    trafficIndexRequest: (row, origin) => ({id: row.id, origin, indexRow: row}),
+    __requests: parameters => parameters.has('locate') ? {format: 'reb-request-index-v1', requests: [], located: {'S1:R42:77': 2400}}
+      : {format: 'reb-request-index-v1', requests: [indexRow]}}});
+  const lookups = () => ui.requests.filter(entry => entry.url.startsWith('/api/requests'));
+  const row = key => ui.rows('#debugger-observations').find(item => item.dataset.key === key);
+  const startLookup = async count => {
+    click(ui, row('1:42:1'));
+    await settle();
+    click(ui, ui.sidebar.querySelector('.debugger-open-request'));
+    await until(() => lookups()[count - 1]?.release, `lookup ${count}, held`);
+    return lookups()[count - 1];
+  };
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length === 2, 'rows');
+  const first = await startLookup(1);
+  click(ui, row('1:42:2'));
+  await settle();
+  assert.equal(first.signal.aborted, true, 'choosing another record cancels the lookup');
+  const second = await startLookup(2);
+  click(ui, ui.sidebar.querySelector('.debugger-kind[data-kind="timer_observation"]'));
+  await settle();
+  assert.equal(second.signal.aborted, true, 'the kind filter cancels the lookup');
+  click(ui, ui.sidebar.querySelector('.debugger-kind[data-kind="all"]'));
+  await until(() => ui.rows('#debugger-observations').length === 2, 'all records again');
+  const third = await startLookup(3);
+  const screen = ui.document.querySelector('#screen-sources');
+  screen.hidden = true;
+  await settle();
+  screen.hidden = false;
+  await settle();
+  holding = false;
+  for (const entry of [first, second, third]) entry.release();
+  await sleep(200);
+  assert.deepEqual(calls, [], 'no cancelled lookup, nor one begun before leaving Sources, switches screens');
+  ui.close();
+});
+
 // Round 3, 3. A selection carried into a Threads scope keeps its place.
 await check('a selection carried into a thread scope keeps its place', async () => {
   const store = createStore(200);

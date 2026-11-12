@@ -9,8 +9,9 @@
   const WEBUI_REQUEST_CLASS = 67;
   // Traffic no tab caused (#425): extension workers and DevTools loads.
   const NO_TAB_CLASSES = Object.freeze({65: 'extension', 66: 'devtools'});
-  // Memory-cache reuses a renderer counted past its budget, always with that renderer.
-  const MEMORY_CACHE_CLASS = 68;
+  // Memory-cache reuses a renderer did not record, always with that renderer.
+  // Classes 68 and 69 belong to another part of the contract.
+  const MEMORY_CACHE_CLASS = 70;
   const INTERNAL_URL = /^(?:brave|chrome|chrome-search|chrome-untrusted|devtools):/i;
 
   // Same rules as include/reb/network_scope.hpp and tools/validate-evidence-store.py.

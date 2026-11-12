@@ -145,7 +145,8 @@ EVENT_TYPES = {
 SCHEME_CLASSES = {*range(0, 9), 15, *range(16, 21)}
 SCHEME_CLASS_TYPES = {"request_initiated", "request_started", "request_completed", "request_failed",
                       "memory_cache_reuse"}
-EXCLUSION_CLASSES = {*range(16, 21), 64, 65, 66, 67, 68}
+# 68 and 69 belong to another part of the contract; 70 is memory_cache_reuse.
+EXCLUSION_CLASSES = {*range(16, 21), *range(64, 71)}
 # Loader kinds, shared with include/reb/tab_link.hpp.
 LOADER_KINDS = {"request_started": range(1, 11), "request_initiated": range(16, 22),
                 "memory_cache_reuse": range(16, 22)}
@@ -880,7 +881,7 @@ def valid_capture_exclusion(event: dict, payload: bytes) -> bool:
             and event["tab_id"] == 0 and event["status_code"] == 0 and event["error_code"] == 0
             and event["resource_type"] == 0 and event["initiator_request_id"] == 0
             and (payload[4] not in (64, 66, 67) or event["initiator_process_id"] == 0)
-            and (payload[4] != 68 or event["initiator_process_id"] != 0))
+            and (payload[4] != 70 or event["initiator_process_id"] != 0))
 
 
 # protocol/native-network-v3.md memory_cache_reuse, shared with include/reb/network_scope.hpp.

@@ -41,12 +41,13 @@ enum class NativeSchemeClass : std::uint8_t {
 
 inline constexpr std::uint8_t kNativeWebUiRendererExclusion = 64;
 inline constexpr std::uint8_t kNativeWebUiRequestExclusion = 67;
-inline constexpr std::uint8_t kNativeMemoryCacheReuseExclusion = 68;
+// Classes 68 and 69 belong to another part of the contract.
+inline constexpr std::uint8_t kNativeMemoryCacheReuseExclusion = 70;
 inline constexpr std::uint16_t kNativeCaptureExclusionPayloadVersion = 1;
 inline constexpr std::uint32_t kNativeCaptureExclusionPayloadSize = 16;
 // One counter per browser-internal scheme class, 16 to 20.
 inline constexpr std::size_t kNativeSchemeExclusionSlots = 5;
-// The renderer's probe queue counters: the scheme classes, then class 68.
+// The renderer's probe queue counters: the scheme classes, then class 70.
 inline constexpr std::size_t kNativeRendererExclusionSlots = kNativeSchemeExclusionSlots + 1;
 
 // The queue slot of a class the renderer counts, or kNativeRendererExclusionSlots.
@@ -70,7 +71,7 @@ inline constexpr std::uint32_t kNativeMemoryCacheReusePayloadSize = 128;
 inline constexpr std::size_t kNativeMemoryCacheReuseHostSize = 120;
 inline constexpr std::uint8_t kNativeMemoryCacheReuseStaticData = 1U << 0U;
 inline constexpr std::uint8_t kNativeMemoryCacheReuseHostTruncated = 1U << 1U;
-// Records one renderer configuration admits; later reuses count as class 68.
+// Records one renderer configuration admits; later reuses count as class 70.
 inline constexpr std::uint32_t kNativeMemoryCacheReuseBudget = 4096;
 
 // resource_type is Blink's ResourceType, 1 to 15 at the pin.

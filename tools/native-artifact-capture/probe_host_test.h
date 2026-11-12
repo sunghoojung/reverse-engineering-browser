@@ -563,9 +563,9 @@ void NativeProbeHostBrowserInternalScope() {
   queue->CountExclusion(reb::kNativeMemoryCacheReuseExclusion);
   host.EventsAvailable();
   Check(session.exclusions.size() == 4 && session.exclusions[3].process == 123 &&
-            session.exclusions[3].exclusion_class == 68 && session.exclusions[3].count == 2 &&
+            session.exclusions[3].exclusion_class == 70 && session.exclusions[3].count == 2 &&
             events.empty(),
-        "Memory-cache reuses past the renderer's budget are reported as class 68");
+        "Memory-cache reuses past the renderer's budget are reported as class 70");
 
   NativeProbeEvent record;
   record.header.category = reb::NativeProbeCategory::kNetwork;

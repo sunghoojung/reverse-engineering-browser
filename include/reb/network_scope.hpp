@@ -39,7 +39,8 @@ enum class ExclusionClass : std::uint8_t {
   kExtensionWorker = 65,
   kDevToolsLoad = 66,
   kWebUiRequest = 67,
-  kMemoryCacheReuse = 68,
+  // 68 and 69 belong to another part of the contract.
+  kMemoryCacheReuse = 70,
 };
 
 inline constexpr std::uint16_t kCaptureExclusionPayloadVersion = 1;
@@ -54,7 +55,7 @@ inline constexpr std::size_t kCaptureExclusionPayloadSize = 16;
 }
 
 [[nodiscard]] constexpr bool IsKnownExclusionClass(const std::uint8_t value) noexcept {
-  return IsBrowserInternalSchemeClass(value) || (value >= 64 && value <= 68);
+  return IsBrowserInternalSchemeClass(value) || (value >= 64 && value <= 70);
 }
 
 // The record types that may name the scheme of their request.

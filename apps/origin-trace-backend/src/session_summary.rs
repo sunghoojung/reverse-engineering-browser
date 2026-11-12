@@ -369,7 +369,8 @@ fn exclusion_class(code: u8) -> Option<(&'static str, &'static str)> {
         65 => ("extension_worker", "requests"),
         66 => ("devtools_load", "requests"),
         67 => ("webui_request", "requests"),
-        68 => ("memory_cache_reuse", "reuses"),
+        // 68 and 69 belong to another part of the contract.
+        70 => ("memory_cache_reuse", "reuses"),
         _ => return None,
     })
 }
@@ -565,12 +566,12 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         item["count"] = json!(no_tab.to_string());
         checks.push(item);
     }
-    if let Some(&reuses) = excluded.get(&68) {
+    if let Some(&reuses) = excluded.get(&70) {
         let mut item = check(
             "memory_cache_reuse_not_recorded",
             "info",
             format!(
-                "{reuses} memory-cache reuses were counted, not recorded: each renderer records at most 4,096 per capture configuration. This is a named exclusion, not a gap."
+                "{reuses} memory-cache reuses were counted, not recorded: each renderer records at most 4,096 per capture configuration, and none in a page that is not ordinary (an SVG image's own document or a page popup). This is a named exclusion, not a gap."
             ),
         );
         item["count"] = json!(reuses.to_string());
@@ -766,8 +767,8 @@ mod tests {
             exclusion(8, 41, 65, 2),
             exclusion(9, 0, 66, 1),
             exclusion(11, 0, 67, 3),
-            exclusion(12, 41, 68, 4),
-            exclusion(13, 41, 68, 9),
+            exclusion(12, 41, 70, 4),
+            exclusion(13, 41, 70, 9),
         ]
         .map(|event| event.to_string())
         .to_vec();

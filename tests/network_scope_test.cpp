@@ -117,9 +117,14 @@ void Exclusions() {
   Case("devtools loads with a producer", Exclusion(66, 1, 4242), false);
   Case("webui requests at the proxy", Exclusion(67, 3, 0), true);
   Case("webui requests with a producer", Exclusion(67, 1, 4242), false);
-  Case("memory-cache reuses of a renderer", Exclusion(68, 4097, 4242), true);
-  Case("memory-cache reuses with no renderer", Exclusion(68, 1, 0), false);
-  Case("exclusion class above the table", Exclusion(69, 1, 4242), false);
+  Case("memory-cache reuses of a renderer", Exclusion(70, 4097, 4242), true);
+  Case("memory-cache reuses with no renderer", Exclusion(70, 1, 0), false);
+  Case("exclusion class above the table", Exclusion(71, 1, 4242), false);
+  // Classes 68 and 69 are defined by another change; the range keeps them valid.
+  for (const std::uint8_t code : {std::uint8_t{68}, std::uint8_t{69}}) {
+    Check(reb::IsValidEvent(Exclusion(code, 1, 0)) && reb::IsValidEvent(Exclusion(code, 1, 4242)),
+          "class " + std::to_string(code) + " stays valid");
+  }
   Case("zero count", Exclusion(16, 0, 4242), false);
   Case("unknown class", Exclusion(21, 1, 4242), false);
   Case("http is never excluded", Exclusion(2, 1, 4242), false);

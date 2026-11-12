@@ -623,18 +623,21 @@ static_assert(std::has_unique_object_representations_v<NativeTaskOriginHeader>);
                                                             i * kNativeTaskSegmentSize),
                 raw.size(), raw.begin());
     out[i] = std::bit_cast<NativeTaskSegment>(raw);
-    // Only the receiver records a rejected origin; a sender never carries one.
-    const bool no_script =
-        out[i].state == static_cast<std::uint8_t>(NativeTaskSegmentState::kNoScript);
+    // A chain that ended with no script, or at an origin an earlier receiver
+    // rejected, travels on with that end last, neither cut nor truncated.
+    const bool ends =
+        out[i].state == static_cast<std::uint8_t>(NativeTaskSegmentState::kNoScript) ||
+        out[i].state == static_cast<std::uint8_t>(NativeTaskSegmentState::kOriginRejected);
     if (!IsValidNativeTaskSegment(out[i], kNativeStackArtifactScopeVersion) ||
-        out[i].state == static_cast<std::uint8_t>(NativeTaskSegmentState::kOriginRejected) ||
-        (no_script && (i + 1 != header.count || header.flags != 0))) {
+        (ends && (i + 1 != header.count || header.flags != 0))) {
       return false;
     }
   }
+  // The posting segment is this message's own post: walked, or no script.
   const std::uint8_t posting = out[0].kind;
   return posting >= static_cast<std::uint8_t>(NativeAsyncTaskKind::kMessagePort) &&
-         posting <= static_cast<std::uint8_t>(NativeAsyncTaskKind::kWorkerMessage);
+         posting <= static_cast<std::uint8_t>(NativeAsyncTaskKind::kWorkerMessage) &&
+         out[0].state != static_cast<std::uint8_t>(NativeTaskSegmentState::kOriginRejected);
 }
 
 template <typename T>

@@ -1718,15 +1718,23 @@ stored as such. Little endian:
 | 8 | 48 x n | version 3 task segments, nearest first: the posting segment (kind 10 to 12), then the sender's chain |
 
 What crosses is the minimum the receiving thread needs to write the chain into
-its own stack artifacts: per segment its kind, state, frame-limit flag,
-registration, frame count and the SHA-256 digest that names its stack
-artifact, which the sender stored. The origin names no process, thread, table
-or serial: version 1 carried the sender's OS process ID, a table number and
+its own stack artifacts: per segment its kind, its state (1, 4, 5, 6, 7 or
+8), its flags (bit 0 the walk stopped at its frame limit; bit 1, kind 9 in
+state 6, promise registration stacks were on), its registration, its frame
+count and the SHA-256 digest naming its stack artifact. That artifact was
+stored by the renderer that walked the segment: the poster for its own
+posting segment, an earlier renderer for one the poster had itself received.
+Segments travel onward: a handler's own posts carry the segments it received
+after its posting segment, so a segment can pass through every later hop of
+a message chain, never more than 32 segments in one message. The origin names
+no process, thread, table or serial: version 1 carried the sender's OS process ID, a table number and
 the posting segment's serial so that a receiver on the posting thread could
 link the posting segment in place. The posting thread now finds its own posts
 in a record it keeps (below), and every other receiver stores copies, which
-give the same chain. A no-script last segment, and bit 1 only with 32
-segments, are checked; a sender never carries `origin_rejected`.
+give the same chain. A no-script or `origin_rejected` segment is only last,
+with neither flag (a handler whose origin was rejected carries that end on
+when it posts), the posting segment is never `origin_rejected`, and bit 1
+needs 32 segments.
 
 At most 1,544 bytes per message, built from at most 32 ring reads when the
 message is posted. The receiving renderer treats the bytes as untrusted and

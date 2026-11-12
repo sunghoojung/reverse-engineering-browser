@@ -87,23 +87,34 @@ it.
   `postMessage` either way) carries a task origin to the thread and renderer
   process that handle it, while request stacks are recorded and capture is
   active on the posting thread. It is at most 1,544 bytes: an 8-byte header
-  (version, segment count, and whether the sender's chain was cut or went on
-  past 32 segments) and up to 32 segments of 48 bytes, each a task kind, a
-  state, a frame-limit flag, a promise registration kind, a frame count and
-  the SHA-256 digest of a stack artifact the sender stored. It names no
-  process, thread, table or serial, and holds no URL, name, source, value or
-  frame. Page JavaScript in neither renderer can read it: Blink hands it only
-  to the stack sink, never to a `MessageEvent`. The receiving renderer process
-  holds the bytes, and a `MessagePort` transferred to a cross-site frame makes
-  that a cross-site process. A compromised receiving renderer would learn how
-  many async tasks of which kinds led to the post, their stack depths and
-  promise registration kinds, whether their stacks were retained, and the
+  (version, segment count, and whether the chain was cut or went on past 32
+  segments) and up to 32 segments of 48 bytes. Each segment is a task kind; a
+  state (captured, not retained, not recorded, scheduled with no script, or
+  ended at a rejected origin); two flags (the walk stopped at its frame limit,
+  and, for a promise reaction with no recorded registration, whether promise
+  registration stacks were on); a promise registration kind; a frame count;
+  and the SHA-256 digest naming a stack artifact. Segments travel onward: a
+  handler that posts again carries the segments it received after its own, so
+  a segment and its digest can reach every renderer a chain of messages later
+  passes through, never more than 32 segments in one message. Each digest
+  names the artifact that the renderer which walked that segment stored: the
+  poster for its own segment, an earlier renderer in the chain for one the
+  poster had received. The origin names no process, thread, table or serial,
+  and holds no URL, name, source, value or frame. Page JavaScript in no
+  renderer can read it: Blink hands it only to the stack sink, never to a
+  `MessageEvent`. Each receiving renderer process holds the bytes, and a
+  `MessagePort` transferred to a cross-site frame makes that a cross-site
+  process. A compromised receiving renderer would learn how many async tasks
+  of which kinds led to the post, their stack depths and promise registration
+  kinds, whether their stacks were retained or promise stacks were on, and the
   digests. A digest reveals no strings, but equal digests mean equal stacks,
-  and since a digest covers the sender's frame identities (script IDs and
-  positions) and its renderer process ID, thread kind and isolate key, such a
-  renderer could confirm guessed values of those. The receiver writes the
+  and since a digest covers the walking renderer's frame identities (script
+  IDs and positions) and its process ID, thread kind and isolate key, such a
+  renderer could confirm guessed values of those. A receiver writes the
   carried digests into the stack artifacts of requests its handler starts, so
-  they are stored in the handler's evidence. An origin that does not validate,
+  they are stored in that handler's evidence. On the posting thread itself a
+  receipt links to the posting segment through a record of that thread's last
+  16 posts, which never leaves the thread. An origin that does not validate,
   or is longer than 1,544 bytes, is rejected without being stored and counted
   as a `message_task_origin_rejected` gap.
 - Debugger observation rules (Console `watch`) are off until armed on one

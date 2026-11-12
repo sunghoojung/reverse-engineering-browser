@@ -783,8 +783,18 @@ void CheckScopedArtifactsAndOrigins() {
         "the first carried segment is a message kind");
   Check(!reb::DecodeNativeTaskOrigin(origin({}), head, carried), "an empty origin");
   Check(!reb::DecodeNativeTaskOrigin(origin({port}, 4), head, carried), "unknown origin flag");
-  Check(!reb::DecodeNativeTaskOrigin(origin({port, rejected}), head, carried),
-        "a sender never carries a rejected origin");
+  // A chain that ended at an origin an earlier receiver rejected travels on
+  // with that end last; a message's own posting segment is never one.
+  Check(reb::DecodeNativeTaskOrigin(origin({port, rejected}), head, carried) &&
+            carried[1].state == reb::kTaskSegmentOriginRejected,
+        "a rejected end travels on as the last segment");
+  Check(!reb::DecodeNativeTaskOrigin(origin({rejected}), head, carried),
+        "a posting segment is never a rejected end");
+  Check(!reb::DecodeNativeTaskOrigin(origin({port, rejected, timeout}), head, carried),
+        "nothing follows a carried rejected end");
+  Check(!reb::DecodeNativeTaskOrigin(origin({port, rejected}, reb::kNativeTaskOriginCut), head,
+                                     carried),
+        "a carried rejected end is neither cut nor truncated");
   Check(!reb::DecodeNativeTaskOrigin(origin({Segment(Kind::kWorkerMessage, State::kNoScript, 0, 0)},
                                             reb::kNativeTaskOriginCut),
                                      head, carried),

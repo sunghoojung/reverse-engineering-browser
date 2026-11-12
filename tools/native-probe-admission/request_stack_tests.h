@@ -1130,6 +1130,31 @@ NativeRequestStackPayload HandlerStack(NativeProbeQueue& queue,
     Drain(queue);
   });
 
+  // A handler whose origin was rejected posts again: its rejected end travels
+  // on as the last segment, and the next receiver counts no second gap.
+  saved = NativeRequestStackWalk::EnterAsyncTask(
+      NativeRequestStackWalk::ReceiveMessageOrigin(NativeAsyncTaskKind::kMessagePort, damaged));
+  assert(GapReason(Pop(queue)) == "message_task_origin_rejected");
+  scenario.task_seed = 9460;
+  const auto onward_size =
+      NativeRequestStackWalk::PostMessageOrigin(NativeAsyncTaskKind::kWorkerMessage, true, origin);
+  NativeRequestStackWalk::ExitAsyncTask(saved);
+  Drain(queue);
+  const std::vector<std::uint8_t> onward(origin.begin(), origin.begin() + onward_size);
+  assert(reb::DecodeNativeTaskOrigin(onward, header, carried) && header.count == 2 &&
+         header.flags == 0 &&
+         carried[1].state ==
+             static_cast<std::uint8_t>(reb::NativeTaskSegmentState::kOriginRejected));
+  thread.Run([&] {
+    const auto handled = HandlerStack(queue, NativeAsyncTaskKind::kWorkerMessage, onward, 7130);
+    const auto copy = GeneratedChain();
+    assert(handled.task_segments == 2 && copy[0].kind == 12 && copy[1].kind == 10 &&
+           copy[1].state ==
+               static_cast<std::uint8_t>(reb::NativeTaskSegmentState::kOriginRejected) &&
+           (handled.flags & reb::kNativeRequestStackTaskChainCut) == 0);
+    Drain(queue);
+  });
+
   // A worker posts to the page and shuts down before the page dispatches the
   // message: the origin already holds the segments, so the page's handler
   // still shows the worker's posting stack.
@@ -1234,12 +1259,12 @@ NativeRequestStackPayload HandlerStack(NativeProbeQueue& queue,
       Drain(queue) == 0);
   scenario = {};
   transport.Disable();
-  std::cout
-      << "PASS message origins: nothing beyond the segments crosses, a same-thread "
-         "receipt linked in place so a MessageChannel loop keeps an older timer, copies on "
-         "other threads, forged, damaged, oversize and wrong-kind origins rejected and counted, "
-         "missing origin cut, a worker that posts and detaches first, no-script post, cut "
-         "and truncated ends carried apart, network off\n";
+  std::cout << "PASS message origins: nothing beyond the segments crosses, a same-thread "
+               "receipt linked in place so a MessageChannel loop keeps an older timer, copies on "
+               "other threads, a rejected end carried onward, forged, damaged, oversize and "
+               "wrong-kind origins rejected and counted, "
+               "missing origin cut, a worker that posts and detaches first, no-script post, cut "
+               "and truncated ends carried apart, network off\n";
 }
 
 // --reb-promise-stacks: a registration's stack, sent once per digest, names

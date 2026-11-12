@@ -1111,8 +1111,14 @@ std::uint64_t NativeRequestStackWalk::ReceiveMessageOrigin(
                      : (header.flags & kNativeTaskOriginTruncated) != 0
                          ? kNativeRequestStackTaskChainTruncated
                          : 0;
+  // An end the chain carried stays a synthetic handle: no script ran, or an
+  // earlier receiver rejected its origin.
   if (carried[count - 1].state == static_cast<std::uint8_t>(NativeTaskSegmentState::kNoScript)) {
     parent = NoScriptHandle(static_cast<NativeAsyncTaskKind>(carried[count - 1].kind));
+    --count;
+  } else if (carried[count - 1].state ==
+             static_cast<std::uint8_t>(NativeTaskSegmentState::kOriginRejected)) {
+    parent = kSyntheticSegment | kRejectedOrigin | carried[count - 1].kind;
     --count;
   }
   for (std::size_t i = count; i-- > 0;) {

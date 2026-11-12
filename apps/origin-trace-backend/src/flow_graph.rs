@@ -20,6 +20,7 @@ use crate::{
     store_scan::{self, Stopped, Stores},
 };
 use regex::bytes::Regex;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -327,6 +328,26 @@ impl Scan {
         }
         true
     }
+}
+
+/// The one field read from a candidate line whose bytes do not name the
+/// session the way the broker writes it.
+#[derive(Deserialize)]
+struct Envelope {
+    #[serde(default)]
+    session_id: Value,
+}
+
+/// Whether a candidate line can be one of the session's records, decided
+/// before the line is parsed in full. The compact bytes the broker writes
+/// answer at once. Any other line reads `session_id` alone, which still checks
+/// that the whole line is JSON; a line that fails goes on to the full parse, so
+/// malformed lines are counted as before.
+fn may_be_session(line: &[u8], needle: &Regex, session: u64) -> bool {
+    needle.is_match(line)
+        || serde_json::from_slice::<Envelope>(line).map_or(true, |envelope| {
+            event_window::unsigned(&envelope.session_id) == Some(session)
+        })
 }
 
 /// The `async_task_stack` payload: task kind, recorded depth, digest and the
@@ -1208,25 +1229,25 @@ pub fn run(
 fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result<Value> {
     let started = Instant::now();
     let deadline = started + SCAN_DEADLINE;
-    let prefilter = Regex::new(&format!(r#""type":"(?:{})""#, TYPES.join("|")))
-        .map_err(|_| Error::new(500, "Flow graph filter failed"))?;
+    let filter = |pattern: &str| {
+        Regex::new(pattern).map_err(|_| Error::new(500, "Flow graph filter failed"))
+    };
+    let prefilter = filter(&format!(r#""type":"(?:{})""#, TYPES.join("|")))?;
+    let needle = filter(&store_scan::field_pattern("session_id", session))?;
     let reader = store_scan::Reader {
         cancel,
         deadline,
         cancelled: CANCELLED,
     };
     let mut scan = Scan::default();
-    let scanned = reader.lines(
-        &stores.events,
-        0,
-        end,
-        Some(&prefilter),
-        &mut |_, line| {
-            let event = serde_json::from_slice::<Value>(line).ok()?;
-            // A record the decoders refuse is counted as malformed.
-            (!store_scan::same_session(&event, session) || scan.record(&event)).then_some(true)
-        },
-    )?;
+    let scanned = reader.lines(&stores.events, 0, end, Some(&prefilter), &mut |_, line| {
+        if !may_be_session(line, &needle, session) {
+            return Some(true);
+        }
+        let event = serde_json::from_slice::<Value>(line).ok()?;
+        // A record the decoders refuse is counted as malformed.
+        (!store_scan::same_session(&event, session) || scan.record(&event)).then_some(true)
+    })?;
     scan.malformed = scanned.malformed;
     scan.scanned_bytes = scanned.position;
     scan.stopped = if scanned.stopped == Stopped::Deadline {

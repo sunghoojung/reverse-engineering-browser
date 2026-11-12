@@ -1293,7 +1293,6 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   expires_at_monotonic_ns_.store(active ? expires_at_monotonic_ns : 0, std::memory_order_relaxed);
   capture_canvas_images_.store(active && capture_canvas_images, std::memory_order_relaxed);
   compiled_script_source_bytes_.store(0, std::memory_order_relaxed);
-  memory_cache_reuses_.store(0, std::memory_order_relaxed);
   frame_id_provider_.store(active ? frame_id_provider : nullptr, std::memory_order_relaxed);
   capture_request_content_.store(active && network_scope.capture_request_content,
                                  std::memory_order_relaxed);
@@ -2247,53 +2246,100 @@ void NativeProbeSink::RecordServiceWorkerRequestEnd(const std::int32_t request_i
   gap.header.session_id = session_id_.load(std::memory_order_relaxed);
   gap.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
   gap.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  gap.header.initiator_process_id = gap.header.process_id;
+  gap.header.initiator_request_id = id;
   SetPayload(gap, "service_worker_end_lost");
   static_cast<void>(EmitStatus(gap, config_generation));
 }
 
-void NativeProbeSink::RecordMemoryCacheReuse(const NativeMemoryCacheReuse& reuse) noexcept {
+NativeMemoryCacheAdmission NativeProbeSink::AdmitMemoryCacheReuse(
+    const bool ordinary_page) noexcept {
   if (!emitter_.load(std::memory_order_acquire)) [[likely]] {
-    return;
+    return {};
   }
   const std::uint64_t config_generation = config_generation_.load(std::memory_order_acquire);
   if ((config_generation & 1U) != 0) {
-    return;
+    return {};
   }
   const std::uint64_t monotonic_time_ns = MonotonicTimeNs();
   const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
   const std::uint64_t expires_at_monotonic_ns =
       expires_at_monotonic_ns_.load(std::memory_order_relaxed);
   const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
-  const bool capture_browser_internal = capture_browser_internal_.load(std::memory_order_relaxed);
   const bool capture_request_content = capture_request_content_.load(std::memory_order_relaxed);
+  const NativeProbeExclusionCounter exclusion_counter =
+      exclusion_counter_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (config_generation_.load(std::memory_order_acquire) != config_generation ||
+      (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0 ||
+      monotonic_time_ns >= expires_at_monotonic_ns) {
+    return {};
+  }
+  const auto count_not_recorded = [&] {
+    if (exclusion_counter) {
+      exclusion_counter(kNativeMemoryCacheReuseExclusion, session_id, config_generation);
+    }
+  };
+  // An SVG image's own document or a page popup belongs to no tab.
+  if (!ordinary_page) {
+    count_not_recorded();
+    return {};
+  }
+  // Reuses can be frequent, so a configuration records a bounded number and
+  // counts the rest. The count is tagged with its generation.
+  const auto tag = static_cast<std::uint32_t>(config_generation);
+  std::uint64_t word = memory_cache_budget_.load(std::memory_order_relaxed);
+  for (;;) {
+    const auto word_tag = static_cast<std::uint32_t>(word >> 32U);
+    if (word_tag != tag && static_cast<std::int32_t>(word_tag - tag) > 0) {
+      // A newer configuration owns the budget; this one was replaced.
+      return {};
+    }
+    const std::uint32_t used = word_tag == tag ? static_cast<std::uint32_t>(word) : 0;
+    if (used >= kNativeMemoryCacheReuseBudget) {
+      count_not_recorded();
+      return {};
+    }
+    if (memory_cache_budget_.compare_exchange_weak(word, (std::uint64_t{tag} << 32U) | (used + 1U),
+                                                   std::memory_order_relaxed)) {
+      return {.generation = config_generation, .capture_request_content = capture_request_content};
+    }
+  }
+}
+
+void NativeProbeSink::RecordMemoryCacheReuse(const NativeMemoryCacheAdmission& admission,
+                                             const NativeMemoryCacheReuse& reuse) noexcept {
+  if (!admission.admitted() || !emitter_.load(std::memory_order_acquire)) {
+    return;
+  }
+  const std::uint64_t config_generation = config_generation_.load(std::memory_order_acquire);
+  if (config_generation != admission.generation) {
+    return;
+  }
+  const std::uint64_t monotonic_time_ns = MonotonicTimeNs();
+  const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
+  const bool capture_browser_internal = capture_browser_internal_.load(std::memory_order_relaxed);
   const NativeProbeExclusionCounter exclusion_counter =
       exclusion_counter_.load(std::memory_order_relaxed);
   const NativeRendererProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
   std::atomic_thread_fence(std::memory_order_acquire);
-  if (config_generation_.load(std::memory_order_acquire) != config_generation || !emitter ||
-      (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0 ||
-      monotonic_time_ns >= expires_at_monotonic_ns) {
+  if (config_generation_.load(std::memory_order_acquire) != config_generation || !emitter) {
     return;
   }
   const NativeSchemeClass scheme_class = ClassifyNativeScheme(reuse.scheme);
   if (IsBrowserInternalSchemeClass(scheme_class) && !capture_browser_internal) {
+    // Counted as the scheme class a request would be, not against the budget.
+    const auto tag = static_cast<std::uint32_t>(config_generation);
+    std::uint64_t word = memory_cache_budget_.load(std::memory_order_relaxed);
+    while (static_cast<std::uint32_t>(word >> 32U) == tag &&
+           static_cast<std::uint32_t>(word) != 0 &&
+           !memory_cache_budget_.compare_exchange_weak(word, word - 1, std::memory_order_relaxed)) {
+    }
     if (exclusion_counter) {
       exclusion_counter(static_cast<std::uint8_t>(scheme_class), session_id, config_generation);
     }
     return;
   }
-  // Reuses can be frequent, so a configuration records a bounded number and
-  // counts the rest.
-  std::uint32_t recorded = memory_cache_reuses_.load(std::memory_order_relaxed);
-  do {
-    if (recorded >= kNativeMemoryCacheReuseBudget) {
-      if (exclusion_counter) {
-        exclusion_counter(kNativeMemoryCacheReuseExclusion, session_id, config_generation);
-      }
-      return;
-    }
-  } while (!memory_cache_reuses_.compare_exchange_weak(recorded, recorded + 1,
-                                                       std::memory_order_relaxed));
 
   NativeProbeEvent event;
   event.header.category = NativeProbeCategory::kNetwork;
@@ -2313,7 +2359,7 @@ void NativeProbeSink::RecordMemoryCacheReuse(const NativeMemoryCacheReuse& reuse
   event.inline_payload =
       EncodeNativeMemoryCacheReusePayload(reuse.resource_type, reuse.static_data, reuse.host);
   if (emitter(event, config_generation) != NativeProbeEmitStatus::kAdmitted ||
-      !capture_request_content) {
+      !admission.capture_request_content) {
     return;
   }
   NativeRendererRequest row;

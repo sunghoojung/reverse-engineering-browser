@@ -417,6 +417,12 @@ reb::MemoryCacheReusePayload ReuseOf(const reb::EventRecord& record) {
 void MemoryCacheReuses() {
   NativeProbeQueue queue;
   ConfigureScope(queue, true, false, 67);
+  // The page check, then the budget, then the record.
+  const auto record = [](const reb::NativeMemoryCacheReuse& value, const bool ordinary = true) {
+    const reb::NativeMemoryCacheAdmission admission = sink.AdmitMemoryCacheReuse(ordinary);
+    sink.RecordMemoryCacheReuse(admission, value);
+    return admission;
+  };
   // Field by field: GCC's -Wmissing-field-initializers rejects partial designated lists.
   const auto reuse_of = [](const std::int32_t request_id, const std::string_view scheme,
                            const std::uint8_t resource_type) {
@@ -433,7 +439,7 @@ void MemoryCacheReuses() {
   image.target_length = 13;
   image.status_code = 200;
   image.decoded_body_length = 5120;
-  sink.RecordMemoryCacheReuse(image);
+  assert(record(image).capture_request_content);
   const auto reuse = Core(Pop(queue));
   const auto target = TargetOf(One(queue));
   const auto payload = ReuseOf(reuse);
@@ -456,7 +462,7 @@ void MemoryCacheReuses() {
   decoded.status_code = 200;
   decoded.decoded_body_length = 3;
   blink::test_frame_present = true;
-  sink.RecordMemoryCacheReuse(decoded);
+  record(decoded);
   blink::test_frame_present = false;
   const auto data = Core(Pop(queue));
   Pop(queue);
@@ -471,7 +477,7 @@ void MemoryCacheReuses() {
   script.host = long_host;
   script.status_code = -1;
   script.decoded_body_length = -1;
-  sink.RecordMemoryCacheReuse(script);
+  record(script);
   const auto worker = Core(Pop(queue));
   Pop(queue);
   assert(ReuseOf(worker).host_length == 120 && ReuseOf(worker).flags == 2 &&
@@ -479,33 +485,52 @@ void MemoryCacheReuses() {
          worker.header.decoded_body_length == 0);
 
   // Browser-internal URLs are counted like requests unless the session opts in.
-  sink.RecordMemoryCacheReuse(reuse_of(6003, "chrome", 3));
+  record(reuse_of(6003, "chrome", 3));
   assert(Drain(queue) == 0 && queue.ExclusionCount(0) == 1 && queue.ExclusionCount(5) == 0);
+  // An SVG image's own document or a page popup belongs to no tab: counted.
+  assert(!record(image, /*ordinary=*/false).admitted());
+  assert(Drain(queue) == 0 && queue.ExclusionCount(5) == 1);
 
   // Metadata sessions record the reuse without its path, at most 4,096 per
-  // configuration; the rest are counted as class 68.
+  // configuration; the rest are counted as class 70. An internal URL counted
+  // by its scheme class returns its budget charge.
   auto metadata_ring = std::make_unique<NativeProbeQueue>();
   auto& metadata = *metadata_ring;
   ConfigureScope(metadata, false, false, 68);
+  record(reuse_of(6004, "devtools", 3));
   for (std::uint32_t index = 0; index < reb::kNativeMemoryCacheReuseBudget + 10; ++index) {
     image.request_id = static_cast<std::int32_t>(7000 + index);
-    sink.RecordMemoryCacheReuse(image);
+    record(image);
   }
   assert(Drain(metadata) == reb::kNativeMemoryCacheReuseBudget && metadata.DroppedCount() == 0);
-  assert(metadata.ExclusionCount(5) == 10 &&
+  assert(metadata.ExclusionCount(3) == 1 && metadata.ExclusionCount(5) == 10 &&
          reb::NativeRendererExclusionClass(5) == reb::kNativeMemoryCacheReuseExclusion);
+  // Past the budget a reuse costs its checks and one counter increment.
+  auto before = allocations.load();
+  for (int index = 0; index < 1000; ++index) {
+    assert(!sink.AdmitMemoryCacheReuse(true).admitted());
+  }
+  assert(allocations == before && metadata.ExclusionCount(5) == 1010);
+  // A new configuration starts a fresh count, and a reuse admitted by the
+  // replaced one is never recorded into it.
   ConfigureScope(metadata, false, false, 68);
-  sink.RecordMemoryCacheReuse(image);
+  const auto fresh = sink.AdmitMemoryCacheReuse(true);
+  assert(fresh.admitted() && !fresh.capture_request_content);
+  ConfigureScope(metadata, false, false, 68);
+  sink.RecordMemoryCacheReuse(fresh, image);
+  assert(Drain(metadata) == 0);
+  record(image);
   assert(Core(One(metadata)).header.type == reb::EventType::kMemoryCacheReuse);
 
   transport.Disable();
-  const auto before = allocations.load();
+  before = allocations.load();
   for (int index = 0; index < 1000; ++index) {
-    sink.RecordMemoryCacheReuse(image);
+    record(image);
   }
   assert(allocations == before && Drain(metadata) == 0);
   std::cout << "PASS memory-cache reuses record their owner, host, status, size and content "
-               "target, count browser-internal URLs and every reuse past 4,096\n";
+               "target; count browser-internal URLs, pages that are not ordinary and every reuse "
+               "past 4,096; a new configuration starts a fresh budget\n";
 }
 
 }  // namespace

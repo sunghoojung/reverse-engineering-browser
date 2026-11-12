@@ -74,6 +74,15 @@ struct NativeNetworkScope final {
   NativeProbeExclusionCounter exclusion_counter = nullptr;
 };
 
+// The configuration that admitted one memory-cache reuse, from
+// NativeProbeSink::AdmitMemoryCacheReuse; default: not admitted.
+struct NativeMemoryCacheAdmission final {
+  std::uint64_t generation = 0;
+  // Whether the reuse gets a request_target child, so the caller slices one.
+  bool capture_request_content = false;
+  [[nodiscard]] constexpr bool admitted() const noexcept { return generation != 0; }
+};
+
 // One ResourceFetcher::DidLoadResourceFromMemoryCache, as Blink reports it.
 // Every view is borrowed for the call; see protocol/native-network-v3.md.
 struct NativeMemoryCacheReuse final {
@@ -818,9 +827,11 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<bool> capture_request_content_{false};
   std::atomic<bool> capture_browser_internal_{false};
   std::atomic<NativeProbeExclusionCounter> exclusion_counter_{nullptr};
-  // memory_cache_reuse records admitted in this configuration, at most
-  // kNativeMemoryCacheReuseBudget.
-  std::atomic<std::uint32_t> memory_cache_reuses_{0};
+  // memory_cache_reuse admissions: the admitting configuration generation's
+  // low 32 bits, then its count, at most kNativeMemoryCacheReuseBudget. A
+  // newer generation starts a fresh count, so reuses still in flight from a
+  // replaced configuration never charge or reset the new one.
+  std::atomic<std::uint64_t> memory_cache_budget_{0};
   // Source bytes queued in this configuration, across every thread.
   std::atomic<std::uint64_t> compiled_script_source_bytes_{0};
   // Monotonic generation claims are never reset: an old capture cannot spend

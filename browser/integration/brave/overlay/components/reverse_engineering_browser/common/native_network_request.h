@@ -19,6 +19,33 @@ inline constexpr std::uint16_t kNativeRequestPayloadVersion = 1;
 inline constexpr std::uint16_t kNativeRequestTargetPayloadVersion = 2;
 inline constexpr std::size_t kNativeRequestPayloadSize = 128;
 inline constexpr std::size_t kNativeRequestTargetPrefixBytes = 116;
+
+// The path and query of a parsed URL without its fragment, as
+// GURL::PathForRequestPiece, inside a spec of spec_length. Components are
+// url::Component begin and len, len -1 when absent. An absent path is an empty
+// target at the spec's end, and the range never leaves the spec.
+struct NativeTargetRange final {
+  std::size_t begin = 0;
+  std::size_t length = 0;
+};
+
+[[nodiscard]] constexpr NativeTargetRange NativeRequestTargetRange(const std::size_t spec_length,
+                                                                   const int path_begin,
+                                                                   const int path_len,
+                                                                   const int query_begin,
+                                                                   const int query_len,
+                                                                   const int ref_begin,
+                                                                   const int ref_len) noexcept {
+  if (path_len < 0 || path_begin < 0 || static_cast<std::size_t>(path_begin) > spec_length) {
+    return {spec_length, 0};
+  }
+  const std::int64_t begin = path_begin;
+  const std::int64_t end = ref_len >= 0     ? std::int64_t{ref_begin} - 1
+                           : query_len >= 0 ? std::int64_t{query_begin} + query_len
+                                            : begin + path_len;
+  const std::int64_t bounded = std::clamp(end, begin, static_cast<std::int64_t>(spec_length));
+  return {static_cast<std::size_t>(begin), static_cast<std::size_t>(bounded - begin)};
+}
 // url::kMaxURLChars at the pin.
 inline constexpr std::size_t kNativeRequestTargetMaxBytes = 2U * 1024U * 1024U;
 inline constexpr std::size_t kNativeRequestContentTypeBytes = 64;

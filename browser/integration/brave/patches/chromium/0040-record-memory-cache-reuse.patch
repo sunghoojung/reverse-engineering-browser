@@ -1,16 +1,65 @@
+diff --git a/third_party/blink/renderer/core/loader/frame_fetch_context.cc b/third_party/blink/renderer/core/loader/frame_fetch_context.cc
+index 41d6770..c5b944e 100644
+--- a/third_party/blink/renderer/core/loader/frame_fetch_context.cc
++++ b/third_party/blink/renderer/core/loader/frame_fetch_context.cc
+@@ -1177,6 +1177,14 @@ ContentSecurityPolicy* FrameFetchContext::GetContentSecurityPolicyForWorld(
+       world);
+ }
+ 
++bool FrameFetchContext::IsOrdinaryPageForNativeCapture() const {
++  if (GetResourceFetcherProperties().IsDetached()) {
++    return false;
++  }
++  const Page* page = GetFrame()->GetPage();
++  return page && page->IsOrdinary();
++}
++
+ bool FrameFetchContext::IsIsolatedSVGChromeClient() const {
+   if (GetResourceFetcherProperties().IsDetached()) {
+     return frozen_state_->is_isolated_svg_chrome_client;
+diff --git a/third_party/blink/renderer/core/loader/frame_fetch_context.h b/third_party/blink/renderer/core/loader/frame_fetch_context.h
+index a78afa3..02f7803 100644
+--- a/third_party/blink/renderer/core/loader/frame_fetch_context.h
++++ b/third_party/blink/renderer/core/loader/frame_fetch_context.h
+@@ -192,6 +192,7 @@ class CORE_EXPORT FrameFetchContext final : public BaseFetchContext,
+   ContentSecurityPolicy* GetContentSecurityPolicyForWorld(
+       const DOMWrapperWorld* world) const override;
+   bool IsIsolatedSVGChromeClient() const override;
++  bool IsOrdinaryPageForNativeCapture() const override;
+   void CountUsage(WebFeature) const override;
+   void CountDeprecation(WebFeature) const override;
+   bool ShouldBlockWebSocketByMixedContentCheck(const KURL&) const override;
+diff --git a/third_party/blink/renderer/platform/loader/fetch/fetch_context.h b/third_party/blink/renderer/platform/loader/fetch/fetch_context.h
+index c0ac1c8..5b7941f 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/fetch_context.h
++++ b/third_party/blink/renderer/platform/loader/fetch/fetch_context.h
+@@ -289,6 +289,11 @@ class PLATFORM_EXPORT FetchContext : public GarbageCollected<FetchContext> {
+   // protocol/native-network-v3.md.
+   virtual reb::NativeFetchOwner GetNativeFetchOwner() const { return {}; }
+ 
++  // False for a document of a page that is not ordinary (an SVG image's own
++  // document, a page popup): its loads belong to no tab, so native capture
++  // counts them instead of recording them.
++  virtual bool IsOrdinaryPageForNativeCapture() const { return true; }
++
+  protected:
+   const Vector<KURL> empty_unused_preloads_;
+ };
 diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
-index 8a48724..1e615ff 100644
+index 8a48724..8e25a67 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
 +++ b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
-@@ -45,6 +45,7 @@
+@@ -45,6 +45,9 @@
  #include "base/time/time.h"
  #include "base/timer/elapsed_timer.h"
  #include "base/unguessable_token.h"
++#include "brave/components/reverse_engineering_browser/common/native_network_request.h"
++#include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
 +#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
  #include "services/network/public/cpp/features.h"
  #include "services/network/public/cpp/request_mode.h"
  #include "services/network/public/mojom/link_header.mojom-blink.h"
-@@ -63,6 +64,7 @@
+@@ -63,6 +66,7 @@
  #include "third_party/blink/public/platform/scheduler/web_scoped_virtual_time_pauser.h"
  #include "third_party/blink/public/platform/web_url.h"
  #include "third_party/blink/public/platform/web_url_request.h"
@@ -18,39 +67,49 @@ index 8a48724..1e615ff 100644
  #include "third_party/blink/renderer/platform/bindings/script_forbidden_scope.h"
  #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
  #include "third_party/blink/renderer/platform/heap/persistent.h"
-@@ -407,6 +409,51 @@ void RecordDeferUnusedPreloadHistograms(const Resource* resource) {
+@@ -407,6 +411,61 @@ void RecordDeferUnusedPreloadHistograms(const Resource* resource) {
    }
  }
  
 +// A load Blink answers from a resource it holds makes no request; see
-+// protocol/native-network-v3.md. Only bounded prefixes are copied, since a
-+// data: URL can be megabytes long.
++// protocol/native-network-v3.md. The sink admits the reuse before anything is
++// converted, and only bounded prefixes are copied, since a data: URL can be
++// megabytes long.
 +void RecordNativeMemoryCacheReuse(const FetchContext& context,
 +                                  const Resource& resource,
 +                                  const ResourceRequest& request,
 +                                  const bool is_static_data) {
-+  if (!reb::NativeProbeSink::Get().IsCaptureArmed()) [[likely]] {
++  reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
++  if (!sink.IsCaptureArmed()) [[likely]] {
++    return;
++  }
++  const reb::NativeMemoryCacheAdmission admission =
++      sink.AdmitMemoryCacheReuse(context.IsOrdinaryPageForNativeCapture());
++  if (!admission.admitted()) {
 +    return;
 +  }
 +  const KURL& url = request.Url();
 +  const AtomicString& spec = url.GetString();
 +  const url::Parsed& parsed = url.GetParsed();
-+  // The path and query without the fragment, as GURL::PathForRequestPiece.
-+  const unsigned begin = parsed.path.is_valid()
-+                             ? static_cast<unsigned>(parsed.path.begin)
-+                             : spec.length();
-+  const unsigned end =
-+      parsed.ref.is_valid()
-+          ? static_cast<unsigned>(parsed.ref.begin - 1)
-+          : static_cast<unsigned>(parsed.query.is_valid() ? parsed.query.end()
-+                                                          : parsed.path.end());
-+  const unsigned target_length = end > begin ? end - begin : 0;
-+  const std::string target =
-+      StringView(spec, begin, std::min(target_length, 116u)).Utf8();
++  const reb::NativeTargetRange range = reb::NativeRequestTargetRange(
++      spec.length(), parsed.path.begin, parsed.path.len, parsed.query.begin,
++      parsed.query.len, parsed.ref.begin, parsed.ref.len);
++  std::string target;
++  if (admission.capture_request_content) {
++    target = StringView(spec, static_cast<wtf_size_t>(range.begin),
++                        static_cast<wtf_size_t>(std::min(
++                            range.length, reb::kNativeRequestTargetPrefixBytes)))
++                 .Utf8();
++  }
 +  // One byte past the 120 the record keeps tells the sink the host is longer.
 +  const StringView host_view = url.Host();
 +  const std::string host =
-+      StringView(host_view, 0, std::min(host_view.length(), 121u)).Utf8();
++      StringView(host_view, 0,
++                 std::min<wtf_size_t>(
++                     host_view.length(),
++                     static_cast<wtf_size_t>(
++                         reb::kNativeMemoryCacheReuseHostSize + 1)))
++          .Utf8();
 +  const std::string scheme = url.Protocol().Utf8();
 +  reb::NativeMemoryCacheReuse reuse;
 +  reuse.request_id = GenerateRequestId();
@@ -58,19 +117,19 @@ index 8a48724..1e615ff 100644
 +  reuse.scheme = scheme;
 +  reuse.host = host;
 +  reuse.target = target;
-+  reuse.target_length = target_length;
++  reuse.target_length = range.length;
 +  reuse.port = url.Port();
 +  reuse.resource_type = static_cast<std::uint8_t>(resource.GetType());
 +  reuse.static_data = is_static_data;
 +  reuse.status_code = resource.GetResponse().HttpStatusCode();
 +  reuse.decoded_body_length = resource.GetResponse().DecodedBodyLength();
-+  reb::NativeProbeSink::Get().RecordMemoryCacheReuse(reuse);
++  sink.RecordMemoryCacheReuse(admission, reuse);
 +}
 +
  }  // namespace
  
  // Used to ensure a ResourceRequest is correctly configured. Specifically
-@@ -935,6 +982,8 @@ void ResourceFetcher::DidLoadResourceFromMemoryCache(
+@@ -935,6 +994,8 @@ void ResourceFetcher::DidLoadResourceFromMemoryCache(
    if (IsDetached() || !resource_load_observer_) {
      return;
    }

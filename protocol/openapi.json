@@ -18569,6 +18569,7 @@
           "end_lost",
           "response_body",
           "memory_cache_source",
+          "watch",
           "mime_type",
           "protocol",
           "response_time_ns",
@@ -18953,6 +18954,56 @@
                 }
               }
             },
+          "watch": {
+            "description": "The row's first request_watch_match (protocol/native-debugger-observation-v1.md): the record, and the rule slot and method flag the debugger decoder reads, both null for a record the core refuses. Null when no watch rule matched.",
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "session_id",
+                  "process_id",
+                  "sequence_number",
+                  "frame_id",
+                  "rule",
+                  "method_matched"
+                ],
+                "properties": {
+                  "session_id": {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  "process_id": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  },
+                  "sequence_number": {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  "frame_id": {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  "rule": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "maximum": 7
+                  },
+                  "method_matched": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
           "mime_type": {
             "type": [
               "string",

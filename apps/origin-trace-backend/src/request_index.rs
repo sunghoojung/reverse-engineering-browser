@@ -24,7 +24,7 @@ use std::{
 pub const SIDECAR_SUFFIX: &str = ".requests-v1";
 const FORMAT: &str = "reb-request-index-v1";
 /// Sidecar row layout; a sidecar of another layout is rebuilt from byte 0.
-const LAYOUT: u32 = 10;
+const LAYOUT: u32 = 11;
 /// Bounds one call; a larger store reports partial coverage and continues next call.
 const SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const RECORD_BYTES: usize = 4096;
@@ -178,6 +178,18 @@ struct BodyChild {
     #[serde(default)]
     snapshot: Option<(u64, u64, BodyRecord)>,
 }
+/// The first `request_watch_match` of a row: the record, and its rule slot
+/// and method flag as the debugger decoder reads them, or None for a record
+/// the core refuses (protocol/native-debugger-observation-v1.md).
+#[derive(Clone, Serialize, Deserialize)]
+struct Watch {
+    session: String,
+    process: u32,
+    sequence: String,
+    frame: String,
+    rule: Option<u64>,
+    method_matched: Option<bool>,
+}
 /// First `request_target` child of a lifecycle record; `None` is malformed.
 #[derive(Clone, Serialize, Deserialize)]
 struct Child {
@@ -259,6 +271,8 @@ struct Row {
     tab_link: (u8, u32),
     /// The extension a `request_extension_link` names.
     extension: Option<String>,
+    /// The request watch rule that matched the row's request, if one did.
+    watch: Option<Watch>,
     /// The renderer `request_initiated`'s loader kind and whether it had a
     /// frame, and the browser `request_started`'s newest nonzero loader kind:
     /// why a row without an owner has none (`request_tabs::unresolved_reason`).
@@ -1877,6 +1891,18 @@ impl RequestIndex {
                     {
                         row.extension = Some(id);
                     }
+                    if kind == "request_watch_match" && row.watch.is_none() {
+                        let detail = crate::debugger_observation::decode(&event)
+                            .map(|decoded| decoded["detail"].clone());
+                        row.watch = Some(Watch {
+                            session: text(&event["session_id"]),
+                            process: number(&event["process_id"]) as u32,
+                            sequence: text(&event["sequence_number"]),
+                            frame: text(&event["frame_id"]),
+                            rule: detail.as_ref().and_then(|d| d["rule"].as_u64()),
+                            method_matched: detail.and_then(|d| d["method_matched"].as_bool()),
+                        });
+                    }
                     let parent = (
                         text(&event["session_id"]),
                         number(&event["process_id"]) as u32,
@@ -2008,6 +2034,7 @@ impl RequestIndex {
                     tab_set: None,
                     tab_link: (0, 0),
                     extension: None,
+                    watch: None,
                     renderer_start: None,
                     browser_start: None,
                 });
@@ -2434,6 +2461,10 @@ impl RequestIndex {
             "main_frame": row.main_frame, "browser_internal": view.internal,
         });
         document["extension_id"] = json!(row.extension);
+        document["watch"] = json!(row.watch.as_ref().map(|watch| json!({
+            "session_id": watch.session, "process_id": watch.process,
+            "sequence_number": watch.sequence, "frame_id": watch.frame,
+            "rule": watch.rule, "method_matched": watch.method_matched})));
         document["memory_cache"] = json!(row.memory_cache);
         document["static_data"] = json!(row.static_data);
         document["race_network"] = json!(row.worker_answer.is_some() && row.browser);
@@ -4608,11 +4639,32 @@ mod tests {
         };
         store.push(42, 5, "request_initiated", b"", json!({}));
         store.push(42, 5, "request_watch_match", &[0; 80], json!({}));
+        // A whole match: a no_script stack summary, rule 2, method matched.
+        let mut matched = vec![1, 0, 128, 0, 2, 0x08];
+        matched.resize(80, 0);
+        matched.extend([2, 1]);
+        matched.resize(128, 0);
+        store.push(42, 6, "request_initiated", b"", json!({}));
+        let sequence = store.push(42, 6, "request_watch_match", &matched, json!({}));
+        store.push(42, 6, "request_watch_match", &matched, json!({}));
+        store.push(42, 7, "request_initiated", b"", json!({}));
         fs::write(&path, store.bytes()).unwrap();
         let mut index = RequestIndex::new(&path);
-        let row = &page(&mut index, "")["requests"][0];
+        let rows = page(&mut index, "sort=capture&order=asc")["requests"].clone();
+        let row = &rows[0];
         assert_eq!(row["records"], 2, "{row}");
         assert_eq!(row["members"][0]["records"], 2);
+        // A match the core refuses still marks its row, with no rule.
+        assert_eq!(row["watch"]["rule"], Value::Null, "{row}");
+        assert_eq!(row["watch"]["sequence_number"], "2");
+        // The first match names the rule; the row counts every match.
+        assert_eq!(
+            rows[1]["watch"],
+            json!({"session_id": "1", "process_id": 42, "sequence_number": sequence,
+                "frame_id": "9", "rule": 2, "method_matched": true})
+        );
+        assert_eq!(rows[1]["records"], 3);
+        assert_eq!(rows[2]["watch"], Value::Null);
     }
 
     #[test]
@@ -4820,6 +4872,25 @@ mod tests {
         push_stack_rows(&mut store);
         renderer_answered(&mut store);
         response_bodies(&mut store);
+        // A request a watch rule matched: the match is a child of its row.
+        let initiated = store.push(
+            41,
+            30,
+            "request_initiated",
+            b"POST w.example.test",
+            json!({}),
+        );
+        let mut matched = vec![1, 0, 128, 0, 2, 0x08];
+        matched.resize(80, 0);
+        matched.extend([3, 1]);
+        matched.resize(128, 0);
+        store.push(
+            41,
+            30,
+            "request_watch_match",
+            &matched,
+            json!({"parent_event_id": initiated}),
+        );
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
         let mut document = page(&mut index, "limit=500");
@@ -4871,7 +4942,11 @@ mod tests {
                     "timeline": answer["timeline"]}),
             )
         });
-        let golden = json!({"events": store.events, "rows": document["requests"].take(),
+        // The events as every backend page delivers them to Traffic, decoded
+        // objects beside the hex.
+        let mut events = store.events.clone();
+        crate::event_query::annotate_events(&mut events);
+        let golden = json!({"events": events, "rows": document["requests"].take(),
             "orders": orders.into_iter().collect::<serde_json::Map<_, _>>(),
             "searches": searches.into_iter().collect::<serde_json::Map<_, _>>(),
             "filters": filters.into_iter().collect::<serde_json::Map<_, _>>()});

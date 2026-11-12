@@ -81,10 +81,10 @@
       // Children of a lifecycle record (protocol/native-network-v2.md and v3).
       // They describe a request; they never advance its lifecycle rank.
       const networkRequestDetailTypes = new Set(['request_target', 'request_body', 'response_body', 'request_headers',
-        'response_headers', 'cookie_list', 'request_initiator_stack', 'navigation_initiator_link']);
+        'response_headers', 'cookie_list', 'request_initiator_stack', 'navigation_initiator_link', 'request_watch_match']);
       // Session-level network records the backend keeps in its network window.
       const networkContextTypes = new Set(['capture_exclusion', 'tab_set', 'request_tab_link',
-        'request_extension_link', 'request_watch_match']);
+        'request_extension_link']);
       const networkRequestArtifactKinds = new Set(['request_body', 'request_target', 'request_headers', 'response_headers',
         'cookie_list']);
       const artifactKinds = new Set([
@@ -897,6 +897,20 @@
       function requestChildOf(details, parent, type) {
         return parent ? details.find(event => event.type === type && event.parent_event_id === parent.sequence_number &&
           event.session_id === parent.session_id && event.process_id === parent.process_id) ?? null : null;
+      }
+
+      // The first request_watch_match of a request (protocol/native-debugger-observation-v1.md),
+      // as the request index's watch names it. The rule is the backend decoder's
+      // debugger_observation beside the record; a record without one, or one the
+      // core refuses, names no rule.
+      function requestWatchMatch(details) {
+        const match = details.filter(event => event.type === 'request_watch_match')
+          .reduce((first, event) => !first || BigInt(event.sequence_number) < BigInt(first.sequence_number) ? event : first, null);
+        if (!match) return null;
+        const decoded = match.debugger_observation?.status === 'decoded' ? match.debugger_observation.detail : null;
+        return {sessionId: match.session_id, processId: match.process_id, sequenceNumber: match.sequence_number, frameId: match.frame_id,
+          rule: Number.isInteger(decoded?.rule) ? decoded.rule : null,
+          methodMatched: typeof decoded?.method_matched === 'boolean' ? decoded.method_matched : null};
       }
 
       function attachRequestDetails(requests, events, browserRequestKeys) {
@@ -1757,6 +1771,7 @@
           if (row.rank < 5 && !row.failed && !row.interrupted) row.status = 'incomplete';
         }
         attachRequestDetails(rows, events, browserRequestKeys);
+        for (const row of rows) row.watch = requestWatchMatch(row.details);
         // A walked initiator stack tells script starts from parser starts (protocol/native-network-v3.md).
         for (const row of rows) {
           // A navigation script started names its renderer stack.

@@ -26,7 +26,7 @@ golden.rows.forEach((row, index) => {
   for (const field of ['id', 'path', 'method', 'status', 'time', 'type', 'targetKind', 'hostOnly', 'failed', 'interrupted',
     'tabId', 'operation', 'targetMalformed', 'transferSize', 'resourceSize', 'fromCache', 'fromServiceWorker', 'memoryCache',
     'staticData', 'raceNetwork', 'endLost', 'mimeType', 'protocol', 'responseTimestamp', 'errorCode', 'loaderObserved', 'initiator', 'mainFrame',
-    'tabReason', 'memoryCacheSource']) {
+    'tabReason', 'memoryCacheSource', 'watch']) {
     assert.deepEqual(shown[field], expected[field], `${expected.id} ${field}`);
   }
   // Why the body is or is not retained, decided from the row's own records.
@@ -50,6 +50,8 @@ golden.rows.forEach((row, index) => {
   for (const field of ['target', 'host', 'urlTruncated', 'targetLength']) {
     assert.deepEqual(shown[field], expected[field] ?? (field === 'urlTruncated' ? false : null), `${expected.id} ${field}`);
   }
+  // Traffic selects a window row without a store read only when it holds every record the index counts.
+  assert.equal(expected.events.length + expected.details.length, row.records, `${expected.id} records`);
   assert.equal(row.domain, view.trafficRequestDomain(expected), `${expected.id} domain`);
   assert.equal(row.browser_internal, view.trafficBrowserInternal(expected), `${expected.id} browser-internal`);
   const root = expected.events.find(event => event.type === 'request_started' && event.request_id !== '0') ??
@@ -69,6 +71,10 @@ assert(lost && lost.status === 'incomplete' && view.trafficStatusCell(lost).text
 const raced = shownRows.find(row => row.raceNetwork);
 assert(raced && raced.status === 'failed' && raced.fromServiceWorker && view.trafficStatusCell(raced).text === 'Failed');
 assert.equal(shownRows.filter(row => row.endLost || row.raceNetwork).length, 2);
+// A watched request names its rule and its match record, from the backend's decode.
+const watched = shownRows.filter(row => row.watch);
+assert(watched.length === 1 && watched[0].watch.rule === 3 && watched[0].watch.methodMatched === true &&
+  /^[1-9][0-9]*$/.test(watched[0].watch.sequenceNumber), 'one watched row with its rule');
 // An MHTML archive reuse has no HTTP status, yet it finished: never No loader.
 const archive = shownRows.find(row => row.memoryCache && row.status === 'finished');
 const archiveCell = archive && view.trafficStatusCell(archive);

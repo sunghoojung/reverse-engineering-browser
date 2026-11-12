@@ -132,8 +132,10 @@ const reachable = node => {
 };
 // Every element in a native pausing section a researcher could activate must
 // be a form control that is really disabled; aria-disabled leaves its handler
-// running, and a summary, a role or an editable region cannot be disabled.
-const pausingControls = 'button, input, select, textarea, a[href], summary, [tabindex], [role="button"], [role="option"], [role="checkbox"], [role="tab"], [contenteditable]:not([contenteditable="false"])';
+// running, and a details element (the browser draws its own toggle when it
+// has no summary), a summary, a link, an editable region or any element given
+// a role (other than presentation or none) cannot be disabled.
+const pausingControls = 'button, input, select, textarea, a[href], details, summary, [tabindex], [role]:not([role="presentation"]):not([role="none"]), [contenteditable]:not([contenteditable="false"])';
 const reallyDisabled = control => ['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(control.tagName) &&
   (control.disabled === true || Boolean(control.closest('fieldset[disabled]')));
 // Only the sidebar's registry writes the marker.
@@ -468,10 +470,12 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
     assert.equal(sidebar.querySelector('[data-debugger-section="threads"]').dataset.stale, 'true', 'a stale section says so');
   }
   // Arming goes through the Console's live document only, and invalid rules send nothing.
-  context.__debuggerAnswer = () => answer();
+  // The stub Console arms the way the renderer confirms: later reads report the set.
+  context.__debuggerAnswer = () => answer(context.__debuggerArmed
+    ? {watch: {state: 'armed', armed: {session_id: '5', target_id: '22', rules: JSON.parse(context.__debuggerArmed)}}} : {});
   context.__watchCalls = [];
   runInContext(`globalThis.RebNativeConsole = {liveDocument: () => ({session_id: '5', target_id: '22', label: 'top #22'}),
-    watch: async rules => { __watchCalls.push(JSON.stringify(rules)); return {status: 'ok', text: 'Armed'}; }};`, context);
+    watch: async rules => { __watchCalls.push(JSON.stringify(rules)); globalThis.__debuggerArmed = rules ? JSON.stringify(rules) : null; return {status: 'ok', text: 'Armed'}; }};`, context);
   click(sidebar.querySelector('.debugger-kind[data-kind="all"]'));
   await settle();
   const form = sidebar.querySelector('.debugger-watch-form');
@@ -508,8 +512,11 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
     ['an aria-disabled button', "const b = document.createElement('button'); b.textContent = 'Go'; b.setAttribute('aria-disabled', 'true'); b.addEventListener('click', () => {}); body.append(b);", /stays disabled/],
     ['a div with role button', "const d = document.createElement('div'); d.setAttribute('role', 'button'); d.textContent = 'Go'; body.append(d);", /stays disabled/],
     ['a nested summary', "const d = document.createElement('details'); const m = document.createElement('summary'); m.textContent = 'More'; d.append(m); body.append(d);", /stays disabled/],
+    ['a details element with no summary', "const d = document.createElement('details'); d.textContent = 'More'; body.append(d);", /stays disabled/],
     ['an editable region', "const d = document.createElement('div'); d.setAttribute('contenteditable', 'true'); body.append(d);", /stays disabled/],
     ['a tab', "const d = document.createElement('div'); d.setAttribute('role', 'tab'); body.append(d);", /stays disabled/],
+    ...['link', 'menuitem', 'switch', 'radio', 'treeitem'].map(role => [`a div with role ${role}`,
+      `const d = document.createElement('div'); d.setAttribute('role', '${role}'); d.textContent = 'Go'; d.addEventListener('click', () => {}); body.append(d);`, /stays disabled/]),
     ['another removed feature', "const b = document.createElement('button'); b.textContent = 'Import cookies'; b.disabled = true; body.append(b);", /implies a CDP control/]]) {
     runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Paused frames', order: 55, native: 'pausing', render(body) {
       body.textContent = 'from the registry'; ${make}

@@ -132,7 +132,12 @@ async function check(name, run) {
 await check('one watch form per Console document, stale arming refused', async () => {
   let live = {session_id: '5', target_id: '22', label: 'top #22'};
   const calls = [];
-  const ui = mount({globals: {RebNativeConsole: {liveDocument: () => live, watch: async rules => { calls.push(rules); return {status: 'ok'}; }}}});
+  // The stub Console arms the way the renderer confirms: the next read reports the set.
+  const ui = mount({globals: {RebNativeConsole: {liveDocument: () => live, watch: async rules => {
+    calls.push(rules);
+    ui.store.watch = rules ? {state: 'armed', armed: {session_id: live.session_id, target_id: live.target_id, rules}} : {state: 'none', armed: null};
+    return {status: 'ok'};
+  }}}});
   ui.open();
   await until(() => ui.sidebar.querySelector('.debugger-watch-form'), 'the form appears');
   const forms = () => [...ui.sidebar.querySelectorAll('.debugger-watch-form')];
@@ -700,6 +705,257 @@ await check('stored reads wait for the bundled backend', async () => {
   await until(() => live.rows('#debugger-observations').length === 2, 'live rows');
   assert.equal(live.reads()[0].timeout, 10000, 'a live read keeps its 10 s deadline');
   live.close();
+});
+
+// Round 3 helpers: a section that hands back the view, and the holes in the
+// sequence of the rows the list holds (each record is the next sequence down).
+const probe = ui => {
+  let seen = null;
+  ui.context.RebDebuggerSidebar.addSection({id: 'probe', title: 'Probe', order: 90, render(body, view) { seen = view; body.textContent = 'probe'; }});
+  return () => seen;
+};
+const holes = view => {
+  const sequences = [...(view.observations.list?.records ?? view.observations.head)].map(record => Number(record.sequence_number));
+  return sequences.flatMap((sequence, index) => index && sequences[index - 1] - sequence !== 1 ? [`${sequences[index - 1]} to ${sequence}`] : []);
+};
+
+// Round 3, 1. Show older records continues exactly the rows it was asked
+// from, whether a read answers or the researcher returns to the top meanwhile.
+await check('a read answering during Show older leaves no hole', async () => {
+  const store = createStore(300);
+  let holding = false;
+  const ui = mount({store, hold: url => holding && url.includes('before=')});
+  const view = probe(ui);
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length > 0, 'rows');
+  holding = true;
+  click(ui, ui.sidebar.querySelector('.debugger-older'));
+  const older = () => ui.reads().find(entry => entry.url.includes('before=') && entry.release);
+  await until(() => older(), 'the older read, held');
+  holding = false;
+  store.add(60);
+  await until(() => view().observations.query.store_end === String(store.storeEnd()), 'a read answers meanwhile', 3 * POLL);
+  older().release();
+  await until(() => !view().observations.loadingOlder, 'the older page');
+  assert.deepEqual(holes(view()), [], 'no records are missing between the newest rows and the older page');
+  assert.equal(view().observations.list.records.length, 360 - 44, 'records 360 to 45');
+  ui.close();
+});
+
+await check('returning to the top during Show older leaves no hole', async () => {
+  const store = createStore(300);
+  let holding = false;
+  const ui = mount({store, hold: url => holding && url.includes('before=')});
+  const view = probe(ui);
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length > 0, 'rows');
+  const list = ui.sidebar.querySelector('#debugger-observations');
+  list.scrollTop = 44 * 20;
+  list.dispatchEvent(event(ui, 'scroll'));
+  store.add(40);
+  await until(() => view().observations.list?.records.length === 168, 'new records join the kept rows', 3 * POLL);
+  holding = true;
+  click(ui, ui.sidebar.querySelector('.debugger-older'));
+  const older = () => ui.reads().find(entry => entry.url.includes('before=') && entry.release);
+  await until(() => older(), 'the older read, held');
+  holding = false;
+  list.scrollTop = 0;
+  list.dispatchEvent(event(ui, 'scroll'));
+  await settle();
+  older().release();
+  await sleep(200);
+  assert.deepEqual(holes(view()), [], 'no records are missing');
+  ui.close();
+});
+
+// Round 4, 1. A Show older read that fails, or is cut short by leaving
+// Sources, added no page, so the rows follow the newest page as before.
+await check('a Show older read that adds no page leaves the rows following the newest', async () => {
+  for (const how of ['fails', 'is cut short by leaving Sources']) {
+    const store = createStore(300);
+    let failing = false, holding = false;
+    const ui = mount({store, failing: url => failing && url.includes('before='), hold: url => holding && url.includes('before=')});
+    const view = probe(ui);
+    ui.open();
+    await until(() => ui.rows('#debugger-observations').length > 0, 'rows');
+    if (how === 'fails') failing = true; else holding = true;
+    click(ui, ui.sidebar.querySelector('.debugger-older'));
+    if (how === 'fails') await until(() => view().observations.olderError, 'the older read fails');
+    else {
+      await until(() => ui.reads().some(entry => entry.url.includes('before=') && entry.release), 'the older read, held');
+      const screen = ui.document.querySelector('#screen-sources');
+      screen.hidden = true;
+      await settle();
+      screen.hidden = false;
+    }
+    failing = false; holding = false;
+    store.add(400);
+    await until(() => ui.rows('#debugger-observations')[0]?.dataset.key === '1:42:700', `${how}: the newest records`, 3 * POLL);
+    assert.equal(ui.sidebar.querySelector('.debugger-observation-pinned').hidden, true, `${how}: no place is claimed as kept`);
+    ui.close();
+  }
+});
+
+// Round 4, 5. The read a Watch action asks for does nothing from a render.
+await check('a read asked for from a render starts none', async () => {
+  const ui = mount({store: createStore(2)});
+  let renders = 0;
+  ui.context.RebDebuggerSidebar.addSection({id: 'eager-action', title: 'Eager', order: 60, render(body, view) {
+    body.textContent = 'eager';
+    renders += 1;
+    if (renders < 300) view.readAfterAction();
+  }});
+  ui.open();
+  await sleep(POLL - 400);
+  assert.equal(ui.reads().length, 1, `one read, not one per render (${renders} renders)`);
+  ui.close();
+});
+
+// Round 3, 2. Choosing another record, the kind filter or leaving Sources
+// cancels a Traffic lookup, and a cancelled lookup never switches screens.
+await check('moving on in the sidebar cancels a Traffic lookup', async () => {
+  const calls = [];
+  let holding = true;
+  const indexRow = {id: 'S1:R42:77', method: 'POST', path: '/collect'};
+  const store = createStore(0);
+  store.records.push(record(0, {type: 'request_watch_match', request_id: '77', detail: {rule: 0, method_matched: true}}));
+  store.records.push(record(1));
+  const state = {requests: [], sessionMode: 'live', inspectorTab: 'general', trafficIndex: {row: () => null}};
+  const ui = mount({store, hold: url => holding && url.startsWith('/api/requests'), globals: {state,
+    showScreen: name => calls.push(['screen', name]), setConsoleTrafficView: () => {}, renderInspector: () => {},
+    selectTrafficRow: id => calls.push(['select', id]), loadTrafficRequest: row => calls.push(['load', row.id]),
+    trafficIndexRequest: (row, origin) => ({id: row.id, origin, indexRow: row}),
+    __requests: parameters => parameters.has('locate') ? {format: 'reb-request-index-v1', requests: [], located: {'S1:R42:77': 2400}}
+      : {format: 'reb-request-index-v1', requests: [indexRow]}}});
+  const lookups = () => ui.requests.filter(entry => entry.url.startsWith('/api/requests'));
+  const row = key => ui.rows('#debugger-observations').find(item => item.dataset.key === key);
+  const startLookup = async count => {
+    click(ui, row('1:42:1'));
+    await settle();
+    click(ui, ui.sidebar.querySelector('.debugger-open-request'));
+    await until(() => lookups()[count - 1]?.release, `lookup ${count}, held`);
+    return lookups()[count - 1];
+  };
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length === 2, 'rows');
+  const first = await startLookup(1);
+  click(ui, row('1:42:2'));
+  await settle();
+  assert.equal(first.signal.aborted, true, 'choosing another record cancels the lookup');
+  const second = await startLookup(2);
+  click(ui, ui.sidebar.querySelector('.debugger-kind[data-kind="timer_observation"]'));
+  await settle();
+  assert.equal(second.signal.aborted, true, 'the kind filter cancels the lookup');
+  click(ui, ui.sidebar.querySelector('.debugger-kind[data-kind="all"]'));
+  await until(() => ui.rows('#debugger-observations').length === 2, 'all records again');
+  const third = await startLookup(3);
+  const screen = ui.document.querySelector('#screen-sources');
+  screen.hidden = true;
+  await settle();
+  screen.hidden = false;
+  await settle();
+  holding = false;
+  for (const entry of [first, second, third]) entry.release();
+  await sleep(200);
+  assert.deepEqual(calls, [], 'no cancelled lookup, nor one begun before leaving Sources, switches screens');
+  ui.close();
+});
+
+// Round 3, 3. A selection carried into a Threads scope keeps its place.
+await check('a selection carried into a thread scope keeps its place', async () => {
+  const store = createStore(200);
+  const ui = mount({store});
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length > 0, 'rows');
+  const list = ui.sidebar.querySelector('#debugger-observations');
+  list.scrollTop = 44 * 110;
+  list.dispatchEvent(event(ui, 'scroll'));
+  click(ui, ui.rows('#debugger-observations').find(item => item.dataset.key === '1:42:81'));
+  await settle();
+  click(ui, ui.rows('#debugger-threads').find(item => item.dataset.key === 'F:1:42:200'));
+  await until(() => /in frame 200/.test(ui.text('.debugger-observation-notes')), 'the scoped read');
+  assert.equal(list.querySelector('[aria-selected="true"]')?.dataset.key, '1:42:81', 'the record stays selected in the scope');
+  store.add(10);
+  await until(() => Number(ui.rows('#debugger-observations')[0]?.getAttribute('aria-setsize')) === 138, 'the next read adds to the kept rows', 2 * POLL + 1500);
+  assert.equal(list.querySelector('[aria-selected="true"]')?.dataset.key, '1:42:81', 'the selection stays in the list');
+  assert.doesNotMatch(ui.text('.debugger-detail'), /no longer in the list/);
+  ui.close();
+});
+
+// Round 3, 4. Arming reads the confirmed set at once, not at the next poll.
+await check('arming reads the confirmed set at once', async () => {
+  const live = {session_id: '5', target_id: '22', label: 'top #22'};
+  const store = createStore(1);
+  const ui = mount({store, globals: {RebNativeConsole: {liveDocument: () => live, watch: async rules => {
+    store.watch = rules ? {state: 'armed', armed: {session_id: '5', target_id: '22', rules}} : {state: 'none', armed: null};
+    return {status: 'ok'};
+  }}}});
+  const section = () => ui.text('[data-debugger-section="watch-rules"] .debugger-section-body');
+  ui.open();
+  await until(() => ui.sidebar.querySelector('.debugger-watch-form'), 'the form');
+  // Slow reads stretch the poll to 6 seconds; arming just after one read ends.
+  store.delay = 1500;
+  await until(() => /every 6 seconds/.test(ui.text('.debugger-sidebar-status')), 'a 6 second interval', 4 * POLL);
+  const form = ui.sidebar.querySelector('.debugger-watch-form');
+  form.querySelector('textarea').value = '/collect';
+  form.dispatchEvent(event(ui, 'submit'));
+  await until(() => /Armed on document 22/.test(section()), 'the outcome');
+  assert.doesNotMatch(section(), /The renderer confirmed the set below/, 'before its read answers, the outcome does not point at a set not shown');
+  await until(() => /Armed on Console document 22/.test(section()), 'the confirmed set, well before the next poll', 4000);
+  assert.match(section(), /Armed on document 22\. The renderer confirmed the set below\./);
+  // Clearing: until its read answers, the outcome does not stand as final
+  // beside the set that was armed.
+  click(ui, [...ui.sidebar.querySelectorAll('.debugger-watch-form button')].find(button => button.textContent === 'Clear rules'));
+  await until(() => /Cleared on document 22/.test(section()), 'the clear outcome');
+  assert.match(section(), /Armed on Console document 22/, 'the read of the cleared set is still out');
+  assert.match(section(), /Cleared on document 22\. Reading the set that is left/);
+  await until(() => /No rules armed/.test(section()), 'the cleared set', 4000);
+  assert.match(section(), /Cleared on document 22\.$|Cleared on document 22\.(?! Reading)/);
+  ui.close();
+});
+
+// Round 3, 5. Reopened with nothing selected, the list shows the newest records.
+await check('reopening shows the newest records, not kept ones', async () => {
+  const store = createStore(200);
+  const ui = mount({store});
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length > 0, 'rows');
+  click(ui, ui.rows('#debugger-observations')[0]);
+  await settle();
+  ui.close();
+  store.add(500);
+  const reads = ui.reads().length;
+  ui.open();
+  await until(() => ui.reads().length > reads && ui.rows('#debugger-observations')[0]?.dataset.key === '1:42:700', 'the newest records', 4000);
+  assert.equal(ui.sidebar.querySelector('.debugger-observation-pinned').hidden, true, 'no place is claimed as kept');
+  assert.equal(ui.sidebar.querySelector('#debugger-observations [aria-selected="true"]'), null);
+  ui.close();
+});
+
+// Round 3, 7. A read while the Console holds the session judges no outcome.
+await check('a busy read leaves the arm outcome', async () => {
+  const live = {session_id: '5', target_id: '22', label: 'top #22'};
+  const store = createStore(1);
+  const ui = mount({store, globals: {RebNativeConsole: {liveDocument: () => live, watch: async rules => {
+    store.watch = rules ? {state: 'armed', armed: {session_id: '5', target_id: '22', rules}} : {state: 'none', armed: null};
+    return {status: 'ok'};
+  }}}});
+  const section = () => ui.text('[data-debugger-section="watch-rules"] .debugger-section-body');
+  ui.open();
+  await until(() => ui.sidebar.querySelector('.debugger-watch-form'), 'the form');
+  const form = ui.sidebar.querySelector('.debugger-watch-form');
+  form.querySelector('textarea').value = '/collect';
+  form.dispatchEvent(event(ui, 'submit'));
+  await until(() => /Armed on Console document 22/.test(section()), 'the armed set', 2 * POLL + 1000);
+  const armed = store.watch;
+  store.watch = {state: 'busy', armed: null};
+  await until(() => /A Console action holds the session/.test(section()), 'a busy read', 2 * POLL + 1000);
+  assert.match(section(), /Armed on document 22/, 'a busy read does not end the outcome');
+  assert.doesNotMatch(section(), /The renderer confirmed the set below/, 'while busy, the outcome does not point at a set not shown');
+  store.watch = armed;
+  await until(() => /Armed on Console document 22/.test(section()), 'armed again', 2 * POLL + 1000);
+  assert.match(section(), /Armed on document 22\. The renderer confirmed the set below\./);
+  ui.close();
 });
 
 console.log(`PASS debugger sidebar: ${results.length} cases with real timers (offline DOM model; no rendered layout claimed)`);

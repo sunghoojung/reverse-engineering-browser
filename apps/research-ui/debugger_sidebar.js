@@ -399,11 +399,14 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
   let open = false, timer = 0, generation = 0, interval = DEBUGGER_SIDEBAR.poll, controller = null;
   // `renderTurn` lasts from a render until the next task, so a refresh() a
   // section queues from render (even as a promise) is ignored.
-  let rendering = false, renderTurn = false, renderTurns = 0, lastStarted = 0, refreshQueued = false;
+  let rendering = false, renderTurn = false, renderTurns = 0, lastStarted = 0, refreshQueued = false, stops = 0, readsStarted = 0;
   const mounted = new Map();
-  const blankObservations = () => ({key: null, head: [], refused: 0, query: null, list: null, loadingOlder: false, olderError: null, olderController: null});
+  const blankObservations = () => ({key: null, head: [], refused: 0, query: null, list: null, loadingOlder: false, olderError: null, olderController: null, olderCreated: null});
   const view = {
-    status: 'loading', document: null, error: null, updatedAt: null, readAt: 0, thread: null, kind: null,
+    // `readSerial` numbers the read whose answer `document` is; readsStarted()
+    // counts reads begun, so an action can tell which reads followed it.
+    status: 'loading', document: null, error: null, updatedAt: null, readSerial: 0, thread: null, kind: null,
+    readsStarted: () => readsStarted,
     observations: blankObservations(),
     // Asks for a read soon. From a render, or the promises it queued, it does
     // nothing: a render follows a read. While a read is in flight it runs one
@@ -433,18 +436,27 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     // Once the researcher has a place (a selected row, or the list scrolled
     // from its top), the newest page becomes a kept list that later reads add
     // to; back at the top with nothing selected, the list follows the newest
-    // page again; followNewest returns whether the rows changed.
+    // page again; followNewest returns whether the rows changed, and with
+    // `any` (a pane drawn again, with no place in it) drops any kept list.
     holdObservations() {
       const observations = view.observations;
       if (observations.list || !observations.query || observations.key !== observationKey()) return;
       observations.list = {records: [...observations.head], top: BigInt(observations.query.store_end), bottom: observations.query.next_before ?? null,
         refused: 0, pinned: null, dropped: 0, query: observations.query, followed: true};
     },
-    followNewest() {
+    followNewest(any = false) {
       const list = view.observations.list;
-      if (!list?.followed || list.pinned || list.dropped) return false;
-      view.observations.list = null;
+      if (!list || (!any && (!list.followed || list.pinned || list.dropped))) return false;
+      // dropList also cancels a Show older read that would continue this list.
+      dropList();
       return true;
+    },
+    // A read for the sidebar's own Watch action: now, or right after the read
+    // in flight, never only at the next poll. Not for registered sections.
+    readAfterAction() {
+      if (!open || rendering) return;
+      if (controller) refreshQueued = true;
+      else read();
     },
     // The other sections registered as presenting the pausing debugger.
     nativeSections: () => sections().filter(section => section.native === 'pausing' && section.id !== 'pausing').map(section => ({id: section.id, title: section.title})),
@@ -490,7 +502,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
   function dropList() {
     const observations = view.observations;
     observations.olderController?.abort();
-    Object.assign(observations, {list: null, loadingOlder: false, olderError: null, olderController: null});
+    Object.assign(observations, {list: null, loadingOlder: false, olderError: null, olderController: null, olderCreated: null});
   }
 
   /* Without a kept list the rows are the newest page. A kept list (older
@@ -547,7 +559,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     controller?.abort();
     const own = new AbortController();
     controller = own;
-    const mine = ++generation, started = Date.now();
+    const mine = ++generation, started = Date.now(), serial = ++readsStarted;
     lastStarted = started;
     try {
       const answer = await fetchDocument(query(), own.signal);
@@ -558,7 +570,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
       view.status = 'ready';
       view.error = null;
       view.updatedAt = new Date();
-      view.readAt = started;
+      view.readSerial = serial;
     } catch (error) {
       if (mine !== generation) return;
       view.status = error?.malformed ? 'malformed' : 'disconnected';
@@ -577,10 +589,26 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     }
   }
 
+  // A Show older read that added no page leaves a list it made only for
+  // itself as it found it: none, so the rows follow the newest page again.
+  function revertOlder() {
+    const observations = view.observations, base = observations.olderCreated;
+    observations.olderCreated = null;
+    if (base && observations.list === base && !base.pinned) observations.list = null;
+  }
+
   async function readOlder() {
     const observations = view.observations, key = observations.key, list = observations.list;
     const before = list ? list.bottom : observations.query?.next_before ?? null;
     if (observations.loadingOlder || before === null || !visible()) return;
+    // Asking for older pages keeps the rows: without a kept list, a copy of
+    // the newest page becomes one now, so a read that answers meanwhile
+    // bridges into it and the older page continues exactly these rows.
+    const base = list ?? {records: [...observations.head], top: BigInt(observations.query.store_end), bottom: before, refused: 0, pinned: null, dropped: 0,
+      query: observations.query};
+    base.followed = false;
+    observations.list = base;
+    observations.olderCreated = list ? null : base;
     const own = new AbortController();
     observations.olderController = own;
     observations.loadingOlder = true;
@@ -588,9 +616,11 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     try {
       const answer = await fetchDocument(query({before: String(before)}), own.signal);
       if (observations.key !== key || observations.olderController !== own) return;
+      // A list dropped or replaced while this read ran, or one that dropped
+      // its oldest rows, is not continued by this page.
+      if (observations.list !== base || base.bottom !== before) return;
       const records = valid(answer);
-      const target = observations.list ?? {records: [...observations.head], top: BigInt(observations.query.store_end), bottom: null, refused: 0, pinned: null, dropped: 0};
-      target.followed = false;
+      const target = base;
       target.records = debuggerUnique([...target.records, ...records]);
       target.refused += answer.observations_malformed + answer.observations.length - records.length;
       target.bottom = answer.observations_query.next_before ?? null;
@@ -599,9 +629,11 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
       observations.olderError = null;
     } catch (error) {
       if (observations.olderController !== own) return;
+      revertOlder();
       observations.olderError = String(error?.message ?? error);
     } finally {
       if (observations.olderController === own) {
+        observations.olderCreated = null;
         observations.loadingOlder = false;
         observations.olderController = null;
         render();
@@ -693,11 +725,13 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
 
   function stop() {
     generation += 1;
+    stops += 1;
     clearTimeout(timer);
     timer = 0;
     refreshQueued = false;
     controller?.abort();
     controller = null;
+    revertOlder();
     view.observations.olderController?.abort();
     view.observations.olderController = null;
     view.observations.loadingOlder = false;
@@ -746,6 +780,8 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     view,
     setOpen,
     isOpen: () => open,
+    // Counts closes and departures from Sources, so work begun before one can tell.
+    stops: () => stops,
     sectionsChanged: () => render(),
     sourceScope() {
       const thread = view.thread;
@@ -892,7 +928,9 @@ function debuggerWatchSection() {
   // The last outcome names its document, so it outlives a form drawn again.
   // An arm or clear outcome lasts only while the state read after it agrees.
   let form = null, outcome = null;
-  const say = (text, kind = 'notice', target = null) => { outcome = {text, kind, target, at: Date.now()}; };
+  // `after` is the count of reads begun when the outcome came; only a read
+  // begun later can confirm or end it.
+  const say = (text, kind = 'notice', target = null, after = 0) => { outcome = {text, kind, target, after}; };
   const sameDocument = (left, right) => Boolean(left && right) && left.session_id === right.session_id && left.target_id === right.target_id;
   function build(view, live) {
     const element = debuggerNode('form', 'debugger-watch-form');
@@ -965,15 +1003,15 @@ function debuggerWatchSection() {
       const reply = await view.hooks.watch(rules);
       if (!reply) say(`No confirmed answer from document ${live.target_id}. The rules may have changed; nothing was retried.`);
       else if (reply.status !== 'ok') say(`Refused by document ${live.target_id}: ${reply.text || reply.status}. A refused set leaves nothing armed.`);
-      else if (action === 'arm') say(`Armed on document ${live.target_id}. The renderer confirmed the set below.`, 'armed', live.target_id);
-      else say(`Cleared on document ${live.target_id}.`, 'cleared', live.target_id);
+      else if (action === 'arm') say(`Armed on document ${live.target_id}. The renderer confirmed the set below.`, 'armed', live.target_id, view.readsStarted());
+      else say(`Cleared on document ${live.target_id}.`, 'cleared', live.target_id, view.readsStarted());
     } catch (error) {
       say(`Not confirmed by document ${live.target_id}: ${error?.message ?? error}. Nothing was retried.`);
     } finally {
       own.sending = false;
-      // The outcome now; the confirmed set with the next read.
+      // A read of the confirmed set starts now; the outcome shows meanwhile.
+      view.readAfterAction();
       view.repaint();
-      view.refresh();
     }
   }
   function drop() {
@@ -991,11 +1029,16 @@ function debuggerWatchSection() {
       const watch = view.document.watch, armed = watch.state === 'armed' ? watch.armed : null;
       // A read that started after the outcome and disagrees with it ends it:
       // "Armed on document 22" never stands above "No rules armed".
-      if (outcome && view.readAt > outcome.at && view.status === 'ready') {
+      if (outcome && view.readSerial > outcome.after && view.status === 'ready' && watch.state !== 'busy') {
         const armedThere = armed?.target_id === outcome.target;
         if ((outcome.kind === 'armed' && !armedThere) || (outcome.kind === 'cleared' && armedThere)) outcome = null;
       }
-      const text = outcome?.text ?? '';
+      // Until a read begun after the outcome answers, and while the Console
+      // holds the session, the set below is not the one the outcome names.
+      const pending = Boolean(outcome) && !(view.readSerial > outcome.after);
+      const text = outcome?.kind === 'armed' && (pending || watch.state === 'busy')
+        ? `Armed on document ${outcome.target}. Reading the set the renderer confirmed…`
+        : outcome?.kind === 'cleared' && pending ? `Cleared on document ${outcome.target}. Reading the set that is left…` : outcome?.text ?? '';
       const nodes = [];
       if (watch.state === 'busy') nodes.push(debuggerNote('A Console action holds the session, so the armed set is read again shortly.', 'warning'));
       else if (!armed) nodes.push(debuggerNote('No rules armed. Nothing is observed until a set is armed on one live document.'));
@@ -1094,6 +1137,7 @@ function debuggerObservationsSection() {
   function choose(view, item, how) {
     if (!item) return;
     if (selected?.key !== item.key) notice = null;
+    if (opening && opening.key !== item.key) cancelOpening();
     selected = item;
     revealKey = item.key;
     list?.set(shown, {selectedKey: item.key});
@@ -1123,8 +1167,13 @@ function debuggerObservationsSection() {
       else say(view, record, 'This record has no retained script position to open.');
     });
   }
-  // One lookup at a time: a newer click, closing the sidebar or leaving
-  // Sources cancels it, and its link says it is working.
+  function cancelOpening() {
+    opening?.controller.abort();
+    opening = null;
+  }
+  // One lookup at a time: a newer click, choosing another record, the kind
+  // filter, Show newest, closing the sidebar or leaving Sources cancels it,
+  // and its link says it is working.
   function openRequest(view, record) {
     const key = debuggerRecordKey(record);
     opening?.controller.abort();
@@ -1234,12 +1283,15 @@ function debuggerObservationsSection() {
     return `${count.toLocaleString('en-US')} ${kind}${scope}, newest first, from ${where}${why}${capped}. Enter opens a row's position in Sources, or its request in Traffic.`;
   }
   function build(view) {
+    // A pane drawn again (reopened or expanded) starts at its top with no
+    // selection, so it holds no place: no rows are kept from before.
+    if (!selected) view.followNewest(true);
     const root = debuggerNode('div', 'debugger-observations');
     const kinds = debuggerNode('div', 'debugger-kinds');
     kinds.setAttribute('role', 'group');
     kinds.setAttribute('aria-label', 'Observation kind');
     for (const [kind, text] of [[null, 'All'], ...Object.entries(DEBUGGER_OBSERVATION_KINDS).map(([kind, value]) => [kind, value.filter])]) {
-      const pill = debuggerButton(text, 'debugger-kind', () => { selected = null; view.setKind(kind); });
+      const pill = debuggerButton(text, 'debugger-kind', () => { selected = null; cancelOpening(); view.setKind(kind); });
       pill.dataset.kind = kind ?? 'all';
       kinds.append(pill);
     }
@@ -1249,6 +1301,7 @@ function debuggerObservationsSection() {
     const pinnedText = debuggerNote('', 'warning');
     pinned.append(pinnedText, debuggerButton('Show newest', 'secondary-button debugger-show-newest', () => {
       selected = null;
+      cancelOpening();
       if (list) list.element.scrollTop = 0;
       view.showNewest();
     }));
@@ -1324,6 +1377,8 @@ function debuggerObservationsSection() {
         const kept = items.find(item => item.key === selected.key);
         if (kept) selected = kept;
       }
+      // A selection or scroll carried into these rows (a Threads scope, say) holds them.
+      if (current && (selected || list.element.scrollTop > 0)) view.holdObservations();
       paintDetail(view);
     },
     release() {
@@ -1421,7 +1476,9 @@ for (const section of [debuggerThreadsSection(), debuggerWatchSection(), debugge
     async openRequest(record, signal) {
       const app = appState(), id = `S${record.session_id}:R${record.process_id}:${record.request_id}`;
       const name = `Request ${record.request_id} of renderer ${record.process_id}`;
-      const moved = () => signal?.aborted || !debuggerSidebarController?.isOpen() || screen.hidden;
+      // Leaving Sources and coming back counts as moving on, as closing does.
+      const stopped = debuggerSidebarController?.stops() ?? 0;
+      const moved = () => signal?.aborted || !debuggerSidebarController?.isOpen() || screen.hidden || debuggerSidebarController.stops() !== stopped;
       if (!app || typeof selectTrafficRow !== 'function' || typeof showScreen !== 'function') return `${name} cannot be opened: Traffic is not available here.`;
       let located = null;
       if (!app.trafficIndex?.row?.(id) && !(app.requests ?? []).some(request => request.id === id)) {

@@ -1382,6 +1382,73 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.screenshot("debugger-sidebar-light-\(size.name)")
       try await ui.click("#theme-toggle")
 
+      // Keyboard in Observations: an arrow moves the active row and brings
+      // its details into view.
+      try await ui.click(".debugger-kind[data-kind='all']")
+      try await ui.waitUntil("[...document.querySelectorAll('#debugger-observations .debugger-list-row')].some(row => row.dataset.kind !== 'listener_dispatch')",
+        "\(size.name): the All filter did not apply")
+      try await ui.click("#debugger-observations .debugger-list-row")
+      try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
+      try await ui.waitUntil("""
+        (() => { const list = document.querySelector('#debugger-observations'), rows = [...list.querySelectorAll('.debugger-list-row')];
+          const active = list.querySelector('.debugger-list-row[data-active="true"]'), detail = document.querySelector('.debugger-detail');
+          if (document.activeElement !== list || !active || rows.indexOf(active) !== 1 || !detail || detail.hidden) return false;
+          const box = detail.getBoundingClientRect(), view = document.querySelector('.debugger-sidebar-sections').getBoundingClientRect();
+          return detail.innerText.includes(`sequence ${active.dataset.key.split(':').at(-1)}`) && box.top < view.bottom - 24 && box.bottom > view.top; })()
+        """, "\(size.name): the arrow did not move to the next record with its details in view")
+
+      // A watched request opens its own Traffic row on the Initiator tab, by
+      // the detail's link and by Enter, through Traffic's row selection.
+      let watched = """
+        !document.querySelector('#screen-traffic').hidden && (state.selectedRequestId ?? '').endsWith(':R\(expected.debuggerProcess):5100') &&
+          document.querySelector('#screen-traffic .inspector-tab[aria-selected="true"]')?.dataset.inspectorTab === 'initiator'
+        """
+      for how in ["link", "Enter"] {
+        try await ui.click(".debugger-kind[data-kind='request_watch_match']")
+        try await ui.waitUntil("(() => { const rows = [...document.querySelectorAll('#debugger-observations .debugger-list-row')]; return rows.length === 1 && rows[0].dataset.kind === 'request_watch_match'; })()",
+          "\(size.name): the Requests filter did not apply")
+        try await ui.click("#debugger-observations .debugger-list-row")
+        if how == "link" {
+          try await ui.waitUntil("Boolean(document.querySelector('.debugger-open-request'))", "\(size.name): the watched request offers its Traffic row")
+          try await ui.click(".debugger-open-request")
+        } else {
+          try await ui.key(36, "\r")
+        }
+        try await ui.waitUntil(watched, "\(size.name): \(how) did not open the watched request in Traffic")
+        if how == "link" {
+          try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) watched request")
+          try await ui.screenshot("debugger-watched-request-\(size.name)")
+        }
+        try await show(ui, "sources")
+        if try await ui.value("document.querySelector('#debugger-sidebar').hidden") as? Bool == true {
+          try await ui.click("#source-debugger-toggle")
+        }
+        try await ui.waitUntil("document.querySelectorAll('#debugger-observations .debugger-list-row').length > 0", "\(size.name): the sidebar did not list records again")
+      }
+      try await ui.click(".debugger-kind[data-kind='all']")
+
+      // A failed read and a malformed answer keep the last rows, marked stale;
+      // the next good read clears it.
+      for (body, status) in [("Promise.reject(new TypeError('Load failed'))", "Disconnected: Load failed"),
+                             ("Promise.resolve(new Response('{\"contract_version\":2}', {status: 200}))", "The last answer was malformed (an unknown contract version)")] {
+        _ = try await ui.value("""
+          (() => { window.__rebDebuggerFetch ??= window.fetch;
+            window.fetch = (input, init) => String(input).startsWith('/api/native-debugger') ? \(body) : window.__rebDebuggerFetch(input, init); return true; })()
+          """)
+        try await ui.waitUntil("""
+          (document.querySelector('#debugger-sidebar .debugger-status-state')?.textContent ?? '').startsWith('\(status)') &&
+            document.querySelector('#debugger-sidebar [data-debugger-section="observations"]').dataset.stale === 'true' &&
+            document.querySelectorAll('#debugger-observations .debugger-list-row').length > 0
+          """, "\(size.name): the sidebar did not keep stale rows after: \(status)")
+        try await assertLayout(ui, "#debugger-sidebar", "\(size.name) debugger stale")
+        try await ui.screenshot("debugger-sidebar-stale-\(status.hasPrefix("Disconnected") ? "disconnected" : "malformed")-\(size.name)")
+      }
+      _ = try await ui.value("(() => { window.fetch = window.__rebDebuggerFetch; delete window.__rebDebuggerFetch; return true; })()")
+      try await ui.waitUntil("""
+        (document.querySelector('#debugger-sidebar .debugger-status-state')?.textContent ?? '').startsWith('Read every') &&
+          document.querySelector('#debugger-sidebar [data-debugger-section="observations"]').dataset.stale === 'false'
+        """, "\(size.name): a good read did not clear the stale state")
+
       // Escape returns to the toggle, or to More while the toggle sits in its
       // menu (a docked sidebar narrows the toolbar); closing stops every read.
       try await ui.click("#debugger-threads .debugger-list-row[data-key$='\(frameKey)']")

@@ -121,13 +121,20 @@ reports with no pausing control, only rows near the view may mount, Tab from
 the focused Threads pane must reach the list with a visible indicator, frame
 200 must scope the Sources tree and Observations, a listener record must open
 `onTap` in Sources at line 2, column 71, and the light theme must pass the
-layout checks. Escape must return to the toggle, or to **More** while a docked
-sidebar has moved the toggle into that menu, and a closed sidebar must make no
-read for 4.5 seconds. `REB_RENDERED_UI_DEBUGGER_RECORDS` (8 to 20,000, default
+layout checks. In Observations an arrow key must move to the next record and
+bring its details into view, and the watched request (5100) must open its own
+Traffic row on the Initiator tab both by its **Open request in Traffic** link
+and by Enter. With `/api/native-debugger` failing, and then answering a
+malformed document, the status must say so while the last rows stay, marked
+stale, until a good read clears it. Escape must return to the toggle, or to
+**More** while a docked sidebar has moved the toggle into that menu, and a
+closed sidebar must make no read for 4.5 seconds. `REB_RENDERED_UI_DEBUGGER_RECORDS` (8 to 20,000, default
 120) sets how many records the fixture writes; they also count as
 Fingerprinting activity. `test6RemovedFeaturesAreAbsent`
-reads Sources with the sidebar open, without the availability statement, and
-compares that statement with `/api/native-debugger`.
+reads Sources with the sidebar open, leaving out only the availability
+statement and native pausing sections inside `#debugger-sidebar`, fails on a
+native marker anywhere else, and compares that statement with
+`/api/native-debugger`.
 
 `test27StartPanelStartRetryAndKeyboard` takes the start panel through a whole
 decision at both window sizes. The driver names a `REB_BRAVE_BINARY` that does

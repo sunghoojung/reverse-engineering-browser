@@ -1301,19 +1301,25 @@ thread's walks read or write them, so a walk takes no lock after its first.
   thread synchronous XHR uses are never named.
 - Tables. A named thread's tables (539,920 bytes) and Blink's buffer for V8's
   frames (1,056 frames of 16 bytes, 16,896 bytes) are allocated by its first
-  walk while capture is active, never by naming, so a worker that never walks
-  under an active configuration costs nothing. With `--reb-promise-stacks`
-  the tables also hold the 2,048-entry registration ring (114,688 bytes). That
-  first walk runs from script, outside every Blink lock, and takes the
-  registry lock once to register the tables. A walk allocates nothing else.
+  call that needs them while capture is active: a walk (a request start, a
+  schedule or post with script running, a navigation, a cookie write, a
+  promise registration or a debugger observation) or a message receipt.
+  Never by naming, and never by a schedule or post with no script running,
+  whose `no_script` handle needs no tables (worker start schedules such tasks
+  under `WorkerThread::lock_`). So a worker that does neither under an active
+  configuration costs nothing. With `--reb-promise-stacks` the tables also
+  hold the 2,048-entry registration ring (114,688 bytes). Walks run from
+  script and receipts from message dispatch, after worker initialization and
+  outside `WorkerThread::lock_`; the call that makes the tables takes the
+  registry lock once to register them. Nothing else allocates.
 - Limit. At most 32 worker threads per renderer process have tables
   (`kNativeStackThreadLimit`), so at most 17,818,112 bytes of worker tables
   and buffers, or 21,488,128 with promise stacks; the document main thread is not counted. A worker that
   walks while 32 others hold tables walks nothing: its requests record state
   6 `not_walked_thread_limit` with its scope, its schedules and received
   messages are not remembered, and one `request_stack_thread_limit` gap per
-  configuration counts the thread. Its place is taken by the first walk after
-  a worker's tables are freed.
+  configuration counts the thread. Its place is taken by the first call that
+  makes tables after a worker's tables are freed.
 - Shutdown. `PerformShutdownOnWorkerThread` frees a worker's tables and Blink's
   buffer and forgets its name and its place.
 
@@ -1514,7 +1520,8 @@ records.
 - Memory: 556,816 bytes per thread with tables (539,920 of tables, refusal
   mailbox, queued index and recent posts, 16,896 of Blink's frame buffer), plus 114,688 for
   the registration ring with `--reb-promise-stacks`. Allocated by the thread's
-  first walk while capture is active, never when it is named, and freed when a
+  first walk or message receipt while capture is active, never when it is
+  named or by a schedule with no script, and freed when a
   worker stops; at most 32 workers per renderer have them
   ([threads](#threads)). The owner ring is 64 KiB of process-static storage,
   untouched until a stack artifact is queued.
@@ -1528,7 +1535,8 @@ malformed records.
 fixture provider: disabled, 150 and 5,000 frames, Wasm and `await` frames,
 repeated stacks, table eviction, budgets and script identity, and on a second
 thread a dedicated worker's own tables, scope, frame IDs and identities; that
-naming allocates nothing and a thread's first active walk makes its tables;
+naming allocates nothing, a schedule or post with no script makes no tables,
+and a thread's first walk or message receipt makes them;
 refusals routed from the transport's thread; a counted mailbox overflow; a
 refusal whose owner slot 8,192 newer artifacts reused, which still reaches its
 owner; over-full bursts from the transport's thread, each counted as an

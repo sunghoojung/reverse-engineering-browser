@@ -112,8 +112,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
   // --reb-request-stacks, for the document main thread at V8 initialization
   // and for each dedicated, shared and service worker when its global scope
   // starts. The thread's tables and Blink's frame buffer are allocated by its
-  // first walk while capture is active, never here. A second call keeps the
-  // first scope.
+  // first walk or message receipt while capture is active, never here and
+  // never by a schedule or post with no script running. A second call keeps
+  // the first scope.
   static void AttachThread(const NativeStackScope& scope) noexcept;
   // Frees the calling worker thread's tables, if any, at its shutdown and
   // forgets its scope; refusals for its artifacts are dropped from then on.
@@ -240,8 +241,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
                          const std::array<std::uint8_t, 48>& tail = {}) noexcept;
   // The checks RecordRequestInitiated makes before admitting a network record.
   [[nodiscard]] static bool NetworkActive(const NativeProbeSink& sink) noexcept;
-  // The calling thread's tables with its routed refusals applied, made on
-  // its first walk while capture is active when `make`; null without. Emits
+  // The calling thread's tables with its routed refusals applied, made by
+  // its first walk or message receipt while capture is active when `make`;
+  // null without. Emits
   // the gaps that counts: a mailbox overflow, and once per configuration a
   // worker past kNativeStackThreadLimit, which also sets `*limited`.
   [[nodiscard]] static NativeRequestStackTables* Tables(std::uint64_t generation,

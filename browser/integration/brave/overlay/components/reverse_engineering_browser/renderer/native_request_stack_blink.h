@@ -71,7 +71,8 @@ inline void AttachMainThread() {
 // or without --reb-request-stacks: dedicated, shared and service workers are
 // named by the worker's context ID, the frame_id of its own requests and
 // cookie records. Two thread-local stores under WorkerThread::lock_; the
-// tables come later, from the first active walk. Worklets get no scope, so
+// tables come later, from the first walk or message receipt while capture is
+// active. Worklets get no scope, so
 // their requests read unsupported_thread.
 inline void AttachWorkerThread(blink::ExecutionContext* scope) {
   if (!scope) {

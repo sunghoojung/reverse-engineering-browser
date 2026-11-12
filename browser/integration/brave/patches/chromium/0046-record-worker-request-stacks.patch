@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index fa4a188..a3df0bc 100644
+index fa4a188..8263a8e 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 @@ -43,7 +43,6 @@
@@ -66,7 +66,7 @@ index fa4a188..a3df0bc 100644
                                 : reb::kNativeRequestStackSyncLimit;
    capture.async_capacity = task ? 0 : reb::kNativeRequestStackAsyncLimit;
    capture.innermost_only = task;
-@@ -2228,11 +2225,17 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -2228,11 +2225,18 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
      isolate->SetJsInvocationCallbacks(js_invocation);
      reb::NativeProbeSink::Get().SetNativeJsInvocationContextProvider(
          CurrentJsInvocation);
@@ -76,7 +76,8 @@ index fa4a188..a3df0bc 100644
      // Installed only with --reb-request-stacks, so a request start without
 -    // it costs the sink one atomic load.
 +    // it costs the sink one atomic load. A thread's tables and V8 frame
-+    // buffer are made by its first walk while capture is active.
++    // buffer are made by its first walk or message receipt while capture is
++    // active.
      if (v8::IsNativeStackCaptureEnabled()) {
 -      NativeStackFrames();
 -      reb::NativeRequestStackWalk::SetProvider(WalkNativeRequestStack);

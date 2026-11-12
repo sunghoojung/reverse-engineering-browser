@@ -1130,6 +1130,36 @@ NativeRequestStackPayload HandlerStack(NativeProbeQueue& queue,
     Drain(queue);
   });
 
+  // A schedule or post with no script running needs no tables: on a named
+  // worker that has not walked, as during worker start under
+  // WorkerThread::lock_, it returns a no_script handle or a one-segment
+  // origin and makes none. A message receipt does make them.
+  {
+    TestThread fresh;
+    const int made = fixture_frames_made;
+    fresh.Run([&] {
+      NativeRequestStackWalk::AttachThread(
+          WorkerScope(reb::NativeStackThread::kDedicatedWorker, 0x888A));
+      const auto quiet_task =
+          NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout, false);
+      assert(quiet_task == ((1ULL << 63U) | 1U));
+      std::array<std::uint8_t, reb::kNativeTaskOriginMaxBytes> out{};
+      const auto n = NativeRequestStackWalk::PostMessageOrigin(NativeAsyncTaskKind::kWorkerMessage,
+                                                               false, out);
+      assert(n == reb::kNativeTaskOriginHeaderSize + reb::kNativeTaskSegmentSize &&
+             fixture_frames_made == made && Drain(queue) == 0);
+      const std::vector<std::uint8_t> sent(out.begin(),
+                                           out.begin() + static_cast<std::ptrdiff_t>(n));
+      assert(reb::DecodeNativeTaskOrigin(sent, header, carried) && header.count == 1 &&
+             carried[0].kind == 12 &&
+             carried[0].state == static_cast<std::uint8_t>(reb::NativeTaskSegmentState::kNoScript));
+      assert(NativeRequestStackWalk::ReceiveMessageOrigin(NativeAsyncTaskKind::kMessagePort, {}) !=
+                 0 &&
+             fixture_frames_made == made + 1);
+      NativeRequestStackWalk::DetachThread();
+    });
+  }
+
   // A handler whose origin was rejected posts again: its rejected end travels
   // on as the last segment, and the next receiver counts no second gap.
   saved = NativeRequestStackWalk::EnterAsyncTask(
@@ -1261,7 +1291,8 @@ NativeRequestStackPayload HandlerStack(NativeProbeQueue& queue,
   transport.Disable();
   std::cout << "PASS message origins: nothing beyond the segments crosses, a same-thread "
                "receipt linked in place so a MessageChannel loop keeps an older timer, copies on "
-               "other threads, a rejected end carried onward, forged, damaged, oversize and "
+               "other threads, no tables made by a schedule or post with no script, a rejected end "
+               "carried onward, forged, damaged, oversize and "
                "wrong-kind origins rejected and counted, "
                "missing origin cut, a worker that posts and detaches first, no-script post, cut "
                "and truncated ends carried apart, network off\n";

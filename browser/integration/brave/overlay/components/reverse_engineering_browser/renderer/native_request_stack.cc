@@ -31,8 +31,10 @@ namespace reb {
 // One thread's tables: written only by that thread's walks, except the
 // refusal mailbox (see below). Keyed by configuration generation so a new
 // session never sees an old session's digests, scripts or budgets. Made by
-// the thread's first walk while capture is active (ActiveTables), never by
-// AttachThread, so an attached thread that never walks costs nothing.
+// the thread's first call that needs them while capture is active
+// (ActiveTables): a walk or a message receipt. Never by AttachThread, nor by
+// a schedule or post with no script running, so a named thread that does
+// neither costs nothing.
 struct NativeRequestStackTables final {
   struct Digest final {
     std::uint64_t generation = 0;
@@ -201,7 +203,7 @@ thread_local NativeNavigationKind g_navigation_kind = NativeNavigationKind::kOth
 
 // Tables with a scope, for routing refusals. The lock is taken when a
 // thread's tables are made and freed, and by StackArtifactRefused; a walk
-// takes it only on the thread's first active walk.
+// takes it only when it makes its thread's tables.
 base::Lock& RegistryLock() {
   static base::NoDestructor<base::Lock> lock;
   return *lock;
@@ -532,7 +534,8 @@ NativeRequestStackTables* ThreadTables(const std::uint64_t generation,
   return state;
 }
 
-// This thread's tables, made on its first walk while capture is active, with
+// This thread's tables, made by its first walk or message receipt while
+// capture is active, with
 // every routed refusal applied. Null on a thread with no scope, and on a
 // worker past kNativeStackThreadLimit, which sets `limited`, and `limit_gap`
 // once per configuration.
@@ -560,7 +563,8 @@ NativeRequestStackTables* ActiveTables(const std::uint64_t generation,
       }
     } while (!g_worker_tables.compare_exchange_weak(live, live + 1, std::memory_order_relaxed));
   }
-  // Once per thread, outside any Blink lock: a walk runs from script.
+  // Once per thread. Walks run from script and receipts from message
+  // dispatch, never under WorkerThread::lock_.
   auto* state = new NativeRequestStackTables();
   state->scope = scope;
   state->process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
@@ -998,13 +1002,15 @@ std::uint64_t NativeRequestStackWalk::RecordAsyncTask(const NativeAsyncTaskKind 
   if ((generation & 1U) != 0 || !NetworkActive(sink)) {
     return 0;
   }
+  // Nothing to walk or store: the handle itself says why the chain ends, so a
+  // named thread needs no tables for it. Worker start schedules tasks under
+  // WorkerThread::lock_ with no script running, and makes none there.
+  if (!script_running) {
+    return t_tables || t_scope.thread != 0 ? NoScriptHandle(kind) : 0;
+  }
   NativeRequestStackTables* const state = Tables(generation, true);
   if (!state) {
     return 0;
-  }
-  // Nothing to walk or store: the handle itself says why the chain ends.
-  if (!script_running) {
-    return NoScriptHandle(kind);
   }
   g_walking = true;
   NativeRequestStackWalk walk(state, generation, 0, 0, RequestFrameId(),
@@ -1024,15 +1030,25 @@ std::size_t NativeRequestStackWalk::PostMessageOrigin(
     const std::span<std::uint8_t, kNativeTaskOriginMaxBytes> out) noexcept {
   const std::uint64_t segment = RecordAsyncTask(kind, script_running);
   NativeRequestStackTables* const state = t_tables;
-  if (segment == 0 || !state) {
+  if (segment == 0) {
     return 0;
   }
   const std::uint64_t generation =
       NativeProbeSink::Get().config_generation_.load(std::memory_order_acquire);
   std::uint16_t count = 0;
   std::uint8_t flags = 0;
-  AppendChainFrom(*state, segment, generation, out.data() + kNativeTaskOriginHeaderSize, count,
-                  flags);
+  if (state) {
+    AppendChainFrom(*state, segment, generation, out.data() + kNativeTaskOriginHeaderSize, count,
+                    flags);
+  } else {
+    // A post with no script on a thread with no tables yet: one no_script
+    // segment, which needs none.
+    NativeTaskSegment last;
+    last.kind = static_cast<std::uint8_t>(kind);
+    last.state = static_cast<std::uint8_t>(NativeTaskSegmentState::kNoScript);
+    std::memcpy(out.data() + kNativeTaskOriginHeaderSize, &last, sizeof(last));
+    count = 1;
+  }
   if (count == 0) {
     return 0;
   }
@@ -1044,7 +1060,7 @@ std::size_t NativeRequestStackWalk::PostMessageOrigin(
       ((flags & kNativeRequestStackTaskChainTruncated) != 0 ? kNativeTaskOriginTruncated : 0));
   std::memcpy(out.data(), &header, sizeof(header));
   const std::size_t size = kNativeTaskOriginHeaderSize + kNativeTaskSegmentSize * count;
-  if ((segment & kSyntheticSegment) == 0) {
+  if (state && (segment & kSyntheticSegment) == 0) {
     state->posts[state->post_next++ % state->posts.size()] = {generation,
                                                               OriginHash(out.first(size)), segment};
   }

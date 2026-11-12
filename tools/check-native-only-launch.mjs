@@ -206,14 +206,20 @@ console.log('PASS native JS invocation sites opt-in, VM-category gate, sensitive
     printf '%s' "${'${brave_arguments[*]-}'}"`],{encoding:'utf8'});
   assert.equal(stacks.status, 0, stacks.stderr);
   assert.equal(stacks.stdout, '--js-flags=--reb-ignore-debugger-statements --reb-request-stacks');
+  const promises = spawnSync(shell,['-c',`set -eu; brave_arguments=(); native_quiet_mode=1; native_wasm_dispatch=0; native_wasm_call_indirect=0; native_guest_adapter=""; native_request_stacks=1; native_promise_stacks=1; ${flagsCode}
+    printf '%s' "${'${brave_arguments[*]-}'}"`],{encoding:'utf8'});
+  assert.equal(promises.status, 0, promises.stderr);
+  assert.equal(promises.stdout, '--js-flags=--reb-ignore-debugger-statements --reb-request-stacks --reb-promise-stacks');
   for (const [options, message] of [[{REB_NATIVE_REQUEST_STACKS:'2'}, /must be 0 or 1/],
-    [{REB_NATIVE_REQUEST_STACKS:'1', REB_CAPTURE_CATEGORY_MASK:'256'}, /Network and Artifact/]]) {
+    [{REB_NATIVE_REQUEST_STACKS:'1', REB_CAPTURE_CATEGORY_MASK:'256'}, /Network and Artifact/],
+    [{REB_NATIVE_PROMISE_STACKS:'2'}, /REB_NATIVE_PROMISE_STACKS must be 0 or 1/],
+    [{REB_NATIVE_PROMISE_STACKS:'1', REB_NATIVE_REQUEST_STACKS:'0'}, /requires REB_NATIVE_REQUEST_STACKS=1/]]) {
     const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env,
       REB_NATIVE_WASM_DISPATCH:'0', REB_NATIVE_WASM_CALL_INDIRECT:'0', ...options}, encoding:'utf8'});
     assert.equal(result.status, 2, result.stderr);
     assert.match(result.stderr, message);
   }
-  console.log('PASS native request stacks opt-in, Network and Artifact gate and js-flags merge');
+  console.log('PASS native request and promise stacks opt-in, Network and Artifact gate, promise stacks dependency and js-flags merge');
 }
 
 // V8 ignores an unknown --js-flags entry and every later one, so the real

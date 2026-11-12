@@ -32,7 +32,6 @@ const FLOW_GRAPH_REASONS = Object.freeze({script_identity_missing: 'no script id
 /* Record types that carry a walked stack; the others only label or resolve one. */
 const FLOW_GRAPH_STACK_RECORDS = ['request_initiator_stack', 'navigation_initiator_stack', 'async_task_stack'];
 const FLOW_GRAPH_LIMITS = 'Observed stacks only. A call that never reached a recorded request, navigation, task or cookie write is not drawn.';
-const FLOW_GRAPH_CANVAS_BYTES = 32 * 1024 * 1024;
 /* At and above this zoom a card shows its rows; below it, its name is painted
  * at screen size over a sketch of the rows, and below the sketch zoom only
  * boxes remain. */
@@ -534,11 +533,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   const requestDraw = () => { if (visible && !frame) frame = requestAnimationFrame(() => { frame = 0; draw(); }); };
   function resize() {
     if (!visible) return;
-    const rect = stage.getBoundingClientRect?.() ?? {width: 0, height: 0};
-    cssW = Math.max(1, Math.floor(rect.width)); cssH = Math.max(1, Math.floor(rect.height));
-    dpr = Math.min(window.devicePixelRatio || 1, Math.sqrt(FLOW_GRAPH_CANVAS_BYTES / (4 * cssW * cssH)), 3);
-    const pw = Math.round(cssW * dpr), ph = Math.round(cssH * dpr);
-    if (canvas.width !== pw || canvas.height !== ph) { canvas.width = pw; canvas.height = ph; canvas.style.width = `${cssW}px`; canvas.style.height = `${cssH}px`; }
+    ({cssW, cssH, dpr} = graphFitCanvas(canvas, stage));
     miniKey = '';
     // The heading gives way to the tools by their measured width.
     host.style?.setProperty?.('--flow-tools-w', `${Math.ceil(tools.offsetWidth || 0)}px`);
@@ -596,7 +591,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     refresh.disabled = true;
     try {
       const response = await fetch(`/api/flow-graph?${new URLSearchParams({session_id: requested})}`, {cache: 'no-store', signal: AbortSignal.any ? AbortSignal.any([controller.signal, AbortSignal.timeout(45000)]) : controller.signal});
-      if (!response.ok) { let message = `The flow graph route returned ${response.status}.`; try { message = (await response.json()).error ?? message; } catch {} throw Error(message); }
+      if (!response.ok) throw await responseError(response, `The flow graph route returned ${response.status}.`);
       const doc = await response.json();
       if (mine !== generation) return;
       const next = flowGraphModel(doc);
@@ -803,7 +798,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     layout.lanes.forEach(lane => {
       if (!visibleBox(lane.x, lane.y, lane.w, lane.h)) return;
       const hue = realmHue(lane.key);
-      ctx.beginPath(); roundedRect(lane.x, lane.y, lane.w, lane.h, 14);
+      ctx.beginPath(); graphRoundedRect(ctx, lane.x, lane.y, lane.w, lane.h, 14);
       ctx.globalAlpha = tokens.alpha.band; ctx.fillStyle = hue; ctx.fill();
       ctx.globalAlpha = tokens.alpha.bandLine; ctx.strokeStyle = hue; ctx.lineWidth = 1 / view.z; ctx.stroke();
       ctx.globalAlpha = 1;
@@ -860,7 +855,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       const viewLeft = Math.max(lane.x, view.x), viewRight = Math.min(lane.x + lane.w, view.x + miniLeft / view.z);
       const left = labelSides?.get(lane.key) === 'left' ? viewLeft + LABEL.inset : Math.max(lane.x + LABEL.inset, viewRight - LABEL.inset - width);
       // A plate keeps an edge passing under the name from striking it out.
-      ctx.globalAlpha = 0.9; ctx.fillStyle = tokens.bg; ctx.beginPath(); roundedRect(left - 8, top, width + 16, LABEL.height, 6); ctx.fill(); ctx.globalAlpha = 1;
+      ctx.globalAlpha = 0.9; ctx.fillStyle = tokens.bg; ctx.beginPath(); graphRoundedRect(ctx, left - 8, top, width + 16, LABEL.height, 6); ctx.fill(); ctx.globalAlpha = 1;
       ctx.fillStyle = hue; ctx.beginPath(); ctx.arc(left + 4, top + LABEL.height / 2, 4, 0, Math.PI * 2); ctx.fill();
       ctx.font = `600 12.5px ${tokens.sans}`; ctx.fillStyle = tokens.text;
       const titleText = fitText(title, width - 16), titleW = ctx.measureText(titleText).width;
@@ -877,7 +872,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       if (x > cssW || x + w < 0 || y > cssH || y + h < 0 || w < 24 || h < 18) return;
       const left = Math.max(x + 6, 6), base = Math.min(Math.max(y + 14, topInset() + 8), y + h - 4);
       const text = fitText(model.contexts[lane.key]?.label.title ?? 'Realm', Math.min(x + w, cssW) - left - 22), width = ctx.measureText(text).width;
-      ctx.globalAlpha = 0.88; ctx.fillStyle = tokens.bg; ctx.beginPath(); roundedRect(left - 2, base - 12, width + 20, 16, 4); ctx.fill(); ctx.globalAlpha = 1;
+      ctx.globalAlpha = 0.88; ctx.fillStyle = tokens.bg; ctx.beginPath(); graphRoundedRect(ctx, left - 2, base - 12, width + 20, 16, 4); ctx.fill(); ctx.globalAlpha = 1;
       ctx.fillStyle = realmHue(lane.key); ctx.beginPath(); ctx.arc(left + 5, base - 4, 3, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = tokens.muted; ctx.fillText(text, left + 13, base);
     });
@@ -955,7 +950,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     if (node.kind === 'chain') {
       // A folded chain reads as a stack of cards behind it, down and right.
       ctx.fillStyle = tokens.card; ctx.strokeStyle = hue; ctx.lineWidth = hair;
-      for (const offset of [6, 3]) { ctx.beginPath(); roundedRect(x + offset, y + offset, w, h, r); ctx.fill(); ctx.globalAlpha = dim ? 0.25 : tokens.alpha.border; ctx.stroke(); ctx.globalAlpha = 1; }
+      for (const offset of [6, 3]) { ctx.beginPath(); graphRoundedRect(ctx, x + offset, y + offset, w, h, r); ctx.fill(); ctx.globalAlpha = dim ? 0.25 : tokens.alpha.border; ctx.stroke(); ctx.globalAlpha = 1; }
     }
     if (node.chain_cut && lod > 0) {
       // Earlier async callers were not recorded: a stub with no edge.
@@ -964,12 +959,12 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     }
     if (picked && lod > 0) {
       // Selected: a soft ring and a glow in the card's colour.
-      ctx.globalAlpha = 0.2; ctx.fillStyle = hue; ctx.beginPath(); roundedRect(x - 4, y - 4, w + 8, h + 8, r + 4); ctx.fill(); ctx.globalAlpha = 1;
+      ctx.globalAlpha = 0.2; ctx.fillStyle = hue; ctx.beginPath(); graphRoundedRect(ctx, x - 4, y - 4, w + 8, h + 8, r + 4); ctx.fill(); ctx.globalAlpha = 1;
       ctx.shadowColor = flowGraphAlpha(hue, 0.35); ctx.shadowBlur = 30 * dpr;
     } else if (lift && !dim) { ctx.shadowColor = tokens.shadow; ctx.shadowBlur = 14 * dpr; ctx.shadowOffsetY = 5 * dpr * view.z; }
     // A dimmed card's fill fades toward its band, so it recedes while its
     // muted text keeps its contrast; no edge runs under a card.
-    ctx.globalAlpha = dim ? 0.5 : 1; ctx.fillStyle = tokens.card; ctx.beginPath(); roundedRect(x, y, w, h, r); ctx.fill(); ctx.globalAlpha = 1;
+    ctx.globalAlpha = dim ? 0.5 : 1; ctx.fillStyle = tokens.card; ctx.beginPath(); graphRoundedRect(ctx, x, y, w, h, r); ctx.fill(); ctx.globalAlpha = 1;
     ctx.shadowBlur = 0; ctx.shadowOffsetY = 0; ctx.shadowColor = 'transparent';
     if (lod === 0) {
       // Boxes: filled with the kind's colour, like the minimap.
@@ -978,13 +973,13 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       return;
     }
     // Header strip, tinted by the kind, ruled off from the body.
-    ctx.save(); ctx.beginPath(); roundedRect(x, y, w, h, r); ctx.clip();
+    ctx.save(); ctx.beginPath(); graphRoundedRect(ctx, x, y, w, h, r); ctx.clip();
     ctx.globalAlpha = tokens.alpha.head * (dim ? 0.35 : 1); ctx.fillStyle = hue; ctx.fillRect(x, y, w, C.head);
     ctx.globalAlpha = dim ? 0.15 : 0.38; ctx.fillRect(x, y + C.head - hair, w, hair);
     ctx.restore(); ctx.globalAlpha = 1;
     // Outline: the kind's colour, heavier when selected; dashed for an
     // unresolved frame or a match of Find.
-    ctx.beginPath(); roundedRect(x, y, w, h, r);
+    ctx.beginPath(); graphRoundedRect(ctx, x, y, w, h, r);
     ctx.strokeStyle = matched && !picked ? tokens.accent : hue;
     ctx.globalAlpha = picked || matched ? 1 : dim ? 0.3 : highlight ? 0.85 : tokens.alpha.border;
     ctx.lineWidth = (picked ? 2 : matched ? 1.5 : 1) / view.z;
@@ -993,7 +988,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     if (marked) {
       // A timeline sample's function: a dashed ring outside the card.
       ctx.strokeStyle = tokens.mark; ctx.lineWidth = 2 / view.z; ctx.setLineDash([6 / view.z, 4 / view.z]);
-      ctx.beginPath(); roundedRect(x - 6, y - 6, w + 12, h + 12, r + 6); ctx.stroke(); ctx.setLineDash([]);
+      ctx.beginPath(); graphRoundedRect(ctx, x - 6, y - 6, w + 12, h + 12, r + 6); ctx.stroke(); ctx.setLineDash([]);
     }
     if (lod === 1) {
       // A sketch of the rows, coloured by what each row does; the name is
@@ -1013,13 +1008,13 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     ctx.textBaseline = 'alphabetic';
     // Header: name, then the stack badge, then the kind pill.
     const pillX = x + w - C.pad - card.pillW, badgeX = pillX - 6 - card.badgeW;
-    ctx.fillStyle = tokens.tagFill; ctx.beginPath(); roundedRect(pillX, y + 8, card.pillW, 16, 4); ctx.fill();
+    ctx.fillStyle = tokens.tagFill; ctx.beginPath(); graphRoundedRect(ctx, pillX, y + 8, card.pillW, 16, 4); ctx.fill();
     if (tokens.alpha.tag > 0) { ctx.globalAlpha = tokens.alpha.tag * (dim ? 0.4 : 1); ctx.fillStyle = hue; ctx.fill(); }
     if (tokens.alpha.tagLine > 0) { ctx.globalAlpha = tokens.alpha.tagLine * (dim ? 0.4 : 1); ctx.strokeStyle = hue; ctx.lineWidth = hair; ctx.stroke(); }
     ctx.globalAlpha = 1;
     setPillFont(); ctx.fillStyle = dim ? tokens.muted : ink; ctx.textAlign = 'center';
     ctx.fillText(card.tag.toUpperCase(), pillX + card.pillW / 2, y + 19.5); ctx.textAlign = 'left'; clearLetterSpacing();
-    ctx.fillStyle = tokens.badgeFill; ctx.strokeStyle = tokens.badge; ctx.lineWidth = hair; ctx.beginPath(); roundedRect(badgeX, y + 8, card.badgeW, 16, 4); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = tokens.badgeFill; ctx.strokeStyle = tokens.badge; ctx.lineWidth = hair; ctx.beginPath(); graphRoundedRect(ctx, badgeX, y + 8, card.badgeW, 16, 4); ctx.fill(); ctx.stroke();
     ctx.font = `10.5px ${tokens.mono}`; ctx.fillStyle = tokens.muted; ctx.fillText(card.badge, badgeX + 5, y + 19.5);
     ctx.font = `600 12.5px ${tokens.mono}`; ctx.fillStyle = node.status === 'resolved' && !dim ? tokens.text : tokens.muted;
     ctx.fillText(fitText(card.title, badgeX - x - C.pad - 8), x + C.pad, y + 21);
@@ -1064,10 +1059,6 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       ctx.fillText(fitText(cards[index].title, sw - 10 + Math.min(24, 26 * view.z)), sx + 6, sy + Math.max(8, FLOW_GRAPH_CARD.head * view.z / 2));
     }
     ctx.textBaseline = 'alphabetic';
-  }
-
-  function roundedRect(x, y, w, h, r) {
-    ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
   }
 
   // Minimap ----------------------------------------------------------------
@@ -1187,8 +1178,9 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     view = fitted(1.2); requestDraw();
   }
   function zoomAt(factor, cx = cssW / 2, cy = cssH / 2) {
-    const z = Math.min(2.5, Math.max(0.02, view.z * factor)), gx = view.x + cx / view.z, gy = view.y + cy / view.z;
-    view.z = z; view.x = gx - cx / z; view.y = gy - cy / z; hideTooltip(); requestDraw();
+    view = graphZoomAt(view, factor, cx, cy);
+    hideTooltip();
+    requestDraw();
   }
   function centerOn(index) {
     const box = nodeBox(index), area = freeArea();

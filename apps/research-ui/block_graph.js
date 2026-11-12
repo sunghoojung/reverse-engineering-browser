@@ -10,6 +10,84 @@ const BLOCK_GRAPH_ROW_ZOOM = 0.6;
 const BLOCK_GRAPH_CACHE_BYTES = 16 * 1024 * 1024;
 /* The backing store is the view's one allocation that scales with window size. */
 const BLOCK_GRAPH_CANVAS_BYTES = 32 * 1024 * 1024;
+const GRAPH_ZOOM = Object.freeze({min: 0.02, max: 2.5});
+
+/* Helpers this view shares with the flow graph (flow_graph.js, which loads
+ * after this file). A view is {x, y, z}: the graph point at the canvas's top
+ * left and the zoom. */
+
+/** A rounded rectangle path on `ctx`; the caller fills or strokes it. */
+function graphRoundedRect(ctx, x, y, w, h, r) {
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+/** Sizes `canvas` to `stage` at the device pixel ratio, lowered so the
+ * backing store stays within BLOCK_GRAPH_CANVAS_BYTES. Returns the stage's
+ * CSS size and the ratio used. */
+function graphFitCanvas(canvas, stage) {
+  const rect = stage.getBoundingClientRect();
+  const cssW = Math.max(1, Math.floor(rect.width)), cssH = Math.max(1, Math.floor(rect.height));
+  const dpr = Math.min(window.devicePixelRatio || 1, Math.sqrt(BLOCK_GRAPH_CANVAS_BYTES / (4 * cssW * cssH)), 3);
+  const pw = Math.round(cssW * dpr), ph = Math.round(cssH * dpr);
+  if (canvas.width !== pw || canvas.height !== ph) {
+    canvas.width = pw;
+    canvas.height = ph;
+    canvas.style.width = `${cssW}px`;
+    canvas.style.height = `${cssH}px`;
+  }
+  return {cssW, cssH, dpr};
+}
+
+/** `view` zoomed by `factor` about the screen point (cx, cy), which stays
+ * over the same graph point. */
+function graphZoomAt(view, factor, cx, cy) {
+  const z = Math.min(GRAPH_ZOOM.max, Math.max(GRAPH_ZOOM.min, view.z * factor));
+  const gx = view.x + cx / view.z, gy = view.y + cy / view.z;
+  return {x: gx - cx / z, y: gy - cy / z, z};
+}
+
+/* Reads Sources and the Flow workspace's CFG pane share. Each throws an Error
+ * whose message can be shown; an aborted read throws an AbortError. */
+
+/** The error a failed response carries: its JSON `error`, else `fallback`. */
+async function responseError(response, fallback) {
+  try { return Error((await response.json()).error || fallback); } catch { return Error(fallback); }
+}
+
+/** What a failed read tells the researcher. */
+const graphReadMessage = error => (error instanceof TypeError ? 'The evidence service is unreachable. Check that the session is still running.' : error.message);
+
+/** A module's function index (wasm-function-index-v1): function indexes in
+ * order, each body's size and name, and the index's status and omissions. */
+async function readWasmFunctionIndex(artifactId, signal) {
+  const response = await fetch(`/api/wasm/functions?artifact_id=${encodeURIComponent(artifactId)}`, {cache: 'no-store', signal});
+  if (!response.ok) throw await responseError(response, `The function index read returned ${response.status}.`);
+  const doc = await response.json();
+  if (doc?.schema !== 'wasm-function-index-v1' || String(doc.artifact_id) !== String(artifactId) || !Array.isArray(doc.functions) || !Array.isArray(doc.names))
+    throw Error('The function index returned an invalid document.');
+  const named = doc.names.filter(entry => Array.isArray(entry) && Number.isSafeInteger(entry[0]) && typeof entry[1] === 'string');
+  return {index: doc.functions.map(row => row[0]), size: new Map(doc.functions.map(row => [row[0], row[2] - row[1]])), names: new Map(named),
+    status: doc.status, omissions: doc.omissions ?? []};
+}
+
+/** One function's basic blocks (wasm-block-graph-v1), decoded and laid out
+ * by `runner` with `view`'s measurements; `view` says when layout starts. */
+async function loadWasmFunctionGraph({artifactId, functionIndex, view, runner, signal}) {
+  const response = await fetch(`/api/wasm/graph?artifact_id=${encodeURIComponent(artifactId)}&function=${functionIndex}`, {cache: 'no-store', signal});
+  if (!response.ok) throw await responseError(response, `The block graph read returned ${response.status}.`);
+  const buffer = await response.arrayBuffer();
+  signal?.throwIfAborted();
+  view.setState('loading', 'Laying out the graph…');
+  const result = await runner.run({type: 'wasm', buffer, metrics: view.measurements(), engine: blockGraphEngine()}, [buffer]);
+  signal?.throwIfAborted();
+  result.graph.functionIndex = functionIndex;
+  return result;
+}
 
 /** Basic blocks for a `reb-vm-static-analysis-v1` report, as declared edges. */
 function vmStaticBlockGraph(report) {
@@ -163,11 +241,7 @@ function createBlockGraphView(root, options = {}) {
   const requestDraw = () => { if (active && !frame) frame = requestAnimationFrame(() => { frame = 0; draw(); }); };
   function resize() {
     if (!active) return;
-    const rect = stage.getBoundingClientRect?.() ?? {width: 0, height: 0};
-    cssW = Math.max(1, Math.floor(rect.width)); cssH = Math.max(1, Math.floor(rect.height));
-    dpr = Math.min(window.devicePixelRatio || 1, Math.sqrt(BLOCK_GRAPH_CANVAS_BYTES / (4 * cssW * cssH)), 3);
-    const pw = Math.round(cssW * dpr), ph = Math.round(cssH * dpr);
-    if (canvas.width !== pw || canvas.height !== ph) { canvas.width = pw; canvas.height = ph; canvas.style.width = `${cssW}px`; canvas.style.height = `${cssH}px`; }
+    ({cssW, cssH, dpr} = graphFitCanvas(canvas, stage));
     if (needsFit && layout && cssW > 1) { needsFit = false; start(); return; }
     // A fitted view stays fitted when the pane resizes (Linear hidden or a
     // divider dragged).
@@ -274,9 +348,9 @@ function createBlockGraphView(root, options = {}) {
     ctx.setLineDash([]);
     ctx.fillStyle = gapCard ? tokens.gap : tokens.card; ctx.strokeStyle = picked ? tokens.accent : tokens.line;
     ctx.lineWidth = picked ? 2 / Math.max(view.z, 0.5) : 1 / Math.max(view.z, 0.5);
-    ctx.beginPath(); roundedRect(x, y, w, h, 4); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); graphRoundedRect(ctx, x, y, w, h, 4); ctx.fill(); ctx.stroke();
     if (lod === 0) return;
-    ctx.save(); ctx.beginPath(); roundedRect(x, y, w, h, 4); ctx.clip();
+    ctx.save(); ctx.beginPath(); graphRoundedRect(ctx, x, y, w, h, 4); ctx.clip();
     if (!gapCard && lod === 2) { ctx.fillStyle = unreached ? tokens.dead : picked ? tokens.soft : tokens.head; ctx.fillRect(x, y, w, m.headerH); }
     else if (unreached) { ctx.fillStyle = tokens.dead; ctx.fillRect(x, y, w, h); }
     if (lod === 2) {
@@ -311,9 +385,6 @@ function createBlockGraphView(root, options = {}) {
       if (rest) { ctx.fillStyle = tokens.muted; ctx.fillText(rest, mnemonicX + (Math.max(mnemonic.length, 10) + 1) * m.charW, line); }
     }
     if (graph.flags[block] & 32) { ctx.fillStyle = tokens.faint; ctx.fillText(count ? 'more rows past the byte budget' : 'rows past the byte budget', x + m.padX, top + count * m.rowH + m.rowH - 4); }
-  }
-  function roundedRect(x, y, w, h, r) {
-    ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
   }
   const blockLabel = block => graph.flags[block] & 16 ? 'gap' : options.blockLabel?.(graph, block) ?? `loc_${graph.offsets[block].toString(16)}`;
   function drawMinimap() {
@@ -386,9 +457,9 @@ function createBlockGraphView(root, options = {}) {
     requestDraw();
   }
   function zoomAt(factor, cx = cssW / 2, cy = cssH / 2) {
-    const z = Math.min(2.5, Math.max(0.02, view.z * factor));
-    const gx = view.x + cx / view.z, gy = view.y + cy / view.z;
-    view.z = z; view.x = gx - cx / z; view.y = gy - cy / z; fitted = false; requestDraw();
+    view = graphZoomAt(view, factor, cx, cy);
+    fitted = false;
+    requestDraw();
   }
   function centerOn(block, zoom = null) {
     if (zoom) view.z = zoom;
@@ -625,56 +696,50 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
     document.addEventListener('pointerdown', outside, true);
   }
   const formatBytes = n => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / 1048576).toFixed(1)} MiB`;
-  async function fetchJSONBuffer(url, signal) {
-    const response = await fetch(url, {cache: 'no-store', signal});
-    if (!response.ok) { let text = `The request returned ${response.status}.`; try { text = (await response.json()).error || text; } catch {} throw Error(text); }
-    return response.arrayBuffer();
+  /** Starts a read that replaces the one in flight; says whether it is still current. */
+  function claim() {
+    const owner = ++generation;
+    abort?.abort();
+    abort = new AbortController();
+    return () => owner === generation;
   }
   async function loadIndex() {
     if (!source) return;
-    const owner = ++generation; abort?.abort(); abort = new AbortController();
+    const current = claim();
     view.setState('loading', 'Listing functions from immutable module bytes…'); indexStatus = 'loading';
     try {
-      const buffer = await fetchJSONBuffer(`/api/wasm/functions?artifact_id=${encodeURIComponent(source.artifact_id)}`, abort.signal);
-      if (owner !== generation) return;
-      const index = JSON.parse(new TextDecoder().decode(buffer));
-      if (index.schema !== 'wasm-function-index-v1' || index.artifact_id !== source.artifact_id) throw Error('The function index returned an invalid document.');
-      names = new Map(index.names.map(([i, n]) => [i, n]));
-      const size = new Map(index.functions.map(row => [row[0], row[2] - row[1]]));
-      functions = {index: index.functions.map(row => row[0]), size, status: index.status, omissions: index.omissions};
+      const index = await readWasmFunctionIndex(source.artifact_id, abort.signal);
+      if (!current()) return;
+      names = index.names;
+      functions = index;
       indexStatus = 'ready'; renderTools();
       if (!functions.index.length) { view.setState('empty', index.omissions[0] || 'This module declares no function bodies.'); return; }
-      const largest = functions.index.reduce((best, candidate) => (size.get(candidate) > size.get(best) ? candidate : best), functions.index[0]);
+      const largest = functions.index.reduce((best, candidate) => (index.size.get(candidate) > index.size.get(best) ? candidate : best), functions.index[0]);
       loadFunction(largest);
     } catch (error) {
-      if (owner === generation && error.name !== 'AbortError') {
+      if (current() && error.name !== 'AbortError') {
         indexStatus = 'error';
-        view.setState('error', fetchMessage(error), true);
+        view.setState('error', graphReadMessage(error), true);
       }
     }
   }
-  const fetchMessage = error => error instanceof TypeError ? 'The evidence service is unreachable. Check that the session is still running.' : error.message;
   async function loadFunction(index, retry = false) {
     if (!source || !isOpen) return;
     if (index === null) { loadIndex(); return; }
     if (retry && indexStatus !== 'ready') { loadIndex(); return; }
     functionIndex = index; renderTools();
-    const cacheKey = `${key()}:${index}`;
+    // A cached function also replaces a read still in flight.
+    const current = claim(), cacheKey = `${key()}:${index}`;
     const hit = cache.get(cacheKey);
     if (hit) { cache.delete(cacheKey); cache.set(cacheKey, hit); applyResult(hit.result); return; }
-    const owner = ++generation; abort?.abort(); abort = new AbortController();
     view.setTitle(displayName(index));
-    view.setState(view.hasGraph() ? 'loading' : 'loading', 'Decoding basic blocks…');
+    view.setState('loading', 'Decoding basic blocks…');
     try {
-      const buffer = await fetchJSONBuffer(`/api/wasm/graph?artifact_id=${encodeURIComponent(source.artifact_id)}&function=${index}`, abort.signal);
-      if (owner !== generation) return;
-      view.setState('loading', 'Laying out the graph…');
-      const result = await runner.run({type: 'wasm', buffer, metrics: view.measurements(), engine: blockGraphEngine()}, [buffer]);
-      if (owner !== generation) return;
-      result.graph.functionIndex = index;
+      const result = await loadWasmFunctionGraph({artifactId: source.artifact_id, functionIndex: index, view, runner, signal: abort.signal});
+      if (!current()) return;
       remember(cacheKey, result); applyResult(result);
     } catch (error) {
-      if (owner === generation && error.name !== 'AbortError') view.setState('error', fetchMessage(error), true);
+      if (current() && error.name !== 'AbortError') view.setState('error', graphReadMessage(error), true);
     }
   }
   function applyResult(result) { view.setResult(result); renderTools(); }

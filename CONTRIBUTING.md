@@ -57,6 +57,12 @@ by strict code-signature verification. Brave integration work must reproduce
 from the pinned upstream revisions and compile with the strongest locally
 available toolchain.
 
+`make check` runs the whole Rust suites with `cargo test`. CI runs them with
+cargo-nextest, which runs the tests of every test binary at once, each in its
+own process. Run `REB_RUST_TEST_RUNNER=nextest make check` to match CI; it
+needs `cargo-nextest` on `PATH`, which `tools/ci-install-nextest.sh` installs
+at the pinned version.
+
 If a platform tool is unavailable, state exactly what is missing and which
 check could not run. Do not present a skipped check as passing.
 

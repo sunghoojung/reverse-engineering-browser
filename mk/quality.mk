@@ -22,9 +22,27 @@ define ignored-rust-test
 		{ echo "Expected exactly one passing ignored test: $(2)" >&2; exit 1; }
 endef
 
+# Whole Rust suites. cargo test runs one test binary at a time, so the
+# backend's unit, http and mcp_stdio suites ran one after another.
+# REB_RUST_TEST_RUNNER=nextest (CI sets it; tools/ci-install-nextest.sh
+# installs the pinned runner) runs the tests of every binary at once, each in
+# its own process, and reports every failure instead of stopping at the first
+# failing binary. nextest does not run doctests, so those stay on cargo test.
+REB_RUST_TEST_RUNNER ?= cargo
+ifeq ($(REB_RUST_TEST_RUNNER),nextest)
+RUST_SUITE = cargo nextest run --locked --no-fail-fast --manifest-path
+RUST_DOCTESTS = cargo test --locked --doc --manifest-path
+else ifeq ($(REB_RUST_TEST_RUNNER),cargo)
+RUST_SUITE = cargo test --locked --manifest-path
+RUST_DOCTESTS =
+else
+$(error REB_RUST_TEST_RUNNER must be cargo or nextest, not $(REB_RUST_TEST_RUNNER))
+endif
+
 check: native-wasm-golden-check native-js-golden-check network-request-wire-check request-index-check request-stack-wire-check debugger-observation-wire-check network-scope-wire-check tab-link-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
-	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
-	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
+	$(RUST_SUITE) apps/origin-trace-backend/Cargo.toml
+	$(if $(RUST_DOCTESTS),$(RUST_DOCTESTS) apps/origin-trace-backend/Cargo.toml)
+	$(RUST_SUITE) apps/deobfuscator-worker/Cargo.toml
 	$(call ignored-rust-test,--lib,owned_vm_debugger::tests::owned_vm_real_helper_control_and_independent_goldens,\
 		REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))")
 	$(call ignored-rust-test,--test owned_vm_http,owned_vm_real_helper_http_cli_lifecycle,\

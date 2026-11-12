@@ -9,6 +9,8 @@ name: Continuous integration
 #   them from the 10 GB repository quota. Each compiler cache is capped at
 #   500M.
 # - Parallel C++ compilation. Cargo stays one invocation at a time.
+# - Whole Rust suites run under cargo-nextest, which runs the tests of every
+#   test binary at once instead of one binary after another.
 # - macOS `make check` and the app/XCTest gate use two runners. The required
 #   check name remains `test (macos-latest)` and fails if either runner fails.
 # - Documentation-only diffs skip native, Rust, and macOS gates. Rust-backend
@@ -172,6 +174,10 @@ jobs:
         with:
           role: ubuntu-debug
 
+      - name: Install the Rust test runner
+        if: success() && steps.prep.outputs.mode != 'docs'
+        run: tools/ci-install-nextest.sh
+
       - name: Build and test native tools and Rust components
         if: success() && steps.prep.outputs.mode != 'docs'
         run: ./tools/ci-run-make.sh check
@@ -226,6 +232,10 @@ jobs:
         uses: ./.github/actions/ci-cache
         with:
           role: macos-debug
+
+      - name: Install the Rust test runner
+        if: success() && steps.prep.outputs.mode != 'docs'
+        run: tools/ci-install-nextest.sh
 
       - name: Build and test native tools and Rust components
         if: success() && steps.prep.outputs.mode != 'docs'

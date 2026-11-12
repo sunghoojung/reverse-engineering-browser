@@ -264,15 +264,22 @@ function createBlockGraphView(root, options = {}) {
     [BLOCK_GRAPH_KIND.call]: ['call', [1, 3]], [BLOCK_GRAPH_KIND.assumed]: ['assumed', [1, 3]], [BLOCK_GRAPH_KIND.sequence]: ['sequence', []]};
   const m = {charW: 6.6, rowH: 16, headerH: 22, padX: 10, padY: 7};
   const measure = () => { if (!ctx) return; ctx.font = `11px ${tokens.mono || 'monospace'}`; m.charW = ctx.measureText('0').width || 6.6; };
-  let needsFit = false, fitted = false;
+  let needsFit = false;
   const requestDraw = () => { if (active && !frame) frame = requestAnimationFrame(() => { frame = 0; draw(); }); };
+  /** The view that shows the whole graph in a canvas of `width` by `height`. */
+  function fitView(width, height) {
+    const z = Math.min(1, Math.max(GRAPH_ZOOM.min, Math.min(width / layout.width, height / layout.height)));
+    return {x: (layout.width - width / z) / 2, y: (layout.height - height / z) / 2, z};
+  }
+  const sameView = (a, b) => Math.abs(a.z - b.z) < 1e-9 && Math.abs(a.x - b.x) < 1e-6 && Math.abs(a.y - b.y) < 1e-6;
   function resize() {
     if (!active) return;
+    // A fitted view stays fitted when the pane resizes (Linear hidden or a
+    // divider dragged), however it came to be fitted.
+    const fitted = Boolean(layout) && cssW > 1 && sameView(view, fitView(cssW, cssH));
     ({cssW, cssH, dpr} = graphFitCanvas(canvas, stage));
     if (needsFit && layout && cssW > 1) { needsFit = false; start(); return; }
-    // A fitted view stays fitted when the pane resizes (Linear hidden or a
-    // divider dragged).
-    if (fitted && layout) { fit(); return; }
+    if (fitted) { fit(); return; }
     requestDraw();
   }
   const visible = (x, y, w, h) => { const r = view.x + cssW / view.z, b = view.y + cssH / view.z; return x < r && x + w > view.x && y < b && y + h > view.y; };
@@ -468,7 +475,7 @@ function createBlockGraphView(root, options = {}) {
    * A graph that fits at actual size is centered whole. Fit is one key away. */
   function start() {
     if (!layout || !cssW) return;
-    view.z = 1; fitted = false;
+    view.z = 1;
     if (layout.width <= cssW && layout.height <= cssH) { view.x = (layout.width - cssW) / 2; view.y = (layout.height - cssH) / 2; requestDraw(); return; }
     const block = selectedBlock >= 0 ? selectedBlock : Math.max(0, graph.roots?.[0] ?? 0);
     view.x = layout.x[block] + layout.w[block] / 2 - cssW / 2;
@@ -477,19 +484,15 @@ function createBlockGraphView(root, options = {}) {
   }
   function fit() {
     if (!layout || !cssW) return;
-    const z = Math.min(1, Math.max(0.02, Math.min(cssW / layout.width, cssH / layout.height)));
-    view.z = z; view.x = (layout.width - cssW / z) / 2; view.y = (layout.height - cssH / z) / 2;
-    fitted = true;
+    view = fitView(cssW, cssH);
     requestDraw();
   }
   function zoomAt(factor, cx = cssW / 2, cy = cssH / 2) {
     view = graphZoomAt(view, factor, cx, cy);
-    fitted = false;
     requestDraw();
   }
   function centerOn(block, zoom = null) {
     if (zoom) view.z = zoom;
-    fitted = false;
     view.x = layout.x[block] + layout.w[block] / 2 - cssW / view.z / 2;
     view.y = layout.y[block] + layout.h[block] / 2 - cssH / view.z / 2;
     requestDraw();
@@ -519,7 +522,7 @@ function createBlockGraphView(root, options = {}) {
   canvas.addEventListener('pointermove', event => {
     if (!pointer.down || !layout) return;
     if (Math.abs(event.clientX - pointer.x) + Math.abs(event.clientY - pointer.y) > 2) pointer.moved = true;
-    view.x -= (event.clientX - pointer.x) / view.z; view.y -= (event.clientY - pointer.y) / view.z; pointer.x = event.clientX; pointer.y = event.clientY; fitted = false; requestDraw();
+    view.x -= (event.clientX - pointer.x) / view.z; view.y -= (event.clientY - pointer.y) / view.z; pointer.x = event.clientX; pointer.y = event.clientY; requestDraw();
   });
   canvas.addEventListener('pointerup', event => {
     if (!pointer.down) return;
@@ -535,7 +538,7 @@ function createBlockGraphView(root, options = {}) {
     if (!layout) return;
     event.preventDefault();
     if (event.ctrlKey || event.metaKey) { const rect = canvas.getBoundingClientRect(); zoomAt(Math.exp(-event.deltaY * 0.01), event.clientX - rect.left, event.clientY - rect.top); }
-    else { view.x += event.deltaX / view.z; view.y += event.deltaY / view.z; fitted = false; requestDraw(); }
+    else { view.x += event.deltaX / view.z; view.y += event.deltaY / view.z; requestDraw(); }
   }, {passive: false});
   function move(dx, dy) {
     if (selectedBlock < 0) return select(0);
@@ -554,7 +557,7 @@ function createBlockGraphView(root, options = {}) {
     if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || !layout) return;
     const panStep = 96 / view.z;
     const key = event.key; let handled = true;
-    if (event.shiftKey && key.startsWith('Arrow')) { view.x += key === 'ArrowLeft' ? -panStep : key === 'ArrowRight' ? panStep : 0; view.y += key === 'ArrowUp' ? -panStep : key === 'ArrowDown' ? panStep : 0; fitted = false; requestDraw(); }
+    if (event.shiftKey && key.startsWith('Arrow')) { view.x += key === 'ArrowLeft' ? -panStep : key === 'ArrowRight' ? panStep : 0; view.y += key === 'ArrowUp' ? -panStep : key === 'ArrowDown' ? panStep : 0; requestDraw(); }
     else if (key === 'ArrowDown') move(0, 1); else if (key === 'ArrowUp') move(0, -1); else if (key === 'ArrowLeft') move(-1, 0); else if (key === 'ArrowRight') move(1, 0);
     else if (key === '+' || key === '=') zoomAt(1.25); else if (key === '-' || key === '_') zoomAt(0.8); else if (key === '0') fit();
     else if (key === 'Home') { select(0); centerOn(0); }

@@ -504,10 +504,10 @@ index 4bb86a13765869efebd16a95d89a1a387cc3627f..1482532bb65d888133ac9348a82fa0a2
    if (compilation_info()->SourcePositionRecordingMode() ==
 diff --git a/src/interpreter/reb-js-invocation.cc b/src/interpreter/reb-js-invocation.cc
 new file mode 100644
-index 0000000000000000000000000000000000000000..f5267651787a6456b20cbbd9fb2ce3d2907fe130
+index 0000000000000000000000000000000000000000..51e35ae598a67940c03d8e6784b9b30b58d494fa
 --- /dev/null
 +++ b/src/interpreter/reb-js-invocation.cc
-@@ -0,0 +1,743 @@
+@@ -0,0 +1,745 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -714,8 +714,10 @@ index 0000000000000000000000000000000000000000..f5267651787a6456b20cbbd9fb2ce3d2
 +void OnWatchedPromise(const v8::FunctionCallbackInfo<v8::Value>& info,
 +                      bool fulfilled) {
 +  Isolate* isolate = reinterpret_cast<Isolate*>(info.GetIsolate());
-+  v8::Local<v8::Value> data = info.Data();
-+  if (data.IsEmpty() || !data->IsUint32()) return;
++  v8::Local<v8::Data> data = info.DataV2();
++  if (data.IsEmpty() || !data->IsValue() || !data.As<v8::Value>()->IsUint32()) {
++    return;
++  }
 +  const uint32_t encoded = data.As<v8::Uint32>()->Value();
 +  DirectHandle<Object> value = isolate->factory()->undefined_value();
 +  if (info.Length() > 0) value = Utils::OpenDirectHandle(*info[0]);
@@ -1456,7 +1458,7 @@ index 55b4e30784116682282220857212a5905ddf56e4..379edce62c68615af1eef645ec0b7a13
    F(ReportMessageFromMicrotask, 1, 1)                      \
    F(RunMicrotaskCallback, 2, 1)                            \
 diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
-index 1c329aef0b7ce7269a4d15cb3a630cc24d2cc86a..b20293add3343c17322addcea6063e55d7244882 100644
+index 1c329aef0b7ce7269a4d15cb3a630cc24d2cc86a..e99cc4a7f53716373da0092996e7f0dbe260caa9 100644
 --- a/test/cctest/test-api.cc
 +++ b/test/cctest/test-api.cc
 @@ -33385,3 +33385,493 @@ TEST(RebNativeJsDispatchAdmissionAndSiteCap) {
@@ -1544,11 +1546,11 @@ index 1c329aef0b7ce7269a4d15cb3a630cc24d2cc86a..b20293add3343c17322addcea6063e55
 +
 +void RebJsInvocationReadData(const v8::FunctionCallbackInfo<v8::Value>& info) {
 +  info.GetReturnValue().Set(
-+      info.GetIsolate()->GetContinuationPreservedEmbedderDataV2().As<v8::Value>());
++      info.GetIsolate()->GetContinuationPreservedEmbedderData().As<v8::Value>());
 +}
 +
 +void RebJsInvocationWriteData(const v8::FunctionCallbackInfo<v8::Value>& info) {
-+  info.GetIsolate()->SetContinuationPreservedEmbedderDataV2(info[0]);
++  info.GetIsolate()->SetContinuationPreservedEmbedderData(info[0]);
 +}
 +
 +v8::JsInvocationSite RebInvocationSite(const std::string& source,
@@ -1857,12 +1859,12 @@ index 1c329aef0b7ce7269a4d15cb3a630cc24d2cc86a..b20293add3343c17322addcea6063e55
 +      "return inside + '/' + forked; } var rebLater;";
 +  capture.Arm(2, {RebInvocationSite(source, RebAnchor(source, "rebData(", 7))});
 +  CompileRun(source.c_str());
-+  isolate->SetContinuationPreservedEmbedderDataV2(v8_str("outer"));
++  isolate->SetContinuationPreservedEmbedderData(v8_str("outer"));
 +  CHECK(CompileRun("rebData(0)")
 +            ->Equals(env.local(), v8_str("outer/fork"))
 +            .FromJust());
 +  // The caller continues with exactly its own value.
-+  CHECK(isolate->GetContinuationPreservedEmbedderDataV2()
++  CHECK(isolate->GetContinuationPreservedEmbedderData()
 +            .As<v8::Value>()
 +            ->Equals(env.local(), v8_str("outer"))
 +            .FromJust());
@@ -1875,10 +1877,10 @@ index 1c329aef0b7ce7269a4d15cb3a630cc24d2cc86a..b20293add3343c17322addcea6063e55
 +  CHECK(observed[1].second.state == v8::JsInvocationContextState::kInside);
 +  CHECK_EQ(observed[0].second.invocation_id, observed[1].second.invocation_id);
 +  // A top-level write, with no JavaScript on the stack, carries none.
-+  isolate->SetContinuationPreservedEmbedderDataV2(v8_str("next task"));
++  isolate->SetContinuationPreservedEmbedderData(v8_str("next task"));
 +  CHECK(isolate->GetCurrentJsInvocation().state ==
 +        v8::JsInvocationContextState::kNone);
-+  isolate->SetContinuationPreservedEmbedderDataV2(v8::Undefined(isolate));
++  isolate->SetContinuationPreservedEmbedderData(v8::Undefined(isolate));
 +}
 +
 +namespace {

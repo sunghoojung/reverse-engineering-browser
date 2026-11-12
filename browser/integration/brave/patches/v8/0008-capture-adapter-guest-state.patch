@@ -887,7 +887,7 @@ index 2003d1252a310aeb07af97baaf2284e3bc80b8c7..48fe2755fd3ee65a6c3d0dfd8bee56c4
  struct GlobalTracingInfo {
    uint32_t global_index;
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 491a39483a9736a381cf4f5112e2ee407468d34d..172f026f9d317ff734162562f1688b052af06a6d 100644
+index 491a39483a9736a381cf4f5112e2ee407468d34d..6c8e0eeae5c2d5fde3e715e83ff7d3e7886a1912 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
 @@ -6,13 +6,18 @@
@@ -1583,7 +1583,7 @@ index 491a39483a9736a381cf4f5112e2ee407468d34d..172f026f9d317ff734162562f1688b05
 +NestedGuestRunners& NestedRunners(
 +    const v8::FunctionCallbackInfo<v8::Value>& args) {
 +  return *static_cast<NestedGuestRunners*>(
-+      args.Data().As<v8::External>()->Value(
++      args.DataV2().As<v8::External>()->Value(
 +          v8::kExternalPointerTypeTagDefault));
 +}
 +v8::Local<v8::Function> NewNestedGuestHost(v8::Isolate* isolate,

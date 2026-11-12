@@ -149,8 +149,30 @@ void Factories() {
         "A gone caller with nothing to fall back on is unresolved, never counted as no page");
   reb::NoteNativeServiceWorkerVersion(&other, 306, {.frame_process_id = 1, .frame_routing_id = 5});
   Check(resolver.ServiceWorkerHasNoPage(306), "Another profile's job note is ignored");
+  // A registration installed in an earlier run: a register() of its current
+  // script, or an identical update(), starts no version, so patch 0045 notes
+  // the caller for the active version it found.
+  const reb::NativeToken128 installed_token{0x27, 0x28};
+  resolver.ServiceWorkerStarted(309, installed_token, {}, "https://installed.test/");
+  Check(resolver.ServiceWorkerHasNoPage(309), "An installed version no page used yet is pageless");
+  {
+    const content::RenderFrameHost again(1, 9, Token(0x29, 0x2a), 44);
+    reb::NoteNativeServiceWorkerVersion(&owned, 309,
+                                        {.frame_process_id = 1,
+                                         .frame_routing_id = 9,
+                                         .service_worker_version_id = 309,
+                                         .cause = Cause::kServiceWorker});
+  }
+  const auto found =
+      resolver.Resolve(reb::NativeLoaderKind::kServiceWorker, installed_token.fold(), kSession);
+  Check(!resolver.ServiceWorkerHasNoPage(309) &&
+            found.status == reb::NativeTabResolution::Status::kLinked &&
+            found.kind == reb::NativeTabLinkKind::kServiceWorkerRegistrant &&
+            found.tabs.size() == 1 && found.tabs[0] == 44,
+        "The active version's later fetches link to the caller that found it");
   std::cout << "PASS service-worker job notes: registrant from the caller, from the updated "
-               "version when the caller is gone, unresolved otherwise, other profiles ignored\n";
+               "version when the caller is gone, from a job that started no version, unresolved "
+               "otherwise, other profiles ignored\n";
 
   // A starting worker's factories name it before its first fetch.
   const auto worker_token = Token(0x31, 0x32);

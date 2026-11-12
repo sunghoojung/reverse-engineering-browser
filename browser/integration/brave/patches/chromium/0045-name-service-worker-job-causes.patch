@@ -96,10 +96,10 @@ index cb73937..6700a55 100644
    registration->ExecuteUpdate(std::move(outside_fetch_client_settings_object),
                                std::move(callback));
 diff --git a/content/browser/service_worker/service_worker_register_job.cc b/content/browser/service_worker/service_worker_register_job.cc
-index 394de6a..78c2d75 100644
+index 394de6a..58bc813 100644
 --- a/content/browser/service_worker/service_worker_register_job.cc
 +++ b/content/browser/service_worker/service_worker_register_job.cc
-@@ -55,14 +55,28 @@ typedef ServiceWorkerRegisterJobBase::RegistrationJobType RegistrationJobType;
+@@ -55,14 +55,46 @@ typedef ServiceWorkerRegisterJobBase::RegistrationJobType RegistrationJobType;
  
  namespace {
  
@@ -127,10 +127,28 @@ index 394de6a..78c2d75 100644
 -                 : blink::mojom::kInvalidServiceWorkerVersionId};
 +                 : blink::mojom::kInvalidServiceWorkerVersionId,
 +          reb::NativeFactoryOwnerCause::kServiceWorker};
++}
++
++// A job with a caller that starts no version, a register() of the current
++// script or an identical update(), still names that caller for the versions
++// it found, as StartWorkerForUpdate does for a new one.
++void NoteNativeJobCauseForVersions(BrowserContext* context,
++                                   const GlobalRenderFrameHostId& cause,
++                                   ServiceWorkerRegistration* registration) {
++  if (!cause || !registration) {
++    return;
++  }
++  for (const ServiceWorkerVersion* const version :
++       {registration->active_version(), registration->waiting_version()}) {
++    if (version) {
++      reb::NoteNativeServiceWorkerVersion(context, version->version_id(),
++                                          NativeScriptOwner(cause, registration));
++    }
++  }
  }
  
  }  // namespace
-@@ -107,7 +121,8 @@ ServiceWorkerRegisterJob::ServiceWorkerRegisterJob(
+@@ -107,7 +139,8 @@ ServiceWorkerRegisterJob::ServiceWorkerRegisterJob(
                 .has_value())
                ? base::UnguessableToken::Create()
                : network::GetNoOpNetworkRestrictionsId()),
@@ -140,7 +158,7 @@ index 394de6a..78c2d75 100644
    CHECK(context_);
    CHECK(outside_fetch_client_settings_object_);
    CHECK(outside_fetch_client_settings_object_->policy_container_policies);
-@@ -159,7 +174,8 @@ ServiceWorkerRegisterJob::ServiceWorkerRegisterJob(
+@@ -159,7 +192,8 @@ ServiceWorkerRegisterJob::ServiceWorkerRegisterJob(
                 .has_value())
                ? base::UnguessableToken::Create()
                : network::GetNoOpNetworkRestrictionsId()),
@@ -150,7 +168,25 @@ index 394de6a..78c2d75 100644
    CHECK(context_);
    CHECK(outside_fetch_client_settings_object_);
    CHECK(outside_fetch_client_settings_object_->policy_container_policies);
-@@ -574,7 +590,7 @@ void ServiceWorkerRegisterJob::StartScriptFetchForNewWorker(
+@@ -464,6 +498,8 @@ void ServiceWorkerRegisterJob::OnUpdateCheckFinished(
+                 "ServiceWorker.UpdateResourceSha256ChecksumsResult", status);
+           }));
+     }
++    NoteNativeJobCauseForVersions(context_->wrapper()->browser_context(),
++                                  native_cause_, registration());
+     ResolvePromise(blink::ServiceWorkerStatusCode::kOk, std::string(),
+                    registration());
+     // This terminates the current job (|this|).
+@@ -535,6 +571,8 @@ void ServiceWorkerRegisterJob::
+   // either case.
+   DCHECK(!existing_registration->installing_version());
+   if (existing_registration->active_version()) {
++    NoteNativeJobCauseForVersions(context_->wrapper()->browser_context(),
++                                  native_cause_, existing_registration.get());
+     // "5.2.1. Invoke Resolve Job Promise with job and registration."
+     ResolvePromise(status, std::string(), existing_registration.get());
+     // "5.2.2. Invoke Finish Job with job and abort these steps."
+@@ -574,7 +612,7 @@ void ServiceWorkerRegisterJob::StartScriptFetchForNewWorker(
    // The network restrictions of the creator (e.g., frame) must be
    // enforced for service worker script fetches.
    std::optional<reb::ScopedNativeFactoryOwner> native_owner(
@@ -159,7 +195,7 @@ index 394de6a..78c2d75 100644
    scoped_refptr<network::SharedURLLoaderFactory> loader_factory =
        context_->wrapper()->GetLoaderFactoryForMainScriptFetch(
            version->scope(), version->version_id(),
-@@ -661,6 +677,10 @@ void ServiceWorkerRegisterJob::StartWorkerForUpdate(
+@@ -661,6 +699,10 @@ void ServiceWorkerRegisterJob::StartWorkerForUpdate(
    // "Let worker be a new ServiceWorker object..." and start the worker.
    set_new_version(std::move(version));
    new_version()->set_force_bypass_cache_for_scripts(force_bypass_cache_);
@@ -170,7 +206,7 @@ index 394de6a..78c2d75 100644
  
    if (GetContentClient()
            ->browser()
-@@ -695,7 +715,7 @@ void ServiceWorkerRegisterJob::UpdateAndContinue() {
+@@ -695,7 +737,7 @@ void ServiceWorkerRegisterJob::UpdateAndContinue() {
    // The network restrictions of the creator (e.g., frame) must be
    // enforced for service worker script fetches.
    std::optional<reb::ScopedNativeFactoryOwner> native_owner(

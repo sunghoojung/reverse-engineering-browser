@@ -1829,11 +1829,11 @@ Ordinary evidence refresh leaves Find and the current window in place; explicit
 original-source pivots choose their own retained location.
 
 The editor toolbar is one row: the URL, **Open file**, Find (Cmd+F), **Inspect**
-and **Graph** for a Wasm module, **Map** and **More**, which holds Go to line,
+and **Graph** for a Wasm module, **Map**, **Debugger** and **More**, which holds Go to line,
 Rename, Decode range, Facts, Track calls, Static cleanup and Details. The row
 never wraps at any width: the URL shortens first (its tooltip keeps it whole),
-then Find, and when the commands still do not fit, Map, Graph and Inspect move in
-that order to the top of More and return once there is room. Find's coverage
+then Find, and when the commands still do not fit, Debugger, Map, Graph and
+Inspect move in that order to the top of More and return once there is room. Find's coverage
 sentence is its tooltip. The status bar shows the
 caret line and column, with the original location in a pretty-printed or derived
 view (`Line 1204, Column 5 (original 1:48213)`), the selection length, the

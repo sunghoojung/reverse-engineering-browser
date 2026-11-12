@@ -593,7 +593,9 @@ function serviceWorkerRegistrantRequest(template, firstSequence, firstTime) {
 // from one renderer of its own: frame 200 holds the retained sources, so its
 // thread scope narrows the Sources tree, and the listener, timer and throw
 // sites name a retained compiled script. Workers come from request records
-// with loader kinds 17 to 19. REB_RENDERED_UI_DEBUGGER_RECORDS raises the count.
+// with loader kinds 17 to 19. No budget gap is written: a runtime gap would
+// mark Fingerprinting coverage partial, which test14 rules out for this store.
+// REB_RENDERED_UI_DEBUGGER_RECORDS raises the count.
 export const DEBUGGER_PROCESS = 4747;
 export const DEBUGGER_FRAME = '200';
 // At most 27 printable bytes, the event type bound; it would load an image if parsed as HTML.
@@ -670,10 +672,9 @@ export async function debuggerObservations(template, artifactsRoot, {records = N
     const kind = kinds[index % kinds.length];
     row({frame_id: frames[index % frames.length]}, kind, observation(tails[kind](index)));
   }
-  // Two records the core refuses, and the budget gap a full renderer leaves.
+  // Two records the core refuses.
   row({frame_id: DEBUGGER_FRAME}, 'listener_dispatch', observation([0, 1, 1, 0]));
   row({frame_id: DEBUGGER_FRAME}, 'dom_mutation', observation([2, 0, 1, 0, 1, 120]));
-  row({frame_id: frames[1]}, 'gap', hex('debugger_observation_budget'));
   const script = await artifact(artifactsRoot, {artifact_id: DEBUGGER_ARTIFACT_ID, session_id: template.session_id, navigation_id: '100',
     frame_id: DEBUGGER_FRAME, creator_event_id: scriptIdentity.sequence_number, capture_origin: 'compiled_script', kind: 'javascript',
     mime_type: 'text/javascript', url: 'https://app.debugger.test/handlers.js'}, source);

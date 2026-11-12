@@ -1334,7 +1334,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
         """)
       XCTAssertTrue((scoped["files"] as? [String] ?? []).contains(expected.debuggerArtifactId), "\(size.name): the frame's script is listed: \(scoped)")
       XCTAssertTrue((scoped["selected"] as? String ?? "").hasSuffix(frameKey), "\(size.name): \(scoped)")
-      try await assertLayout(ui, "#screen-sources", "\(size.name) debugger scoped")
+      // Below 1,112 px the sidebar overlays the editor by design, so the
+      // navigator and the sidebar are checked, not the covered editor.
+      try await assertLayout(ui, ".sources-navigator", "\(size.name) debugger scoped tree")
+      try await assertLayout(ui, "#debugger-sidebar", "\(size.name) debugger scoped")
       try await ui.screenshot("debugger-sidebar-scoped-\(size.name)")
 
       // A listener record opens its own resolved frame in Sources.

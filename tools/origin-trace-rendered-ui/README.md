@@ -112,8 +112,8 @@ backend and the app share one temporary saved set through
 
 `test28DebuggerSidebar` opens the Sources debugger sidebar on the fixture's
 observation records: a renderer of its own (process 4343) with records in six
-frames, three workers, a watched request, two malformed records and a budget
-gap, and a retained compiled script (artifact 350) whose listener, timer and
+frames, three workers, a watched request and two malformed records, and a
+retained compiled script (artifact 350) whose listener, timer and
 throw sites the records name. One listener's event type is markup and must
 stay text. At both window sizes the sections must be Threads, Watch rules,
 Observations and Pausing, Pausing must state the availability the backend

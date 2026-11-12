@@ -353,7 +353,9 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
   title.id = 'debugger-sidebar-title';
   const mode = debuggerNode('span', 'debugger-sidebar-mode', 'Observes, never pauses');
   mode.title = 'Native observation records only. Nothing here pauses, steps or reads a value.';
-  const close = debuggerButton('×', 'debugger-sidebar-close', () => { setOpen(false); toggle.focus({preventScroll: true}); });
+  // A narrow toolbar keeps the toggle in the More menu; focus goes to More then.
+  const focusToggle = () => (toggle.closest('details:not([open])')?.querySelector('summary') ?? toggle).focus({preventScroll: true});
+  const close = debuggerButton('×', 'debugger-sidebar-close', () => { setOpen(false); focusToggle(); });
   close.setAttribute('aria-label', 'Close debugger');
   close.title = 'Close debugger (Esc)';
   head.append(title, mode, close);
@@ -564,7 +566,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     if (event.key !== 'Escape' || event.defaultPrevented) return;
     event.preventDefault();
     if (hooks.overlays()) setOpen(false);
-    toggle.focus({preventScroll: true});
+    focusToggle();
   });
   // Leaving Sources stops the reads; coming back resumes them.
   if (typeof MutationObserver === 'function') {

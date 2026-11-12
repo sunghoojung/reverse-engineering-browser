@@ -88,12 +88,13 @@ if (typeof MutationObserver === 'function' && elements.sourcePosition?.parentEle
   if (typeof ResizeObserver === 'function') new ResizeObserver(fitSourceStatus).observe(bar);
 }
 // The Sources commands stay on one row at every width. The URL and then Find
-// shrink (app.css); when the row still overflows, Map, then Graph, then
-// Inspect move to the top of More, and return in reverse order once they fit.
+// shrink (app.css); when the row still overflows, Debugger, then Map, then
+// Graph, then Inspect move to the top of More, and return in reverse order
+// once they fit.
 // A wrapped second row is not an option: WebKit does not re-measure the
 // toolbar's auto grid row when a width change alters its line count, so the
 // code view would cover that row. The menu is left alone while it is open.
-const SOURCE_TOOLBAR_OVERFLOW = ['source-wasm', 'source-graph', 'source-map'];
+const SOURCE_TOOLBAR_OVERFLOW = ['source-wasm', 'source-graph', 'source-map', 'source-debugger-toggle'];
 let sourceToolbarObserver = null;
 function fitSourceToolbar() {
   const row = document.querySelector('#source-editor-controls'), more = elements.sourceMore, first = elements.sourceGoto;

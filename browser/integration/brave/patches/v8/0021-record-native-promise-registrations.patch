@@ -252,7 +252,7 @@ index 3c5816f..076472a 100644
              "print stack trace when an illegal exception is thrown")
  DEFINE_BOOL(abort_on_uncaught_exception, false,
 diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
-index 207e899..a3d0e86 100644
+index 207e899..655a7b6 100644
 --- a/test/cctest/test-api.cc
 +++ b/test/cctest/test-api.cc
 @@ -59,6 +59,7 @@
@@ -263,7 +263,7 @@ index 207e899..a3d0e86 100644
  #include "include/v8-primitive-object.h"
  #include "include/v8-regexp.h"
  #include "include/v8-util.h"
-@@ -33381,3 +33382,130 @@ TEST(RebNativeCompiledScriptDisabledRunsNothing) {
+@@ -33381,3 +33382,137 @@ TEST(RebNativeCompiledScriptDisabledRunsNothing) {
    CompileRun("eval('8 + 8');");
    CHECK(reb_compiled_scripts.empty());
  }
@@ -279,6 +279,13 @@ index 207e899..a3d0e86 100644
 +  std::vector<uint32_t> finished;
 +};
 +RebPromiseLog* reb_promise_log = nullptr;
++
++// The isolate's promise-hook bit for async event delegates, which both the
++// inspector's delegate and the REB callbacks set.
++bool RebPromiseHookBit(i::Isolate* isolate) {
++  return i::Isolate::PromiseHookFields::HasAsyncEventDelegate::decode(
++      *reinterpret_cast<uint32_t*>(isolate->promise_hook_flags_address()));
++}
 +
 +// The callbacks outlive a test's log, so each one checks it is still there.
 +bool RebPromiseActive() {
@@ -308,11 +315,11 @@ index 207e899..a3d0e86 100644
 +  v8::Isolate* isolate = env.isolate();
 +  v8::HandleScope scope(isolate);
 +  i::Isolate* const i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-+  const bool hook_before = i_isolate->HasAsyncEventDelegate();
++  const bool hook_before = RebPromiseHookBit(i_isolate);
 +  RebPromiseLog log;
 +  reb_promise_log = &log;
 +  v8::SetNativePromiseCallbacks(isolate, &kRebPromiseCallbacks);
-+  CHECK(i_isolate->HasAsyncEventDelegate());
++  CHECK(RebPromiseHookBit(i_isolate));
 +  // One registration per user call, in call order; builtins that call then
 +  // internally (catch, finally) report as themselves.
 +  CompileRun(
@@ -361,7 +368,7 @@ index 207e899..a3d0e86 100644
 +  // Null removes the callbacks: the promise-hook bit is as it was and nothing
 +  // is reported, but the protector installing invalidated stays invalid.
 +  v8::SetNativePromiseCallbacks(isolate, nullptr);
-+  CHECK_EQ(hook_before, i_isolate->HasAsyncEventDelegate());
++  CHECK_EQ(hook_before, RebPromiseHookBit(i_isolate));
 +  CHECK(!i::Protectors::IsPromiseHookIntact(i_isolate));
 +  log = {};
 +  CompileRun("Promise.resolve(4).then(() => {}); (async () => { await 0; })();");
@@ -380,17 +387,17 @@ index 207e899..a3d0e86 100644
 +  reb_promise_log = &log;
 +  CHECK(!v8::IsNativePromiseStackCaptureEnabled());
 +  i::Isolate* const i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-+  const bool hook_before = i_isolate->HasAsyncEventDelegate();
++  const bool hook_before = RebPromiseHookBit(i_isolate);
 +  // Without --reb-promise-stacks the callbacks are not installed, and the
 +  // isolate's promise hook state is unchanged.
 +  v8::SetNativePromiseCallbacks(isolate, &kRebPromiseCallbacks);
-+  CHECK_EQ(hook_before, i_isolate->HasAsyncEventDelegate());
++  CHECK_EQ(hook_before, RebPromiseHookBit(i_isolate));
 +  CompileRun("Promise.resolve(3).then(() => {});");
 +  isolate->PerformMicrotaskCheckpoint();
 +  CHECK_EQ(0, log.active_checks);
 +  CHECK(log.registered.empty());
 +  // Removing what was never installed is harmless.
 +  v8::SetNativePromiseCallbacks(isolate, nullptr);
-+  CHECK_EQ(hook_before, i_isolate->HasAsyncEventDelegate());
++  CHECK_EQ(hook_before, RebPromiseHookBit(i_isolate));
 +  reb_promise_log = nullptr;
 +}

@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/public/web/web_node.h b/third_party/blink/public/web/web_node.h
-index 28df186..e53f09b 100644
+index 15be1e1..a04bf18 100644
 --- a/third_party/blink/public/web/web_node.h
 +++ b/third_party/blink/public/web/web_node.h
 @@ -42,6 +42,7 @@
@@ -25,7 +25,7 @@ index 28df186..e53f09b 100644
  class BLINK_EXPORT WebNode {
   public:
    enum class EventType {
-@@ -187,6 +196,12 @@ class BLINK_EXPORT WebNode {
+@@ -197,6 +206,12 @@ class BLINK_EXPORT WebNode {
        base::RepeatingCallback<void(WebDOMEvent)> handler,
        bool use_capture = false);
  
@@ -39,7 +39,7 @@ index 28df186..e53f09b 100644
    bool HasEventListeners(EventType event_type) const;
  
 diff --git a/third_party/blink/renderer/core/exported/web_node.cc b/third_party/blink/renderer/core/exported/web_node.cc
-index 2792632..57e2ca9 100644
+index ba1f630..7772ae9 100644
 --- a/third_party/blink/renderer/core/exported/web_node.cc
 +++ b/third_party/blink/renderer/core/exported/web_node.cc
 @@ -39,6 +39,7 @@
@@ -48,9 +48,9 @@ index 2792632..57e2ca9 100644
  #include "third_party/blink/public/web/web_element_collection.h"
 +#include "third_party/blink/renderer/bindings/core/v8/js_event_listener.h"
  #include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_node.h"
  #include "third_party/blink/renderer/core/accessibility/ax_object_cache.h"
- #include "third_party/blink/renderer/core/display_lock/display_lock_utilities.h"
-@@ -61,6 +62,7 @@
+@@ -62,6 +63,7 @@
  #include "third_party/blink/renderer/core/html/html_element.h"
  #include "third_party/blink/renderer/core/layout/layout_box.h"
  #include "third_party/blink/renderer/core/paint/paint_layer_scrollable_area.h"
@@ -58,7 +58,7 @@ index 2792632..57e2ca9 100644
  #include "third_party/blink/renderer/platform/bindings/exception_state.h"
  #include "third_party/blink/renderer/platform/bindings/script_regexp.h"
  #include "third_party/blink/renderer/platform/heap/persistent.h"
-@@ -406,6 +408,87 @@ base::ScopedClosureRunner WebNode::AddEventListener(
+@@ -432,6 +434,87 @@ base::ScopedClosureRunner WebNode::AddEventListener(
        &EventListener::RemoveListener, WrapWeakPersistent(listener.Get())));
  }
  

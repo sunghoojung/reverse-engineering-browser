@@ -240,7 +240,7 @@ index 3c5816f..076472a 100644
              "print stack trace when an illegal exception is thrown")
  DEFINE_BOOL(abort_on_uncaught_exception, false,
 diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
-index 207e899..7a061de 100644
+index 207e899..6cd999d 100644
 --- a/test/cctest/test-api.cc
 +++ b/test/cctest/test-api.cc
 @@ -59,6 +59,7 @@
@@ -251,7 +251,7 @@ index 207e899..7a061de 100644
  #include "include/v8-primitive-object.h"
  #include "include/v8-regexp.h"
  #include "include/v8-util.h"
-@@ -33381,3 +33382,97 @@ TEST(RebNativeCompiledScriptDisabledRunsNothing) {
+@@ -33381,3 +33382,108 @@ TEST(RebNativeCompiledScriptDisabledRunsNothing) {
    CompileRun("eval('8 + 8');");
    CHECK(reb_compiled_scripts.empty());
  }
@@ -316,11 +316,22 @@ index 207e899..7a061de 100644
 +    ids.push_back(id);
 +  }
 +  // Each registered reaction runs between started and finished with its ID.
++  // finally's derived promise also runs a resolve-thenable job under its ID,
++  // so IDs are compared as a set.
 +  std::vector<uint32_t> started = log.started;
 +  std::sort(ids.begin(), ids.end());
 +  std::sort(started.begin(), started.end());
++  started.erase(std::unique(started.begin(), started.end()), started.end());
 +  CHECK(std::adjacent_find(ids.begin(), ids.end()) == ids.end());
-+  CHECK(ids == started);
++  const auto text = [](const std::vector<uint32_t>& values) {
++    std::string out;
++    for (uint32_t value : values) out += std::to_string(value) + " ";
++    return out;
++  };
++  CHECK_WITH_MSG(ids == started,
++                 ("registered " + text(ids) + "started " + text(started) +
++                  "finished " + text(log.finished))
++                     .c_str());
 +  CHECK(log.started == log.finished);
 +
 +  // Inactive: no frame scan, no ID, so no reaction is reported either.

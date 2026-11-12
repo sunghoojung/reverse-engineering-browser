@@ -282,14 +282,17 @@ const native = readFileSync(new URL('../apps/research-ui/macos/SessionPanel.swif
 for (const op of ['state', 'start', 'retry', 'offline', 'removeSite', 'clearSites']) {
   assert(native.includes(`case "${op}"`) || native.includes(`"${op}"`), `native handles ${op}`);
 }
-assert.match(native, /isSubset\(of: \["op", "mode"\] \+ ContentLimits\.keys\)/,
-  'native refuses a start that names anything but the mode and the content limits');
+// A start is accepted only through LivePanelStart.parse, whose rules (the mode,
+// Content limits checked as the agent path checks them, none on Metadata, no
+// other key) tools/check-live-session-failure.swift runs.
 assert(!/body\["keychain"\]/.test(native), 'native reads no Keychain value from the page');
-assert.match(native, /LiveCaptureMode\(rawValue: raw\)/, 'native accepts only a known capture mode');
-assert.match(native, /ContentLimits\.validated\(body\)/, 'native checks a Content start’s limits');
-assert.match(native, /apply only to a Content session/, 'native refuses limits on a Metadata start');
-// One set of bounds and defaults: the app, the agent path and the launcher.
+const startCase = native.slice(native.indexOf('case "start":'), native.indexOf('case "retry":'));
+assert.match(startCase, /switch LivePanelStart\.parse\(body\)/, 'native parses a start with the shared rules');
+assert.match(startCase, /accept\(\.start\(start\.mode, start\.limits\)\)/, 'native starts with the parsed choice only');
+assert.doesNotMatch(startCase, /body\[/, 'the start case reads nothing from the page but through the parser');
 const coordinator = readFileSync(new URL('../apps/research-ui/macos/LiveSessionCoordinator.swift', import.meta.url), 'utf8');
+assert.match(coordinator, /isSubset\(of: \["op", "mode"\] \+ ContentLimits\.keys\)/, 'the parser refuses any other key');
+// One set of bounds and defaults: the app, the agent path and the launcher.
 const agent = readFileSync(new URL('../apps/origin-trace-backend/src/session_launch.rs', import.meta.url), 'utf8');
 const launcher = readFileSync(new URL('../scripts/run-live-session.sh', import.meta.url), 'utf8');
 assert.match(coordinator, /requestContentBudgetRange: ClosedRange<UInt32> = 1\.\.\.4096/);

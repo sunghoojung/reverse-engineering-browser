@@ -135,22 +135,10 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
       return (state(), nil)
     case "start":
       guard case .choose = content else { throw SessionPanelRefusal("This start choice is no longer open.") }
-      // The mode and a Content session's limits are the only choices; a page
-      // cannot add a Keychain or any other switch.
-      guard Set(body.keys).isSubset(of: ["op", "mode"] + ContentLimits.keys) else {
-        throw SessionPanelRefusal("The start panel offers only the capture mode and a Content session's limits.")
-      }
-      guard let raw = body["mode"] as? String, let mode = LiveCaptureMode(rawValue: raw) else {
-        throw SessionPanelRefusal("Choose Content or Metadata only.")
-      }
-      guard mode.capturesNetworkContent else {
-        guard ContentLimits.keys.allSatisfy({ body[$0] == nil }) else {
-          throw SessionPanelRefusal("Budgets and media capture apply only to a Content session.")
-        }
-        return accept(.start(mode, nil))
-      }
-      switch ContentLimits.validated(body) {
-      case .success(let limits): return accept(.start(mode, limits))
+      // The mode and, for Content only, its limits, checked as the agent path
+      // checks them (LivePanelStart.parse).
+      switch LivePanelStart.parse(body) {
+      case .success(let start): return accept(.start(start.mode, start.limits))
       case .failure(let refusal): throw SessionPanelRefusal(refusal.message)
       }
     case "retry":

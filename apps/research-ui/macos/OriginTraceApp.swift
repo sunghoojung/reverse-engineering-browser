@@ -2586,6 +2586,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   // is. Nil until the panel starts a Content session: until then a session
   // takes them from the environment, and the panel offers those.
   private var selectedContentLimits: ContentLimits?
+  // The panel chose this run's mode, so it decides request content over an
+  // inherited REB_CAPTURE_REQUEST_CONTENT, in reopens as well.
+  private var panelChoseMode = false
+  // How the session on screen was started, for its Retry.
+  private var lastStartModeChosen = false
   // Continue Offline holds for the rest of the run: a reopen starts nothing.
   private var automaticSessionSuppressed = false
   // The panel shows a start or failure decision. Nothing starts a session
@@ -2843,6 +2848,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     startAutomaticLiveSession(
       captureMode: selectedCaptureMode,
       contentLimits: selectedCaptureMode.capturesNetworkContent ? selectedContentLimits : nil,
+      modeChosen: panelChoseMode,
       useSystemKeychain: configuredAutomaticSystemKeychain()
     )
   }
@@ -2868,15 +2874,22 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     case (.start(let mode, let limits), .choose):
       automaticSessionSuppressed = false
       selectedCaptureMode = mode
+      panelChoseMode = true
       // A Metadata start keeps the last Content limits for a later Content one.
       if let limits { selectedContentLimits = limits }
+      // The panel names limits only for a session they apply to: a category
+      // mask without Network and Artifact keeps no request content.
+      let applied = LiveSessionCoordinator.retainsRequestContent(
+        environment: ProcessInfo.processInfo.environment, captureNetworkContent: mode.capturesNetworkContent,
+        modeChosen: true) ? limits : nil
       // Not a decision, so the start below is not refused as one behind it.
-      sessionPanel.content = .starting(mode: mode, limits: limits)
-      startAutomaticLiveSession(captureMode: mode, contentLimits: limits, useSystemKeychain: false)
+      sessionPanel.content = .starting(mode: mode, limits: applied)
+      startAutomaticLiveSession(captureMode: mode, contentLimits: applied, modeChosen: true, useSystemKeychain: false)
     case (.retry, .failed(_, let mode, let limits)):
       sessionPanel.content = .starting(mode: mode, limits: limits)
       liveSessionCoordinator.stop()
-      startAutomaticLiveSession(captureMode: mode, contentLimits: limits, useSystemKeychain: false)
+      startAutomaticLiveSession(
+        captureMode: mode, contentLimits: limits, modeChosen: lastStartModeChosen, useSystemKeychain: false)
     case (.offline, .choose), (.offline, .failed):
       sessionPanel.content = .hidden
       automaticSessionSuppressed = true
@@ -2890,9 +2903,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private func startAutomaticLiveSession(
     captureMode: LiveCaptureMode,
     contentLimits: ContentLimits?,
+    modeChosen: Bool,
     useSystemKeychain: Bool
   ) {
     guard !liveSessionCoordinator.isRunning, !liveSessionDecisionOpen else { return }
+    lastStartModeChosen = modeChosen
     guard let braveURL = customBraveApplicationURL(),
       let braveBundle = Bundle(url: braveURL),
       let braveExecutableURL = braveBundle.executableURL
@@ -2913,6 +2928,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       braveExecutableURL: braveExecutableURL,
       captureNetworkContent: captureMode.capturesNetworkContent,
       contentLimits: contentLimits,
+      modeChosen: modeChosen,
       useSystemKeychain: useSystemKeychain,
       ready: { [weak self] liveURL in
         guard let self else { return }

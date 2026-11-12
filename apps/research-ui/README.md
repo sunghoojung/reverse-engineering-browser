@@ -939,9 +939,10 @@ shows **Content capture** and its tooltip names which; a browser built before
 that capture ignores the switch, and each Traffic row and Payload tab still shows what
 was actually captured. **Metadata only** is the
 opt-out: Traffic stays host-only and no Canvas image is kept. Every mode records
-each request body's length, type and SHA-256. In Content mode,
+each request body's length, type and SHA-256. For the automatic launch,
 `REB_CAPTURE_REQUEST_CONTENT=0` or `REB_CAPTURE_CANVAS_IMAGES=0` turns either
-off.
+off. Once the start panel has chosen a mode, that mode decides request content
+for the rest of the run, over an inherited `REB_CAPTURE_REQUEST_CONTENT`.
 
 With Content chosen, the panel also shows the session's **Content limits**:
 
@@ -965,9 +966,11 @@ first shows those variables when the launcher would accept them, else the
 defaults; the limits it starts with hold for later Content sessions in the same
 app run, including Retry and a Dock reopen, as the mode does. Until the panel
 starts a Content session, the automatic launch takes the variables as they are.
-**Metadata only** keeps no content, so the panel shows none of the limits and
-passes none to the launcher. The starting and failed panels name the limits
-the session runs with, the launch log's `Request content capture` and
+**Metadata only** keeps no content, so the panel shows none of the limits, and
+a session that keeps no request content, whatever started it, is given none of
+the three variables, inherited ones included, as the agent path removes them.
+The starting and failed panels name the limits the session runs with, and
+only for a session that keeps request content; the launch log's `Request content capture` and
 `Response body capture` lines record them, and `get_session_context` reports
 them as `capture_options.content_limits`, so a researcher or an agent can tell
 which budgets the session ran with.

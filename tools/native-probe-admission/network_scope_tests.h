@@ -210,7 +210,7 @@ void RendererFetchOwners() {
                "to the script frame, and validates its loader kind\n";
 }
 
-std::string_view GapReason(const NativeProbeEvent& event) {
+std::string_view NetworkGapReason(const NativeProbeEvent& event) {
   assert(event.header.type == reb::NativeProbeType::kGap &&
          event.header.category == reb::NativeProbeCategory::kNetwork);
   return {reinterpret_cast<const char*>(event.inline_payload.data()), event.header.payload_size};
@@ -268,9 +268,9 @@ void ServiceWorkerRequestEnds() {
   const auto lost = One(metadata);
   // The gap names the row it leaves unfinished as a request_tab_link names a
   // renderer record: by process and request ID, with no frame.
-  assert(GapReason(lost) == "service_worker_end_lost" && Core(lost).header.session_id == 65 &&
-         lost.header.request_id == 0 && lost.header.frame_id == 0 &&
-         lost.header.initiator_process_id == lost.header.process_id &&
+  assert(NetworkGapReason(lost) == "service_worker_end_lost" &&
+         Core(lost).header.session_id == 65 && lost.header.request_id == 0 &&
+         lost.header.frame_id == 0 && lost.header.initiator_process_id == lost.header.process_id &&
          lost.header.initiator_request_id == 5003);
   // The slot still holds the newer start, which finishes normally.
   sink.RecordServiceWorkerRequestEnd(5003 + 1024, "/new", 4, -1, -2);

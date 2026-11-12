@@ -244,14 +244,10 @@ pub fn decode_artifact(content: &[u8], record: &Record) -> Option<(Vec<Frame>, V
         .map(|segments| (frames, segments))
 }
 
-/// A stack artifact read by its own header, for a digest that no stack record
-/// describes here (a `script_cookie` write's walk). The header is checked
-/// against the frames exactly as a record's would be.
-pub(crate) fn decode_artifact_alone(content: &[u8]) -> Option<(Record, Vec<Frame>, Vec<Segment>)> {
-    if content.len() < HEADER + FRAME || content[11] != 0 {
-        return None;
-    }
-    let record = Record {
+/// The record a stack artifact's own header states, before its frames are
+/// checked against it.
+fn header_record(content: &[u8], innermost: Frame) -> Option<Record> {
+    (content.len() >= HEADER).then(|| Record {
         version: u16_at(content, 4),
         task_segments: u32::from(u16_at(content, 28)),
         state: 1,
@@ -264,8 +260,18 @@ pub(crate) fn decode_artifact_alone(content: &[u8]) -> Option<(Record, Vec<Frame
         wasm_frames: 0,
         scripts: 0,
         digest: [0; 32],
-        innermost: Frame::read(&content[HEADER..HEADER + FRAME]),
-    };
+        innermost,
+    })
+}
+
+/// A stack artifact read by its own header, for a digest that no stack record
+/// describes here (a `script_cookie` write's walk). The header is checked
+/// against the frames exactly as a record's would be.
+pub(crate) fn decode_artifact_alone(content: &[u8]) -> Option<(Record, Vec<Frame>, Vec<Segment>)> {
+    if content.len() < HEADER + FRAME || content[11] != 0 {
+        return None;
+    }
+    let record = header_record(content, Frame::read(&content[HEADER..HEADER + FRAME]))?;
     let bounded = matches!(record.version, 1 | 2)
         && (1..=SYNC_LIMIT).contains(&record.recorded)
         && record.async_frames <= ASYNC_LIMIT
@@ -886,14 +892,14 @@ pub fn resolve_call(
             })
         })
         .and_then(|artifact| read(artifact, MAX_ARTIFACT).ok())
-        .filter(|content| content.len() >= HEADER);
-    if let Some(content) = header {
-        record.flags |= content[10] & 0x06;
-        record.total = u32_at(&content, 12);
-        record.recorded = u32_at(&content, 16);
-        record.omitted = u32_at(&content, 20);
-        record.async_frames = u32::from(u16_at(&content, 24));
-        record.async_segments = u32::from(u16_at(&content, 26));
+        .and_then(|content| header_record(&content, record.innermost));
+    if let Some(header) = header {
+        record.flags |= header.flags & 0x06;
+        record.total = header.total;
+        record.recorded = header.recorded;
+        record.omitted = header.omitted;
+        record.async_frames = header.async_frames;
+        record.async_segments = header.async_segments;
     }
     let mut document = resolve(event, &record, identities, artifacts, read);
     if digest.is_none() {

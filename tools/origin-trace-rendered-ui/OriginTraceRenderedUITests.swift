@@ -355,6 +355,9 @@ struct Expectations: Decodable {
   let workerStackHost: String
   let workerStackPostingProcess: Int
   let registrantHost: String
+  let debuggerProcess: Int
+  let debuggerFrame: String
+  let debuggerArtifactId: String
 
   static func load() throws -> Expectations {
     let text = try Harness.required(ProcessInfo.processInfo.environment, "REB_RENDERED_UI_EXPECT")
@@ -1237,9 +1240,32 @@ final class OriginTraceRenderedUITests: XCTestCase {
     let ui = try await prepare(windowSizes[0])
     for screen in ["traffic", "api-collection", "sources", "vm", "signals"] {
       try await show(ui, screen)
-      let text = try await ui.value("document.querySelector('#screen-\(screen)').innerText") as? String ?? ""
+      if screen == "sources" {
+        // The debugger sidebar is open so its sections are read too.
+        try await ui.click("#source-debugger-toggle")
+        try await ui.waitUntil("Boolean(document.querySelector('#debugger-sidebar [data-debugger-native=\"availability\"]'))", "the debugger sidebar did not read its state")
+      }
+      // The pausing words have one native meaning: the sidebar's statement of
+      // the availability get_native_debugger reports, read here and compared.
+      let read = try await ui.json("""
+        (async () => {
+          const root = document.querySelector('#screen-\(screen)'), statement = root.querySelector('[data-debugger-native="availability"]');
+          if (statement) statement.hidden = true;
+          const text = root.innerText;
+          if (statement) statement.hidden = false;
+          const reported = statement ? (await (await fetch('/api/native-debugger', {cache: 'no-store'})).json()).availability : null;
+          return {text, statement: statement?.dataset.availability ?? null, reported,
+            controls: statement ? statement.querySelectorAll('button, input, select, textarea, a, summary, [tabindex]').length : 0};
+        })()
+        """)
+      let text = read["text"] as? String ?? ""
       for phrase in removedFeaturePhrases {
         XCTAssertFalse(text.contains(phrase), "\(screen) still offers removed CDP feature text: \(phrase)")
+      }
+      if screen == "sources" {
+        XCTAssertEqual(read["statement"] as? String, read["reported"] as? String, "the pausing state is the reported availability: \(read)")
+        XCTAssertEqual(read["controls"] as? Int, 0, "the pausing state offers no control")
+        try await ui.click("#source-debugger-toggle")
       }
     }
     for id in ["websocket-inspector", "runtime-hook-traffic", "request-memory-pivot", "screen-memory", "screen-experiments",
@@ -1248,6 +1274,106 @@ final class OriginTraceRenderedUITests: XCTestCase {
       "screen-field-provenance", "decoder-field-origin"] {
       let count = try await ui.value("document.querySelectorAll('#\(id)').length") as? Int ?? -1
       XCTAssertEqual(count, 0, "#\(id) must be removed, not hidden")
+    }
+  }
+
+  // The Sources debugger sidebar (#434 phase 1) on the fixture's observation
+  // records: sections from get_native_debugger, rows mounted by view, inert
+  // captured names, an observed frame scoping the Sources tree, a listener
+  // opening its site in Sources, keyboard focus, and both themes.
+  @MainActor
+  func test28DebuggerSidebar() async throws {
+    let expected = try Expectations.load()
+    let frameKey = ":\(expected.debuggerProcess):\(expected.debuggerFrame)"
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-debugger-toggle")
+      try await ui.waitUntil("document.querySelectorAll('#debugger-observations .debugger-list-row').length > 0 && document.querySelectorAll('#debugger-threads .debugger-list-row').length > 0",
+        "\(size.name): the debugger sidebar did not list threads and observations")
+      let opened = try await ui.json("""
+        ({sections: [...document.querySelectorAll('#debugger-sidebar .debugger-section')].map(node => node.dataset.debuggerSection),
+          focus: document.activeElement?.closest('summary') ? document.activeElement.closest('.debugger-section').dataset.debuggerSection : document.activeElement?.id,
+          rows: document.querySelectorAll('#debugger-observations .debugger-list-row').length,
+          size: Number(document.querySelector('#debugger-observations .debugger-list-row').getAttribute('aria-setsize')),
+          view: Math.ceil(document.querySelector('#debugger-observations').clientHeight / 44),
+          threads: [...document.querySelectorAll('#debugger-threads .debugger-list-group')].map(node => node.innerText.replace(/\\s+/g, ' ')),
+          pausing: document.querySelector('[data-debugger-native="availability"]')?.dataset.availability ?? null,
+          buttons: [...document.querySelectorAll('#debugger-sidebar button')].map(button => button.innerText).filter(text => /pause|resume|step|breakpoint/i.test(text)),
+          details: document.querySelector('#source-sidebar').hidden})
+        """)
+      print("RENDERED_UI_DEBUGGER \(size.name) \(opened)")
+      XCTAssertEqual(opened["sections"] as? [String], ["threads", "watch", "observations", "pausing"], "\(size.name): \(opened)")
+      XCTAssertEqual(opened["focus"] as? String, "threads", "\(size.name): opening focuses the first section")
+      XCTAssertGreaterThanOrEqual(opened["size"] as? Int ?? 0, 100, "\(size.name): the newest page is listed: \(opened)")
+      XCTAssertLessThanOrEqual(opened["rows"] as? Int ?? .max, (opened["view"] as? Int ?? 0) + 13, "\(size.name): only rows near the view mount: \(opened)")
+      XCTAssertEqual(opened["pausing"] as? String, "unsupported", "\(size.name): pausing states the reported availability")
+      XCTAssertEqual(opened["buttons"] as? [String], [], "\(size.name): no pausing control is offered")
+      XCTAssertEqual(opened["details"] as? Bool, true, "\(size.name): Details and the debugger share one column")
+      XCTAssertTrue((opened["threads"] as? [String] ?? []).contains { $0.hasPrefix("Workers") }, "\(size.name): recorded workers are threads: \(opened)")
+      try await assertInert(ui, "\(size.name) debugger sidebar")
+      try await assertLayout(ui, "#debugger-sidebar", "\(size.name) debugger sidebar")
+      try await ui.screenshot("debugger-sidebar-\(size.name)")
+
+      // Keyboard: the next stop is the Threads list, with a visible indicator.
+      try await ui.tab()
+      let stop = try await ui.json("__rebUiProbe.focusState()")
+      XCTAssertEqual(stop["id"] as? String, "debugger-threads", "\(size.name): Tab reaches the Threads list: \(stop)")
+      XCTAssertEqual(stop["focusVisible"] as? Bool, true, "\(size.name): \(stop)")
+      XCTAssertNotEqual(stop["indicator"] as? String, "none", "\(size.name): the list shows its focus")
+
+      // An observed frame scopes Observations and the Sources tree exactly.
+      try await ui.click("#debugger-threads .debugger-list-row[data-key$='\(frameKey)']")
+      try await ui.waitUntil("""
+        (document.querySelector('#source-tree')?.innerText ?? '').includes('selected in Debugger Threads') &&
+          [...document.querySelectorAll('#debugger-observations .debugger-list-row')].every(row => row.innerText.includes(' F\(expected.debuggerFrame) '))
+        """, "\(size.name): the observed frame did not scope the tree and the observations")
+      let scoped = try await ui.json("""
+        ({files: [...document.querySelectorAll('#source-tree [role=treeitem][data-artifact-id]')].map(row => row.dataset.artifactId),
+          selected: document.querySelector('#debugger-threads .debugger-list-row[aria-selected="true"]')?.dataset.key ?? ''})
+        """)
+      XCTAssertTrue((scoped["files"] as? [String] ?? []).contains(expected.debuggerArtifactId), "\(size.name): the frame's script is listed: \(scoped)")
+      XCTAssertTrue((scoped["selected"] as? String ?? "").hasSuffix(frameKey), "\(size.name): \(scoped)")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) debugger scoped")
+      try await ui.screenshot("debugger-sidebar-scoped-\(size.name)")
+
+      // A listener record opens its own resolved frame in Sources.
+      try await ui.click(".debugger-kind[data-kind='listener_dispatch']")
+      try await ui.waitUntil("[...document.querySelectorAll('#debugger-observations .debugger-list-row')].every(row => row.dataset.kind === 'listener_dispatch')",
+        "\(size.name): the Listeners filter did not apply")
+      try await ui.click("#debugger-observations .debugger-list-row", containing: "click listener")
+      try await ui.waitUntil("(document.querySelector('.debugger-open-source')?.innerText ?? '').includes('onTap @ handlers.js:2:71')",
+        "\(size.name): the listener's site did not resolve")
+      try await assertLayout(ui, "#debugger-sidebar", "\(size.name) debugger record")
+      try await ui.screenshot("debugger-sidebar-record-\(size.name)")
+      try await ui.click(".debugger-open-source")
+      try await ui.waitUntil("(document.querySelector('#source-position')?.textContent ?? '').includes('line 2, Column 71')",
+        "\(size.name): Sources did not open at the listener")
+
+      try await ui.click("#theme-toggle")
+      try await ui.waitUntil("document.documentElement.dataset.theme === 'light'", "light theme did not apply")
+      if try await ui.value("document.querySelector('#debugger-sidebar').hidden") as? Bool == true {
+        try await ui.click("#source-debugger-toggle")
+      }
+      try await ui.waitUntil("document.querySelectorAll('#debugger-observations .debugger-list-row').length > 0", "\(size.name): the light sidebar did not list records")
+      try await assertLayout(ui, "#debugger-sidebar", "\(size.name) debugger light")
+      try await ui.screenshot("debugger-sidebar-light-\(size.name)")
+      try await ui.click("#theme-toggle")
+
+      // Escape returns to the toggle; closing stops every read.
+      try await ui.click("#debugger-threads .debugger-list-row[data-key$='\(frameKey)']")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.activeElement?.id === 'source-debugger-toggle'", "\(size.name): Escape did not return to the toggle")
+      if try await ui.value("document.querySelector('#debugger-sidebar').hidden") as? Bool == false {
+        try await ui.click("#source-debugger-toggle")
+      }
+      let reads = "performance.getEntriesByType('resource').filter(entry => entry.name.includes('/api/native-debugger')).length"
+      let before = try await ui.value(reads) as? Int ?? -1
+      try await Task.sleep(nanoseconds: 4_500_000_000)
+      let after = try await ui.value(reads) as? Int ?? -2
+      XCTAssertEqual(after, before, "\(size.name): a closed sidebar must not read")
+      let closed = try await ui.value("(document.querySelector('#source-tree')?.innerText ?? '').includes('selected in Debugger Threads')") as? Bool
+      XCTAssertEqual(closed, false, "\(size.name): closing the sidebar lifts the tree scope")
     }
   }
 

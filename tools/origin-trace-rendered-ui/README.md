@@ -110,6 +110,23 @@ the test then continues offline and returns to the harness page. The harness
 backend and the app share one temporary saved set through
 `--js-invocation-site-store` and `REB_JS_INVOCATION_SITE_STORE`.
 
+`test28DebuggerSidebar` opens the Sources debugger sidebar on the fixture's
+observation records: a renderer of its own (process 4343) with records in six
+frames, three workers, a watched request, two malformed records and a budget
+gap, and a retained compiled script (artifact 350) whose listener, timer and
+throw sites the records name. One listener's event type is markup and must
+stay text. At both window sizes the sections must be Threads, Watch rules,
+Observations and Pausing, Pausing must state the availability the backend
+reports with no pausing control, only rows near the view may mount, Tab from
+the focused Threads pane must reach the list with a visible indicator, frame
+200 must scope the Sources tree and Observations, a listener record must open
+`onTap` in Sources at line 2, column 71, and the light theme must pass the
+layout checks. Escape must return to the toggle, and a closed sidebar must
+make no read for 4.5 seconds. `REB_RENDERED_UI_DEBUGGER_RECORDS` (8 to 20,000,
+default 600) sets how many records the fixture writes. `test6RemovedFeaturesAreAbsent`
+reads Sources with the sidebar open, without the availability statement, and
+compares that statement with `/api/native-debugger`.
+
 `test27StartPanelStartRetryAndKeyboard` takes the start panel through a whole
 decision at both window sizes. The driver names a `REB_BRAVE_BINARY` that does
 not exist, so Start fails at once and no browser launches on any machine. The

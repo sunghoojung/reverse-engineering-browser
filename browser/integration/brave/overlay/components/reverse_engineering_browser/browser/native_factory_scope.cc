@@ -36,6 +36,10 @@ NativeFactoryScope NativeFactoryScopeOf(content::BrowserContext* context,
     const NativeFactoryOwnerTab owner = registry.NoteFactory(frame);
     scope.tab_id = owner.tab;
     scope.owner.service_worker_version = owner.service_worker_version;
+    scope.owner.service_worker_without_caller = owner.service_worker_without_caller;
+    if (owner.prefetch_without_page) {
+      scope.exclusion = kNativeBrowserPrefetchExclusion;
+    }
   }
   return scope;
 }

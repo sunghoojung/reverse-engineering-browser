@@ -70,6 +70,30 @@ NativeTabResolver::Worker* NativeTabResolver::FindWorker(const std::uint64_t fol
   return entry == workers_.end() ? nullptr : &entry->second;
 }
 
+const NativeTabResolver::Worker* NativeTabResolver::DedicatedParent(
+    const NativeToken128 token) const {
+  const auto entry = workers_.find(token.fold());
+  return entry != workers_.end() && !entry->second.ambiguous && entry->second.token == token &&
+                 entry->second.kind == NativeLoaderKind::kDedicatedWorker
+             ? &entry->second
+             : nullptr;
+}
+
+const NativeTabResolver::Worker& NativeTabResolver::DedicatedRoot(const Worker& worker) const {
+  const Worker* current = &worker;
+  for (std::size_t depth = 1; depth < kCreatorDepth; ++depth) {
+    if (current->tab != 0 || current->extension || !current->creator.valid()) {
+      break;
+    }
+    const Worker* parent = DedicatedParent(current->creator);
+    if (!parent) {
+      break;
+    }
+    current = parent;
+  }
+  return *current;
+}
+
 NativeTabResolver::Worker& NativeTabResolver::AddWorker(const NativeLoaderKind kind,
                                                         const NativeToken128 token,
                                                         const std::string_view extension) {
@@ -139,20 +163,20 @@ void NativeTabResolver::DedicatedWorkerCreated(const NativeToken128 worker,
   if (!worker.valid()) {
     return;
   }
-  // A nested worker takes its parent's tab now; the parent may be gone later.
+  // A nested worker takes its parent's tab now when the parent is known; the
+  // parent may be gone later. Enumeration can report a child before its
+  // parent, so the creator is kept and resolved when a request is linked.
   std::uint32_t tab = creator_tab;
-  const Worker* parent = nullptr;
+  bool inherited = false;
+  std::optional<NativeExtensionId> inherited_id;
   if (tab == 0 && creator_worker.valid()) {
-    if (const Worker* found = FindWorker(creator_worker.fold());
-        found && !found->ambiguous && found->token == creator_worker &&
-        found->kind == NativeLoaderKind::kDedicatedWorker) {
-      parent = found;
-      tab = parent->tab;
+    if (const Worker* parent = DedicatedParent(creator_worker)) {
+      const Worker& root = DedicatedRoot(*parent);
+      tab = root.tab;
+      inherited = extension.empty() && root.extension;
+      inherited_id = inherited ? root.extension_id : std::nullopt;
     }
   }
-  const bool inherited = extension.empty() && parent && parent->extension;
-  const std::optional<NativeExtensionId> inherited_id =
-      inherited ? parent->extension_id : std::nullopt;
   Worker& entry = AddWorker(NativeLoaderKind::kDedicatedWorker, worker, extension);
   if (inherited && !entry.extension) {
     entry.extension = true;
@@ -160,6 +184,9 @@ void NativeTabResolver::DedicatedWorkerCreated(const NativeToken128 worker,
   }
   if (entry.tab == 0) {
     entry.tab = tab;
+  }
+  if (entry.tab == 0 && !entry.creator.valid()) {
+    entry.creator = creator_worker;
   }
 }
 
@@ -220,6 +247,8 @@ void NativeTabResolver::ServiceWorkerControlleeAdded(const std::int64_t version,
                                                      const std::string_view client,
                                                      const std::span<const std::uint32_t> tabs) {
   Version& entry = VersionOf(version);
+  // A client is a page even before its navigation commits and names a tab.
+  entry.had_page = true;
   if (tabs.empty() ||
       (entry.controllees.size() >= kClientCapacity && !entry.controllees.contains(client))) {
     return;
@@ -254,14 +283,55 @@ void NativeTabResolver::ServiceWorkerControlleeRemoved(const std::int64_t versio
   Rebuild(entry.current, ControlleeTabs(entry));
 }
 
+void NativeTabResolver::ServiceWorkerJobStarted(const std::int64_t version,
+                                                const bool caller,
+                                                const std::uint32_t caller_tab,
+                                                const std::int64_t active) {
+  std::vector<std::uint32_t> tabs;
+  bool active_page = false;
+  std::string active_scope;
+  if (caller_tab != 0) {
+    tabs.push_back(caller_tab);
+  } else if (const auto found = versions_.find(active); found != versions_.end()) {
+    tabs = VersionPageTabs(found->second);
+    active_page = found->second.had_page;
+    active_scope = found->second.scope;
+  }
+  Version& entry = VersionOf(version);
+  entry.had_page |= caller || active_page || !tabs.empty();
+  if (entry.scope.empty()) {
+    entry.scope = std::move(active_scope);
+  }
+  if (!tabs.empty()) {
+    entry.registrant = {};
+    Rebuild(entry.registrant, std::move(tabs));
+  }
+}
+
+std::vector<std::uint32_t> NativeTabResolver::VersionPageTabs(const Version& version) const {
+  for (const TabSet* set : {&version.current, &version.last, &version.registrant}) {
+    if (!set->tabs.empty()) {
+      return set->tabs;
+    }
+  }
+  const auto scoped = last_by_scope_.find(version.scope);
+  return scoped == last_by_scope_.end() ? std::vector<std::uint32_t>{} : scoped->second.tabs;
+}
+
+bool NativeTabResolver::ServiceWorkerHasNoPage(const std::int64_t version) const {
+  const auto found = versions_.find(version);
+  return found == versions_.end() ||
+         (!found->second.had_page && !last_by_scope_.contains(found->second.scope));
+}
+
 std::vector<std::uint32_t> NativeTabResolver::WorkerTabs(const NativeToken128 worker) const {
   const auto entry = workers_.find(worker.fold());
   if (entry == workers_.end() || entry->second.ambiguous || entry->second.token != worker) {
     return {};
   }
   if (entry->second.kind == NativeLoaderKind::kDedicatedWorker) {
-    return entry->second.tab ? std::vector<std::uint32_t>{entry->second.tab}
-                             : std::vector<std::uint32_t>{};
+    const std::uint32_t tab = DedicatedRoot(entry->second).tab;
+    return tab ? std::vector<std::uint32_t>{tab} : std::vector<std::uint32_t>{};
   }
   return entry->second.kind == NativeLoaderKind::kSharedWorker ? SharedTabs(entry->second)
                                                                : std::vector<std::uint32_t>{};
@@ -299,14 +369,20 @@ NativeTabResolution NativeTabResolver::Resolve(const NativeLoaderKind owner_kind
   if (!worker || worker->ambiguous || worker->kind != owner_kind) {
     return {};
   }
-  if (worker->extension) {
+  // A nested worker of an extension worker is extension traffic too.
+  const Worker& owner =
+      owner_kind == NativeLoaderKind::kDedicatedWorker ? DedicatedRoot(*worker) : *worker;
+  if (owner.extension) {
     NativeTabResolution excluded;
     excluded.status = NativeTabResolution::Status::kExtension;
-    excluded.extension = worker->extension_id;
+    excluded.extension = owner.extension_id;
     return excluded;
   }
   switch (owner_kind) {
     case NativeLoaderKind::kDedicatedWorker:
+      if (worker->tab == 0) {
+        worker->tab = owner.tab;
+      }
       Rebuild(worker->current, {worker->tab});
       return Linked(NativeTabLinkKind::kDedicatedWorker, owner_kind, owner_fold, false,
                     worker->current, session_id);
@@ -318,8 +394,14 @@ NativeTabResolution NativeTabResolver::Resolve(const NativeLoaderKind owner_kind
                           worker->current, session_id);
     case NativeLoaderKind::kServiceWorker: {
       const auto found = versions_.find(worker->version);
-      return found == versions_.end() ? NativeTabResolution{}
-                                      : VersionTabs(found->second, owner_fold, session_id);
+      NativeTabResolution resolution = found == versions_.end()
+                                           ? NativeTabResolution{}
+                                           : VersionTabs(found->second, owner_fold, session_id);
+      if (resolution.status == NativeTabResolution::Status::kUnresolved &&
+          ServiceWorkerHasNoPage(worker->version)) {
+        resolution.status = NativeTabResolution::Status::kNoPage;
+      }
+      return resolution;
     }
     default:
       return {};
@@ -337,6 +419,10 @@ NativeTabResolution NativeTabResolver::VersionTabs(Version& version,
   if (!version.last.tabs.empty()) {
     return Linked(NativeTabLinkKind::kServiceWorkerLastClients, kOwner, fold, true, version.last,
                   session_id);
+  }
+  if (!version.registrant.tabs.empty()) {
+    return Linked(NativeTabLinkKind::kServiceWorkerRegistrant, kOwner, fold, false,
+                  version.registrant, session_id);
   }
   const auto scoped = last_by_scope_.find(version.scope);
   return scoped == last_by_scope_.end() ? NativeTabResolution{}

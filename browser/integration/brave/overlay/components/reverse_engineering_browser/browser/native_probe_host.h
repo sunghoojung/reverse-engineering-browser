@@ -166,10 +166,12 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   std::uint64_t reported_dropped_events_ = 0;
   std::array<std::uint64_t, kNativeRendererExclusionSlots> reported_exclusions_{};
   std::uint32_t renderer_os_pid_ = 0;
-  // Requests of extension workers; their later renderer records are dropped too.
+  // Requests of extension workers and of service workers no page used; their
+  // later renderer records are dropped too.
   std::array<std::uint64_t, 64> excluded_requests_{};
   std::size_t excluded_next_ = 0;
   std::uint64_t extension_requests_excluded_ = 0;
+  std::uint64_t no_page_requests_excluded_ = 0;
   bool browser_internal_ = false;
   bool disabling_ = false;
   std::uint64_t wasm_capture_epoch_ = 0;

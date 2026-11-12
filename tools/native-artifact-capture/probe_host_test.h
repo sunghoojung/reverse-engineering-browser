@@ -814,6 +814,77 @@ void NativeProbeHostWorkerTabLinks() {
             version.owner_fold == reb::NativeToken128{0x81, 0x82}.fold() &&
             version.kind == reb::NativeTabLinkKind::kServiceWorkerLastClients,
         "A version's script fetch links to its clients and names the worker that ran");
+
+  // A worklet names its creating document; a context with no document stays unresolved.
+  const reb::NativeToken128 document{0x55, 0x56};
+  resolver.NoteFrame(1, document, 13);
+  start(reb::NativeLoaderKind::kWorklet, document.fold(), 60);
+  Check(events.size() == 1 && events[0].header.tab_id == 13 && valid(events[0]),
+        "A worklet's record takes its creating document's tab");
+  start(reb::NativeLoaderKind::kOtherContext, reb::NativeToken128{0x57, 0x58}.fold(), 61);
+  Check(events.size() == 1 && events[0].header.tab_id == 0 && valid(events[0]),
+        "A context with no parent document is recorded without a tab");
+
+  // Enumeration can report a nested worker before its parent.
+  const reb::NativeToken128 early_child{0x31, 0x32}, late_parent{0x33, 0x34};
+  resolver.DedicatedWorkerCreated(early_child, {}, 0, late_parent);
+  resolver.DedicatedWorkerCreated(late_parent, {}, 12, {});
+  start(reb::NativeLoaderKind::kDedicatedWorker, early_child.fold(), 62);
+  Check(events.size() == 3 && events[2].header.tab_id == 12 &&
+            link(events[2]) == std::pair{1U, 1U} && std::ranges::all_of(events, valid),
+        "A nested worker seen before its parent links through the parent when it fetches");
+  // A creator chain resolves through at most kCreatorDepth workers.
+  const auto chained = [](std::uint64_t index) {
+    return reb::NativeToken128{0x4000 + index, index + 1};
+  };
+  for (std::uint64_t index = reb::NativeTabResolver::kCreatorDepth; index > 0; --index) {
+    resolver.DedicatedWorkerCreated(chained(index), {}, 0, chained(index - 1));
+  }
+  resolver.DedicatedWorkerCreated(chained(0), {}, 15, {});
+  start(reb::NativeLoaderKind::kDedicatedWorker,
+        chained(reb::NativeTabResolver::kCreatorDepth).fold(), 63);
+  Check(events.size() == 1 && events[0].header.tab_id == 0,
+        "A chain longer than the creator depth stays unresolved");
+  start(reb::NativeLoaderKind::kDedicatedWorker,
+        chained(reb::NativeTabResolver::kCreatorDepth - 1).fold(), 64);
+  Check(events.size() == 3 && events[2].header.tab_id == 15,
+        "A chain of exactly the creator depth reaches the document's tab");
+
+  // A version installed by a page's register() links its fetches to that page.
+  resolver.ServiceWorkerJobStarted(10, true, 33, -1);
+  resolver.ServiceWorkerStarted(10, {0xd1, 0xd2}, {}, "https://install.test/");
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0xd1, 0xd2}.fold(), 65);
+  Check(events.size() == 3 && events[0].header.tab_id == 33 &&
+            link(events[2]) == std::pair{5U, 1U} && std::ranges::all_of(events, valid),
+        "An installing service worker's fetch links to the tab that registered it");
+
+  // A service worker no page ever used: counted, and its later records dropped.
+  resolver.ServiceWorkerStarted(9, {0xc1, 0xc2}, {}, "https://push.test/");
+  const auto before = session.exclusions.size();
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0xc1, 0xc2}.fold(), 66);
+  Check(events.empty() && session.exclusions.size() == before + 1 &&
+            session.exclusions.back().process == 123 &&
+            session.exclusions.back().exclusion_class == 68 && session.exclusions.back().count == 1,
+        "A push-time fetch of a service worker no page used is counted, not recorded");
+  NativeProbeEvent pageless_done = completion;
+  pageless_done.header.sequence_number = ++sequence;
+  pageless_done.header.request_id = 66;
+  Check(queue->TryPush(pageless_done), "Renderer ring admits the completion");
+  events.clear();
+  host.EventsAvailable();
+  Check(events.empty(), "Later records of a pageless worker's request are dropped with it");
+  resolver.ServiceWorkerControlleeAdded(9, "page", std::vector<std::uint32_t>{14});
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0xc1, 0xc2}.fold(), 67);
+  Check(events.size() == 3 && events[0].header.tab_id == 14 && link(events[2]) == std::pair{3U, 1U},
+        "Once a page uses the version its requests link to that page");
+  // A client whose navigation never committed names no tab but is a page.
+  resolver.ServiceWorkerControlleeAdded(11, "uncommitted", std::vector<std::uint32_t>{});
+  resolver.ServiceWorkerStarted(11, {0xe1, 0xe2}, {}, "https://uncommitted.test/");
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0xe1, 0xe2}.fold(), 68);
+  Check(
+      events.size() == 1 && events[0].header.tab_id == 0 && session.exclusions.size() == before + 1,
+      "A version whose only client never committed stays unresolved, never counted");
+
   for (std::uint64_t index = 0; index <= reb::NativeTabResolver::kFrameCapacity; ++index) {
     resolver.NoteFrame(4, {0xf000 + index, index + 1}, 41);
   }
@@ -825,6 +896,7 @@ void NativeProbeHostWorkerTabLinks() {
       "The frame registry is bounded and evicts its oldest entry");
   session.active = false;
   session.emitted = {};
-  std::cout << "PASS production NativeProbeHost links worker requests to tab sets and keeps "
-               "tombstoned frame tabs\n";
+  std::cout
+      << "PASS production NativeProbeHost links worker requests to tab sets, registrants and "
+         "worklet documents, counts pageless service workers, and keeps tombstoned frame tabs\n";
 }

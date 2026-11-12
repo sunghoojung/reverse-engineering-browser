@@ -850,6 +850,12 @@ void NativeProbeHost::EmitWorkerRequest(NativeProbeEvent& event) {
                             ++extension_requests_excluded_);
     return;
   }
+  if (resolution.status == NativeTabResolution::Status::kNoPage) {
+    excluded_requests_[excluded_next_++ % excluded_requests_.size()] = event.header.request_id;
+    session_->EmitExclusion(renderer_os_pid_, kNativeServiceWorkerNoPageExclusion,
+                            ++no_page_requests_excluded_);
+    return;
+  }
   if (!extension && resolution.status != NativeTabResolution::Status::kLinked) {
     session_->Emit(event);
     return;

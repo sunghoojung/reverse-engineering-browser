@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <string_view>
 
+#include "brave/components/reverse_engineering_browser/browser/native_tab_resolver.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
 #include "brave/components/reverse_engineering_browser/common/native_request_namespace.h"
 #include "brave/components/reverse_engineering_browser/common/native_tab_link.h"
@@ -26,7 +27,7 @@ namespace reb {
 
 // Fixed when Chromium creates the factory; protocol/native-network-v3.md.
 struct NativeFactoryScope final {
-  // 65, 66 or 67 counts the factory's requests instead of recording them.
+  // 65, 66, 67 or 69 counts the factory's requests instead of recording them.
   std::uint8_t exclusion = 0;
   std::uint32_t tab_id = 0;
   NativeBrowserRequestOwner owner;
@@ -87,7 +88,8 @@ struct NativeFactoryPolicy final {
                                                      : NativeBodyFileAccess::kRefused;
 }
 
-// The renderer or drain counts renderer-issued extension and internal-scheme requests.
+// The drain counts renderer-issued extension, no-page service-worker and
+// internal-scheme requests.
 struct NativeRequestExclusion final {
   std::uint8_t exclusion_class = 0;
   bool counted_here = false;
@@ -101,6 +103,11 @@ struct NativeRequestExclusion final {
   if (scope.exclusion != 0) {
     return {scope.exclusion,
             scope.exclusion != kNativeExtensionWorkerExclusion || !renderer_issued};
+  }
+  // Decided per request: a version stops being pageless when a page first uses it.
+  if (scope.owner.service_worker_without_caller && scope.tab_id == 0 &&
+      NativeTabResolver::Get().ServiceWorkerHasNoPage(scope.owner.service_worker_version)) {
+    return {kNativeServiceWorkerNoPageExclusion, !renderer_issued};
   }
   const NativeSchemeClass scheme = ClassifyNativeScheme(url_scheme);
   if (IsBrowserInternalSchemeClass(scheme) && !scope.record_browser_internal) {

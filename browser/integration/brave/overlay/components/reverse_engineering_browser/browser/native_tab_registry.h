@@ -24,6 +24,10 @@ namespace reb {
 struct NativeFactoryOwnerTab final {
   std::uint32_t tab = 0;
   std::int64_t service_worker_version = -1;
+  // A service-worker job or worker start that named no caller frame.
+  bool service_worker_without_caller = false;
+  // A browser-initiated prefetch with no live referring WebContents.
+  bool prefetch_without_page = false;
 };
 
 // Feeds NativeTabResolver from the Chromium services that know each owner

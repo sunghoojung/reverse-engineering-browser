@@ -30,7 +30,8 @@ struct NativeToken128 final {
 };
 
 struct NativeTabResolution final {
-  enum class Status { kUnresolved, kLinked, kExtension };
+  // kNoPage: a service worker no page ever used (class 68).
+  enum class Status { kUnresolved, kLinked, kExtension, kNoPage };
   Status status = Status::kUnresolved;
   NativeTabLinkKind kind = NativeTabLinkKind::kDedicatedWorker;
   NativeLoaderKind owner_kind = NativeLoaderKind::kNotRecorded;
@@ -77,6 +78,8 @@ class NativeTabResolver final {
   static constexpr std::size_t kFrameCapacity = 16384;
   static constexpr std::size_t kWorkerCapacity = 4096;
   static constexpr std::size_t kClientCapacity = 4096;
+  // A nested dedicated worker resolves through at most this many creators.
+  static constexpr std::size_t kCreatorDepth = 64;
 
   static NativeTabResolver& Get();
 
@@ -106,6 +109,18 @@ class NativeTabResolver final {
                                     std::string_view client,
                                     std::span<const std::uint32_t> tabs);
   void ServiceWorkerControlleeRemoved(std::int64_t version, std::string_view client);
+  // A service-worker job starts `version`: `caller` when it named a frame,
+  // whose tab is `caller_tab` (0 once the frame was gone), and the active
+  // version it updates, else -1. Its registrant is the caller's tab, else the
+  // active version's tabs now.
+  void ServiceWorkerJobStarted(std::int64_t version,
+                               bool caller,
+                               std::uint32_t caller_tab,
+                               std::int64_t active);
+  // Nothing in this browser named a page for the version or its registration:
+  // no caller, client, last client or registrant. True for -1 and for a
+  // version never seen.
+  [[nodiscard]] bool ServiceWorkerHasNoPage(std::int64_t version) const;
   // Current client tabs of a dedicated or shared worker, for a worker client.
   [[nodiscard]] std::vector<std::uint32_t> WorkerTabs(NativeToken128 worker) const;
 
@@ -131,6 +146,8 @@ class NativeTabResolver final {
     bool ambiguous = false;
     // Dedicated: the creator document's tab. Shared: client frame -> tab.
     std::uint32_t tab = 0;
+    // Dedicated: the parent worker, kept while the tab is not known yet.
+    NativeToken128 creator;
     std::map<std::uint64_t, std::uint32_t> clients;
     std::int64_t version = 0;
     TabSet current;
@@ -141,9 +158,19 @@ class NativeTabResolver final {
     std::map<std::string, std::vector<std::uint32_t>, std::less<>> controllees;
     TabSet current;
     TabSet last;
+    // The tabs of the job that installed the version.
+    TabSet registrant;
+    // Sticky: a client, a caller or a registrant tab once named a page.
+    bool had_page = false;
   };
 
   Worker* FindWorker(std::uint64_t fold);
+  const Worker* DedicatedParent(NativeToken128 token) const;
+  // The first worker up the creator chain with a tab or an extension, or the
+  // last one reached.
+  const Worker& DedicatedRoot(const Worker& worker) const;
+  // Current, last, registrant, then the registration's last tabs.
+  std::vector<std::uint32_t> VersionPageTabs(const Version& version) const;
   Worker& AddWorker(NativeLoaderKind kind, NativeToken128 token, std::string_view extension);
   Version& VersionOf(std::int64_t version);
   static void Rebuild(TabSet& set, std::vector<std::uint32_t> tabs);

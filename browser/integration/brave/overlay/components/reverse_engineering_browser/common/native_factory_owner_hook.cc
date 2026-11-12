@@ -9,6 +9,8 @@ namespace reb {
 
 namespace {
 constinit thread_local NativeFactoryOwner g_owner;
+// Set once on the UI thread, which is the only thread that notes versions.
+constinit NativeServiceWorkerVersionObserver g_version_observer = nullptr;
 }  // namespace
 
 ScopedNativeFactoryOwner::ScopedNativeFactoryOwner(const NativeFactoryOwner& owner) noexcept
@@ -22,6 +24,19 @@ ScopedNativeFactoryOwner::~ScopedNativeFactoryOwner() {
 
 NativeFactoryOwner CurrentNativeFactoryOwner() noexcept {
   return g_owner;
+}
+
+void SetNativeServiceWorkerVersionObserver(
+    const NativeServiceWorkerVersionObserver observer) noexcept {
+  g_version_observer = observer;
+}
+
+void NoteNativeServiceWorkerVersion(content::BrowserContext* context,
+                                    const std::int64_t version_id,
+                                    const NativeFactoryOwner& cause) {
+  if (g_version_observer) {
+    g_version_observer(context, version_id, cause);
+  }
 }
 
 }  // namespace reb

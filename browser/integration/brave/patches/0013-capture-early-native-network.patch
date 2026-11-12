@@ -1,8 +1,8 @@
 diff --git a/browser/brave_browser_main_parts.cc b/browser/brave_browser_main_parts.cc
-index 5fbaad3..b697fa1 100644
+index 4314e0e..bc319bf 100644
 --- a/browser/brave_browser_main_parts.cc
 +++ b/browser/brave_browser_main_parts.cc
-@@ -19,6 +19,7 @@
+@@ -20,6 +20,7 @@
  #include "brave/components/constants/brave_constants.h"
  #include "brave/components/constants/pref_names.h"
  #include "brave/components/ipfs/buildflags/buildflags.h"
@@ -10,7 +10,7 @@ index 5fbaad3..b697fa1 100644
  #include "brave/components/speedreader/common/buildflags/buildflags.h"
  #include "brave/components/tor/buildflags/buildflags.h"
  #include "build/build_config.h"
-@@ -177,6 +178,9 @@ void ChromeBrowserMainParts::PreShutdown() {
+@@ -182,6 +183,9 @@ void ChromeBrowserMainParts::PreShutdown() {
  }
  
  void ChromeBrowserMainParts::PreProfileInit() {
@@ -21,10 +21,10 @@ index 5fbaad3..b697fa1 100644
  #if !BUILDFLAG(IS_ANDROID)
    auto* command_line = base::CommandLine::ForCurrentProcess();
 diff --git a/browser/brave_content_browser_client.cc b/browser/brave_content_browser_client.cc
-index 5104ff1..a9dc1b6 100644
+index 92ae7d1..aec166a 100644
 --- a/browser/brave_content_browser_client.cc
 +++ b/browser/brave_content_browser_client.cc
-@@ -91,7 +91,6 @@
+@@ -92,7 +92,6 @@
  #include "brave/components/psst/buildflags/buildflags.h"
  #include "brave/components/reverse_engineering_browser/browser/native_console_session.h"
  #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
@@ -32,11 +32,7 @@ index 5104ff1..a9dc1b6 100644
  #include "brave/components/request_otr/common/buildflags/buildflags.h"
  #include "brave/components/skus/common/features.h"
  #include "brave/components/skus/common/skus_internals.mojom.h"
-@@ -573,12 +572,10 @@ void BraveContentBrowserClient::RenderProcessWillLaunch(
-   if (reb::IsNativeConsoleEnabled()) {
-     auto retired = reb::NativeConsoleRetireCallback();
-     if (!retired) {
-       retired = base::BindOnce(&chrome::ExitIgnoreUnloadHandlers);
+@@ -606,8 +605,6 @@ void BraveContentBrowserClient::RenderProcessWillLaunch(
      }
      reb::StartNativeConsoleSession(std::move(retired));
    }
@@ -46,10 +42,10 @@ index 5104ff1..a9dc1b6 100644
    // The BraveRendererUpdater might be null for some irregular profiles, e.g.
    // the System Profile.
 diff --git a/browser/net/brave_proxying_url_loader_factory.cc b/browser/net/brave_proxying_url_loader_factory.cc
-index b36bb6c..2c79187 100644
+index 6debf8d..7aadceb 100644
 --- a/browser/net/brave_proxying_url_loader_factory.cc
 +++ b/browser/net/brave_proxying_url_loader_factory.cc
-@@ -161,6 +161,12 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+@@ -163,6 +163,12 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
        request_id_(request_id),
        network_service_request_id_(network_service_request_id),
        render_frame_token_(render_frame_token),
@@ -62,7 +58,7 @@ index b36bb6c..2c79187 100644
        options_(options),
        browser_context_(browser_context),
        traffic_annotation_(traffic_annotation),
-@@ -171,6 +177,14 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+@@ -173,6 +179,14 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
        proxied_client_receiver_(this),
        navigation_response_task_runner_(navigation_response_task_runner),
        weak_factory_(this) {
@@ -77,7 +73,7 @@ index b36bb6c..2c79187 100644
    // If there is a client error, clean up the request.
    target_client_.set_disconnect_handler(base::BindOnce(
        &BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnRequestError,
-@@ -184,6 +198,10 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+@@ -186,6 +200,10 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
  
  template <template <typename> class T>
  BraveProxyingURLLoaderFactory<T>::InProgressRequest::~InProgressRequest() {
@@ -88,7 +84,7 @@ index b36bb6c..2c79187 100644
    if (ctx_) {
      factory_->request_handler_->OnURLRequestDestroyed(ctx_);
    }
-@@ -207,6 +225,25 @@ void BraveProxyingURLLoaderFactory<
+@@ -209,6 +227,25 @@ void BraveProxyingURLLoaderFactory<
    native_capture_identity_initialized_ = true;
  }
  
@@ -114,7 +110,7 @@ index b36bb6c..2c79187 100644
  template <template <typename> class T>
  void BraveProxyingURLLoaderFactory<T>::InProgressRequest::Restart() {
    UpdateRequestInfo();
-@@ -225,6 +262,8 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnLoaderDisconnected(
+@@ -252,6 +289,8 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnLoaderDisconnected(
      if (target_loader_.is_bound()) {
        target_loader_.ResetWithReason(custom_reason, description);
      }
@@ -123,7 +119,7 @@ index b36bb6c..2c79187 100644
      factory_->RemoveRequest(this);
    } else {
      OnRequestError(network::URLLoaderCompletionStatus(net::ERR_ABORTED));
-@@ -397,13 +436,7 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnComplete(
+@@ -475,13 +514,7 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnComplete(
      OnRequestError(status);
      return;
    }
@@ -138,7 +134,7 @@ index b36bb6c..2c79187 100644
  
    target_client_->OnComplete(status);
  
-@@ -508,6 +541,13 @@ void BraveProxyingURLLoaderFactory<
+@@ -586,6 +619,13 @@ void BraveProxyingURLLoaderFactory<
        return;
      }
  
@@ -152,7 +148,7 @@ index b36bb6c..2c79187 100644
      // Craft the response.
      target_client_->OnReceiveResponse(std::move(response), std::move(consumer),
                                        std::move(cached_metadata_));
-@@ -575,15 +615,6 @@ void BraveProxyingURLLoaderFactory<
+@@ -653,15 +693,6 @@ void BraveProxyingURLLoaderFactory<
    if (!target_loader_.is_bound() && factory_->target_factory_.is_bound()) {
      // Nothing has cancelled us up to this point, so it's now OK to
      // initiate the real network request.
@@ -168,7 +164,7 @@ index b36bb6c..2c79187 100644
      uint32_t options = options_;
      factory_->target_factory_->CreateLoaderAndStart(
          target_loader_.BindNewPipeAndPassReceiver(
-@@ -690,16 +721,15 @@ void BraveProxyingURLLoaderFactory<
+@@ -768,16 +799,15 @@ void BraveProxyingURLLoaderFactory<
  
    std::uint64_t creator_event_id = 0;
    auto& network_capture = reb::NativeNetworkCaptureSink::Get();
@@ -188,7 +184,7 @@ index b36bb6c..2c79187 100644
      current_response_body_ = artifact_capture.MaybeCaptureResponse(
          request_id_, frame_id_, creator_event_id, request_,
          *current_response_head_, std::move(current_response_body_));
-@@ -730,8 +760,7 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::
+@@ -808,8 +838,7 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::
      ctx_->set_redirect_source(request_.url);
    }
    auto& network_capture = reb::NativeNetworkCaptureSink::Get();
@@ -198,7 +194,7 @@ index b36bb6c..2c79187 100644
      network_capture.RecordRequestRedirected(
          request_id_, network_service_request_id_, initiator_process_id_,
          tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_,
-@@ -791,13 +820,7 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnRequestError(
+@@ -870,13 +899,7 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::OnRequestError(
    // Make a non-const copy of status so that |should_collapse_initiator| can be
    // modified.
    network::URLLoaderCompletionStatus collapse_status(status);
@@ -214,18 +210,10 @@ index b36bb6c..2c79187 100644
    if (base::FeatureList::IsEnabled(
            ::brave_shields::features::kBraveAdblockCollapseBlockedElements) &&
 diff --git a/browser/net/brave_proxying_url_loader_factory.h b/browser/net/brave_proxying_url_loader_factory.h
-index e4ab039..5ac81b7 100644
+index 7a40210..9d9fa15 100644
 --- a/browser/net/brave_proxying_url_loader_factory.h
 +++ b/browser/net/brave_proxying_url_loader_factory.h
-@@ -12,6 +12,7 @@
- #include <optional>
- #include <set>
- #include <string>
-+#include <string_view>
- #include <utility>
- #include <vector>
- 
-@@ -26,6 +27,7 @@
+@@ -24,6 +24,7 @@
  #include "base/timer/elapsed_timer.h"
  #include "brave/browser/net/resource_context_data.h"
  #include "brave/browser/net/url_context.h"
@@ -233,7 +221,7 @@ index e4ab039..5ac81b7 100644
  #include "mojo/public/cpp/bindings/pending_receiver.h"
  #include "mojo/public/cpp/bindings/pending_remote.h"
  #include "mojo/public/cpp/bindings/receiver_set.h"
-@@ -128,6 +130,9 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
+@@ -145,6 +146,9 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
      void OnRequestError(const network::URLLoaderCompletionStatus& status);
      void HandleBeforeRequestRedirect();
      void EnsureNativeCaptureIdentity();
@@ -241,9 +229,9 @@ index e4ab039..5ac81b7 100644
 +    void FinishNativeCapture(const network::URLLoaderCompletionStatus& status,
 +                             std::string_view disposition = {});
  
-     base::ElapsedTimer elapsed_timer_;
- 
-@@ -146,6 +151,7 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
+     // Terminates a request whose client violated the URLLoader contract for
+     // FollowRedirect(), and reports `reason` as a bad message if the client is
+@@ -170,6 +174,7 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
      uint64_t browser_context_id_high_ = 0;
      uint64_t browser_context_id_low_ = 0;
      bool native_capture_identity_initialized_ = false;

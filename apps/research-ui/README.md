@@ -2148,10 +2148,13 @@ The timeline reads
 `GET /api/events?session_id=…&category=vm&type=wasm_dispatch_observation,wasm_indirect_observation,wasm_dispatch_overflow,wasm_indirect_overflow,js_invocation_start,js_invocation_settle,js_invocation_request,gap`
 forward from the start of the store, 1,000 records a page, at most 4 pages a
 read and 8,000 records held; anything unread is stated, with **Read more**.
-It reads again when the session changes, on **Refresh**, and quietly when Flow
-redraws more than 15 seconds after a complete read. A refresh reads from the
-start through at least as many pages as it holds, so it never undoes **Read
-more**, and a selection the records still hold stays selected, drawn or not.
+It reads again from the start when the session changes and on **Refresh**,
+through at least as many records as it holds, so it never undoes **Read
+more**. When Flow redraws more than 15 seconds after a complete read, it
+continues quietly from where its last page stopped and adds what is new; when
+nothing is new it redraws nothing. A partial read waits for **Read more**. A
+selection the records still hold stays selected, drawn or not, and keyboard
+focus stays on the item it was on.
 
 - One track per invocation, keyed by process and invocation ID, along that
   renderer's `sequence_number` order, never wall-clock time. A run of

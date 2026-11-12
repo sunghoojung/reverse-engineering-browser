@@ -13,7 +13,7 @@ const FLOW_TIMELINE_CATEGORY = 'vm';
  * cover a session; the caps keep a long store from filling the page. */
 const FLOW_TIMELINE_LIMITS = Object.freeze({pageSize: 1000, pagesPerRead: 4, maxRecords: 8000, maxPageBytes: 8 * 1024 * 1024,
   maxTracks: 64, maxSamples: 512, maxRequests: 128, maxGapMarks: 64, maxGapReasons: 6, unit: 22, gapCap: 6, labelEvery: 96});
-// A complete read is read again quietly when Flow redraws this long after it.
+// A complete read continues quietly when Flow redraws this long after it.
 const FLOW_TIMELINE_STALE_MS = 15000;
 // The decoded settle names its value kind (protocol/native-js-invocation-v1.md).
 const FLOW_VALUE_NAMES = {bigint: 'BigInt', array_buffer: 'ArrayBuffer', array_buffer_view: 'typed array'};
@@ -397,9 +397,6 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
   // scanned, every session and record type in it, not this session alone.
   const noScan = () => ({sequence: 0n, sequenceSaturated: false, drops: 0n, dropsSaturated: false});
   let scan = noScan();
-  // Pages behind the records held. A refresh reads at least as many again,
-  // so it never undoes a Read more or shrinks the view.
-  let pagesHeld = 0;
 
   function setState(kind, title = '', text = '', retry = false) {
     status = kind;
@@ -414,7 +411,11 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
   }
   stateRetry.addEventListener('click', () => load(session));
 
-  /** Reads the session's records from the start of the store, forward. */
+  /** Reads the session's records forward. A full read starts at the store's
+   * start and reads at least as many records as it held, so it never undoes
+   * Read more. `more` continues from where the last page stopped and adds
+   * what is new; a `quiet` read shows no banner and, when nothing is new,
+   * redraws nothing. */
   async function load(next, {more = false, quiet = false} = {}) {
     if (!next) { reset(); setState('idle', 'No session yet', 'Tracked calls appear once a session has recorded requests.'); return; }
     // A new session starts empty; reset first so it cannot cancel this read.
@@ -423,13 +424,12 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
     const owner = ++generation, abort = new AbortController();
     controller = abort;
     session = String(next);
-    const collected = more ? events.slice() : [], scanned = more ? {...scan} : noScan();
+    const collected = more ? events.slice() : [], scanned = more ? {...scan} : noScan(), held = more ? 0 : events.length;
     let after = more ? cursor : '0', pages = 0, done = false;
     if (!model) setState('loading', 'Reading tracked calls…', 'Invocation records and Wasm samples, in record order.');
     else if (!quiet) setBanner('Refreshing tracked calls…');
     try {
-      const budget = more ? limits.pagesPerRead : Math.max(limits.pagesPerRead, pagesHeld);
-      while (pages < budget && collected.length < limits.maxRecords) {
+      while ((pages < limits.pagesPerRead || collected.length < held) && collected.length < limits.maxRecords) {
         const parameters = new URLSearchParams({session_id: session, category: FLOW_TIMELINE_CATEGORY, type: FLOW_TIMELINE_TYPES.join(','), after, limit: String(limits.pageSize)});
         const body = await flowTimelinePage(`/api/events?${parameters}`, abort.signal);
         if (owner !== generation) return;
@@ -438,12 +438,17 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
         pages += 1;
         scanned.sequence += captureWideTotal(body.sequence_gaps) ?? 0n; scanned.drops += captureWideTotal(body.queue_drops) ?? 0n;
         scanned.sequenceSaturated ||= body.sequence_gaps_saturated === true; scanned.dropsSaturated ||= body.queue_drops_saturated === true;
-        const query = body.query;
+        // The next read continues where this page stopped; a cursor that
+        // does not move ends the read.
+        const query = body.query, from = after;
+        if (typeof query.next_after === 'string') after = query.next_after;
         if (!query.limited && !query.budget_exhausted) { done = true; break; }
-        if (typeof query.next_after !== 'string' || query.next_after === after) { done = true; break; }
-        after = query.next_after;
+        if (after === from) { done = true; break; }
       }
-      events = collected; cursor = after; partial = !done; error = null; loadedAt = Date.now(); scan = scanned; pagesHeld = (more ? pagesHeld : 0) + pages;
+      const unchanged = collected.length === events.length && partial === !done && scanned.sequence === scan.sequence && scanned.drops === scan.drops
+        && scanned.sequenceSaturated === scan.sequenceSaturated && scanned.dropsSaturated === scan.dropsSaturated;
+      events = collected; cursor = after; partial = !done; error = null; loadedAt = Date.now(); scan = scanned;
+      if (more && quiet && unchanged) return;
       model = flowTimelineModel(events);
       render();
       onPartial(partial);
@@ -458,7 +463,7 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
   }
   function reset() {
     controller?.abort(); controller = null; generation += 1;
-    events = []; model = null; view = null; cursor = '0'; partial = false; loadedAt = 0; chosenProcess = null; selected = null; items = new Map(); scan = noScan(); pagesHeld = 0;
+    events = []; model = null; view = null; cursor = '0'; partial = false; loadedAt = 0; chosenProcess = null; selected = null; items = new Map(); scan = noScan();
     canvas.replaceChildren(); detailText.textContent = ''; detailFollow.hidden = true; setBanner(''); gapNotice.textContent = ''; gapNotice.hidden = true;
     processSelect.replaceChildren(); processSelect.hidden = true;
   }
@@ -496,10 +501,14 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
       return;
     }
     setState('ready');
+    // Drawing replaces every item, so keyboard focus moves to the same
+    // item again, or to the tab stop when it is gone.
+    const focused = canvas.contains(document.activeElement) ? document.activeElement.dataset.key : null;
     draw();
     // A selection the records still hold stays, drawn or not.
     if (selected && !describe(selected)) selected = null;
     paintSelection();
+    if (focused) (items.get(focused) ?? tabStopFor(describe(selected)))?.focus({preventScroll: true});
   }
   /** The gap notice: this renderer's refusals and losses, which other
    * renderers have some, and the scanned range's missing and dropped records. */
@@ -781,10 +790,11 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
 
   return {
     processSelect,
-    /** Loads when the session changes, else refreshes quietly when stale. */
+    /** Reads when the session changes; a complete read gone stale continues
+     * quietly. A partial read waits for Read more. */
     sync(next) {
       if (String(next ?? '') !== String(session ?? '') || (!model && status !== 'loading' && status !== 'error')) { load(next); return; }
-      if (model && !partial && !controller && Date.now() - loadedAt > FLOW_TIMELINE_STALE_MS) load(session, {quiet: true});
+      if (model && !partial && !controller && Date.now() - loadedAt > FLOW_TIMELINE_STALE_MS) load(session, {more: true, quiet: true});
     },
     refresh: () => load(session),
     /** Selects by key ("sample:<process>:<seq>", "call:<process>:<inv>" or "request:..."). */

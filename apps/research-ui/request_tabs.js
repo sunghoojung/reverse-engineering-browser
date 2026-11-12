@@ -113,7 +113,24 @@
     return `${name} · ${link.count} ${link.count === 1 ? 'tab' : 'tabs'}`;
   }
 
-  // Adds tabIds, tabLink, tabLinkLabel and extensionId to each row; evidence is not changed.
+  // Why a row without an owner has none, from its renderer and browser start
+  // records: the same rule as unresolved_reason in request_tabs.rs.
+  function unresolvedReason(row) {
+    const events = row.events ?? [];
+    const renderer = events.find(event => event.type === 'request_initiated');
+    if (renderer) {
+      const kind = renderer.loader_kind ?? 0;
+      if (kind === 0) return 'no_loader_kind';
+      if (OWNER_KINDS.has(kind)) return 'worker';
+      if (kind === 20) return 'no_document';
+      return (renderer.frame_id ?? '0') === '0' ? 'no_frame' : 'document_frame';
+    }
+    const starts = events.filter(event => event.type === 'request_started');
+    if (!starts.length) return 'no_start';
+    return starts.some(event => event.loader_kind) ? 'browser_factory' : 'no_loader_kind';
+  }
+
+  // Adds tabIds, tabLink, tabLinkLabel, extensionId and tabReason to each row; evidence is not changed.
   function attachRequestTabs(rows, events) {
     const sets = tabSetsFrom(events);
     const links = new Map(), extensions = new Map();
@@ -131,6 +148,7 @@
       row.tabLink = link && {kind: link.kind, count: link.count, complete: Boolean(link.set?.complete)};
       row.tabLinkLabel = link ? linkLabel(link) : '';
       row.extensionId = extensions.get(row.id) ?? null;
+      row.tabReason = row.tabIds.length || row.extensionId ? null : unresolvedReason(row);
     }
     return rows;
   }
@@ -170,7 +188,7 @@
   }
 
   const api = Object.freeze({decodeTabSet, decodeTabLink, decodeExtensionLink, tabSetsFrom, attachRequestTabs, rowTabs,
-    scopeLabel, isUnresolved, tabPageLabel, unresolvedNotice, linkLabel});
+    scopeLabel, isUnresolved, tabPageLabel, unresolvedNotice, linkLabel, unresolvedReason});
   global.RebRequestTabs = api;
   if (typeof module === 'object' && module?.exports) module.exports = api;
 })(globalThis);

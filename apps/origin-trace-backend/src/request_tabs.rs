@@ -24,21 +24,31 @@ struct State {
     request_id: u64,
     /// The renderer request_initiated's loader kind and whether it had a frame.
     renderer: Option<(u64, bool)>,
-    /// The newest browser record's loader kind.
-    browser_kind: u64,
+    /// Set by a browser request_started: its newest nonzero loader kind, else 0.
+    browser: Option<u64>,
 }
 
-/// Why a row has no tab (protocol/native-network-v3.md "Unresolved requests").
-fn reason(state: &State) -> &'static str {
-    match state.renderer {
-        Some((0, _)) => "no_loader_kind",
-        Some((17..=19, _)) => "worker",
-        Some((20, _)) => "no_document",
-        Some((_, false)) => "no_frame",
-        Some(_) => "document_frame",
-        None if state.browser_kind != 0 => "browser_factory",
-        None => "no_loader_kind",
+/// Why a row has no tab (protocol/native-network-v3.md "Unresolved requests"),
+/// from its renderer start's loader kind and frame and its browser start's
+/// loader kind. The request index names its rows with the same rule.
+pub(crate) fn unresolved_reason(
+    renderer: Option<(u64, bool)>,
+    browser: Option<u64>,
+) -> &'static str {
+    match (renderer, browser) {
+        (Some((0, _)), _) => "no_loader_kind",
+        (Some((17..=19, _)), _) => "worker",
+        (Some((20, _)), _) => "no_document",
+        (Some((_, false)), _) => "no_frame",
+        (Some(_), _) => "document_frame",
+        (None, None) => "no_start",
+        (None, Some(0)) => "no_loader_kind",
+        (None, Some(_)) => "browser_factory",
     }
+}
+
+fn reason(state: &State) -> &'static str {
+    unresolved_reason(state.renderer, state.browser)
 }
 
 /// One lifecycle record's part in its row.
@@ -46,7 +56,7 @@ struct Record {
     process_id: u64,
     request_id: u64,
     renderer: Option<(u64, bool)>,
-    browser_kind: u64,
+    browser: Option<u64>,
 }
 
 #[derive(Default)]
@@ -151,11 +161,7 @@ impl RequestTabs {
             // A memory-cache reuse names its owner as request_initiated does.
             renderer: matches!(kind, "request_initiated" | "memory_cache_reuse")
                 .then(|| (loader_kind, number("frame_id") != 0)),
-            browser_kind: if kind == "request_started" {
-                loader_kind
-            } else {
-                0
-            },
+            browser: (kind == "request_started").then_some(loader_kind),
         };
         self.note(row, number("tab_id") != 0, false, Some(record));
     }
@@ -173,7 +179,7 @@ impl RequestTabs {
             process_id: 0,
             request_id: 0,
             renderer: None,
-            browser_kind: 0,
+            browser: None,
         });
         state.linked |= linked;
         state.extension |= extension;
@@ -184,8 +190,12 @@ impl RequestTabs {
             (state.process_id, state.request_id) = (record.process_id, record.request_id);
         }
         state.renderer = state.renderer.or(record.renderer);
-        if record.browser_kind != 0 {
-            state.browser_kind = record.browser_kind;
+        if let Some(kind) = record.browser {
+            state.browser = Some(if kind == 0 {
+                state.browser.unwrap_or(0)
+            } else {
+                kind
+            });
         }
     }
 
@@ -399,11 +409,13 @@ mod tests {
             "initiator_process_id": 31, "initiator_request_id": 5,
             "browser_context_id_high": "3", "browser_context_id_low": "4", "loader_kind": 7}),
         ));
+        // Only a completion: the start was dropped, outside the scan or past the exclusion ring.
+        tabs.record(&record("request_completed", 31, 8, 0, json!({})));
         // A memory-cache reuse names its owner as a start does.
         tabs.record(&record(
             "memory_cache_reuse",
             31,
-            8,
+            9,
             0,
             json!({"loader_kind": 16, "frame_id": "83"}),
         ));
@@ -427,13 +439,14 @@ mod tests {
                 (4, "no_frame"),
                 (5, "worker"),
                 (6, "no_loader_kind"),
-                (8, "document_frame"),
+                (8, "no_start"),
+                (9, "document_frame"),
             ])
         );
         assert_eq!(
             tabs.document()["unresolved_reasons"],
             json!({"document_frame": "3", "no_document": "1", "no_frame": "1",
-                   "no_loader_kind": "1", "worker": "1"})
+                   "no_loader_kind": "1", "no_start": "1", "worker": "1"})
         );
     }
 }

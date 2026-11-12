@@ -594,6 +594,7 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `no_tab_traffic_excluded` | Capture counted extension-worker requests, DevTools loads, requests of service workers no page used in this browser, and browser-initiated prefetches with no page, instead of recording them; `count` is the requests. Not a gap. `REB_CAPTURE_EXTENSION_TRAFFIC=1` records the extension requests instead. |
 | `memory_cache_reuse_not_recorded` | Renderers counted memory-cache reuses past their 4,096 records per capture configuration instead of recording them; `count` is the reuses. Not a gap. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are the separate `non_ordinary_page_reuse` exclusion. |
 | `network_tab_unresolved` | Severity `error`: `count` request rows have no tab, and the message counts them by reason. A capture bug; `request_tabs.unresolved_requests` names up to 16 by `process_id` and `request_id`, each with its `reason`. |
+| `network_tab_no_document` | Severity `warning`: `count` request rows come from a context with no parent document (a shared storage worklet), which the capture does not link; their reason is `no_document`. |
 | `bounded_scope` | Only the newest 64 MiB of events were summarized. |
 
 `exclusions` lists those counts by class and unit; see
@@ -601,7 +602,7 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 `request_tabs` counts request rows, the ones under an extension
 (`extension_rows`) and the ones without an owner, by reason
 (`unresolved_reasons`: `document_frame`, `worker`, `no_document`, `no_frame`,
-`browser_factory` or `no_loader_kind`); see
+`browser_factory`, `no_loader_kind` or `no_start`); see
 [request owners and tabs](native-network-v3.md#request-owners-and-tabs) and
 [unresolved requests](native-network-v3.md#unresolved-requests).
 The summary scans the same newest 64 MiB as the polling window and the newest

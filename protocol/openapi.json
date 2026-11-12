@@ -9175,14 +9175,15 @@
       },
       "RequestTabUnresolvedReason": {
         "type": "string",
-        "description": "Why a request row has no tab (protocol/native-network-v3.md \"Unresolved requests\"): document_frame, a document, worklet or script-context renderer record whose frame the browser held no tab for; worker, a worker renderer record no link names; no_document, a context with no parent document; no_frame, a renderer record with frame 0; browser_factory, only browser records, from a factory with no frame, owner or version tab; no_loader_kind, an earlier producer.",
+        "description": "Why a request row has no tab (protocol/native-network-v3.md \"Unresolved requests\"): document_frame, a document, worklet or script-context renderer record whose frame the browser held no tab for; worker, a worker renderer record no link names; no_document, a context with no parent document; no_frame, a renderer record with frame 0; browser_factory, only browser records, from a factory with no frame, owner or version tab; no_loader_kind, an earlier producer; no_start, no renderer request_initiated or browser request_started among the scanned records.",
         "enum": [
           "document_frame",
           "worker",
           "no_document",
           "no_frame",
           "browser_factory",
-          "no_loader_kind"
+          "no_loader_kind",
+          "no_start"
         ]
       },
       "Uint64String": {
@@ -18283,6 +18284,7 @@
           "tab_ids",
           "tab_link",
           "extension_id",
+          "tab_reason",
           "operation",
           "first_time_ns",
           "last_time_ns",
@@ -18464,6 +18466,17 @@
             ],
             "pattern": "^[a-p]{32}$",
             "description": "The extension a request_extension_link names: extension traffic recorded with REB_CAPTURE_EXTENSION_TRAFFIC=1 (protocol/native-network-v3.md), else null."
+          },
+          "tab_reason": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RequestTabUnresolvedReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why a row with no tab and no extension has no owner, the same reason get_session_summary gives; null for a row with an owner."
           },
           "operation": {
             "type": "string"
@@ -34284,6 +34297,7 @@
                     "no_tab_traffic_excluded",
                     "memory_cache_reuse_not_recorded",
                     "network_tab_unresolved",
+                    "network_tab_no_document",
                     "bounded_scope"
                   ]
                 },

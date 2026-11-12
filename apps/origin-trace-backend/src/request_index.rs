@@ -24,7 +24,7 @@ use std::{
 pub const SIDECAR_SUFFIX: &str = ".requests-v1";
 const FORMAT: &str = "reb-request-index-v1";
 /// Sidecar row layout; a sidecar of another layout is rebuilt from byte 0.
-const LAYOUT: u32 = 8;
+const LAYOUT: u32 = 9;
 /// Bounds one call; a larger store reports partial coverage and continues next call.
 const SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const RECORD_BYTES: usize = 4096;
@@ -225,6 +225,11 @@ struct Row {
     tab_link: (u8, u32),
     /// The extension a `request_extension_link` names.
     extension: Option<String>,
+    /// The renderer `request_initiated`'s loader kind and whether it had a
+    /// frame, and the browser `request_started`'s newest nonzero loader kind:
+    /// why a row without an owner has none (`request_tabs::unresolved_reason`).
+    renderer_start: Option<(u8, bool)>,
+    browser_start: Option<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1672,6 +1677,8 @@ impl RequestIndex {
                     tab_set: None,
                     tab_link: (0, 0),
                     extension: None,
+                    renderer_start: None,
+                    browser_start: None,
                 });
                 self.views.push(view(state.rows.last().unwrap()));
                 ordinal
@@ -1734,9 +1741,20 @@ impl RequestIndex {
         let renderer_row = kind == "request_initiated" || kind == "memory_cache_reuse";
         row.loader |= !renderer_row;
         row.renderer |= renderer_row || number(&event["initiator_process_id"]) > 0;
+        let loader_kind = u8::try_from(number(&event["loader_kind"])).unwrap_or(0);
+        // A memory-cache reuse names its owner as request_initiated does.
+        if renderer_row && row.renderer_start.is_none() {
+            let frame = text(&event["frame_id"]);
+            row.renderer_start = Some((loader_kind, !frame.is_empty() && frame != "0"));
+        }
         if kind == "request_started" {
             row.worker_started |= flags & 4 != 0;
             row.main_frame |= number(&event["resource_type"]) == 0;
+            row.browser_start = Some(if loader_kind == 0 {
+                row.browser_start.unwrap_or(0)
+            } else {
+                loader_kind
+            });
         }
         let response = (kind == "response_started").then(|| response_metadata(&payload));
         // A renderer completion carries the response's cache and service-worker
@@ -2072,6 +2090,15 @@ impl RequestIndex {
         document["static_data"] = json!(row.static_data);
         document["race_network"] = json!(row.worker_answer.is_some() && row.browser);
         document["end_lost"] = json!(row.end_lost);
+        let owned = row.extension.is_some()
+            || !row_tabs(row, &self.state.as_ref().unwrap().tab_sets).is_empty();
+        document["tab_reason"] = json!((!owned).then(|| {
+            crate::request_tabs::unresolved_reason(
+                row.renderer_start
+                    .map(|(kind, frame)| (u64::from(kind), frame)),
+                row.browser_start.map(u64::from),
+            )
+        }));
         // Raw; the get_requests handler replaces it with the frame's resolution.
         document["initiator_frame"] = json!(row.stack_frame.as_ref().map(|(session, process, isolate, frame)| {
             let script = u32::from_le_bytes(frame[4..8].try_into().unwrap());

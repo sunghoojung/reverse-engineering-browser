@@ -93,6 +93,18 @@ const orphan = Object.assign(golden('browser loader kind 6'), {process_id: 2, re
   browser_context_id_high: '3', browser_context_id_low: '4'});
 rows = tabs.attachRequestTabs(model.requestsFromEvents([orphan], 'live'), [orphan]);
 assert(rows.length === 1 && tabs.isUnresolved(rows[0]) && rows[0].tabIds.length === 0);
+assert.equal(rows[0].tabReason, 'browser_factory');
+// Each row without an owner names why, by the summary's rule.
+const reasonOf = events => tabs.attachRequestTabs(model.requestsFromEvents(events, 'live'), events)[0].tabReason;
+assert.equal(reasonOf([record({loader_kind: 20, request_id: '40', sequence_number: '40'})]), 'no_document');
+assert.equal(reasonOf([record({loader_kind: 18, request_id: '41', sequence_number: '41'})]), 'worker');
+assert.equal(reasonOf([record({loader_kind: 16, request_id: '42', sequence_number: '42', frame_id: '77'})]), 'document_frame');
+assert.equal(reasonOf([record({loader_kind: 21, request_id: '43', sequence_number: '43', frame_id: '0'})]), 'no_frame');
+const completionOnly = Object.assign(golden('renderer loader kind 16'), {type: 'request_completed', loader_kind: undefined,
+  process_id: 31, request_id: '44', sequence_number: '44', payload: hex('completed'), payload_size: 9});
+delete completionOnly.loader_kind;
+assert.equal(reasonOf([completionOnly]), 'no_start');
+assert.equal(reasonOf([record({loader_kind: 16, request_id: '45', sequence_number: '45', tab_id: 4})]), null);
 assert.equal(tabs.unresolvedNotice(1), '1 request without a tab (capture error)');
 assert.equal(tabs.unresolvedNotice(0), '');
 

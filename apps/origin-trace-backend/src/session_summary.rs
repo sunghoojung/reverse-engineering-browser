@@ -538,10 +538,13 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         item["count"] = json!(gap.count.to_string());
         checks.push(item);
     }
-    let unresolved = request_tabs.unresolved();
+    // A context with no parent document (a shared storage worklet) is not
+    // linked by design, so it is a warning; every other reason is a capture bug.
+    let mut reasons = request_tabs.unresolved_reasons();
+    let no_document = reasons.remove("no_document").unwrap_or(0);
+    let unresolved: u64 = reasons.values().sum();
     if unresolved > 0 {
-        let reasons = request_tabs
-            .unresolved_reasons()
+        let reasons = reasons
             .iter()
             .map(|(reason, count)| format!("{reason} {count}"))
             .collect::<Vec<_>>()
@@ -555,6 +558,17 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         );
         item["count"] = json!(unresolved.to_string());
         checks.insert(0, item);
+    }
+    if no_document > 0 {
+        let mut item = check(
+            "network_tab_no_document",
+            "warning",
+            format!(
+                "{no_document} requests come from a context with no parent document, a shared storage worklet, which the renderer cannot name a tab for. The capture does not link them; request_tabs lists them with reason no_document."
+            ),
+        );
+        item["count"] = json!(no_document.to_string());
+        checks.push(item);
     }
     let excluded = exclusions.totals();
     let no_tab: u64 = [65, 66, 68, 69]
@@ -793,6 +807,14 @@ mod tests {
         orphan["browser_context_id_high"] = json!("3");
         orphan["browser_context_id_low"] = json!("4");
         lines.push(orphan.to_string());
+        // A shared storage worklet's fetch: unresolved by design, a warning.
+        let mut worklet = event(1, "network", "request_initiated", 0, "GET example.test");
+        worklet["process_id"] = json!(31);
+        worklet["request_id"] = json!("5");
+        worklet["frame_id"] = json!("9");
+        worklet["loader_kind"] = json!(20);
+        worklet["tab_id"] = json!(0);
+        lines.push(worklet.to_string());
         let mut dirty = exclusion(7, 42, 16, 9);
         let mut bytes = hex::decode(dirty["payload"].as_str().unwrap()).unwrap();
         bytes[5] = 1;
@@ -837,13 +859,32 @@ mod tests {
         assert_eq!(checks[0]["severity"], "error");
         assert_eq!(
             summary["request_tabs"]["unresolved_requests"],
-            json!([{"process_id": 7, "request_id": "77", "reason": "no_loader_kind"}])
+            json!([
+                {"process_id": 31, "request_id": "5", "reason": "no_document"},
+                {"process_id": 7, "request_id": "77", "reason": "no_loader_kind"}
+            ])
         );
         assert!(
             checks[0]["message"]
                 .as_str()
                 .unwrap()
                 .starts_with("1 requests have no tab (no_loader_kind 1).")
+        );
+        assert_eq!(checks[0]["count"], "1");
+        let no_document = checks
+            .iter()
+            .find(|check| check["code"] == "network_tab_no_document")
+            .unwrap();
+        assert_eq!(
+            (
+                no_document["severity"].as_str(),
+                no_document["count"].as_str()
+            ),
+            (Some("warning"), Some("1"))
+        );
+        assert_eq!(
+            summary["request_tabs"]["unresolved_reasons"],
+            json!({"no_document": "1", "no_loader_kind": "1"})
         );
         let no_tab = checks
             .iter()

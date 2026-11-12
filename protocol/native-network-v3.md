@@ -620,23 +620,28 @@ tab. Extension pages (background page, popup, options) are their own
 A row (records joined as in Traffic) is unresolved when none of its records
 has a nonzero `tab_id` and no `request_tab_link` or `request_extension_link`
 names it. `get_session_summary` reports `request_tabs` (rows, unresolved rows
-by reason, and up to 16 of them by process and request id with their reason)
-and the error check `network_tab_unresolved`, whose message counts the rows by
-reason. Traffic shows the count in its footer; the button lists those rows.
+by reason, and up to 16 of them by process and request id with their reason).
+Rows of reason `no_document` raise the warning `network_tab_no_document`: the
+renderer names no creating document for a shared storage worklet, so the
+capture does not link it. Every other reason is the error
+`network_tab_unresolved`, whose message counts the rows by reason. The request
+index gives each such row its `tab_reason`, and Traffic names it in the row's
+tooltip. Traffic shows the count in its footer; the button lists those rows.
 They are never hidden.
 
 The reason comes from the row's records: the renderer `request_initiated` when
-the row has one, else the newest browser record's loader kind. The first that
-applies:
+the row has one, else the newest nonzero loader kind of a browser
+`request_started`. The first that applies:
 
 | Reason | Row |
 | --- | --- |
-| `no_loader_kind` | The renderer record, or every browser record, has no loader kind (an earlier producer) |
+| `no_loader_kind` | The renderer record, or every browser `request_started`, has no loader kind (an earlier producer) |
 | `worker` | A renderer record of loader kind 17 to 19 that no link names: the worker was never seen or was evicted, its creator chain is longer than 64 workers, or it had no tab and was not counted as traffic no tab caused |
 | `no_document` | A renderer record of loader kind 20 |
 | `no_frame` | A renderer record with frame 0 |
 | `document_frame` | A renderer record of loader kind 16, 21 or 22 whose frame the browser held no tab for: never seen, evicted, or sharing its fold with another frame of the process |
 | `browser_factory` | Only browser records: a factory with no frame, scoped owner or version tab, or a scoped owner whose frame was gone |
+| `no_start` | No renderer `request_initiated` and no browser `request_started`: the start was dropped by a full queue (the queue reports the drop), is older than the scanned records, or belonged to an excluded request whose later records outlived the drain's 64-request exclusion ring |
 
 ### Hot path and bounds
 

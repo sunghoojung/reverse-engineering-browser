@@ -3553,7 +3553,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           if (!request) throw new Error('its stored records no longer form this request');
           // Tab sets and links have no request ID, so the store read lacks them; the index row has them.
           Object.assign(request, {tabIds: indexed.tabIds, tabLink: indexed.tabLink, tabLinkLabel: indexed.tabLinkLabel,
-            extensionId: indexed.extensionId, recordsPartial: partial});
+            extensionId: indexed.extensionId, tabReason: indexed.tabReason, recordsPartial: partial});
           if (indexed.endLost) markTrafficEndLost(request);
           retainTrafficRequest(request);
           rebuildTrafficRequests();

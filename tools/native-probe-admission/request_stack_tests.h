@@ -1280,13 +1280,15 @@ NativeRequestStackPayload HandlerStack(NativeProbeQueue& queue,
     assert(deep.recorded == 32 && (deep.flags & reb::kNativeTaskSegmentBounded) != 0);
     Drain(queue);
     scenario.task_depth = 3;
-    // A reaction V8 tagged with no remembered registration reads not_recorded.
+    // A reaction V8 tagged with no remembered registration reads
+    // not_recorded, marked as recorded with promise stacks on.
     scenario.microtask = true;
     scenario.attribution = 31;
     NativeRequestStackWalk::PromiseReactionStarted(77);
     StackPayload(Start(queue, 7202).second);
     assert(GeneratedChain()[0].state ==
-           static_cast<std::uint8_t>(reb::NativeTaskSegmentState::kNotRecorded));
+               static_cast<std::uint8_t>(reb::NativeTaskSegmentState::kNotRecorded) &&
+           GeneratedChain()[0].flags == reb::kNativeTaskSegmentRegistrationsOn);
     Drain(queue);
     NativeRequestStackWalk::PromiseReactionFinished(77);
     scenario.microtask = false;

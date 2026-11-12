@@ -1272,8 +1272,16 @@ NativeTaskSegment NativeRequestStackWalk::MicrotaskSegment() const noexcept {
   NativeTaskSegment segment;
   segment.kind = static_cast<std::uint8_t>(NativeAsyncTaskKind::kMicrotask);
   segment.state = static_cast<std::uint8_t>(NativeTaskSegmentState::kNotRecorded);
+  if (!state_->registrations) {
+    // REB_NATIVE_PROMISE_STACKS was off for this thread.
+    return segment;
+  }
+  // Promise stacks were on: say so when this reaction's registration is not
+  // remembered (registered by a builtin, before the tables existed, while
+  // capture was off, or overwritten in the ring).
+  segment.flags = kNativeTaskSegmentRegistrationsOn;
   const std::uint32_t id = t_reaction;
-  if (id == 0 || !state_->registrations) {
+  if (id == 0) {
     return segment;
   }
   const auto& entry = (*state_->registrations)[id & (kNativePromiseRegistrationRing - 1)];

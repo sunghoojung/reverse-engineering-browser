@@ -107,6 +107,9 @@ enum class NativeTaskSegmentState : std::uint8_t {
   kOriginRejected = 8,
 };
 inline constexpr std::uint8_t kNativeTaskSegmentBounded = 1U << 0U;
+// Version 3, kind 9 not_recorded: promise registration stacks were on, but
+// the thread remembered no registration for this reaction.
+inline constexpr std::uint8_t kNativeTaskSegmentRegistrationsOn = 1U << 1U;
 // The call that registered a microtask's promise reaction, version 3.
 enum class NativePromiseRegistration : std::uint8_t {
   kThen = 1,
@@ -438,7 +441,10 @@ inline void SetNativeStackScope(std::array<std::uint8_t, N>& tail,
     const std::uint16_t artifact_version = kNativeStackArtifactTaskVersion) noexcept {
   using native_request_stack_detail::AllZero;
   const bool scoped = artifact_version == kNativeStackArtifactScopeVersion;
-  if (!AllZero(s.reserved1) || (s.flags & ~kNativeTaskSegmentBounded) != 0) {
+  const bool microtask = s.kind == static_cast<std::uint8_t>(NativeAsyncTaskKind::kMicrotask);
+  const std::uint8_t known_flags =
+      kNativeTaskSegmentBounded | (scoped && microtask ? kNativeTaskSegmentRegistrationsOn : 0);
+  if (!AllZero(s.reserved1) || (s.flags & ~known_flags) != 0) {
     return false;
   }
   const auto state = static_cast<NativeTaskSegmentState>(s.state);
@@ -451,11 +457,13 @@ inline void SetNativeStackScope(std::array<std::uint8_t, N>& tail,
            !AllZero(s.digest);
   };
   const bool empty = s.flags == 0 && s.recorded == 0 && AllZero(s.digest);
-  if (s.kind == static_cast<std::uint8_t>(NativeAsyncTaskKind::kMicrotask)) {
+  if (microtask) {
     if (state == NativeTaskSegmentState::kNotRecorded) {
-      return s.registration == 0 && empty;
+      return s.registration == 0 && (s.flags & ~kNativeTaskSegmentRegistrationsOn) == 0 &&
+             s.recorded == 0 && AllZero(s.digest);
     }
     return scoped && s.registration >= 1 && s.registration <= 4 &&
+           (s.flags & kNativeTaskSegmentRegistrationsOn) == 0 &&
            frames(kNativePromiseRegistrationFrameLimit);
   }
   if (s.registration != 0 || s.kind < 1 || s.kind > (scoped ? kNativeAsyncTaskKindLimit : 8)) {

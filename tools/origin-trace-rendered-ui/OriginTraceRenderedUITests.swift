@@ -1245,16 +1245,22 @@ final class OriginTraceRenderedUITests: XCTestCase {
         try await ui.click("#source-debugger-toggle")
         try await ui.waitUntil("Boolean(document.querySelector('#debugger-sidebar [data-debugger-native=\"availability\"]'))", "the debugger sidebar did not read its state")
       }
-      // The pausing words have one native meaning: the sidebar's statement of
-      // the availability get_native_debugger reports, read here and compared.
+      // The pausing words have a native meaning only in the debugger sidebar:
+      // the statement of the availability get_native_debugger reports, read
+      // here and compared, and sections registered as native pausing ones.
+      // Those are left out of the text; their pausing controls stay disabled
+      // while the backend reports the debugger unsupported.
       let read = try await ui.json("""
         (async () => {
           const root = document.querySelector('#screen-\(screen)'), statement = root.querySelector('[data-debugger-native="availability"]');
-          if (statement) statement.hidden = true;
+          const native = [...root.querySelectorAll('[data-debugger-native]')];
+          native.forEach(node => { node.hidden = true; });
           const text = root.innerText;
-          if (statement) statement.hidden = false;
+          native.forEach(node => { node.hidden = false; });
           const reported = statement ? (await (await fetch('/api/native-debugger', {cache: 'no-store'})).json()).availability : null;
-          return {text, statement: statement?.dataset.availability ?? null, reported,
+          const enabled = [...root.querySelectorAll('[data-debugger-native="pausing"] button')]
+            .filter(button => !button.disabled && /pause|resume|step|breakpoint/i.test(button.innerText)).map(button => button.innerText);
+          return {text, statement: statement?.dataset.availability ?? null, reported, enabled,
             controls: statement ? statement.querySelectorAll('button, input, select, textarea, a, summary, [tabindex]').length : 0};
         })()
         """)
@@ -1265,6 +1271,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       if screen == "sources" {
         XCTAssertEqual(read["statement"] as? String, read["reported"] as? String, "the pausing state is the reported availability: \(read)")
         XCTAssertEqual(read["controls"] as? Int, 0, "the pausing state offers no control")
+        if read["reported"] as? String == "unsupported" {
+          XCTAssertEqual(read["enabled"] as? [String], [], "no pausing control is enabled while the debugger is unsupported")
+        }
         // Docked, the sidebar narrows the editor and Debugger may move into More.
         try await ui.click("#debugger-sidebar .debugger-sidebar-close")
       }
@@ -1283,7 +1292,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // captured names, an observed frame scoping the Sources tree, a listener
   // opening its site in Sources, keyboard focus, and both themes.
   @MainActor
-  func test28DebuggerSidebar() async throws {
+  func test31DebuggerSidebar() async throws {
     let expected = try Expectations.load()
     let frameKey = ":\(expected.debuggerProcess):\(expected.debuggerFrame)"
     for size in windowSizes {
@@ -1300,16 +1309,18 @@ final class OriginTraceRenderedUITests: XCTestCase {
           view: Math.ceil(document.querySelector('#debugger-observations').clientHeight / 44),
           threads: [...document.querySelectorAll('#debugger-threads .debugger-list-group')].map(node => node.innerText.replace(/\\s+/g, ' ')),
           pausing: document.querySelector('[data-debugger-native="availability"]')?.dataset.availability ?? null,
-          buttons: [...document.querySelectorAll('#debugger-sidebar button')].map(button => button.innerText).filter(text => /pause|resume|step|breakpoint/i.test(text)),
+          buttons: [...document.querySelectorAll('#debugger-sidebar button')].filter(button => !button.closest('[data-debugger-native="pausing"]'))
+            .map(button => button.innerText).filter(text => /pause|resume|step|breakpoint/i.test(text)),
           details: document.querySelector('#source-sidebar').hidden})
         """)
       print("RENDERED_UI_DEBUGGER \(size.name) \(opened)")
-      XCTAssertEqual(opened["sections"] as? [String], ["threads", "watch", "observations", "pausing"], "\(size.name): \(opened)")
+      XCTAssertEqual(Array((opened["sections"] as? [String] ?? []).prefix(4)), ["threads", "watch-rules", "observations", "pausing"],
+        "\(size.name): the phase 1 sections come first: \(opened)")
       XCTAssertEqual(opened["focus"] as? String, "threads", "\(size.name): opening focuses the first section")
       XCTAssertGreaterThanOrEqual(opened["size"] as? Int ?? 0, 100, "\(size.name): the newest page is listed: \(opened)")
       XCTAssertLessThanOrEqual(opened["rows"] as? Int ?? .max, (opened["view"] as? Int ?? 0) + 13, "\(size.name): only rows near the view mount: \(opened)")
       XCTAssertEqual(opened["pausing"] as? String, "unsupported", "\(size.name): pausing states the reported availability")
-      XCTAssertEqual(opened["buttons"] as? [String], [], "\(size.name): no pausing control is offered")
+      XCTAssertEqual(opened["buttons"] as? [String], [], "\(size.name): no pausing control outside a native pausing section")
       XCTAssertEqual(opened["details"] as? Bool, true, "\(size.name): Details and the debugger share one column")
       XCTAssertTrue((opened["threads"] as? [String] ?? []).contains { $0.hasPrefix("Workers") }, "\(size.name): recorded workers are threads: \(opened)")
       try await assertInert(ui, "\(size.name) debugger sidebar")

@@ -20,7 +20,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-DEPOT_REV = "1afcf0756e47f3a6ee82d7736b9fcda2d57b268e"
+DEPOT_REV = "94e89b10b92cc9d6e58fc8d1b6474b7d29e8a114"
 PUBLIC_TEST = "test-run-wasm/RebNativePublicQuickJSGuestState"
 TEST_NAMES = [
     "RebNativeBrTableRuntimeDispatch",

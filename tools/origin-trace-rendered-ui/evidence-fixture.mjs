@@ -36,6 +36,8 @@ export const SERVICE_WORKER_FAILED_HOST = 'api.worker.test';
 // A service worker's end the renderer could not join to its start: End lost.
 export const SERVICE_WORKER_LOST_HOST = 'api.lost.test';
 const FIXTURE_TAB_ID = 1;
+// A service worker's install-time fetch, linked to the tab that registered it.
+export const REGISTRANT_HOST = 'sw.install.test';
 export const RESPONSE_BODY_MARKER = '<img src=x onerror="window.__rebInjected=9">';
 export const HEADER_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=7">';
 export const COOKIE_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=8">';
@@ -557,6 +559,36 @@ function rendererAnsweredRequests(template, events) {
   return [reused, target, start, startTarget, failed, lostStart, lostTarget, lost];
 }
 
+// A renderer-only service-worker request linked to the fixture tab as its
+// registrant (request_tab_link kind 5), and two requests of a service worker no
+// page used, counted as class 68 (protocol/native-network-v3.md).
+function serviceWorkerRegistrantRequest(template, firstSequence, firstTime) {
+  const renderer = 5161, fold = '4660';
+  let sequence = firstSequence, time = BigInt(firstTime);
+  const base = {...template, navigation_id: '0', artifact_id: '0', parent_event_id: '0', status_code: 0, error_code: 0,
+    encoded_data_length: '0', decoded_body_length: '0', resource_type: 0, flags: 0, payload_truncated: false};
+  const at = (fields, payload) => {
+    time += 1000n;
+    return {...base, monotonic_time_ns: String(time), ...fields, payload_size: payload.length / 2, payload};
+  };
+  const workerRecord = {process_id: renderer, thread_id: renderer, request_id: '61', frame_id: fold, tab_id: 0, scheme_class: 2};
+  const start = at({...workerRecord, sequence_number: '1', type: 'request_initiated', loader_kind: 19}, hex(`GET ${REGISTRANT_HOST}`));
+  const done = at({...workerRecord, sequence_number: '2', type: 'request_completed', status_code: 200}, hex('completed'));
+  const browser = (fields, bytes) => at({sequence_number: String(sequence++), request_id: '0', ...fields}, bytes.toString('hex'));
+  const set = Buffer.alloc(128);
+  set.writeUInt16LE(1, 0); set.writeUInt16LE(128, 2); set[4] = 19; set.writeBigUInt64LE(1n, 8);
+  set.writeUInt32LE(1, 16); set.writeUInt16LE(1, 20); set.writeUInt32LE(FIXTURE_TAB_ID, 24);
+  const link = Buffer.alloc(24);
+  link.writeUInt16LE(1, 0); link.writeUInt16LE(24, 2); link[4] = 5; link.writeBigUInt64LE(1n, 8); link.writeUInt32LE(1, 16);
+  const counted = Buffer.alloc(16);
+  counted.writeUInt16LE(1, 0); counted.writeUInt16LE(16, 2); counted[4] = 68; counted.writeBigUInt64LE(2n, 8);
+  return [start, done,
+    browser({type: 'tab_set', tab_id: FIXTURE_TAB_ID, frame_id: fold}, set),
+    browser({type: 'request_tab_link', tab_id: FIXTURE_TAB_ID, frame_id: fold, parent_event_id: start.sequence_number,
+      initiator_process_id: renderer, initiator_request_id: 61}, link),
+    browser({type: 'capture_exclusion', tab_id: 0, frame_id: '0', initiator_process_id: 0, initiator_request_id: 0}, counted)];
+}
+
 // Like the browser, each gap takes its renderer's own sequence slot, so the
 // stream has no hole. The payload is the reason text, as the producers write it.
 function namedBudgetGaps(template, events) {
@@ -585,8 +617,12 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const lastBrowser = adjacent.filter(event => event.process_id === network.process_id).at(-1);
   const withBodies = await requestBodyRequests(network, Number(lastBrowser.sequence_number) + 1, lastBrowser.monotonic_time_ns, artifacts);
   const workerStack = await workerStackRequest(network, withBodies.events.at(-1).monotonic_time_ns, artifacts);
-  const answered = rendererAnsweredRequests(network, [...demoEvents, ...scrolled, ...adjacent, ...withBodies.events, ...workerStack.events]);
-  const requests = [...scrolled, ...adjacent, ...withBodies.events, ...workerStack.events, ...answered];
+  const lastBodies = withBodies.events.filter(event => event.process_id === network.process_id).at(-1);
+  const registrant = serviceWorkerRegistrantRequest(network, Number(lastBodies.sequence_number) + 1,
+    workerStack.events.at(-1).monotonic_time_ns);
+  const answered = rendererAnsweredRequests(network,
+    [...demoEvents, ...scrolled, ...adjacent, ...withBodies.events, ...workerStack.events, ...registrant]);
+  const requests = [...scrolled, ...adjacent, ...withBodies.events, ...workerStack.events, ...registrant, ...answered];
   const lines = Array.from({length: SOURCE_LINE_COUNT}, (_, index) => index === 2
     ? `// ${HOSTILE_SOURCE_MARKER}` : `const retainedLine${index} = ${index}; // long line ${'x'.repeat(index % 7 === 0 ? 180 : 12)}`);
   const source = await artifact(artifacts, {artifact_id: '303', session_id: '1', navigation_id: '100', frame_id: '200',

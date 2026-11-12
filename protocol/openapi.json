@@ -18443,8 +18443,8 @@
               "kind": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 4,
-                "description": "request_tab_link kind: 1 dedicated worker, 2 shared worker clients, 3 service worker clients, 4 service worker last clients."
+                "maximum": 5,
+                "description": "request_tab_link kind: 1 dedicated worker, 2 shared worker clients, 3 service worker clients, 4 service worker last clients, 5 service worker registrant."
               },
               "count": {
                 "type": "integer",

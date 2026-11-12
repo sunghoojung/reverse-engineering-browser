@@ -6,7 +6,9 @@
 #include <thread>
 #include <vector>
 
+#include "brave/components/reverse_engineering_browser/common/native_network_request.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_fetch_owner.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_service_worker_starts.h"
 #include "reb/event.hpp"
 #include "reb/network_request.hpp"
 #include "reb/network_scope.hpp"
@@ -263,8 +265,12 @@ void ServiceWorkerRequestEnds() {
   assert(Drain(metadata) == 2);
   sink.RecordServiceWorkerRequestEnd(5003, "/late", 5, -1, -2);
   const auto lost = One(metadata);
+  // The gap names the row it leaves unfinished as a request_tab_link names a
+  // renderer record: by process and request ID, with no frame.
   assert(GapReason(lost) == "service_worker_end_lost" && Core(lost).header.session_id == 65 &&
-         lost.header.request_id == 0);
+         lost.header.request_id == 0 && lost.header.frame_id == 0 &&
+         lost.header.initiator_process_id == lost.header.process_id &&
+         lost.header.initiator_request_id == 5003);
   // The slot still holds the newer start, which finishes normally.
   sink.RecordServiceWorkerRequestEnd(5003 + 1024, "/new", 4, -1, -2);
   assert(Core(One(metadata)).header.request_id == 5003 + 1024);
@@ -276,6 +282,29 @@ void ServiceWorkerRequestEnds() {
   sink.RecordServiceWorkerRequestEnd(5004, "/old", 4, -1, -2);
   assert(Drain(metadata) == 0);
 
+  // The kSentBody boundary: one completion whichever side ends the request.
+  // A response the worker sent carries from_service_worker, so the loader's
+  // client finishes the row and the loader does not.
+  auto answered = sink.RecordRequestInitiated(5005, "GET", "https", "example.test");
+  One(metadata);
+  answered.NoteResponse(200, true, false);
+  sink.RecordRendererRequestComplete(answered, "/ok", 3, -1, 0, 10, 10);
+  if (reb::NativeServiceWorkerEndsRequest(/*response_sent=*/true, false, false)) {
+    sink.RecordServiceWorkerRequestEnd(5005, "/ok", 3, -1, -2);
+  }
+  assert(Core(One(metadata)).header.type == reb::EventType::kRequestCompleted);
+  // An error before any response: the loader ends it, and the client's own
+  // completion, which has no service-worker response, adds nothing.
+  auto unanswered = sink.RecordRequestInitiated(5006, "GET", "https", "example.test");
+  One(metadata);
+  if (reb::NativeServiceWorkerEndsRequest(false, false, false)) {
+    sink.RecordServiceWorkerRequestEnd(5006, "/no", 3, -1, -2);
+  }
+  sink.RecordRendererRequestComplete(unanswered, "/no", 3, -1, -2, 0, 0);
+  assert(Core(One(metadata)).header.type == reb::EventType::kRequestFailed);
+  assert(!reb::NativeServiceWorkerEndsRequest(false, /*completed=*/true, false) &&
+         !reb::NativeServiceWorkerEndsRequest(false, false, /*network_answered=*/true));
+
   transport.Disable();
   const auto before = allocations.load();
   for (int index = 0; index < 1000; ++index) {
@@ -286,58 +315,95 @@ void ServiceWorkerRequestEnds() {
                "and error; evicted, earlier-configuration, non-http and inactive ends\n";
 }
 
-// Writers fill one start slot while ends read it: an end finishes only a start
-// it read whole, so its frame (the writer's owner, equal to the ID here) always
-// matches its request ID, or it reports the loss.
-void ServiceWorkerStartRace() {
-  auto ring = std::make_unique<NativeProbeQueue>();
-  auto& queue = *ring;
-  ConfigureScope(queue, false, false, 69);
+// The start table is a Boehm-style sequence lock, correct only if a reader
+// never accepts a slot that writers half filled. Every field here is a
+// function of the request ID, so any accepted mix shows. Accepting every read
+// (a broken lock) fails this within a few thousand reads.
+void ServiceWorkerStartSequenceLock() {
+  static reb::NativeServiceWorkerStarts starts;
   constexpr int kWriters = 4;
-  constexpr int kStarts = 1000;
-  std::atomic<std::int32_t> latest{0};
+  constexpr std::uint32_t kStarts = 250000;
+  constexpr std::uint32_t kSlot = 7;
+  const auto start_of = [](const std::uint32_t id) {
+    reb::NativeRendererRequest start;
+    start.request_id = id;
+    start.generation = std::uint64_t{id} * 2 + 2;
+    start.initiated_sequence = std::uint64_t{id} * 3 + 1;
+    start.initiated_time_ns = std::uint64_t{id} * 5 + 7;
+    start.frame_id = std::uint64_t{id} * 11 + 13;
+    start.thread_id = id ^ 0x5a5a5a5aU;
+    start.scheme_class =
+        (id & 1024U) != 0 ? reb::NativeSchemeClass::kHttps : reb::NativeSchemeClass::kHttp;
+    return start;
+  };
   std::atomic<int> running{kWriters};
   std::vector<std::thread> writers;
   for (int writer = 0; writer < kWriters; ++writer) {
     writers.emplace_back([&, writer] {
-      for (int index = 0; index < kStarts; ++index) {
-        const auto id = static_cast<std::int32_t>(9000 + 1024 * (writer * kStarts + index));
-        const reb::NativeFetchOwnerScope owner(
-            {reb::NativeLoaderKind::kDocument, static_cast<std::uint64_t>(id)});
-        static_cast<void>(sink.RecordRequestInitiated(id, "GET", "https", "example.test"));
-        latest.store(id, std::memory_order_release);
+      for (std::uint32_t index = 0; index < kStarts; ++index) {
+        starts.Keep(
+            start_of(kSlot + 1024U * (static_cast<std::uint32_t>(writer) * kStarts + index)));
+        // A short pause between writes lets the reader in between them too.
+        for (int spin = 0; spin < 32; ++spin) {
+          static_cast<void>(running.load(std::memory_order_relaxed));
+        }
       }
       running.fetch_sub(1, std::memory_order_acq_rel);
     });
   }
-  std::size_t ends = 0;
-  while (latest.load(std::memory_order_acquire) == 0) {
-  }
-  while (running.load(std::memory_order_acquire) != 0 && ends < kStarts) {
-    sink.RecordServiceWorkerRequestEnd(latest.load(std::memory_order_acquire), "/", 1, -1, -2);
-    ++ends;
+  std::uint64_t accepted = 0, busy = 0, torn = 0;
+  while (running.load(std::memory_order_acquire) != 0) {
+    reb::NativeRendererRequest read;
+    if (!starts.Read(kSlot, read)) {
+      ++busy;
+      continue;
+    }
+    ++accepted;
+    if (read.request_id == 0) {
+      continue;
+    }
+    const auto expected = start_of(read.request_id);
+    torn += read.generation != expected.generation ||
+            read.initiated_sequence != expected.initiated_sequence ||
+            read.initiated_time_ns != expected.initiated_time_ns ||
+            read.frame_id != expected.frame_id || read.thread_id != expected.thread_id ||
+            read.scheme_class != expected.scheme_class;
   }
   for (auto& writer : writers) {
     writer.join();
   }
-  std::size_t finished = 0, lost = 0;
-  NativeProbeEvent event;
-  while (queue.TryPop(event)) {
-    const auto record = Core(event);
-    if (record.header.type == reb::EventType::kRequestFailed) {
-      assert(record.header.frame_id == record.header.request_id);
-      ++finished;
-    } else if (record.header.type == reb::EventType::kGap) {
-      assert(GapReason(event) == "service_worker_end_lost");
-      ++lost;
-    }
-  }
-  // Every end ran after a start of this configuration filled the slot.
-  assert(finished + lost == ends && queue.DroppedCount() == 0);
-  transport.Disable();
-  std::cout << "PASS service-worker start slots: " << ends << " ends racing " << kWriters
-            << " writers never read a torn start (" << finished << " finished, " << lost
-            << " reported lost)\n";
+  assert(torn == 0);
+  assert(accepted > 1000);
+  std::cout << "PASS service-worker start slots: " << accepted << " reads racing " << kWriters
+            << " writers accepted no torn slot (" << busy << " found it busy)\n";
+}
+
+// protocol/native-network-v3.md: the path and query a target keeps, without
+// the fragment, never outside the spec whatever the parser left.
+void RequestTargetRanges() {
+  using reb::NativeRequestTargetRange;
+  // "https://a.test/p?q#f": path 14+2, query 17+1, ref 19+1, 20 bytes.
+  const auto check = [](const reb::NativeTargetRange range, const std::size_t begin,
+                        const std::size_t length) {
+    assert(range.begin == begin && range.length == length);
+  };
+  check(NativeRequestTargetRange(20, 14, 2, 17, 1, 19, 1), 14, 4);
+  check(NativeRequestTargetRange(19, 14, 2, 17, 1, 0, -1), 14, 4);
+  check(NativeRequestTargetRange(16, 14, 2, 0, -1, 0, -1), 14, 2);
+  // No components at all: an empty target at the end, never a wrapped length.
+  check(NativeRequestTargetRange(20, 0, -1, 0, -1, 0, -1), 20, 0);
+  check(NativeRequestTargetRange(0, 0, -1, 0, -1, 0, -1), 0, 0);
+  // Invalid path with a query or ref still keeps nothing.
+  check(NativeRequestTargetRange(20, 0, -1, 17, 1, 19, 1), 20, 0);
+  // A ref before the path, a query past the spec, a path past the spec.
+  check(NativeRequestTargetRange(20, 14, 2, 0, -1, 10, 1), 14, 0);
+  check(NativeRequestTargetRange(20, 14, 2, 17, 50, 0, -1), 14, 6);
+  check(NativeRequestTargetRange(20, 25, 2, 0, -1, 0, -1), 20, 0);
+  check(NativeRequestTargetRange(20, 14, 2, 0, -1, 0, 0), 14, 0);
+  // "data:image/png;base64,AAAA": the path is all after the scheme.
+  check(NativeRequestTargetRange(26, 5, 21, 0, -1, 0, -1), 5, 21);
+  std::cout << "PASS request target ranges: fragment dropped, empty and invalid components "
+               "give an empty target, every range stays inside the spec\n";
 }
 
 reb::MemoryCacheReusePayload ReuseOf(const reb::EventRecord& record) {

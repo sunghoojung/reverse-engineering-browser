@@ -10,6 +10,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/common/page_guest_dispatch.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_fetch_owner.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_service_worker_starts.h"
 
 #include <algorithm>
 #include <array>
@@ -1207,67 +1208,9 @@ void SetPayload(NativeProbeEvent& event,
 namespace {
 constinit thread_local NativeFetchOwner g_fetch_owner;
 
-// The newest recorded http(s) starts by request ID, for the service-worker
-// loader, which knows only that ID (protocol/native-network-v3.md). Each slot
-// is a sequence lock: its version is odd while a writer fills it.
-struct ServiceWorkerStart final {
-  std::atomic<std::uint32_t> version{0};
-  std::atomic<std::uint32_t> request_id{0};
-  std::atomic<std::uint64_t> generation{0};
-  std::atomic<std::uint64_t> sequence{0};
-  std::atomic<std::uint64_t> time_ns{0};
-  std::atomic<std::uint64_t> frame_id{0};
-  std::atomic<std::uint32_t> thread_id{0};
-  std::atomic<std::uint8_t> scheme_class{0};
-};
-constexpr std::size_t kServiceWorkerStartSlots = 1024;
-static_assert((kServiceWorkerStartSlots & (kServiceWorkerStartSlots - 1)) == 0);
-static_assert(sizeof(ServiceWorkerStart) == 48);
-// Zero-initialized storage: no constructor runs and no page is touched until
-// a start is kept.
-constinit std::array<ServiceWorkerStart, kServiceWorkerStartSlots> g_service_worker_starts{};
-
-ServiceWorkerStart& ServiceWorkerStartSlot(const std::uint32_t request_id) noexcept {
-  return g_service_worker_starts[request_id & (kServiceWorkerStartSlots - 1)];
-}
-
-void KeepServiceWorkerStart(const NativeRendererRequest& start) noexcept {
-  ServiceWorkerStart& slot = ServiceWorkerStartSlot(start.request_id);
-  std::uint32_t version = slot.version.load(std::memory_order_relaxed);
-  // A writer that finds the slot busy skips it; that end is then reported lost.
-  if ((version & 1U) != 0 ||
-      !slot.version.compare_exchange_strong(version, version + 1, std::memory_order_relaxed)) {
-    return;
-  }
-  std::atomic_thread_fence(std::memory_order_release);
-  slot.request_id.store(start.request_id, std::memory_order_relaxed);
-  slot.generation.store(start.generation, std::memory_order_relaxed);
-  slot.sequence.store(start.initiated_sequence, std::memory_order_relaxed);
-  slot.time_ns.store(start.initiated_time_ns, std::memory_order_relaxed);
-  slot.frame_id.store(start.frame_id, std::memory_order_relaxed);
-  slot.thread_id.store(start.thread_id, std::memory_order_relaxed);
-  slot.scheme_class.store(static_cast<std::uint8_t>(start.scheme_class), std::memory_order_relaxed);
-  slot.version.store(version + 2, std::memory_order_release);
-}
-
-// A consistent copy of the slot, or false while a writer holds it.
-bool ReadServiceWorkerStart(const std::uint32_t request_id, NativeRendererRequest& out) noexcept {
-  const ServiceWorkerStart& slot = ServiceWorkerStartSlot(request_id);
-  const std::uint32_t version = slot.version.load(std::memory_order_acquire);
-  if ((version & 1U) != 0) {
-    return false;
-  }
-  out.request_id = slot.request_id.load(std::memory_order_relaxed);
-  out.generation = slot.generation.load(std::memory_order_relaxed);
-  out.initiated_sequence = slot.sequence.load(std::memory_order_relaxed);
-  out.initiated_time_ns = slot.time_ns.load(std::memory_order_relaxed);
-  out.frame_id = slot.frame_id.load(std::memory_order_relaxed);
-  out.thread_id = slot.thread_id.load(std::memory_order_relaxed);
-  out.scheme_class =
-      static_cast<NativeSchemeClass>(slot.scheme_class.load(std::memory_order_relaxed));
-  std::atomic_thread_fence(std::memory_order_acquire);
-  return slot.version.load(std::memory_order_relaxed) == version;
-}
+// Zero-initialized storage: no constructor runs and no page is touched until a
+// start is kept.
+constinit NativeServiceWorkerStarts g_service_worker_starts;
 }  // namespace
 
 NativeFetchOwnerScope::NativeFetchOwnerScope(const NativeFetchOwner& owner) noexcept
@@ -2150,7 +2093,7 @@ NativeRendererRequest NativeProbeSink::RecordRequestInitiated(
   request.request_id = static_cast<std::uint32_t>(event.header.request_id);
   request.scheme_class = scheme_class;
   if (scheme_class == NativeSchemeClass::kHttp || scheme_class == NativeSchemeClass::kHttps) {
-    KeepServiceWorkerStart(request);
+    g_service_worker_starts.Keep(request);
   }
   return request;
 }
@@ -2280,7 +2223,8 @@ void NativeProbeSink::RecordServiceWorkerRequestEnd(const std::int32_t request_i
   const auto id = static_cast<std::uint32_t>(request_id);
   NativeRendererRequest start;
   // One retry covers a writer that was filling the slot when the read began.
-  const bool read = ReadServiceWorkerStart(id, start) || ReadServiceWorkerStart(id, start);
+  const bool read =
+      g_service_worker_starts.Read(id, start) || g_service_worker_starts.Read(id, start);
   if (read && start.generation != config_generation) {
     // Not recorded in this configuration, so this one has no row to finish.
     return;
@@ -2292,8 +2236,9 @@ void NativeProbeSink::RecordServiceWorkerRequestEnd(const std::int32_t request_i
     RecordRendererRequestComplete(start, target, target_length, port, error_code, 0, 0);
     return;
   }
-  // A later start of this configuration took the slot, so this end has no
-  // start to join; protocol/native-network-v3.md names the loss.
+  // Another start of this configuration took the slot, so this end has no
+  // start to join. The gap names the row it leaves unfinished the way a
+  // request_tab_link names a renderer record; protocol/native-network-v3.md.
   NativeProbeEvent gap;
   gap.header.category = NativeProbeCategory::kNetwork;
   gap.header.type = NativeProbeType::kGap;

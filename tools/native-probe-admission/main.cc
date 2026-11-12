@@ -2288,7 +2288,8 @@ int main() {
   Run<&RendererAnsweredRequests>();
   Run<&RendererFetchOwners>();
   Run<&ServiceWorkerRequestEnds>();
-  Run<&ServiceWorkerStartRace>();
+  Run<&ServiceWorkerStartSequenceLock>();
+  Run<&RequestTargetRanges>();
   Run<&MemoryCacheReuses>();
   Run<&ScriptCookieAccess>();
   Run<&CanvasCreatorAdmission>();

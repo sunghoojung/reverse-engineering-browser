@@ -11,7 +11,7 @@ index 24128fe..b72ca91 100644
      "//cc",
      "//cc/animation",
 diff --git a/content/renderer/service_worker/service_worker_subresource_loader.cc b/content/renderer/service_worker/service_worker_subresource_loader.cc
-index 4f84533..97d79dd 100644
+index 4f84533..0a895a4 100644
 --- a/content/renderer/service_worker/service_worker_subresource_loader.cc
 +++ b/content/renderer/service_worker/service_worker_subresource_loader.cc
 @@ -5,6 +5,7 @@
@@ -34,9 +34,9 @@ index 4f84533..97d79dd 100644
    return timing;
  }
  
-+// The browser proxy never sees a request this loader keeps from the network,
-+// so the renderer finishes one it ends without a response; see
-+// protocol/native-network-v3.md.
++// The browser proxy never records what the page received from a request this
++// loader answers, so the renderer finishes one it ends without a response,
++// race network requests included; see protocol/native-network-v3.md.
 +void RecordNativeServiceWorkerEnd(int32_t request_id,
 +                                  const GURL& url,
 +                                  int error_code) {
@@ -48,32 +48,36 @@ index 4f84533..97d79dd 100644
  }  // namespace
  
  // A ServiceWorkerStreamCallback implementation which waits for completion of
-@@ -342,6 +355,12 @@ ServiceWorkerSubresourceLoader::~ServiceWorkerSubresourceLoader() {
+@@ -342,6 +355,14 @@ ServiceWorkerSubresourceLoader::~ServiceWorkerSubresourceLoader() {
  }
  
  void ServiceWorkerSubresourceLoader::OnMojoDisconnect() {
 +  // The page cancelled a request this loader still held.
-+  if (status_ != Status::kSentBody && status_ != Status::kCompleted &&
-+      dispatched_preload_type() != DispatchedPreloadType::kRaceNetworkRequest) {
++  if (reb::NativeServiceWorkerEndsRequest(
++          status_ == Status::kSentBody, status_ == Status::kCompleted,
++          commit_responsibility() ==
++              FetchResponseFrom::kWithoutServiceWorker)) {
 +    RecordNativeServiceWorkerEnd(request_id_, resource_request_.url,
 +                                 net::ERR_ABORTED);
 +  }
    MaybeDeleteThis();
  }
  
-@@ -1001,6 +1020,11 @@ void ServiceWorkerSubresourceLoader::CommitCompleted(int error_code,
+@@ -1001,6 +1022,13 @@ void ServiceWorkerSubresourceLoader::CommitCompleted(int error_code,
                "error_code", net::ErrorToString(error_code), "reason",
                TRACE_STR_COPY(reason));
  
-+  // An error before any response, with no network request of this loader's.
++  // An error before any response that the worker, not a race network
++  // request, gave the page.
 +  const bool reb_unanswered =
-+      error_code != net::OK && status_ != Status::kSentBody &&
-+      status_ != Status::kCompleted &&
-+      dispatched_preload_type() != DispatchedPreloadType::kRaceNetworkRequest;
++      error_code != net::OK &&
++      reb::NativeServiceWorkerEndsRequest(
++          status_ == Status::kSentBody, status_ == Status::kCompleted,
++          commit_responsibility() == FetchResponseFrom::kWithoutServiceWorker);
    TransitionToStatus(Status::kCompleted);
    if (error_code == net::OK) {
      switch (commit_responsibility()) {
-@@ -1024,6 +1048,10 @@ void ServiceWorkerSubresourceLoader::CommitCompleted(int error_code,
+@@ -1024,6 +1052,10 @@ void ServiceWorkerSubresourceLoader::CommitCompleted(int error_code,
    status.error_code = error_code;
    status.completion_time = base::TimeTicks::Now();
    url_loader_client_->OnComplete(status);

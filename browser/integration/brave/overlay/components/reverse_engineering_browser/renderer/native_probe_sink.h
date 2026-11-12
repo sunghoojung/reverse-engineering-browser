@@ -446,20 +446,28 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                                      std::int32_t error_code,
                                      std::int64_t encoded_data_length,
                                      std::int64_t decoded_body_length) noexcept;
-  // A request content::ServiceWorkerSubresourceLoader ended without sending a
-  // response or handing it to the network: the renderer completion, with
+  // A request content::ServiceWorkerSubresourceLoader ended itself
+  // (NativeServiceWorkerEndsRequest): the renderer completion, with
   // from_service_worker, of the http(s) start this process recorded under
-  // request_id; or a service_worker_end_lost gap when a later start of the
-  // same configuration took its slot. One atomic load while inactive.
+  // request_id; or a service_worker_end_lost gap naming that request when
+  // another start of the same configuration took its slot. One atomic load
+  // while inactive.
   void RecordServiceWorkerRequestEnd(std::int32_t request_id,
                                      std::string_view target,
                                      std::size_t target_length,
                                      int port,
                                      std::int32_t error_code) noexcept;
-  // One memory_cache_reuse record and, in content sessions, its target. Past
-  // kNativeMemoryCacheReuseBudget records a configuration counts the reuse as
-  // exclusion class 68 instead. Callers check IsCaptureArmed first.
-  void RecordMemoryCacheReuse(const NativeMemoryCacheReuse& reuse) noexcept;
+  // Charges one memory-cache reuse to the configuration's budget, after the
+  // Network category, expiry and page checks, so the caller converts nothing
+  // for a reuse it will not record. A reuse in a page that is not ordinary, or
+  // past kNativeMemoryCacheReuseBudget, is counted as exclusion class 70
+  // instead. Callers check IsCaptureArmed first.
+  [[nodiscard]] NativeMemoryCacheAdmission AdmitMemoryCacheReuse(bool ordinary_page) noexcept;
+  // One memory_cache_reuse record and, in content sessions, its target, into
+  // the configuration that admitted it. A browser-internal URL is counted per
+  // scheme class instead and returns its budget charge.
+  void RecordMemoryCacheReuse(const NativeMemoryCacheAdmission& admission,
+                              const NativeMemoryCacheReuse& reuse) noexcept;
   // Copies one guest step the caller already observed. The instruction
   // pointer, opcode, and handler index are not read from V8, Wasm, canvas,
   // or a static handler table. At most kNativeVmDispatchSampleBudget samples

@@ -42,22 +42,6 @@ function flowValueLabel(kind, length) {
   return name;
 }
 
-/** A gap counter from a page: a canonical unsigned decimal string, else 0. */
-function flowCount(value) {
-  if (value === '0' || value === 0) return 0n;
-  return flowSeq(value) ?? 0n;
-}
-/** A `gap` marker as the backend reads it (protocol/http-api.md): a payload
- * naming a producer reason is a named gap; any other marker is a queue drop
- * that weighs its canonical decimal payload, else one record. */
-function flowGapRecord(event, key, seq) {
-  const hex = typeof event.payload === 'string' && event.payload.length <= 512 && event.payload.length % 2 === 0 && /^[0-9a-f]*$/i.test(event.payload) ? event.payload : '';
-  let text = '';
-  if (event.payload_truncated !== true) for (let at = 0; at < hex.length; at += 2) text += String.fromCharCode(Number.parseInt(hex.slice(at, at + 2), 16));
-  const named = /^[a-z][a-z0-9_]{0,127}$/.test(text) && typeof event.category === 'string' && /^[a-z][a-z0-9_]{0,31}$/.test(event.category);
-  const count = !named && /^[1-9][0-9]{0,19}$/.test(text) ? BigInt(text) : 0n;
-  return {key, seq, process: event.process_id, reason: named ? text : null, weight: count > 0n && count <= 18446744073709551615n ? count : 1n};
-}
 /** Which stream of this timeline a gap reason belongs to. */
 function flowGapStream(reason) {
   if (reason.startsWith('native_js_invocation_request_')) return 'requests';
@@ -66,22 +50,26 @@ function flowGapStream(reason) {
   if (reason.startsWith('native_wasm_indirect_')) return 'call_indirect';
   return 'other';
 }
-const FLOW_GAP_GLOSS = {
-  native_js_invocation_budget_incomplete: 'the 256-call budget filled; later calls were not recorded',
-  native_js_invocation_site_budget_incomplete: 'a site’s 64-call budget filled; its later calls were not recorded',
-  native_js_invocation_request_budget_incomplete: 'the 256-request budget filled; later requests were not recorded',
-  native_js_invocation_transport_unavailable: 'admitted records were rejected on their way out of the renderer',
-  native_js_invocation_input_unavailable: 'records were refused as invalid or outside a live document',
-  native_js_invocation_settle_unavailable: 'a settle ran after its document went away and was not recorded'
-};
-/** What a gap reason means, in a few words; the reason itself is always shown. */
-function flowGapGloss(reason) {
+/** What a budget that filled left out, by the stream it belongs to. */
+const FLOW_GAP_BUDGETS = {calls: 'a call budget filled; later calls were not recorded', requests: 'a request budget filled; later requests were not recorded',
+  br_table: 'a sampling budget filled; later executions were not sampled', call_indirect: 'a sampling budget filled; later executions were not sampled',
+  other: 'a budget or limit was reached; later records were not recorded'};
+/** What a named gap means, in a few words, read from the reason's shape in
+ * the order the backend's session summary reads it (gap_meaning in
+ * session_summary.rs), with the evidence models' sampling labels. An
+ * invocation site's own reasons name the site slot. The reason itself is
+ * always shown beside it. */
+function flowGapMeaning(reason) {
   const slot = /^native_js_invocation_site_(\d+)_(compiled_before_arming|unsupported_function)$/.exec(reason);
   if (slot) return slot[2] === 'compiled_before_arming' ? `site slot ${slot[1]} compiled before arming, so its calls were not recorded` : `site slot ${slot[1]} is a generator, constructor or initializer, so it was not tracked`;
-  if (FLOW_GAP_GLOSS[reason]) return FLOW_GAP_GLOSS[reason];
-  if (/_filtered$/.test(reason)) return 'the sample policy excluded these executions';
-  if (/budget|limit/.test(reason)) return 'a sampling budget filled; later executions were not sampled';
-  return 'records were lost';
+  if (samplePolicyFilterGapLabels.has(reason) || reason.includes('filtered')) return 'the sample policy excluded these executions before they took a sample slot';
+  if (reason.includes('limit_or_invalid') || reason.includes('module_invalid')) return 'records were refused as malformed or outside a structural bound';
+  if (samplingBudgetGapLabels.has(reason)) return `the ${samplingBudgetGapLabels.get(reason)} sampling budget filled; later executions were not sampled`;
+  if (/budget|limit|capped/.test(reason)) return FLOW_GAP_BUDGETS[flowGapStream(reason)];
+  if (/unavailable|lost/.test(reason)) return 'a capture stage was unavailable, so these were not recorded';
+  if (/unresolved|mismatch|omitted|unbound/.test(reason)) return 'their linkage could not be established, so they were recorded without it';
+  if (/unsupported|left_liftoff/.test(reason)) return 'the execution was outside document Liftoff code, so it was named and not sampled';
+  return 'the capture refused or dropped these records';
 }
 
 /** Folds filtered event records into per-process tracks.
@@ -114,8 +102,12 @@ function flowTimelineModel(events) {
     seen.add(key); counts.records += 1;
     const owner = processOf(process);
     if (event.type === 'gap') {
+      // A payload naming a producer reason is a named gap; any other marker
+      // is a queue drop weighing its decimal count, else one record
+      // (protocol/http-api.md).
+      if (typeof event.payload !== 'string') { counts.invalid += 1; continue; }
       counts.gaps += 1;
-      owner.gaps.push(flowGapRecord(event, key, seq));
+      owner.gaps.push({key, seq, process, reason: namedGapOf(event)?.reason ?? null, weight: countReportedQueueDrops([event])});
       continue;
     }
     if (event.type === 'wasm_dispatch_overflow' || event.type === 'wasm_indirect_overflow') {
@@ -212,7 +204,7 @@ function flowGapSummary(owner) {
 function flowGapNotes(gaps) {
   const limits = FLOW_TIMELINE_LIMITS;
   if (!gaps?.records) return [];
-  const notes = gaps.named.slice(0, limits.maxGapReasons).map(entry => `${entry.reason} ×${entry.count} (${flowGapGloss(entry.reason)})`);
+  const notes = gaps.named.slice(0, limits.maxGapReasons).map(entry => `${entry.reason} ×${entry.count} (${flowGapMeaning(entry.reason)})`);
   if (gaps.named.length > limits.maxGapReasons) notes.push(`${gaps.named.length - limits.maxGapReasons} more gap reasons`);
   for (const kind of ['br_table', 'call_indirect']) {
     const tally = gaps.overflow[kind], parts = [];
@@ -350,7 +342,7 @@ function flowSampleLabel(sample, site) {
 
 /** One gap mark's tooltip: the reason, the refused execution, or the drop. */
 function flowGapMarkText(gap) {
-  if (gap.reason) return `${gap.reason} (${flowGapGloss(gap.reason)})`;
+  if (gap.reason) return `${gap.reason} (${flowGapMeaning(gap.reason)})`;
   if (gap.kind && gap.undecoded) return `${gap.kind} overflow record this backend does not decode`;
   if (gap.kind && gap.omitted) return `at least ${flowNumber(gap.omitted)} ${gap.kind} executions the sample budget omitted`;
   if (gap.kind) return `${gap.kind} execution the sample budget refused at func ${gap.function_index} ${flowHex(gap.offset)}`;
@@ -444,7 +436,7 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
         if (!body || !Array.isArray(body.events) || !body.query || typeof body.query !== 'object') throw new TypeError('The event store returned a malformed page.');
         collected.push(...body.events.slice(0, limits.maxRecords - collected.length));
         pages += 1;
-        scanned.sequence += flowCount(body.sequence_gaps); scanned.drops += flowCount(body.queue_drops);
+        scanned.sequence += captureWideTotal(body.sequence_gaps) ?? 0n; scanned.drops += captureWideTotal(body.queue_drops) ?? 0n;
         scanned.sequenceSaturated ||= body.sequence_gaps_saturated === true; scanned.dropsSaturated ||= body.queue_drops_saturated === true;
         const query = body.query;
         if (!query.limited && !query.budget_exhausted) { done = true; break; }

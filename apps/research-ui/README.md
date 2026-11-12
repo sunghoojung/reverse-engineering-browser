@@ -2181,11 +2181,15 @@ more**, and a selection the records still hold stays selected, drawn or not.
   ends with why it is not drawn, and the drawn item nearest it in record order
   keeps the timeline's one tab stop.
 - Gaps are never silent. A notice under the banner names the shown
-  renderer's `gap` reasons with their counts and what they mean (such as
-  `native_js_invocation_budget_incomplete`, the 256-call budget), the
-  executions `wasm_dispatch_overflow` and `wasm_indirect_overflow` say a
-  sample budget refused (identities, and at least the largest omitted
-  count), and queue-drop markers. It names other renderers that have gaps,
+  renderer's `gap` reasons with their counts and what they mean, read from
+  each reason's shape in the order the session summary reads it: a sample
+  policy filter, a refused malformed record (`limit_or_invalid`), a sampling
+  budget named as the evidence banner names it, another budget such as
+  `native_js_invocation_budget_incomplete`'s call budget, an unavailable
+  stage, missing linkage, code outside Liftoff, else a refusal. It also
+  counts the executions `wasm_dispatch_overflow` and `wasm_indirect_overflow`
+  say a sample budget refused (identities, and at least the largest omitted
+  count) and the queue-drop markers. It names other renderers that have gaps,
   which the renderer picker also marks, and the page counters
   `sequence_gaps` and `queue_drops`, which cover the whole scanned store
   range, every session and type. A Gaps lane marks each record at its

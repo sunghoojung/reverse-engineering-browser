@@ -1,8 +1,8 @@
 diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
-index c141e5dfd15721b1f80ca1730ef25582ee44714d..c682ee627fb10847eae3cc29b5a100876e124c58 100644
+index 8547f2174178a2fe430896229697564356602940..4905f7963db5a21baf3b004ff3bebaae99137e94 100644
 --- a/include/v8-callbacks.h
 +++ b/include/v8-callbacks.h
-@@ -318,6 +318,42 @@ using ExtensionCallback = bool (*)(const FunctionCallbackInfo<Value>&);
+@@ -319,6 +319,42 @@ using ExtensionCallback = bool (*)(const FunctionCallbackInfo<Value>&);
  using AllowWasmCodeGenerationCallback = bool (*)(Local<Context> context,
                                                   Local<String> source);
  
@@ -46,10 +46,10 @@ index c141e5dfd15721b1f80ca1730ef25582ee44714d..c682ee627fb10847eae3cc29b5a10087
    kCompile,
    kModule,
 diff --git a/include/v8-isolate.h b/include/v8-isolate.h
-index 3a42bcc197d7b7527413af21d8706483a2106a5b..bd7058a59709f3697d19bd61370a740098f8bd83 100644
+index 51de511b0217a145aab58033b867e107cfe68aac..53402f4a66f12ff1cef4d1a605f187374ac656bb 100644
 --- a/include/v8-isolate.h
 +++ b/include/v8-isolate.h
-@@ -1758,6 +1758,18 @@ class V8_EXPORT Isolate {
+@@ -1786,6 +1786,18 @@ class V8_EXPORT Isolate {
  
    void SetWasmModuleBytesCallback(WasmModuleBytesCallback callback);
  
@@ -69,10 +69,10 @@ index 3a42bcc197d7b7527413af21d8706483a2106a5b..bd7058a59709f3697d19bd61370a7400
  
    void SetRuntimeBufferCallback(RuntimeBufferCallback callback);
 diff --git a/src/api/api.cc b/src/api/api.cc
-index 3698c6e3f916c2d41916b849ca6faa6ccd8acd50..cf6dd1f95f7fd9285f77fa3ac2e430f713c4e0a0 100644
+index fa0bd7cc38b0449b911cd8b455173b7ae47ece63..2e21bf94d25d62338ef4cca0f02c5a754b25bbc3 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
-@@ -11004,6 +11004,22 @@ CALLBACK_SETTER(AllowWasmCodeGenerationCallback,
+@@ -11063,6 +11063,22 @@ CALLBACK_SETTER(AllowWasmCodeGenerationCallback,
  CALLBACK_SETTER(WasmModuleCallback, ExtensionCallback, wasm_module_callback)
  CALLBACK_SETTER(WasmInstanceCallback, ExtensionCallback, wasm_instance_callback)
  
@@ -96,23 +96,23 @@ index 3698c6e3f916c2d41916b849ca6faa6ccd8acd50..cf6dd1f95f7fd9285f77fa3ac2e430f7
                  wasm_module_bytes_callback)
  
 diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
-index e1180fc81d963877f242f1ac3d11a447784b5b6b..c8da883b4d275bd50e99c6f2f59c8a23b20d8ff2 100644
+index a4777c98ed2e585cfa0ffacf3bdf99b0876eceaf..2ddf87bd1eae80fddd1784156c10f6502e65a72b 100644
 --- a/src/builtins/builtins-definitions.h
 +++ b/src/builtins/builtins-definitions.h
-@@ -1406,6 +1406,8 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
-   IF_WASM(ASM, WasmDebugBreak, WasmDummy)                                      \
+@@ -1502,6 +1502,8 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
    IF_WASM(ASM, WasmOnStackReplace, WasmDummy)                                  \
    IF_WASM(ASM, WasmHandleStackOverflow, WasmHandleStackOverflow)               \
+   IF_WASM(ASM, WasmReturnFromSegment, WasmDummy)                               \
 +  IF_WASM(TFC, WasmRebTraceBrTable, WasmTraceMemory)             \
 +  IF_WASM(TFC, WasmRebTraceCallIndirect, WasmTraceMemory)        \
    IF_WASM(TFC, WasmFloat32ToNumber, WasmFloat32ToNumber)                       \
    IF_WASM(TFC, WasmFloat64ToNumber, WasmFloat64ToTagged)                       \
    IF_WASM(TFC, WasmFloat64ToString, WasmFloat64ToTagged)                       \
 diff --git a/src/builtins/builtins-wasm-gen.cc b/src/builtins/builtins-wasm-gen.cc
-index 058b9021d16903b48c9591ebd6077438524c509a..5b7313fc4f5a519164ecc8dbb73077622feb9f07 100644
+index 294ece27bf64d216ea4a614b488de09cdc5b4555..61ed1d6fffc6d4c0324639d95d9bff6a152a2429 100644
 --- a/src/builtins/builtins-wasm-gen.cc
 +++ b/src/builtins/builtins-wasm-gen.cc
-@@ -134,6 +134,19 @@ TNode<Float64T> WasmBuiltinsAssembler::StringToFloat64(TNode<String> input) {
+@@ -118,6 +118,19 @@ TNode<Float64T> WasmBuiltinsAssembler::StringToFloat64(TNode<String> input) {
  #endif
  }
  
@@ -133,10 +133,10 @@ index 058b9021d16903b48c9591ebd6077438524c509a..5b7313fc4f5a519164ecc8dbb7307762
    auto val = UncheckedParameter<Float32T>(Descriptor::kValue);
    Return(ChangeFloat32ToTagged(val));
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index cedbe4e4a1c3a2c6efe6502edaf13a9f9b547d9c..59734eea68165a96ebe2ef75c505e68550a70085 100644
+index f660f29fec9917df2b4a6ead29e72061436078a6..86713d38693f4cbdc4b89233ac1f382b87474882 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
-@@ -503,6 +503,13 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
+@@ -506,6 +506,13 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
    V(AllowWasmCodeGenerationCallback, allow_wasm_code_gen_callback, nullptr) \
    V(ExtensionCallback, wasm_module_callback, &NoExtension)                  \
    V(ExtensionCallback, wasm_instance_callback, &NoExtension)                \
@@ -151,12 +151,12 @@ index cedbe4e4a1c3a2c6efe6502edaf13a9f9b547d9c..59734eea68165a96ebe2ef75c505e685
    V(SharedArrayBufferConstructorEnabledCallback,                            \
      sharedarraybuffer_constructor_enabled_callback, nullptr)                \
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index 7f1aebf78aaf7455216a3ca21bbc6df8af6feb76..84783e90625b04f2e7512721040f033d4cb2f30b 100644
+index 2005a95b9cae6628495d925764622d684e7a2759..2b04d9f1e432e0b801aa05caae191ca14fcac969 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -2047,6 +2047,16 @@ DEFINE_BOOL(liftoff, true,
+@@ -2131,6 +2131,16 @@ DEFINE_BOOL(liftoff, true,
              "enable Liftoff, the baseline compiler for WebAssembly")
- DEFINE_BOOL(liftoff_only, false,
+ DEFINE_BOOL(liftoff_only, !V8_ENABLE_TURBOFAN_BOOL,
              "disallow TurboFan compilation for WebAssembly (for testing)")
 +DEFINE_BOOL(reb_wasm_call_indirect_dispatch, false,
 +            "emit native REB call_indirect observations (baseline-only "
@@ -172,7 +172,7 @@ index 7f1aebf78aaf7455216a3ca21bbc6df8af6feb76..84783e90625b04f2e7512721040f033d
  DEFINE_NEG_IMPLICATION(liftoff_only, wasm_tier_up)
  DEFINE_NEG_IMPLICATION(liftoff_only, wasm_dynamic_tiering)
 diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
-index 79d69177b9bcc301b40f8bbc45e1250ae3df0bb3..75ae9324ddde94bbfea44f66e14f0f30dd73aa3e 100644
+index e09b0ac9267c31ba81763abbec600f5266f35cd0..976c6aca8bd801228f20ecf92ea844ee1f078aa2 100644
 --- a/src/runtime/runtime-wasm.cc
 +++ b/src/runtime/runtime-wasm.cc
 @@ -4,6 +4,7 @@
@@ -180,10 +180,10 @@ index 79d69177b9bcc301b40f8bbc45e1250ae3df0bb3..75ae9324ddde94bbfea44f66e14f0f30
  #include <optional>
  
 +#include "src/api/api-inl.h"
+ #include "src/base/unique-array.h"
  #include "src/builtins/builtins-inl.h"
  #include "src/builtins/data-view-ops.h"
- #include "src/common/assert-scope.h"
-@@ -40,6 +41,7 @@
+@@ -43,6 +44,7 @@
  #include "src/wasm/wasm-stack-wrapper-cache.h"
  #include "src/wasm/wasm-subtyping.h"
  #include "src/wasm/wasm-value.h"
@@ -191,7 +191,7 @@ index 79d69177b9bcc301b40f8bbc45e1250ae3df0bb3..75ae9324ddde94bbfea44f66e14f0f30
  
  #if V8_ENABLE_WEBASSEMBLY && V8_ENABLE_DRUMBRAKE
  #include "src/wasm/interpreter/wasm-interpreter.h"
-@@ -147,6 +149,145 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
+@@ -150,6 +152,145 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
    return ret;
  }
  
@@ -338,10 +338,10 @@ index 79d69177b9bcc301b40f8bbc45e1250ae3df0bb3..75ae9324ddde94bbfea44f66e14f0f30
    HandleScope scope(isolate);
    DCHECK_EQ(3, args.length());
 diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
-index c3195fb561ae3819216fd712db894043c39d3b57..39d291226d50f89f8b9262480eba8012eea3648c 100644
+index a87b29917913941ad44914ed48ded40d80330b3e..1ee3ebe2bff39f191ed876e7cc41a138c6a2f04c 100644
 --- a/src/runtime/runtime.h
 +++ b/src/runtime/runtime.h
-@@ -714,6 +714,8 @@ constexpr bool CanTriggerGC(T... properties) {
+@@ -723,6 +723,8 @@ constexpr bool CanTriggerGC(T... properties) {
  
  #define FOR_EACH_INTRINSIC_WASM(F, I)                            \
    FOR_EACH_INTRINSIC_WASM_DRUMBRAKE(F, I)                        \
@@ -351,10 +351,10 @@ index c3195fb561ae3819216fd712db894043c39d3b57..39d291226d50f89f8b9262480eba8012
    F(ThrowWasmFXSuspendError, 0, 1)                               \
    F(ThrowWasmError, 1, 1)                                        \
 diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
-index 85e9a85bed1a7fa7a776610533c6d642d3e6363b..03bb86c58e177eb3cdb402c0b20490d1a7bff39c 100644
+index 2ef1838fb2cc1318282bfb04324786d62a5b3911..15f01598caf03dfe826eea3122d9fe6d760ce725 100644
 --- a/src/wasm/baseline/liftoff-compiler.cc
 +++ b/src/wasm/baseline/liftoff-compiler.cc
-@@ -3866,8 +3866,73 @@ class LiftoffCompiler {
+@@ -4076,8 +4076,73 @@ class LiftoffCompiler {
                      frozen);
    }
  
@@ -428,7 +428,7 @@ index 85e9a85bed1a7fa7a776610533c6d642d3e6363b..03bb86c58e177eb3cdb402c0b20490d1
      LiftoffRegList pinned;
      LiftoffRegister value = pinned.set(__ PopToRegister());
  
-@@ -4815,6 +4880,9 @@ class LiftoffCompiler {
+@@ -5040,6 +5105,9 @@ class LiftoffCompiler {
    void CallIndirect(FullDecoder* decoder, const Value& index_val,
                      const CallIndirectImmediate& imm, const Value args[],
                      Value returns[]) {
@@ -438,7 +438,7 @@ index 85e9a85bed1a7fa7a776610533c6d642d3e6363b..03bb86c58e177eb3cdb402c0b20490d1
      CallIndirectImpl(decoder, imm, CallJumpMode::kCall);
    }
  
-@@ -4832,6 +4900,9 @@ class LiftoffCompiler {
+@@ -5057,6 +5125,9 @@ class LiftoffCompiler {
    void ReturnCallIndirect(FullDecoder* decoder, const Value& index_val,
                            const CallIndirectImmediate& imm,
                            const Value args[]) {
@@ -449,11 +449,11 @@ index 85e9a85bed1a7fa7a776610533c6d642d3e6363b..03bb86c58e177eb3cdb402c0b20490d1
      CallIndirectImpl(decoder, imm, CallJumpMode::kTailCall);
    }
 diff --git a/src/wasm/wasm-builtin-list.h b/src/wasm/wasm-builtin-list.h
-index ddab741f33c7e60771023515800e65081e227318..586ad06814a357df38eb3bcc6f446116e1d02431 100644
+index 3625da8267df2ebd6dc4d0c97a57dc457abbc905..56df3955d09f67cee68cacc72f73cf7f707eaa9a 100644
 --- a/src/wasm/wasm-builtin-list.h
 +++ b/src/wasm/wasm-builtin-list.h
-@@ -60,6 +60,8 @@ namespace v8::internal::wasm {
-   V(WasmHandleStackOverflow)                                                   \
+@@ -62,6 +62,8 @@ namespace v8::internal::wasm {
+   V(WasmReturnFromSegment)                                                     \
    V(WasmTraceEnter)                                                            \
    V(WasmTraceExit)                                                             \
 +  V(WasmRebTraceBrTable)                                                       \
@@ -462,11 +462,11 @@ index ddab741f33c7e60771023515800e65081e227318..586ad06814a357df38eb3bcc6f446116
    V(WasmTraceGlobal)                                                           \
    V(BigIntToI32Pair)                                                           \
 diff --git a/src/wasm/wasm-serialization.cc b/src/wasm/wasm-serialization.cc
-index ac9c1a6f4384868a1cea6f1bad46320216430744..58a44b3a25a7f9dbb49c8ed517cf5f293818d78d 100644
+index a955b8f3a3d942d381c06b366928e8aadb9e4c9d..3e995ecf8bcac52ade2fc5acf50eb010e0f6cd26 100644
 --- a/src/wasm/wasm-serialization.cc
 +++ b/src/wasm/wasm-serialization.cc
-@@ -1202,6 +1202,12 @@ MaybeDirectHandle<WasmModuleObject> DeserializeNativeModule(
-     base::OwnedVector<const uint8_t>& wire_bytes_vec,
+@@ -1203,6 +1203,12 @@ MaybeDirectHandle<WasmModuleObject> DeserializeNativeModule(
+     base::UniqueArray<const uint8_t>& wire_bytes_vec,
      const CompileTimeImports& compile_imports,
      base::Vector<const char> source_url) {
 +  // Serialized code is TurboFan-only and lacks the baseline dispatch hooks.
@@ -513,7 +513,7 @@ index 220507b1e74ef8585cf380eb09ef3664fc6b07a3..2003d1252a310aeb07af97baaf2284e3
    uint32_t global_index;
    uint8_t is_store;  // 0 or 1
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 17b4883adda27b84a74dea71523d64ad0935a6f8..05543acc7ca416893e9f1f6fe9b7a5981029a975 100644
+index ad0a25ab4acf709fcdee338a8537581c134e623e..491a39483a9736a381cf4f5112e2ee407468d34d 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
 @@ -1240,6 +1240,379 @@ WASM_EXEC_TEST(Regression_660262) {

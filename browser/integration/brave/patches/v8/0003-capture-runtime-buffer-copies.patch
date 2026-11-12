@@ -1,5 +1,5 @@
 diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
-index 456af07..8bbea4f 100644
+index 4e1dd2b..388f94a 100644
 --- a/include/v8-callbacks.h
 +++ b/include/v8-callbacks.h
 @@ -6,6 +6,7 @@
@@ -10,7 +10,7 @@ index 456af07..8bbea4f 100644
  
  #include <functional>
  #include <string>
-@@ -324,6 +325,20 @@ using ApiImplementationCallback = void (*)(const FunctionCallbackInfo<Value>&);
+@@ -338,6 +339,20 @@ using ApiImplementationCallback = void (*)(const FunctionCallbackInfo<Value>&);
  // --- Callback for WebAssembly.compileStreaming ---
  using WasmStreamingCallback = void (*)(const FunctionCallbackInfo<Value>&);
  
@@ -32,10 +32,10 @@ index 456af07..8bbea4f 100644
  
  // --- Callback called when async WebAssembly operations finish ---
 diff --git a/include/v8-isolate.h b/include/v8-isolate.h
-index f8395c9..6cc95c2 100644
+index 3b66256..c829546 100644
 --- a/include/v8-isolate.h
 +++ b/include/v8-isolate.h
-@@ -1735,6 +1735,8 @@ class V8_EXPORT Isolate {
+@@ -1788,6 +1788,8 @@ class V8_EXPORT Isolate {
  
    void SetWasmStreamingCallback(WasmStreamingCallback callback);
  
@@ -45,10 +45,10 @@ index f8395c9..6cc95c2 100644
        WasmAsyncResolvePromiseCallback callback);
  
 diff --git a/src/api/api.cc b/src/api/api.cc
-index 9ba67d3..eaa9562 100644
+index 3c48289..17f2019 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
-@@ -11007,6 +11007,9 @@ CALLBACK_SETTER(WasmInstanceCallback, ExtensionCallback, wasm_instance_callback)
+@@ -11069,6 +11069,9 @@ CALLBACK_SETTER(WasmModuleBytesCallback, WasmModuleBytesCallback,
  CALLBACK_SETTER(WasmStreamingCallback, WasmStreamingCallback,
                  wasm_streaming_callback)
  
@@ -59,10 +59,10 @@ index 9ba67d3..eaa9562 100644
                  WasmAsyncResolvePromiseCallback,
                  wasm_async_resolve_promise_callback)
 diff --git a/src/builtins/builtins-arraybuffer.cc b/src/builtins/builtins-arraybuffer.cc
-index 7561ffd..3412bce 100644
+index 1768bee..daf7dd8 100644
 --- a/src/builtins/builtins-arraybuffer.cc
 +++ b/src/builtins/builtins-arraybuffer.cc
-@@ -15,6 +15,24 @@
+@@ -16,6 +16,24 @@
  namespace v8 {
  namespace internal {
  
@@ -85,24 +85,24 @@ index 7561ffd..3412bce 100644
 +}  // namespace
 +
  #define CHECK_SHARED(expected, name, method)                                \
-   if (name->is_shared() != expected) {                                      \
+   if (name->is_shared().value() != expected) {                              \
      THROW_NEW_ERROR_RETURN_FAILURE(                                         \
-@@ -181,8 +199,11 @@ BUILTIN(ArrayBufferConstructor) {
+@@ -178,8 +196,11 @@ BUILTIN(ArrayBufferConstructor) {
            NewRangeError(MessageTemplate::kInvalidArrayBufferMaxLength));
      }
    }
 -  return ConstructBuffer(isolate, target, new_target, number_length,
--                         number_max_length, InitializedFlag::kZeroInitialized);
+-                         number_max_length, InitializedFlag{true});
 +  Tagged<Object> result =
 +      ConstructBuffer(isolate, target, new_target, number_length, number_max_length,
-+                      InitializedFlag::kZeroInitialized);
++                      InitializedFlag{true});
 +  NotifyRuntimeArrayBuffer(isolate, result);
 +  return result;
  }
  
  // This is a helper to construct an ArrayBuffer with uinitialized memory.
 diff --git a/src/builtins/builtins-typed-array-gen.cc b/src/builtins/builtins-typed-array-gen.cc
-index 6828322..17d2e4b 100644
+index 9a14e71..cf10dbc 100644
 --- a/src/builtins/builtins-typed-array-gen.cc
 +++ b/src/builtins/builtins-typed-array-gen.cc
 @@ -123,6 +123,7 @@ TF_BUILTIN(TypedArrayConstructor, TypedArrayBuiltinsAssembler) {
@@ -114,10 +114,10 @@ index 6828322..17d2e4b 100644
  
    BIND(&throwtypeerror);
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index 536cea9..530d497 100644
+index 767782e..f660f29 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
-@@ -506,6 +506,7 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
+@@ -510,6 +510,7 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
    V(SharedArrayBufferConstructorEnabledCallback,                            \
      sharedarraybuffer_constructor_enabled_callback, nullptr)                \
    V(WasmStreamingCallback, wasm_streaming_callback, nullptr)                \
@@ -126,7 +126,7 @@ index 536cea9..530d497 100644
      DefaultWasmAsyncResolvePromiseCallback)                                 \
    V(WasmLoadSourceMapCallback, wasm_load_source_map_callback, nullptr)      \
 diff --git a/src/runtime/runtime-typedarray.cc b/src/runtime/runtime-typedarray.cc
-index 2725e04..a24466b 100644
+index 5b664a1..492c039 100644
 --- a/src/runtime/runtime-typedarray.cc
 +++ b/src/runtime/runtime-typedarray.cc
 @@ -66,6 +66,41 @@ RUNTIME_FUNCTION(Runtime_TypedArrayGetBuffer) {
@@ -172,10 +172,10 @@ index 2725e04..a24466b 100644
    HandleScope scope(isolate);
    DCHECK_EQ(1, args.length());
 diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
-index 2d7628d..c3195fb 100644
+index 8bb3713..a87b299 100644
 --- a/src/runtime/runtime.h
 +++ b/src/runtime/runtime.h
-@@ -700,6 +700,7 @@ constexpr bool CanTriggerGC(T... properties) {
+@@ -709,6 +709,7 @@ constexpr bool CanTriggerGC(T... properties) {
    F(ArrayBufferDetach, -1, 1)                  \
    F(ArrayBufferSetDetachKey, 2, 1)             \
    F(GrowableSharedArrayBufferByteLength, 1, 1) \
@@ -183,4 +183,3 @@ index 2d7628d..c3195fb 100644
    F(TypedArrayCopyElements, 3, 1)              \
    F(TypedArrayGetBuffer, 1, 1)                 \
    F(TypedArraySet, 2, 1)                       \
-

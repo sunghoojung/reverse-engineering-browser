@@ -1,8 +1,8 @@
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -3204,6 +3204,9 @@ DEFINE_INT(cpu_profiler_sampling_interval, 1000,
-            "CPU profiler sampling interval in microseconds")
+@@ -3224,6 +3224,9 @@ DEFINE_UINT(cpu_profiler_sampling_interval, 1000,
+             "CPU profiler sampling interval in microseconds")
  
  // debugger
 +DEFINE_BOOL(reb_ignore_debugger_statements, false,

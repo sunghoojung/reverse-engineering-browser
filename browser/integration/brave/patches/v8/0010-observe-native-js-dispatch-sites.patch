@@ -1,8 +1,8 @@
 diff --git a/BUILD.gn b/BUILD.gn
-index 701248da7b5007faff4623dcb0a3a288400247a5..8ae797fb39769a695470c5749a74048642f3d5f6 100644
+index 0583d8ba37131608d38c0e5a06da7e1226b9df67..de5fad538ca84c8f9ec8f56e6fe8c91c1808841e 100644
 --- a/BUILD.gn
 +++ b/BUILD.gn
-@@ -4282,6 +4282,7 @@ v8_header_set("v8_internal_headers") {
+@@ -4634,6 +4634,7 @@ v8_header_set("v8_internal_headers") {
      "src/interpreter/interpreter-intrinsics.h",
      "src/interpreter/interpreter.h",
      "src/interpreter/prototype-assignment-sequence-builder.h",
@@ -10,7 +10,7 @@ index 701248da7b5007faff4623dcb0a3a288400247a5..8ae797fb39769a695470c5749a740486
      "src/json/json-parser.h",
      "src/json/json-stringifier.h",
      "src/libsampler/sampler.h",
-@@ -6143,6 +6144,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
+@@ -6541,6 +6542,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
      "src/interpreter/interpreter-intrinsics.cc",
      "src/interpreter/interpreter.cc",
      "src/interpreter/prototype-assignment-sequence-builder.cc",
@@ -19,12 +19,12 @@ index 701248da7b5007faff4623dcb0a3a288400247a5..8ae797fb39769a695470c5749a740486
      "src/json/json-stringifier.cc",
      "src/libsampler/sampler.cc",
 diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
-index d61d790a84881d386f04ffc56827a15669d8dc1f..e0f09f1cab1218e878a1cc159a639e8b1cd7b0c0 100644
+index 98421067b623b8b87256834d2bed05a5450c467e..f6ef15a4ece79b7475ef280b65d0d8399e656c2b 100644
 --- a/include/v8-callbacks.h
 +++ b/include/v8-callbacks.h
-@@ -600,6 +600,97 @@ using PrepareStackTraceCallback = MaybeLocal<Value> (*)(Local<Context> context,
-                                                         Local<Value> error,
-                                                         Local<Array> sites);
+@@ -616,6 +616,97 @@ using PrepareStackTraceCallback = MaybeLocal<Value> (*)(Local<Context> context,
+ using DynamicScriptCompiledFromEmbedderCallback =
+     void (*)(Local<Context> context, int script_id);
  
 +// REB native JavaScript dispatch capture. Inactive unless V8 runs with
 +// --reb-js-dispatch-capture (off by default) and the embedder reports a
@@ -121,10 +121,10 @@ index d61d790a84881d386f04ffc56827a15669d8dc1f..e0f09f1cab1218e878a1cc159a639e8b
  /**
   * Callback to selectively enable ETW tracing based on the document URL.
 diff --git a/include/v8-isolate.h b/include/v8-isolate.h
-index 1e15d99d04ae1b90ec133745ef9524cb287b64ec..a16807b1abbfff1c68c5d046314aef01da63d08d 100644
+index 0ae57d5a162b02a8a51d751e34ef6ba277547741..8a16bc6caddabb3585235a88193bd7a211028b6a 100644
 --- a/include/v8-isolate.h
 +++ b/include/v8-isolate.h
-@@ -1476,6 +1476,14 @@ class V8_EXPORT Isolate {
+@@ -1496,6 +1496,14 @@ class V8_EXPORT Isolate {
     */
    void SetUseCounterCallback(UseCounterCallback callback);
  
@@ -140,10 +140,10 @@ index 1e15d99d04ae1b90ec133745ef9524cb287b64ec..a16807b1abbfff1c68c5d046314aef01
     * Enables the host application to provide a mechanism for recording
     * statistics counters.
 diff --git a/src/api/api.cc b/src/api/api.cc
-index 88aa455542564baaf1e44053db7c355c567d311a..b9d7709ab6b5bc17f030ee096e3fbec0f1c935d7 100644
+index 36868fd7c8f27a75757b09d35e9907a7a264fe16..15b196bc9233115ca91255329cadf28d04e70c67 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
-@@ -10775,6 +10775,11 @@ void Isolate::SetUseCounterCallback(UseCounterCallback callback) {
+@@ -10831,6 +10831,11 @@ void Isolate::SetUseCounterCallback(UseCounterCallback callback) {
    reinterpret_cast<i::Isolate*>(this)->SetUseCounterCallback(callback);
  }
  
@@ -156,10 +156,10 @@ index 88aa455542564baaf1e44053db7c355c567d311a..b9d7709ab6b5bc17f030ee096e3fbec0
    i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
    i_isolate->counters()->ResetCounterFunction(callback);
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index ee736a9fccffc0e456a8f44bcc9da819a18a2991..ac3acc9bef4df04501e6b25690660cd4cbd47c3c 100644
+index b6c2deedeeb99f26c2c4b768520fe703e5a6241e..37aaa7ff35702f316c7c0b800a9ea3eeeb0b57c2 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
-@@ -43,6 +43,7 @@
+@@ -44,6 +44,7 @@
  #include "src/heap/heap.h"
  #include "src/heap/read-only-heap.h"
  #include "src/init/isolate-group.h"
@@ -167,7 +167,7 @@ index ee736a9fccffc0e456a8f44bcc9da819a18a2991..ac3acc9bef4df04501e6b25690660cd4
  #include "src/objects/code.h"
  #include "src/objects/contexts.h"
  #include "src/objects/debug-objects.h"
-@@ -2103,6 +2104,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -2129,6 +2130,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
      return lazy_compile_dispatcher_.get();
    }
  
@@ -177,7 +177,7 @@ index ee736a9fccffc0e456a8f44bcc9da819a18a2991..ac3acc9bef4df04501e6b25690660cd4
    bool IsInCreationContext(Tagged<JSObject> object, uint32_t index);
  
    void ClearKeptObjects();
-@@ -2850,6 +2854,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -2883,6 +2887,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    Zone* compiler_zone_ = nullptr;
  
    std::unique_ptr<LazyCompileDispatcher> lazy_compile_dispatcher_;
@@ -186,10 +186,10 @@ index ee736a9fccffc0e456a8f44bcc9da819a18a2991..ac3acc9bef4df04501e6b25690660cd4
    baseline::BaselineBatchCompiler* baseline_batch_compiler_ = nullptr;
  #endif  // V8_ENABLE_SPARKPLUG
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index 1e479d9f44db52d64d15550ff789b2470eabb86b..0c16ad6c18757a0288d479ad6496d7d1a1202dad 100644
+index b9c50370a2a7de9ae09e6963ed1923ccbc2c54f4..f37f2e44dfff3e49cf4a4b4d715d46d59cb1a227 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -3194,6 +3194,25 @@ DEFINE_NEG_IMPLICATION(generate_dump_positions, load_dump_positions)
+@@ -3214,6 +3214,25 @@ DEFINE_NEG_IMPLICATION(generate_dump_positions, load_dump_positions)
  // compilation-cache.cc
  DEFINE_BOOL(compilation_cache, true, "enable compilation cache")
  
@@ -216,7 +216,7 @@ index 1e479d9f44db52d64d15550ff789b2470eabb86b..0c16ad6c18757a0288d479ad6496d7d1
  
  // lazy-compile-dispatcher.cc
 diff --git a/src/interpreter/bytecode-generator.cc b/src/interpreter/bytecode-generator.cc
-index 144da53bb2904457c75615938844c4ce0c16d6a8..1981396888cc224bb825151832fb74491104f4da 100644
+index 79b2971abf4278bb7daa8b86fb7a07d6a41024f7..49088c75de29ea15cbdc10f3d12fb6ff27b2fe30 100644
 --- a/src/interpreter/bytecode-generator.cc
 +++ b/src/interpreter/bytecode-generator.cc
 @@ -14,6 +14,7 @@
@@ -227,7 +227,7 @@ index 144da53bb2904457c75615938844c4ce0c16d6a8..1981396888cc224bb825151832fb7449
  #include "src/ast/ast.h"
  #include "src/ast/scopes.h"
  #include "src/ast/variables.h"
-@@ -1695,8 +1696,106 @@ bool NeedsContextInitialization(DeclarationScope* scope) {
+@@ -1696,8 +1697,106 @@ bool NeedsContextInitialization(DeclarationScope* scope) {
  }
  }  // namespace
  
@@ -331,10 +331,10 @@ index 144da53bb2904457c75615938844c4ce0c16d6a8..1981396888cc224bb825151832fb7449
  void BytecodeGenerator::GenerateBytecode(uintptr_t stack_limit) {
    InitializeAstVisitor(stack_limit);
 +  FindRebArmedSites(stack_limit);
-   if (v8_flags.stress_lazy_compilation && local_isolate_->is_main_thread() &&
+   if (V8_UNLIKELY(v8_flags.stress_lazy_compilation) &&
+       local_isolate_->is_main_thread() &&
        !local_isolate_->AsIsolate()->bootstrapper()->IsActive()) {
-     // Trigger stack overflow with 1/stress_lazy_compilation probability.
-@@ -2072,6 +2171,11 @@ void BytecodeGenerator::AllocateTopLevelRegisters() {
+@@ -2074,6 +2173,11 @@ void BytecodeGenerator::AllocateTopLevelRegisters() {
        incoming_new_target_or_generator_ = register_allocator()->NewRegister();
      }
    }
@@ -346,9 +346,9 @@ index 144da53bb2904457c75615938844c4ce0c16d6a8..1981396888cc224bb825151832fb7449
  }
  
  void BytecodeGenerator::BuildGeneratorPrologue() {
-@@ -2793,6 +2897,16 @@ void BytecodeGenerator::VisitSwitchStatement(SwitchStatement* stmt) {
- 
-   VisitForAccumulatorValue(stmt->tag());
+@@ -2797,6 +2901,16 @@ void BytecodeGenerator::VisitSwitchStatement(SwitchStatement* stmt) {
+                                n_comp_cases, jump_table);
+   ControlScopeForBreakable scope(this, stmt, &switch_builder);
  
 +  if (V8_UNLIKELY(reb_activation_.is_valid()) &&
 +      reb_armed_.Contains(JsDispatchShape::kSwitch, stmt->position())) {
@@ -363,7 +363,7 @@ index 144da53bb2904457c75615938844c4ce0c16d6a8..1981396888cc224bb825151832fb7449
    if (use_jump_table) {
      // Release temps so that they can be reused in clauses.
      RegisterAllocationScope allocation_scope(this);
-@@ -6836,6 +6950,22 @@ void BytecodeGenerator::VisitCall(Call* expr) {
+@@ -6923,6 +7037,22 @@ void BytecodeGenerator::VisitCall(Call* expr) {
    const bool use_reflect_apply =
        spread_position == Call::kHasNonFinalSpread || eval_with_final_spread;
  
@@ -386,7 +386,7 @@ index 144da53bb2904457c75615938844c4ce0c16d6a8..1981396888cc224bb825151832fb7449
    // Grow the args list as we visit receiver / arguments to avoid allocating all
    // the registers up-front. Otherwise these registers are unavailable during
    // receiver / argument visiting and we can end up with memory leaks due to
-@@ -6860,6 +6990,11 @@ void BytecodeGenerator::VisitCall(Call* expr) {
+@@ -6947,6 +7077,11 @@ void BytecodeGenerator::VisitCall(Call* expr) {
      case Call::KEYED_PROPERTY_CALL:
      case Call::PRIVATE_CALL: {
        Property* property = callee_expr->AsProperty();
@@ -398,7 +398,7 @@ index 144da53bb2904457c75615938844c4ce0c16d6a8..1981396888cc224bb825151832fb7449
        VisitAndPushIntoRegisterList(property->obj(), &args);
        VisitPropertyLoadForRegister(args.last_register(), property, callee);
        break;
-@@ -7016,6 +7151,13 @@ void BytecodeGenerator::VisitCall(Call* expr) {
+@@ -7112,6 +7247,13 @@ void BytecodeGenerator::VisitCall(Call* expr) {
          .StoreAccumulatorInRegister(callee);
    }
  
@@ -412,7 +412,7 @@ index 144da53bb2904457c75615938844c4ce0c16d6a8..1981396888cc224bb825151832fb7449
    builder()->SetExpressionPosition(expr);
  
    if (use_reflect_apply) {
-@@ -7038,6 +7180,65 @@ void BytecodeGenerator::VisitCall(Call* expr) {
+@@ -7134,6 +7276,65 @@ void BytecodeGenerator::VisitCall(Call* expr) {
    }
  }
  
@@ -479,7 +479,7 @@ index 144da53bb2904457c75615938844c4ce0c16d6a8..1981396888cc224bb825151832fb7449
    RegisterAllocationScope register_scope(this);
    SuperCallReference* super = expr->expression()->AsSuperCallReference();
 diff --git a/src/interpreter/bytecode-generator.h b/src/interpreter/bytecode-generator.h
-index 621183fcefd3acb9fa134b6040b0900587426698..0cd179915d2b56e6fec4cf1d15f81e0306adfa5e 100644
+index bdea0ba4fc68c103adf49b4a2ff81b769d12b20d..1f5b4bce94497cb9053e912915c99c176defebeb 100644
 --- a/src/interpreter/bytecode-generator.h
 +++ b/src/interpreter/bytecode-generator.h
 @@ -12,6 +12,7 @@
@@ -505,7 +505,7 @@ index 621183fcefd3acb9fa134b6040b0900587426698..0cd179915d2b56e6fec4cf1d15f81e03
  #ifdef DEBUG
    int CheckBytecodeMatches(Handle<BytecodeArray> bytecode);
  #endif
-@@ -406,6 +415,12 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
+@@ -405,6 +414,12 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
                                 ArrayLiteral* expr);
    void BuildCreateObjectLiteral(Register literal, uint8_t flags, size_t entry);
    void AllocateTopLevelRegisters();
@@ -518,7 +518,7 @@ index 621183fcefd3acb9fa134b6040b0900587426698..0cd179915d2b56e6fec4cf1d15f81e03
    void VisitArgumentsObject(Variable* variable);
    void VisitRestArgumentsArray(Variable* rest);
    void VisitCallSuper(Call* call);
-@@ -693,6 +708,12 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
+@@ -692,6 +707,12 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
    ForInScope* current_for_in_scope_;
  
    HandlerTable::CatchPrediction catch_prediction_;
@@ -532,7 +532,7 @@ index 621183fcefd3acb9fa134b6040b0900587426698..0cd179915d2b56e6fec4cf1d15f81e03
  
  }  // namespace interpreter
 diff --git a/src/interpreter/interpreter.cc b/src/interpreter/interpreter.cc
-index 0278e8f05d6fd4598f62a2b5d8973feff14e7b27..f6452a1327bcd4756c52873a63324385383c8146 100644
+index 3c3bcbaacada8ee140bc1f40d8966feddd85be69..4bb86a13765869efebd16a95d89a1a387cc3627f 100644
 --- a/src/interpreter/interpreter.cc
 +++ b/src/interpreter/interpreter.cc
 @@ -6,6 +6,7 @@
@@ -552,7 +552,7 @@ index 0278e8f05d6fd4598f62a2b5d8973feff14e7b27..f6452a1327bcd4756c52873a63324385
  #include "src/objects/shared-function-info.h"
  #include "src/parsing/parse-info.h"
  #include "src/utils/ostreams.h"
-@@ -282,6 +285,24 @@ InterpreterCompilationJob::Status InterpreterCompilationJob::DoFinalizeJobImpl(
+@@ -265,6 +268,24 @@ InterpreterCompilationJob::Status InterpreterCompilationJob::DoFinalizeJobImpl(
      compilation_info()->SetBytecodeArray(bytecodes);
    }
  
@@ -1161,10 +1161,10 @@ index 0000000000000000000000000000000000000000..2c86a9cc2e0146889246eb75ed840c9c
 +
 +#endif  // V8_INTERPRETER_REB_JS_DISPATCH_H_
 diff --git a/src/runtime/runtime-internal.cc b/src/runtime/runtime-internal.cc
-index 4d0838239943bc020a368bdc5fc18311fb67355d..e0eaf48de2ea43db102ff49ca73403255c19d095 100644
+index d11f4cac19130a519acbe4b037c09a8ab296dffc..fbe26b6efc89f09a4fa91424fd2e320b215bf4de 100644
 --- a/src/runtime/runtime-internal.cc
 +++ b/src/runtime/runtime-internal.cc
-@@ -243,6 +243,18 @@ RUNTIME_FUNCTION(Runtime_PropagateException) {
+@@ -266,6 +266,18 @@ RUNTIME_FUNCTION(Runtime_PropagateException) {
    return ReadOnlyRoots(isolate).exception();
  }
  
@@ -1184,10 +1184,10 @@ index 4d0838239943bc020a368bdc5fc18311fb67355d..e0eaf48de2ea43db102ff49ca7340325
    HandleScope scope(isolate);
    DCHECK_EQ(1, args.length());
 diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
-index 39d291226d50f89f8b9262480eba8012eea3648c..96c4130c2092c4815450f9506eef194a1d9d096b 100644
+index 1ee3ebe2bff39f191ed876e7cc41a138c6a2f04c..55b4e30784116682282220857212a5905ddf56e4 100644
 --- a/src/runtime/runtime.h
 +++ b/src/runtime/runtime.h
-@@ -307,6 +307,7 @@ constexpr bool CanTriggerGC(T... properties) {
+@@ -309,6 +309,7 @@ constexpr bool CanTriggerGC(T... properties) {
    F(NewTypeError, -1 /* [1, 4] */, 1)                      \
    F(OrdinaryHasInstance, 2, 1)                             \
    F(PropagateException, 0, 1)                              \
@@ -1196,10 +1196,10 @@ index 39d291226d50f89f8b9262480eba8012eea3648c..96c4130c2092c4815450f9506eef194a
    F(RunMicrotaskCallback, 2, 1)                            \
    F(PerformMicrotaskCheckpoint, 0, 1)                      \
 diff --git a/src/snapshot/code-serializer.cc b/src/snapshot/code-serializer.cc
-index 18bbc14c745df1a654d1063d7e974c8a5b30b60a..521a4ecf445f9727ea22729181172d5995fcec24 100644
+index b14d5b515f190d529e6a3dbe258346ef4327c59a..ef1027c9398899af7fe2298e1fc77b4881effd12 100644
 --- a/src/snapshot/code-serializer.cc
 +++ b/src/snapshot/code-serializer.cc
-@@ -57,6 +57,10 @@ ScriptCompiler::CachedData* CodeSerializer::Serialize(
+@@ -61,6 +61,10 @@ ScriptCompiler::CachedData* CodeSerializer::Serialize(
    RCS_SCOPE(isolate, RuntimeCallCounterId::kCompileSerialize);
    TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"), "V8.CompileSerialize");
  
@@ -1210,7 +1210,7 @@ index 18bbc14c745df1a654d1063d7e974c8a5b30b60a..521a4ecf445f9727ea22729181172d59
    base::ElapsedTimer timer;
    if (v8_flags.profile_deserialization) timer.Start();
    DirectHandle<Script> script(Cast<Script>(info->script()), isolate);
-@@ -787,6 +791,11 @@ SerializedCodeSanityCheckResult SerializedCodeData::SanityCheckJustSource(
+@@ -816,6 +820,11 @@ SerializedCodeSanityCheckResult SerializedCodeData::SanityCheckJustSource(
  
  SerializedCodeSanityCheckResult SerializedCodeData::SanityCheckWithoutSource(
      uint32_t expected_ro_snapshot_checksum) const {
@@ -1223,7 +1223,7 @@ index 18bbc14c745df1a654d1063d7e974c8a5b30b60a..521a4ecf445f9727ea22729181172d59
      return SerializedCodeSanityCheckResult::kInvalidHeader;
    }
 diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
-index 0e5aefebed637304086356d66a92de5994946d11..e9addc26f28685ad74d07a09347dbbaa347e5ceb 100644
+index 8749b774f891ebc5969933dde548d2e8434c1440..1c329aef0b7ce7269a4d15cb3a630cc24d2cc86a 100644
 --- a/test/cctest/test-api.cc
 +++ b/test/cctest/test-api.cc
 @@ -27,15 +27,19 @@
@@ -1246,23 +1246,23 @@ index 0e5aefebed637304086356d66a92de5994946d11..e9addc26f28685ad74d07a09347dbbaa
  
  #include "test/cctest/cctest.h"
  
-@@ -64,6 +68,7 @@
- #include "src/base/platform/platform.h"
+@@ -65,6 +69,7 @@
  #include "src/base/strings.h"
+ #include "src/base/unique-array.h"
  #include "src/codegen/compilation-cache.h"
 +#include "src/codegen/compiler.h"
  #include "src/common/globals.h"
  #include "src/compiler/globals.h"
  #include "src/execution/execution.h"
-@@ -74,6 +79,7 @@
+@@ -75,6 +80,7 @@
  #include "src/heap/heap.h"
  #include "src/heap/incremental-marking.h"
  #include "src/init/v8.h"
 +#include "src/interpreter/bytecode-array-iterator.h"
  #include "src/logging/metrics.h"
+ #include "src/objects/api-callbacks-inl.h"
  #include "src/objects/feedback-vector-inl.h"
- #include "src/objects/feedback-vector.h"
-@@ -86,6 +92,7 @@
+@@ -89,6 +95,7 @@
  #include "src/objects/string-inl.h"
  #include "src/objects/synthetic-module-inl.h"
  #include "src/profiler/cpu-profiler.h"
@@ -1270,7 +1270,7 @@ index 0e5aefebed637304086356d66a92de5994946d11..e9addc26f28685ad74d07a09347dbbaa
  #include "src/utils/utils.h"
  #include "test/cctest/heap/heap-tester.h"
  #include "test/cctest/heap/heap-utils.h"
-@@ -31949,3 +31956,712 @@ TEST(IsolateFree) {
+@@ -32669,3 +32676,712 @@ TEST(IsolateFree) {
    v8::Isolate::Free(isolate1);
    v8::Isolate::Free(isolate2);
  }

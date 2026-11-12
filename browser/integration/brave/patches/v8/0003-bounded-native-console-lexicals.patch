@@ -1,8 +1,8 @@
 diff --git a/src/debug/debug-interface.cc b/src/debug/debug-interface.cc
-index 64559d1..97d5e22 100644
+index 60ad0de..36ac7e6 100644
 --- a/src/debug/debug-interface.cc
 +++ b/src/debug/debug-interface.cc
-@@ -1317,6 +1317,31 @@ void GlobalLexicalScopeNames(v8::Local<v8::Context> v8_context,
+@@ -1316,6 +1316,31 @@ void GlobalLexicalScopeNames(v8::Local<v8::Context> v8_context,
    }
  }
  
@@ -35,12 +35,12 @@ index 64559d1..97d5e22 100644
    i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
    isolate->debug()->set_return_value(*Utils::OpenDirectHandle(*value));
 diff --git a/src/debug/debug-interface.h b/src/debug/debug-interface.h
-index a8227d3..80b6b86 100644
+index 9e4522f..20a3b98 100644
 --- a/src/debug/debug-interface.h
 +++ b/src/debug/debug-interface.h
-@@ -547,6 +547,11 @@ class V8_EXPORT_PRIVATE StackTraceIterator {
-                                              bool throw_on_side_effect) = 0;
- };
+@@ -549,6 +549,11 @@ class V8_EXPORT_PRIVATE StackTraceIterator {
+ 
+ V8_EXPORT_PRIVATE bool IsAPIFunctionWithSideEffects(v8::Local<v8::Value> value);
  
 +V8_EXPORT_PRIVATE void GetConsoleLexicalNames(
 +    v8::Local<v8::Context> context,

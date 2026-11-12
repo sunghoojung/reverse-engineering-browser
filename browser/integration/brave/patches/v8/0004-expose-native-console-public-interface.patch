@@ -1,37 +1,15 @@
 diff --git a/BUILD.gn b/BUILD.gn
-index 1b40a42ddc558a41af1b3ef8753883c69c05813f..701248da7b5007faff4623dcb0a3a288400247a5 100644
+index c922976e8febc65d35865038c4ed806e9122b878..0583d8ba37131608d38c0e5a06da7e1226b9df67 100644
 --- a/BUILD.gn
 +++ b/BUILD.gn
-@@ -903,7 +903,9 @@ config("internal_config_base") {
-     "$target_gen_dir",
-     "$target_gen_dir/include",
-   ]
--  _include_dirs = include_dirs include_dirs = [] include_dirs = [ "//brave/chromium_src/v8" ] + _include_dirs
-+  _include_dirs = include_dirs
-+  include_dirs = []
-+  include_dirs = [ "//brave/chromium_src/v8" ] + _include_dirs
- }
- 
- config("internal_config") {
-@@ -3548,6 +3550,7 @@ v8_header_set("v8_headers") {
-     "include/v8-message.h",
+@@ -3901,6 +3901,7 @@ v8_header_set("v8_headers") {
+     "include/v8-metrics.h",
      "include/v8-microtask-queue.h",
      "include/v8-microtask.h",
 +    "include/v8-native-console.h",
      "include/v8-object.h",
      "include/v8-persistent-handle.h",
      "include/v8-primitive-object.h",
-@@ -3588,7 +3591,9 @@ v8_header_set("v8_headers") {
-     ":v8_tracing",
-     ":v8_version",
-   ]
--  import("//brave/v8/sources.gni") sources += brave_v8_headers_sources public_deps += brave_v8_headers_public_deps
-+  import("//brave/v8/sources.gni")
-+  sources += brave_v8_headers_sources
-+  public_deps += brave_v8_headers_public_deps
- }
- 
- if (v8_generate_external_defines_header) {
 diff --git a/include/v8-native-console.h b/include/v8-native-console.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..e176c34e4e82f1eb1d8a0e438f8188c6835bc2cb
@@ -74,7 +52,7 @@ index 0000000000000000000000000000000000000000..e176c34e4e82f1eb1d8a0e438f8188c6
 +
 +#endif  // INCLUDE_V8_NATIVE_CONSOLE_H_
 diff --git a/src/debug/debug-interface.cc b/src/debug/debug-interface.cc
-index 97d5e226c5cb6d987450275608d0537297ffd9f0..08db237e0fa7e543ada28942dd91c2a506063565 100644
+index 36ac7e613cdab9ce5ef7fca3c6138568f0064f35..e36dddef99db48209cb6dca4f0fcd5469619f6d2 100644
 --- a/src/debug/debug-interface.cc
 +++ b/src/debug/debug-interface.cc
 @@ -10,6 +10,7 @@
@@ -85,7 +63,7 @@ index 97d5e226c5cb6d987450275608d0537297ffd9f0..08db237e0fa7e543ada28942dd91c2a5
  #include "src/api/api-inl.h"
  #include "src/base/logging.h"
  #include "src/base/utils/random-number-generator.h"
-@@ -1317,6 +1318,22 @@ void GlobalLexicalScopeNames(v8::Local<v8::Context> v8_context,
+@@ -1316,6 +1317,22 @@ void GlobalLexicalScopeNames(v8::Local<v8::Context> v8_context,
    }
  }
  

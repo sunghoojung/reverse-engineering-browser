@@ -1,42 +1,42 @@
 diff --git a/include/v8-isolate.h b/include/v8-isolate.h
-index f8395c96..4e324679 100644
+index a7db7a74..3b662563 100644
 --- a/include/v8-isolate.h
 +++ b/include/v8-isolate.h
-@@ -665,6 +665,29 @@ class V8_EXPORT Isolate {
-     kOBSOLETE_WasmResizableBuffers = 183,
-     kInvalidatedArrayBufferMutableProtector = 184,
-     kHoleyArrayReadthrough = 185,
-+    kRebMathAcos = 186,
-+    kRebMathAcosh = 187,
-+    kRebMathAsin = 188,
-+    kRebMathAsinh = 189,
-+    kRebMathAtan = 190,
-+    kRebMathAtan2 = 191,
-+    kRebMathAtanh = 192,
-+    kRebMathCbrt = 193,
-+    kRebMathCos = 194,
-+    kRebMathCosh = 195,
-+    kRebMathExp = 196,
-+    kRebMathExpm1 = 197,
-+    kRebMathHypot = 198,
-+    kRebMathLog = 199,
-+    kRebMathLog1p = 200,
-+    kRebMathLog10 = 201,
-+    kRebMathPow = 202,
-+    kRebMathSin = 203,
-+    kRebMathSinh = 204,
-+    kRebMathSqrt = 205,
-+    kRebMathTan = 206,
-+    kRebMathTanh = 207,
-+    kRebDateGetTimezoneOffset = 208,
+@@ -677,6 +677,29 @@ class V8_EXPORT Isolate {
+     kRegExpCustomSpecies = 189,
+     kWasmWideArithmetic = 190,
+     kBigInt = 191,
++    kRebMathAcos = 192,
++    kRebMathAcosh = 193,
++    kRebMathAsin = 194,
++    kRebMathAsinh = 195,
++    kRebMathAtan = 196,
++    kRebMathAtan2 = 197,
++    kRebMathAtanh = 198,
++    kRebMathCbrt = 199,
++    kRebMathCos = 200,
++    kRebMathCosh = 201,
++    kRebMathExp = 202,
++    kRebMathExpm1 = 203,
++    kRebMathHypot = 204,
++    kRebMathLog = 205,
++    kRebMathLog1p = 206,
++    kRebMathLog10 = 207,
++    kRebMathPow = 208,
++    kRebMathSin = 209,
++    kRebMathSinh = 210,
++    kRebMathSqrt = 211,
++    kRebMathTan = 212,
++    kRebMathTanh = 213,
++    kRebDateGetTimezoneOffset = 214,
  
      // If you add new values here, you'll also need to update Chromium's:
      // web_feature.mojom, use_counter_callback.cc, and enums.xml. V8 changes to
 diff --git a/src/builtins/builtins-date-gen.cc b/src/builtins/builtins-date-gen.cc
-index 37125aac..312972e3 100644
+index 2c15fa47..bf1b3a6c 100644
 --- a/src/builtins/builtins-date-gen.cc
 +++ b/src/builtins/builtins-date-gen.cc
-@@ -145,6 +145,8 @@ TF_BUILTIN(DatePrototypeGetTime, DateBuiltinsAssembler) {
+@@ -160,6 +160,8 @@ TF_BUILTIN(DatePrototypeGetTime, DateBuiltinsAssembler) {
  TF_BUILTIN(DatePrototypeGetTimezoneOffset, DateBuiltinsAssembler) {
    auto context = Parameter<Context>(Descriptor::kContext);
    auto receiver = Parameter<Object>(Descriptor::kReceiver);

@@ -682,11 +682,14 @@ fn scheme_name(class: u8) -> Option<&'static str> {
 /// A `memory_cache_reuse` payload: Blink resource type, static data and host.
 /// Port of `decodeMemoryCacheReuse`; the C++ core and Python share its rules.
 fn memory_cache(event: &Value) -> Option<(u8, bool, String)> {
+    // Every lifecycle record comes here; only a reuse pays for decoding.
+    if event["type"] != "memory_cache_reuse" {
+        return None;
+    }
     let bytes = hex::decode(event["payload"].as_str()?).ok()?;
     let (kind, flags, length) = (*bytes.get(4)?, *bytes.get(5)?, usize::from(*bytes.get(6)?));
     let host = bytes.get(8..8 + length)?;
-    (event["type"] == "memory_cache_reuse"
-        && event["protocol_version"] == 3
+    (event["protocol_version"] == 3
         && event["flags"] == 0
         && bytes.len() == 128
         && bytes[..4] == [1, 0, 128, 0]

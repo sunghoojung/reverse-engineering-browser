@@ -287,7 +287,12 @@ its slot busy, which takes two starts a multiple of 1,024 request IDs apart at
 the same moment, skips it, so that end is reported lost too. A slot of an
 earlier configuration means the start was not recorded in this one, so nothing
 is emitted; a start of this configuration that has since reused the slot of a
-request started before it makes that request's end read as lost.
+request started before it makes that request's end read as lost. One loss is
+silent: a start skipped because a writer of a configuration that has since
+ended was still filling its slot leaves that earlier start there, so its end
+reads a slot of an earlier configuration and emits nothing. It takes a
+configuration change during one slot write, and the end then belongs to a
+request whose start raced that change.
 
 #### Memory-cache reuse
 
@@ -552,6 +557,13 @@ extension worker's renderer record, the proxy a worker main script or
 service-worker script it fetches. An extension origin whose host is not a valid
 id stays counted. Sessions started by `reb-api session start` or
 `start_live_session` always set it to 0.
+
+An extension worker's [memory-cache reuse](#memory-cache-reuse) starts its own
+row, so the drain treats it as a request start: counted, it adds one to
+`extension_worker` requests, and its request ID takes one of the 64 the drain
+keeps for excluded extension requests so that the reuse's `request_target`
+child is dropped too, as a request's later records are. An excluded ID that
+has left those 64 has its later records recorded without their start.
 
 Content-script requests use their page's document factory and stay with that
 tab. Extension pages (background page, popup, options) are their own

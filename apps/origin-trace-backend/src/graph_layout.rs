@@ -613,32 +613,53 @@ fn lay_out(graph: &Graph) -> Outcome {
         };
     }
     let parts = parts(graph);
-    let mut local = vec![0usize; graph.nodes.len()];
-    let mut drawings = Vec::with_capacity(parts.len());
-    for (nodes, edges) in &parts {
-        for (index, &node) in nodes.iter().enumerate() {
-            local[node] = index;
-        }
-        let part = Graph {
-            nodes: nodes.iter().map(|&node| graph.nodes[node]).collect(),
-            edges: edges
-                .iter()
-                .map(|&edge| {
-                    let [from, to] = graph.edges[edge];
-                    [local[from as usize] as u64, local[to as usize] as u64]
-                })
-                .collect(),
-        };
-        match draw(&part) {
-            Ok(drawing) => drawings.push(drawing),
-            Err(reason) => return Outcome::Failed { reason },
-        }
+    let drawings = parts
+        .iter()
+        .map(|(nodes, edges)| draw(&subgraph(graph, nodes, edges)))
+        .collect::<std::result::Result<Vec<_>, _>>();
+    let drawings = match drawings {
+        Ok(drawings) => drawings,
+        Err(reason) => return Outcome::Failed { reason },
+    };
+    let outcome = packed(graph, &parts, &drawings, started);
+    match defect(graph, &outcome) {
+        Some(reason) => Outcome::Failed { reason },
+        None => outcome,
     }
-    let offsets = pack(&drawings);
+}
+
+/// One part as a graph of its own. Its nodes are in index order, so a node's
+/// number in the part is its position there.
+fn subgraph(graph: &Graph, nodes: &[usize], edges: &[usize]) -> Graph {
+    let local = |node: u64| {
+        nodes
+            .binary_search(&(node as usize))
+            .expect("an edge joins nodes of one part") as u64
+    };
+    Graph {
+        nodes: nodes.iter().map(|&node| graph.nodes[node]).collect(),
+        edges: edges
+            .iter()
+            .map(|&edge| {
+                let [from, to] = graph.edges[edge];
+                [local(from), local(to)]
+            })
+            .collect(),
+    }
+}
+
+/// The parts' drawings packed in rows and rounded into one layout.
+fn packed(
+    graph: &Graph,
+    parts: &[(Vec<usize>, Vec<usize>)],
+    drawings: &[Drawing],
+    started: Instant,
+) -> Outcome {
+    let offsets = pack(drawings);
     let mut corners = vec![[Coord(0.0); 2]; graph.nodes.len()];
     let mut routes = vec![Vec::new(); graph.edges.len()];
     let (mut width, mut height) = (0.0f64, 0.0f64);
-    for (((nodes, edges), drawing), &(dx, dy)) in parts.iter().zip(&drawings).zip(&offsets) {
+    for (((nodes, edges), drawing), &(dx, dy)) in parts.iter().zip(drawings).zip(&offsets) {
         for (&node, &(x, y)) in nodes.iter().zip(&drawing.nodes) {
             corners[node] = [Coord::rounded(x + dx), Coord::rounded(y + dy)];
         }
@@ -653,16 +674,12 @@ fn lay_out(graph: &Graph) -> Outcome {
             height.max(dy + drawing.height),
         );
     }
-    let outcome = Outcome::LaidOut {
+    Outcome::LaidOut {
         nodes: corners,
         edges: routes,
         width: Coord::rounded(width),
         height: Coord::rounded(height),
         elapsed_ms: millis(started.elapsed()),
-    };
-    match defect(graph, &outcome) {
-        Some(reason) => Outcome::Failed { reason },
-        None => outcome,
     }
 }
 

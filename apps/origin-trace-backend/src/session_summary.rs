@@ -1735,8 +1735,9 @@ mod tests {
             };
             build(&store, &artifacts, &state).unwrap()
         };
-        let summary = summarize(json!({"version":1,"request_content_budget_mib":4,
-            "response_body_budget_mib":4,"response_media":false}));
+        // Different budgets, so a check that reports the other one fails.
+        let summary = summarize(json!({"version":1,"request_content_budget_mib":3,
+            "response_body_budget_mib":8,"response_media":false}));
         let find = |summary: &Value, category: &str, reason: &str| {
             summary["checks"]
                 .as_array()
@@ -1748,12 +1749,12 @@ mod tests {
         };
         let response = find(&summary, "response_body", "not_captured_session_budget");
         assert_eq!(response["count"], "2");
-        assert_eq!(response["budget_mib"], 4);
+        assert_eq!(response["budget_mib"], 8);
         assert_eq!(response["retained_bytes"], (4 * 1_048_576).to_string());
         assert_eq!(response["retained_complete"], true);
         assert_eq!(
             response["message"],
-            "2 response bodies arrived after this session's 4 MiB response body budget was used; 4.0 MiB of unique response bodies are retained. Raise Response body budget in the start panel (New Live Session…) for the next session; an agent's start_live_session sets response_body_budget_mib."
+            "2 response bodies arrived after this session's 8 MiB response body budget was used; 4.0 MiB of unique response bodies are retained. Raise Response body budget in the start panel (New Live Session…) for the next session; an agent's start_live_session sets response_body_budget_mib."
         );
         // Request bodies and full targets share the request content budget.
         for (category, reason, noun) in [
@@ -1769,10 +1770,10 @@ mod tests {
             ),
         ] {
             let check = find(&summary, category, reason);
-            assert_eq!(check["budget_mib"], 4, "{category}");
+            assert_eq!(check["budget_mib"], 3, "{category}");
             assert_eq!(check["retained_bytes"], "1048576", "{category}");
             let message = check["message"].as_str().unwrap();
-            assert!(message.starts_with(&format!("1 {noun} arrived after this session's 4 MiB request content budget was used; 1.0 MiB of unique request bodies and full targets are retained.")), "{message}");
+            assert!(message.starts_with(&format!("1 {noun} arrived after this session's 3 MiB request content budget was used; 1.0 MiB of unique request bodies and full targets are retained.")), "{message}");
             assert!(message.contains("Raise Request content budget in the start panel (New Live Session…) for the next session"), "{message}");
             assert!(message.contains("request_content_budget_mib"), "{message}");
             assert!(!message.contains("REB_"), "{message}");

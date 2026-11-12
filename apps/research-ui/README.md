@@ -967,7 +967,10 @@ app run, including Retry and a Dock reopen, as the mode does. Until the panel
 starts a Content session, the automatic launch takes the variables as they are.
 **Metadata only** keeps no content, so the panel shows none of the limits and
 passes none to the launcher. The starting and failed panels name the limits
-the session runs with.
+the session runs with, the launch log's `Request content capture` and
+`Response body capture` lines record them, and `get_session_context` reports
+them as `capture_options.content_limits`, so a researcher or an agent can tell
+which budgets the session ran with.
 
 The app saves no capture choice between launches. `REB_AUTOMATIC_CAPTURE_MODE=metadata`
 selects Metadata for the automatic launch and preselects it in the start panel.

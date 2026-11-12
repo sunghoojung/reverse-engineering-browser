@@ -369,7 +369,8 @@ conditional reads. No target/session join is inferred from URL or timing.
 
 `capture_options` labels what this session's launcher passed to Brave, for
 every live session (agent, app or `make live`): `request_content`,
-`canvas_images`, `request_stacks`, `document_start` (`permitted` or `not_permitted`; whether
+`content_limits`, `canvas_images`, `request_stacks`, `document_start`
+(`permitted` or `not_permitted`; whether
 this Brave honors it is `document_start_supported` in `get_native_console`),
 and `js_invocation` with `state` (`not_armed`, `armed`, `browser_unsupported`
 or `unreadable`), `count` and `digests`. `run-live-session.sh` passes the
@@ -378,6 +379,18 @@ backend `--session-request-content`, `--session-canvas-images`,
 enable nothing. Idle and demo
 backends report `source: not_live` with everything off. Site labels and
 source URLs stay in `get_js_invocation_sites`.
+
+`content_limits` is a versioned addition to `capture_options`: for a session
+with `request_content` it is `{"version": 1, "request_content_budget_mib",
+"response_body_budget_mib", "response_media"}`, the limits the session runs
+with, named as the start options are, whichever of the app's start panel, the
+start options or the launcher environment set them. Otherwise it is null. The
+launcher passes them as `--session-request-content-budget-mib`,
+`--session-response-body-budget-mib` and `--session-response-media`, which the
+backend accepts only with `--session-request-content` and within the
+launcher's bounds; a budget no launcher named is null, never a guessed
+default. A backend from before the addition omits `content_limits`; a reader
+treats that as not reported.
 
 CDP was removed. Version 1 keeps its debugger fields with fixed retirement
 values so existing clients still parse it: `debugger_state` is `unavailable`,

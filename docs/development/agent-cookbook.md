@@ -327,7 +327,9 @@ permits document-start Console scripts (recipe 19). `"js_invocation_sites": "/ab
 `"js_invocation_saved_sites": true` for the sites agent sessions saved with
 `js_invocation_site_action`, arms invocation tracking. None of these is ever
 taken from the environment; `options` in the result and
-`capture_options` in `get_session_context` show what the session runs with. A guest adapter
+`capture_options` in `get_session_context` show what the session runs with,
+its budgets and media choice in `capture_options.content_limits` (null without
+request content). A guest adapter
 needs `"guest_adapter": "/absolute/path/recipe.json"` with `wasm_dispatch`.
 An error names the launcher's reason, for example a Brave build that lacks a
 requested V8 flag; nothing is left running. From a shell, `reb-api session

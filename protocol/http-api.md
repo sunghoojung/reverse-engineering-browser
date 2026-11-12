@@ -1168,7 +1168,9 @@ analysis already cached in this backend and reports `analysis-not-ready` rather
 than computing one.
 
 Rows are links the stores already hold: the recorded parent event, the renderer
-request named as a request's initiator, its lifecycle events and captured
+request named as a request's initiator (for a memory-cache reuse, the request
+whose response Blink reused, as `reused_response`, never as an initiator), its
+lifecycle events and captured
 response, the host events whose exact parent is a retained dispatch sample of the
 selection, the artifact's creator event, parent and children, and Wasm import,
 export and direct-call uses. A link that was not recorded is listed under `gaps`

@@ -354,7 +354,9 @@ static data. The source names a row as a `request_tab_link` names a renderer
 record: `initiator_process_id` (the record's own process) and
 `initiator_request_id`. A reuse's own row stays keyed by its own request ID;
 consumers never join it to its source by those fields, and they leave them
-out of its legacy browser key. A reuse a worker owns is linked to its tabs by the drain
+out of its legacy browser key. They are never its initiator either: Traffic's
+Initiator tab shows the reuse's own renderer request and names the source as
+"Reused response of", and `get_xrefs` lists it as `reused_response`. A reuse a worker owns is linked to its tabs by the drain
 with a `request_tab_link`, as a worker request start is.
 
 ##### `memory_cache_reuse` (type 52)

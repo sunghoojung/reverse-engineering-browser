@@ -1101,6 +1101,8 @@ struct PassFacts {
     saw_samples: bool,
     saw_gap_reasons: BTreeSet<String>,
     initiator_found: bool,
+    /// A memory-cache reuse's named source request was found.
+    source_found: bool,
     parent_found: bool,
     link_parents: HashSet<(u64, u64)>,
     scanned_end: u64,
@@ -1158,6 +1160,26 @@ fn classify_event(
                 && unsigned(&event["request_id"]) == initiator_request
                 && event["type"] == "request_initiated"
             {
+                // A version 2 memory_cache_reuse names, in those fields, the
+                // request whose response Blink reused, not an initiator
+                // (protocol/native-network-v3.md).
+                if root["type"] == "memory_cache_reuse" {
+                    facts.source_found = true;
+                    let detail = format!(
+                        "renderer process {process} · request {initiator_request} · Blink reused its response"
+                    );
+                    emit(
+                        sinks,
+                        Direction::In,
+                        event_row(
+                            "reused_response",
+                            "Reused response of".to_owned(),
+                            detail,
+                            event,
+                        ),
+                    );
+                    return;
+                }
                 facts.initiator_found = true;
                 let detail = format!("renderer process {process} · request {initiator_request}");
                 emit(
@@ -1717,7 +1739,20 @@ fn gaps_for(plan: &Plan, facts: &PassFacts) -> [Vec<Value>; 2] {
                     format!("Event {parent} is named as the parent but is not retained."),
                 ));
             }
-            if unsigned(&root["initiator_process_id"]) == 0 && parent == 0 {
+            if root["type"] == "memory_cache_reuse" {
+                gaps[0].push(gap(
+                    "no-initiator-stack",
+                    "No initiator recorded",
+                    "A memory-cache reuse makes no request, so it has no initiator.".to_owned(),
+                ));
+                if unsigned(&root["initiator_process_id"]) != 0 && !facts.source_found {
+                    gaps[0].push(gap(
+                        "reused-source-not-retained",
+                        "Reused request not retained",
+                        "The request whose response Blink reused is not retained.".to_owned(),
+                    ));
+                }
+            } else if unsigned(&root["initiator_process_id"]) == 0 && parent == 0 {
                 gaps[0].push(gap(
                     "no-initiator-stack",
                     "No initiator recorded",
@@ -2225,6 +2260,61 @@ mod tests {
         );
         assert_eq!(orphan["counts"]["in"]["total"], 0);
         assert_eq!(orphan["gaps"]["in"][0]["reason"], "no-initiator-stack");
+    }
+
+    // A version 2 memory_cache_reuse names its source request in the initiator
+    // fields; it is the reused response, never the reuse's initiator.
+    #[test]
+    fn a_reuse_names_its_reused_request_not_an_initiator() {
+        let reuse = |sequence: u64, source: u64| {
+            event(
+                sequence,
+                json!({"process_id":61,"request_id":"21","type":"memory_cache_reuse",
+                    "initiator_process_id":61,"initiator_request_id":source}),
+            )
+        };
+        let events = vec![
+            event(
+                1,
+                json!({"process_id":61,"request_id":"20","type":"request_initiated"}),
+            ),
+            reuse(2, 20),
+        ];
+        let store = fixture(&events, &[]);
+        let document = page(
+            &store,
+            &Cursors::default(),
+            "kind=request&session_id=7&process_id=61&sequence_number=2&request_id=21",
+        );
+        let rows = document["pages"]["in"]["rows"].as_array().unwrap();
+        assert!(
+            rows.iter().all(|row| row["kind"] != "request_initiator"),
+            "{rows:?}"
+        );
+        assert_eq!(rows[0]["kind"], "reused_response");
+        assert_eq!(rows[0]["name"], "Reused response of");
+        assert_eq!(rows[0]["ids"]["request_id"], "20");
+        let reasons = |document: &Value| {
+            document["gaps"]["in"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|gap| gap["reason"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(reasons(&document), ["no-initiator-stack"]);
+        // A source that is not retained is named as that, never as a lost initiator.
+        let missing = fixture(&[reuse(2, 30)], &[]);
+        let document = page(
+            &missing,
+            &Cursors::default(),
+            "kind=request&session_id=7&process_id=61&sequence_number=2&request_id=21",
+        );
+        assert_eq!(document["counts"]["in"]["total"], 0);
+        assert_eq!(
+            reasons(&document),
+            ["no-initiator-stack", "reused-source-not-retained"]
+        );
     }
 
     #[test]

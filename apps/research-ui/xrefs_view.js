@@ -11,7 +11,7 @@
   const ROW = 44, GROUP = 30, OVERSCAN = 6, PAGE_SIZE = 128, KEEP_PAGES = 1;
   const SELECTION_DEBOUNCE_MS = 120, FILTER_DEBOUNCE_MS = 180, PAGE_DEBOUNCE_MS = 50, SETTLE_MS = 800;
   const FINGERPRINT_CATEGORIES = new Set(['canvas', 'webgl', 'web_audio', 'navigator', 'permissions', 'storage', 'webrtc', 'runtime']);
-  const KIND_LABELS = {request_initiator: 'initiator', parent_event: 'parent', host_link: 'host link', request_event: 'lifecycle', child_event: 'child',
+  const KIND_LABELS = {request_initiator: 'initiator', reused_response: 'reused', parent_event: 'parent', host_link: 'host link', request_event: 'lifecycle', child_event: 'child',
     response_artifact: 'response', call: 'call', read: 'read', artifact_creator: 'creator', artifact_capture: 'capture', parent_artifact: 'parent',
     child_artifact: 'child', wasm_import: 'import', wasm_export: 'export', wasm_call: 'call', direct_caller: 'caller', indirect_call: 'indirect',
     dispatch_sample: 'sample', artifact_use: 'use'};

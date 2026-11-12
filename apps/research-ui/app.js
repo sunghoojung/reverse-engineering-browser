@@ -4179,8 +4179,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = true;
           const lifecycleEvents = request?.events ?? [];
-          const correlated = lifecycleEvents.find(event => event.protocol_version >= 2 && event.initiator_process_id > 0);
-          const initiated = lifecycleEvents.find(event => event.type === 'request_initiated');
+          // A memory-cache reuse's initiator fields name the request whose
+          // response Blink reused, never an initiator (protocol/native-network-v3.md).
+          const correlated = lifecycleEvents.find(event => event.protocol_version >= 2 && event.initiator_process_id > 0 &&
+            event.type !== 'memory_cache_reuse');
+          const reuse = lifecycleEvents.find(event => event.type === 'memory_cache_reuse');
+          const initiated = lifecycleEvents.find(event => event.type === 'request_initiated') ?? reuse;
           const contextEvent = lifecycleEvents.find(event => browserContextToken(event));
           if (correlated || initiated || contextEvent) {
             const source = correlated ?? initiated ?? contextEvent;
@@ -4200,6 +4204,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
               );
             }
             details.push({ key: 'Frame', value: integerText(source, 'frame_id'), type: 'id' });
+            if (reuse && !correlated) {
+              details.push({ key: 'Reused response of', value: request.memoryCacheSource
+                ? `${request.memoryCacheSource}: Blink reused this request's response; it did not start this load`
+                : 'No request named: no request was made', type: request.memoryCacheSource ? 'id' : 'unavailable' });
+            }
             requestStackPanel.render(elements.fieldTree, request, inspectorDetailRows(details));
           } else {
             const empty = document.createElement('div');

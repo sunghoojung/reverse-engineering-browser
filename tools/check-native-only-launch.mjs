@@ -127,7 +127,20 @@ printf '%s\\n' "${'${ui_arguments[@]-}'}"`], {encoding:'utf8'});
     assert.equal(result.status, 2, result.stderr);
     assert.match(result.stderr, message);
   }
-  console.log('PASS content session limits: the launcher refuses out-of-bounds budgets and labels a content session\'s limits for the session context, a metadata session none');
+  // The documents say what the launcher and the start panel actually do.
+  const safety = (await read('SAFETY.md')).replace(/\s+/g, ' ');
+  for (const phrase of ["`REB_REQUEST_CONTENT_BUDGET_MIB` or the start panel's **Request content budget** sets another, from 1 MiB to 4 GiB",
+    "`REB_CAPTURE_RESPONSE_MEDIA=1` or the start panel's **Capture media and fonts**",
+    "the panel's **Response body budget** sets that budget, from 1 MiB to 16 GiB"]) {
+    assert(safety.includes(phrase), `SAFETY.md says: ${phrase}`);
+  }
+  const v2 = (await read('protocol/native-network-v2.md')).replace(/\s+/g, ' ');
+  assert(!v2.includes('65,536 artifacts'), 'native network v2 no longer states a fixed artifact count');
+  assert(v2.includes('the launcher sizes the receiver\'s store at 256 MiB plus the request content budget plus the response body budget, '
+    + 'allows one artifact per 4 KiB of that store'), 'native network v2 states the launcher\'s receiver sizing');
+  assert.match(launch, /artifact_store_mib=\$\(\(256 \+ request_content_budget_mib \+ response_body_budget_mib\)\)/);
+  assert.match(launch, /artifact_item_limit=\$\(\(artifact_store_bytes \/ 4096\)\)/);
+  console.log('PASS content session limits: the launcher refuses out-of-bounds budgets and labels a content session\'s limits for the session context, a metadata session none; SAFETY.md and native network v2 say what the panel and the launcher do');
 }
 
 const adapterDirectory = await mkdtemp(join(tmpdir(), 'reb-native-adapter-'));

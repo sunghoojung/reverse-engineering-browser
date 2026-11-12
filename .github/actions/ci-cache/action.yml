@@ -1,9 +1,13 @@
 name: Restore compiler caches
-description: Cargo registry and sccache. Exact keys stay small enough to survive GitHub's per-repository cache quota; restore-keys reuse the newest entry from this branch or main.
+description: Cargo registry and sccache. Only main, the schedule and manual runs save; pull requests restore the newest main entry, so they never evict it.
 inputs:
   role:
     description: Cache namespace, so parallel jobs do not overwrite one key.
     required: true
+  save:
+    description: Save this role after a run on main. A job that restores another job's role passes false.
+    required: false
+    default: "true"
 runs:
   using: composite
   steps:
@@ -11,7 +15,13 @@ runs:
       shell: bash
       run: tools/ci-install-compiler-cache.sh
 
-    - name: Restore Cargo registry
+    # GitHub keeps 10 GB of cache per repository and evicts the least recently
+    # used entry beyond it. When every pull request push saved about 2 GB of
+    # its own entries (readable only by that pull request), main's entries
+    # were evicted and each new pull request started cold. A pull request can
+    # read main's entries, so only main writes.
+    - name: Restore and save Cargo registry
+      if: inputs.save == 'true' && github.event_name != 'pull_request'
       uses: actions/cache@v4
       with:
         path: |
@@ -20,8 +30,34 @@ runs:
           ~/.cargo/git/db
         key: cargo-registry-v1-${{ runner.os }}-${{ hashFiles('apps/origin-trace-backend/Cargo.lock', 'apps/deobfuscator-worker/Cargo.lock') }}
 
-    - name: Restore compiler cache
+    - name: Restore Cargo registry
+      if: inputs.save != 'true' || github.event_name == 'pull_request'
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: cargo-registry-v1-${{ runner.os }}-${{ hashFiles('apps/origin-trace-backend/Cargo.lock', 'apps/deobfuscator-worker/Cargo.lock') }}
+        restore-keys: |
+          cargo-registry-v1-${{ runner.os }}-
+
+    # actions/cache will not replace an existing key, so the key names the
+    # commit and the restore prefix finds the newest entry for this role.
+    - name: Restore and save compiler cache
+      if: inputs.save == 'true' && github.event_name != 'pull_request'
       uses: actions/cache@v4
+      with:
+        path: ~/.cache/sccache
+        key: sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.role }}-${{ hashFiles('apps/origin-trace-backend/Cargo.lock', 'apps/deobfuscator-worker/Cargo.lock') }}-${{ github.sha }}
+        restore-keys: |
+          sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.role }}-${{ hashFiles('apps/origin-trace-backend/Cargo.lock', 'apps/deobfuscator-worker/Cargo.lock') }}-
+          sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.role }}-
+          sccache-v1-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Restore compiler cache
+      if: inputs.save != 'true' || github.event_name == 'pull_request'
+      uses: actions/cache/restore@v4
       with:
         path: ~/.cache/sccache
         key: sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.role }}-${{ hashFiles('apps/origin-trace-backend/Cargo.lock', 'apps/deobfuscator-worker/Cargo.lock') }}-${{ github.sha }}

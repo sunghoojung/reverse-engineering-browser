@@ -6,6 +6,20 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly repository_root
 cd "${repository_root}"
 
+# --check-pin stops after the pin and browser-input checks, before any
+# platform, network or filesystem work, so a release workflow can refuse a
+# stale pin before it spends a build on it.
+check_pin_only=false
+case "${1:-}" in
+  "") ;;
+  --check-pin) check_pin_only=true ;;
+  *)
+    echo "usage: prepare-release-brave.sh [--check-pin]" >&2
+    exit 2
+    ;;
+esac
+readonly check_pin_only
+
 # BEGIN reviewed paired browser pin
 # One reviewed unit: the browser ZIP paired with this release, its provenance,
 # where both are hosted, and the commit whose browser inputs built them. The ZIP
@@ -51,22 +65,29 @@ if ((${#unfinished[@]})); then
   exit 1
 fi
 
-if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
-  echo "The paired Brave artifact requires an arm64 macOS runner." >&2
-  exit 1
-fi
-
 # Reuse the published browser bytes only while every browser input and wire
 # contract still matches the commit that built them.
 if ! git cat-file -e "${build_source}^{commit}" 2>/dev/null; then
   echo "Browser build commit ${build_source} is not in this checkout's history." >&2
   exit 1
 fi
-git diff --exit-code "${build_source}" -- \
+if ! git diff --exit-code "${build_source}" -- \
   browser include src protocol services \
   scripts/bootstrap-brave.sh scripts/brave-toolchain.sh \
   scripts/build-brave-distribution.sh scripts/build-integrated-brave.sh \
-  scripts/package-brave-distribution.sh scripts/sync-browser-integration.sh
+  scripts/package-brave-distribution.sh scripts/sync-browser-integration.sh; then
+  echo "Browser inputs changed since ${build_source} built ${brave_name}; build, package and pin a new browser." >&2
+  exit 1
+fi
+if [[ "${check_pin_only}" == true ]]; then
+  echo "The paired browser pin matches this source's browser inputs."
+  exit 0
+fi
+
+if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
+  echo "The paired Brave artifact requires an arm64 macOS runner." >&2
+  exit 1
+fi
 
 readonly release_root=build/release-pair
 # The pin this directory was prepared from. A rerun reuses only a directory

@@ -38,6 +38,7 @@ FORCE_FULL_FILES = {
     "tools/ci-scope-decision.sh",
     "tools/ci-run-make.sh",
     "tools/ci-install-compiler-cache.sh",
+    "tools/ci-install-nextest.sh",
     "tools/agent-preflight.sh",
 }
 FORCE_FULL_PREFIXES = (

@@ -104,6 +104,18 @@ const completionOnly = Object.assign(golden('renderer loader kind 16'), {type: '
   process_id: 31, request_id: '44', sequence_number: '44', payload: hex('completed'), payload_size: 9});
 delete completionOnly.loader_kind;
 assert.equal(reasonOf([completionOnly]), 'no_start');
+// A memory-cache reuse is its row's renderer start.
+const reusePayload = Buffer.alloc(128);
+reusePayload.writeUInt16LE(1, 0);
+reusePayload.writeUInt16LE(128, 2);
+reusePayload[4] = 1;
+reusePayload[6] = 6;
+reusePayload.write('m.test', 8, 'ascii');
+const reuse = fields => Object.assign(record(fields), {type: 'memory_cache_reuse', payload: reusePayload.toString('hex'),
+  payload_size: 128, status_code: 200});
+assert.equal(reasonOf([reuse({loader_kind: 22, request_id: '46', sequence_number: '46', frame_id: '78'})]),
+  'document_frame');
+assert.equal(reasonOf([reuse({loader_kind: 19, request_id: '47', sequence_number: '47', frame_id: '79'})]), 'worker');
 assert.equal(reasonOf([record({loader_kind: 16, request_id: '45', sequence_number: '45', tab_id: 4})]), null);
 assert.equal(tabs.unresolvedNotice(1), '1 request without a tab (capture error)');
 assert.equal(tabs.unresolvedNotice(0), '');

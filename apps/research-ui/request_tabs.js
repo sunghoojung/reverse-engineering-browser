@@ -114,10 +114,11 @@
   }
 
   // Why a row without an owner has none, from its renderer and browser start
-  // records: the same rule as unresolved_reason in request_tabs.rs.
+  // records: the same rule as unresolved_reason in request_tabs.rs. A
+  // memory-cache reuse names its owner as request_initiated does.
   function unresolvedReason(row) {
     const events = row.events ?? [];
-    const renderer = events.find(event => event.type === 'request_initiated');
+    const renderer = events.find(event => ['request_initiated', 'memory_cache_reuse'].includes(event.type));
     if (renderer) {
       const kind = renderer.loader_kind ?? 0;
       if (kind === 0) return 'no_loader_kind';

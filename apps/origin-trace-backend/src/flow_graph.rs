@@ -104,9 +104,15 @@ enum Shape {
     Alone,
 }
 
+/// Where a frame's script ID is read: its renderer process and isolate key
+/// (zero for the document main thread, else the worker's context ID).
+/// Script IDs are unique only per isolate (protocol/native-network-v3.md).
+type Where = (u32, u64);
+
 /// One distinct walked stack and every record that named it.
 struct Walk {
     process: u32,
+    isolate: u64,
     digest: [u8; 32],
     shape: Shape,
     innermost: Frame,
@@ -126,7 +132,7 @@ struct Walk {
 
 #[derive(Default)]
 struct Scan {
-    identities: HashMap<u32, HashMap<u32, Identity>>,
+    identities: HashMap<Where, HashMap<u32, Identity>>,
     identity_count: usize,
     identities_dropped: u64,
     labels: HashMap<(u32, u64), u32>,
@@ -134,7 +140,7 @@ struct Scan {
     label_text: Vec<String>,
     labels_dropped: bool,
     walks: Vec<Walk>,
-    by_digest: HashMap<(u32, [u8; 32]), usize>,
+    by_digest: HashMap<(Where, [u8; 32]), usize>,
     stacks_over_budget: u64,
     records: BTreeMap<&'static str, u64>,
     not_walked: BTreeMap<&'static str, u64>,
@@ -151,16 +157,18 @@ impl Scan {
     fn walk(
         &mut self,
         event: &Value,
+        isolate: u64,
         digest: [u8; 32],
         shape: Shape,
         innermost: Frame,
     ) -> Option<&mut Walk> {
         let process = number(event, "process_id") as u32;
-        let index = match self.by_digest.get(&(process, digest)) {
+        let index = match self.by_digest.get(&((process, isolate), digest)) {
             Some(index) => *index,
             None if self.walks.len() < MAX_STACKS => {
                 self.walks.push(Walk {
                     process,
+                    isolate,
                     digest,
                     shape,
                     innermost,
@@ -174,7 +182,7 @@ impl Scan {
                     requests: Vec::new(),
                 });
                 self.by_digest
-                    .insert((process, digest), self.walks.len() - 1);
+                    .insert(((process, isolate), digest), self.walks.len() - 1);
                 self.walks.len() - 1
             }
             None => {
@@ -221,11 +229,11 @@ impl Scan {
     }
 
     fn identity(&mut self, event: &Value, bytes: &[u8]) -> bool {
-        let Some((script, identity)) = request_stack::decode_identity(bytes) else {
+        let Some((isolate, script, identity)) = request_stack::decode_identity(bytes) else {
             return false;
         };
         let process = number(event, "process_id") as u32;
-        let table = self.identities.entry(process).or_default();
+        let table = self.identities.entry((process, isolate)).or_default();
         if !table.contains_key(&script) && self.identity_count == MAX_IDENTITIES {
             self.identities_dropped += 1;
         } else {
@@ -291,7 +299,8 @@ impl Scan {
         );
         let room = self.request_refs < MAX_REQUEST_REFS;
         let (digest, innermost, unretained) = (record.digest, record.innermost, record.state != 1);
-        let kept = match self.walk(event, digest, Shape::Record(record), innermost) {
+        let isolate = record.scope.isolate_key;
+        let kept = match self.walk(event, isolate, digest, Shape::Record(record), innermost) {
             Some(walk) => {
                 walk.unretained |= unretained;
                 *walk.sinks.entry(Sink::Request(label)).or_default() += 1;
@@ -315,7 +324,7 @@ impl Scan {
             return false;
         };
         let (digest, innermost, unretained) = (record.digest, record.innermost, record.state != 1);
-        if let Some(walk) = self.walk(event, digest, Shape::Record(record), innermost) {
+        if let Some(walk) = self.walk(event, 0, digest, Shape::Record(record), innermost) {
             walk.unretained |= unretained;
             *walk.sinks.entry(Sink::Navigation(kind)).or_default() += 1;
         }
@@ -323,11 +332,12 @@ impl Scan {
     }
 
     fn scheduling_stack(&mut self, event: &Value, bytes: &[u8]) -> bool {
-        let Some((task, recorded, digest, innermost)) = decode_scheduling(bytes) else {
+        let Some((task, recorded, digest, innermost, isolate)) = decode_scheduling(bytes) else {
             return false;
         };
         let bounded = bytes[5] & 1 != 0;
-        if let Some(walk) = self.walk(event, digest, Shape::Scheduling(recorded), innermost) {
+        let shape = Shape::Scheduling(recorded);
+        if let Some(walk) = self.walk(event, isolate, digest, shape, innermost) {
             walk.bounded |= bounded;
             *walk.schedules.entry(task).or_default() += 1;
         }
@@ -343,7 +353,7 @@ impl Scan {
         if matches!(script.api, 1 | 3 | 6) && script.flags & 0x06 == 0x06 {
             let api = request_cookies::APIS[usize::from(script.api)];
             let innermost = Frame::read(&script.frame);
-            if let Some(walk) = self.walk(event, script.stack, Shape::Alone, innermost) {
+            if let Some(walk) = self.walk(event, 0, script.stack, Shape::Alone, innermost) {
                 *walk.sinks.entry(Sink::Cookie(api)).or_default() += 1;
             }
         }
@@ -371,31 +381,51 @@ fn may_be_session(line: &[u8], needle: &Regex, session: u64) -> bool {
         })
 }
 
-/// The `async_task_stack` payload: task kind, recorded depth, digest and the
-/// innermost frame, or None for a malformed record.
-fn decode_scheduling(bytes: &[u8]) -> Option<(&'static str, u32, [u8; 32], Frame)> {
+/// The `async_task_stack` payload: task kind, recorded depth, digest, the
+/// innermost frame and the isolate key, or None for a malformed record.
+/// Version 2 adds message kinds 10 to 12, promise registrations (kind 9, at
+/// most 32 frames, its call at byte 6) and the stack scope at bytes 80-95.
+fn decode_scheduling(bytes: &[u8]) -> Option<(&'static str, u32, [u8; 32], Frame, u64)> {
     if bytes.len() != 128
-        || bytes[..4] != [1, 0, 128, 0]
-        || !(1..=8).contains(&bytes[4])
+        || !matches!(bytes[..4], [1 | 2, 0, 128, 0])
         || bytes[5] & !1 != 0
-        || bytes[6..8] != [0, 0]
+        || bytes[7] != 0
         || bytes[20..32].iter().any(|b| *b != 0)
-        || bytes[80..].iter().any(|b| *b != 0)
     {
         return None;
     }
+    let scoped = bytes[0] == 2;
+    let (kind, registration) = (bytes[4], bytes[6]);
+    let limit = if kind == 9 { 32 } else { 256 };
+    let kinds = if kind == 9 {
+        scoped && (1..=4).contains(&registration)
+    } else {
+        registration == 0 && (1..=if scoped { 12 } else { 8 }).contains(&kind)
+    };
+    let isolate = if scoped {
+        if bytes[96..].iter().any(|b| *b != 0) {
+            return None;
+        }
+        request_stack::Scope::read(&bytes[80..96])?.isolate_key
+    } else if bytes[80..].iter().any(|b| *b != 0) {
+        return None;
+    } else {
+        0
+    };
     let recorded = request_stack::u32_at(bytes, 8);
     let digest: [u8; 32] = bytes[32..64].try_into().unwrap();
     let innermost = Frame::read(&bytes[64..80]);
-    ((1..=256).contains(&recorded)
-        && (bytes[5] & 1 == 0 || recorded == 256)
+    (kinds
+        && (1..=limit).contains(&recorded)
+        && (bytes[5] & 1 == 0 || recorded == limit)
         && digest.iter().any(|b| *b != 0))
     .then(|| {
         (
-            request_stack::task_kind(bytes[4]),
+            request_stack::task_kind(kind),
             recorded,
             digest,
             innermost,
+            isolate,
         )
     })
 }
@@ -406,8 +436,10 @@ struct Decoded {
     sync: Vec<Frame>,
     omitted: u32,
     asyncs: Vec<Frame>,
-    /// Many stacks share one scheduling stack, so its frames are shared.
-    segments: Vec<(Segment, Option<Arc<[Frame]>>)>,
+    /// Many stacks share one scheduling stack, so its frames are shared. They
+    /// are read where their own artifact says they were walked: a message
+    /// carries segments from another thread or process.
+    segments: Vec<(Segment, Option<Arc<(Vec<Frame>, Where)>>)>,
     /// Record flags bit 2, bit 3 and bit 4.
     asyncs_truncated: bool,
     chain_cut: bool,
@@ -430,6 +462,7 @@ enum Code {
 enum NodeKey {
     Function {
         process: u32,
+        isolate: u64,
         realm: u64,
         code: Code,
         wasm: bool,
@@ -543,7 +576,7 @@ struct Detail {
 /// One stack being added: its process, how many records it stands for, and
 /// the edges it has walked.
 struct Visit {
-    process: u32,
+    at: Where,
     weight: u64,
     path: BTreeSet<usize>,
 }
@@ -560,6 +593,7 @@ struct Resolved {
 
 struct Context {
     process: u32,
+    isolate: u64,
     realm: u64,
     frame_votes: BTreeMap<u64, u64>,
     tabs: BTreeSet<u64>,
@@ -580,6 +614,7 @@ impl Context {
         json!({
             "id": id,
             "process_id": self.process,
+            "isolate_key": (self.isolate != 0).then(|| format!("{:016x}", self.isolate)),
             "execution_context_id": (self.realm != 0).then(|| self.realm.to_string()),
             "origin": origins.first().map(|(origin, _)| origin),
             "origins": origins.iter().take(8).map(|(origin, functions)| json!({"origin": origin, "functions": functions})).collect::<Vec<_>>(),
@@ -594,7 +629,7 @@ struct Builder<'a> {
     scan: &'a Scan,
     resolved: &'a HashMap<[u8; 32], Resolved>,
     contexts: Vec<Context>,
-    context_index: HashMap<(u32, u64), usize>,
+    context_index: HashMap<(Where, u64), usize>,
     nodes: Vec<Node>,
     node_index: HashMap<NodeKey, usize>,
     edges: Vec<Edge>,
@@ -650,25 +685,23 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn identity(&self, process: u32, script: u32) -> Option<&'a Identity> {
-        self.scan.identities.get(&process)?.get(&script)
+    fn identity(&self, at: Where, script: u32) -> Option<&'a Identity> {
+        self.scan.identities.get(&at)?.get(&script)
     }
 
-    fn context(&mut self, process: u32, realm: u64) -> usize {
-        *self
-            .context_index
-            .entry((process, realm))
-            .or_insert_with(|| {
-                self.contexts.push(Context {
-                    process,
-                    realm,
-                    frame_votes: BTreeMap::new(),
-                    tabs: BTreeSet::new(),
-                    origins: BTreeMap::new(),
-                    kinds: BTreeMap::new(),
-                });
-                self.contexts.len() - 1
-            })
+    fn context(&mut self, at: Where, realm: u64) -> usize {
+        *self.context_index.entry((at, realm)).or_insert_with(|| {
+            self.contexts.push(Context {
+                process: at.0,
+                isolate: at.1,
+                realm,
+                frame_votes: BTreeMap::new(),
+                tabs: BTreeSet::new(),
+                origins: BTreeMap::new(),
+                kinds: BTreeMap::new(),
+            });
+            self.contexts.len() - 1
+        })
     }
 
     /// The node for `key`, added with the context, kind and detail `describe`
@@ -704,13 +737,14 @@ impl<'a> Builder<'a> {
 
     /// The node for one frame, or None past the node budget. Combinator frames
     /// are labels on the await edge, never nodes.
-    fn function(&mut self, process: u32, frame: &Frame) -> Option<usize> {
-        let identity = self.identity(process, frame.script_id);
+    fn function(&mut self, at: Where, frame: &Frame) -> Option<usize> {
+        let identity = self.identity(at, frame.script_id);
         let realm = identity.map_or(0, |identity| identity.realm);
         let wasm = frame.kind == 2;
         let top_level = !wasm && frame.flags & 2 != 0;
         let key = NodeKey::Function {
-            process,
+            process: at.0,
+            isolate: at.1,
             realm,
             code: identity
                 .and_then(|identity| identity.sha256)
@@ -719,7 +753,7 @@ impl<'a> Builder<'a> {
             function: if top_level { u32::MAX } else { frame.detail },
         };
         self.node(key, |builder| {
-            let context = builder.context(process, realm);
+            let context = builder.context(at, realm);
             let kind = if wasm {
                 "wasm"
             } else if identity.is_some_and(|identity| identity.eval) {
@@ -811,11 +845,11 @@ impl<'a> Builder<'a> {
     }
 
     /// The call position inside the caller, as a one-based line and column.
-    fn site(&self, process: u32, caller: &Frame) -> Option<(u64, u64)> {
+    fn site(&self, at: Where, caller: &Frame) -> Option<(u64, u64)> {
         if caller.kind == 2 {
             return Some((0, u64::from(caller.position)));
         }
-        let identity = self.identity(process, caller.script_id);
+        let identity = self.identity(at, caller.script_id);
         let (identity, resolved) =
             request_stack::find_source(identity, |_, sha| self.resolved.get(sha)).ok()?;
         let &(line, column) = resolved.lines.get(&caller.position)?;
@@ -890,12 +924,13 @@ impl<'a> Builder<'a> {
     fn run(
         &mut self,
         visit: &mut Visit,
+        at: Where,
         frames: &[Frame],
         omitted_after: Option<(usize, u32)>,
     ) -> Vec<Option<usize>> {
         let nodes: Vec<Option<usize>> = frames
             .iter()
-            .map(|frame| self.function(visit.process, frame))
+            .map(|frame| self.function(at, frame))
             .collect();
         for (index, pair) in nodes.windows(2).enumerate() {
             let &[Some(callee), Some(caller)] = pair else {
@@ -912,7 +947,7 @@ impl<'a> Builder<'a> {
                 _ => (
                     "call",
                     Detail {
-                        site: self.site(visit.process, &frames[index + 1]),
+                        site: self.site(at, &frames[index + 1]),
                         ..Detail::default()
                     },
                 ),
@@ -929,13 +964,14 @@ impl<'a> Builder<'a> {
 
     fn add(&mut self, walk: &Walk, decoded: &Decoded) {
         let mut visit = Visit {
-            process: walk.process,
+            at: (walk.process, walk.isolate),
             weight: walk.occurrences,
             path: BTreeSet::new(),
         };
         // A stack deeper than 1,024 keeps the innermost and outermost 512.
         let omitted_after = (decoded.omitted != 0).then_some((511, decoded.omitted));
-        let sync = self.run(&mut visit, &decoded.sync, omitted_after);
+        let own = visit.at;
+        let sync = self.run(&mut visit, own, &decoded.sync, omitted_after);
         let innermost = sync.first().copied().flatten();
         let outermost = sync.last().copied().flatten();
         // A walk that stopped at 256 frames did not reach its task's first frame.
@@ -995,10 +1031,10 @@ impl<'a> Builder<'a> {
                 continue;
             }
             // A node past the budget is a gap, never bridged.
-            let node = self.function(visit.process, frame)?;
+            let node = self.function(visit.at, frame)?;
             if let Some(to) = target {
                 let detail = Detail {
-                    site: self.site(visit.process, frame),
+                    site: self.site(visit.at, frame),
                     label: label.take(),
                     ..Detail::default()
                 };
@@ -1039,11 +1075,11 @@ impl<'a> Builder<'a> {
             };
             let task = request_stack::task_kind(segment.kind);
             match frames.as_deref() {
-                Some(frames) if !frames.is_empty() => {
-                    let nodes = self.run(visit, frames, None);
+                Some((frames, at)) if !frames.is_empty() => {
+                    let nodes = self.run(visit, *at, frames, None);
                     if let Some(from) = nodes[0] {
                         let detail = Detail {
-                            site: self.site(visit.process, &frames[0]),
+                            site: self.site(*at, &frames[0]),
                             via: std::mem::take(&mut via),
                             ..Detail::default()
                         };
@@ -1167,8 +1203,8 @@ fn decode_main(
         .get(&walk.digest)
         .and_then(|artifact| read(artifact, request_stack::MAX_ARTIFACT));
     let decoded = content.as_deref().and_then(|content| match &walk.shape {
-        Shape::Record(record) => {
-            request_stack::decode_artifact(content, record).map(|(frames, segments)| {
+        Shape::Record(record) => request_stack::decode_artifact(content, record, walk.process).map(
+            |(frames, segments)| {
                 (
                     record.recorded,
                     record.omitted,
@@ -1176,10 +1212,10 @@ fn decode_main(
                     frames,
                     segments,
                 )
-            })
-        }
+            },
+        ),
         Shape::Scheduling(recorded) => request_stack::decode_segment_artifact(content, *recorded)
-            .map(|frames| (*recorded, 0, 0, frames, Vec::new())),
+            .map(|(frames, _)| (*recorded, 0, 0, frames, Vec::new())),
         Shape::Alone => {
             request_stack::decode_artifact_alone(content).map(|(record, frames, segments)| {
                 (
@@ -1208,7 +1244,7 @@ fn decode(
     main: std::result::Result<Main, &'static str>,
     stacks: &HashMap<[u8; 32], Value>,
     read: &dyn Fn(&Value, usize) -> Option<Vec<u8>>,
-    segments_seen: &mut HashMap<[u8; 32], Option<Arc<[Frame]>>>,
+    segments_seen: &mut HashMap<[u8; 32], Option<Arc<(Vec<Frame>, Where)>>>,
     missing: &mut BTreeMap<&'static str, u64>,
 ) -> Decoded {
     let (recorded, omitted, flags, mut frames, segments) = match main {
@@ -1244,7 +1280,13 @@ fn decode(
                         .and_then(|content| {
                             request_stack::decode_segment_artifact(&content, segment.recorded)
                         })
-                        .map(Arc::from)
+                        // A version 1 or 2 artifact is the walk's own document.
+                        .map(|(frames, scope)| {
+                            let at = scope.map_or((walk.process, 0), |(process, scope)| {
+                                (process, scope.isolate_key)
+                            });
+                            Arc::new((frames, at))
+                        })
                 })
                 .clone();
             if frames.is_none() {
@@ -1497,17 +1539,23 @@ fn decode_walks(
 fn source_offsets(scan: &Scan, decoded: &[Decoded]) -> BTreeMap<[u8; 32], (bool, BTreeSet<u32>)> {
     let mut offsets: BTreeMap<[u8; 32], (bool, BTreeSet<u32>)> = BTreeMap::new();
     for (walk, decoded) in scan.walks.iter().zip(decoded) {
-        let frames = decoded.sync.iter().chain(&decoded.asyncs).chain(
-            decoded
-                .segments
-                .iter()
-                .filter_map(|(_, frames)| frames.as_deref())
-                .flatten(),
-        );
-        for frame in frames.filter(|frame| frame.script_id != 0) {
+        let own: Where = (walk.process, walk.isolate);
+        let frames = decoded
+            .sync
+            .iter()
+            .chain(&decoded.asyncs)
+            .map(|frame| (own, frame))
+            .chain(
+                decoded
+                    .segments
+                    .iter()
+                    .filter_map(|(_, frames)| frames.as_deref())
+                    .flat_map(|(frames, at)| frames.iter().map(move |frame| (*at, frame))),
+            );
+        for (at, frame) in frames.filter(|(_, frame)| frame.script_id != 0) {
             let Some(sha) = scan
                 .identities
-                .get(&walk.process)
+                .get(&at)
                 .and_then(|t| t.get(&frame.script_id))
                 .and_then(|i| i.sha256)
             else {

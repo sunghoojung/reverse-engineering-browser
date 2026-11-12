@@ -539,7 +539,10 @@ fn describe_script(event: &Value, script: &Script) -> Value {
 
 /// A renderer's script identities outside the records `provenance` read, and
 /// whether an identity absent from them is absent from the store.
-pub type IndexedIdentities = (HashMap<u32, request_stack::Identity>, bool);
+pub type IndexedIdentities = (
+    HashMap<request_stack::IdentityKey, request_stack::Identity>,
+    bool,
+);
 
 /// Everything in `events` that touched cookie `name` in `session_id`.
 pub fn provenance(
@@ -558,7 +561,8 @@ pub fn provenance(
     let mut malformed = Vec::new();
     let mut lists: HashMap<String, Option<Vec<Cookie>>> = HashMap::new();
     let mut unread = BTreeSet::new();
-    let mut identities: HashMap<u64, HashMap<u32, request_stack::Identity>> = HashMap::new();
+    let mut identities: HashMap<u64, HashMap<request_stack::IdentityKey, request_stack::Identity>> =
+        HashMap::new();
     for event in events
         .iter()
         .filter(|event| event["session_id"] == session && event["type"] == "script_identity")
@@ -567,11 +571,13 @@ pub fn provenance(
             .as_str()
             .and_then(|payload| hex::decode(payload).ok())
             .and_then(|bytes| request_stack::decode_identity(&bytes));
-        if let (Some((script, identity)), Some(process)) = (decoded, event["process_id"].as_u64()) {
+        if let (Some((isolate, script, identity)), Some(process)) =
+            (decoded, event["process_id"].as_u64())
+        {
             identities
                 .entry(process)
                 .or_default()
-                .insert(script, identity);
+                .insert((process as u32, isolate, script), identity);
         }
     }
     let mut known_identities: HashMap<u64, bool> = HashMap::new();
@@ -605,13 +611,14 @@ pub fn provenance(
                             let known = *known_identities.entry(process).or_insert_with(|| {
                                 let (indexed, exhaustive) = indexed_identities(process);
                                 let table = identities.entry(process).or_default();
-                                for (script, identity) in indexed {
-                                    table.entry(script).or_insert(identity);
+                                for (key, identity) in indexed {
+                                    table.entry(key).or_insert(identity);
                                 }
                                 exhaustive
                             });
                             let mut stack = request_stack::resolve_call(
                                 event,
+                                request_stack::Scope::DOCUMENT,
                                 &script.frame,
                                 (script.flags & 4 != 0).then_some(script.stack),
                                 identities.get(&process).unwrap_or(&no_identities),
@@ -1015,9 +1022,13 @@ mod tests {
         let without = vec![events[0].clone()];
         let resolution_of =
             |origin: &Value| origin["script"][0]["stack"]["frames"][0]["resolution"].clone();
-        let from_index = |_process: u64| -> IndexedIdentities {
+        let from_index = |process: u64| -> IndexedIdentities {
             (
-                HashMap::from([request_stack::decode_identity(&identity).unwrap()]),
+                HashMap::from([{
+                    let (isolate, script, identity) =
+                        request_stack::decode_identity(&identity).unwrap();
+                    ((process as u32, isolate, script), identity)
+                }]),
                 false,
             )
         };

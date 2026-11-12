@@ -1212,7 +1212,10 @@ impl App {
                             .identities(&session, process as u32)
                             .map_or((HashMap::new(), complete), |(indexed, exhaustive)| {
                                 (
-                                    crate::request_stack::decode_indexed_identities(&indexed),
+                                    crate::request_stack::decode_indexed_identities(
+                                        process as u32,
+                                        &indexed,
+                                    ),
                                     exhaustive || complete,
                                 )
                             })

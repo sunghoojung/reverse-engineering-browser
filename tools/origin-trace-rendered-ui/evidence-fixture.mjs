@@ -29,9 +29,12 @@ export const REQUEST_BODY_MARKER = '<img src=x onerror="window.__rebInjected=4">
 export const METADATA_BODY_HOST = 'api.metadata.test';
 // A content-session response body (native-network-v3.md) whose JSON carries markup.
 export const RESPONSE_BODY_HOST = 'api.response.test';
-// A content-session POST whose body and response both arrived after their
-// session budgets were used (native-network-v2.md state 10, v3 state 12).
+// A content-session POST, recorded as real capture records it: its target's
+// first 116 bytes, the rest refused by the request content budget, and its
+// body and response refused by their budgets (native-network-v2.md target
+// retention 4 and body state 10, v3 response state 12).
 export const BUDGET_HOST = 'api.budget.test';
+export const BUDGET_TARGET = `/collect/batch?session=fixture&events=${'e'.repeat(160)}`;
 // Rows only the renderer finishes (protocol/native-network-v3.md).
 export const MEMORY_CACHE_HOST = 'cdn.memory.test';
 export const MEMORY_CACHE_TARGET = '/sprite.png?v=3';
@@ -325,6 +328,18 @@ function budgetResponsePayload(length, contentType = 'application/json') {
   return payload.toString('hex');
 }
 
+// A version 2 request_target whose bytes past the prefix were not retained.
+function requestTargetPayloadV2(target, retention) {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(2, 0);
+  payload.writeUInt16LE(128, 2);
+  payload.writeUInt32LE(Buffer.byteLength(target), 4);
+  payload[8] = 2;
+  payload[9] = retention;
+  payload.write(target.slice(0, 116), 12, 'utf8');
+  return payload.toString('hex');
+}
+
 function requestTargetPayload(target) {
   const payload = Buffer.alloc(128);
   payload.writeUInt16LE(1, 0);
@@ -418,6 +433,7 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
   row(cached, 'request_completed', hex('completed'), {status_code: 200});
   const refused = {request_id: '3004'};
   const refusedStart = row(refused, 'request_started', hex(`POST ${BUDGET_HOST}`), {resource_type: 13});
+  row(refused, 'request_target', requestTargetPayloadV2(BUDGET_TARGET, 4), {parent_event_id: refusedStart.sequence_number});
   row(refused, 'request_body', requestBodyPayload({state: 10, content: true, bytes: Buffer.from('{"events":[1,2,3]}')}),
     {parent_event_id: refusedStart.sequence_number});
   const refusedResponse = row(refused, 'response_started', hex('application/json'), {status_code: 200});

@@ -194,11 +194,16 @@ with the agent path's reasons. A raised 1,024 MiB budget and media capture
 typed and checked from the keyboard reach the start, whose failure (the
 missing Brave) names them. Narrow opens with those limits, held for the run;
 Metadata hides them and its start names none. In Traffic, the fixture's
-`api.budget.test` row, whose body and response met their budgets, and the
-driver's address (64 and 128 MiB) make the footer name both budgets, their
-sizes, the bytes kept and the control for the next session, in both themes
-without clipping, and the Payload and Response tabs name the control instead
-of an environment variable.
+`api.budget.test` row is a content-session POST whose target past its first
+116 bytes, body and response met their budgets. The footer must take its
+counts from the session summary (two request records, one response) and, as
+this harness backend is not live, name no size; once the page reads a live
+session context (64 and 128 MiB), the footer, the Request URL row and the
+Payload tab name those sizes, and the Response tab names the control, all
+without an environment variable. At the narrow size with the request open the
+footer must show a one-line button instead of the line, fully visible, which
+Return opens to the whole sentence and Escape closes with focus kept. Both
+themes, nothing clipped.
 
 `testLaunchStartsWithoutStartPanel` runs alone in a second launch pass. That
 pass starts the copied app without `--ui-url` or an evidence-store argument,

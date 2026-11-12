@@ -3575,31 +3575,53 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
     try await returnToHarness(ui, harnessURL)
 
-    // Traffic: the fixture's budget row and the session's limits from its address.
+    // Traffic: the fixture's budget row, a POST whose target, body and
+    // response met their budgets. This backend is not live, so the session
+    // context names no size, and neither does anything drawn; the counts are
+    // the summary's (two request records, one response), not the loaded rows'.
     for size in windowSizes {
       let traffic = try await prepare(size)
       try await show(traffic, "traffic")
-      let footer = "document.querySelector('#request-budget')"
-      try await traffic.waitUntil("!\(footer).hidden && \(footer).textContent.includes(' kept:')", "\(size.name): the footer did not name the used budgets")
-      let notice = try await traffic.value("\(footer).textContent") as? String ?? ""
-      let pattern = #"^Request content budget \(64 MiB\) used, \d+ KiB kept: 1 request body or URL not kept · "#
-        + #"Response body budget \(128 MiB\) used, \d+ KiB kept: 1 response body not kept · Raise them in New Live Session… for the next session\.$"#
-      XCTAssertNotNil(notice.range(of: pattern, options: .regularExpression), "\(size.name): footer: \(notice)")
+      let line = "document.querySelector('#request-budget-text')"
+      try await traffic.waitUntil("!document.querySelector('#request-budget').hidden && \(line).textContent.includes(' kept:')",
+        "\(size.name): the footer did not name the used budgets")
+      let unsized = try await traffic.value("\(line).textContent") as? String ?? ""
+      let pattern = #"^Request content budget used, \d+ KiB kept: 2 request bodies or URLs not kept · "#
+        + #"Response body budget used, \d+ KiB kept: 1 response body not kept · Raise them in New Live Session… for the next session\.$"#
+      XCTAssertNotNil(unsized.range(of: pattern, options: .regularExpression), "\(size.name): footer: \(unsized)")
+      let context = try await traffic.json("({read: state.sessionContentLimitsRead, limits: state.sessionContentLimits})")
+      XCTAssertEqual(context["read"] as? String, "answered", "\(size.name): the session context was read: \(context)")
+      XCTAssertTrue(context["limits"] is NSNull, "\(size.name): a backend that is not live names no limits: \(context)")
+      // A live session's context names the sizes, and everything drawn follows it.
+      _ = try await traffic.value("""
+        (() => { window.__rebContextFetch ??= window.fetch;
+          window.fetch = (input, init) => String(input).startsWith('/api/session/context')
+            ? Promise.resolve(new Response(JSON.stringify({capture_options: {content_limits: {version: 1, request_content_budget_mib: 64,
+                response_body_budget_mib: 128, response_media: false}}}), {status: 200, headers: {'Content-Type': 'application/json'}}))
+            : window.__rebContextFetch(input, init);
+          state.sessionContentLimitsRead = null; refreshSessionContentLimits(); return true; })()
+        """)
+      try await traffic.waitUntil("\(line).textContent.startsWith('Request content budget (64 MiB) used')", "\(size.name): the footer did not take the context's sizes")
+      let sized = try await traffic.value("\(line).textContent") as? String ?? ""
+      XCTAssertTrue(sized.contains(" · Response body budget (128 MiB) used, "), "\(size.name): footer: \(sized)")
       try await assertLayout(traffic, "#screen-traffic .request-window", "\(size.name) budget footer")
-      try await assertFullyVisible(traffic, "#request-budget", "\(size.name) budget footer")
+      try await assertFullyVisible(traffic, "#request-budget-text", "\(size.name) budget footer")
       try await traffic.screenshot("traffic-budget-footer-\(size.name)")
       try await traffic.click("#screen-traffic .request-row", containing: expected.budgetHost)
       try await traffic.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "\(size.name): request detail did not open")
-      // The short stacked inspector gives the ledger the budget line's height;
-      // side by side, the line stays whole beside the open request.
-      let shown = try await traffic.value("getComputedStyle(document.querySelector('#request-budget')).display !== 'none'") as? Bool
-      XCTAssertEqual(shown, size.name == "normal", "\(size.name): the budget line beside an open request")
-      if size.name == "normal" { try await assertFullyVisible(traffic, "#request-budget", "\(size.name) budget footer with a request open") }
+      // General: the Request URL row says why the rest of the target is missing.
+      try await traffic.click("#inspector-tab-general")
+      try await traffic.waitUntil("(document.querySelector('#exchange-inspector')?.innerText ?? '').includes('the full target was not retained')",
+        "\(size.name): the Request URL row did not say why")
+      let general = try await traffic.value("document.querySelector('#exchange-inspector').innerText") as? String ?? ""
+      XCTAssertTrue(general.contains("the full target was not retained: this session had used its 64 MiB request content budget. "
+        + "Raise Request content budget in New Live Session… for the next session)"), "\(size.name): Request URL: \(general)")
       try await traffic.click("#inspector-tab-payload")
       try await traffic.waitUntil("(document.querySelector('#payload-inspector')?.innerText ?? '').includes('Not captured')", "\(size.name): Payload did not say why")
       let payload = try await traffic.value("document.querySelector('#payload-inspector').innerText") as? String ?? ""
       XCTAssertTrue(payload.contains("Not captured: this session had used its 64 MiB request content budget. Raise Request content budget in New Live Session… for the next session."),
         "\(size.name): Payload: \(payload)")
+      XCTAssertFalse(payload.contains("recorded only in content capture sessions"), "\(size.name): a content session's row: \(payload)")
       try await assertLayout(traffic, "#screen-traffic .detail-pane", "\(size.name) budget payload")
       try await traffic.screenshot("traffic-budget-payload-\(size.name)")
       try await traffic.click("#inspector-tab-response")
@@ -3607,10 +3629,41 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let response = try await traffic.value("document.querySelector('#response-inspector').innerText") as? String ?? ""
       XCTAssertTrue(response.contains("Not retained: this session had used its response body budget. Raise Response body budget in New Live Session… for the next session."),
         "\(size.name): Response: \(response)")
-      XCTAssertFalse((payload + response + notice).contains("REB_"), "\(size.name): no environment variable is the remedy")
+      XCTAssertFalse((general + payload + response + sized).contains("REB_"), "\(size.name): no environment variable is the remedy")
       try await assertInert(traffic, "\(size.name) budget row")
       try await assertLayout(traffic, "#screen-traffic .detail-pane", "\(size.name) budget response")
       try await traffic.screenshot("traffic-budget-used-\(size.name)")
+      if size.name == "normal" {
+        // Side by side, the whole line stays beside the open request.
+        try await assertFullyVisible(traffic, "#request-budget-text", "\(size.name) budget footer with a request open")
+      } else {
+        // The short stacked inspector: a one-line button that cannot clip, and
+        // the whole sentence from the keyboard.
+        let stacked = try await traffic.json("""
+          ({toggle: getComputedStyle(document.querySelector('#request-budget-toggle')).display, text: getComputedStyle(\(line)).display,
+            label: document.querySelector('#request-budget-toggle').textContent, expanded: document.querySelector('#request-budget-toggle').getAttribute('aria-expanded')})
+          """)
+        XCTAssertNotEqual(stacked["toggle"] as? String, "none", "\(size.name): the budget button shows: \(stacked)")
+        XCTAssertEqual(stacked["text"] as? String, "none", "\(size.name): the sentence waits behind the button: \(stacked)")
+        XCTAssertEqual(stacked["label"] as? String, "Budgets used", "\(size.name): \(stacked)")
+        XCTAssertEqual(stacked["expanded"] as? String, "false", "\(size.name): \(stacked)")
+        try await assertFullyVisible(traffic, "#request-budget-toggle", "\(size.name) budget button")
+        try await assertLayout(traffic, "#screen-traffic .request-window", "\(size.name) budget button")
+        _ = try await traffic.value("(document.querySelector('#request-budget-toggle').focus(), true)")
+        try await traffic.key(36, "\r")
+        try await traffic.waitUntil("document.querySelector('#request-budget-toggle').getAttribute('aria-expanded') === 'true'",
+          "\(size.name): Return did not open the sentence")
+        let opened = try await traffic.json("({display: getComputedStyle(\(line)).display, focus: document.activeElement?.id})")
+        XCTAssertNotEqual(opened["display"] as? String, "none", "\(size.name): \(opened)")
+        XCTAssertEqual(opened["focus"] as? String, "request-budget-toggle", "\(size.name): \(opened)")
+        try await assertFullyVisible(traffic, "#request-budget-text", "\(size.name) budget sentence")
+        try await traffic.screenshot("traffic-budget-sentence-\(size.name)")
+        try await traffic.key(53, "\u{1B}")
+        try await traffic.waitUntil("document.querySelector('#request-budget-toggle').getAttribute('aria-expanded') === 'false'",
+          "\(size.name): Escape did not close the sentence")
+        let closed = try await traffic.value("document.activeElement?.id") as? String
+        XCTAssertEqual(closed, "request-budget-toggle", "\(size.name): Escape keeps focus on the button")
+      }
       _ = try await traffic.value("""
         (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null; document.documentElement.dataset.theme = 'light';
           await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
@@ -3619,7 +3672,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await traffic.screenshot("traffic-budget-used-light-\(size.name)")
       _ = try await traffic.value("""
         (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
-          else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme; return true; })()
+          else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme;
+          window.fetch = window.__rebContextFetch; delete window.__rebContextFetch; return true; })()
         """)
     }
   }

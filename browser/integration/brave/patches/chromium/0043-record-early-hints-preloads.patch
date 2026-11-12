@@ -1,0 +1,37 @@
+diff --git a/content/browser/renderer_host/navigation_request.cc b/content/browser/renderer_host/navigation_request.cc
+index eb951c7..f659f19 100644
+--- a/content/browser/renderer_host/navigation_request.cc
++++ b/content/browser/renderer_host/navigation_request.cc
+@@ -47,6 +47,7 @@
+ #include "base/trace_event/trace_event.h"
+ #include "base/types/optional_util.h"
+ #include "base/types/pass_key.h"
++#include "brave/components/reverse_engineering_browser/common/native_factory_owner_hook.h"
+ #include "build/build_config.h"
+ #include "build/buildflag.h"
+ #include "components/viz/host/host_frame_sink_manager.h"
+@@ -5607,11 +5608,23 @@ NavigationRequest::CreateNavigationEarlyHintsManagerParams(
+ 
+   // TODO(crbug.com/40188470): Support DevTools instrumentation and extension's
+   // WebRequest API.
++  // The embedder sees the preloads like other loads. The document has not
++  // committed, so no frame is passed; the navigating main frame is scoped as
++  // their owner (protocol/native-network-v3.md).
++  RenderFrameHostImpl* const native_owner_frame =
++      frame_tree_node_->current_frame_host();
++  const reb::ScopedNativeFactoryOwner native_owner(
++      {native_owner_frame->GetProcess()->GetDeprecatedID(),
++       native_owner_frame->GetRoutingID()});
+   auto loader_factory = url_loader_factory::CreatePendingRemote(
+       ContentBrowserClient::URLLoaderFactoryType::kEarlyHints,
+       url_loader_factory::TerminalParams::ForNetworkContext(
+           process->GetStoragePartition()->GetNetworkContext(),
+-          std::move(url_loader_factory_params)));
++          std::move(url_loader_factory_params)),
++      url_loader_factory::ContentClientParams(
++          process->GetBrowserContext(), /*frame=*/nullptr,
++          process->GetDeprecatedID(), tentative_origin, isolation_info,
++          ukm::kInvalidSourceIdObj));
+ 
+   did_create_early_hints_manager_params_ = true;
+   return NavigationEarlyHintsManagerParams(

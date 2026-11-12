@@ -702,5 +702,105 @@ await check('stored reads wait for the bundled backend', async () => {
   live.close();
 });
 
+// Round 3 helpers: a section that hands back the view, and the holes in the
+// sequence of the rows the list holds (each record is the next sequence down).
+const probe = ui => {
+  let seen = null;
+  ui.context.RebDebuggerSidebar.addSection({id: 'probe', title: 'Probe', order: 90, render(body, view) { seen = view; body.textContent = 'probe'; }});
+  return () => seen;
+};
+const holes = view => {
+  const sequences = [...(view.observations.list?.records ?? view.observations.head)].map(record => Number(record.sequence_number));
+  return sequences.flatMap((sequence, index) => index && sequences[index - 1] - sequence !== 1 ? [`${sequences[index - 1]} to ${sequence}`] : []);
+};
+
+// Round 3, 1. Show older records continues exactly the rows it was asked
+// from, whether a read answers or the researcher returns to the top meanwhile.
+await check('a read answering during Show older leaves no hole', async () => {
+  const store = createStore(300);
+  let holding = false;
+  const ui = mount({store, hold: url => holding && url.includes('before=')});
+  const view = probe(ui);
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length > 0, 'rows');
+  holding = true;
+  click(ui, ui.sidebar.querySelector('.debugger-older'));
+  const older = () => ui.reads().find(entry => entry.url.includes('before=') && entry.release);
+  await until(() => older(), 'the older read, held');
+  holding = false;
+  store.add(60);
+  await until(() => view().observations.query.store_end === String(store.storeEnd()), 'a read answers meanwhile', 3 * POLL);
+  older().release();
+  await until(() => !view().observations.loadingOlder, 'the older page');
+  assert.deepEqual(holes(view()), [], 'no records are missing between the newest rows and the older page');
+  assert.equal(view().observations.list.records.length, 360 - 44, 'records 360 to 45');
+  ui.close();
+});
+
+await check('returning to the top during Show older leaves no hole', async () => {
+  const store = createStore(300);
+  let holding = false;
+  const ui = mount({store, hold: url => holding && url.includes('before=')});
+  const view = probe(ui);
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length > 0, 'rows');
+  const list = ui.sidebar.querySelector('#debugger-observations');
+  list.scrollTop = 44 * 20;
+  list.dispatchEvent(event(ui, 'scroll'));
+  store.add(40);
+  await until(() => view().observations.list?.records.length === 168, 'new records join the kept rows', 3 * POLL);
+  holding = true;
+  click(ui, ui.sidebar.querySelector('.debugger-older'));
+  const older = () => ui.reads().find(entry => entry.url.includes('before=') && entry.release);
+  await until(() => older(), 'the older read, held');
+  holding = false;
+  list.scrollTop = 0;
+  list.dispatchEvent(event(ui, 'scroll'));
+  await settle();
+  older().release();
+  await sleep(200);
+  assert.deepEqual(holes(view()), [], 'no records are missing');
+  ui.close();
+});
+
+// Round 3, 3. A selection carried into a Threads scope keeps its place.
+await check('a selection carried into a thread scope keeps its place', async () => {
+  const store = createStore(200);
+  const ui = mount({store});
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length > 0, 'rows');
+  const list = ui.sidebar.querySelector('#debugger-observations');
+  list.scrollTop = 44 * 110;
+  list.dispatchEvent(event(ui, 'scroll'));
+  click(ui, ui.rows('#debugger-observations').find(item => item.dataset.key === '1:42:81'));
+  await settle();
+  click(ui, ui.rows('#debugger-threads').find(item => item.dataset.key === 'F:1:42:200'));
+  await until(() => /in frame 200/.test(ui.text('.debugger-observation-notes')), 'the scoped read');
+  assert.equal(list.querySelector('[aria-selected="true"]')?.dataset.key, '1:42:81', 'the record stays selected in the scope');
+  store.add(10);
+  await until(() => Number(ui.rows('#debugger-observations')[0]?.getAttribute('aria-setsize')) === 138, 'the next read adds to the kept rows', 2 * POLL + 1500);
+  assert.equal(list.querySelector('[aria-selected="true"]')?.dataset.key, '1:42:81', 'the selection stays in the list');
+  assert.doesNotMatch(ui.text('.debugger-detail'), /no longer in the list/);
+  ui.close();
+});
+
+// Round 3, 5. Reopened with nothing selected, the list shows the newest records.
+await check('reopening shows the newest records, not kept ones', async () => {
+  const store = createStore(200);
+  const ui = mount({store});
+  ui.open();
+  await until(() => ui.rows('#debugger-observations').length > 0, 'rows');
+  click(ui, ui.rows('#debugger-observations')[0]);
+  await settle();
+  ui.close();
+  store.add(500);
+  const reads = ui.reads().length;
+  ui.open();
+  await until(() => ui.reads().length > reads && ui.rows('#debugger-observations')[0]?.dataset.key === '1:42:700', 'the newest records', 4000);
+  assert.equal(ui.sidebar.querySelector('.debugger-observation-pinned').hidden, true, 'no place is claimed as kept');
+  assert.equal(ui.sidebar.querySelector('#debugger-observations [aria-selected="true"]'), null);
+  ui.close();
+});
+
 console.log(`PASS debugger sidebar: ${results.length} cases with real timers (offline DOM model; no rendered layout claimed)`);
 for (const name of results) console.log(`  ${name}`);

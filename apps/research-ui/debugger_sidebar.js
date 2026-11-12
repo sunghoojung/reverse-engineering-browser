@@ -433,17 +433,19 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     // Once the researcher has a place (a selected row, or the list scrolled
     // from its top), the newest page becomes a kept list that later reads add
     // to; back at the top with nothing selected, the list follows the newest
-    // page again; followNewest returns whether the rows changed.
+    // page again; followNewest returns whether the rows changed, and with
+    // `any` (a pane drawn again, with no place in it) drops any kept list.
     holdObservations() {
       const observations = view.observations;
       if (observations.list || !observations.query || observations.key !== observationKey()) return;
       observations.list = {records: [...observations.head], top: BigInt(observations.query.store_end), bottom: observations.query.next_before ?? null,
         refused: 0, pinned: null, dropped: 0, query: observations.query, followed: true};
     },
-    followNewest() {
+    followNewest(any = false) {
       const list = view.observations.list;
-      if (!list?.followed || list.pinned || list.dropped) return false;
-      view.observations.list = null;
+      if (!list || (!any && (!list.followed || list.pinned || list.dropped))) return false;
+      // dropList also cancels a Show older read that would continue this list.
+      dropList();
       return true;
     },
     // The other sections registered as presenting the pausing debugger.
@@ -581,6 +583,13 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     const observations = view.observations, key = observations.key, list = observations.list;
     const before = list ? list.bottom : observations.query?.next_before ?? null;
     if (observations.loadingOlder || before === null || !visible()) return;
+    // Asking for older pages keeps the rows: without a kept list, a copy of
+    // the newest page becomes one now, so a read that answers meanwhile
+    // bridges into it and the older page continues exactly these rows.
+    const base = list ?? {records: [...observations.head], top: BigInt(observations.query.store_end), bottom: before, refused: 0, pinned: null, dropped: 0,
+      query: observations.query};
+    base.followed = false;
+    observations.list = base;
     const own = new AbortController();
     observations.olderController = own;
     observations.loadingOlder = true;
@@ -588,9 +597,11 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     try {
       const answer = await fetchDocument(query({before: String(before)}), own.signal);
       if (observations.key !== key || observations.olderController !== own) return;
+      // A list dropped or replaced while this read ran, or one that dropped
+      // its oldest rows, is not continued by this page.
+      if (observations.list !== base || base.bottom !== before) return;
       const records = valid(answer);
-      const target = observations.list ?? {records: [...observations.head], top: BigInt(observations.query.store_end), bottom: null, refused: 0, pinned: null, dropped: 0};
-      target.followed = false;
+      const target = base;
       target.records = debuggerUnique([...target.records, ...records]);
       target.refused += answer.observations_malformed + answer.observations.length - records.length;
       target.bottom = answer.observations_query.next_before ?? null;
@@ -1234,6 +1245,9 @@ function debuggerObservationsSection() {
     return `${count.toLocaleString('en-US')} ${kind}${scope}, newest first, from ${where}${why}${capped}. Enter opens a row's position in Sources, or its request in Traffic.`;
   }
   function build(view) {
+    // A pane drawn again (reopened or expanded) starts at its top with no
+    // selection, so it holds no place: no rows are kept from before.
+    if (!selected) view.followNewest(true);
     const root = debuggerNode('div', 'debugger-observations');
     const kinds = debuggerNode('div', 'debugger-kinds');
     kinds.setAttribute('role', 'group');
@@ -1324,6 +1338,8 @@ function debuggerObservationsSection() {
         const kept = items.find(item => item.key === selected.key);
         if (kept) selected = kept;
       }
+      // A selection or scroll carried into these rows (a Threads scope, say) holds them.
+      if (current && (selected || list.element.scrollTop > 0)) view.holdObservations();
       paintDetail(view);
     },
     release() {

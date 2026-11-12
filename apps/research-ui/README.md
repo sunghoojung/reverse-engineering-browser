@@ -359,9 +359,9 @@ rendered suite enforce:
 - While `view.document?.availability` is not `available`, and while
   `view.status` is not `ready`, every control in such a section is a form
   control (`button`, `input`, `select`, `textarea`) with `disabled` set.
-  `aria-disabled` does not count, and a `summary`, a link, a `role` of
-  button, option, checkbox or tab, a `tabindex` or an editable region cannot
-  be disabled, so none may appear then.
+  `aria-disabled` does not count, and a `summary`, a link, a `tabindex`, an
+  editable region or any element with a `role` other than `presentation` or
+  `none` cannot be disabled, so none may appear then.
 - `render` handles `view.document === null` (before the first read, and in a
   window without a backend).
 - Ids other than the built-in `threads`, `watch-rules`, `observations` and

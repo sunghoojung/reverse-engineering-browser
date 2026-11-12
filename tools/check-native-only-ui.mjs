@@ -132,8 +132,9 @@ const reachable = node => {
 };
 // Every element in a native pausing section a researcher could activate must
 // be a form control that is really disabled; aria-disabled leaves its handler
-// running, and a summary, a role or an editable region cannot be disabled.
-const pausingControls = 'button, input, select, textarea, a[href], summary, [tabindex], [role="button"], [role="option"], [role="checkbox"], [role="tab"], [contenteditable]:not([contenteditable="false"])';
+// running, and a summary, a link, an editable region or any element given a
+// role (other than presentation or none) cannot be disabled.
+const pausingControls = 'button, input, select, textarea, a[href], summary, [tabindex], [role]:not([role="presentation"]):not([role="none"]), [contenteditable]:not([contenteditable="false"])';
 const reallyDisabled = control => ['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(control.tagName) &&
   (control.disabled === true || Boolean(control.closest('fieldset[disabled]')));
 // Only the sidebar's registry writes the marker.
@@ -512,6 +513,8 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
     ['a nested summary', "const d = document.createElement('details'); const m = document.createElement('summary'); m.textContent = 'More'; d.append(m); body.append(d);", /stays disabled/],
     ['an editable region', "const d = document.createElement('div'); d.setAttribute('contenteditable', 'true'); body.append(d);", /stays disabled/],
     ['a tab', "const d = document.createElement('div'); d.setAttribute('role', 'tab'); body.append(d);", /stays disabled/],
+    ...['link', 'menuitem', 'switch', 'radio', 'treeitem'].map(role => [`a div with role ${role}`,
+      `const d = document.createElement('div'); d.setAttribute('role', '${role}'); d.textContent = 'Go'; d.addEventListener('click', () => {}); body.append(d);`, /stays disabled/]),
     ['another removed feature', "const b = document.createElement('button'); b.textContent = 'Import cookies'; b.disabled = true; body.append(b);", /implies a CDP control/]]) {
     runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Paused frames', order: 55, native: 'pausing', render(body) {
       body.textContent = 'from the registry'; ${make}

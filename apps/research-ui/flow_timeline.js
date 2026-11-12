@@ -31,11 +31,13 @@ function flowSeq(value) {
 const flowSeqOrder = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 /* Helpers the Flow workspace shares; flow_workspace.js loads after this file. */
-/** An element with a class and text; captured values only ever go in as text. */
-function flowElement(tag, className = '', text = '') {
+/** An element with a class, text and attributes; captured values only ever
+ * go in as text. */
+function flowElement(tag, className = '', text = '', attributes = {}) {
   const element = document.createElement(tag);
   if (className) element.className = className;
   if (text) element.textContent = text;
+  for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
   return element;
 }
 /** A button with a class, text and, when given, an accessible name. */
@@ -96,103 +98,101 @@ function flowGapMeaning(reason) {
  * object; without one they are counted as undecoded and draw nothing, so a
  * backend that does not decode them still shows the Wasm-only tracks. */
 function flowTimelineModel(events) {
-  const counts = {records: 0, starts: 0, settles: 0, requests: 0, samples: 0, outside: 0, invalid: 0, undecoded: 0, duplicates: 0, conflicts: 0, gaps: 0, overflow: 0};
-  const processes = new Map(), seen = new Set();
-  let decoded = false;
-  const processOf = id => {
-    if (!processes.has(id)) processes.set(id, {process: id, tracks: new Map(), outside: [], requests: [], gaps: [], overflow: []});
-    return processes.get(id);
-  };
-  const trackOf = (owner, invocation) => {
-    let track = owner.tracks.get(invocation);
-    if (!track) {
-      track = {key: `${owner.process}:${invocation}`, process: owner.process, invocation, slot: null, start: null, settle: null, samples: [], requests: []};
-      owner.tracks.set(invocation, track);
-    }
-    return track;
-  };
-  for (const event of Array.isArray(events) ? events : []) {
-    if (!event || typeof event !== 'object' || !FLOW_TIMELINE_TYPES.includes(event.type)) continue;
+  const model = {counts: {records: 0, starts: 0, settles: 0, requests: 0, samples: 0, outside: 0, invalid: 0, undecoded: 0, duplicates: 0, conflicts: 0, gaps: 0, overflow: 0}, decoded: false};
+  const processes = new Map(), seen = new Set(), counts = model.counts;
+  for (const event of events) {
+    if (!isPlainObject(event) || !FLOW_TIMELINE_TYPES.includes(event.type)) continue;
     const seq = flowSeq(event.sequence_number), process = event.process_id;
     if (seq === null || !Number.isSafeInteger(process) || process < 0) { counts.invalid += 1; continue; }
-    const key = `${process}:${seq}`;
-    if (seen.has(key)) { counts.duplicates += 1; continue; }
-    seen.add(key); counts.records += 1;
-    const owner = processOf(process);
-    if (event.type === 'gap') {
-      // A payload naming a producer reason is a named gap; any other marker
-      // is a queue drop weighing its decimal count, else one record
-      // (protocol/http-api.md).
-      if (typeof event.payload !== 'string') { counts.invalid += 1; continue; }
-      counts.gaps += 1;
-      owner.gaps.push({key, seq, process, reason: namedGapOf(event)?.reason ?? null, weight: countReportedQueueDrops([event])});
-      continue;
-    }
-    if (event.type === 'wasm_dispatch_overflow' || event.type === 'wasm_indirect_overflow') {
-      // An execution a budget refused, not an observation: it names no module
-      // and no call, so it only says which sites ran more than was sampled.
-      const row = event.wasm_overflow, kind = event.type === 'wasm_dispatch_overflow' ? 'br_table' : 'call_indirect';
-      if (row !== undefined && (!row || row.status !== 'decoded')) { counts.invalid += 1; continue; }
-      const entry = !row ? {key, seq, process, kind, undecoded: true}
-        : row.kind === 'omitted' && Number.isSafeInteger(row.omitted_count) && row.omitted_count > 0 ? {key, seq, process, kind, omitted: row.omitted_count}
-          : row.kind === 'identity' && Number.isSafeInteger(row.function_index) && Number.isSafeInteger(row.module_byte_offset) ? {key, seq, process, kind, function_index: row.function_index, offset: row.module_byte_offset}
-            : null;
-      if (!entry) { counts.invalid += 1; continue; }
-      counts.overflow += 1;
-      owner.overflow.push(entry);
-      continue;
-    }
-    if (event.type.startsWith('wasm_')) {
-      const row = event.wasm_observation;
-      if (!row || row.status !== 'decoded' || !Number.isSafeInteger(row.function_index) || !Number.isSafeInteger(row.module_byte_offset)) { counts.invalid += 1; continue; }
-      const inside = row.js_invocation_state === 2 && Number.isSafeInteger(row.js_invocation_id) && row.js_invocation_id > 0;
-      const sample = {key, seq, process, kind: event.type === 'wasm_dispatch_observation' ? 'br_table' : 'call_indirect',
-        artifact_id: String(event.artifact_id ?? '0'), function_index: row.function_index, offset: row.module_byte_offset,
-        selector: Number.isSafeInteger(row.selector) ? row.selector : null, tableCount: Number.isSafeInteger(row.table_count) ? row.table_count : null,
-        sampleIndex: Number.isSafeInteger(row.sample_index) ? row.sample_index : null, state: Number.isSafeInteger(row.js_invocation_state) ? row.js_invocation_state : 0,
-        invocation: inside ? String(row.js_invocation_id) : null, callee: Number.isSafeInteger(row.callee_function_index) ? row.callee_function_index : null,
-        resolution: typeof row.resolution === 'string' ? row.resolution : null};
-      counts.samples += 1;
-      if (inside) trackOf(owner, sample.invocation).samples.push(sample);
-      else { owner.outside.push(sample); counts.outside += 1; }
-      continue;
-    }
-    const js = event.js_invocation;
-    if (!js || typeof js !== 'object') { counts.undecoded += 1; continue; }
-    decoded = true;
-    if (js.status !== 'decoded') { counts.invalid += 1; continue; }
-    const kind = event.type.slice('js_invocation_'.length);
-    const invocation = js.invocation_id === null || js.invocation_id === undefined || String(js.invocation_id) === '0' ? null : String(js.invocation_id);
-    if (kind === 'request') {
-      const entry = {key, seq, process, request: String(js.request_id), invocation: js.inside === true ? invocation : null};
-      counts.requests += 1;
-      owner.requests.push(entry);
-      if (entry.invocation) trackOf(owner, entry.invocation).requests.push(entry);
-      continue;
-    }
-    if (!invocation) { counts.invalid += 1; continue; }
-    const track = trackOf(owner, invocation);
-    if (Number.isSafeInteger(js.site_slot)) track.slot ??= js.site_slot;
-    if (kind === 'start') {
-      if (track.start) { counts.conflicts += 1; continue; }
-      counts.starts += 1;
-      track.start = {key, seq, parent: js.parent_invocation_id ? String(js.parent_invocation_id) : null, parentUnknown: js.parent_unknown === true,
-        argumentCount: Number.isSafeInteger(js.argument_count) ? js.argument_count : null,
-        site: typeof js.source_sha256 === 'string' && Number.isSafeInteger(js.anchor_offset) ? {sha256: js.source_sha256, anchor: js.anchor_offset} : null};
-    } else {
-      if (track.settle) { counts.conflicts += 1; continue; }
-      counts.settles += 1;
-      track.settle = {key, seq, fulfilled: js.fulfilled !== false,
-        valueKind: typeof js.value_kind === 'string' ? js.value_kind : '',
-        valueLength: Number.isSafeInteger(js.value_length) ? js.value_length : null, via: typeof js.via === 'string' ? js.via : null};
-    }
+    const record = {key: `${process}:${seq}`, seq, process};
+    if (seen.has(record.key)) { counts.duplicates += 1; continue; }
+    seen.add(record.key);
+    counts.records += 1;
+    if (!processes.has(process)) processes.set(process, {process, tracks: new Map(), outside: [], requests: [], gaps: [], overflow: []});
+    const owner = processes.get(process);
+    if (event.type === 'gap') flowReadGap(event, record, owner, counts);
+    else if (event.type.endsWith('_overflow')) flowReadOverflow(event, record, owner, counts);
+    else if (event.type.startsWith('wasm_')) flowReadSample(event, record, owner, counts);
+    else flowReadInvocation(event, record, owner, model);
   }
   const list = [...processes.values()].map(flowTimelineProcess);
   // The busiest renderer first: calls, then samples and requests; a process
   // that holds only gap markers comes last but is still listed.
   const items = view => view.outside.length + view.requests.length + view.tracks.reduce((sum, track) => sum + track.samples.length, 0);
   list.sort((a, b) => b.tracks.length - a.tracks.length || items(b) - items(a) || a.process - b.process);
-  return {processes: list, counts, decoded};
+  return {processes: list, counts, decoded: model.decoded};
+}
+/** The track of one invocation in a process, made on first use. */
+function flowTrackOf(owner, invocation) {
+  if (!owner.tracks.has(invocation)) owner.tracks.set(invocation, {key: `${owner.process}:${invocation}`, process: owner.process, invocation, slot: null, start: null, settle: null, samples: [], requests: []});
+  return owner.tracks.get(invocation);
+}
+/** A `gap` marker: a payload naming a producer reason is a named gap; any
+ * other marker is a queue drop weighing its decimal count, else one record
+ * (protocol/http-api.md). */
+function flowReadGap(event, record, owner, counts) {
+  if (typeof event.payload !== 'string') { counts.invalid += 1; return; }
+  counts.gaps += 1;
+  owner.gaps.push({...record, reason: namedGapOf(event)?.reason ?? null, weight: countReportedQueueDrops([event])});
+}
+/** An execution a budget refused, not an observation: it names no module
+ * and no call, so it only says which sites ran more than was sampled. */
+function flowReadOverflow(event, record, owner, counts) {
+  const row = event.wasm_overflow, kind = event.type === 'wasm_dispatch_overflow' ? 'br_table' : 'call_indirect';
+  if (row !== undefined && row?.status !== 'decoded') { counts.invalid += 1; return; }
+  let entry = null;
+  if (!row) entry = {...record, kind, undecoded: true};
+  else if (row.kind === 'omitted' && Number.isSafeInteger(row.omitted_count) && row.omitted_count > 0) entry = {...record, kind, omitted: row.omitted_count};
+  else if (row.kind === 'identity' && Number.isSafeInteger(row.function_index) && Number.isSafeInteger(row.module_byte_offset)) entry = {...record, kind, function_index: row.function_index, offset: row.module_byte_offset};
+  if (!entry) { counts.invalid += 1; return; }
+  counts.overflow += 1;
+  owner.overflow.push(entry);
+}
+/** A br_table or call_indirect sample; it joins a track only by the
+ * invocation ID it carries while inside one (state 2). */
+function flowReadSample(event, record, owner, counts) {
+  const row = event.wasm_observation;
+  if (row?.status !== 'decoded' || !Number.isSafeInteger(row.function_index) || !Number.isSafeInteger(row.module_byte_offset)) { counts.invalid += 1; return; }
+  const inside = row.js_invocation_state === 2 && Number.isSafeInteger(row.js_invocation_id) && row.js_invocation_id > 0;
+  const integer = value => (Number.isSafeInteger(value) ? value : null);
+  const sample = {...record, kind: event.type === 'wasm_dispatch_observation' ? 'br_table' : 'call_indirect',
+    artifact_id: String(event.artifact_id ?? '0'), function_index: row.function_index, offset: row.module_byte_offset,
+    selector: integer(row.selector), tableCount: integer(row.table_count), sampleIndex: integer(row.sample_index), state: integer(row.js_invocation_state) ?? 0,
+    invocation: inside ? String(row.js_invocation_id) : null, callee: integer(row.callee_function_index), resolution: typeof row.resolution === 'string' ? row.resolution : null};
+  counts.samples += 1;
+  if (inside) flowTrackOf(owner, sample.invocation).samples.push(sample);
+  else { owner.outside.push(sample); counts.outside += 1; }
+}
+/** An invocation start, settle or request, by the backend's decoded
+ * `js_invocation` object; without one it is counted as undecoded. */
+function flowReadInvocation(event, record, owner, model) {
+  const {counts} = model, js = event.js_invocation;
+  if (!isPlainObject(js)) { counts.undecoded += 1; return; }
+  model.decoded = true;
+  if (js.status !== 'decoded') { counts.invalid += 1; return; }
+  const kind = event.type.slice('js_invocation_'.length);
+  const invocation = js.invocation_id === null || js.invocation_id === undefined || String(js.invocation_id) === '0' ? null : String(js.invocation_id);
+  if (kind === 'request') {
+    const entry = {...record, request: String(js.request_id), invocation: js.inside === true ? invocation : null};
+    counts.requests += 1;
+    owner.requests.push(entry);
+    if (entry.invocation) flowTrackOf(owner, entry.invocation).requests.push(entry);
+    return;
+  }
+  if (!invocation) { counts.invalid += 1; return; }
+  const track = flowTrackOf(owner, invocation);
+  if (Number.isSafeInteger(js.site_slot)) track.slot ??= js.site_slot;
+  if (track[kind]) { counts.conflicts += 1; return; }
+  if (kind === 'start') {
+    counts.starts += 1;
+    track.start = {key: record.key, seq: record.seq, parent: js.parent_invocation_id ? String(js.parent_invocation_id) : null, parentUnknown: js.parent_unknown === true,
+      argumentCount: Number.isSafeInteger(js.argument_count) ? js.argument_count : null,
+      site: typeof js.source_sha256 === 'string' && Number.isSafeInteger(js.anchor_offset) ? {sha256: js.source_sha256, anchor: js.anchor_offset} : null};
+  } else {
+    counts.settles += 1;
+    track.settle = {key: record.key, seq: record.seq, fulfilled: js.fulfilled !== false, valueKind: typeof js.value_kind === 'string' ? js.value_kind : '',
+      valueLength: Number.isSafeInteger(js.value_length) ? js.value_length : null, via: typeof js.via === 'string' ? js.via : null};
+  }
 }
 
 /** One process's refusals and losses, each counted: named gap reasons, queue
@@ -394,31 +394,39 @@ async function flowTimelinePage(url, signal) {
 function createFlowTimeline({root, onSelect, onFollow, onPartial, describeRequest}) {
   const limits = FLOW_TIMELINE_LIMITS;
   root.classList.add('flow-timeline');
-  const banner = flowElement('div', 'flow-tl-banner'); banner.hidden = true; banner.setAttribute('role', 'status');
+  // The read banner: partial reads, bounds, refresh failures and Read more.
+  const banner = flowElement('div', 'flow-tl-banner', '', {role: 'status', hidden: ''});
   const bannerText = flowElement('span', 'flow-tl-banner-text');
-  const bannerAction = flowButton('secondary-button flow-tl-banner-action'); bannerAction.hidden = true;
+  const bannerAction = flowButton('secondary-button flow-tl-banner-action');
+  bannerAction.hidden = true;
   banner.append(bannerText, bannerAction);
   // Refusals and losses stay stated apart from the read banner, so a refresh
-  // notice never replaces them.
-  const gapNotice = flowElement('p', 'flow-tl-gaps'); gapNotice.hidden = true; gapNotice.setAttribute('role', 'note');
-  // A long notice scrolls, so it takes a tab stop of its own.
-  gapNotice.tabIndex = 0;
-  const state = flowElement('div', 'flow-tl-state'); state.setAttribute('role', 'status'); state.setAttribute('aria-live', 'polite');
-  const stateTitle = flowElement('strong', '', ''), stateText = flowElement('p', '', '');
-  const stateRetry = flowButton('secondary-button', 'Retry'); stateRetry.hidden = true;
+  // notice never replaces them. A long notice scrolls, so it takes a tab stop.
+  const gapNotice = flowElement('p', 'flow-tl-gaps', '', {role: 'note', tabindex: '0', hidden: ''});
+  // Loading, empty and failed reads.
+  const state = flowElement('div', 'flow-tl-state', '', {role: 'status', 'aria-live': 'polite'});
+  const stateTitle = flowElement('strong'), stateText = flowElement('p');
+  const stateRetry = flowButton('secondary-button', 'Retry');
+  stateRetry.hidden = true;
   state.append(stateTitle, stateText, stateRetry);
   const scroll = flowElement('div', 'flow-tl-scroll');
-  const canvas = flowElement('div', 'flow-tl-canvas'); canvas.setAttribute('role', 'group'); canvas.setAttribute('aria-label', 'Tracked calls in record order');
+  const canvas = flowElement('div', 'flow-tl-canvas', '', {role: 'group', 'aria-label': 'Tracked calls in record order'});
   scroll.append(canvas);
-  const detail = flowElement('div', 'flow-tl-detail'); detail.setAttribute('aria-live', 'polite');
-  const detailText = flowElement('span', 'flow-tl-detail-text', '');
-  const detailFollow = flowButton('secondary-button flow-tl-follow', 'Open in CFG'); detailFollow.hidden = true;
+  // The detail line: what is selected, and Open in CFG for a sample.
+  const detail = flowElement('div', 'flow-tl-detail', '', {'aria-live': 'polite'});
+  const detailText = flowElement('span', 'flow-tl-detail-text');
+  const detailFollow = flowButton('secondary-button flow-tl-follow', 'Open in CFG');
+  detailFollow.hidden = true;
   detail.append(detailText, detailFollow);
   root.append(banner, gapNotice, state, scroll, detail);
-  const processSelect = flowElement('select', 'flow-tl-process'); processSelect.setAttribute('aria-label', 'Renderer process'); processSelect.hidden = true;
+  // The renderer picker, which the workspace puts in the pane head.
+  const processSelect = flowElement('select', 'flow-tl-process', '', {'aria-label': 'Renderer process', hidden: ''});
 
-  let session = null, events = [], model = null, view = null, cursor = '0', partial = false, status = 'idle', error = null;
-  let generation = 0, controller = null, loadedAt = 0, chosenProcess = null, selected = null, items = new Map();
+  // The read: its session, records, cursor and state.
+  let session = null, events = [], cursor = '0', partial = false, status = 'idle', error = null;
+  let generation = 0, controller = null, loadedAt = 0;
+  // What is drawn: the model, the shown renderer, the selection and the items.
+  let model = null, view = null, chosenProcess = null, selected = null, items = new Map();
   // Gap counters of the pages read. They describe the byte range each page
   // scanned, every session and record type in it, not this session alone.
   const noScan = () => ({sequence: 0n, sequenceSaturated: false, drops: 0n, dropsSaturated: false});
@@ -428,11 +436,15 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
     status = kind;
     root.dataset.state = kind;
     state.hidden = kind === 'ready';
-    stateTitle.textContent = title; stateText.textContent = text; stateRetry.hidden = !retry;
+    stateTitle.textContent = title;
+    stateText.textContent = text;
+    stateRetry.hidden = !retry;
   }
   function setBanner(text, action = null, handler = null) {
-    banner.hidden = !text; bannerText.textContent = text || '';
-    bannerAction.hidden = !action; bannerAction.textContent = action || '';
+    banner.hidden = !text;
+    bannerText.textContent = text || '';
+    bannerAction.hidden = !action;
+    bannerAction.textContent = action || '';
     bannerAction.onclick = handler;
   }
   stateRetry.addEventListener('click', () => load(session));
@@ -473,7 +485,12 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
       }
       const unchanged = collected.length === events.length && partial === !done && scanned.sequence === scan.sequence && scanned.drops === scan.drops
         && scanned.sequenceSaturated === scan.sequenceSaturated && scanned.dropsSaturated === scan.dropsSaturated;
-      events = collected; cursor = after; partial = !done; error = null; loadedAt = Date.now(); scan = scanned;
+      events = collected;
+      cursor = after;
+      partial = !done;
+      error = null;
+      loadedAt = Date.now();
+      scan = scanned;
       if (more && quiet && unchanged) return;
       model = flowTimelineModel(events);
       render();
@@ -489,9 +506,16 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
   }
   function reset() {
     controller?.abort(); controller = null; generation += 1;
-    events = []; model = null; view = null; cursor = '0'; partial = false; loadedAt = 0; chosenProcess = null; selected = null; items = new Map(); scan = noScan();
-    canvas.replaceChildren(); detailText.textContent = ''; detailFollow.hidden = true; setBanner(''); gapNotice.textContent = ''; gapNotice.hidden = true;
-    processSelect.replaceChildren(); processSelect.hidden = true;
+    events = []; cursor = '0'; partial = false; loadedAt = 0; scan = noScan();
+    model = null; view = null; chosenProcess = null; selected = null; items = new Map();
+    canvas.replaceChildren();
+    detailText.textContent = '';
+    detailFollow.hidden = true;
+    setBanner('');
+    gapNotice.textContent = '';
+    gapNotice.hidden = true;
+    processSelect.replaceChildren();
+    processSelect.hidden = true;
   }
 
   function currentProcess() {
@@ -555,129 +579,174 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
 
   // Geometry, in CSS pixels. The label column stays put while the tracks scroll.
   const G = {label: 152, axis: 26, track: 50, lane: 42, left: 24, right: 48, chip: 188};
+  /** Places an element at a left offset, and optionally a top and a width. */
+  function place(element, left, top = null, width = null) {
+    element.style.left = `${left}px`;
+    if (top !== null) element.style.top = `${top}px`;
+    if (width !== null) element.style.width = `${width}px`;
+    return element;
+  }
+  /** A drawn item: one stop of the timeline's keyboard model. */
+  function item(element, key, seq) {
+    element.dataset.key = key;
+    element.dataset.seq = String(seq);
+    element.tabIndex = -1;
+    items.set(key, element);
+    return element;
+  }
   function draw() {
-    const seqs = [];
-    for (const track of view.drawn) {
-      for (const seq of [track.start?.seq, track.settle?.seq]) if (seq !== undefined) seqs.push(seq);
-      for (const sample of track.drawnSamples) seqs.push(sample.seq);
-      for (const request of track.requests) seqs.push(request.seq);
-    }
-    for (const sample of view.drawnOutside) seqs.push(sample.seq);
-    for (const request of view.drawnRequests) seqs.push(request.seq);
-    for (const gap of view.drawnGaps) seqs.push(gap.seq);
-    const axis = flowTimelineAxis(seqs);
+    const axis = flowTimelineAxis(drawnSeqs());
     const X = seq => G.label + G.left + axis.x(seq);
-    const rows = [...(view.drawnGaps.length ? [{type: 'gaps'}] : []), ...view.drawn.map(track => ({type: 'track', track})), ...(view.drawnOutside.length ? [{type: 'outside'}] : []), ...(view.drawnRequests.length ? [{type: 'requests'}] : [])];
-    let top = G.axis;
-    const nodes = [];
-    items = new Map();
     const width = G.label + G.left + axis.width + G.right;
-    // Axis: tick labels at record positions, and a mark where records were compressed.
-    const axisRow = flowElement('div', 'flow-tl-axis'); axisRow.style.width = `${width}px`;
-    for (const tick of axis.ticks) {
-      const label = flowElement('span', 'flow-tl-tick', tick.seq.toLocaleString('en-US')); label.style.left = `${X(tick.seq)}px`; axisRow.append(label);
-      const rule = flowElement('span', 'flow-tl-rule'); rule.style.left = `${X(tick.seq)}px`; nodes.push(rule);
-    }
-    for (const item of axis.breaks) {
-      const mark = flowElement('span', 'flow-tl-break', '≈'); mark.style.left = `${G.label + G.left + item.x}px`;
-      // The skipped numbers are not all records: some may never have been stored.
-      mark.title = `${item.skipped.toLocaleString('en-US')} sequence ${flowPlural(item.skipped, 'number')} between ${item.after.toLocaleString('en-US')} and ${item.before.toLocaleString('en-US')} hold no record drawn here: records of other types, or numbers with no stored record; this read cannot tell which`;
-      axisRow.append(mark);
-    }
-    nodes.push(axisRow);
-    // Request chips that would overlap stack in levels; a fourth level is not
-    // drawn but counted, so the lane stays readable.
-    const chipLevels = new Map();
-    let levels = 1, crowded = 0;
-    {
-      const ends = [];
-      for (const request of view.drawnRequests) {
-        const x = X(request.seq);
-        let level = ends.findIndex(end => end <= x);
-        if (level < 0) level = ends.length;
-        if (level >= 3) { crowded += 1; continue; }
-        ends[level] = x + G.chip + 6; chipLevels.set(request.key, level);
-        levels = Math.max(levels, level + 1);
-      }
-    }
+    items = new Map();
+    const {axisRow, rules} = drawAxis(axis, X, width);
+    const chips = stackChips(X);
+    const rows = [...(view.drawnGaps.length ? [{type: 'gaps'}] : []), ...view.drawn.map(track => ({type: 'track', track})),
+      ...(view.drawnOutside.length ? [{type: 'outside'}] : []), ...(view.drawnRequests.length ? [{type: 'requests'}] : [])];
+    const heights = {track: G.track, gaps: 30, outside: G.lane, requests: 10 + chips.levels * 32};
+    const nodes = [...rules, axisRow];
+    let top = G.axis;
     for (const row of rows) {
-      const height = row.type === 'track' ? G.track : row.type === 'requests' ? 10 + levels * 32 : row.type === 'gaps' ? 30 : G.lane;
-      const line = flowElement('div', `flow-tl-row flow-tl-row-${row.type}`); line.style.top = `${top}px`; line.style.height = `${height}px`; line.style.width = `${width}px`;
-      const labelCell = flowElement('div', 'flow-tl-label');
-      if (row.type === 'track') {
-        const {track} = row;
-        line.dataset.track = track.key;
-        const name = flowButton('flow-tl-call', flowTrackName(track)); name.dataset.key = `call:${track.key}`; name.dataset.seq = String(track.first); name.tabIndex = -1;
-        name.setAttribute('aria-label', `${flowTrackName(track)}, ${flowTrackOutcome(track)}, ${track.samples.length} samples, ${track.requests.length} requests`);
-        name.addEventListener('click', () => choose({type: 'call', key: `call:${track.key}`}));
-        items.set(`call:${track.key}`, name);
-        const outcome = flowElement('span', 'flow-tl-meta', flowTrackOutcome(track)); outcome.title = flowTrackOutcome(track);
-        labelCell.append(name, outcome);
-        const mid = height / 2;
-        const from = track.start?.seq ?? track.first, to = track.settle?.seq ?? track.last;
-        const open = flowElement('span', `flow-tl-open${track.start ? '' : ' flow-tl-open-uncut'}${track.settle ? '' : ' flow-tl-open-unsettled'}`);
-        open.style.left = `${X(from)}px`; open.style.width = `${Math.max(2, X(to) - X(from))}px`; open.style.top = `${mid - 1}px`;
-        open.title = track.start && track.settle ? 'Open from its start record to its settle record' : flowTrackOutcome(track);
-        line.append(open);
-        if (track.start && track.settle && FLOW_SYNC_VIA.has(track.settle.via)) {
-          const run = flowElement('span', 'flow-tl-run'); run.style.left = `${X(track.start.seq)}px`; run.style.width = `${Math.max(4, X(track.settle.seq) - X(track.start.seq))}px`; run.style.top = `${mid - 5}px`;
-          // Records between start and settle are made while the call ran (the
-          // samples and requests on this track among them), so the span is
-          // not "nothing else happened".
-          run.title = 'Settled synchronously: it returned or threw without a promise, so it ran without yielding from its start record to its settle record. Samples and requests on this track were recorded inside it; other records in that range can come from other threads.';
-          line.append(run);
-        }
-        if (track.start) { const mark = flowElement('span', 'flow-tl-start'); mark.style.left = `${X(track.start.seq)}px`; mark.style.top = `${mid - 12}px`; mark.title = `start · sequence ${track.start.seq.toLocaleString('en-US')}${track.start.argumentCount !== null ? ` · ${track.start.argumentCount} arguments` : ''}`; line.append(mark); }
-        if (track.settle) { const mark = flowElement('span', `flow-tl-settle${track.settle.fulfilled ? '' : ' flow-tl-rejected'}`); mark.style.left = `${X(track.settle.seq)}px`; mark.style.top = `${mid - 12}px`; mark.title = `${flowTrackOutcome(track)} · sequence ${track.settle.seq.toLocaleString('en-US')}`; line.append(mark); }
-        for (const request of track.requests) { const mark = flowElement('span', 'flow-tl-request-mark'); mark.style.left = `${X(request.seq)}px`; mark.style.top = `${mid + 6}px`; mark.title = `request #${request.request} started inside this call`; line.append(mark); }
-        for (const sample of track.drawnSamples) line.append(sampleButton(sample, X, mid));
-        if (track.drawnSamples.length < track.samples.length) {
-          const more = flowElement('span', 'flow-tl-more', `+${track.samples.length - track.drawnSamples.length} not drawn`);
-          more.style.left = `${X(track.last) + 12}px`; more.style.top = `${mid - 8}px`; line.append(more);
-        }
-      } else if (row.type === 'gaps') {
-        labelCell.append(flowElement('span', 'flow-tl-lane-name', 'Gaps'), flowElement('span', 'flow-tl-meta', `${view.gaps.records} refused or lost${view.hidden.gaps ? `, ${view.hidden.gaps} not drawn` : ''}`));
-        for (const gap of view.drawnGaps) {
-          const mark = flowElement('span', 'flow-tl-gap'); mark.style.left = `${X(gap.seq)}px`; mark.style.top = `${height / 2 - 9}px`;
-          mark.title = `${flowGapMarkText(gap)} · sequence ${gap.seq.toLocaleString('en-US')}`;
-          line.append(mark);
-        }
-      } else if (row.type === 'outside') {
-        labelCell.append(flowElement('span', 'flow-tl-lane-name', 'Not in a tracked call'), flowElement('span', 'flow-tl-meta', 'no call, or call unknown'));
-        for (const sample of view.drawnOutside) line.append(sampleButton(sample, X, height / 2));
-      } else {
-        labelCell.append(flowElement('span', 'flow-tl-lane-name', 'Requests'), flowElement('span', 'flow-tl-meta', crowded ? `${crowded} more overlap, not drawn` : `issued in renderer ${view.process}`));
-        for (const request of view.drawnRequests) {
-          if (!chipLevels.has(request.key)) continue;
-          const known = describeRequest(view.process, request.request);
-          const chip = flowButton(`flow-tl-chip${request.invocation ? '' : ' flow-tl-chip-unknown'}`); chip.tabIndex = -1;
-          chip.dataset.key = `request:${request.key}`; chip.dataset.seq = String(request.seq);
-          chip.append(flowElement('span', 'flow-tl-chip-name', known?.label ?? `request #${request.request}`), flowElement('span', 'flow-tl-chip-meta', request.invocation ? `in #${request.invocation}` : 'call unknown'));
-          chip.style.left = `${X(request.seq)}px`; chip.style.top = `${6 + chipLevels.get(request.key) * 32}px`; chip.style.width = `${G.chip}px`;
-          chip.setAttribute('aria-label', `${known?.label ?? `Renderer request ${request.request}`}, ${request.invocation ? `started inside call #${request.invocation}` : 'started while a call was open, which one is unknown'}, sequence ${request.seq.toLocaleString('en-US')}`);
-          chip.addEventListener('click', () => choose({type: 'request', key: `request:${request.key}`}));
-          items.set(`request:${request.key}`, chip);
-          line.append(chip);
-        }
-      }
-      line.prepend(labelCell);
+      const height = heights[row.type];
+      const line = flowElement('div', `flow-tl-row flow-tl-row-${row.type}`);
+      line.style.top = `${top}px`;
+      line.style.height = `${height}px`;
+      line.style.width = `${width}px`;
+      const label = flowElement('div', 'flow-tl-label');
+      if (row.type === 'track') drawTrack(line, label, row.track, X, height / 2);
+      else if (row.type === 'gaps') drawGaps(line, label, X, height / 2);
+      else if (row.type === 'outside') drawOutside(line, label, X, height / 2);
+      else drawRequests(line, label, X, chips);
+      line.prepend(label);
       nodes.push(line);
       top += height;
     }
-    canvas.style.width = `${width}px`; canvas.style.height = `${top + 8}px`;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${top + 8}px`;
     canvas.replaceChildren(...nodes);
     // The one tab stop is set by paintSelection, which always follows.
   }
+  /** The sequence of everything drawn, for the record-order axis. */
+  function drawnSeqs() {
+    const seqs = [];
+    for (const track of view.drawn) {
+      if (track.start) seqs.push(track.start.seq);
+      if (track.settle) seqs.push(track.settle.seq);
+      for (const sample of track.drawnSamples) seqs.push(sample.seq);
+      for (const request of track.requests) seqs.push(request.seq);
+    }
+    for (const entry of [...view.drawnOutside, ...view.drawnRequests, ...view.drawnGaps]) seqs.push(entry.seq);
+    return seqs;
+  }
+  /** Tick labels at record positions with their rules, and a mark where
+   * records were compressed. */
+  function drawAxis(axis, X, width) {
+    const axisRow = flowElement('div', 'flow-tl-axis');
+    axisRow.style.width = `${width}px`;
+    const rules = [];
+    for (const tick of axis.ticks) {
+      axisRow.append(place(flowElement('span', 'flow-tl-tick', tick.seq.toLocaleString('en-US')), X(tick.seq)));
+      rules.push(place(flowElement('span', 'flow-tl-rule'), X(tick.seq)));
+    }
+    for (const gap of axis.breaks) {
+      const mark = place(flowElement('span', 'flow-tl-break', '≈'), G.label + G.left + gap.x);
+      // The skipped numbers are not all records: some may never have been stored.
+      mark.title = `${gap.skipped.toLocaleString('en-US')} sequence ${flowPlural(gap.skipped, 'number')} between ${gap.after.toLocaleString('en-US')} and ${gap.before.toLocaleString('en-US')} hold no record drawn here: records of other types, or numbers with no stored record; this read cannot tell which`;
+      axisRow.append(mark);
+    }
+    return {axisRow, rules};
+  }
+  /** Request chips that would overlap stack in levels; a chip past the third
+   * level is not drawn but counted, so the lane stays readable. */
+  function stackChips(X) {
+    const level = new Map(), ends = [];
+    let crowded = 0;
+    for (const request of view.drawnRequests) {
+      const x = X(request.seq);
+      let at = ends.findIndex(end => end <= x);
+      if (at < 0) at = ends.length;
+      if (at >= 3) { crowded += 1; continue; }
+      ends[at] = x + G.chip + 6;
+      level.set(request.key, at);
+    }
+    return {level, crowded, levels: Math.max(1, ends.length)};
+  }
+  /** One tracked call: its name and outcome, the open span, a running span
+   * for a synchronous settle, its start, settle and request marks, and its samples. */
+  function drawTrack(line, label, track, X, mid) {
+    line.dataset.track = track.key;
+    const name = item(flowButton('flow-tl-call', flowTrackName(track)), `call:${track.key}`, track.first);
+    name.setAttribute('aria-label', `${flowTrackName(track)}, ${flowTrackOutcome(track)}, ${track.samples.length} samples, ${track.requests.length} requests`);
+    name.addEventListener('click', () => choose({type: 'call', key: `call:${track.key}`}));
+    const outcome = flowElement('span', 'flow-tl-meta', flowTrackOutcome(track));
+    outcome.title = flowTrackOutcome(track);
+    label.append(name, outcome);
+    const from = track.start?.seq ?? track.first, to = track.settle?.seq ?? track.last;
+    const open = place(flowElement('span', `flow-tl-open${track.start ? '' : ' flow-tl-open-uncut'}${track.settle ? '' : ' flow-tl-open-unsettled'}`), X(from), mid - 1, Math.max(2, X(to) - X(from)));
+    open.title = track.start && track.settle ? 'Open from its start record to its settle record' : flowTrackOutcome(track);
+    line.append(open);
+    if (track.start && track.settle && FLOW_SYNC_VIA.has(track.settle.via)) {
+      const run = place(flowElement('span', 'flow-tl-run'), X(track.start.seq), mid - 5, Math.max(4, X(track.settle.seq) - X(track.start.seq)));
+      // Records between start and settle are made while the call ran (the
+      // samples and requests on this track among them), so the span is not
+      // "nothing else happened".
+      run.title = 'Settled synchronously: it returned or threw without a promise, so it ran without yielding from its start record to its settle record. Samples and requests on this track were recorded inside it; other records in that range can come from other threads.';
+      line.append(run);
+    }
+    if (track.start) {
+      const mark = place(flowElement('span', 'flow-tl-start'), X(track.start.seq), mid - 12);
+      mark.title = `start · sequence ${track.start.seq.toLocaleString('en-US')}${track.start.argumentCount !== null ? ` · ${track.start.argumentCount} arguments` : ''}`;
+      line.append(mark);
+    }
+    if (track.settle) {
+      const mark = place(flowElement('span', `flow-tl-settle${track.settle.fulfilled ? '' : ' flow-tl-rejected'}`), X(track.settle.seq), mid - 12);
+      mark.title = `${flowTrackOutcome(track)} · sequence ${track.settle.seq.toLocaleString('en-US')}`;
+      line.append(mark);
+    }
+    for (const request of track.requests) {
+      const mark = place(flowElement('span', 'flow-tl-request-mark'), X(request.seq), mid + 6);
+      mark.title = `request #${request.request} started inside this call`;
+      line.append(mark);
+    }
+    for (const sample of track.drawnSamples) line.append(sampleButton(sample, X, mid));
+    const hidden = track.samples.length - track.drawnSamples.length;
+    if (hidden) line.append(place(flowElement('span', 'flow-tl-more', `+${hidden} not drawn`), X(track.last) + 12, mid - 8));
+  }
+  function drawGaps(line, label, X, mid) {
+    label.append(flowElement('span', 'flow-tl-lane-name', 'Gaps'), flowElement('span', 'flow-tl-meta', `${view.gaps.records} refused or lost${view.hidden.gaps ? `, ${view.hidden.gaps} not drawn` : ''}`));
+    for (const gap of view.drawnGaps) {
+      const mark = place(flowElement('span', 'flow-tl-gap'), X(gap.seq), mid - 9);
+      mark.title = `${flowGapMarkText(gap)} · sequence ${gap.seq.toLocaleString('en-US')}`;
+      line.append(mark);
+    }
+  }
+  function drawOutside(line, label, X, mid) {
+    label.append(flowElement('span', 'flow-tl-lane-name', 'Not in a tracked call'), flowElement('span', 'flow-tl-meta', 'no call, or call unknown'));
+    for (const sample of view.drawnOutside) line.append(sampleButton(sample, X, mid));
+  }
+  /** The Requests lane: a chip per request started inside a call, dashed
+   * when the call it was started in is unknown. */
+  function drawRequests(line, label, X, chips) {
+    label.append(flowElement('span', 'flow-tl-lane-name', 'Requests'), flowElement('span', 'flow-tl-meta', chips.crowded ? `${chips.crowded} more overlap, not drawn` : `issued in renderer ${view.process}`));
+    for (const request of view.drawnRequests) {
+      if (!chips.level.has(request.key)) continue;
+      const known = describeRequest(view.process, request.request);
+      const chip = item(flowButton(`flow-tl-chip${request.invocation ? '' : ' flow-tl-chip-unknown'}`), `request:${request.key}`, request.seq);
+      chip.append(flowElement('span', 'flow-tl-chip-name', known?.label ?? `request #${request.request}`), flowElement('span', 'flow-tl-chip-meta', request.invocation ? `in #${request.invocation}` : 'call unknown'));
+      place(chip, X(request.seq), 6 + chips.level.get(request.key) * 32, G.chip);
+      chip.setAttribute('aria-label', `${known?.label ?? `Renderer request ${request.request}`}, ${request.invocation ? `started inside call #${request.invocation}` : 'started while a call was open, which one is unknown'}, sequence ${request.seq.toLocaleString('en-US')}`);
+      chip.addEventListener('click', () => choose({type: 'request', key: `request:${request.key}`}));
+      line.append(chip);
+    }
+  }
   function sampleButton(sample, X, mid) {
     const site = view.sites.get(sample.site);
-    const button = flowButton(`flow-tl-sample flow-tl-${sample.kind}`); button.tabIndex = -1;
-    button.dataset.key = `sample:${sample.key}`; button.dataset.seq = String(sample.seq);
-    button.style.left = `${X(sample.seq) - 9}px`; button.style.top = `${mid - 21}px`;
+    const button = item(flowButton(`flow-tl-sample flow-tl-${sample.kind}`), `sample:${sample.key}`, sample.seq);
+    place(button, X(sample.seq) - 9, mid - 21);
     button.append(flowElement('span', 'flow-tl-tick-mark'), flowElement('span', 'flow-tl-value', sample.kind === 'br_table' ? String(sample.selector ?? '?') : 'ci'));
     button.setAttribute('aria-label', flowSampleLabel(sample, site));
     button.title = flowSampleLabel(sample, site);
     button.addEventListener('click', () => choose({type: 'sample', key: `sample:${sample.key}`}));
-    items.set(`sample:${sample.key}`, button);
     return button;
   }
 
@@ -738,47 +807,67 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
       element.tabIndex = element === stop ? 0 : -1;
     }
     for (const row of canvas.querySelectorAll('.flow-tl-row-track')) row.toggleAttribute('data-selected', Boolean(info?.track && row.dataset.track === info.track.key));
-    if (!info) { detailText.textContent = view ? 'Pick a sample, a call or a request. Enter on a sample opens its block in the CFG.' : ''; detailFollow.hidden = true; return; }
+    detailText.textContent = info ? detailLine(info).filter(Boolean).join(' · ') : view ? 'Pick a sample, a call or a request. Enter on a sample opens its block in the CFG.' : '';
+    // Only a sample opens in the CFG.
+    detailFollow.hidden = info?.type !== 'sample';
+  }
+  /** The detail line's parts for the selection, ending with why it is not drawn. */
+  function detailLine(info) {
+    const seq = value => value.toLocaleString('en-US');
     if (info.type === 'sample') {
       const sample = info.sample;
-      detailText.textContent = [`${sample.kind} ${info.count}`, info.track ? `${flowTrackName(info.track)} · ${sample.callOrdinal} of ${info.track.samples.length}` : `outside a tracked call (${FLOW_INVOCATION_STATES[sample.state] ?? 'unknown'})`,
-        `func ${sample.function_index} ${flowHex(sample.offset)}`, flowSampleValue(sample),
-        `seq ${sample.seq.toLocaleString('en-US')} · renderer ${sample.process}`, notDrawn(info)].filter(Boolean).join(' · ');
-      detailFollow.hidden = false;
-    } else if (info.type === 'call') {
-      const track = info.track;
-      detailText.textContent = [flowTrackName(track), track.slot !== null ? `site slot ${track.slot}` : '', flowTrackOutcome(track), `${track.samples.length} samples`, `${track.requests.length} requests`,
-        track.start ? `seq ${track.start.seq.toLocaleString('en-US')}${track.settle ? ` → ${track.settle.seq.toLocaleString('en-US')}` : ''}` : '', notDrawn(info)].filter(Boolean).join(' · ');
-      detailFollow.hidden = true;
-    } else {
-      detailText.textContent = [info.label, info.track ? `started inside ${flowTrackName(info.track)}` : 'started while a call was open; which one is unknown', `seq ${info.request.seq.toLocaleString('en-US')}`, notDrawn(info)].filter(Boolean).join(' · ');
-      detailFollow.hidden = true;
+      const call = info.track ? `${flowTrackName(info.track)} · ${sample.callOrdinal} of ${info.track.samples.length}` : `outside a tracked call (${FLOW_INVOCATION_STATES[sample.state] ?? 'unknown'})`;
+      return [`${sample.kind} ${info.count}`, call, `func ${sample.function_index} ${flowHex(sample.offset)}`, flowSampleValue(sample), `seq ${seq(sample.seq)} · renderer ${sample.process}`, notDrawn(info)];
     }
+    if (info.type === 'call') {
+      const track = info.track;
+      const span = track.start ? `seq ${seq(track.start.seq)}${track.settle ? ` → ${seq(track.settle.seq)}` : ''}` : '';
+      return [flowTrackName(track), track.slot !== null ? `site slot ${track.slot}` : '', flowTrackOutcome(track), `${track.samples.length} samples`, `${track.requests.length} requests`, span, notDrawn(info)];
+    }
+    return [info.label, info.track ? `started inside ${flowTrackName(info.track)}` : 'started while a call was open; which one is unknown', `seq ${seq(info.request.seq)}`, notDrawn(info)];
   }
   detailFollow.addEventListener('click', () => { const info = describe(selected); if (info) onFollow(info); });
 
   // Keyboard: one tab stop; arrows move along and between rows, J and K step
   // samples in record order, Enter follows a sample into the CFG.
+  const choiceOf = element => ({type: element.dataset.key.split(':')[0], key: element.dataset.key});
+  /** The item a key moves to from `target`, null for none there, or
+   * undefined for a key the timeline leaves alone. */
+  function moveFrom(target, event) {
+    const key = event.key.toLowerCase();
+    // J and K with Shift are not steps.
+    if (event.shiftKey && (key === 'j' || key === 'k')) return undefined;
+    switch (key) {
+      case 'arrowleft': return neighbour(target, -1);
+      case 'arrowright': return neighbour(target, 1);
+      case 'arrowup': return verticalNeighbour(target, -1);
+      case 'arrowdown': return verticalNeighbour(target, 1);
+      case 'j': return stepElement(target.dataset.key, 1);
+      case 'k': return stepElement(target.dataset.key, -1);
+      case 'home': return items.values().next().value;
+      case 'end': return [...items.values()].at(-1);
+      default: return undefined;
+    }
+  }
   canvas.addEventListener('keydown', event => {
     if (event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
-    const target = event.target?.closest?.('[data-key]');
+    const target = event.target.closest?.('[data-key]');
     if (!target || !items.has(target.dataset.key)) return;
-    const key = event.key;
-    let next = null;
-    if (key === 'ArrowLeft' || key === 'ArrowRight') next = neighbour(target, key === 'ArrowRight' ? 1 : -1);
-    else if (key === 'ArrowUp' || key === 'ArrowDown') next = verticalNeighbour(target, key === 'ArrowDown' ? 1 : -1);
-    else if (!event.shiftKey && (key === 'j' || key === 'J' || key === 'k' || key === 'K')) next = stepElement(target.dataset.key, key.toLowerCase() === 'j' ? 1 : -1);
-    else if (key === 'Home' || key === 'End') { const list = [...items.values()]; next = key === 'Home' ? list[0] : list.at(-1); }
-    else if (key === 'Enter') {
-      event.preventDefault(); event.stopPropagation();
-      const info = choose({type: target.dataset.key.split(':')[0], key: target.dataset.key});
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      event.stopPropagation();
+      const info = choose(choiceOf(target));
       if (info) onFollow(info);
       return;
-    } else return;
-    event.preventDefault(); event.stopPropagation();
+    }
+    const next = moveFrom(target, event);
+    if (next === undefined) return;
+    event.preventDefault();
+    event.stopPropagation();
     if (!next) return;
-    target.tabIndex = -1; next.tabIndex = 0;
-    choose({type: next.dataset.key.split(':')[0], key: next.dataset.key}, {focus: true});
+    target.tabIndex = -1;
+    next.tabIndex = 0;
+    choose(choiceOf(next), {focus: true});
   });
   const rowOf = element => element.closest('.flow-tl-row');
   const leftOf = element => parseFloat(element.style.left) || 0;
@@ -788,18 +877,24 @@ function createFlowTimeline({root, onSelect, onFollow, onPartial, describeReques
     const at = list.indexOf(element);
     return list[at + direction] ?? null;
   }
+  /** The item in the next row that way nearest this one's position; a call
+   * name sits left of every mark. */
   function verticalNeighbour(element, direction) {
     const rows = [...canvas.querySelectorAll('.flow-tl-row')];
-    const x = element.classList.contains('flow-tl-call') ? -1 : leftOf(element);
+    const x = place => (place.classList.contains('flow-tl-call') ? -1 : leftOf(place));
     for (let at = rows.indexOf(rowOf(element)) + direction; at >= 0 && at < rows.length; at += direction) {
       const candidates = [...rows[at].querySelectorAll('[data-key]')];
-      if (!candidates.length) continue;
-      return candidates.reduce((best, item) => (Math.abs((item.classList.contains('flow-tl-call') ? -1 : leftOf(item)) - x) < Math.abs((best.classList.contains('flow-tl-call') ? -1 : leftOf(best)) - x) ? item : best));
+      if (candidates.length) return candidates.reduce((best, item) => (Math.abs(x(item) - x(element)) < Math.abs(x(best) - x(element)) ? item : best));
     }
     return null;
   }
+  /** The drawn samples in record order. */
   function orderedSamples() {
-    return [...items.keys()].filter(key => key.startsWith('sample:')).map(key => ({key, sample: describe({type: 'sample', key})?.sample})).filter(item => item.sample).sort((a, b) => flowSeqOrder(a.sample.seq, b.sample.seq));
+    return [...items.keys()]
+      .filter(key => key.startsWith('sample:'))
+      .map(key => ({key, sample: describe({type: 'sample', key})?.sample}))
+      .filter(entry => entry.sample)
+      .sort((a, b) => flowSeqOrder(a.sample.seq, b.sample.seq));
   }
   function stepElement(fromKey, direction) {
     const list = orderedSamples();

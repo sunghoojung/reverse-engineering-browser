@@ -1,9 +1,10 @@
 # Native debugger v1
 
-Status: Phase 1 is a source candidate with every hook patched; the Sources
-sidebar and Threads view are not built yet. Phases 2 and 3 are a proposal
-awaiting maintainer approval; nothing here changes [SAFETY.md](../../SAFETY.md)
-until that approval lands.
+Status: Phase 1 is a source candidate with every hook patched, and Origin
+Trace shows it in the Sources debugger sidebar and its Threads view; no live
+run has fed them yet. Phases 2 and 3 are a proposal awaiting maintainer
+approval; nothing here changes [SAFETY.md](../../SAFETY.md) until that
+approval lands.
 
 ## Phase 1: observe without pausing
 
@@ -21,7 +22,29 @@ value is read, and records carry identities, kinds and positions only.
 | Pause on exceptions | `exception_observation` (uncaught, caught, unhandled rejection) |
 | DOM breakpoints | `dom_mutation` on up to 4 selected elements |
 | Global listeners | Console `listeners` on `window` and `document` |
-| Threads | `get_native_debugger` threads: Console documents, out-of-process frames, and workers that started requests |
+| Threads | `get_native_debugger` threads: Console documents, out-of-process frames, observed frames and workers that started requests |
+
+### Sources debugger sidebar
+
+**Debugger** in the Sources toolbar opens the sidebar
+([Origin Trace guide](../../apps/research-ui/README.md#debugger-sidebar)). It
+reads `get_native_debugger` only while open and visible and never pauses.
+
+- **Threads** is the Threads view. It lists every thread with its kind, origin,
+  frame, process and state. An observed frame (the session, renderer and frame
+  that observation records carry) scopes Observations and the Sources tree
+  exactly; a Console document carries no native frame ID, so it scopes only
+  Watch rules.
+- **Watch rules** shows what the renderer confirmed armed. Arming and clearing
+  go only through the Console's live connection to the document the researcher
+  selected and confirmed there, with its `watch` and `unwatch` commands;
+  `native_debugger_action` has no watch action.
+- **Observations** lists the newest records per kind, with their identities,
+  and opens a record's own frame (`get_request_stack` with
+  `observation_sequence`) in Sources, or a watched request in Traffic.
+- **Pausing** states the availability `get_native_debugger` reports and offers
+  no control. Phase 3 adds its paused-state sections through the sidebar's
+  section registry (`RebDebuggerSidebar.addSection`).
 
 ## Phase 2: proposed policy (for maintainer approval)
 

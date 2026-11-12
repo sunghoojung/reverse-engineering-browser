@@ -2488,6 +2488,67 @@ mod tests {
         );
     }
 
+    /// A service worker's `cookieStore.set` walk (a version 1 artifact, read
+    /// in the isolate its version 2 `script_cookie` names) resolves to the
+    /// worker's script, not to a page script with the same ID.
+    #[test]
+    fn service_worker_cookie_writes_resolve_in_the_workers_isolate() {
+        let mut f = Fixture::new();
+        let page = "function onPage() {\n  document.cookie = 'sid=1';\n}\n";
+        let worker = "let n = 0;\nfunction inWorker() {\n  cookieStore.set('sid', '1');\n}\n";
+        let at = |text: &str, needle: &str| text.find(needle).unwrap() as u32;
+        f.artifact("javascript", "https://app.test/page.js", page.as_bytes());
+        f.artifact("javascript", "https://app.test/sw.js", worker.as_bytes());
+        f.event(
+            "script_identity",
+            41,
+            0,
+            7,
+            &identity_bytes(1, 0x02, 7, (0, 0), 99, page.as_bytes()),
+        );
+        let mut worker_identity = identity_bytes(1, 0x02, 7, (0, 0), 98, worker.as_bytes());
+        worker_identity[0] = 2;
+        worker_identity[72] = 4;
+        worker_identity[80..88].copy_from_slice(&0x5157u64.to_le_bytes());
+        f.event("script_identity", 41, 0, 0x5157, &worker_identity);
+        let write = frame(1, 0, 7, at(worker, "cookieStore"), at(worker, "() {"));
+        let walked = stack_artifact(1, std::slice::from_ref(&write), &[], &[]);
+        let digest = hex::decode(f.artifact("stack", "reb-stack:cookie", &walked)).unwrap();
+        // Version 2: cookieStore.set, frame and stack recorded, thread 4.
+        let mut cookie = vec![2, 0, 128, 0, 3, 0x06, 4, 0];
+        cookie.extend(1u32.to_le_bytes());
+        cookie.extend(3u32.to_le_bytes());
+        cookie.extend(1u32.to_le_bytes());
+        cookie.extend(0u32.to_le_bytes());
+        cookie.extend(&write);
+        cookie.extend(&digest);
+        cookie.extend(Sha256::digest(b"1"));
+        cookie.extend(b"sid");
+        cookie.resize(128, 0);
+        f.event("script_cookie", 41, 0, 0x5157, &cookie);
+        let record = f.events.last_mut().unwrap();
+        for key in ["encoded_data_length", "decoded_body_length"] {
+            record[key] = json!("0");
+        }
+        for key in ["status_code", "error_code", "resource_type"] {
+            record[key] = json!(0);
+        }
+        let g = graph(&f);
+        assert_eq!(g["coverage"]["malformed_records"], 0, "{}", g["coverage"]);
+        let contexts = g["contexts"].as_array().unwrap();
+        let lane = &contexts[node(&g, "inWorker")["context"].as_u64().unwrap() as usize];
+        assert_eq!(lane["isolate_key"], "0000000000005157");
+        assert_eq!(node(&g, "cookieStore.set")["kind"], "cookie_write");
+        assert!(
+            !g["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| node["name"] == "onPage"),
+            "the page's script 7 is not the worker's"
+        );
+    }
+
     #[test]
     fn an_empty_store_is_an_empty_complete_graph() {
         let f = Fixture::new();

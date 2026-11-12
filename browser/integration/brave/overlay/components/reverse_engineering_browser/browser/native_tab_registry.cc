@@ -200,6 +200,16 @@ NativeFactoryOwnerTab NativeTabRegistry::NoteFactory(content::RenderFrameHost* f
           .prefetch_without_page = owner.cause == NativeFactoryOwnerCause::kPrefetchWithoutPage};
 }
 
+void NativeTabRegistry::NoteStartingServiceWorker(const url::Origin& origin) {
+  const NativeFactoryOwner owner = CurrentNativeFactoryOwner();
+  const NativeToken128 token{owner.service_worker_token_high, owner.service_worker_token_low};
+  if (owner.cause == NativeFactoryOwnerCause::kServiceWorker && token.valid() &&
+      owner.service_worker_version_id >= 0) {
+    NativeTabResolver::Get().ServiceWorkerStarted(owner.service_worker_version_id, token,
+                                                  ExtensionOf(origin), {});
+  }
+}
+
 void NativeTabRegistry::ObserveContext(content::BrowserContext* context) {
   content::StoragePartition* const partition =
       context ? context->GetDefaultStoragePartition() : nullptr;

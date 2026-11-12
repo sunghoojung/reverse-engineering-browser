@@ -33,6 +33,10 @@ struct NativeFactoryOwner final {
   int frame_routing_id = -2;
   std::int64_t service_worker_version_id = -1;
   NativeFactoryOwnerCause cause = NativeFactoryOwnerCause::kNamed;
+  // A starting service worker's ServiceWorkerToken, scoped with its factory
+  // bundles so the worker is known before its first fetch is drained.
+  std::uint64_t service_worker_token_high = 0;
+  std::uint64_t service_worker_token_low = 0;
 };
 
 class COMPONENT_EXPORT(REB_FACTORY_OWNER_HOOK) ScopedNativeFactoryOwner final {

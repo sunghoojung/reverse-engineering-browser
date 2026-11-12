@@ -32,6 +32,9 @@ NativeFactoryScope NativeFactoryScopeOf(content::BrowserContext* context,
   // Observing before a session starts keeps the workers and frames that predate it.
   NativeTabRegistry& registry = NativeTabRegistry::Get();
   registry.ObserveContext(context);
+  if (!frame) {
+    registry.NoteStartingServiceWorker(initiator);
+  }
   if (scope.exclusion == 0 && !scope.owner.extension) {
     const NativeFactoryOwnerTab owner = registry.NoteFactory(frame);
     scope.tab_id = owner.tab;

@@ -33,7 +33,7 @@ index c13d42c..3dda838 100644
          sw_url_,
          blink::StorageKey::CreateFirstParty(url::Origin::Create(option.scope)),
 diff --git a/content/browser/service_worker/embedded_worker_instance.cc b/content/browser/service_worker/embedded_worker_instance.cc
-index f4ca463..2e5a4f5 100644
+index f4ca463..9d6b8b3 100644
 --- a/content/browser/service_worker/embedded_worker_instance.cc
 +++ b/content/browser/service_worker/embedded_worker_instance.cc
 @@ -15,6 +15,7 @@
@@ -44,14 +44,18 @@ index f4ca463..2e5a4f5 100644
  #include "content/browser/bad_message.h"
  #include "content/browser/data_url_loader_factory.h"
  #include "content/browser/devtools/devtools_instrumentation.h"
-@@ -367,6 +368,10 @@ void EmbeddedWorkerInstance::Start(
+@@ -367,6 +368,14 @@ void EmbeddedWorkerInstance::Start(
  
      // Create factory bundles for this worker to do loading. These bundles don't
      // support reconnection to the network service, see below comments.
-+    // Their fetches serve this version's clients (protocol/native-network-v3.md).
++    // Their fetches serve this version's clients, and they name the worker
++    // before its first fetch (protocol/native-network-v3.md).
++    const base::UnguessableToken& native_token = params->service_worker_token.value();
 +    const reb::ScopedNativeFactoryOwner native_owner(
 +        {.service_worker_version_id = owner_version_->version_id(),
-+         .cause = reb::NativeFactoryOwnerCause::kServiceWorker});
++         .cause = reb::NativeFactoryOwnerCause::kServiceWorker,
++         .service_worker_token_high = native_token.GetHighForSerialization(),
++         .service_worker_token_low = native_token.GetLowForSerialization()});
  
      // The bundle for new scripts is passed to ServiceWorkerScriptLoaderFactory
      // and used to request non-installed service worker scripts. It's only

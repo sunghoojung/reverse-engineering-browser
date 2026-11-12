@@ -83,6 +83,25 @@ assert.equal(row.path, 'https://example.test/api?id=7');
 assert(row.failed && row.status === 'failed' && row.time !== 'pending' && row.fromServiceWorker && row.errorCode === -2);
 assert(model.isBrokerEvent(swFailed));
 
+// A lost end names its row by process and request ID; the row reads
+// incomplete with endLost, never Pending.
+const lostStart = renderer({sequence_number: '26', request_id: '17'}, 'GET example.test');
+const lostGap = strip(Object.assign(renderer({type: 'gap', sequence_number: '27', request_id: '0', frame_id: '0',
+  scheme_class: undefined, initiator_process_id: 31, initiator_request_id: 17}, 'service_worker_end_lost')));
+[row] = model.requestsFromEvents([lostStart, lostGap], 'live');
+assert(row.endLost && row.status === 'incomplete' && !row.failed && row.time === 'pending');
+// A race network request: the worker's network error is what the page got,
+// over the browser attempt's 200.
+const raceStart = renderer({sequence_number: '28', request_id: '18'}, 'GET example.test');
+const raceBrowser = (type, sequence, extra) => strip(Object.assign(renderer({type, process_id: 2, sequence_number: sequence,
+  request_id: '940', initiator_process_id: 31, initiator_request_id: 18, browser_context_id_high: '3', browser_context_id_low: '4',
+  scheme_class: type === 'request_started' ? 2 : undefined, frame_id: '77'}, type === 'request_started' ? 'GET example.test' : 'completed'), extra));
+const raceFailed = renderer({type: 'request_failed', sequence_number: '29', request_id: '18', error_code: -2, flags: 4,
+  monotonic_time_ns: '2004'}, 'failed');
+[row] = model.requestsFromEvents([raceStart, raceBrowser('request_started', '5'), raceBrowser('request_completed', '6',
+  {status_code: 200, monotonic_time_ns: '2003'}), raceFailed], 'live');
+assert(row.raceNetwork && row.failed && row.status === 'failed' && row.errorCode === -2 && row.fromServiceWorker);
+
 // Memory-cache reuses are complete rows of their own, with their target child.
 const reuse = (name, fields) => Object.assign(golden(name), {process_id: 31, frame_id: '77'}, fields);
 const cached = reuse('memory-cache image', {sequence_number: '50', request_id: '60'});

@@ -1640,6 +1640,13 @@
             (rendererRow || (versioned && event.initiator_process_id > 0) ? 1 : 0) |
             (versioned && event.type === 'request_started' && (event.flags & 4) !== 0 ? 2 : 0) | (versioned ? 4 : 0);
           const loaderObserved = Boolean(previous?.loaderObserved) || !rendererRow;
+          // A renderer completion with from_service_worker is what the page
+          // received; the browser's records on such a row are a race network
+          // request (protocol/native-network-v3.md).
+          const workerAnswer = versioned && ['request_completed', 'request_failed'].includes(event.type) &&
+            (event.flags & 4) !== 0 && event.initiator_process_id === 0 && !browserContextToken(event)
+            ? {failed: event.type === 'request_failed', code: numericStatus, errorCode: event.error_code}
+            : previous?.workerAnswer ?? null;
           requests.set(id, {
             id,
             path: updatesTarget ? target.value : previous?.path ?? 'Unidentified network event',
@@ -1664,6 +1671,9 @@
             interrupted,
             rank,
             statusRank: hasNewerStatus ? incomingRank : previousStatusRank,
+            code: hasNewerStatus ? numericStatus : previous?.code ?? 0,
+            workerAnswer,
+            endLost: false,
             targetRank,
             tabId: event.protocol_version === 3 && event.tab_id > 0
               ? String(event.tab_id) : previous?.tabId ?? '0',
@@ -1688,6 +1698,27 @@
           });
         });
         const rows = [...requests.values()];
+        for (const row of rows) {
+          const answer = row.workerAnswer;
+          row.raceNetwork = Boolean(answer) && row.browserObserved;
+          if (!answer) continue;
+          const code = answer.code > 0 ? answer.code : row.code;
+          row.failed = answer.failed;
+          row.interrupted = false;
+          row.status = answer.failed ? 'failed' : code > 0 ? code : 'pending';
+          row.errorCode = answer.errorCode;
+        }
+        // A service worker's end the renderer could not join to its start
+        // names the row by process and request ID, as a request_tab_link does.
+        const byId = new Map(rows.map(row => [row.id, row]));
+        for (const event of events) {
+          if (event.category !== 'network' || event.type !== 'gap' || !(event.initiator_process_id > 0) ||
+              decodePayload(event) !== 'service_worker_end_lost') continue;
+          const row = byId.get(correlatedRendererIdentity(event));
+          if (!row) continue;
+          row.endLost = true;
+          if (row.rank < 5 && !row.failed && !row.interrupted) row.status = 'incomplete';
+        }
         attachRequestDetails(rows, events, browserRequestKeys);
         // A walked initiator stack tells script starts from parser starts (protocol/native-network-v3.md).
         for (const row of rows) {

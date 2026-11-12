@@ -18287,6 +18287,8 @@
           "from_service_worker",
           "memory_cache",
           "static_data",
+          "race_network",
+          "end_lost",
           "mime_type",
           "protocol",
           "response_time_ns",
@@ -18573,6 +18575,14 @@
           "static_data": {
             "type": "boolean",
             "description": "A memory-cache row whose resource Blink decoded in place: a data: URL or MHTML archive resource."
+          },
+          "race_network": {
+            "type": "boolean",
+            "description": "A race network request the service worker answered: the renderer's own completion flagged from_service_worker sits on a row with browser records, and failed, interrupted, status and error_code are that completion's (protocol/native-network-v3.md)."
+          },
+          "end_lost": {
+            "type": "boolean",
+            "description": "A service_worker_end_lost gap names this row: the renderer lost the end of a request its service worker handled, so a row with no response reads incomplete, not pending."
           },
           "mime_type": {
             "type": [
@@ -34081,7 +34091,7 @@
           },
           "exclusions": {
             "type": "array",
-            "description": "Evidence the capture counted instead of recording, by class, from capture_exclusion records (protocol/native-network-v3.md). Requests are chrome, chrome_untrusted, brave, devtools and chrome_search scheme loads, webui_request requests WebUI renderers sent through the browser proxy, extension_worker requests of extension workers and devtools_load requests of the DevTools factory; webui_renderer counts renderer processes with WebUI bindings or a WebUI process lock that were not admitted; memory_cache_reuse counts the memory-cache reuses a renderer did not record past its 4,096 per configuration. These are named exclusions, never gaps or drops. Empty when nothing was excluded or REB_CAPTURE_BROWSER_INTERNAL=1 recorded browser-internal loads.",
+            "description": "Evidence the capture counted instead of recording, by class, from capture_exclusion records (protocol/native-network-v3.md). Requests are chrome, chrome_untrusted, brave, devtools and chrome_search scheme loads, webui_request requests WebUI renderers sent through the browser proxy, extension_worker requests of extension workers and devtools_load requests of the DevTools factory; webui_renderer counts renderer processes with WebUI bindings or a WebUI process lock that were not admitted; memory_cache_reuse counts the memory-cache reuses a renderer did not record, past its 4,096 per configuration or in a page that is not ordinary (an SVG image's own document or a page popup). These are named exclusions, never gaps or drops. Empty when nothing was excluded or REB_CAPTURE_BROWSER_INTERNAL=1 recorded browser-internal loads.",
             "items": {
               "type": "object",
               "additionalProperties": false,

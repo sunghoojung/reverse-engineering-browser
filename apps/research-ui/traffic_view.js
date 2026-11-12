@@ -302,6 +302,10 @@ function trafficStatusCell(request) {
   if (request.interrupted) {
     return {text: String(request.status), className: 'status-neutral', title: 'Native proxy observation ended; final network outcome is unavailable.'};
   }
+  if (request.endLost) {
+    return {text: 'End lost', className: 'status-neutral status-unobserved',
+      title: 'A service worker ended this request without a response, but the renderer had already reused the slot that held its start, so its outcome was not recorded.'};
+  }
   if (request.status === 'pending' && request.loaderObserved === false) {
     return {text: 'No loader', className: 'status-neutral status-unobserved',
       title: 'Browser loader not observed: only the renderer recorded this request, so its status, size and completion are unknown.'};
@@ -433,6 +437,7 @@ function trafficIndexRequest(row, origin) {
     firstTimestamp: BigInt(row.first_time_ns), lastTimestamp: BigInt(row.last_time_ns),
     transferSize: row.transfer_size, resourceSize: row.resource_size, fromCache: row.from_cache,
     fromServiceWorker: row.from_service_worker, memoryCache: row.memory_cache === true, staticData: row.static_data === true,
+    raceNetwork: row.race_network === true, endLost: row.end_lost === true,
     mimeType: row.mime_type, protocol: row.protocol,
     responseTimestamp: row.response_time_ns === null ? null : BigInt(row.response_time_ns), errorCode: row.error_code,
     loaderObserved: row.loader_observed, initiator: row.initiator, mainFrame: row.main_frame, browserInternal: row.browser_internal,
@@ -523,7 +528,7 @@ function renderTrafficRows(container, requests, options) {
     const key = JSON.stringify([request.path, request.method, request.status, request.time,
       request.type, request.origin, request.hostOnly, request.failed, request.targetKind, request.operation, researcherName,
       request.tabLinkLabel, request.transferSize, request.resourceSize, request.fromCache, request.fromServiceWorker,
-      request.memoryCache, request.staticData, request.mimeType, request.protocol,
+      request.memoryCache, request.staticData, request.raceNetwork, request.endLost, request.mimeType, request.protocol,
       request.initiator, trafficInitiatorFrame(request)?.title, request.errorCode, request.loaderObserved, time(request.firstTimestamp), time(request.lastTimestamp),
       time(request.responseTimestamp), scaleKey]);
     // Reuse the row itself on lifecycle changes, preserving focus and its single
@@ -688,8 +693,8 @@ function renderTrafficDetails(container, request, notice = '', targetView = null
       ? (Number.isInteger(request.provisionalStatus) ? `Pending · provisional HTTP ${request.provisionalStatus}` : 'Pending')
       : request.status, trafficOriginLabel(request), request.id,
     trafficTabText(request),
-    `${request.memoryCache ? `${request.staticData
-      ? 'Blink decoded this data: URL in the renderer and made no request, so no headers, request body or response body exist for it.'
+    `${request.raceNetwork ? 'A service worker answered this request and also raced it to the network: the status is what the page received from the service worker, and the browser records are the network attempt, whose status and timing may differ. ' : ''}${request.memoryCache ? `${request.staticData
+      ? 'Blink decoded this data: URL or MHTML archive resource in the renderer and made no request, so no headers, request body or response body exist for it.'
       : 'Blink answered this load from a resource it already held (the memory cache) and made no request, so no headers, request body or response body exist for it.'}${
         request.hostOnly ? ' Its URL path and query are recorded only in content capture sessions.' : ''}`
       : `${request.hostOnly

@@ -24,7 +24,7 @@ use std::{
 pub const SIDECAR_SUFFIX: &str = ".requests-v1";
 const FORMAT: &str = "reb-request-index-v1";
 /// Sidecar row layout; a sidecar of another layout is rebuilt from byte 0.
-const LAYOUT: u32 = 7;
+const LAYOUT: u32 = 8;
 /// Bounds one call; a larger store reports partial coverage and continues next call.
 const SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const RECORD_BYTES: usize = 4096;
@@ -195,6 +195,13 @@ struct Row {
     static_data: bool,
     /// The target names only a scheme (`data:`); its child then gives the URL.
     scheme_only: bool,
+    /// A renderer completion with from_service_worker: what the page received,
+    /// as failed, status code and error (protocol/native-network-v3.md).
+    worker_answer: Option<(bool, i64, i64)>,
+    /// A record of the row carries a BrowserContext: the browser proxy saw it.
+    browser: bool,
+    /// A service_worker_end_lost gap names the row.
+    end_lost: bool,
     mime: Option<String>,
     protocol: Option<String>,
     response_ns: Option<u64>,
@@ -627,6 +634,18 @@ fn rank(kind: &str) -> Option<u8> {
         "response_completed" | "request_completed" | "request_failed" | "memory_cache_reuse" => 5,
         _ => return None,
     })
+}
+/// What the page received: failed, interrupted, status code and error. A
+/// renderer completion with from_service_worker decides over the browser's
+/// records, which on such a row are a race network request; port of the
+/// worker-answer pass in `requestsFromEvents`.
+fn outcome(row: &Row) -> (bool, bool, i64, i64) {
+    match row.worker_answer {
+        Some((failed, code, error)) => {
+            (failed, false, if code > 0 { code } else { row.code }, error)
+        }
+        None => (row.failed, row.interrupted, row.code, row.error),
+    }
 }
 /// Blink `ResourceType` at the pin, from a `memory_cache_reuse` record; port
 /// of `memoryCacheTypeFilter`.
@@ -1230,12 +1249,13 @@ fn view(row: &Row) -> View {
         url_truncated = found.length > 116;
         target_length = Some(found.length);
     }
-    let status = if row.failed {
+    let (failed, interrupted, code, _) = outcome(row);
+    let status = if failed {
         json!("failed")
-    } else if row.interrupted {
+    } else if interrupted || (row.end_lost && row.rank < 5) {
         json!("incomplete")
-    } else if row.code > 0 {
-        json!(row.code)
+    } else if code > 0 {
+        json!(code)
     } else {
         json!("pending")
     };
@@ -1506,6 +1526,21 @@ impl RequestIndex {
             return;
         }
         let Some(incoming) = rank(kind) else {
+            // A service worker's end the renderer could not join to its start
+            // names the row as a request_tab_link would.
+            if kind == "gap"
+                && number(&event["initiator_process_id"]) > 0
+                && hex::decode(event["payload"].as_str().unwrap_or(""))
+                    .ok()
+                    .as_deref()
+                    == Some(b"service_worker_end_lost".as_slice())
+            {
+                if let Some(&ordinal) = state.by_id.get(&correlated_identity(&event)) {
+                    state.rows[ordinal as usize].end_lost = true;
+                    self.views[ordinal as usize] = view(&state.rows[ordinal as usize]);
+                }
+                return;
+            }
             if kind == "tab_set" {
                 fold_tab_set(&event, &mut state.tab_sets);
                 return;
@@ -1612,6 +1647,9 @@ impl RequestIndex {
                     memory_cache: false,
                     static_data: false,
                     scheme_only: false,
+                    worker_answer: None,
+                    browser: false,
+                    end_lost: false,
                     mime: None,
                     protocol: None,
                     response_ns: None,
@@ -1656,6 +1694,15 @@ impl RequestIndex {
         if code > 0 && incoming >= row.status_rank {
             row.code = code;
             row.status_rank = incoming;
+        }
+        row.browser |= context_token(&event).is_some();
+        if matches!(kind, "request_completed" | "request_failed")
+            && number(&event["flags"]) & 4 != 0
+            && number(&event["initiator_process_id"]) == 0
+            && context_token(&event).is_none()
+        {
+            row.worker_answer =
+                Some((kind == "request_failed", code, number(&event["error_code"])));
         }
         if let Some((method, value)) = target.filter(|_| incoming >= row.target_rank) {
             row.target_rank = incoming;
@@ -1793,7 +1840,7 @@ impl RequestIndex {
                 .as_ref()
                 .is_none_or(|domain| view.domain == *domain)
             && query.kind.is_none_or(|kind| row.resource == kind)
-            && (!query.failed || row.failed)
+            && (!query.failed || outcome(row).0)
             && (!query.third_party || third_party[ordinal]);
         if !scoped {
             return false;
@@ -1989,7 +2036,7 @@ impl RequestIndex {
             "target_kind": view.target_kind, "host": view.host, "target": view.target,
             "url_truncated": view.url_truncated, "target_length": view.target_length,
             "target_malformed": view.target_malformed, "status": view.status,
-            "failed": row.failed, "interrupted": row.interrupted,
+            "failed": outcome(row).0, "interrupted": outcome(row).1,
             "time": duration(row).map_or_else(|| "pending".to_owned(), milliseconds),
             "duration_ns": duration(row).map(|d| d.to_string()),
             "type": row.resource, "tab_id": row.tab.to_string(), "operation": row.operation,
@@ -2011,12 +2058,14 @@ impl RequestIndex {
             "from_cache": row.cache, "from_service_worker": row.worker_served,
             "mime_type": row.mime, "protocol": row.protocol,
             "response_time_ns": row.response_ns.map(|time| time.to_string()),
-            "error_code": row.error, "loader_observed": row.loader, "initiator": initiator(row),
+            "error_code": outcome(row).3, "loader_observed": row.loader, "initiator": initiator(row),
             "main_frame": row.main_frame, "browser_internal": view.internal,
         });
         document["extension_id"] = json!(row.extension);
         document["memory_cache"] = json!(row.memory_cache);
         document["static_data"] = json!(row.static_data);
+        document["race_network"] = json!(row.worker_answer.is_some() && row.browser);
+        document["end_lost"] = json!(row.end_lost);
         // Raw; the get_requests handler replaces it with the frame's resolution.
         document["initiator_frame"] = json!(row.stack_frame.as_ref().map(|(session, process, isolate, frame)| {
             let script = u32::from_le_bytes(frame[4..8].try_into().unwrap());
@@ -2198,7 +2247,7 @@ impl RequestIndex {
         }
         let total = state.rows.len();
         let through = query.through.unwrap_or(total).min(total);
-        let failed = (0..through).filter(|&i| state.rows[i].failed).count();
+        let failed = (0..through).filter(|&i| outcome(&state.rows[i]).0).count();
         let index = json!({
             "epoch": state.epoch, "indexed_end": state.indexed_to.to_string(), "store_end": store_end.to_string(),
             "complete": self.caught_up(state.indexed_to),
@@ -2702,6 +2751,69 @@ mod tests {
                 json!({"error_code": -2, "flags": 4, "loader_kind": 0}),
             ),
         );
+        // A race network request: the browser's attempt completed, but the
+        // service worker answered the page with a network error.
+        store.push(
+            51,
+            35,
+            "request_initiated",
+            b"GET race.example.test",
+            class(2),
+        );
+        let raced = json!({"tab_id": 3, "initiator_process_id": 51, "initiator_request_id": 35,
+            "browser_context_id_high": "5", "browser_context_id_low": "6"});
+        store.push(
+            7,
+            935,
+            "request_started",
+            b"GET race.example.test",
+            merge(
+                raced.clone(),
+                json!({"resource_type": 13, "scheme_class": 2, "loader_kind": 3}),
+            ),
+        );
+        store.push(
+            7,
+            935,
+            "response_started",
+            b"application/json",
+            merge(raced.clone(), json!({"status_code": 200})),
+        );
+        store.push(
+            7,
+            935,
+            "request_completed",
+            b"completed",
+            merge(
+                raced,
+                json!({"status_code": 200, "decoded_body_length": "9"}),
+            ),
+        );
+        store.push(
+            51,
+            35,
+            "request_failed",
+            b"failed",
+            merge(
+                class(2),
+                json!({"error_code": -2, "flags": 4, "loader_kind": 0}),
+            ),
+        );
+        // A service worker's end whose start slot was reused: the gap names the row.
+        store.push(
+            51,
+            36,
+            "request_initiated",
+            b"GET lost.example.test",
+            class(2),
+        );
+        store.push(
+            51,
+            0,
+            "gap",
+            b"service_worker_end_lost",
+            json!({"initiator_process_id": 51, "initiator_request_id": 36, "frame_id": "0"}),
+        );
     }
     fn write(path: &Path, store: &Store) {
         fs::write(path, store.bytes()).unwrap();
@@ -2744,50 +2856,88 @@ mod tests {
                 row["static_data"],
                 row["from_service_worker"],
                 row["loader_observed"],
-                row["initiator"]
+                row["initiator"],
+                row["race_network"],
+                row["end_lost"]
             ])
         };
-        assert_eq!(
-            rows.iter().map(summary).collect::<Vec<_>>(),
-            [
-                json!([
-                    "data:text/plain,hi",
-                    "url",
-                    200,
-                    "other",
-                    false,
-                    false,
-                    false,
-                    true,
-                    "renderer"
-                ]),
-                json!([
-                    "https://cdn.example.test/logo.png?v=2",
-                    "url",
-                    200,
-                    "img",
-                    true,
-                    false,
-                    false,
-                    false,
-                    "renderer"
-                ]),
-                json!([
-                    "data:", "host", 200, "css", true, true, false, false, "renderer"
-                ]),
-                json!([
-                    "https://sw.example.test/api?id=7",
-                    "url",
-                    "failed",
-                    "other",
-                    false,
-                    false,
-                    true,
-                    true,
-                    "renderer"
-                ]),
-            ]
-        );
+        let expected = [
+            json!([
+                "data:text/plain,hi",
+                "url",
+                200,
+                "other",
+                false,
+                false,
+                false,
+                true,
+                "renderer",
+                false,
+                false
+            ]),
+            json!([
+                "https://cdn.example.test/logo.png?v=2",
+                "url",
+                200,
+                "img",
+                true,
+                false,
+                false,
+                false,
+                "renderer",
+                false,
+                false
+            ]),
+            json!([
+                "data:", "host", 200, "css", true, true, false, false, "renderer", false, false
+            ]),
+            json!([
+                "https://sw.example.test/api?id=7",
+                "url",
+                "failed",
+                "other",
+                false,
+                false,
+                true,
+                true,
+                "renderer",
+                false,
+                false
+            ]),
+            // The worker's network error, not the race attempt's 200.
+            json!([
+                "race.example.test",
+                "host",
+                "failed",
+                "xhr",
+                false,
+                false,
+                true,
+                true,
+                "renderer",
+                true,
+                false
+            ]),
+            json!([
+                "lost.example.test",
+                "host",
+                "incomplete",
+                "other",
+                false,
+                false,
+                false,
+                false,
+                "renderer",
+                false,
+                true
+            ]),
+        ];
+        assert_eq!(rows.iter().map(summary).collect::<Vec<_>>(), expected);
+        assert_eq!(rows[4]["error_code"], -2);
+        assert_eq!(rows[4]["interrupted"], false);
+        // The Failed filter and count follow what the page received.
+        let failed = page(&mut RequestIndex::new(&path), "limit=50&failed=1");
+        assert_eq!(failed["matching"], 2);
         assert_eq!(rows[1]["resource_size"], 5120);
         assert_eq!(rows[1]["transfer_size"], 0);
         assert_eq!(rows[1]["host"], "cdn.example.test");

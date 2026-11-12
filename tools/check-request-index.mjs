@@ -12,7 +12,7 @@ const load = (files, names) => new Function(`${files.map(file => fs.readFileSync
 const {requestsFromEvents} = load(['apps/research-ui/evidence_models.js'], 'requestsFromEvents');
 const view = load(['apps/research-ui/request_stack.js', 'apps/research-ui/traffic_view.js', 'apps/research-ui/traffic_filter.js'], `trafficSortedRequests, trafficSearchRequests,
   trafficRequestDomain, trafficIndexRequest, trafficParseFilter, trafficApplyFilter, trafficBrowserInternal, trafficSizeCell, trafficWaterfall,
-  trafficInitiatorFrame`);
+  trafficInitiatorFrame, trafficStatusCell`);
 
 const model = requestsFromEvents(golden.events, 'live');
 assert.equal(golden.rows.length, model.length, 'one index row per Traffic row');
@@ -21,7 +21,7 @@ golden.rows.forEach((row, index) => {
   const expected = model[index], shown = view.trafficIndexRequest(row, 'live');
   for (const field of ['id', 'path', 'method', 'status', 'time', 'type', 'targetKind', 'hostOnly', 'failed', 'interrupted',
     'tabId', 'operation', 'targetMalformed', 'transferSize', 'resourceSize', 'fromCache', 'fromServiceWorker', 'memoryCache',
-    'staticData', 'mimeType', 'protocol', 'responseTimestamp', 'errorCode', 'loaderObserved', 'initiator', 'mainFrame']) {
+    'staticData', 'raceNetwork', 'endLost', 'mimeType', 'protocol', 'responseTimestamp', 'errorCode', 'loaderObserved', 'initiator', 'mainFrame']) {
     assert.deepEqual(shown[field], expected[field], `${expected.id} ${field}`);
   }
   for (const field of ['target', 'host', 'urlTruncated', 'targetLength']) {
@@ -35,6 +35,14 @@ golden.rows.forEach((row, index) => {
   assert.deepEqual(row.root && [row.root.session_id, row.root.process_id, row.root.sequence_number],
     root && [root.session_id, root.process_id, root.sequence_number], `${expected.id} root event`);
 });
+// A service worker's end that lost its start reads as such, never Pending; a
+// race network row shows what the page received.
+const shownRows = golden.rows.map(row => view.trafficIndexRequest(row, 'live'));
+const lost = shownRows.find(row => row.endLost);
+assert(lost && lost.status === 'incomplete' && view.trafficStatusCell(lost).text === 'End lost');
+const raced = shownRows.find(row => row.raceNetwork);
+assert(raced && raced.status === 'failed' && raced.fromServiceWorker && view.trafficStatusCell(raced).text === 'Failed');
+assert.equal(shownRows.filter(row => row.endLost || row.raceNetwork).length, 2);
 for (const [sort, orders] of Object.entries(golden.orders)) {
   for (const [direction, sign] of [['asc', 1], ['desc', -1]]) {
     assert.deepEqual(orders[direction], view.trafficSortedRequests(model, sort, sign).map(request => request.id), `${sort} ${direction}`);

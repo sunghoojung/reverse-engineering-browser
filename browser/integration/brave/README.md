@@ -140,12 +140,14 @@ observation, never evidence. See
 needs, so `./scripts/bootstrap-brave.sh --init` applies them before Brave reads
 `DEPS`. The synchronization script never reads or reverses this stack.
 
-- `0001-remove-pip-cryptography-hooks.patch` backports brave-core
-  [#40095](https://github.com/brave/brave-core/pull/40095). Pinned `DEPS` runs
-  `python3 -m pip` hooks to install `cryptography`, which brave-core uses only
-  for Windows Widevine signing. Since depot_tools moved gclient to a `uv`
-  environment (`vpython.toml`, August 2026), that `python3` has no `pip`, so the
-  hook stopped initialization before the later toolchain, Node and version hooks.
+The stack is empty at the pinned Brave `v1.99.57`. Its only patch backported
+brave-core [#40095](https://github.com/brave/brave-core/pull/40095), which
+removed the `python3 -m pip` hooks that installed `cryptography` (used only for
+Windows Widevine signing). Since depot_tools moved gclient to a `uv`
+environment (`vpython.toml`, August 2026) that `python3` has no `pip`, so
+`v1.95.52` stopped initializing at those hooks. `v1.99.57` ships without them,
+so the backport no longer applies and was dropped. Bootstrap skips a missing or
+empty stack.
 
 ## Layout
 

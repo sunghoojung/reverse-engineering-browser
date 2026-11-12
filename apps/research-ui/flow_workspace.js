@@ -98,34 +98,27 @@ function flowLinkKind(model) {
 
 /**
  * Builds the workspace on `root` (the Flow screen). `graph` is the flow graph
- * panel; its selection methods are used only when present, so this runs with
- * a graph that has none.
+ * panel. The app's callbacks: `getRequest()` the request it shows,
+ * `selectRequest(id)`, `findRendererRequest(process, request)` the captured
+ * row a renderer request names, `selectTraceRow(key)` and `focusTraceRow()`
+ * in Lineage, and `openSource({artifact_id, offset})`.
  */
-function createFlowWorkspace(options) {
-  const {root, graph = null, storage = null, now = () => Date.now()} = options;
-  const fetchImpl = options.fetch ?? ((...args) => fetch(...args));
-  const makeView = options.createBlockGraphView ?? (typeof createBlockGraphView === 'function' ? createBlockGraphView : null);
-  const makeRunner = options.createBlockGraphRunner ?? (typeof createBlockGraphRunner === 'function' ? createBlockGraphRunner : null);
-  const engine = options.blockGraphEngine ?? (typeof blockGraphEngine === 'function' ? blockGraphEngine : () => 'layered');
-  const makeTimeline = options.createFlowTimeline ?? (typeof createFlowTimeline === 'function' ? createFlowTimeline : null);
-  const call = (name, ...args) => (typeof options[name] === 'function' ? options[name](...args) : undefined);
+function createFlowWorkspace({root, graph, storage = null, getRequest, selectRequest, findRendererRequest, selectTraceRow, focusTraceRow, openSource}) {
   // The graph's setters act for the host and never report back as a pick;
   // called silently, they answer with the selection they made. `intended`
   // is a key the graph could not select yet: its later `host` report is
   // that pick.
   let intended = null;
-  const graphCall = (name, ...args) => (graph && typeof graph[name] === 'function' ? graph[name](...args) : undefined);
   // A pick the researcher makes through the workspace (a Related entry, a
   // lineage step that lights its request) drives the graph, and the card the
   // graph selects in answer is that pick.
   function graphIntent(name, ...args) {
-    if (!graph || typeof graph[name] !== 'function') return;
     const info = graph[name](...args);
     if (name === 'select' && !info) { intended = String(args[0]); return; }
     intended = null;
-    graphPicked(info ?? graph.selection?.() ?? null);
+    graphPicked(info ?? graph.selection());
   }
-  const doc = root.ownerDocument ?? document;
+  const doc = document;
   const $ = selector => root.querySelector(selector);
   const make = (tag, className = '', text = '') => { const element = doc.createElement(tag); if (className) element.className = className; if (text) element.textContent = text; return element; };
   const button = (className, text, label) => { const element = make('button', className, text); element.type = 'button'; if (label) element.setAttribute('aria-label', label); return element; };
@@ -153,7 +146,7 @@ function createFlowWorkspace(options) {
   let sizes = {...FLOW_SIZE_DEFAULTS}, prefs = flowWorkspacePrefs(storage);
   // Selection, trail and history.
   let selection = {request: null, call: null, fn: null, site: null, sample: null, step: null, graphKey: null};
-  let history = [], cursor = -1, restoring = false, graphInfo = null, lineageModels = [], lineageStepModel = null;
+  let history = [], cursor = -1, restoring = false, graphInfo = null, lineageModels = [];
   // Above zero while one pick makes several changes that are one trail entry.
   let batching = 0;
   // `{id}` of the app's request after restoring an entry that names another
@@ -162,7 +155,6 @@ function createFlowWorkspace(options) {
   // Short feedback for a key that did nothing visible; it clears itself.
   let flashTimer = 0;
   const flash = text => {
-    if (!status) return;
     status.textContent = text; status.hidden = false;
     clearTimeout(flashTimer);
     flashTimer = setTimeout(() => { status.textContent = ''; status.hidden = true; }, 4000);
@@ -171,22 +163,22 @@ function createFlowWorkspace(options) {
   // CFG pane: the Sources block graph view and its layout worker.
   const cfg = {fn: null, mark: null, key: null, loaded: false, result: null, generation: 0, abort: null, view: null, runner: null, error: null, names: new Map()};
   function ensureCfgView() {
-    if (cfg.view || !makeView || !cfgHost) return cfg.view;
-    cfg.view = makeView(cfgHost, {
+    if (cfg.view) return cfg.view;
+    cfg.view = createBlockGraphView(cfgHost, {
       onSelect: (offset, block, graphDoc) => cfgPicked(offset, block, graphDoc),
       onReveal: (offset, block, graphDoc) => cfgPicked(offset, block, graphDoc),
       retry: () => loadCfg(cfg.fn, {offset: cfg.mark, force: true}),
       titleOf: graphDoc => cfg.fn?.name || `func ${graphDoc.functionIndex}`,
       statsPrefix: graphDoc => (cfg.fn?.name ? `func ${graphDoc.functionIndex}` : '')
     });
-    cfg.runner = makeRunner ? makeRunner() : null;
+    cfg.runner = createBlockGraphRunner();
     // The view's own head is the pane head: the identity mark, Sources and focus.
-    const head = cfg.view.tools?.parentElement;
-    if (head) { const mark = make('span', 'flow-pane-mark'); mark.setAttribute('aria-hidden', 'true'); head.prepend(mark); head.dataset.flowHead = 'cfg'; }
+    const head = cfg.view.tools.parentElement;
+    const mark = make('span', 'flow-pane-mark'); mark.setAttribute('aria-hidden', 'true'); head.prepend(mark); head.dataset.flowHead = 'cfg';
     const open = button('source-tool block-graph-tool flow-cfg-source', 'Sources', 'Open this function in Sources');
     open.title = 'Open the module in Sources at this function';
-    open.addEventListener('click', () => { if (cfg.fn) call('openSource', {artifact_id: cfg.fn.artifact_id, offset: cfgFirstByte()}); });
-    cfg.view.tools?.append(open, focusButton('cfg'));
+    open.addEventListener('click', () => { if (cfg.fn) openSource({artifact_id: cfg.fn.artifact_id, offset: cfgFirstByte()}); });
+    cfg.view.tools.append(open, focusButton('cfg'));
     return cfg.view;
   }
   /** The function's first byte: its body's start in the module, which the
@@ -205,7 +197,7 @@ function createFlowWorkspace(options) {
     const keepSample = selection.sample && selection.site && flowBlockAt(graphDoc, selection.site.offset) === block;
     setSelection({site: {offset: keepSample ? selection.site.offset : start, kind: keepSample ? selection.site.kind : 'block', label: keepSample ? selection.site.label : `loc_${Number(start).toString(16)}`},
       sample: keepSample ? selection.sample : null}, {pane: 'cfg'});
-    if (!keepSample) graphCall('setMark', cfg.fn ? {artifact_id: cfg.fn.artifact_id, function_index: cfg.fn.function_index, offset: start} : null);
+    if (!keepSample) graph.setMark(cfg.fn ? {artifact_id: cfg.fn.artifact_id, function_index: cfg.fn.function_index, offset: start} : null);
     renderCfgSamples();
   }
   /** Function names from the module's name section, read once per module as
@@ -216,7 +208,7 @@ function createFlowWorkspace(options) {
       if (nameReads.size >= 8) nameReads.delete(nameReads.keys().next().value);
       nameReads.set(artifactId, (async () => {
         try {
-          const response = await fetchImpl(`/api/wasm/functions?artifact_id=${encodeURIComponent(artifactId)}`, {cache: 'no-store'});
+          const response = await fetch(`/api/wasm/functions?artifact_id=${encodeURIComponent(artifactId)}`, {cache: 'no-store'});
           if (!response.ok) return new Map();
           const index = await response.json();
           if (index?.schema !== 'wasm-function-index-v1' || !Array.isArray(index.names)) return new Map();
@@ -244,9 +236,8 @@ function createFlowWorkspace(options) {
     cfg.key = key; cfg.loaded = false; cfg.error = null;
     if (!visible) return;
     const view = ensureCfgView();
-    if (!view) { renderCfgChrome('The block graph view is unavailable in this shell.'); return; }
     const owner = ++cfg.generation;
-    cfg.abort?.abort(); cfg.abort = typeof AbortController === 'function' ? new AbortController() : null;
+    cfg.abort?.abort(); cfg.abort = new AbortController();
     view.activate();
     view.setTitle(fn.name || `func ${fn.function_index}`);
     view.setState('loading', 'Decoding basic blocks…');
@@ -255,13 +246,12 @@ function createFlowWorkspace(options) {
       const names = fn.name ? null : functionNames(fn.artifact_id);
       let result = !force && cfg.result?.flowKey === key ? cfg.result : null;
       if (!result) {
-        const response = await fetchImpl(`/api/wasm/graph?artifact_id=${encodeURIComponent(fn.artifact_id)}&function=${fn.function_index}`, {cache: 'no-store', signal: cfg.abort?.signal});
+        const response = await fetch(`/api/wasm/graph?artifact_id=${encodeURIComponent(fn.artifact_id)}&function=${fn.function_index}`, {cache: 'no-store', signal: cfg.abort.signal});
         if (!response.ok) { let text = `The block graph read returned ${response.status}.`; try { text = (await response.json()).error || text; } catch { /* keep the status text */ } throw Error(text); }
         const buffer = await response.arrayBuffer();
         if (owner !== cfg.generation) return;
-        if (!cfg.runner) throw Error('The layout worker is unavailable in this shell.');
         view.setState('loading', 'Laying out the graph…');
-        result = await cfg.runner.run({type: 'wasm', buffer, metrics: view.measurements(), engine: engine()}, [buffer]);
+        result = await cfg.runner.run({type: 'wasm', buffer, metrics: view.measurements(), engine: blockGraphEngine()}, [buffer]);
         if (owner !== cfg.generation) return;
         result.graph.functionIndex = fn.function_index;
         result.flowKey = key;
@@ -285,28 +275,23 @@ function createFlowWorkspace(options) {
     cfg.view.select(block, flowRowAt(cfg.result.graph, cfg.result.starts, block, cfg.mark));
   }
   function releaseCfg() {
-    cfg.generation += 1; cfg.abort?.abort(); cfg.abort = null; cfg.runner?.cancel?.();
+    cfg.generation += 1; cfg.abort?.abort(); cfg.abort = null; cfg.runner?.cancel();
     // The decoded result stays for one function so returning needs no read;
     // the canvas and drawing resources go.
     if (cfg.view) cfg.view.release();
     cfg.loaded = false;
   }
-  function renderCfgChrome(problem = null) {
+  function renderCfgChrome() {
     const hasFn = Boolean(cfg.fn);
-    if (cfgEmpty) {
-      cfgEmpty.hidden = hasFn && !problem;
-      const message = cfgEmpty.querySelector('p');
-      if (problem && message) message.textContent = problem;
-    }
-    if (cfgHost) cfgHost.hidden = !hasFn || Boolean(problem);
-    if (cfgHead) cfgHead.dataset.hasView = String(hasFn && Boolean(cfg.view) && !problem);
-    if (cfgMeta) cfgMeta.textContent = hasFn ? `${cfg.fn.name || `func ${cfg.fn.function_index}`} · func ${cfg.fn.function_index}` : 'no function';
+    cfgEmpty.hidden = hasFn;
+    cfgHost.hidden = !hasFn;
+    cfgHead.dataset.hasView = String(hasFn && Boolean(cfg.view));
+    cfgMeta.textContent = hasFn ? `${cfg.fn.name || `func ${cfg.fn.function_index}`} · func ${cfg.fn.function_index}` : 'no function';
   }
   /** The sampled sites of the CFG's function, and a stepper for the chosen sample. */
   function renderCfgSamples() {
-    if (!cfgSamples) return;
-    const sites = cfg.fn && timeline ? timeline.samplesFor(cfg.fn.artifact_id, cfg.fn.function_index) : [];
-    const chosen = timeline?.selection();
+    const sites = cfg.fn ? timeline.samplesFor(cfg.fn.artifact_id, cfg.fn.function_index) : [];
+    const chosen = timeline.selection();
     cfgSamples.hidden = !sites.length;
     if (!sites.length) { cfgSamples.replaceChildren(); return; }
     const nodes = [];
@@ -335,23 +320,23 @@ function createFlowWorkspace(options) {
   }
 
   // Timeline pane.
-  const timeline = makeTimeline && timelineRoot ? makeTimeline({
+  const timeline = createFlowTimeline({
     root: timelineRoot,
     fetchJSON: async (url, signal) => {
-      const response = await fetchImpl(url, {cache: 'no-store', signal});
+      const response = await fetch(url, {cache: 'no-store', signal});
       if (!response.ok) { let text = `The event store returned ${response.status}.`; try { text = (await response.json()).error || text; } catch { /* keep the status text */ } throw Error(text); }
       const buffer = await response.arrayBuffer();
-      if (buffer.byteLength > (typeof FLOW_TIMELINE_LIMITS === 'object' ? FLOW_TIMELINE_LIMITS.maxPageBytes : 8 * 1024 * 1024)) throw Error('An event page was larger than the page budget.');
+      if (buffer.byteLength > FLOW_TIMELINE_LIMITS.maxPageBytes) throw Error('An event page was larger than the page budget.');
       return JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(buffer));
     },
-    describeRequest: (process, request) => call('findRendererRequest', process, request) ?? null,
+    describeRequest: findRendererRequest,
     onSelect: info => timelinePicked(info),
     onFollow: info => { timelinePicked(info); follow(); },
     onPartial: () => renderTabs()
-  }) : null;
-  if (timeline?.processSelect && timelineSlot) timelineSlot.replaceWith(timeline.processSelect);
-  timelineRefresh?.addEventListener('click', () => timeline?.refresh());
-  timelineOpenButton?.addEventListener('click', () => { timelineOpen = !timelineOpen; applyLayout(); if (timelineOpen) focusPaneContent('timeline'); });
+  });
+  timelineSlot.replaceWith(timeline.processSelect);
+  timelineRefresh.addEventListener('click', () => timeline.refresh());
+  timelineOpenButton.addEventListener('click', () => { timelineOpen = !timelineOpen; applyLayout(); if (timelineOpen) focusPaneContent('timeline'); });
   // Every pick keeps only the crumbs that are recorded relationships of the
   // new item: a sample keeps its call, function and site; a call or a request
   // chip keeps the call it names; a card keeps its function and row. The
@@ -362,7 +347,7 @@ function createFlowWorkspace(options) {
     if (!info) {
       // The sample's function and site go with it, unless a graph card holds them.
       setSelection({call: null, sample: null, ...(selection.graphKey ? {} : {fn: null, site: null})}, {pane: 'timeline'});
-      graphCall('setMark', null); renderCfgSamples(); renderLineageSelected(); return;
+      graph.setMark(null); renderCfgSamples(); renderLineageSelected(); return;
     }
     const callCrumb = info.track ? {key: `call:${info.track.key}`, label: `call #${info.track.invocation}`} : null;
     if (info.type === 'sample') {
@@ -372,19 +357,19 @@ function createFlowWorkspace(options) {
       const sameCard = graphInfo?.key && graphInfo.key === selection.graphKey && String(graphInfo.artifact_id) === String(sample.artifact_id) && graphInfo.function_index === sample.function_index;
       setSelection({...noCrumbs, call: callCrumb, fn, site: {offset: sample.offset, kind: sample.kind, label: `${flowHexOffset(sample.offset)} ${sample.kind}`}, sample: {key: info.key, label: `sample ${sample.ordinal}`},
         graphKey: sameCard ? selection.graphKey : null}, {pane: 'timeline'});
-      graphCall('setMark', {artifact_id: sample.artifact_id, function_index: sample.function_index, offset: sample.offset});
+      graph.setMark({artifact_id: sample.artifact_id, function_index: sample.function_index, offset: sample.offset});
       openCfg(fn, sample.offset, {auto: true});
     } else if (info.type === 'call') {
       setSelection({...noCrumbs, call: callCrumb}, {pane: 'timeline'});
-      graphCall('setMark', null);
+      graph.setMark(null);
     } else {
-      const known = call('findRendererRequest', info.process, info.request.request);
+      const known = findRendererRequest(info.process, info.request.request);
       // The chip's request is the request crumb now, in the same trail entry;
       // the app's selection catches up and only refreshes its label.
       const request = known?.id ? requestCrumb(known, info.request.request) : null;
       setSelection({...noCrumbs, call: callCrumb, ...(request ? requestPatch(request) : {})}, {pane: 'timeline'});
-      graphCall('setMark', null);
-      if (known?.id) call('selectRequest', known.id);
+      graph.setMark(null);
+      if (known?.id) selectRequest(known.id);
       else flash('This request is not in the captured request list, so Lineage cannot open it.');
     }
     renderCfgSamples(); renderLineageSelected(); renderRelated();
@@ -420,7 +405,7 @@ function createFlowWorkspace(options) {
     if (restoring || !pick) { renderRelated(); renderTabs(); return; }
     intended = null;
     // A card replaces a picked sample, so the timeline lets go of it too.
-    if (info && selection.sample) { timeline?.clear(); graphCall('setMark', null); }
+    if (info && selection.sample) { timeline.clear(); graph.setMark(null); }
     // Clearing the card clears its own crumbs; a sample's stay.
     if (!info) { setSelection(selection.graphKey ? {graphKey: null, fn: null, site: null} : {graphKey: null}, {pane: 'graph'}); renderRelated(); return; }
     const wasm = info.kind === 'wasm' && info.artifact_id && Number.isSafeInteger(info.function_index);
@@ -439,7 +424,6 @@ function createFlowWorkspace(options) {
 
   // Lineage pane.
   function lineagePicked(model) {
-    lineageStepModel = model ?? null;
     if (restoring || !model) return;
     // The step, the card its request lights and its call are one pick and
     // one trail entry.
@@ -449,30 +433,28 @@ function createFlowWorkspace(options) {
       if (!step) return;
       // A renderer request record names the stack that made it; the
       // request's own browser records follow the selected request's stack.
-      const own = call('getRequest');
+      const own = getRequest();
       const rendererKey = step.operation === 'request_initiated' && step.request_id && step.request_id !== '0'
         ? {process: step.event.process_id, request: String(step.request_id)} : own?.renderer ?? null;
       if (rendererKey && step.category === 'network') graphIntent('highlightRequest', rendererKey);
       // A tracked call's start or settle record selects that call's track.
-      const record = `${step.event.process_id}:${step.event.sequence_number}`;
-      const track = timeline?.view()?.tracks.find(item => item.start?.key === record || item.settle?.key === record);
+      const tracked = timeline.callAt(`${step.event.process_id}:${step.event.sequence_number}`);
       // A step that names neither a card nor a call is a detail of the
       // request and leaves the trail as it is.
-      if (!track) return;
-      if (selection.sample) graphCall('setMark', null);
-      timeline.select(`call:${track.key}`, {silent: true});
-      setSelection({...noCrumbs, call: {key: `call:${track.key}`, label: `call #${track.invocation}`}}, {pane: 'lineage'});
+      if (!tracked) return;
+      if (selection.sample) graph.setMark(null);
+      timeline.select(tracked.key, {silent: true});
+      setSelection({...noCrumbs, call: {key: tracked.key, label: tracked.label}}, {pane: 'lineage'});
     });
     renderLineageSelected(); renderRelated();
   }
   function setLineageTab(name, {focus = false} = {}) {
     lineageTab = name === 'details' ? 'details' : 'lineage';
     applyLayout();
-    if (focus) (lineageTab === 'details' ? sideTabs.details : sideTabs.lineage)?.focus({focusVisible: true});
+    if (focus) (lineageTab === 'details' ? sideTabs.details : sideTabs.lineage).focus({focusVisible: true});
   }
   function renderLineageSelected() {
-    if (!lineageSelected) return;
-    const chosen = timeline?.selection();
+    const chosen = timeline.selection();
     if (chosen?.type !== 'sample') { lineageSelected.hidden = true; lineageSelected.replaceChildren(); return; }
     const {sample, site} = chosen;
     const heading = make('h3', '', 'Selected');
@@ -517,7 +499,7 @@ function createFlowWorkspace(options) {
     try { run(); } finally { batching -= 1; }
     if (!batching && !restoring) pushHistory(active);
   }
-  function snapshot(pane) { return {selection: {...selection}, pane, sample: timeline?.selection()?.key ?? null}; }
+  function snapshot(pane) { return {selection: {...selection}, pane, sample: timeline.selection()?.key ?? null}; }
   function pushHistory(pane) {
     const entry = snapshot(pane);
     const last = history[cursor];
@@ -529,42 +511,41 @@ function createFlowWorkspace(options) {
     renderHistoryButtons();
   }
   function renderHistoryButtons() {
-    if (backButton) backButton.disabled = cursor <= 0;
-    if (forwardButton) forwardButton.disabled = cursor >= history.length - 1;
+    backButton.disabled = cursor <= 0;
+    forwardButton.disabled = cursor >= history.length - 1;
   }
   /** Restores one trail entry: its selection in every pane, then its pane. */
   function restore(entry) {
     restoring = true;
     try {
       const target = entry.selection;
-      const current = call('getRequest');
-      if (target.request?.id && current?.id !== target.request.id) call('selectRequest', target.request.id);
+      const current = getRequest();
+      if (target.request?.id && current?.id !== target.request.id) selectRequest(target.request.id);
       // The app keeps its own request when the entry had none or its request
       // is no longer listed; that request is held, so the next render's sync
       // neither counts it as a pick nor truncates Forward.
-      const shown = call('getRequest')?.id ?? null, wanted = target.request?.id ?? null;
+      const shown = getRequest()?.id ?? null, wanted = target.request?.id ?? null;
       heldRequest = shown !== wanted ? {id: shown} : null;
       if (heldRequest) flash(!wanted ? 'This trail entry had no request; Lineage still shows the selected one.'
         : `This trail entry\u2019s request is no longer in the request list${shown === null ? '' : '; Lineage still shows the selected request'}.`);
       selection = {...target};
-      if (target.step) call('selectTraceRow', target.step);
-      if (target.sample) timeline?.select(target.sample.key, {silent: true});
-      else if (target.call) timeline?.select(target.call.key, {silent: true});
-      else timeline?.clear();
+      if (target.step) selectTraceRow(target.step);
+      if (target.sample) timeline.select(target.sample.key, {silent: true});
+      else if (target.call) timeline.select(target.call.key, {silent: true});
+      else timeline.clear();
       if (target.fn?.function_index !== null && target.fn?.function_index !== undefined && target.fn.artifact_id) loadCfg(target.fn, {offset: target.site?.offset ?? null});
-      if (target.graphKey) graphCall('select', target.graphKey, {reveal: true, silent: false});
-      graphCall('setMark', target.sample && target.fn?.artifact_id ? {artifact_id: target.fn.artifact_id, function_index: target.fn.function_index, offset: target.site?.offset ?? null} : null);
+      if (target.graphKey) graph.select(target.graphKey, {reveal: true, silent: false});
+      graph.setMark(target.sample && target.fn?.artifact_id ? {artifact_id: target.fn.artifact_id, function_index: target.fn.function_index, offset: target.site?.offset ?? null} : null);
       reveal(entry.pane, {focus: true, record: false});
     } finally { restoring = false; }
     renderTrail(); renderHistoryButtons(); renderCfgSamples(); renderLineageSelected(); renderRelated();
   }
   function back() { if (cursor <= 0) { flash('This is the start of the trail.'); return false; } cursor -= 1; restore(history[cursor]); return true; }
   function forward() { if (cursor >= history.length - 1) { flash('This is the end of the trail.'); return false; } cursor += 1; restore(history[cursor]); return true; }
-  backButton?.addEventListener('click', back);
-  forwardButton?.addEventListener('click', forward);
+  backButton.addEventListener('click', back);
+  forwardButton.addEventListener('click', forward);
 
   function renderTrail() {
-    if (!trail) return;
     const crumbs = flowTrailCrumbs(selection);
     if (!crumbs.length) { trail.replaceChildren(make('span', 'flow-trail-empty', 'Select a request, card or sample')); return; }
     const nodes = [];
@@ -584,9 +565,9 @@ function createFlowWorkspace(options) {
   /** A crumb or Related entry jumps to its item in its pane. */
   function jump(crumb) {
     if (crumb.kind === 'site' || (crumb.kind === 'fn' && crumb.pane === 'cfg')) { if (selection.fn) loadCfg(selection.fn, {offset: selection.site?.offset ?? null}); }
-    if (crumb.kind === 'fn' && crumb.pane === 'graph' && selection.fn?.key) graphCall('select', selection.fn.key, {reveal: true, silent: false});
-    if (crumb.kind === 'call' && selection.call) timeline?.select(selection.call.key, {silent: true});
-    if (crumb.kind === 'sample' && selection.sample) timeline?.select(selection.sample.key, {silent: true});
+    if (crumb.kind === 'fn' && crumb.pane === 'graph' && selection.fn?.key) graph.select(selection.fn.key, {reveal: true, silent: false});
+    if (crumb.kind === 'call' && selection.call) timeline.select(selection.call.key, {silent: true});
+    if (crumb.kind === 'sample' && selection.sample) timeline.select(selection.sample.key, {silent: true});
     if (crumb.pane === 'timeline') timelineOpen = true;
     reveal(crumb.pane, {focus: true});
   }
@@ -605,10 +586,10 @@ function createFlowWorkspace(options) {
 
   // Panes, modes and layout.
   function readLayout() {
-    const value = (typeof getComputedStyle === 'function' && body ? getComputedStyle(body).getPropertyValue('--flow-layout') : '').trim();
+    const value = getComputedStyle(body).getPropertyValue('--flow-layout').trim();
     return value === 'laptop' || value === 'compact' || value === 'wide' ? value : 'wide';
   }
-  function defaultSingle() { return call('getRequest') ? 'lineage' : 'graph'; }
+  function defaultSingle() { return getRequest() ? 'lineage' : 'graph'; }
   function mainPane() { return layout === 'compact' ? (singlePane ?? defaultSingle()) : mode === 'focus' ? focusPane : null; }
   /** The panes this layout shows. */
   function shownPanes() {
@@ -634,7 +615,6 @@ function createFlowWorkspace(options) {
     return 'lineage';
   }
   function applyLayout() {
-    if (!body) return;
     layout = readLayout();
     const shown = shownPanes(), main = mainPane();
     const effectiveMode = layout === 'compact' ? 'single' : mode;
@@ -648,36 +628,32 @@ function createFlowWorkspace(options) {
     body.dataset.timelineOpen = String(layout !== 'laptop' || effectiveMode !== 'split' || timelineOpen);
     for (const name of FLOW_PANES) {
       const pane = panes[name];
-      if (!pane) continue;
       pane.dataset.shown = String(shown.has(name));
       pane.toggleAttribute('data-active', name === active && effectiveMode === 'split');
     }
     // Lineage and Details are tabs of one column; in the laptop split CFG joins them.
     const lineageSide = side === 'cfg' ? 'cfg' : lineageTab;
     for (const [name, tab] of Object.entries(sideTabs)) {
-      if (!tab) continue;
       const on = name === lineageSide;
       tab.setAttribute('aria-selected', String(on)); tab.tabIndex = on ? 0 : -1;
       if (name === 'cfg') tab.hidden = !(layout === 'laptop' && effectiveMode === 'split' && split.cfg);
     }
-    for (const [name, panel] of Object.entries(lineagePanels)) if (panel) panel.hidden = name !== lineageTab;
+    for (const [name, panel] of Object.entries(lineagePanels)) panel.hidden = name !== lineageTab;
     // Sizes: the split's tracks, each within what the body can hold.
     applySizes();
     // Head controls: toggles in the split, Split view in focus, neither single.
-    if (togglesGroup) togglesGroup.hidden = effectiveMode !== 'split';
-    if (splitButton) splitButton.hidden = effectiveMode !== 'focus';
-    for (const [name, toggle] of Object.entries(toggles)) if (toggle) toggle.setAttribute('aria-pressed', String(split[name]));
-    if (timelineOpenButton) {
-      timelineOpenButton.hidden = !(layout === 'laptop' && effectiveMode === 'split');
-      timelineOpenButton.textContent = timelineOpen ? 'Close' : 'Open';
-      timelineOpenButton.setAttribute('aria-expanded', String(timelineOpen));
-    }
-    if (tabs) tabs.hidden = !main;
+    togglesGroup.hidden = effectiveMode !== 'split';
+    splitButton.hidden = effectiveMode !== 'focus';
+    for (const [name, toggle] of Object.entries(toggles)) toggle.setAttribute('aria-pressed', String(split[name]));
+    timelineOpenButton.hidden = !(layout === 'laptop' && effectiveMode === 'split');
+    timelineOpenButton.textContent = timelineOpen ? 'Close' : 'Open';
+    timelineOpenButton.setAttribute('aria-expanded', String(timelineOpen));
+    tabs.hidden = !main;
     renderTabs();
-    if (related) related.hidden = effectiveMode !== 'focus';
+    related.hidden = effectiveMode !== 'focus';
     if (effectiveMode === 'focus') renderRelated();
     // The canvases resize with their panes; the graph also observes its own.
-    graphCall('resize');
+    graph.resize();
   }
   function applySizes() {
     const width = body.clientWidth || 0, height = body.clientHeight || 0;
@@ -698,21 +674,20 @@ function createFlowWorkspace(options) {
     body.style.setProperty('--flow-dock-track', `${dock}px`);
   }
   function renderTabs() {
-    if (!tabs) return;
     const main = mainPane();
     const meta = {
       graph: graphInfo?.name || (session ? 'session' : ''),
       cfg: cfg.fn ? (cfg.fn.name || `func ${cfg.fn.function_index}`) : 'none',
       lineage: selection.request?.renderer ? `#${selection.request.renderer}` : selection.request ? 'request' : 'none',
-      timeline: timeline?.summary().split(' · ').slice(0, 2).join(' · ') || ''
+      timeline: timeline.summary().split(' · ').slice(0, 2).join(' · ') || ''
     };
     for (const tab of tabs.querySelectorAll('[role="tab"]')) {
       const name = tab.dataset.pane, on = name === main;
       tab.setAttribute('aria-selected', String(on)); tab.tabIndex = on ? 0 : -1;
       const label = tab.querySelector('.flow-tab-meta'); if (label) label.textContent = meta[name] ?? '';
     }
-    if (graphMeta) graphMeta.textContent = graphInfo ? [graphInfo.name, graphInfo.kind].filter(Boolean).join(' · ') : '';
-    if (timelineMeta && timeline) timelineMeta.textContent = timeline.summary();
+    graphMeta.textContent = graphInfo ? [graphInfo.name, graphInfo.kind].filter(Boolean).join(' · ') : '';
+    timelineMeta.textContent = timeline.summary();
   }
   /** Makes a pane visible in the current layout, then optionally focuses it. */
   function reveal(name, {focus = false, record = true} = {}) {
@@ -735,16 +710,16 @@ function createFlowWorkspace(options) {
   /** Keyboard focus on the pane's working control, else the pane itself. */
   function focusPaneContent(name) {
     let done = false;
-    if (name === 'graph' && graph?.focus) { graph.focus(); done = true; }
-    else if (name === 'cfg' && cfg.view?.hasGraph?.()) { cfg.view.focus(); done = true; }
-    else if (name === 'lineage') done = Boolean(call('focusTraceRow'));
-    else if (name === 'timeline') done = Boolean(timeline?.focus());
-    if (!done) panes[name]?.focus?.({preventScroll: true, focusVisible: true});
-    // Focus never stays on the page itself; a DOM without activeElement skips this.
+    if (name === 'graph') { graph.focus(); done = true; }
+    else if (name === 'cfg' && cfg.view?.hasGraph()) { cfg.view.focus(); done = true; }
+    else if (name === 'lineage') done = Boolean(focusTraceRow());
+    else if (name === 'timeline') done = Boolean(timeline.focus());
+    if (!done) panes[name].focus({preventScroll: true, focusVisible: true});
+    // Focus never stays on the page itself.
     const focused = doc.activeElement;
-    if (focused !== undefined && (!focused || focused === doc.body) && name !== 'graph') { focusPaneContent('graph'); return; }
+    if ((!focused || focused === doc.body) && name !== 'graph') { focusPaneContent('graph'); return; }
     active = name;
-    for (const pane of FLOW_PANES) panes[pane]?.toggleAttribute('data-active', pane === name && body?.dataset.mode === 'split');
+    for (const pane of FLOW_PANES) panes[pane].toggleAttribute('data-active', pane === name && body.dataset.mode === 'split');
   }
   /** Whether a pane can take focus in this layout: shown, and in the laptop
    * split not the closed timeline strip or the Lineage list behind the CFG tab. */
@@ -776,8 +751,8 @@ function createFlowWorkspace(options) {
     applyLayout();
     flash(`${FLOW_PANE_NAMES[name]} ${split[name] ? 'shown' : 'hidden'} in the split.`);
   }
-  for (const [name, toggle] of Object.entries(toggles)) toggle?.addEventListener('click', () => togglePane(name));
-  splitButton?.addEventListener('click', () => setMode('split'));
+  for (const [name, toggle] of Object.entries(toggles)) toggle.addEventListener('click', () => togglePane(name));
+  splitButton.addEventListener('click', () => setMode('split'));
   function focusButton(name) {
     const element = button('flow-focus-button', '', `Open ${FLOW_PANE_NAMES[name]} on its own`);
     element.dataset.focus = name; element.title = `Open ${FLOW_PANE_NAMES[name]} on its own, or return to the split (Z)`;
@@ -786,8 +761,7 @@ function createFlowWorkspace(options) {
     return element;
   }
   function flowIcon(path) {
-    const svg = doc.createElementNS?.('http://www.w3.org/2000/svg', 'svg');
-    if (!svg?.setAttribute) return make('span', 'flow-icon');
+    const svg = doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('viewBox', '0 0 20 20'); svg.setAttribute('aria-hidden', 'true');
     const line = doc.createElementNS('http://www.w3.org/2000/svg', 'path'); line.setAttribute('d', path); svg.append(line);
     return svg;
@@ -806,8 +780,8 @@ function createFlowWorkspace(options) {
     if (pane) toggleFocus(pane === 'lineage' && currentSideTab() === 'cfg' ? 'cfg' : pane);
   });
   // Focus mode tabs and the narrow pane switch share one tab bar.
-  tabs?.addEventListener('click', event => { const tab = event.target?.closest?.('[role="tab"][data-pane]'); if (tab) reveal(tab.dataset.pane, {focus: false}); });
-  tabs?.addEventListener('keydown', event => {
+  tabs.addEventListener('click', event => { const tab = event.target?.closest?.('[role="tab"][data-pane]'); if (tab) reveal(tab.dataset.pane, {focus: false}); });
+  tabs.addEventListener('keydown', event => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     const list = [...tabs.querySelectorAll('[role="tab"][data-pane]')];
     const at = list.indexOf(event.target?.closest?.('[role="tab"]'));
@@ -817,14 +791,14 @@ function createFlowWorkspace(options) {
     reveal(list[next].dataset.pane); list[next].focus({focusVisible: true});
   });
   for (const [name, tab] of Object.entries(sideTabs)) {
-    tab?.addEventListener('click', () => {
+    tab.addEventListener('click', () => {
       if (name === 'cfg') { sideTab = 'cfg'; active = 'cfg'; applyLayout(); if (cfg.fn && !cfg.loaded) loadCfg(cfg.fn, {offset: cfg.mark}); return; }
       sideTab = 'lineage'; setLineageTab(name);
     });
   }
-  $('.flow-inspector-tabs')?.addEventListener('keydown', event => {
+  $('.flow-inspector-tabs').addEventListener('keydown', event => {
     if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
-    const list = Object.values(sideTabs).filter(tab => tab && !tab.hidden);
+    const list = Object.values(sideTabs).filter(tab => !tab.hidden);
     const at = list.indexOf(event.target);
     if (at < 0) return;
     event.preventDefault();
@@ -834,7 +808,7 @@ function createFlowWorkspace(options) {
   // The active pane is the one the keyboard or pointer last worked in.
   root.addEventListener('focusin', event => {
     const pane = event.target?.closest?.('.flow-pane')?.dataset.pane;
-    if (pane && pane !== active) { active = pane; for (const name of FLOW_PANES) panes[name]?.toggleAttribute('data-active', name === pane && body?.dataset.mode === 'split'); }
+    if (pane && pane !== active) { active = pane; for (const name of FLOW_PANES) panes[name].toggleAttribute('data-active', name === pane && body.dataset.mode === 'split'); }
   });
   root.addEventListener('pointerdown', event => {
     const pane = event.target?.closest?.('.flow-pane')?.dataset.pane;
@@ -843,7 +817,7 @@ function createFlowWorkspace(options) {
 
   // Related rail (focus mode): what is linked to the selection, each entry a jump.
   function renderRelated() {
-    if (!related || related.hidden) return;
+    if (related.hidden) return;
     const sections = [];
     const section = (title, pane, entries, action) => {
       const block = make('section', 'flow-related-section');
@@ -875,7 +849,7 @@ function createFlowWorkspace(options) {
     if (lineageModels.length) {
       const entries = steps.map(model => {
         const {line, kind} = flowLinkKind(model);
-        const item = entry(model.title, model.confidence, () => { call('selectTraceRow', model.key); reveal('lineage', {focus: true}); }, 'flow-related-link');
+        const item = entry(model.title, model.confidence, () => { selectTraceRow(model.key); reveal('lineage', {focus: true}); }, 'flow-related-link');
         const sample = make('span', 'flow-link-line'); sample.dataset.line = line; sample.dataset.kind = kind; sample.setAttribute('aria-hidden', 'true');
         item.prepend(sample);
         return item;
@@ -885,7 +859,7 @@ function createFlowWorkspace(options) {
       section(`Lineage${selection.request?.renderer ? ` · #${selection.request.renderer}` : ''}`, 'lineage', entries, {label: 'Open', key: '3', aria: 'Open Lineage', run: () => reveal('lineage', {focus: true})});
     }
     // Samples of the selected call, or at the selected site.
-    const chosen = timeline?.selection();
+    const chosen = timeline.selection();
     const sampleList = chosen?.type === 'sample' ? chosen.site.samples : chosen?.track ? chosen.track.samples : [];
     if (sampleList.length) {
       const strip = make('div', 'flow-related-strip');
@@ -902,7 +876,7 @@ function createFlowWorkspace(options) {
         {label: 'Open', key: '4', aria: 'Open Timeline', run: () => { timelineOpen = true; reveal('timeline', {focus: true}); }});
     }
     // Sampled sites of the selected function.
-    if (cfg.fn && timeline) {
+    if (cfg.fn) {
       const sites = timeline.samplesFor(cfg.fn.artifact_id, cfg.fn.function_index);
       if (sites.length) section(`CFG · ${cfg.fn.label}`, 'cfg', sites.slice(0, FLOW_WORKSPACE_LIMITS.related).map(site => entry(`${flowHexOffset(site.offset)} ${site.kind}`, `×${site.samples.length}`, () => {
         setSelection({site: {offset: site.offset, kind: site.kind, label: `${flowHexOffset(site.offset)} ${site.kind}`}}, {pane: 'cfg'});
@@ -920,10 +894,10 @@ function createFlowWorkspace(options) {
         for (const item of list.slice(0, 4)) entries.push(entry(`${label} ${item.name ?? item.key ?? ''}`.trim(), item.note ?? '', () => pickCard(item.key)));
       }
       if (graphInfo.request) {
-        const known = call('findRendererRequest', graphInfo.request.process, graphInfo.request.request);
+        const known = findRendererRequest(graphInfo.request.process, graphInfo.request.request);
         entries.push(entry(known?.label ?? `request #${graphInfo.request.request}`, known ? 'trace its lineage' : 'not in the request list', () => {
           // The card made this request, so its crumbs stay beside it.
-          if (known?.id) batch(() => { setSelection(requestPatch(requestCrumb(known, graphInfo.request.request)), {pane: 'lineage'}); call('selectRequest', known.id); reveal('lineage', {focus: true}); });
+          if (known?.id) batch(() => { setSelection(requestPatch(requestCrumb(known, graphInfo.request.request)), {pane: 'lineage'}); selectRequest(known.id); reveal('lineage', {focus: true}); });
           else flash('This request is not in the captured request list.');
         }));
       }
@@ -941,7 +915,7 @@ function createFlowWorkspace(options) {
     const set = value => {
       const name = sizeName();
       sizes[name] = Math.round(Math.max(FLOW_SIZE_BOUNDS[name][0], Math.min(FLOW_SIZE_BOUNDS[name][1], value)));
-      applySizes(); describeHandle(); graphCall('resize');
+      applySizes(); describeHandle(); graph.resize();
     };
     const describeHandle = () => {
       const name = sizeName();
@@ -953,7 +927,7 @@ function createFlowWorkspace(options) {
     describeHandle();
     handle.addEventListener('pointerdown', event => {
       if (event.button !== 0) return;
-      event.preventDefault(); handle.focus?.(); handle.setPointerCapture?.(event.pointerId);
+      event.preventDefault(); handle.focus(); handle.setPointerCapture(event.pointerId);
       drag = {pointer: event.pointerId, start: axis === 'x' ? event.clientX : event.clientY, size: sizes[sizeName()], previous: sizes[sizeName()]};
       body.classList.add('flow-resizing');
     });
@@ -970,7 +944,7 @@ function createFlowWorkspace(options) {
     };
     handle.addEventListener('pointerup', () => finish(true));
     handle.addEventListener('pointercancel', () => finish(false));
-    handle.addEventListener('dblclick', () => { sizes[sizeName()] = FLOW_SIZE_DEFAULTS[sizeName()]; applySizes(); describeHandle(); savePrefs(); graphCall('resize'); });
+    handle.addEventListener('dblclick', () => { sizes[sizeName()] = FLOW_SIZE_DEFAULTS[sizeName()]; applySizes(); describeHandle(); savePrefs(); graph.resize(); });
     handle.addEventListener('keydown', event => {
       if (event.key === 'Escape' && drag) { event.preventDefault(); event.stopPropagation(); finish(false); return; }
       if (event.key === 'Home') { event.preventDefault(); event.stopPropagation(); sizes[sizeName()] = FLOW_SIZE_DEFAULTS[sizeName()]; applySizes(); describeHandle(); savePrefs(); return; }
@@ -984,7 +958,7 @@ function createFlowWorkspace(options) {
     });
   }
   function savePrefs() {
-    const entry = {sizes: {...sizes}, panes: {...split}, cfgHidden: cfgUserHidden, at: now()};
+    const entry = {sizes: {...sizes}, panes: {...split}, cfgHidden: cfgUserHidden, at: Date.now()};
     prefs.last = entry;
     if (session) {
       prefs.sessions[session] = entry;
@@ -1014,8 +988,8 @@ function createFlowWorkspace(options) {
   doc.addEventListener('keydown', event => {
     if (!visible || root.hidden || !inScope(event.target)) return;
     if (event.defaultPrevented || event.isComposing || event.metaKey || event.ctrlKey || event.altKey || typing(event.target)) return;
-    // A modal dialog keeps the keyboard; a DOM without :modal has none.
-    try { if (doc.querySelector?.('dialog:modal')) return; } catch { /* no :modal support */ }
+    // A modal dialog keeps the keyboard.
+    if (doc.querySelector('dialog:modal')) return;
     const key = event.key, code = event.code ?? '';
     const digit = /^Digit([1-4])$/.exec(code)?.[1] ?? (/^[1-4]$/.test(key) ? key : null);
     let handled = true;
@@ -1028,12 +1002,12 @@ function createFlowWorkspace(options) {
     else if (event.shiftKey && !event.repeat && (code === 'KeyT' || key === 'T')) togglePane('timeline');
     else if (key === 'Backspace') { if (event.shiftKey) forward(); else back(); }
     else if (key === 'Enter' && !event.target?.closest?.('button, a, summary, [role="tab"], canvas, [role="application"]')) follow();
-    else if ((key === 'j' || key === 'k' || key === 'J' || key === 'K') && !event.shiftKey && event.target?.closest?.('#flow-pane-cfg')) { if (!timeline?.stepSample(key.toLowerCase() === 'j' ? 1 : -1)) flash('No sample to step: pick one in the timeline.'); }
+    else if ((key === 'j' || key === 'k' || key === 'J' || key === 'K') && !event.shiftKey && event.target?.closest?.('#flow-pane-cfg')) { if (!timeline.stepSample(key.toLowerCase() === 'j' ? 1 : -1)) flash('No sample to step: pick one in the timeline.'); }
     else handled = false;
     if (handled) { event.preventDefault(); event.stopPropagation(); }
   });
 
-  if (typeof ResizeObserver === 'function' && body) new ResizeObserver(() => { if (visible) applyLayout(); }).observe(body);
+  new ResizeObserver(() => { if (visible) applyLayout(); }).observe(body);
   applyLayout();
   renderTrail(); renderHistoryButtons(); renderCfgChrome();
 
@@ -1048,7 +1022,7 @@ function createFlowWorkspace(options) {
         loadPrefs(session);
         // The old session's CFG read, layout, decoded result and names must
         // never land in or be reused by this one.
-        cfg.generation += 1; cfg.abort?.abort(); cfg.abort = null; cfg.runner?.cancel?.();
+        cfg.generation += 1; cfg.abort?.abort(); cfg.abort = null; cfg.runner?.cancel();
         history = []; cursor = -1; heldRequest = null; graphInfo = null; cfg.fn = null; cfg.key = null; cfg.result = null; cfg.mark = null; cfg.loaded = false; cfg.error = null;
         cfg.names.clear(); nameReads.clear();
         if (cfg.view) cfg.view.release();
@@ -1063,7 +1037,7 @@ function createFlowWorkspace(options) {
         if ((crumb?.id ?? null) !== (selection.request?.id ?? null)) {
           // The app chose another request: a new pick, and nothing below the
           // old request is a recorded relationship of it.
-          if (selection.sample) { timeline?.clear(); graphCall('setMark', null); }
+          if (selection.sample) { timeline.clear(); graph.setMark(null); }
           setSelection({...noCrumbs, request: crumb, step: null}, {pane: 'lineage', record: Boolean(crumb)});
         } else if (crumb && (crumb.label !== selection.request.label || crumb.renderer !== selection.request.renderer)) {
           // The same request, named afresh: no pick, so no trail entry; the
@@ -1073,30 +1047,19 @@ function createFlowWorkspace(options) {
           renderTrail(); renderTabs();
         }
       }
-      if (requestTag) requestTag.hidden = !request;
-      if (requestMeta) {
-        const parts = request ? [request.renderer?.request ? `#${request.renderer.request}` : null, request.status ? String(request.status) : null, request.renderer ? `renderer ${request.renderer.process}` : null].filter(Boolean) : [];
-        requestMeta.textContent = parts.join(' · '); requestMeta.hidden = !parts.length;
-      }
-      timeline?.sync(session, {visible});
+      requestTag.hidden = !request;
+      const parts = request ? [request.renderer?.request ? `#${request.renderer.request}` : null, request.status ? String(request.status) : null, request.renderer ? `renderer ${request.renderer.process}` : null].filter(Boolean) : [];
+      requestMeta.textContent = parts.join(' · '); requestMeta.hidden = !parts.length;
+      timeline.sync(session);
       if (!wasVisible) { applyLayout(); if (cfg.fn && !cfg.loaded) loadCfg(cfg.fn, {offset: cfg.mark}); }
       else renderTabs();
     },
     /** The lineage rows renderBacktrace just drew, for the Related rail. */
-    setLineage(models) { lineageModels = Array.isArray(models) ? models.slice(0, 256) : []; if (!related?.hidden) renderRelated(); },
+    setLineage(models) { lineageModels = models.slice(0, 256); if (!related.hidden) renderRelated(); },
+    /** A Lineage row the researcher picked. */
     lineageSelected: lineagePicked,
-    graphSelected: (info, how) => graphPicked(info, {cause: how?.cause ?? 'pick'}),
+    graphSelected: (info, how) => graphPicked(info, {cause: how.cause}),
     graphFollowed: info => graphPicked(info, {followed: true}),
-    reveal, follow, back, forward, togglePane, setMode, toggleFocus,
-    selection: () => ({...selection}),
-    trail: () => flowTrailCrumbs(selection),
-    history: () => ({entries: history.length, cursor}),
-    state: () => ({layout, mode: body?.dataset.mode, focusPane, active, split: {...split}, sideTab: currentSideTab(), lineageTab, timelineOpen, sizes: {...sizes}, shown: [...shownPanes()]}),
-    timeline, cfg: () => ({fn: cfg.fn, mark: cfg.mark, loaded: cfg.loaded, error: cfg.error}),
-    relayout: applyLayout
+    reveal
   };
-}
-
-if (typeof module === 'object' && module?.exports) {
-  module.exports = {FLOW_PANES, FLOW_WORKSPACE_STORAGE, FLOW_SIZE_BOUNDS, FLOW_SIZE_DEFAULTS, flowWorkspacePrefs, flowWorkspaceSizes, flowWorkspacePanes, flowBlockAt, flowRowAt, flowTrailCrumbs, flowLinkKind, createFlowWorkspace};
 }

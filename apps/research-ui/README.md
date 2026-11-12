@@ -2199,8 +2199,8 @@ the graph, and shows its selector histogram in Lineage.
 ### Graph selection
 
 The workspace passes `onSelect` and `onFollow` to `createFlowGraphPanel` and
-calls its `select`, `setMark`, `resize` and `highlightRequest` only when the
-panel has them, so it also runs with a graph that offers none. A Wasm card
+drives the panel through its `select`, `setMark`, `resize` and
+`highlightRequest`. A Wasm card
 opens its CFG; a sample marks its function's card; Back and Forward reselect
 the card a trail entry named. The graph's setters never report back as a
 pick, so nothing loops. A pick made through the workspace uses the setter's

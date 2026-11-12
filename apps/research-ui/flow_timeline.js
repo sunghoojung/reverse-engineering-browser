@@ -13,9 +13,9 @@ const FLOW_TIMELINE_CATEGORY = 'vm';
  * cover a session; the caps keep a long store from filling the page. */
 const FLOW_TIMELINE_LIMITS = Object.freeze({pageSize: 1000, pagesPerRead: 4, maxRecords: 8000, maxPageBytes: 8 * 1024 * 1024,
   maxTracks: 64, maxSamples: 512, maxRequests: 128, maxGapMarks: 64, maxGapReasons: 6, unit: 22, gapCap: 6, labelEvery: 96});
-// The decoded settle names its value kind (protocol/native-js-invocation-v1.md);
-// the stored integer order is the fallback for an older payload decode.
-const FLOW_VALUE_KINDS = ['', 'integer', 'number', 'string', 'symbol', 'undefined', 'null', 'boolean', 'bigint', 'object', 'function', 'array', 'array_buffer', 'array_buffer_view', 'promise'];
+// A complete read is read again quietly when Flow redraws this long after it.
+const FLOW_TIMELINE_STALE_MS = 15000;
+// The decoded settle names its value kind (protocol/native-js-invocation-v1.md).
 const FLOW_VALUE_NAMES = {bigint: 'BigInt', array_buffer: 'ArrayBuffer', array_buffer_view: 'typed array'};
 // A settle reached by a synchronous return or throw ran start to settle without yielding.
 const FLOW_SYNC_VIA = new Set(['sync_return', 'sync_throw']);
@@ -34,12 +34,11 @@ const flowHex = value => `+0x${Number(value).toString(16)}`;
 
 /** What a settle returned, from its kind and length; never its content. */
 function flowValueLabel(kind, length) {
-  const raw = typeof kind === 'string' ? kind : FLOW_VALUE_KINDS[kind];
-  const name = FLOW_VALUE_NAMES[raw] ?? (raw || 'value');
+  const name = FLOW_VALUE_NAMES[kind] ?? (kind || 'value');
   if (!Number.isSafeInteger(length) || length <= 0) return name;
-  if (raw === 'string') return `${name} · ${flowNumber(length)} UTF-16 units`;
-  if (raw === 'array') return `${name} · ${flowNumber(length)} elements`;
-  if (raw === 'array_buffer' || raw === 'array_buffer_view') return `${name} · ${flowNumber(length)} bytes`;
+  if (kind === 'string') return `${name} · ${flowNumber(length)} UTF-16 units`;
+  if (kind === 'array') return `${name} · ${flowNumber(length)} elements`;
+  if (kind === 'array_buffer' || kind === 'array_buffer_view') return `${name} · ${flowNumber(length)} bytes`;
   return name;
 }
 
@@ -90,7 +89,7 @@ function flowGapGloss(reason) {
  * inside). Invocation records join by the backend's decoded `js_invocation`
  * object; without one they are counted as undecoded and draw nothing, so a
  * backend that does not decode them still shows the Wasm-only tracks. */
-function flowTimelineModel(events, limits = FLOW_TIMELINE_LIMITS) {
+function flowTimelineModel(events) {
   const counts = {records: 0, starts: 0, settles: 0, requests: 0, samples: 0, outside: 0, invalid: 0, undecoded: 0, duplicates: 0, conflicts: 0, gaps: 0, overflow: 0};
   const processes = new Map(), seen = new Set();
   let decoded = false;
@@ -155,9 +154,7 @@ function flowTimelineModel(events, limits = FLOW_TIMELINE_LIMITS) {
     const kind = event.type.slice('js_invocation_'.length);
     const invocation = js.invocation_id === null || js.invocation_id === undefined || String(js.invocation_id) === '0' ? null : String(js.invocation_id);
     if (kind === 'request') {
-      const inside = js.inside === true || (js.inside === undefined && invocation !== null);
-      const request = String(js.request_id ?? event.request_id ?? '');
-      const entry = {key, seq, process, request, invocation: inside ? invocation : null};
+      const entry = {key, seq, process, request: String(js.request_id), invocation: js.inside === true ? invocation : null};
       counts.requests += 1;
       owner.requests.push(entry);
       if (entry.invocation) trackOf(owner, entry.invocation).requests.push(entry);
@@ -176,11 +173,11 @@ function flowTimelineModel(events, limits = FLOW_TIMELINE_LIMITS) {
       if (track.settle) { counts.conflicts += 1; continue; }
       counts.settles += 1;
       track.settle = {key, seq, fulfilled: js.fulfilled !== false,
-        valueKind: typeof js.value_kind === 'string' ? js.value_kind : (FLOW_VALUE_KINDS[js.value_kind] || ''),
+        valueKind: typeof js.value_kind === 'string' ? js.value_kind : '',
         valueLength: Number.isSafeInteger(js.value_length) ? js.value_length : null, via: typeof js.via === 'string' ? js.via : null};
     }
   }
-  const list = [...processes.values()].map(owner => flowTimelineProcess(owner, limits));
+  const list = [...processes.values()].map(flowTimelineProcess);
   // The busiest renderer first: calls, then samples and requests; a process
   // that holds only gap markers comes last but is still listed.
   const items = view => view.outside.length + view.requests.length + view.tracks.reduce((sum, track) => sum + track.samples.length, 0);
@@ -212,7 +209,8 @@ function flowGapSummary(owner) {
   return {named: [...named.values()], dropped, overflow, streams, records: owner.gaps.length + owner.overflow.length};
 }
 /** Plain sentences for one process's gaps, at most `maxGapReasons` reasons. */
-function flowGapNotes(gaps, limits = FLOW_TIMELINE_LIMITS) {
+function flowGapNotes(gaps) {
+  const limits = FLOW_TIMELINE_LIMITS;
   if (!gaps?.records) return [];
   const notes = gaps.named.slice(0, limits.maxGapReasons).map(entry => `${entry.reason} ×${entry.count} (${flowGapGloss(entry.reason)})`);
   if (gaps.named.length > limits.maxGapReasons) notes.push(`${gaps.named.length - limits.maxGapReasons} more gap reasons`);
@@ -228,7 +226,8 @@ function flowGapNotes(gaps, limits = FLOW_TIMELINE_LIMITS) {
 }
 
 /** Orders one process's records and applies the drawing bounds. */
-function flowTimelineProcess(owner, limits) {
+function flowTimelineProcess(owner) {
+  const limits = FLOW_TIMELINE_LIMITS;
   const first = track => [track.start?.seq, track.samples[0]?.seq, track.requests[0]?.seq, track.settle?.seq].filter(seq => seq !== undefined).reduce((a, b) => (a < b ? a : b));
   const tracks = [...owner.tracks.values()];
   for (const track of tracks) {
@@ -291,7 +290,8 @@ function flowTimelineProcess(owner, limits) {
 /** Record order as x positions. A run of records nobody here names is
  * compressed to one gap, marked as a break, so order stays exact and the
  * spacing between neighbours stays readable. */
-function flowTimelineAxis(seqs, {unit = 12, gapCap = 12, labelEvery = 96} = {}) {
+function flowTimelineAxis(seqs) {
+  const {unit, gapCap, labelEvery} = FLOW_TIMELINE_LIMITS;
   const sorted = [...new Map(seqs.map(seq => [String(seq), seq])).values()].sort(flowSeqOrder);
   const points = [], breaks = [], cap = BigInt(gapCap);
   let x = 0;
@@ -360,11 +360,13 @@ function flowGapMarkText(gap) {
 /**
  * The timeline view. `fetchJSON(url, signal)` returns a parsed page;
  * `onSelect(selection | null)` and `onFollow(selection)` report the chosen
- * sample, call or request to the workspace.
+ * sample, call or request to the workspace, `onPartial(partial)` follows
+ * every read, and `describeRequest(process, request)` names a renderer
+ * request when the app lists it.
  */
-function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = () => {}, onPartial = () => {}, describeRequest = () => null, limits = FLOW_TIMELINE_LIMITS, now = () => Date.now()}) {
-  const doc = root.ownerDocument ?? document;
-  const make = (tag, className = '', text = '') => { const element = doc.createElement(tag); if (className) element.className = className; if (text) element.textContent = text; return element; };
+function createFlowTimeline({root, fetchJSON, onSelect, onFollow, onPartial, describeRequest}) {
+  const limits = FLOW_TIMELINE_LIMITS;
+  const make = (tag, className = '', text = '') => { const element = document.createElement(tag); if (className) element.className = className; if (text) element.textContent = text; return element; };
   root.classList.add('flow-timeline');
   const banner = make('div', 'flow-tl-banner'); banner.hidden = true; banner.setAttribute('role', 'status');
   const bannerText = make('span', 'flow-tl-banner-text');
@@ -390,7 +392,7 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
   const processSelect = make('select', 'flow-tl-process'); processSelect.setAttribute('aria-label', 'Renderer process'); processSelect.hidden = true;
 
   let session = null, events = [], model = null, view = null, cursor = '0', partial = false, status = 'idle', error = null;
-  let generation = 0, controller = null, loadedAt = 0, chosenProcess = null, selected = null, items = new Map(), focusKey = null;
+  let generation = 0, controller = null, loadedAt = 0, chosenProcess = null, selected = null, items = new Map();
   // Gap counters of the pages read. They describe the byte range each page
   // scanned, every session and record type in it, not this session alone.
   const noScan = () => ({sequence: 0n, sequenceSaturated: false, drops: 0n, dropsSaturated: false});
@@ -418,7 +420,7 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
     // A new session starts empty; reset first so it cannot cancel this read.
     if (String(next) !== String(session)) reset();
     controller?.abort();
-    const owner = ++generation, abort = typeof AbortController === 'function' ? new AbortController() : null;
+    const owner = ++generation, abort = new AbortController();
     controller = abort;
     session = String(next);
     const collected = more ? events.slice() : [], scanned = more ? {...scan} : noScan();
@@ -429,7 +431,7 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
       const budget = more ? limits.pagesPerRead : Math.max(limits.pagesPerRead, pagesHeld);
       while (pages < budget && collected.length < limits.maxRecords) {
         const parameters = new URLSearchParams({session_id: session, category: FLOW_TIMELINE_CATEGORY, type: FLOW_TIMELINE_TYPES.join(','), after, limit: String(limits.pageSize)});
-        const body = await fetchJSON(`/api/events?${parameters}`, abort?.signal);
+        const body = await fetchJSON(`/api/events?${parameters}`, abort.signal);
         if (owner !== generation) return;
         if (!body || !Array.isArray(body.events) || !body.query || typeof body.query !== 'object') throw new TypeError('The event store returned a malformed page.');
         collected.push(...body.events.slice(0, limits.maxRecords - collected.length));
@@ -441,8 +443,8 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
         if (typeof query.next_after !== 'string' || query.next_after === after) { done = true; break; }
         after = query.next_after;
       }
-      events = collected; cursor = after; partial = !done; error = null; loadedAt = now(); scan = scanned; pagesHeld = (more ? pagesHeld : 0) + pages;
-      model = flowTimelineModel(events, limits);
+      events = collected; cursor = after; partial = !done; error = null; loadedAt = Date.now(); scan = scanned; pagesHeld = (more ? pagesHeld : 0) + pages;
+      model = flowTimelineModel(events);
       render();
       onPartial(partial);
     } catch (failure) {
@@ -456,7 +458,7 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
   }
   function reset() {
     controller?.abort(); controller = null; generation += 1;
-    events = []; model = null; view = null; cursor = '0'; partial = false; loadedAt = 0; chosenProcess = null; selected = null; items = new Map(); focusKey = null; scan = noScan(); pagesHeld = 0;
+    events = []; model = null; view = null; cursor = '0'; partial = false; loadedAt = 0; chosenProcess = null; selected = null; items = new Map(); scan = noScan(); pagesHeld = 0;
     canvas.replaceChildren(); detailText.textContent = ''; detailFollow.hidden = true; setBanner(''); gapNotice.textContent = ''; gapNotice.hidden = true;
     processSelect.replaceChildren(); processSelect.hidden = true;
   }
@@ -503,7 +505,7 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
    * renderers have some, and the scanned range's missing and dropped records. */
   function renderGaps(processes) {
     const parts = [];
-    const lines = flowGapNotes(view?.gaps, limits);
+    const lines = flowGapNotes(view?.gaps);
     if (lines.length) parts.push(`Gaps in renderer ${view.process}: ${lines.join('; ')}.`);
     const others = processes.filter(item => item !== view && item.gaps.records).map(item => item.process);
     if (others.length) parts.push(`${others.length === 1 ? 'Renderer' : 'Renderers'} ${others.join(', ')} also ${others.length === 1 ? 'has' : 'have'} gaps.`);
@@ -528,7 +530,7 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
     for (const sample of view.drawnOutside) seqs.push(sample.seq);
     for (const request of view.drawnRequests) seqs.push(request.seq);
     for (const gap of view.drawnGaps) seqs.push(gap.seq);
-    const axis = flowTimelineAxis(seqs, limits);
+    const axis = flowTimelineAxis(seqs);
     const X = seq => G.label + G.left + axis.x(seq);
     const rows = [...(view.drawnGaps.length ? [{type: 'gaps'}] : []), ...view.drawn.map(track => ({type: 'track', track})), ...(view.drawnOutside.length ? [{type: 'outside'}] : []), ...(view.drawnRequests.length ? [{type: 'requests'}] : [])];
     let top = G.axis;
@@ -780,12 +782,10 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
   return {
     processSelect,
     /** Loads when the session changes, else refreshes quietly when stale. */
-    sync(next, {visible = true, staleAfter = 15000} = {}) {
-      if (!visible) return;
+    sync(next) {
       if (String(next ?? '') !== String(session ?? '') || (!model && status !== 'loading' && status !== 'error')) { load(next); return; }
-      if (model && !partial && !controller && now() - loadedAt > staleAfter) load(session, {quiet: true});
+      if (model && !partial && !controller && Date.now() - loadedAt > FLOW_TIMELINE_STALE_MS) load(session, {quiet: true});
     },
-    load, reset,
     refresh: () => load(session),
     /** Selects by key ("sample:<process>:<seq>", "call:<process>:<inv>" or "request:..."). */
     select(key, {focus = false, silent = true} = {}) {
@@ -811,7 +811,6 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
       if (!view) return [];
       return [...view.sites.values()].filter(site => site.artifact_id === String(artifactId) && site.function_index === functionIndex);
     },
-    callsFor(track) { return track ? track.samples : []; },
     focus() {
       const target = items.get(selected?.key) ?? [...items.values()].find(item => item.tabIndex === 0) ?? items.values().next().value;
       if (target) { target.focus({focusVisible: true}); return true; }
@@ -825,15 +824,11 @@ function createFlowTimeline({root, fetchJSON, onSelect = () => {}, onFollow = ()
       const samples = view.tracks.reduce((sum, track) => sum + track.samples.length, 0) + view.outside.length;
       return `${view.tracks.length} ${view.tracks.length === 1 ? 'call' : 'calls'} · ${samples} ${samples === 1 ? 'sample' : 'samples'} · renderer ${view.process} record order${partial ? ' · partial' : ''}${view.gaps.records ? ' · gaps' : ''}`;
     },
-    status: () => status,
-    model: () => model,
-    view: () => view,
-    isPartial: () => partial,
-    /** The gap counters of the pages read, for checks and the workspace. */
-    scanGaps: () => ({...scan})
+    /** The tracked call whose start or settle record is `record`
+     * ("process:sequence"), described as select() describes it, or null. */
+    callAt(record) {
+      const track = view?.tracks.find(item => item.start?.key === record || item.settle?.key === record);
+      return track ? describe({type: 'call', key: `call:${track.key}`}) : null;
+    }
   };
-}
-
-if (typeof module === 'object' && module?.exports) {
-  module.exports = {FLOW_TIMELINE_TYPES, FLOW_TIMELINE_CATEGORY, FLOW_TIMELINE_LIMITS, flowSeq, flowGapRecord, flowGapGloss, flowGapNotes, flowSampleCount, flowValueLabel, flowTimelineModel, flowTimelineAxis, flowTrackOutcome, flowTrackName, createFlowTimeline};
 }

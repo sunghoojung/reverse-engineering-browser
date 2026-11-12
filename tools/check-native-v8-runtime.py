@@ -2,8 +2,8 @@
 """Build the pinned native V8 runtime tests, not a Brave/browser acceptance run.
 
 This independent system-Clang profile does not fetch Chromium's binary
-toolchains. Authored C++ patches are unchanged. Brave-specific GN wiring is
-omitted; modernized upstream lifetime-attribute spellings are receipt-recorded.
+toolchains. Authored C++ patches are unchanged and Brave-specific GN wiring
+is omitted.
 """
 
 import argparse
@@ -20,7 +20,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-DEPOT_REV = "94e89b10b92cc9d6e58fc8d1b6474b7d29e8a114"
+DEPOT_REV = "1afcf0756e47f3a6ee82d7736b9fcda2d57b268e"
 PUBLIC_TEST = "test-run-wasm/RebNativePublicQuickJSGuestState"
 TEST_NAMES = [
     "RebNativeBrTableRuntimeDispatch",
@@ -141,26 +141,6 @@ def binary_dependencies(deps):
     raise ValueError("Missing DEPS dictionary")
 
 
-ABSEIL_CAPTURE_COUNTS = {
-    "status/statusor.h": 1,
-    "synchronization/mutex.h": 8,
-    "base/internal/spinlock.h": 1,
-    "container/internal/raw_hash_map.h": 8,
-    "container/internal/raw_hash_set.h": 4,
-    "container/internal/btree_container.h": 5,
-}
-
-
-def modernize_abseil_capture(source, expected):
-    # Preserve lifetime analysis: Clang23 replaced the deprecated spelling for
-    # captures by this with a dedicated attribute, not an absent annotation.
-    pattern = r"ABSL_INTERNAL_ATTRIBUTE_CAPTURED_BY\((?:\s|\\\n)*this\s*\)"
-    result, count = re.subn(pattern, "[[clang::lifetime_capture_by_this]]", source)
-    if count != expected:
-        raise ValueError("Pinned Abseil lifetime annotations changed; review required")
-    return result
-
-
 def create_clang_toolchain_view(destination, system_base, resource_dir, builtins):
     """Expose the real distro archive at Chromium's expected x64 runtime path."""
     if not builtins.is_file() or not (resource_dir / "include").is_dir():
@@ -229,18 +209,6 @@ def self_test():
     assert binary_dependencies("deps={'tool':{'dep_type':'gcs'},'src':'git','gn':{'dep_type':'cipd'}}") == {
         "v8/tool": None, "v8/gn": None,
     }
-    original = "ABSL_INTERNAL_ATTRIBUTE_CAPTURED_BY(this)"
-    assert modernize_abseil_capture(original, 1) == "[[clang::lifetime_capture_by_this]]"
-    multiline = "ABSL_INTERNAL_ATTRIBUTE_CAPTURED_BY(" + "\\" + "\n this)"
-    assert modernize_abseil_capture(multiline, 1) == "[[clang::lifetime_capture_by_this]]"
-    other_owner = "ABSL_INTERNAL_ATTRIBUTE_CAPTURED_BY(owner)"
-    assert modernize_abseil_capture(other_owner, 0) == other_owner
-    try:
-        modernize_abseil_capture(original, 2)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("Changed Abseil annotations must fail closed")
     with tempfile.TemporaryDirectory() as directory:
         # Resolve once: macOS temp directories live behind a /var symlink.
         root = Path(directory).resolve()
@@ -569,18 +537,6 @@ def main():
                     run(["git", "apply", "--check", str(temporary)], v8)
                     run(["git", "apply", str(temporary)], v8)
             receipt["patches"].append(entry)
-        receipt["standalone_upstream_annotations"] = []
-        for relative, count in ABSEIL_CAPTURE_COUNTS.items():
-            path = v8 / "third_party/abseil-cpp/absl" / relative
-            original = path.read_text()
-            modernized = modernize_abseil_capture(original, count)
-            path.write_text(modernized)
-            receipt["standalone_upstream_annotations"].append({
-                "path": str(path.relative_to(v8)), "count": count,
-                "change": "lifetime_capture_by(this) to lifetime_capture_by_this",
-                "before_sha256": hashlib.sha256(original.encode()).hexdigest(),
-                "after_sha256": hashlib.sha256(modernized.encode()).hexdigest(),
-            })
         save_receipt()
         # Temporal alone pulls Rust into this standalone build; guest capture
         # and the public QuickJS fixture do not use the Temporal API.

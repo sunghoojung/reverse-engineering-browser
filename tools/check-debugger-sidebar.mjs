@@ -132,7 +132,12 @@ async function check(name, run) {
 await check('one watch form per Console document, stale arming refused', async () => {
   let live = {session_id: '5', target_id: '22', label: 'top #22'};
   const calls = [];
-  const ui = mount({globals: {RebNativeConsole: {liveDocument: () => live, watch: async rules => { calls.push(rules); return {status: 'ok'}; }}}});
+  // The stub Console arms the way the renderer confirms: the next read reports the set.
+  const ui = mount({globals: {RebNativeConsole: {liveDocument: () => live, watch: async rules => {
+    calls.push(rules);
+    ui.store.watch = rules ? {state: 'armed', armed: {session_id: live.session_id, target_id: live.target_id, rules}} : {state: 'none', armed: null};
+    return {status: 'ok'};
+  }}}});
   ui.open();
   await until(() => ui.sidebar.querySelector('.debugger-watch-form'), 'the form appears');
   const forms = () => [...ui.sidebar.querySelectorAll('.debugger-watch-form')];
@@ -834,6 +839,30 @@ await check('a selection carried into a thread scope keeps its place', async () 
   ui.close();
 });
 
+// Round 3, 4. Arming reads the confirmed set at once, not at the next poll.
+await check('arming reads the confirmed set at once', async () => {
+  const live = {session_id: '5', target_id: '22', label: 'top #22'};
+  const store = createStore(1);
+  const ui = mount({store, globals: {RebNativeConsole: {liveDocument: () => live, watch: async rules => {
+    store.watch = rules ? {state: 'armed', armed: {session_id: '5', target_id: '22', rules}} : {state: 'none', armed: null};
+    return {status: 'ok'};
+  }}}});
+  const section = () => ui.text('[data-debugger-section="watch-rules"] .debugger-section-body');
+  ui.open();
+  await until(() => ui.sidebar.querySelector('.debugger-watch-form'), 'the form');
+  // Slow reads stretch the poll to 6 seconds; arming just after one read ends.
+  store.delay = 1500;
+  await until(() => /every 6 seconds/.test(ui.text('.debugger-sidebar-status')), 'a 6 second interval', 4 * POLL);
+  const form = ui.sidebar.querySelector('.debugger-watch-form');
+  form.querySelector('textarea').value = '/collect';
+  form.dispatchEvent(event(ui, 'submit'));
+  await until(() => /Armed on document 22/.test(section()), 'the outcome');
+  assert.doesNotMatch(section(), /The renderer confirmed the set below/, 'before its read answers, the outcome does not point at a set not shown');
+  await until(() => /Armed on Console document 22/.test(section()), 'the confirmed set, well before the next poll', 4000);
+  assert.match(section(), /Armed on document 22\. The renderer confirmed the set below\./);
+  ui.close();
+});
+
 // Round 3, 5. Reopened with nothing selected, the list shows the newest records.
 await check('reopening shows the newest records, not kept ones', async () => {
   const store = createStore(200);
@@ -849,6 +878,31 @@ await check('reopening shows the newest records, not kept ones', async () => {
   await until(() => ui.reads().length > reads && ui.rows('#debugger-observations')[0]?.dataset.key === '1:42:700', 'the newest records', 4000);
   assert.equal(ui.sidebar.querySelector('.debugger-observation-pinned').hidden, true, 'no place is claimed as kept');
   assert.equal(ui.sidebar.querySelector('#debugger-observations [aria-selected="true"]'), null);
+  ui.close();
+});
+
+// Round 3, 7. A read while the Console holds the session judges no outcome.
+await check('a busy read leaves the arm outcome', async () => {
+  const live = {session_id: '5', target_id: '22', label: 'top #22'};
+  const store = createStore(1);
+  const ui = mount({store, globals: {RebNativeConsole: {liveDocument: () => live, watch: async rules => {
+    store.watch = rules ? {state: 'armed', armed: {session_id: '5', target_id: '22', rules}} : {state: 'none', armed: null};
+    return {status: 'ok'};
+  }}}});
+  const section = () => ui.text('[data-debugger-section="watch-rules"] .debugger-section-body');
+  ui.open();
+  await until(() => ui.sidebar.querySelector('.debugger-watch-form'), 'the form');
+  const form = ui.sidebar.querySelector('.debugger-watch-form');
+  form.querySelector('textarea').value = '/collect';
+  form.dispatchEvent(event(ui, 'submit'));
+  await until(() => /Armed on Console document 22/.test(section()), 'the armed set', 2 * POLL + 1000);
+  const armed = store.watch;
+  store.watch = {state: 'busy', armed: null};
+  await until(() => /A Console action holds the session/.test(section()), 'a busy read', 2 * POLL + 1000);
+  assert.match(section(), /Armed on document 22/, 'a busy read does not end the outcome');
+  store.watch = armed;
+  await until(() => /Armed on Console document 22/.test(section()), 'armed again', 2 * POLL + 1000);
+  assert.match(section(), /Armed on document 22\. The renderer confirmed the set below\./);
   ui.close();
 });
 

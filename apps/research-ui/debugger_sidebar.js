@@ -399,11 +399,14 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
   let open = false, timer = 0, generation = 0, interval = DEBUGGER_SIDEBAR.poll, controller = null;
   // `renderTurn` lasts from a render until the next task, so a refresh() a
   // section queues from render (even as a promise) is ignored.
-  let rendering = false, renderTurn = false, renderTurns = 0, lastStarted = 0, refreshQueued = false, stops = 0;
+  let rendering = false, renderTurn = false, renderTurns = 0, lastStarted = 0, refreshQueued = false, stops = 0, readsStarted = 0;
   const mounted = new Map();
   const blankObservations = () => ({key: null, head: [], refused: 0, query: null, list: null, loadingOlder: false, olderError: null, olderController: null});
   const view = {
-    status: 'loading', document: null, error: null, updatedAt: null, readAt: 0, thread: null, kind: null,
+    // `readSerial` numbers the read whose answer `document` is; readsStarted()
+    // counts reads begun, so an action can tell which reads followed it.
+    status: 'loading', document: null, error: null, updatedAt: null, readSerial: 0, thread: null, kind: null,
+    readsStarted: () => readsStarted,
     observations: blankObservations(),
     // Asks for a read soon. From a render, or the promises it queued, it does
     // nothing: a render follows a read. While a read is in flight it runs one
@@ -447,6 +450,13 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
       // dropList also cancels a Show older read that would continue this list.
       dropList();
       return true;
+    },
+    // A read for the sidebar's own Watch action: now, or right after the read
+    // in flight, never only at the next poll. Not for registered sections.
+    readAfterAction() {
+      if (!open) return;
+      if (controller) refreshQueued = true;
+      else read();
     },
     // The other sections registered as presenting the pausing debugger.
     nativeSections: () => sections().filter(section => section.native === 'pausing' && section.id !== 'pausing').map(section => ({id: section.id, title: section.title})),
@@ -549,7 +559,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     controller?.abort();
     const own = new AbortController();
     controller = own;
-    const mine = ++generation, started = Date.now();
+    const mine = ++generation, started = Date.now(), serial = ++readsStarted;
     lastStarted = started;
     try {
       const answer = await fetchDocument(query(), own.signal);
@@ -560,7 +570,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
       view.status = 'ready';
       view.error = null;
       view.updatedAt = new Date();
-      view.readAt = started;
+      view.readSerial = serial;
     } catch (error) {
       if (mine !== generation) return;
       view.status = error?.malformed ? 'malformed' : 'disconnected';
@@ -906,7 +916,9 @@ function debuggerWatchSection() {
   // The last outcome names its document, so it outlives a form drawn again.
   // An arm or clear outcome lasts only while the state read after it agrees.
   let form = null, outcome = null;
-  const say = (text, kind = 'notice', target = null) => { outcome = {text, kind, target, at: Date.now()}; };
+  // `after` is the count of reads begun when the outcome came; only a read
+  // begun later can confirm or end it.
+  const say = (text, kind = 'notice', target = null, after = 0) => { outcome = {text, kind, target, after}; };
   const sameDocument = (left, right) => Boolean(left && right) && left.session_id === right.session_id && left.target_id === right.target_id;
   function build(view, live) {
     const element = debuggerNode('form', 'debugger-watch-form');
@@ -979,15 +991,15 @@ function debuggerWatchSection() {
       const reply = await view.hooks.watch(rules);
       if (!reply) say(`No confirmed answer from document ${live.target_id}. The rules may have changed; nothing was retried.`);
       else if (reply.status !== 'ok') say(`Refused by document ${live.target_id}: ${reply.text || reply.status}. A refused set leaves nothing armed.`);
-      else if (action === 'arm') say(`Armed on document ${live.target_id}. The renderer confirmed the set below.`, 'armed', live.target_id);
-      else say(`Cleared on document ${live.target_id}.`, 'cleared', live.target_id);
+      else if (action === 'arm') say(`Armed on document ${live.target_id}. The renderer confirmed the set below.`, 'armed', live.target_id, view.readsStarted());
+      else say(`Cleared on document ${live.target_id}.`, 'cleared', live.target_id, view.readsStarted());
     } catch (error) {
       say(`Not confirmed by document ${live.target_id}: ${error?.message ?? error}. Nothing was retried.`);
     } finally {
       own.sending = false;
-      // The outcome now; the confirmed set with the next read.
+      // A read of the confirmed set starts now; the outcome shows meanwhile.
+      view.readAfterAction();
       view.repaint();
-      view.refresh();
     }
   }
   function drop() {
@@ -1005,11 +1017,13 @@ function debuggerWatchSection() {
       const watch = view.document.watch, armed = watch.state === 'armed' ? watch.armed : null;
       // A read that started after the outcome and disagrees with it ends it:
       // "Armed on document 22" never stands above "No rules armed".
-      if (outcome && view.readAt > outcome.at && view.status === 'ready') {
+      if (outcome && view.readSerial > outcome.after && view.status === 'ready' && watch.state !== 'busy') {
         const armedThere = armed?.target_id === outcome.target;
         if ((outcome.kind === 'armed' && !armedThere) || (outcome.kind === 'cleared' && armedThere)) outcome = null;
       }
-      const text = outcome?.text ?? '';
+      // Until a read after the arm answers, the confirmed set is not below yet.
+      const text = outcome?.kind === 'armed' && !(view.readSerial > outcome.after)
+        ? `Armed on document ${outcome.target}. Reading the set the renderer confirmed…` : outcome?.text ?? '';
       const nodes = [];
       if (watch.state === 'busy') nodes.push(debuggerNote('A Console action holds the session, so the armed set is read again shortly.', 'warning'));
       else if (!armed) nodes.push(debuggerNote('No rules armed. Nothing is observed until a set is armed on one live document.'));

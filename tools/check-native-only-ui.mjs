@@ -468,10 +468,12 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
     assert.equal(sidebar.querySelector('[data-debugger-section="threads"]').dataset.stale, 'true', 'a stale section says so');
   }
   // Arming goes through the Console's live document only, and invalid rules send nothing.
-  context.__debuggerAnswer = () => answer();
+  // The stub Console arms the way the renderer confirms: later reads report the set.
+  context.__debuggerAnswer = () => answer(context.__debuggerArmed
+    ? {watch: {state: 'armed', armed: {session_id: '5', target_id: '22', rules: JSON.parse(context.__debuggerArmed)}}} : {});
   context.__watchCalls = [];
   runInContext(`globalThis.RebNativeConsole = {liveDocument: () => ({session_id: '5', target_id: '22', label: 'top #22'}),
-    watch: async rules => { __watchCalls.push(JSON.stringify(rules)); return {status: 'ok', text: 'Armed'}; }};`, context);
+    watch: async rules => { __watchCalls.push(JSON.stringify(rules)); globalThis.__debuggerArmed = rules ? JSON.stringify(rules) : null; return {status: 'ok', text: 'Armed'}; }};`, context);
   click(sidebar.querySelector('.debugger-kind[data-kind="all"]'));
   await settle();
   const form = sidebar.querySelector('.debugger-watch-form');

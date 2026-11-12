@@ -89,6 +89,33 @@ async function loadWasmFunctionGraph({artifactId, functionIndex, view, runner, s
   return result;
 }
 
+/** Why the region layout stayed (a graphLayoutClient reason, or one_block
+ * and not_served from the layout worker), as the header's tooltip words it. */
+function blockGraphLayoutReason(reason) {
+  switch (reason?.code) {
+    case 'one_block': return 'one block';
+    case 'too_large': return 'over Triskel\u2019s size limit';
+    case 'request_budget': return 'past what one layout request holds';
+    case 'wider': return `Triskel would draw it ${reason.ratio.toFixed(1)}\u00d7 wider`;
+    case 'taller': return `Triskel would draw it ${reason.ratio.toFixed(1)}\u00d7 taller`;
+    case 'mismatch': return 'the Triskel answer did not match the function';
+    case 'failed': return `Triskel ${reason.status}${reason.detail ? `: ${reason.detail}` : ''}`;
+    case 'status': return `the layout route returned ${reason.status}`;
+    case 'route_failed': return `the layout route was unavailable (${reason.detail})`;
+    case 'not_served': return 'the layout route is not served here';
+    default: return '';
+  }
+}
+
+/** What the header adds about the layout engine, if anything. */
+function blockGraphEngineNote(engine) {
+  if (engine?.name === 'triskel') return 'Triskel layout';
+  const code = engine?.reason?.code;
+  if (code === 'wider' || code === 'taller') return `region layout: Triskel ${engine.reason.ratio.toFixed(1)}\u00d7 ${code}`;
+  if (code === 'too_large') return 'region layout: over Triskel\u2019s limit';
+  return '';
+}
+
 /** Basic blocks for a `reb-vm-static-analysis-v1` report, as declared edges. */
 function vmStaticBlockGraph(report) {
   const instructions = report.instructions, edges = report.cfg.edges;
@@ -417,18 +444,17 @@ function createBlockGraphView(root, options = {}) {
     miniWrap.hidden = !layout;
   }
   retry.addEventListener('click', () => onError?.());
-  function setResult(result, stats_) {
+  function setResult(result) {
     graph = result.graph; starts = result.starts; layout = result.layout;
     selectedBlock = -1; selectedRow = -1; view.z = 1; miniDirty = true;
     title.textContent = options.titleOf?.(graph) ?? graph.title;
     const parts = [`${graph.count.toLocaleString()} ${graph.count === 1 ? 'block' : 'blocks'}`, `${graph.instructions.toLocaleString()} ${graph.evidence === 'observed' ? 'retained steps' : 'instructions'}`];
     // Which engine laid it out is said in the header, not only on hover.
-    const reason = layout.engine?.reason ?? '';
-    if (layout.engine?.name === 'triskel') parts.push('Triskel layout');
-    else if (/^Triskel would draw it/.test(reason)) parts.push(`region layout: ${reason.replace('Triskel would draw it ', 'Triskel ')}`);
-    else if (/size limit/.test(reason)) parts.push('region layout: over Triskel\u2019s limit');
-    stats.textContent = stats_ ?? [options.statsPrefix?.(graph), ...parts].filter(Boolean).join(' · ');
-    stats.title = layout.engine?.name === 'triskel' ? `Laid out by Triskel ${layout.engine.revision?.slice(0, 7) ?? ''}, a CFG layout engine built on single-entry single-exit regions.`.replace(' ,', ',') : layout.engine?.reason ? `Region layout: ${layout.engine.reason}.` : '';
+    parts.push(blockGraphEngineNote(layout.engine));
+    stats.textContent = [options.statsPrefix?.(graph), ...parts].filter(Boolean).join(' · ');
+    const revision = layout.engine?.revision ? ` ${layout.engine.revision.slice(0, 7)}` : '';
+    const reason = blockGraphLayoutReason(layout.engine?.reason);
+    stats.title = layout.engine?.name === 'triskel' ? `Laid out by Triskel${revision}, a CFG layout engine built on single-entry single-exit regions.` : reason ? `Region layout: ${reason}.` : '';
     evidence.textContent = graph.status === 'partial' ? `${graph.evidence} · partial` : graph.evidence;
     limits.textContent = graph.evidence === 'observed' ? graph.notice : BLOCK_GRAPH_LIMITS;
     limits.title = graph.evidence === 'observed' ? graph.notice : 'Declared static flow. Reachable here is not observed execution, and a complete drawing is not a proof.';

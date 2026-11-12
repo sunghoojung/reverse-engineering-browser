@@ -276,6 +276,24 @@ function flowGraphPathsThrough(model, members) {
   return model.paths.filter(path => path.nodes.some(node => wanted.has(node)));
 }
 
+/** Why a realm kept the layered layout (a graphLayoutClient reason, or
+ * one_card and not_served from the layout worker), or '' when it needs none. */
+function flowGraphLayoutReason(reason) {
+  const {LIMITS} = graphLayoutClient;
+  switch (reason?.code) {
+    case 'too_large': return 'over Triskel\u2019s size limit';
+    case 'request_budget': return reason.limit === 'graphs' ? `past the ${LIMITS.graphs} realms one layout request holds` : `past the ${LIMITS.nodes.toLocaleString()} cards one layout request holds`;
+    case 'wider': return `Triskel would draw it ${reason.ratio.toFixed(1)}\u00d7 wider`;
+    case 'taller': return `Triskel would draw it ${reason.ratio.toFixed(1)}\u00d7 taller`;
+    case 'mismatch': return 'Triskel\u2019s answer did not match the realm';
+    case 'failed': return `Triskel ${reason.status}${reason.detail ? `: ${reason.detail}` : ''}`;
+    case 'status': return `the layout route returned ${reason.status}`;
+    case 'route_failed': return 'the layout route was unavailable';
+    case 'not_served': return 'the layout route is not served here';
+    default: return '';
+  }
+}
+
 /** Highlight sets for a set of paths, as display node and edge indexes. */
 function flowGraphHighlight(model, display, paths) {
   const nodes = new Set(), edges = new Set(), originalEdges = new Set();
@@ -691,11 +709,11 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   function renderEngine() {
     const engine = layout?.engine, realms = engine?.realms ?? [];
     if (!engine) { engineLabel.textContent = ''; engineLabel.title = ''; return; }
-    const sized = realms.filter(item => item.reason !== 'one card'), triskel = sized.filter(item => item.engine === 'triskel').length;
+    const sized = realms.filter(item => item.reason?.code !== 'one_card'), triskel = sized.filter(item => item.engine === 'triskel').length;
     engineLabel.textContent = triskel ? `Triskel layout${triskel < sized.length ? ` · ${triskel} of ${sized.length} realms` : ''}` : engine.failure ? 'Layered layout · Triskel unavailable' : 'Layered layout';
     engineLabel.dataset.engine = triskel ? 'triskel' : 'layered';
     engineLabel.title = [triskel ? `Triskel ${engine.revision ? engine.revision.slice(0, 7) : ''} lays out each realm that fits its limits; a realm it would draw far wider than the stacked layered layout keeps that one.`.trim() : 'Laid out in the app with the layered layout.',
-      ...realms.filter(item => item.reason && item.reason !== 'one card').map(item => `${model?.contexts[item.key]?.label.title ?? 'Realm'}: layered, ${item.reason}.`), engine.failure ?? ''].filter(Boolean).join('\n');
+      ...realms.filter(item => flowGraphLayoutReason(item.reason)).map(item => `${model?.contexts[item.key]?.label.title ?? 'Realm'}: layered, ${flowGraphLayoutReason(item.reason)}.`), engine.failure ?? ''].filter(Boolean).join('\n');
   }
 
   // Geometry ---------------------------------------------------------------
@@ -1540,7 +1558,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       const name = make('button', 'flow-inspector-link flow-inspector-realm', context.label.title); name.type = 'button';
       name.addEventListener('click', () => showRealm(context.index));
       const engine = layout?.engine?.realms?.find(entry => entry.key === context.index);
-      const laidBy = !engine || engine.reason === 'one card' ? '' : engine.engine === 'triskel' ? 'laid out by Triskel' : `layered layout: ${engine.reason}`;
+      const laidBy = engine?.engine === 'triskel' ? 'laid out by Triskel' : flowGraphLayoutReason(engine?.reason) ? `layered layout: ${flowGraphLayoutReason(engine.reason)}` : '';
       item.append(name, make('span', '', context.label.detail), make('span', 'flow-inspector-meta', counts));
       if (laidBy) item.append(make('span', 'flow-inspector-meta', laidBy));
       list.append(item);

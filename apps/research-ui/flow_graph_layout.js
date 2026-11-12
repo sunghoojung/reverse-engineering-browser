@@ -215,22 +215,12 @@ const flowGraphLayout = (() => {
     return offset;
   }
 
-  /** A route through corner points: repeats and straight-through points are
-   * dropped, the first point moves, the last is a line, the rest are
-   * rounded corners. */
-  function orthogonal(flat) {
-    const points = [];
-    for (let i = 0; i + 1 < flat.length; i += 2) {
-      const x = flat[i], y = flat[i + 1], last = points.length - 2;
-      if (last >= 0 && Math.abs(points[last] - x) < 0.01 && Math.abs(points[last + 1] - y) < 0.01) continue;
-      if (last >= 2) {
-        const ax = points[last - 2], ay = points[last - 1], bx = points[last], by = points[last + 1];
-        if ((Math.abs(ax - bx) < 0.01 && Math.abs(bx - x) < 0.01) || (Math.abs(ay - by) < 0.01 && Math.abs(by - y) < 0.01)) points.length = last;
-      }
-      points.push(x, y);
-    }
-    const last = points.length / 2 - 1;
-    return {points, types: Array.from({length: last + 1}, (_, k) => k === 0 ? MOVE : k === last ? LINE : CORNER)};
+  /** A route through corner points (graphLayoutClient.routePoints drops
+   * repeats and straight-through points): the first point moves, the last is
+   * a line, the rest are rounded corners. */
+  function orthogonal(flat, dx = 0) {
+    const points = graphLayoutClient.routePoints(flat, dx), last = points.length / 2 - 1;
+    return {points, types: Array.from({length: last + 1}, (_, k) => (k === 0 ? MOVE : k === last ? LINE : CORNER))};
   }
 
   /**
@@ -345,9 +335,7 @@ const flowGraphLayout = (() => {
     routeStart[edgeCount] = kinds.length;
     const laneW = m.lanePadX * 2 + leftW + shared + rightW;
     const lanes = content.bands.map((band, index) => {
-      const box = {key: band.key, x: m.margin, y: top[index], w: laneW, h: bottom[index] - top[index], gutter: shift + offsets[index] + band.cards + m.lanePadX / 2, top: contentTop[index]};
-      if (band.engine) { box.engine = band.engine; box.reason = band.reason; }
-      return box;
+      return {key: band.key, x: m.margin, y: top[index], w: laneW, h: bottom[index] - top[index], gutter: shift + offsets[index] + band.cards + m.lanePadX / 2, top: contentTop[index]};
     });
     let height = (bands ? bottom[bands - 1] : m.margin + m.lanePadTop) + m.margin;
     for (let i = 1; i < points.length; i += 2) height = Math.max(height, points[i] + m.margin);
@@ -600,89 +588,48 @@ const flowGraphLayout = (() => {
     return out;
   }
 
-  /* Triskel (graph-layout-v1, POST /api/graph-layout) lays out each realm
-   * that fits its limits, the way a CFG tool lays out a function. A realm
-   * Triskel would draw much wider than the layered layout above (a wide fan
-   * of calls, which Triskel does not stack) keeps the layered one; so does
-   * every realm when the route is missing or fails. Bands keep the layered
-   * layout's order, so the page still sits above the frames it calls into,
-   * and calls between bands are routed the same way for either engine. */
-  const TRISKEL = {maxNodes: 2000, maxEdges: 8000, maxTotal: 8000, widen: 1.6, freeWidth: 1400, freeHeight: 1600};
+  /* Triskel, through graphLayoutClient, lays out each realm of two or more
+   * cards the way a CFG tool lays out a function. A realm keeps the layered
+   * layout above where the client says why: Triskel would draw it much wider
+   * (a wide fan of calls, which Triskel does not stack) or taller, it is past
+   * the route's limits, or the route is missing or fails. Bands keep the
+   * layered layout's order, so the page still sits above the frames it calls
+   * into, and calls between bands are routed the same way for either engine. */
 
-  /** Waypoints as a route: corners rounded, repeats and straight-through
-   * points dropped. */
-  function waypointRoute(flat, dx, dy) {
-    const points = [];
-    for (let i = 0; i + 1 < flat.length; i += 2) {
-      const x = flat[i] + dx, y = flat[i + 1] + dy, last = points.length - 2;
-      if (last >= 0 && Math.abs(points[last] - x) < 0.01 && Math.abs(points[last + 1] - y) < 0.01) continue;
-      if (last >= 2) {
-        const ax = points[last - 2], ay = points[last - 1], bx = points[last], by = points[last + 1];
-        if ((Math.abs(ax - bx) < 0.01 && Math.abs(bx - x) < 0.01) || (Math.abs(ay - by) < 0.01 && Math.abs(by - y) < 0.01)) { points.length = last; }
-      }
-      points.push(x, y);
+  /** Each realm's cards, the calls inside it, and each card's index in it. */
+  function realms(graph, local) {
+    const {count, from, to} = graph, {bandOf} = local.content;
+    const members = local.lanes.map(() => []), inner = local.lanes.map(() => []), localIndex = new Int32Array(count);
+    for (let v = 0; v < count; v += 1) {
+      localIndex[v] = members[bandOf[v]].length;
+      members[bandOf[v]].push(v);
     }
-    return points;
+    for (let e = 0; e < from.length; e += 1) if (bandOf[from[e]] === bandOf[to[e]]) inner[bandOf[from[e]]].push(e);
+    return {members, inner, localIndex};
   }
 
-  /** The request body for the realms worth sending, and how to read it back. */
-  function triskelRequest(graph, local) {
-    const {count, from, to} = graph, laneOf = new Map(local.lanes.map((lane, index) => [lane.key, index]));
-    const members = local.lanes.map(() => []), localIndex = new Int32Array(count);
-    for (let v = 0; v < count; v += 1) { const lane = laneOf.get(graph.lane[v]); localIndex[v] = members[lane].length; members[lane].push(v); }
-    const inner = local.lanes.map(() => []);
-    for (let e = 0; e < from.length; e += 1) { const a = laneOf.get(graph.lane[from[e]]); if (a === laneOf.get(graph.lane[to[e]])) inner[a].push(e); }
-    const sent = [], graphs = [];
-    let total = 0;
-    local.lanes.forEach((lane, index) => {
-      const nodes = members[index].length;
-      if (nodes < 2 || nodes > TRISKEL.maxNodes || inner[index].length > TRISKEL.maxEdges || total + nodes > TRISKEL.maxTotal) return;
-      total += nodes; sent.push(index);
-      graphs.push({nodes: members[index].map(v => [Math.round(local.w[v] * 100) / 100, Math.round(local.h[v] * 100) / 100]), edges: inner[index].map(e => [localIndex[from[e]], localIndex[to[e]]])});
-    });
-    return {sent, graphs, members, inner, localIndex};
-  }
-
-  /** Places each band from Triskel's answer or the layered layout, stacks
-   * the bands top to bottom and routes the calls between them. */
-  function assemble(graph, local, plan, answer, metrics) {
+  /** Places each band from its Triskel result or the layered layout, stacks
+   * the bands top to bottom and routes the calls between them. `outcomes`
+   * holds per realm {result} or {reason}. */
+  function assemble(graph, local, realm, outcomes, report, metrics) {
     const m = {...METRICS, ...metrics};
-    const {from, to} = graph, edgeCount = from.length, lanes = local.lanes.length;
-    const engines = local.lanes.map(() => ({engine: 'layered', reason: 'one card'}));
-    const results = local.lanes.map(() => null);
-    plan.sent.forEach((lane, position) => {
-      const result = answer?.graphs?.[position], members = plan.members[lane];
-      const band = local.content.bands[lane], layeredW = band.w, layeredH = band.h;
-      if (!result) { engines[lane] = {engine: 'layered', reason: 'Triskel gave no answer'}; return; }
-      if (result.status !== 'laid_out') { engines[lane] = {engine: 'layered', reason: result.status === 'too_large' ? 'over Triskel’s size limit' : `Triskel ${result.status}${result.reason ? `: ${result.reason}` : ''}`}; return; }
-      const ok = Array.isArray(result.nodes) && result.nodes.length === members.length && Array.isArray(result.edges) && result.edges.length === plan.inner[lane].length
-        && result.nodes.every(point => Number.isFinite(point?.[0]) && Number.isFinite(point?.[1])) && result.edges.every(list => Array.isArray(list) && list.length >= 4 && list.every(Number.isFinite));
-      if (!ok) { engines[lane] = {engine: 'layered', reason: 'Triskel answer did not match the realm'}; return; }
-      if (result.width > Math.max(layeredW * TRISKEL.widen, TRISKEL.freeWidth)) { engines[lane] = {engine: 'layered', reason: `Triskel would draw it ${(result.width / Math.max(1, layeredW)).toFixed(1)}× wider`}; return; }
-      // Triskel stacks loop bodies, so a realm full of back edges can come
-      // out far taller than it is wide; that, too, keeps the layered layout.
-      if (result.height > Math.max(layeredH * TRISKEL.widen, layeredH + TRISKEL.freeHeight)) { engines[lane] = {engine: 'layered', reason: `Triskel would draw it ${(result.height / Math.max(1, layeredH)).toFixed(1)}× taller`}; return; }
-      engines[lane] = {engine: 'triskel'};
-      results[lane] = result;
-    });
-    plan.members.forEach((members, lane) => { if (members.length >= 2 && !plan.sent.includes(lane) && engines[lane].reason === 'one card') engines[lane] = {engine: 'layered', reason: 'over Triskel’s size limit'}; });
+    const {from, to} = graph, edgeCount = from.length;
     // A Triskel band replaces its content: card positions, routes inside it
-    // and its size. Calls out of or into it get fresh ports.
+    // and its size. Calls out of or into it get fresh ports. Its drawing
+    // starts at 0, 0 (graph-layout-v1), its waypoints included.
     const base = local.content, lx = Float64Array.from(base.lx), ly = Float64Array.from(base.ly), routes = base.routes.slice();
     const outPort = Float64Array.from(base.outPort), inPort = Float64Array.from(base.inPort);
-    const bands = base.bands.map((band, index) => ({...band, engine: engines[index].engine, reason: engines[index].reason}));
-    for (let lane = 0; lane < lanes; lane += 1) {
-      const result = results[lane];
-      if (!result) continue;
-      const members = plan.members[lane];
-      let minX = 0;
-      for (const list of result.edges) for (let i = 0; i < list.length; i += 2) minX = Math.min(minX, list[i]);
-      for (const point of result.nodes) minX = Math.min(minX, point[0]);
-      // Everything of the band from x = 0, its routes included.
-      const shift = -minX;
-      let right = result.width + shift, cards = 0, bottom = result.height;
-      members.forEach((v, i) => { lx[v] = shift + result.nodes[i][0]; ly[v] = result.nodes[i][1]; cards = Math.max(cards, lx[v] + local.w[v]); bottom = Math.max(bottom, ly[v] + local.h[v]); });
-      plan.inner[lane].forEach((e, i) => {
+    const bands = base.bands.slice();
+    outcomes.forEach(({result}, lane) => {
+      if (!result) return;
+      let right = result.width, cards = 0, bottom = result.height;
+      realm.members[lane].forEach((v, i) => {
+        lx[v] = result.nodes[i][0];
+        ly[v] = result.nodes[i][1];
+        cards = Math.max(cards, lx[v] + local.w[v]);
+        bottom = Math.max(bottom, ly[v] + local.h[v]);
+      });
+      realm.inner[lane].forEach((e, i) => {
         if (from[e] === to[e]) {
           // Recursion: a tight loop on the card's right edge, not
           // Triskel's loop around the whole row.
@@ -691,9 +638,9 @@ const flowGraphLayout = (() => {
           right = Math.max(right, edge + 16);
           return;
         }
-        const points = waypointRoute(result.edges[i], shift, 0), last = points.length / 2 - 1;
+        routes[e] = orthogonal(result.edges[i]);
+        const points = routes[e].points;
         for (let k = 0; k < points.length; k += 2) { right = Math.max(right, points[k]); bottom = Math.max(bottom, points[k + 1]); }
-        routes[e] = {points, types: Array.from({length: last + 1}, (_, k) => k === 0 ? MOVE : k === last ? LINE : CORNER)};
       });
       bands[lane] = {...bands[lane], w: Math.max(right, cards), h: bottom, cards};
       for (let e = 0; e < edgeCount; e += 1) {
@@ -701,52 +648,35 @@ const flowGraphLayout = (() => {
         if (base.bandOf[from[e]] === lane) outPort[e] = NaN;
         if (base.bandOf[to[e]] === lane) inPort[e] = NaN;
       }
-    }
-    const content = {bands, bandOf: base.bandOf, lx, ly, routes, outPort, inPort, offsets: results.some(Boolean) ? undefined : base.offsets};
+    });
+    const laid = outcomes.filter(outcome => outcome.result).length;
+    const content = {bands, bandOf: base.bandOf, lx, ly, routes, outPort, inPort, offsets: laid ? undefined : base.offsets};
     const stacked = stackBands(graph, local.w, local.h, content, m);
-    const laid = engines.filter(item => item.engine === 'triskel').length;
     const {content: unused, ...rest} = local;
-    return {...rest, ...stacked,
-      engine: {name: laid ? 'triskel' : 'layered', revision: answer?.engine?.revision ?? null, triskel: laid, realms: engines.map((item, index) => ({key: local.lanes[index].key, ...item}))}};
+    const realmReport = outcomes.map((outcome, lane) => ({key: local.lanes[lane].key, engine: outcome.result ? 'triskel' : 'layered', reason: outcome.reason ?? null}));
+    return {...rest, ...stacked, engine: {name: laid ? 'triskel' : 'layered', revision: report.revision, triskel: laid, realms: realmReport, failure: report.failure}};
   }
 
-  /** Layered layout, then Triskel for the realms it can take. `request`
-   * posts a graph-layout-v1 body and resolves to the parsed answer. */
-  async function layoutWithTriskel(graph, metrics, request) {
-    const local = layoutGraph(graph, metrics);
-    const plan = triskelRequest(graph, local);
-    if (!plan.graphs.length) return assemble(graph, local, plan, null, metrics);
-    let answer = null, failure = '';
-    try {
-      answer = await request({graphs: plan.graphs});
-      if (answer?.schema !== 'graph-layout-v1' || !Array.isArray(answer.graphs) || answer.graphs.length !== plan.graphs.length) { failure = 'The layout route returned an unexpected answer.'; answer = null; }
-    } catch (error) { failure = error?.message ?? 'The layout route failed.'; }
-    const layout = assemble(graph, local, plan, answer, metrics);
-    if (failure) { layout.engine.failure = failure; layout.engine.realms.forEach(item => { if (item.engine === 'layered' && item.reason !== 'one card') item.reason = 'the layout route was unavailable'; }); }
-    return layout;
-  }
-
-  /** The browser's request for the Triskel route, bounded in time. */
-  const fetchTriskel = async body => {
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 20000);
-    try {
-      const response = await fetch('/api/graph-layout', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body), signal: controller.signal, cache: 'no-store'});
-      if (!response.ok) throw Error(`The layout route returned ${response.status}.`);
-      return await response.json();
-    } finally { clearTimeout(timer); }
-  };
-
-  /** The layered layout alone, with the same engine report as when Triskel
-   * takes part. */
-  function run(message) {
-    const graph = message.graph, metrics = message.metrics ?? METRICS, local = layoutGraph(graph, metrics);
-    const layout = assemble(graph, local, {...triskelRequest(graph, local), sent: []}, null, metrics);
-    layout.engine.realms.forEach(item => { if (item.reason !== 'one card') item.reason = 'the layout route is not served here'; });
-    return layout;
-  }
-  async function runAsync(message) {
-    if (message.engine === 'triskel' && typeof fetch === 'function') return layoutWithTriskel(message.graph, message.metrics ?? METRICS, fetchTriskel);
-    return run(message);
+  /** The layered layout, then Triskel for the realms the client keeps when
+   * `engine` is triskel; the engine report says why each other realm stayed. */
+  async function runAsync({graph, metrics = METRICS, engine}) {
+    const local = layoutGraph(graph, metrics), realm = realms(graph, local);
+    const outcomes = realm.members.map(list => ({reason: {code: list.length < 2 ? 'one_card' : 'not_served'}}));
+    const report = {revision: null, failure: null};
+    if (engine === 'triskel') {
+      const lanes = [], graphs = [];
+      realm.members.forEach((list, lane) => {
+        if (list.length < 2) return;
+        const band = local.content.bands[lane];
+        lanes.push(lane);
+        graphs.push({nodes: list.map(v => [local.w[v], local.h[v]]), edges: realm.inner[lane].map(e => [realm.localIndex[graph.from[e]], realm.localIndex[graph.to[e]]]), width: band.w, height: band.h});
+      });
+      const answer = await graphLayoutClient.layOut(graphs);
+      lanes.forEach((lane, index) => { outcomes[lane] = answer.outcomes[index]; });
+      report.revision = answer.revision;
+      report.failure = answer.failure;
+    }
+    return assemble(graph, local, realm, outcomes, report, metrics);
   }
   const transfer = layout => [layout.x.buffer, layout.y.buffer, layout.w.buffer, layout.h.buffer, layout.layer.buffer, layout.back.buffer,
     layout.routes.buffer, layout.routeTypes.buffer, layout.routeStart.buffer];
@@ -754,6 +684,7 @@ const flowGraphLayout = (() => {
 })();
 
 if (typeof importScripts === 'function') {
+  importScripts('graph_layout_client.js');
   self.onmessage = async event => {
     try {
       const layout = await flowGraphLayout.runAsync(event.data);

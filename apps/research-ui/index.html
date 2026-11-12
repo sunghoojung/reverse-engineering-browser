@@ -933,6 +933,8 @@
     <script src="vm_static.js"></script>
     <!-- Before the graphs: the flow graph reuses its frame reasons and task names. -->
     <script src="request_stack.js"></script>
+    <!-- The Triskel route's client, for both layout workers and the flow graph's on-thread fallback. -->
+    <script src="graph_layout_client.js"></script>
     <!-- Loaded here as well so the page and the Worker share one script; it does work only inside the Worker. -->
     <script src="block_graph_layout.js"></script>
     <script src="block_graph.js"></script>

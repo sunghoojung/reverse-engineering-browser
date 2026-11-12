@@ -2034,8 +2034,11 @@ cases:
 The header says `Triskel layout` when Triskel was used, and hovering the counts
 says why the region layout stayed. The region layout also stays when Triskel's
 drawing would be more than 1.6 times taller and over 1,600 px taller, as nested
-loops can make it. Triskel's and fmt's licence texts ship as
-`Contents/Resources/GraphLayoutLicenses.txt`.
+loops can make it. Both layout workers reach the route through
+`graph_layout_client.js`, which holds its limits, the 20 s request budget, the
+answer check and this acceptance rule, and gives each graph it does not lay out
+a reason code that each view words for itself. Triskel's and fmt's licence
+texts ship as `Contents/Resources/GraphLayoutLicenses.txt`.
 
 The region layout uses dominator regions: each subtree is entered once, so it
 lays out alone and only its members' sizes reach its parent. A layer of one
@@ -2492,8 +2495,9 @@ when a shell cannot start one, on card sizes measured from their text.
 
 **Triskel:** when the backend serves `POST /api/graph-layout`, each realm of 2
 to 2,000 cards is then sent to
-[Triskel](https://github.com/triskellib/triskel), at most 8,000 cards per
-request. A realm takes Triskel's coordinates and waypoints unless Triskel would
+[Triskel](https://github.com/triskellib/triskel), in band order, at most 64
+realms and 8,000 cards per request; a realm past either total keeps the layered
+layout and says which total it hit. A realm takes Triskel's coordinates and waypoints unless Triskel would
 draw it more than 1.6 times wider than the layered layout and over 1,400 px,
 or more than 1.6 times taller and over 1,600 px taller.
 Triskel does not stack a wide fan of calls, and a call tree's breadth would

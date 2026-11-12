@@ -1375,6 +1375,14 @@ final class OriginTraceRenderedUITests: XCTestCase {
           selected: document.querySelector('#debugger-threads .debugger-list-row[aria-selected="true"]')?.dataset.key ?? ''})
         """)
       XCTAssertTrue((scoped["files"] as? [String] ?? []).contains(expected.debuggerArtifactId), "\(size.name): the frame's script is listed: \(scoped)")
+      // The scope notice above listed rows is a disclosure, without the empty state's band above it.
+      let notice = try await ui.json("""
+        (() => { const node = document.querySelector('#source-tree .source-tree-empty');
+          return {padding: node ? parseFloat(getComputedStyle(node).paddingTop) : -1,
+            gap: node ? node.getBoundingClientRect().top - document.querySelector('#source-tree').getBoundingClientRect().top : -1}; })()
+        """)
+      XCTAssertLessThanOrEqual(notice["padding"] as? Double ?? 99, 8, "\(size.name): the scope notice has disclosure padding: \(notice)")
+      XCTAssertLessThanOrEqual(notice["gap"] as? Double ?? 99, 8, "\(size.name): no blank band above the scope notice: \(notice)")
       XCTAssertTrue((scoped["selected"] as? String ?? "").hasSuffix(frameKey), "\(size.name): \(scoped)")
       // Below 1,112 px the sidebar overlays the editor by design, so the
       // navigator and the sidebar are checked, not the covered editor.

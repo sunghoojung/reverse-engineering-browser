@@ -492,6 +492,35 @@ observer the Console installs only while exceptions are watched. Each hook
 costs one relaxed load while disarmed. See
 [native debugger observation v1](../../../protocol/native-debugger-observation-v1.md).
 
+## Pausing debugger (experiment)
+
+`--reb-native-debugger=<socket path>` makes the browser open one private
+command socket and lets a renderer create the pausing debugger. It is never
+set by the packaged app or by `make live`. Without it the renderer creates no
+agent and no inspector session. This experiment adds no probe to a hot path:
+V8's own breakpoint machinery does the pausing, so the only cost when the
+switch is absent is one command-line check per frame.
+
+`browser/native_debugger_pause_host.cc` serves the socket and routes each
+command to the one authorized document, and holds two deadlines the renderer
+cannot time for itself: the 60 second lease over a pause, started from the
+renderer's own notification that the page stopped, and the five minute idle
+limit on an authorization no command has touched.
+`renderer/native_debugger_pause_agent.cc` binds its receiver on the renderer
+IO thread while the page runs and hands each command to the local root's
+`InspectorTaskRunner`; `renderer/native_debugger_pause_session.cc` owns the
+in-process inspector session, turns this contract's commands into inspector
+protocol messages that never leave the renderer, and emits event types 66 to
+69 through the same walk the phase 1 observations use.
+
+Chromium `0050` adds the public entry points this needs:
+`WebNativeDebugger::Attach`, which installs upstream's own nested pause loop
+when no DevTools session has, and `WebNativeDebugger::Poster`, which exposes
+the local root's unpausable task runner. The XHR, event listener, DOM and CSP
+breakpoints are not here: an inspector session does not dispatch Blink's
+DOMDebugger domain, and phase 1 records all four without pausing. See
+[native debugger pause v1](../../../protocol/native-debugger-pause-v1.md).
+
 ## Native Wasm dispatch (opt-in)
 
 Rebuilt browsers can record physical `br_table` operands with

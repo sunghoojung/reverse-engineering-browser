@@ -235,6 +235,23 @@ class Session final {
   // One monotonic identity space for Console targets and document-start
   // records. A document that is not a current target still gets a stable
   // nonsecret ID, remembered in a bounded table keyed by its exact generation.
+  // The lookup half of DocumentId: no assignment, no recycling.
+  std::uint64_t DocumentIdIfAssigned(content::RenderFrameHost* frame) {
+    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+    if (!Eligible(frame))
+      return 0;
+    for (const auto& target : targets_) {
+      if (target.document.AsRenderFrameHostIfValid() == frame)
+        return target.id;
+    }
+    const auto token = frame->GetDocumentToken().value();
+    for (const auto& entry : documents_) {
+      if (entry.first == token)
+        return entry.second;
+    }
+    return 0;
+  }
+
   std::uint64_t DocumentId(content::RenderFrameHost* frame) {
     DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
     if (!Eligible(frame))
@@ -658,6 +675,10 @@ bool IsNativeConsoleDocument(content::RenderFrameHost* frame) {
 
 std::uint64_t NativeConsoleDocumentId(content::RenderFrameHost* frame) {
   return Session::Get().DocumentId(frame);
+}
+
+std::uint64_t NativeConsoleDocumentIdIfAssigned(content::RenderFrameHost* frame) {
+  return Session::Get().DocumentIdIfAssigned(frame);
 }
 
 }  // namespace reb

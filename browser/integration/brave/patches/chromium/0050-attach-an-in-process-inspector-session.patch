@@ -1,0 +1,330 @@
+diff --git a/third_party/blink/public/BUILD.gn b/third_party/blink/public/BUILD.gn
+index 8d0f0c5..8574945 100644
+--- a/third_party/blink/public/BUILD.gn
++++ b/third_party/blink/public/BUILD.gn
+@@ -341,6 +341,7 @@ source_set("blink_headers") {
+     "web/web_media_inspector.h",
+     "web/web_message_port_converter.h",
+     "web/web_meta_element.h",
++    "web/web_native_debugger.h",
+     "web/web_navigation_control.h",
+     "web/web_navigation_params.h",
+     "web/web_navigation_policy.h",
+diff --git a/third_party/blink/public/web/web_native_debugger.h b/third_party/blink/public/web/web_native_debugger.h
+new file mode 100644
+index 0000000..790ee68
+--- /dev/null
++++ b/third_party/blink/public/web/web_native_debugger.h
+@@ -0,0 +1,77 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_NATIVE_DEBUGGER_H_
++#define THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_NATIVE_DEBUGGER_H_
++
++#include <memory>
++#include <string_view>
++
++#include "base/functional/callback_forward.h"
++#include "base/memory/ref_counted.h"
++#include "base/memory/scoped_refptr.h"
++#include "third_party/blink/public/platform/web_common.h"
++
++namespace blink {
++
++class WebLocalFrame;
++
++// Posts work to one frame's main thread so that it runs even while that
++// thread is stopped in the debugger's nested pause loop. Obtained on the main
++// thread and used from any thread, which is what lets an embedder serve
++// resume, step and evaluate from another thread.
++class BLINK_EXPORT WebNativeDebuggerPoster
++    : public base::RefCountedThreadSafe<WebNativeDebuggerPoster> {
++ public:
++  // With `interrupt`, also requests a V8 interrupt, so the task runs while
++  // script is running. Pass false for a task that runs JavaScript itself,
++  // which is not safe at an interrupt; such a task still reaches a paused
++  // main thread, because the inspector task queue is unpausable. Returns
++  // false once the frame's inspector task runner is disposed.
++  virtual bool Post(bool interrupt, base::OnceClosure task) = 0;
++
++ protected:
++  friend class base::RefCountedThreadSafe<WebNativeDebuggerPoster>;
++  virtual ~WebNativeDebuggerPoster() = default;
++};
++
++// One in-process inspector session on a frame's main thread. It opens no
++// remote debugging port, exposes no protocol endpoint and creates no DevTools
++// frontend: the messages below are built and read inside this renderer.
++class BLINK_EXPORT WebNativeDebugger {
++ public:
++  class BLINK_EXPORT Client {
++   public:
++    virtual ~Client() = default;
++    // One complete inspector response or notification as UTF-8 JSON, on the
++    // main thread, from inside Dispatch or while that thread is paused.
++    virtual void OnInspectorMessage(std::string_view message) = 0;
++  };
++
++  // Attaches to the context group of `frame`'s local root and installs the
++  // nested pause loop when no DevTools session has installed it, so that a
++  // pause actually stops the thread. `frame` need not be a local root: an
++  // inspector session belongs to the group, and a pause in a same-process
++  // iframe is a pause of that group either way. Null when the frame has no
++  // main thread debugger. Main thread only. `client` need not outlive the
++  // session: destroying the session detaches it, and V8 owns the channel for
++  // as long as a deferred destruction can still answer through it.
++  static std::unique_ptr<WebNativeDebugger> Attach(WebLocalFrame* frame,
++                                                   Client* client);
++
++  // The poster of `frame`'s local root, whose inspector task runner is the
++  // one that runs on a paused page. Main thread only; the result is safe to
++  // use from any thread.
++  static scoped_refptr<WebNativeDebuggerPoster> Poster(WebLocalFrame* frame);
++
++  virtual ~WebNativeDebugger() = default;
++
++  // Dispatches one inspector protocol command on the main thread, including
++  // while that thread is inside the nested pause loop.
++  virtual void Dispatch(std::string_view message) = 0;
++};
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_NATIVE_DEBUGGER_H_
+diff --git a/third_party/blink/renderer/core/exported/build.gni b/third_party/blink/renderer/core/exported/build.gni
+index 38b3aa1..9307b08 100644
+--- a/third_party/blink/renderer/core/exported/build.gni
++++ b/third_party/blink/renderer/core/exported/build.gni
+@@ -42,6 +42,7 @@ blink_core_sources_exported = [
+   "web_language_detection_details.cc",
+   "web_message_port_converter.cc",
+   "web_meta_element.cc",
++  "web_native_debugger.cc",
+   "web_navigation_params.cc",
+   "web_node.cc",
+   "web_option_element.cc",
+diff --git a/third_party/blink/renderer/core/exported/web_dev_tools_agent_impl.cc b/third_party/blink/renderer/core/exported/web_dev_tools_agent_impl.cc
+index e65bcb0..0f49a5d 100644
+--- a/third_party/blink/renderer/core/exported/web_dev_tools_agent_impl.cc
++++ b/third_party/blink/renderer/core/exported/web_dev_tools_agent_impl.cc
+@@ -312,6 +312,11 @@ class ClientMessageLoopAdapter : public MainThreadDebugger::ClientMessageLoop {
+ 
+ ClientMessageLoopAdapter* ClientMessageLoopAdapter::instance_ = nullptr;
+ 
++// static
++void WebDevToolsAgentImpl::EnsureMainThreadPauseLoop(v8::Isolate* isolate) {
++  ClientMessageLoopAdapter::EnsureMainThreadDebuggerCreated(isolate);
++}
++
+ void WebDevToolsAgentImpl::AttachSession(DevToolsSession* session,
+                                          bool restore) {
+   if (!network_agents_.size()) {
+diff --git a/third_party/blink/renderer/core/exported/web_dev_tools_agent_impl.h b/third_party/blink/renderer/core/exported/web_dev_tools_agent_impl.h
+index faee42d..a3f86ae 100644
+--- a/third_party/blink/renderer/core/exported/web_dev_tools_agent_impl.h
++++ b/third_party/blink/renderer/core/exported/web_dev_tools_agent_impl.h
+@@ -43,6 +43,7 @@
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/scheduler/public/thread.h"
+ #include "third_party/blink/renderer/platform/wtf/forward.h"
++#include "v8/include/v8-forward.h"
+ 
+ namespace blink {
+ 
+@@ -65,6 +66,13 @@ class CORE_EXPORT WebDevToolsAgentImpl final
+  public:
+   static WebDevToolsAgentImpl* CreateForFrame(WebLocalFrameImpl*);
+ 
++  // Installs this thread's single MainThreadDebugger::ClientMessageLoop when
++  // no DevTools session has installed it yet. An in-process inspector session
++  // with no DevTools frontend needs it: without a client message loop,
++  // MainThreadDebugger::runMessageLoopOnPause returns at once and the page
++  // keeps running instead of pausing.
++  static void EnsureMainThreadPauseLoop(v8::Isolate*);
++
+   WebDevToolsAgentImpl(WebLocalFrameImpl*);
+   ~WebDevToolsAgentImpl() override;
+   void Trace(Visitor*) const override;
+diff --git a/third_party/blink/renderer/core/exported/web_native_debugger.cc b/third_party/blink/renderer/core/exported/web_native_debugger.cc
+new file mode 100644
+index 0000000..7e10a53
+--- /dev/null
++++ b/third_party/blink/renderer/core/exported/web_native_debugger.cc
+@@ -0,0 +1,175 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/public/web/web_native_debugger.h"
++
++#include <memory>
++#include <utility>
++
++#include "base/functional/callback.h"
++#include "third_party/blink/renderer/core/exported/web_dev_tools_agent_impl.h"
++#include "third_party/blink/renderer/core/frame/local_frame.h"
++#include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
++#include "third_party/blink/renderer/core/inspector/inspector_task_runner.h"
++#include "third_party/blink/renderer/core/inspector/main_thread_debugger.h"
++#include "third_party/blink/renderer/core/inspector/v8_inspector_string.h"
++#include "third_party/blink/renderer/core/page/page.h"
++#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
++#include "third_party/blink/renderer/platform/heap/persistent.h"
++#include "third_party/blink/renderer/platform/scheduler/public/agent_group_scheduler.h"
++#include "third_party/blink/renderer/platform/wtf/functional.h"
++#include "v8/include/v8-inspector.h"
++
++namespace blink {
++
++namespace {
++
++// V8 keeps a cppgc Persistent on a ManagedChannel for as long as its session
++// lives, which is the ownership `connectShared` asks for: a session whose
++// destruction V8 defers, because a dispatch is still on the stack, can answer
++// through the channel after the embedder has let go of it. The embedder's
++// client goes away first, so the channel is detached from it rather than
++// freed with it. DevToolsSession is a ManagedChannel for the same reason.
++class NativeDebuggerChannel final
++    : public v8_inspector::V8Inspector::ManagedChannel {
++ public:
++  explicit NativeDebuggerChannel(WebNativeDebugger::Client* client)
++      : client_(client) {}
++
++  // After this, a response V8 still had in flight is dropped instead of
++  // reaching a client that no longer exists.
++  void Detach() { client_ = nullptr; }
++
++  void sendResponse(
++      int call_id,
++      std::unique_ptr<v8_inspector::StringBuffer> message) override {
++    Send(message.get());
++  }
++  void sendNotification(
++      std::unique_ptr<v8_inspector::StringBuffer> message) override {
++    Send(message.get());
++  }
++  void flushProtocolNotifications() override {}
++
++ private:
++  void Send(v8_inspector::StringBuffer* message) {
++    if (!client_ || !message) {
++      return;
++    }
++    const std::string text = ToCoreString(message->string()).Utf8();
++    client_->OnInspectorMessage(text);
++  }
++
++  // Off-heap and owned by the embedder, which detaches this channel before
++  // the client is destroyed, so this is never traced.
++  WebNativeDebugger::Client* client_ = nullptr;
++};
++
++class NativeDebuggerSession final : public WebNativeDebugger {
++ public:
++  NativeDebuggerSession(
++      NativeDebuggerChannel* channel,
++      std::shared_ptr<v8_inspector::V8InspectorSession> session)
++      : channel_(channel), session_(std::move(session)) {}
++
++  ~NativeDebuggerSession() override {
++    // The client is going away with this object. The V8 session may outlive
++    // both, so the channel, which V8 still owns, stops calling the client.
++    channel_->Detach();
++  }
++
++  void Dispatch(std::string_view message) override {
++    // V8's own 8 bit view of the bytes; the inspector answers in the same
++    // encoding, which is why the channel converts back from a StringBuffer.
++    session_->dispatchProtocolMessage(v8_inspector::StringView(
++        reinterpret_cast<const uint8_t*>(message.data()), message.size()));
++  }
++
++ private:
++  const Persistent<NativeDebuggerChannel> channel_;
++  // Shared, because V8 defers session destruction while a dispatch is still
++  // on the stack, which is what a detach during a pause needs.
++  const std::shared_ptr<v8_inspector::V8InspectorSession> session_;
++};
++
++class NativeDebuggerPoster final : public WebNativeDebuggerPoster {
++ public:
++  explicit NativeDebuggerPoster(scoped_refptr<InspectorTaskRunner> runner)
++      : runner_(std::move(runner)) {}
++
++  bool Post(bool interrupt, base::OnceClosure task) override {
++    CrossThreadOnceClosure closure(std::move(task));
++    return interrupt ? runner_->AppendTask(std::move(closure))
++                     : runner_->AppendTaskDontInterrupt(std::move(closure));
++  }
++
++ private:
++  ~NativeDebuggerPoster() override = default;
++
++  const scoped_refptr<InspectorTaskRunner> runner_;
++};
++
++// An inspector session and the task runner that reaches a paused thread both
++// belong to the local root, so a same-process iframe resolves to its root
++// rather than being refused.
++LocalFrame* LocalRootOf(WebLocalFrame* web_frame) {
++  // Dynamic, because the caller is allowed to hand this a frame it has not
++  // checked: To<> would CHECK instead of answering null.
++  auto* impl = DynamicTo<WebLocalFrameImpl>(web_frame);
++  if (!impl) {
++    return nullptr;
++  }
++  LocalFrame* frame = impl->GetFrame();
++  if (!frame) {
++    return nullptr;
++  }
++  LocalFrame& root = frame->LocalFrameRoot();
++  return root.GetPage() ? &root : nullptr;
++}
++
++}  // namespace
++
++std::unique_ptr<WebNativeDebugger> WebNativeDebugger::Attach(
++    WebLocalFrame* web_frame,
++    Client* client) {
++  LocalFrame* frame = LocalRootOf(web_frame);
++  if (!frame || !client) {
++    return nullptr;
++  }
++  v8::Isolate* isolate = frame->GetPage()->GetAgentGroupScheduler().Isolate();
++  // Without a client message loop, MainThreadDebugger::runMessageLoopOnPause
++  // returns at once and the page never actually stops.
++  WebDevToolsAgentImpl::EnsureMainThreadPauseLoop(isolate);
++  MainThreadDebugger* debugger = MainThreadDebugger::Instance(isolate);
++  v8_inspector::V8Inspector* inspector = debugger->GetV8Inspector();
++  if (!inspector) {
++    return nullptr;
++  }
++  auto* channel = MakeGarbageCollected<NativeDebuggerChannel>(client);
++  std::shared_ptr<v8_inspector::V8InspectorSession> session =
++      inspector->connectShared(
++          debugger->ContextGroupId(frame), channel,
++          v8_inspector::StringView(),
++          v8_inspector::V8Inspector::kFullyTrusted,
++          v8_inspector::V8Inspector::kNotWaitingForDebugger);
++  if (!session) {
++    return nullptr;
++  }
++  return std::make_unique<NativeDebuggerSession>(channel, std::move(session));
++}
++
++scoped_refptr<WebNativeDebuggerPoster> WebNativeDebugger::Poster(
++    WebLocalFrame* web_frame) {
++  LocalFrame* frame = LocalRootOf(web_frame);
++  if (!frame) {
++    return nullptr;
++  }
++  scoped_refptr<InspectorTaskRunner> runner = frame->GetInspectorTaskRunner();
++  if (!runner) {
++    return nullptr;
++  }
++  return base::MakeRefCounted<NativeDebuggerPoster>(std::move(runner));
++}
++
++}  // namespace blink

@@ -873,6 +873,14 @@ void NativeProbeHostWorkerTabLinks() {
   events.clear();
   host.EventsAvailable();
   Check(events.empty(), "Later records of a pageless worker's request are dropped with it");
+  // A new configuration on the same renderer counts its own requests from one.
+  host.Configure(kSession, kMask, 200, false, false);
+  mapping = client.region.Map();
+  queue = static_cast<reb::NativeProbeQueue*>(mapping.memory());
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0xc1, 0xc2}.fold(), 70);
+  Check(events.empty() && session.exclusions.back().exclusion_class == 68 &&
+            session.exclusions.back().count == 1,
+        "A second configuration counts class 68 from one, not on top of the first");
   resolver.ServiceWorkerControlleeAdded(9, "page", std::vector<std::uint32_t>{14});
   start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0xc1, 0xc2}.fold(), 67);
   Check(events.size() == 3 && events[0].header.tab_id == 14 && link(events[2]) == std::pair{3U, 1U},
@@ -880,10 +888,11 @@ void NativeProbeHostWorkerTabLinks() {
   // A client whose navigation never committed names no tab but is a page.
   resolver.ServiceWorkerControlleeAdded(11, "uncommitted", std::vector<std::uint32_t>{});
   resolver.ServiceWorkerStarted(11, {0xe1, 0xe2}, {}, "https://uncommitted.test/");
+  const auto counted_before_uncommitted = session.exclusions.size();
   start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0xe1, 0xe2}.fold(), 68);
-  Check(
-      events.size() == 1 && events[0].header.tab_id == 0 && session.exclusions.size() == before + 1,
-      "A version whose only client never committed stays unresolved, never counted");
+  Check(events.size() == 1 && events[0].header.tab_id == 0 &&
+            session.exclusions.size() == counted_before_uncommitted,
+        "A version whose only client never committed stays unresolved, never counted");
 
   for (std::uint64_t index = 0; index <= reb::NativeTabResolver::kFrameCapacity; ++index) {
     resolver.NoteFrame(4, {0xf000 + index, index + 1}, 41);

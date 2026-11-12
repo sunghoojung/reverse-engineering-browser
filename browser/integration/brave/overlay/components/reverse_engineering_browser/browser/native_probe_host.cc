@@ -729,6 +729,7 @@ void NativeProbeHost::Configure(const std::uint64_t session_id,
                          : 0;
   reported_exclusions_ = {};
   extension_requests_excluded_ = 0;
+  no_page_requests_excluded_ = 0;
 
   queue_region_ = base::UnsafeSharedMemoryRegion::Create(sizeof(NativeProbeQueue));
   if (!queue_region_.IsValid()) {

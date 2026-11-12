@@ -685,7 +685,9 @@ fn body_case_meaning(case: &str) -> &'static str {
         "cancelled" => "the page or browser stopped reading; what arrived is retained",
         "empty" => "the body had no bytes",
         "not_modified" => "HTTP 304: the server sent no body",
-        "redirected" => "redirected, then ended with no other response; Chromium discards redirect bodies",
+        "redirected" => {
+            "redirected, then ended with no other response; Chromium discards redirect bodies"
+        }
         "not_captured_type" => {
             "images, audio, video or fonts that page elements load, kept only with REB_CAPTURE_RESPONSE_MEDIA=1"
         }
@@ -719,9 +721,25 @@ fn body_case_meaning(case: &str) -> &'static str {
     }
 }
 
+/// The summary's ETag key: capture state, artifact manifest and the request
+/// index's progress, since the body case counts change as the index reads an
+/// unchanged store.
+pub fn etag_key(state: &str, manifest: &str, progress: &str) -> String {
+    format!("summary:{state}:{manifest}:index:{progress}")
+}
+
 /// Every request's response body case, counted from the request index's rows,
-/// and a check naming the bodies the browser proxy can never see.
-pub fn add_response_bodies(summary: &mut Value, counts: Value) {
+/// and a check naming the bodies the browser proxy can never see. An index
+/// that cannot answer leaves the counts unavailable, with its reason.
+pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Value, String>) {
+    let counts = match counts {
+        Ok(counts) => counts,
+        Err(reason) => {
+            summary["response_bodies"] = json!({"available": false, "reason": reason,
+                "complete": false, "requests": "0", "unindexed_records": "0", "cases": []});
+            return;
+        }
+    };
     let count = |case: &str| {
         counts["cases"][case]
             .as_str()
@@ -743,6 +761,7 @@ pub fn add_response_bodies(summary: &mut Value, counts: Value) {
         count("renderer_answered"),
     );
     summary["response_bodies"] = json!({
+        "available": true, "reason": null,
         "complete": counts["complete"], "requests": counts["requests"],
         "unindexed_records": counts["unindexed_records"], "cases": cases,
     });
@@ -771,9 +790,12 @@ mod tests {
         let mut summary = json!({"checks": []});
         add_response_bodies(
             &mut summary,
-            json!({"complete": true, "requests": "6", "unindexed_records": "0",
+            Ok(
+                json!({"complete": true, "requests": "6", "unindexed_records": "0",
                 "cases": {"captured": "2", "memory_cache": "1", "service_worker": "2", "renderer_answered": "1"}}),
+            ),
         );
+        assert_eq!(summary["response_bodies"]["available"], true);
         let cases = summary["response_bodies"]["cases"].as_array().unwrap();
         assert_eq!(cases.len(), 4);
         let worker = cases
@@ -800,9 +822,25 @@ mod tests {
         let mut quiet = json!({"checks": []});
         add_response_bodies(
             &mut quiet,
-            json!({"complete": true, "requests": "2", "unindexed_records": "0", "cases": {"captured": "2"}}),
+            Ok(
+                json!({"complete": true, "requests": "2", "unindexed_records": "0", "cases": {"captured": "2"}}),
+            ),
         );
         assert!(quiet["checks"].as_array().unwrap().is_empty());
+        // An index that cannot answer leaves the counts unavailable, never the summary.
+        let mut failed = json!({"checks": []});
+        add_response_bodies(&mut failed, Err("The request index is unreadable".into()));
+        assert_eq!(failed["response_bodies"]["available"], false);
+        assert_eq!(
+            failed["response_bodies"]["reason"],
+            "The request index is unreadable"
+        );
+        assert_eq!(failed["response_bodies"]["cases"], json!([]));
+        // The tag changes as the index reads an unchanged store.
+        assert_ne!(
+            etag_key("live", "m1", "4096"),
+            etag_key("live", "m1", "caught-up")
+        );
     }
 
     #[test]

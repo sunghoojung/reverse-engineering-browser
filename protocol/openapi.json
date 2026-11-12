@@ -35502,12 +35502,25 @@
               "additionalProperties": false,
               "description": "Every request's response body case from the request index's rows: how many bodies were retained, and why each other one was not, including the responses the browser proxy never sees (served by a service worker, reused from the memory cache, answered in the renderer).",
               "required": [
+                "available",
+                "reason",
                 "complete",
                 "requests",
                 "unindexed_records",
                 "cases"
               ],
               "properties": {
+                "available": {
+                  "type": "boolean",
+                  "description": "False when the request index could not answer; the rest of the summary stands."
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why the counts are unavailable, else null."
+                },
                 "complete": {
                   "type": "boolean",
                   "description": "The index had read the whole store; otherwise the counts cover the part read so far."

@@ -604,7 +604,10 @@ with its `count` and `meaning`, such as `captured`, `partial`, `not_modified`,
 `redirected`, `aborted`, `cancelled`, `empty`, `service_worker`, `memory_cache`,
 `failed_before_response` and `cancelled_before_response`
 ([native network v3](native-network-v3.md#bodies-the-proxy-never-sees)).
-`complete` is false while the index is still reading the store.
+`complete` is false while the index is still reading the store, and the
+route's ETag follows the index's progress, so a revalidating client sees the
+counts complete. When the index cannot answer, `available` is false with a
+`reason` and the rest of the summary stands.
 
 `exclusions` lists those counts by class and unit; see
 [native network v3](native-network-v3.md#browser-internal-exclusion).

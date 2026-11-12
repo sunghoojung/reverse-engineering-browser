@@ -1002,11 +1002,18 @@ impl App {
                     self.receiver_connected().await,
                     capture.state.as_str(),
                 );
+                // The body case counts follow the request index, which can be
+                // mid-store on an unchanged file, so its progress is in the tag.
+                let progress = self.requests.lock().await.progress_marker();
                 etag = Some(event_window::etag(
                     &self.options.store,
-                    &format!(
-                        "summary:{state:?}:{}",
-                        evidence::resource_etag(&self.options.artifacts.join("manifest.jsonl"), "")
+                    &session_summary::etag_key(
+                        &format!("{state:?}"),
+                        &evidence::resource_etag(
+                            &self.options.artifacts.join("manifest.jsonl"),
+                            "",
+                        ),
+                        &progress,
                     ),
                 ));
                 if matches_etag(headers, etag.as_deref()) {
@@ -1015,7 +1022,16 @@ impl App {
                 let store = self.options.store.clone();
                 let artifacts = self.options.artifacts.clone();
                 let instance = self.instance_id.clone();
-                let mut index = self.requests.clone().lock_owned().await;
+                // Per request, so they come from the request index's rows. The
+                // index is held only for its counts, and a failure leaves the
+                // rest of the summary standing.
+                let index = self.requests.clone().lock_owned().await;
+                let counts = self
+                    .blocking(move || {
+                        let mut index = index;
+                        Ok(index.response_bodies().map_err(|error| error.message))
+                    })
+                    .await?;
                 let mut summary = self
                     .blocking(move || {
                         let mut summary = session_summary::build(
@@ -1030,11 +1046,7 @@ impl App {
                                 artifact_receiver_connected: state.4,
                             },
                         )?;
-                        // Per request, so it comes from the request index's rows.
-                        session_summary::add_response_bodies(
-                            &mut summary,
-                            index.response_bodies()?,
-                        );
+                        session_summary::add_response_bodies(&mut summary, counts);
                         Ok(summary)
                     })
                     .await?;

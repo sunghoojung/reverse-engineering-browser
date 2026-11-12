@@ -39,7 +39,7 @@ else
 $(error REB_RUST_TEST_RUNNER must be cargo or nextest, not $(REB_RUST_TEST_RUNNER))
 endif
 
-check: native-wasm-golden-check native-js-golden-check network-request-wire-check request-index-check request-stack-wire-check debugger-observation-wire-check network-scope-wire-check tab-link-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-tab-registry-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
+check: native-wasm-golden-check native-js-golden-check network-request-wire-check request-index-check request-stack-wire-check debugger-observation-wire-check network-scope-wire-check tab-link-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-tab-registry-check native-debugger-pause-compile native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
 	$(RUST_SUITE) apps/origin-trace-backend/Cargo.toml
 	$(if $(RUST_DOCTESTS),$(RUST_DOCTESTS) apps/origin-trace-backend/Cargo.toml)
 	$(RUST_SUITE) apps/deobfuscator-worker/Cargo.toml
@@ -173,6 +173,13 @@ native-network-capture-check:
 .PHONY: native-tab-registry-check
 native-tab-registry-check:
 	CXX="$(CXX)" ./tools/check-native-tab-registry.sh
+
+# The pausing debugger overlay compiled against stand-in declarations of the
+# pinned types. Compile-only: no machine here can build Brave, so this is
+# where the browser half's name lookup and conversions get checked.
+.PHONY: native-debugger-pause-compile
+native-debugger-pause-compile:
+	CXX="$(CXX)" ./tools/check-native-debugger-pause.sh
 
 # C++ request_body/request_target verdicts against the Python validator and the
 # shipped Traffic decoders and row model.

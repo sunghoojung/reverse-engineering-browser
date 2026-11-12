@@ -539,13 +539,17 @@ def main():
             receipt["patches"].append(entry)
         save_receipt()
         # Temporal alone pulls Rust into this standalone build; guest capture
-        # and the public QuickJS fixture do not use the Temporal API.
+        # and the public QuickJS fixture do not use the Temporal API. V8 15.7
+        # generates instance types with metagen, which needs the prebuilt
+        # libclang GCS package this job never fetches; V8 keeps the Torque
+        # path behind v8_use_metagen=false for its transition. Brave builds
+        # with metagen, so this profile differs there.
         gn_args = " ".join((
             'is_debug=false', 'is_component_build=false', 'symbol_level=0',
             'is_clang=true', 'use_lld=true',
             'clang_use_chrome_plugins=false', 'clang_version="23"', 'clang_base_path=' + json.dumps(str(clang_base)), 'use_custom_libcxx=true', 'use_sysroot=false',
             'use_custom_libcxx_for_host=true', 'v8_enable_sandbox=true',
-            'enable_rust=false', 'v8_enable_temporal_support=false',
+            'enable_rust=false', 'v8_enable_temporal_support=false', 'v8_use_metagen=false',
             'use_remoteexec=false', 'treat_warnings_as_errors=true',
             'target_cpu="x64"', 'v8_target_cpu="x64"', 'v8_enable_i18n_support=false',
             'v8_use_external_startup_data=false', 'v8_dcheck_always_on=true',

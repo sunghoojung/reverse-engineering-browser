@@ -13,6 +13,8 @@ namespace reb {
 // Cookie records, see "Cookies" in protocol/native-network-v3.md. The overlay's
 // common/native_network_cookies.h is the producer half of this ABI.
 inline constexpr std::uint16_t kCookiePayloadVersion = 1;
+// script_cookie version 2 names the isolate of its frame and stack (byte 6).
+inline constexpr std::uint16_t kScriptCookiePayloadVersion = 2;
 inline constexpr std::uint32_t kCookieListLimitBytes = 2U * 1024U * 1024U;
 inline constexpr std::uint32_t kCookieListHeaderBytes = 16;
 inline constexpr std::uint32_t kCookieEntryBytes = 64;
@@ -72,11 +74,17 @@ struct ScriptFrame final {
 static_assert(sizeof(ScriptFrame) == 16);
 
 struct ScriptCookiePayload final {
-  std::uint16_t protocol_version = kCookiePayloadVersion;
+  std::uint16_t protocol_version = kScriptCookiePayloadVersion;
   std::uint16_t payload_size = 128;
   std::uint8_t api = 0;
   std::uint8_t flags = 0;
-  std::uint16_t reserved0 = 0;
+  // Version 2: the stack thread (1 document, 2 dedicated, 3 shared, 4 service
+  // worker) whose isolate the frame and stack belong to, or 0 when the thread
+  // was not named and nothing was recorded. A worker's record carries the
+  // worker's context ID as frame_id, the stack scope's isolate key. Version 1
+  // is zero and the document's.
+  std::uint8_t thread = 0;
+  std::uint8_t reserved0 = 0;
   std::uint32_t count = 0;
   std::uint32_t name_length = 0;
   std::uint32_t value_length = 0;
@@ -88,6 +96,7 @@ struct ScriptCookiePayload final {
 };
 static_assert(sizeof(ScriptCookiePayload) == 128);
 static_assert(std::is_trivially_copyable_v<ScriptCookiePayload>);
+static_assert(offsetof(ScriptCookiePayload, thread) == 6);
 static_assert(offsetof(ScriptCookiePayload, frame) == 24);
 static_assert(offsetof(ScriptCookiePayload, stack_digest) == 40);
 static_assert(offsetof(ScriptCookiePayload, value_sha256) == 72);
@@ -173,7 +182,8 @@ template <class Bytes>
   value.payload_size = static_cast<std::uint16_t>(Get(bytes, 2, 2));
   value.api = static_cast<std::uint8_t>(Get(bytes, 4, 1));
   value.flags = static_cast<std::uint8_t>(Get(bytes, 5, 1));
-  value.reserved0 = static_cast<std::uint16_t>(Get(bytes, 6, 2));
+  value.thread = static_cast<std::uint8_t>(Get(bytes, 6, 1));
+  value.reserved0 = static_cast<std::uint8_t>(Get(bytes, 7, 1));
   value.count = static_cast<std::uint32_t>(Get(bytes, 8, 4));
   value.name_length = static_cast<std::uint32_t>(Get(bytes, 12, 4));
   value.value_length = static_cast<std::uint32_t>(Get(bytes, 16, 4));
@@ -192,9 +202,15 @@ template <class Bytes>
 
 [[nodiscard]] inline bool IsValidScriptCookiePayload(const ScriptCookiePayload& value) noexcept {
   using cookie_detail::Zero;
-  if (value.protocol_version != kCookiePayloadVersion || value.payload_size != 128 ||
-      value.reserved0 != 0 || value.api < 1 || value.api > 6 || value.count == 0 ||
-      (value.flags & ~0x0fU) != 0) {
+  const bool scoped = value.protocol_version == kScriptCookiePayloadVersion;
+  if ((value.protocol_version != kCookiePayloadVersion && !scoped) || value.payload_size != 128 ||
+      value.reserved0 != 0 || (scoped ? value.thread > 4 : value.thread != 0) || value.api < 1 ||
+      value.api > 6 || value.count == 0 || (value.flags & ~0x0fU) != 0) {
+    return false;
+  }
+  // A version 2 record that names no thread records no frame or stack.
+  if (scoped && value.thread == 0 &&
+      (value.flags & (kScriptCookieFrameRecorded | kScriptCookieStackRecorded)) != 0) {
     return false;
   }
   const auto api = static_cast<ScriptCookieApi>(value.api);
@@ -239,7 +255,7 @@ template <class Bytes>
          h.navigation_id == 0 && h.status_code == 0 && h.error_code == 0 &&
          h.encoded_data_length == 0 && h.decoded_body_length == 0 && h.resource_type == 0 &&
          DecodeScriptCookiePayload(event.inline_payload, value) &&
-         IsValidScriptCookiePayload(value);
+         IsValidScriptCookiePayload(value) && (value.thread < 2 || h.frame_id != 0);
 }
 }  // namespace reb
 #endif

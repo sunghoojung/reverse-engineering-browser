@@ -989,15 +989,19 @@ each call costs one atomic load.
 Type 39 `script_cookie` is a renderer record: category `network`, flags 0,
 payload size 128, `request_id`, `parent_event_id`, `artifact_id`, navigation,
 status, error, lengths and resource type zero. `frame_id` is the document's
-frame for `document.cookie` and the calling frame for the Cookie Store API.
+frame for `document.cookie` and the calling frame for the Cookie Store API on
+the document main thread. In a service worker, whose `cookieStore` calls run
+on the worker thread, `frame_id` is the worker's context ID: the frame ID of
+its own requests and the isolate key of its [stack scope](#stack-scope).
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `1` |
+| 0 | 2 | payload version, `2`; readers also accept `1` |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | API: 1 `document.cookie` set, 2 `document.cookie` get, 3 `cookieStore.set`, 4 `cookieStore.get`, 5 `cookieStore.getAll`, 6 `cookieStore.delete` |
 | 5 | 1 | flags |
-| 6 | 2 | reserved, zero |
+| 6 | 1 | version 2: the stack thread of the calling isolate, 1 to 4 as in the [stack scope](#stack-scope), or 0 when the thread was never named; version 1: zero |
+| 7 | 1 | reserved, zero |
 | 8 | 4 | count: 1 for a write; for a read, reads since this key's previous record |
 | 12 | 4 | name length in UTF-8 bytes |
 | 16 | 4 | value length in UTF-8 bytes; 0 for a read |
@@ -1019,22 +1023,35 @@ zero; for API 1 the string length is at least name plus value length, and for
 script ID, its combinator 0 and only frame flag bits 0 and 1, and without bit
 1 the frame is zero; bit 2 if and
 only if the stack digest is nonzero, and only with bit 1; bit 3 only for a
-read; reserved bytes are zero.
+read; reserved bytes are zero. Version 2: byte 6 is 0 to 4; with 0, bits 1
+and 2 are clear, since no frame could be read in a known isolate; with 2 to 4,
+`frame_id` is nonzero.
+
+The script frame and the stack are read in the isolate byte 6 names, with the
+worker's context ID as its key: script IDs are unique only per isolate, so a
+service worker's `cookieStore.set` resolves to the worker's scripts and never
+to a page script with the same ID. Version 1 records, written before byte 6,
+were all read as the document's; a service worker's version 1 record could
+therefore name a page script, which is why version 2 exists. Blink names each
+thread's isolate whether or not request stacks are recorded (`AttachThread`,
+two thread-local stores), so byte 6 is 0 only on a thread Blink never named,
+and neither API runs on one today.
 
 `document.cookie` set parses the name and value like `ParsedCookie`: up to the
 first `;`, split at the first `=`, whitespace trimmed; no `=` means an empty
 name. The script frame comes from `v8::StackTrace::CurrentStackTrace` (one
 frame): script ID and character position; function start is 0. When the
 request stack provider is installed ([gate](#gate)), a write on the document
-main thread also walks the stack the way a request start does, without a
+main thread or in a service worker also walks the stack the way a request
+start does, in that thread's isolate, without a
 `request_initiator_stack` record: the write carries the walked innermost frame
 (with its function start) and the stack digest with bit 2. The record's
 sequence is reserved before the walk, so the stack artifact's
 `creator_event_id` and the new `script_identity` records' parent are the
 `script_cookie` record. Reads stay one-frame.
 
-Reads are frequent, so each renderer aggregates them per frame, API, script
-frame and name in a 256-entry table per configuration. A key records its 1st,
+Reads are frequent, so each renderer aggregates them per frame, thread, API,
+script frame and name in a 256-entry table per configuration. A key records its 1st,
 2nd, 4th, 8th and later power-of-two reads, each with the reads since the
 previous record, and its remainder when the configuration ends. A new key
 while the table is full is recorded alone with bit 3.

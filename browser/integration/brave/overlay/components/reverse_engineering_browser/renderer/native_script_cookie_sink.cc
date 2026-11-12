@@ -69,6 +69,7 @@ void NativeScriptCookieSink::Flush() noexcept {
       summary.name_prefix = entry.key.name_prefix;
       summary.string_length = entry.string_length;
       summary.frame = entry.key.frame;
+      summary.thread = entry.key.thread;
       summary.flags = static_cast<std::uint8_t>(
           (entry.key.name_length > kNativeScriptCookieNamePrefixBytes
                ? kNativeScriptCookieNameTruncated
@@ -93,9 +94,13 @@ NativeScriptCookieSummary NativeScriptCookieSink::Summary(
   if (name.size() > kept) {
     summary.flags |= kNativeScriptCookieNameTruncated;
   }
+  // The isolate the frame's script ID belongs to. A thread never attached
+  // (none runs these APIs today) records no frame, since none could resolve.
+  summary.thread = NativeRequestStackWalk::CurrentScope().thread;
   NativeScriptFrame frame;
   if (const FrameProvider provider = provider_.load(std::memory_order_relaxed);
-      provider && provider(frame) && (frame.kind == 1 || frame.kind == 2) && frame.script_id != 0) {
+      summary.thread != 0 && provider && provider(frame) && (frame.kind == 1 || frame.kind == 2) &&
+      frame.script_id != 0) {
     frame.combinator = 0;
     frame.flags &= 0x03U;
     summary.frame = frame;
@@ -148,7 +153,16 @@ void NativeScriptCookieSink::RecordCookieStore(const NativeScriptCookieApi api,
   }
 }
 
-std::uint64_t NativeScriptCookieSink::CallingFrameId() noexcept {
+std::uint64_t NativeScriptCookieSink::CallingFrameId(const std::uint64_t frame_id) noexcept {
+  // A service worker's cookieStore call names the worker, as its requests do.
+  if (const NativeStackScope scope = NativeRequestStackWalk::CurrentScope();
+      scope.thread != 0 &&
+      scope.thread != static_cast<std::uint8_t>(NativeStackThread::kDocument)) {
+    return scope.isolate_key;
+  }
+  if (frame_id != 0) {
+    return frame_id;
+  }
   const NativeProbeFrameIdProvider calling =
       NativeProbeSink::Get().frame_id_provider_.load(std::memory_order_relaxed);
   return calling ? calling() : 0;
@@ -163,12 +177,13 @@ void NativeScriptCookieSink::Record(NativeScriptCookieSummary summary,
   }
   summary.count = 1;
   summary.value_sha256 = crypto::hash::Sha256(value);
-  frame_id = frame_id ? frame_id : CallingFrameId();
+  frame_id = CallingFrameId(frame_id);
   // Reserved first so the walked stack's artifact can name this record.
   const std::uint64_t sequence =
       NativeProbeSink::Get().next_sequence_.fetch_add(1, std::memory_order_relaxed);
   NativeStackFrame innermost;
-  if (NativeRequestStackWalk::RecordCookieStack(sequence, frame_id, summary.stack_digest,
+  if (summary.thread != 0 &&
+      NativeRequestStackWalk::RecordCookieStack(sequence, frame_id, summary.stack_digest,
                                                 innermost) &&
       (innermost.kind == 1 || innermost.kind == 2)) {
     summary.frame = NativeScriptFrame{innermost.kind,
@@ -190,8 +205,10 @@ void NativeScriptCookieSink::RecordRead(NativeScriptCookieSummary summary,
   if (generation == 0) {
     return;
   }
-  frame_id = frame_id ? frame_id : CallingFrameId();
-  const ReadKey key{frame_id, summary.frame, summary.name_length, summary.name_prefix, summary.api};
+  frame_id = CallingFrameId(frame_id);
+  const ReadKey key{
+      frame_id,   summary.thread, summary.frame, summary.name_length, summary.name_prefix,
+      summary.api};
   base::AutoLock lock(reads_lock_);
   // A configuration that ended while this call ran no longer owns the table.
   if (generation_.load(std::memory_order_acquire) != generation) {

@@ -11063,6 +11063,7 @@
           "table_full",
           "script_frame",
           "stack_digest",
+          "thread",
           "stack"
         ],
         "properties": {
@@ -11173,6 +11174,16 @@
             ],
             "pattern": "^[0-9a-f]{64}$",
             "description": "The digest of the stack this write walked (protocol/native-network-v3.md), or null."
+          },
+          "thread": {
+            "enum": [
+              "document",
+              "dedicated_worker",
+              "shared_worker",
+              "service_worker",
+              null
+            ],
+            "description": "The isolate the call's script frame and stack are read in: a service worker's cookieStore call is the worker's, with its context ID as frame_id. Version 1 records are the document's. Null when a version 2 record names no thread, which records no frame."
           },
           "stack": {
             "oneOf": [

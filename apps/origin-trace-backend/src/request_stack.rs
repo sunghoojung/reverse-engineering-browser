@@ -57,6 +57,22 @@ impl Scope {
         thread: 1,
         isolate_key: 0,
     };
+    /// A `script_cookie` record's isolate: version 2 byte 6 and, for a worker,
+    /// the record's frame_id, which is the worker's context ID. None when the
+    /// thread was not named, so no frame of it can be read.
+    pub fn of_cookie(thread: u8, frame_id: u64) -> Option<Self> {
+        match thread {
+            1 => Some(Self::DOCUMENT),
+            2..=4 if frame_id != 0 => Some(Self {
+                thread,
+                isolate_key: frame_id,
+            }),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        self.thread_name()
+    }
     /// A request index row's thread and isolate key; a pre-scope row is the document's.
     fn of_row(thread: u64, isolate_key: u64) -> Self {
         match u8::try_from(thread) {

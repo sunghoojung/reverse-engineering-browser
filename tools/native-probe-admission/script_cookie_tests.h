@@ -185,6 +185,56 @@ void ScriptCookieAccess() {
   transport.Disable();
   Drain(queue);
 
+  // A service worker's cookieStore write names the worker: version 2 with
+  // thread 4, the worker's context ID as frame_id, and the stack walked in
+  // the worker's isolate, whose script identities carry the worker's scope,
+  // so its frames resolve to the worker's scripts and not the page's.
+  ConfigureCookies(queue, true);
+  scenario = StackScenario{};
+  scenario.depth = 2;
+  scenario.scripts = 1;
+  scenario.seed = 310;
+  scenario.context = 92;
+  {
+    TestThread service_worker;
+    const auto scope = WorkerScope(reb::NativeStackThread::kServiceWorker, 0x5157);
+    service_worker.Run([&] {
+      NativeRequestStackWalk::AttachThread(scope);
+      cookies.RecordCookieStore(reb::NativeScriptCookieApi::kCookieStoreSet, "sw", "1");
+      const auto worker_identity = IdentityPayload(Pop(queue));
+      assert(worker_identity.script_id == 10 &&
+             reb::NativeStackScopeOf(worker_identity.reserved2) == scope);
+      const auto worker_event = One(queue);
+      const auto worker_value = ScriptCookie(worker_event);
+      assert(worker_event.header.frame_id == 0x5157 &&
+             worker_value.protocol_version == reb::kScriptCookiePayloadVersion &&
+             worker_value.thread == 4 && (worker_value.flags & reb::kScriptCookieStackRecorded) &&
+             worker_value.frame.script_id == 10 && worker_value.frame.position == 310);
+      // The worker's reads aggregate apart from the page's.
+      cookies.RecordCookieStore(reb::NativeScriptCookieApi::kCookieStoreGet, "sw", {});
+      const auto read_event = One(queue);
+      assert(ScriptCookie(read_event).thread == 4 && read_event.header.frame_id == 0x5157);
+      NativeRequestStackWalk::DetachThread();
+      // A thread with no scope records no frame or stack it could not resolve.
+      cookies.RecordCookieStore(reb::NativeScriptCookieApi::kCookieStoreSet, "sw", "2");
+      const auto bare = ScriptCookie(One(queue));
+      assert(bare.thread == 0 &&
+             (bare.flags & (reb::kScriptCookieFrameRecorded | reb::kScriptCookieStackRecorded)) ==
+                 0 &&
+             bare.frame.script_id == 0);
+    });
+  }
+  // The page's write still names the document.
+  scenario = StackScenario{};
+  scenario.result = reb::NativeRequestStackWalkResult::kNoScript;
+  cookies.RecordDocumentCookieSet("page=1", document_frame);
+  const auto page = One(queue);
+  value = ScriptCookie(page);
+  assert(value.thread == 1 && page.header.frame_id == document_frame);
+  scenario = StackScenario{};
+  transport.Disable();
+  Drain(queue);
+
   // The Network category gates admission too.
   ConfigureCookies(queue, true, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kCanvas));
   cookies.RecordDocumentCookieSet("a=b", document_frame);
@@ -195,6 +245,6 @@ void ScriptCookieAccess() {
                "value digest, lengths, frame and position, empty and 24-byte names, calling "
                "frame, missing position, read aggregation at powers of two with the "
                "configuration-end remainder, full table, walked write stacks named by "
-               "digest, category gate\n";
+               "digest, a service worker's write scoped to its isolate, category gate\n";
 }
 }  // namespace

@@ -64,6 +64,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeScriptCookieSink final {
 
   struct ReadKey final {
     std::uint64_t frame_id = 0;
+    std::uint8_t thread = 0;
     NativeScriptFrame frame;
     std::uint32_t name_length = 0;
     std::array<std::uint8_t, kNativeScriptCookieNamePrefixBytes> name_prefix{};
@@ -83,7 +84,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeScriptCookieSink final {
               std::uint64_t frame_id,
               std::string_view value) noexcept;
   void RecordRead(NativeScriptCookieSummary summary, std::uint64_t frame_id) noexcept;
-  [[nodiscard]] static std::uint64_t CallingFrameId() noexcept;
+  // The frame a record names: a worker's context ID on a worker, else
+  // `frame_id` when Blink passed one, else the calling document's.
+  [[nodiscard]] static std::uint64_t CallingFrameId(std::uint64_t frame_id) noexcept;
   bool Emit(const NativeScriptCookieSummary& summary,
             std::uint64_t frame_id,
             std::uint64_t generation,

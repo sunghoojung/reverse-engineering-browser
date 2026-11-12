@@ -447,6 +447,7 @@ use the names.
 | 48 | `async_task_stack` | `include/reb/request_stack.hpp` | [native network v3](native-network-v3.md#async_task_stack-type-48) |
 | 50 | `request_extension_link` | `include/reb/tab_link.hpp` | [native network v3](native-network-v3.md#request_extension_link-type-50) |
 | 51 | `script_compiled` | `include/reb/compiled_script.hpp` | [native compiled scripts](native-compiled-scripts-v1.md) |
+| 52 | `memory_cache_reuse` | `include/reb/network_scope.hpp` | [native network v3](native-network-v3.md#memory_cache_reuse-type-52) |
 
 `wasm_indirect_observation` payloads are version 2 and `wasm_guest_invocation`
 version 4: each adds the JavaScript invocation context in previously reserved

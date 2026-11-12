@@ -43,6 +43,9 @@ inline constexpr std::size_t kNativeStackOwnerRing = 8192;
 // still arrive. A power of two above the sum of the three artifact budgets,
 // which bounds how many can be outstanding, so an entry is never displaced.
 inline constexpr std::size_t kNativeStackQueuedIndex = 4096;
+// Messages a thread remembers having posted, so a receipt on the same
+// thread links the posting segment in place instead of copying.
+inline constexpr std::size_t kNativeStackRecentPosts = 16;
 // Worker threads per renderer process with stack tables (about 650 KiB each
 // with Blink's frame buffer and a promise registration ring). The document
 // main thread is not counted. A worker past the limit walks nothing; its
@@ -160,8 +163,10 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
       NativeAsyncTaskKind kind,
       bool script_running,
       std::span<std::uint8_t, kNativeTaskOriginMaxBytes> out) noexcept;
-  // The segment a received message's handler runs under: copies of the
-  // carried segments, stored in this thread's ring. While capture is active,
+  // The segment a received message's handler runs under: on the thread that
+  // posted it, while its chain is unchanged, the posting segment itself;
+  // elsewhere copies of the carried segments, stored in this thread's ring.
+  // While capture is active,
   // an empty origin cuts the chain there (the sender carried nothing), and
   // one that does not validate ends it with an origin_rejected segment and a
   // message_task_origin_rejected gap. 0 while inactive or without tables.

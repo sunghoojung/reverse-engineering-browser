@@ -1030,10 +1030,46 @@ NativeRequestStackPayload HandlerStack(NativeProbeQueue& queue,
     assert(zero(carried[i].reserved1));
   }
 
-  // Received on the posting thread: copies, so the same chain.
+  // Received on the posting thread: the posting segment linked in place.
   auto stack = HandlerStack(queue, NativeAsyncTaskKind::kMessagePort, bytes, 7100);
   auto chain = GeneratedChain();
   assert(stack.task_segments == 2 && chain[0] == carried[0] && chain[1] == carried[1]);
+  Drain(queue);
+
+  // A scheduler that re-posts itself through a MessageChannel, as React's
+  // does: each receipt on the posting thread links in place, so 300 ticks
+  // write 300 ring entries, not up to 33 each, and a timer scheduled before
+  // the loop is still remembered.
+  scenario.task_seed = 9440;
+  const auto before_loop =
+      NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout);
+  Drain(queue);
+  scenario.task_seed = 9450;
+  std::uint64_t tick = 0;
+  for (int i = 0; i < 300; ++i) {
+    const auto outer = NativeRequestStackWalk::EnterAsyncTask(tick);
+    const auto n =
+        NativeRequestStackWalk::PostMessageOrigin(NativeAsyncTaskKind::kMessagePort, true, origin);
+    NativeRequestStackWalk::ExitAsyncTask(outer);
+    Drain(queue);
+    tick = NativeRequestStackWalk::ReceiveMessageOrigin(NativeAsyncTaskKind::kMessagePort,
+                                                        std::span(origin.data(), n));
+    assert(tick != 0 && (tick >> 63U) == 0);
+  }
+  saved = NativeRequestStackWalk::EnterAsyncTask(tick);
+  stack = StackPayload(Start(queue, 7120).second);
+  chain = GeneratedChain();
+  assert(stack.task_segments == 32 &&
+         (stack.flags & reb::kNativeRequestStackTaskChainTruncated) != 0 &&
+         std::all_of(chain.begin(), chain.end(),
+                     [](const reb::NativeTaskSegment& segment) { return segment.kind == 10; }));
+  NativeRequestStackWalk::ExitAsyncTask(saved);
+  Drain(queue);
+  saved = NativeRequestStackWalk::EnterAsyncTask(before_loop);
+  stack = StackPayload(Start(queue, 7121).second);
+  assert(stack.task_segments == 1 && (stack.flags & reb::kNativeRequestStackTaskChainCut) == 0 &&
+         GeneratedChain()[0].kind == 1);
+  NativeRequestStackWalk::ExitAsyncTask(saved);
   Drain(queue);
 
   // An origin that does not validate is rejected and counted: the handler's
@@ -1198,10 +1234,12 @@ NativeRequestStackPayload HandlerStack(NativeProbeQueue& queue,
       Drain(queue) == 0);
   scenario = {};
   transport.Disable();
-  std::cout << "PASS message origins: nothing beyond the segments crosses, copies on every "
-               "thread, forged, damaged, oversize and wrong-kind origins rejected and counted, "
-               "missing origin cut, a worker that posts and detaches first, no-script post, cut "
-               "and truncated ends carried apart, network off\n";
+  std::cout
+      << "PASS message origins: nothing beyond the segments crosses, a same-thread "
+         "receipt linked in place so a MessageChannel loop keeps an older timer, copies on "
+         "other threads, forged, damaged, oversize and wrong-kind origins rejected and counted, "
+         "missing origin cut, a worker that posts and detaches first, no-script post, cut "
+         "and truncated ends carried apart, network off\n";
 }
 
 // --reb-promise-stacks: a registration's stack, sent once per digest, names

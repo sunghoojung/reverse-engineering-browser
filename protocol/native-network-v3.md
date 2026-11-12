@@ -1299,7 +1299,7 @@ thread's walks read or write them, so a walk takes no lock after its first.
   The name is what `script_cookie` records carry (byte 6), so it exists without
   the provider too. Worklets, the background loader thread and the pool
   thread synchronous XHR uses are never named.
-- Tables. A named thread's tables (539,528 bytes) and Blink's buffer for V8's
+- Tables. A named thread's tables (539,920 bytes) and Blink's buffer for V8's
   frames (1,056 frames of 16 bytes, 16,896 bytes) are allocated by its first
   walk while capture is active, never by naming, so a worker that never walks
   under an active configuration costs nothing. With `--reb-promise-stacks`
@@ -1307,8 +1307,8 @@ thread's walks read or write them, so a walk takes no lock after its first.
   first walk runs from script, outside every Blink lock, and takes the
   registry lock once to register the tables. A walk allocates nothing else.
 - Limit. At most 32 worker threads per renderer process have tables
-  (`kNativeStackThreadLimit`), so at most 17,805,568 bytes of worker tables
-  and buffers, or 21,475,584 with promise stacks; the document main thread is not counted. A worker that
+  (`kNativeStackThreadLimit`), so at most 17,818,112 bytes of worker tables
+  and buffers, or 21,488,128 with promise stacks; the document main thread is not counted. A worker that
   walks while 32 others hold tables walks nothing: its requests record state
   6 `not_walked_thread_limit` with its scope, its schedules and received
   messages are not remembered, and one `request_stack_thread_limit` gap per
@@ -1511,8 +1511,8 @@ records.
   Draining routed refusals is two loads when none arrived; a drain that found
   some does one scan of the 2,048-entry segment ring (and the registration
   ring) however many it applies, plus a bounded index lookup per refusal.
-- Memory: 556,424 bytes per thread with tables (539,528 of tables, refusal
-  mailbox and queued index, 16,896 of Blink's frame buffer), plus 114,688 for
+- Memory: 556,816 bytes per thread with tables (539,920 of tables, refusal
+  mailbox, queued index and recent posts, 16,896 of Blink's frame buffer), plus 114,688 for
   the registration ring with `--reb-promise-stacks`. Allocated by the thread's
   first walk while capture is active, never when it is named, and freed when a
   worker stops; at most 32 workers per renderer have them
@@ -1723,8 +1723,9 @@ registration, frame count and the SHA-256 digest that names its stack
 artifact, which the sender stored. The origin names no process, thread, table
 or serial: version 1 carried the sender's OS process ID, a table number and
 the posting segment's serial so that a receiver on the posting thread could
-link the posting segment in place; every receiver now stores copies instead,
-which give the same chain. A no-script last segment, and bit 1 only with 32
+link the posting segment in place. The posting thread now finds its own posts
+in a record it keeps (below), and every other receiver stores copies, which
+give the same chain. A no-script last segment, and bit 1 only with 32
 segments, are checked; a sender never carries `origin_rejected`.
 
 At most 1,544 bytes per message, built from at most 32 ring reads when the
@@ -1746,8 +1747,18 @@ the message itself is never affected:
   and counts it as above. `kRebTaskOriginMaxBytes` in
   `third_party/blink/public/common/messaging/cloneable_message.h` is
   static-asserted equal to the contract's bound.
-- Valid: the carried segments are copied into the receiving thread's ring (at
-  most 32 writes), farthest first, the last one marked cut or truncated as
+- Valid, on the thread that posted it: each thread remembers its last 16
+  posts (the configuration, an FNV-1a hash of the origin bytes and the
+  posting segment's serial; kept on that thread, never sent). When one
+  matches and the chain rebuilt from that segment equals the carried bytes
+  and flags (at most 32 ring reads), the handler's task continues the posting
+  segment itself and nothing is copied. So a scheduler that re-posts itself
+  through a `MessageChannel`, as React's does, writes one ring entry per tick,
+  and older tasks are not pushed out of the 2,048-entry ring. A chain that
+  changed since the post (a refused artifact, a forgotten caller) is copied
+  instead.
+- Valid, anywhere else: the carried segments are copied into the receiving
+  thread's ring (at most 32 writes), farthest first, the last one marked cut or truncated as
   bit 0 or 1 says, so a request in the handler lists the posting stack and
   the sender's callers, with bit 3 or bit 4 as the sender's chain had. Each
   copied segment's frames resolve in the scope of its own artifact. A sender
@@ -1869,8 +1880,10 @@ a microtask.
 - Active: a scheduling walk of at most 256 frames, one SHA-256 of at most
   4,144 bytes, one ring entry, and an artifact only for a new stack. A
   top-level callback inside a task allocates one task state. A message post
-  adds at most 32 ring reads and 1,544 bytes in the message; a receipt at
-  most 32 ring writes, or one gap record when its origin is rejected. A
+  adds at most 32 ring reads, one hash of at most 1,544 bytes and those bytes
+  in the message; a receipt on the posting thread one hash and at most 32
+  ring reads, elsewhere at most 32 ring writes, or one gap record when its
+  origin is rejected. A
   schedule with no script running costs the session checks only.
 - Fixed per-thread tables, part of the [thread](#threads) allocation: 2,048
   segments, 4,096 task attribution IDs, 8 pending form submissions, and with

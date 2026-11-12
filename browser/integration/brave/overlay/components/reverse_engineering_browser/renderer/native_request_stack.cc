@@ -80,6 +80,14 @@ struct NativeRequestStackTables final {
     std::uint64_t target = 0;
     std::uint64_t sequence = 0;
   };
+  // A message this thread posted, so its receipt here links the posting
+  // segment in place instead of copying the carried ones. Kept on this
+  // thread only; nothing of it goes into the message.
+  struct Post final {
+    std::uint64_t generation = 0;
+    std::uint64_t hash = 0;
+    std::uint64_t serial = 0;
+  };
   // A stack artifact this thread queued in budget_generation, until a
   // browser refusal needs it. Sequence 0 marks a free slot.
   struct QueuedStack final {
@@ -138,6 +146,8 @@ struct NativeRequestStackTables final {
   std::unique_ptr<std::array<Registration, kNativePromiseRegistrationRing>> registrations;
   std::array<FormNavigation, kNativeFormNavigationTable> forms{};
   std::size_t form_evict = 0;
+  std::array<Post, kNativeStackRecentPosts> posts{};
+  std::size_t post_next = 0;
 };
 static_assert(kNativeStackQueuedIndex > kNativeRequestStackArtifactBudget +
                                             kNativeAsyncTaskArtifactBudget +
@@ -603,6 +613,15 @@ std::array<std::uint8_t, 48> ScopeTail(const NativeRequestStackTables* state) no
   return state ? ScopeTail(state->scope) : std::array<std::uint8_t, 48>{};
 }
 
+// FNV-1a of a message's task origin, the key of this thread's recent posts.
+std::uint64_t OriginHash(const std::span<const std::uint8_t> bytes) noexcept {
+  std::uint64_t hash = 0xcbf29ce484222325ULL;
+  for (const std::uint8_t byte : bytes) {
+    hash = (hash ^ byte) * 0x100000001b3ULL;
+  }
+  return hash;
+}
+
 // Writes the chain from `next`, nearest first, after `count` segments already
 // in `out`. Stops at 32 (bit 4), a forgotten or unknown caller (bit 3), a
 // carried chain's end (its own bit), or a segment scheduled with no script
@@ -1024,7 +1043,12 @@ std::size_t NativeRequestStackWalk::PostMessageOrigin(
       ((flags & kNativeRequestStackTaskChainCut) != 0 ? kNativeTaskOriginCut : 0) |
       ((flags & kNativeRequestStackTaskChainTruncated) != 0 ? kNativeTaskOriginTruncated : 0));
   std::memcpy(out.data(), &header, sizeof(header));
-  return kNativeTaskOriginHeaderSize + kNativeTaskSegmentSize * count;
+  const std::size_t size = kNativeTaskOriginHeaderSize + kNativeTaskSegmentSize * count;
+  if ((segment & kSyntheticSegment) == 0) {
+    state->posts[state->post_next++ % state->posts.size()] = {generation,
+                                                              OriginHash(out.first(size)), segment};
+  }
+  return size;
 }
 
 std::uint64_t NativeRequestStackWalk::ReceiveMessageOrigin(
@@ -1056,9 +1080,31 @@ std::uint64_t NativeRequestStackWalk::ReceiveMessageOrigin(
     EmitGap("message_task_origin_rejected", RequestFrameId(), generation);
     return kSyntheticSegment | kRejectedOrigin | static_cast<std::uint8_t>(kind);
   }
-  // Copies on every thread, the posting one included, farthest first, so
-  // each points at the one before it in the chain. A no-script last segment
-  // stays a synthetic handle.
+  // Posted on this thread and its chain unchanged since: link the posting
+  // segment in place. A scheduler that re-posts itself through a
+  // MessageChannel would otherwise copy up to 32 segments per receipt and
+  // push older tasks out of the ring.
+  const std::uint64_t hash = OriginHash(origin);
+  for (const auto& post : state->posts) {
+    if (post.generation != generation || post.hash != hash || post.serial == 0) {
+      continue;
+    }
+    std::array<std::uint8_t, kNativeTaskSegmentSize * kNativeTaskSegmentLimit> chain;
+    std::uint16_t linked = 0;
+    std::uint8_t flags = 0;
+    AppendChainFrom(*state, post.serial, generation, chain.data(), linked, flags);
+    const std::uint8_t ends = static_cast<std::uint8_t>(
+        ((flags & kNativeRequestStackTaskChainCut) != 0 ? kNativeTaskOriginCut : 0) |
+        ((flags & kNativeRequestStackTaskChainTruncated) != 0 ? kNativeTaskOriginTruncated : 0));
+    if (linked == header.count && ends == header.flags &&
+        std::memcmp(chain.data(), origin.data() + kNativeTaskOriginHeaderSize,
+                    kNativeTaskSegmentSize * linked) == 0) {
+      return post.serial;
+    }
+  }
+  // Copies on every other thread, and on this one when the chain changed
+  // since it was posted, farthest first, so each points at the one before it
+  // in the chain. A no-script last segment stays a synthetic handle.
   std::size_t count = header.count;
   std::uint64_t parent = 0;
   std::uint8_t end = (header.flags & kNativeTaskOriginCut) != 0 ? kNativeRequestStackTaskChainCut

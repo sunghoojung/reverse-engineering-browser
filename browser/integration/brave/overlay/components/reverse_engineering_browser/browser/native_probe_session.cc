@@ -348,6 +348,28 @@ void NativeProbeSession::EmitExclusion(const std::uint32_t excluded_process_id,
       exclusion_class, count));
 }
 
+void NativeProbeSession::EmitNamedGap(const NativeProbeCategory category,
+                                      const std::string_view reason) noexcept {
+  if (!IsActive()) {
+    return;
+  }
+  NativeProbeEvent gap;
+  gap.header.category = category;
+  gap.header.type = NativeProbeType::kGap;
+  gap.header.session_id = session_id();
+  gap.header.sequence_number = NextBrowserSequence();
+  gap.header.monotonic_time_ns =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  gap.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  gap.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  const std::size_t size = std::min(reason.size(), gap.inline_payload.size());
+  for (std::size_t index = 0; index < size; ++index) {
+    gap.inline_payload[index] = static_cast<std::byte>(static_cast<unsigned char>(reason[index]));
+  }
+  gap.header.payload_size = static_cast<std::uint32_t>(size);
+  Emit(gap);
+}
+
 std::uint64_t NativeProbeSession::NextBrowserSequence() noexcept {
   return next_browser_sequence_.fetch_add(1, std::memory_order_relaxed);
 }

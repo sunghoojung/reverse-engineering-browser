@@ -833,22 +833,41 @@ void NativeProbeHostWorkerTabLinks() {
   Check(events.size() == 3 && events[2].header.tab_id == 12 &&
             link(events[2]) == std::pair{1U, 1U} && std::ranges::all_of(events, valid),
         "A nested worker seen before its parent links through the parent when it fetches");
-  // A creator chain resolves through at most kCreatorDepth workers.
-  const auto chained = [](std::uint64_t index) {
-    return reb::NativeToken128{0x4000 + index, index + 1};
+  // One depth rule: a worker resolves when its chain from the document holds
+  // at most kCreatorDepth workers, whatever order the workers were seen in and
+  // whichever worker fetched first.
+  constexpr std::uint64_t kDepth = reb::NativeTabResolver::kCreatorDepth;
+  const auto chained = [](std::uint64_t family, std::uint64_t index) {
+    return reb::NativeToken128{family + index, index + 1};
   };
-  for (std::uint64_t index = reb::NativeTabResolver::kCreatorDepth; index > 0; --index) {
-    resolver.DedicatedWorkerCreated(chained(index), {}, 0, chained(index - 1));
+  const auto tab_of = [&](std::uint64_t family, std::uint64_t index, std::uint64_t request) {
+    start(reb::NativeLoaderKind::kDedicatedWorker, chained(family, index).fold(), request);
+    return events.empty() ? 0U : events[0].header.tab_id;
+  };
+  // Children seen before their parents, as enumeration can report them.
+  for (std::uint64_t index = kDepth; index > 0; --index) {
+    resolver.DedicatedWorkerCreated(chained(0x4000, index), {}, 0, chained(0x4000, index - 1));
   }
-  resolver.DedicatedWorkerCreated(chained(0), {}, 15, {});
-  start(reb::NativeLoaderKind::kDedicatedWorker,
-        chained(reb::NativeTabResolver::kCreatorDepth).fold(), 63);
-  Check(events.size() == 1 && events[0].header.tab_id == 0,
-        "A chain longer than the creator depth stays unresolved");
-  start(reb::NativeLoaderKind::kDedicatedWorker,
-        chained(reb::NativeTabResolver::kCreatorDepth - 1).fold(), 64);
-  Check(events.size() == 3 && events[2].header.tab_id == 15,
-        "A chain of exactly the creator depth reaches the document's tab");
+  resolver.DedicatedWorkerCreated(chained(0x4000, 0), {}, 15, {});
+  Check(tab_of(0x4000, kDepth, 63) == 0,
+        "Seen child first, a chain one past the depth stays unresolved");
+  Check(tab_of(0x4000, kDepth - 1, 64) == 15, "Seen child first, a chain of the depth resolves");
+  // Parents seen first, so each worker inherits at creation.
+  resolver.DedicatedWorkerCreated(chained(0x5000, 0), {}, 16, {});
+  for (std::uint64_t index = 1; index <= kDepth; ++index) {
+    resolver.DedicatedWorkerCreated(chained(0x5000, index), {}, 0, chained(0x5000, index - 1));
+  }
+  Check(tab_of(0x5000, kDepth, 71) == 0,
+        "Seen parent first, a chain one past the depth stays unresolved");
+  Check(tab_of(0x5000, kDepth - 1, 72) == 16, "Seen parent first, a chain of the depth resolves");
+  // A worker halfway down fetches first and caches the tab with its depth.
+  for (std::uint64_t index = kDepth; index > 0; --index) {
+    resolver.DedicatedWorkerCreated(chained(0x6000, index), {}, 0, chained(0x6000, index - 1));
+  }
+  resolver.DedicatedWorkerCreated(chained(0x6000, 0), {}, 17, {});
+  Check(tab_of(0x6000, kDepth / 2, 73) == 17, "A worker halfway down resolves");
+  Check(tab_of(0x6000, kDepth, 74) == 0 && tab_of(0x6000, kDepth - 1, 75) == 17,
+        "A tab cached halfway down keeps the same boundary below it");
 
   // A version installed by a page's register() links its fetches to that page.
   resolver.ServiceWorkerJobStarted(10, true, 33, -1);
@@ -885,6 +904,62 @@ void NativeProbeHostWorkerTabLinks() {
   start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0xc1, 0xc2}.fold(), 67);
   Check(events.size() == 3 && events[0].header.tab_id == 14 && link(events[2]) == std::pair{3U, 1U},
         "Once a page uses the version its requests link to that page");
+  // One class 68 answer per renderer-issued request, whichever half asks first.
+  reb::NativeFactoryScope worker_scope;
+  worker_scope.owner.service_worker_without_caller = true;
+  const auto proxy = [&](std::int64_t version, std::uint32_t request) {
+    worker_scope.owner.service_worker_version = version;
+    return reb::NativeProxyRequestExclusion(
+        worker_scope, static_cast<int>(reb::NativeUrlLoaderFactoryKind::kServiceWorkerSubResource),
+        "https", {1, request});
+  };
+  const reb::NativeToken128 shared_worker_token{0xf1, 0xf2};
+  resolver.ServiceWorkerStarted(12, shared_worker_token, {}, "https://shared.test/");
+  // A: the proxy leaves the browser half out, then a page arrives before the drain.
+  const auto left_out = proxy(12, 81);
+  Check(left_out.exclusion_class == 68 && !left_out.counted_here,
+        "The proxy leaves a pageless worker's request out for the drain to count");
+  resolver.ServiceWorkerControlleeAdded(12, "late", std::vector<std::uint32_t>{19});
+  auto counted_now = session.exclusions.size();
+  start(reb::NativeLoaderKind::kServiceWorker, shared_worker_token.fold(), 81);
+  Check(
+      events.empty() && session.exclusions.size() == counted_now + 1 &&
+          session.exclusions.back().exclusion_class == 68,
+      "The renderer record takes the proxy's answer though a page arrived since, and counts once");
+  start(reb::NativeLoaderKind::kServiceWorker, shared_worker_token.fold(), 82);
+  Check(events.size() == 3 && events[0].header.tab_id == 19 && proxy(12, 82).exclusion_class == 0,
+        "After the page arrived both halves of a new request are kept");
+  // B: the drain asks first for a worker it does not know; the proxy keeps its half too.
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0xf3, 0xf4}.fold(), 83);
+  Check(events.size() == 1 && events[0].header.tab_id == 0 && proxy(13, 83).exclusion_class == 0,
+        "A record of an unknown worker is kept, so its pageless browser half is kept as well");
+  // The drain asks first for a pageless worker: the proxy follows though a page arrived since.
+  const reb::NativeToken128 drained_first{0xf5, 0xf6};
+  resolver.ServiceWorkerStarted(14, drained_first, {}, "https://drained.test/");
+  counted_now = session.exclusions.size();
+  start(reb::NativeLoaderKind::kServiceWorker, drained_first.fold(), 84);
+  resolver.ServiceWorkerControlleeAdded(14, "late", std::vector<std::uint32_t>{20});
+  const auto followed = proxy(14, 84);
+  Check(events.empty() && session.exclusions.size() == counted_now + 1 &&
+            followed.exclusion_class == 68 && !followed.counted_here,
+        "The proxy takes the drain's answer and does not count the request again");
+  // An answer evicted before its other half asked is a named network gap.
+  constexpr std::size_t kAnswers = reb::NativeTabResolver::kSharedDecisionCapacity;
+  for (std::uint32_t index = 0; index < kAnswers; ++index) {
+    static_cast<void>(resolver.SharedServiceWorkerNoPage({9, index}, 12));
+  }
+  static_cast<void>(resolver.TakeEvictedSharedDecisions());
+  static_cast<void>(resolver.SharedServiceWorkerNoPage({9, 1'000'000}, 15));
+  for (std::uint32_t index = 0; index < kAnswers; ++index) {
+    static_cast<void>(resolver.SharedServiceWorkerNoPage({10, index}, 12));
+  }
+  const auto gaps = session.named_gaps.size();
+  start(reb::NativeLoaderKind::kServiceWorker, shared_worker_token.fold(), 85);
+  Check(session.named_gaps.size() == gaps + 1 &&
+            session.named_gaps.back().first == reb::NativeProbeCategory::kNetwork &&
+            session.named_gaps.back().second == reb::kNativeSharedDecisionEvictedGap,
+        "Only the evicted answer its other half could have decided otherwise is a named gap");
+
   // A client whose navigation never committed names no tab but is a page.
   resolver.ServiceWorkerControlleeAdded(11, "uncommitted", std::vector<std::uint32_t>{});
   resolver.ServiceWorkerStarted(11, {0xe1, 0xe2}, {}, "https://uncommitted.test/");
@@ -907,5 +982,6 @@ void NativeProbeHostWorkerTabLinks() {
   session.emitted = {};
   std::cout
       << "PASS production NativeProbeHost links worker requests to tab sets, registrants and "
-         "worklet documents, counts pageless service workers, and keeps tombstoned frame tabs\n";
+         "worklet documents under one creator depth, takes one class 68 answer per request with "
+         "its browser half, and keeps tombstoned frame tabs\n";
 }

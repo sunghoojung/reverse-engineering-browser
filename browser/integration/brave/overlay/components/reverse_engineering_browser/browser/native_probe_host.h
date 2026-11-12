@@ -148,6 +148,7 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   [[nodiscard]] std::uint32_t FrameTab(const std::unordered_map<std::uint64_t, std::uint32_t>& live,
                                        std::uint64_t frame_id) const;
   [[nodiscard]] static bool IsWorkerRequestStart(const NativeProbeEvent& event);
+  void ReportUnsharedDecisions();
   [[nodiscard]] bool IsExcludedRequestRecord(const NativeProbeEvent& event) const;
   void EmitWorkerRequest(NativeProbeEvent& event);
   // Reports the browser verdict for module bytes sent with the guest dispatch

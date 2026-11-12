@@ -1025,9 +1025,12 @@ void FactoryOwners() {
   assert(decide(Factory::kNavigation, "", "", true).exclusion == 0);
   assert(decide(Factory::kDocumentSubResource, "https", "a.test", false).exclusion == 0);
 
-  const auto exclusion = [](const reb::NativeFactoryScope& scope, Factory kind,
-                            std::string_view scheme) {
-    const auto value = reb::NativeProxyRequestExclusion(scope, static_cast<int>(kind), scheme);
+  // Each call is a new request's only decision, as the proxy makes it.
+  std::uint32_t next_request = 1;
+  const auto exclusion = [&next_request](const reb::NativeFactoryScope& scope, Factory kind,
+                                         std::string_view scheme) {
+    const auto value = reb::NativeProxyRequestExclusion(scope, static_cast<int>(kind), scheme,
+                                                        {1, next_request++});
     return std::pair{value.exclusion_class, value.counted_here};
   };
   const reb::NativeFactoryScope plain;

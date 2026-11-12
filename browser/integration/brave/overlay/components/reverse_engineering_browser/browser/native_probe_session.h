@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
@@ -85,6 +86,9 @@ class NativeProbeSession final {
   void EmitExclusion(std::uint32_t excluded_process_id,
                      std::uint8_t exclusion_class,
                      std::uint64_t count) noexcept;
+  // One named loss in the browser's own sequence: a gap record whose payload
+  // is `reason`, a lowercase identifier.
+  void EmitNamedGap(NativeProbeCategory category, std::string_view reason) noexcept;
   [[nodiscard]] std::uint64_t NextBrowserSequence() noexcept;
   void Emit(const NativeProbeEvent& event) const noexcept;
 

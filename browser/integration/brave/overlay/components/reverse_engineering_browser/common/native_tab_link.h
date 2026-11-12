@@ -58,6 +58,9 @@ inline constexpr std::uint8_t kNativeExtensionWorkerExclusion = 65;
 inline constexpr std::uint8_t kNativeDevToolsLoadExclusion = 66;
 inline constexpr std::uint8_t kNativeServiceWorkerNoPageExclusion = 68;
 inline constexpr std::uint8_t kNativeBrowserPrefetchExclusion = 69;
+// A class 68 answer evicted before its other half asked; that half then
+// decided alone (protocol/native-network-v3.md).
+inline constexpr char kNativeSharedDecisionEvictedGap[] = "service_worker_page_decision_unshared";
 inline constexpr std::uint16_t kNativeTabSetPayloadVersion = 1;
 inline constexpr std::uint32_t kNativeTabSetPayloadSize = 128;
 inline constexpr std::size_t kNativeTabSetPartTabs = 26;

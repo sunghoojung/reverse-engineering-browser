@@ -95,18 +95,26 @@ struct NativeRequestExclusion final {
   bool counted_here = false;
 };
 
+// Called once per request, while capture runs: for a renderer-issued
+// service-worker request it takes the class 68 answer the drain shares.
+// `request` is the factory's renderer and the request's renderer id.
 [[nodiscard]] inline NativeRequestExclusion NativeProxyRequestExclusion(
     const NativeFactoryScope& scope,
     const int factory_type,
-    const std::string_view url_scheme) noexcept {
+    const std::string_view url_scheme,
+    const NativeTabResolver::RendererRequest request) noexcept {
   const bool renderer_issued = NativeRendererIssuedRequestId(factory_type);
   if (scope.exclusion != 0) {
     return {scope.exclusion,
             scope.exclusion != kNativeExtensionWorkerExclusion || !renderer_issued};
   }
-  // Decided per request: a version stops being pageless when a page first uses it.
+  // Decided per request: a version stops being pageless when a page first uses
+  // it. A renderer-issued request shares one answer with its renderer record.
   if (scope.owner.service_worker_without_caller && scope.tab_id == 0 &&
-      NativeTabResolver::Get().ServiceWorkerHasNoPage(scope.owner.service_worker_version)) {
+      (renderer_issued
+           ? NativeTabResolver::Get().SharedServiceWorkerNoPage(request,
+                                                                scope.owner.service_worker_version)
+           : NativeTabResolver::Get().ServiceWorkerHasNoPage(scope.owner.service_worker_version))) {
     return {kNativeServiceWorkerNoPageExclusion, !renderer_issued};
   }
   const NativeSchemeClass scheme = ClassifyNativeScheme(url_scheme);

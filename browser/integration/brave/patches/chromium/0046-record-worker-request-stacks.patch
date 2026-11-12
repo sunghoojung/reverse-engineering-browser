@@ -1,0 +1,121 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index fa4a188..8263a8e 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -43,7 +43,6 @@
+ #include "base/location.h"
+ #include "base/memory/scoped_refptr.h"
+ #include "base/metrics/histogram_functions.h"
+-#include "base/no_destructor.h"
+ #include "base/system/sys_info.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/task/thread_pool.h"
+@@ -833,16 +832,9 @@ reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
+   return result;
+ }
+ 
+-// Request initiator stacks, protocol/native-network-v3.md. V8 fills a buffer
+-// owned here; the sink copies identities and never calls back into V8.
+-std::array<v8::NativeStackFrame, reb::kNativeRequestStackFrameCapacity>&
+-NativeStackFrames() {
+-  static base::NoDestructor<
+-      std::array<v8::NativeStackFrame, reb::kNativeRequestStackFrameCapacity>>
+-      frames;
+-  return *frames;
+-}
+-
++// Request initiator stacks, protocol/native-network-v3.md. V8 fills the
++// walking thread's buffer, attached with its tables; the sink copies
++// identities and never calls back into V8.
+ struct NativeRequestStackCall {
+   reb::NativeRequestStackWalk& walk;
+   v8::Isolate* isolate;
+@@ -858,7 +850,8 @@ void NativeStackFramesReady(void* data, const v8::NativeStackCapture& capture) {
+   reb::NativeRequestStackWalk& walk =
+       static_cast<NativeRequestStackCall*>(data)->walk;
+   const base::span<reb::NativeStackFrame> out = walk.frames();
+-  const auto& in = NativeStackFrames();
++  const auto& in = *static_cast<const reb::request_stack_blink::V8StackFrames*>(
++      walk.embedder_frames());
+   const auto copy = [&](const std::size_t from, const std::size_t count) {
+     for (std::size_t i = from; i < from + count && i < out.size(); ++i) {
+       out[i].kind = static_cast<std::uint8_t>(in[i].kind);
+@@ -947,7 +940,11 @@ void NativeStackScriptDescribed(void* data, const v8::NativeStackScript& script)
+ 
+ reb::NativeRequestStackWalkResult WalkNativeRequestStack(
+     reb::NativeRequestStackWalk& walk) {
+-  if (!IsMainThread()) {
++  // The document main thread and dedicated, shared and service workers have
++  // attached tables; worklets and loader threads have none.
++  auto* const frames =
++      static_cast<reb::request_stack_blink::V8StackFrames*>(walk.embedder_frames());
++  if (!frames) {
+     return reb::NativeRequestStackWalkResult::kUnsupportedThread;
+   }
+   v8::Isolate* const isolate = v8::Isolate::TryGetCurrent();
+@@ -962,10 +959,10 @@ reb::NativeRequestStackWalkResult WalkNativeRequestStack(
+   reb::request_stack_blink::SetAsyncContext(walk, isolate);
+   NativeRequestStackCall call{walk, isolate};
+   v8::NativeStackCapture capture;
+-  capture.frames = NativeStackFrames().data();
++  capture.frames = frames->data();
+   // A scheduling-time walk stops at its innermost frames, without awaits.
+   const bool task = walk.async_task_walk();
+-  capture.sync_capacity = task ? reb::kNativeAsyncTaskFrameLimit
++  capture.sync_capacity = task ? walk.task_frame_limit()
+                                : reb::kNativeRequestStackSyncLimit;
+   capture.async_capacity = task ? 0 : reb::kNativeRequestStackAsyncLimit;
+   capture.innermost_only = task;
+@@ -2228,11 +2225,18 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+     isolate->SetJsInvocationCallbacks(js_invocation);
+     reb::NativeProbeSink::Get().SetNativeJsInvocationContextProvider(
+         CurrentJsInvocation);
++    // Names the main thread's isolate for request stacks and script_cookie
++    // records, with or without --reb-request-stacks; allocates nothing.
++    reb::request_stack_blink::AttachMainThread();
+     // Installed only with --reb-request-stacks, so a request start without
+-    // it costs the sink one atomic load.
++    // it costs the sink one atomic load. A thread's tables and V8 frame
++    // buffer are made by its first walk or message receipt while capture is
++    // active.
+     if (v8::IsNativeStackCaptureEnabled()) {
+-      NativeStackFrames();
+-      reb::NativeRequestStackWalk::SetProvider(WalkNativeRequestStack);
++      reb::NativeRequestStackWalk::SetProvider(
++          WalkNativeRequestStack,
++          &reb::request_stack_blink::AllocateV8StackFrames,
++          &reb::request_stack_blink::ReleaseV8StackFrames);
+     }
+   }
+   // Every isolate, including workers. The worker br_table gap is recorded
+diff --git a/third_party/blink/renderer/core/workers/worker_thread.cc b/third_party/blink/renderer/core/workers/worker_thread.cc
+index b6981ea..459bdd7 100644
+--- a/third_party/blink/renderer/core/workers/worker_thread.cc
++++ b/third_party/blink/renderer/core/workers/worker_thread.cc
+@@ -25,6 +25,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/workers/worker_thread.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack_blink.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_worker_observation_blink.h"
+ 
+ #include <atomic>
+@@ -681,6 +682,10 @@ void WorkerThread::InitializeOnWorkerThread(
+     // initialization/evaluation.
+     reb::worker_observation::ObserveScope(
+         GlobalScope(), {reb::NativeWorkerOperation::kGlobalScopeStarted});
++    // Names this worker's isolate for request stacks and script_cookie
++    // records: thread-local stores only, nothing allocated under lock_; see
++    // protocol/native-network-v3.md.
++    reb::request_stack_blink::AttachWorkerThread(GlobalScope());
+ 
+     worker_inspector_controller_ = WorkerInspectorController::Create(
+         this, url_for_debugger, inspector_task_runner_,
+@@ -851,6 +856,7 @@ void WorkerThread::PerformShutdownOnWorkerThread() {
+ 
+   GlobalScope()->Dispose();
+   global_scope_ = nullptr;
++  reb::NativeRequestStackWalk::DetachThread();
+ 
+   console_message_storage_.Clear();
+   inspector_issue_storage_.Clear();

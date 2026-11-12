@@ -105,6 +105,16 @@ the mode and Keychain choice made by keyboard (so native received them), and
 focus Retry; Return on Retry must fail afresh, and Continue Offline must close
 the panel and return focus to the workspace.
 
+`test30WorkerInitiatorStack` opens the synthetic request a dedicated worker
+started (two synthetic renderer processes, version 3 stack records,
+[native network v3](../../protocol/native-network-v3.md)). At both sizes the
+Initiator column must name the worker's frame, and the Initiator tab must
+resolve that frame and a `Promise.then` registration in the worker's isolate,
+a `MessagePort.postMessage` segment in the posting renderer's isolate with its
+process named, and the stated end of a task scheduled with no script, then list
+the async callers still not shown, with nothing clipped and captured names
+inert.
+
 `testLaunchStartsWithoutStartPanel` runs alone in a second launch pass. That
 pass starts the copied app without `--ui-url` or an evidence-store argument,
 with automatic live sessions on, `REB_EVENT_STORE` and its siblings naming

@@ -97,13 +97,108 @@ assert.deepEqual(lines, [
   'setTimeout',
   'schedule @ page:30:5',
   'Microtask',
-  'the call that registered it is not recorded',
+  'the call that registered it is not recorded: promise registration stacks were off (REB_NATIVE_PROMISE_STACKS=1 records them)',
   'Earlier async callers were not recorded'
 ]);
 assert.equal(tree.querySelectorAll('img').length, 0, 'captured names are text, never markup');
 assert.match(tree.textContent, /Async callers not shown: MessagePort and worker messages\./);
 tree.querySelector('.request-stack-open').dispatchEvent(new window.Event('click'));
 assert.equal(opened.resolution.artifact_line, 3);
+
+// A version 3 stack walked in a dedicated worker: a .then registration, a
+// MessagePort post from another renderer, then a task with no script.
+const workerEvent = structuredClone(stackEvent);
+workerEvent.payload = `03${workerEvent.payload.slice(2, 10)}00${workerEvent.payload.slice(12, 160)}02${'00'.repeat(7)}7700000000000000${'00'.repeat(32)}`;
+const workerRecord = decodeRequestStackRecord(workerEvent);
+assert.equal(workerRecord?.thread, 'dedicated_worker', 'a version 3 worker record decodes its thread');
+let workerPending = null;
+const workerPanel = createRequestStackPanel({
+  load: () => workerPending = Promise.resolve({status: 'recorded', state: 'captured',
+    request: {sequence_number: workerEvent.sequence_number}, frames_retained: true, frames: [frames[0]],
+    scope: {thread: 'dedicated_worker', isolate_key: '0000000000000077'},
+    task_segments: [
+      {index: 0, kind: 'microtask', registration: 'then', state: 'captured', recorded: 1, bounded: false, frames_retained: true,
+        scope: {thread: 'dedicated_worker', process_id: 4, elsewhere: false, other_process: false}, frames: [taskSegments[0].frames[0]]},
+      {index: 1, kind: 'message_port', registration: null, state: 'captured', recorded: 1, bounded: false, frames_retained: true,
+        scope: {thread: 'document', process_id: 5, elsewhere: true, other_process: true}, frames: [taskSegments[0].frames[0]]},
+      {index: 2, kind: 'event', registration: null, state: 'no_script', recorded: 0, bounded: false, frames_retained: false, scope: null, frames: []}
+    ],
+    task_chain_cut: false,
+    async_callers_not_shown: ['ServiceWorker.postMessage and Client.postMessage', 'window.postMessage to or from another process']}),
+  refresh: () => {}, open: () => {}
+});
+workerPanel.render(tree, {events: [initiated], details: [workerEvent]}, [chain]);
+assert.match(tree.textContent, /Started in a dedicated worker\./);
+await workerPending;
+await new Promise(resolve => setTimeout(resolve, 0));
+workerPanel.render(tree, {events: [initiated], details: [workerEvent]}, [chain]);
+assert.deepEqual([...tree.querySelectorAll('li')].map(item => item.textContent), [
+  '<img src=x onerror=alert(1)> @ page:13:10',
+  'Promise.then',
+  'schedule @ page:30:5',
+  'MessagePort.postMessage · on the document main thread in process 5',
+  'schedule @ page:30:5',
+  'Event or observer',
+  'scheduled while no script ran (the browser, the parser or a native callback); the chain ends here'
+]);
+assert.match(tree.textContent, /Async callers not shown: ServiceWorker\.postMessage and Client\.postMessage; window\.postMessage to or from another process\./);
+// Exact notes: a reaction with promise stacks on and nothing remembered, a
+// rejected message origin, and the per-thread budgets of each kind.
+let notesPending = null;
+const notesPanel = createRequestStackPanel({
+  load: () => notesPending = Promise.resolve({status: 'recorded', state: 'captured',
+    request: {sequence_number: workerEvent.sequence_number}, frames_retained: true, frames: [frames[0]],
+    task_segments: [
+      {index: 0, kind: 'microtask', registration: null, state: 'not_recorded', promise_stacks_on: true, recorded: 0,
+        bounded: false, frames_retained: false, scope: null, frames: []},
+      {index: 1, kind: 'set_timeout', registration: null, state: 'not_retained_budget', recorded: 3, bounded: false,
+        frames_retained: false, scope: null, frames: []},
+      {index: 2, kind: 'microtask', registration: 'then', state: 'not_retained_budget', recorded: 3, bounded: false,
+        frames_retained: false, scope: null, frames: []},
+      {index: 3, kind: 'broadcast_channel', registration: null, state: 'origin_rejected', recorded: 0, bounded: false,
+        frames_retained: false, scope: null, frames: []}
+    ],
+    task_chain_cut: false, async_callers_not_shown: []}),
+  refresh: () => {}, open: () => {}
+});
+notesPanel.render(tree, {events: [initiated], details: [workerEvent]}, [chain]);
+await notesPending;
+await new Promise(resolve => setTimeout(resolve, 0));
+notesPanel.render(tree, {events: [initiated], details: [workerEvent]}, [chain]);
+assert.deepEqual([...tree.querySelectorAll('li')].map(item => item.textContent).slice(1), [
+  'Microtask',
+  'the call that registered it is not recorded: promise registration stacks were on, but this thread remembered no registration for it (a builtin such as Promise.all registered it, capture was off when it was registered, or 2,048 later registrations replaced it)',
+  'setTimeout',
+  'frames not retained: this thread already sent 1,024 scheduling stacks in this capture',
+  'Promise.then',
+  'frames not retained: this thread already sent 1,024 promise registration stacks in this capture',
+  'BroadcastChannel.postMessage',
+  'its task origin did not validate (forged, damaged or longer than 1,544 bytes), so the sender is not known; the chain ends here'
+]);
+// A request stack over its thread's budget names that budget's owner.
+const overBudget = structuredClone(workerEvent);
+overBudget.payload = `${overBudget.payload.slice(0, 8)}05${overBudget.payload.slice(10)}`;
+assert.equal(decodeRequestStackRecord(overBudget)?.state, 'not_retained_budget');
+panel.render(tree, {events: [initiated], details: [overBudget]}, [chain]);
+assert.match(tree.textContent, /this thread already sent 1,024 stacks for requests, navigations, cookie writes and debugger observations in this capture/);
+assert.doesNotMatch(tree.textContent, /this renderer already sent/);
+// A worker past the renderer's table limit: named, nothing walked or read.
+const limitCase = cases.find(item => item.name === 'stack record thread limit');
+assert(limitCase?.valid, 'golden thread-limit record');
+const limited = {...limitCase.event, parent_event_id: initiated.sequence_number, session_id: initiated.session_id,
+  process_id: initiated.process_id};
+assert.equal(decodeRequestStackRecord(limited)?.state, 'not_walked_thread_limit');
+let limitReads = 0;
+createRequestStackPanel({load: () => { limitReads += 1; return new Promise(() => {}); }, refresh: () => {}, open: () => {}})
+  .render(tree, {events: [initiated], details: [limited]}, [chain]);
+assert.match(tree.textContent, /Started in a dedicated worker\.\s*No stack was walked: 32 workers in this renderer already had stack tables/);
+assert.equal(limitReads, 0, 'nothing is read for a stack that was not walked');
+
+const workerLoader = structuredClone(workerEvent);
+workerLoader.payload = `0300800002000000${'00'.repeat(72)}02${'00'.repeat(7)}7700000000000000${'00'.repeat(32)}`;
+panel.render(tree, {events: [initiated], details: [workerLoader]}, [chain]);
+assert.match(tree.textContent, /Request call stack\s*Worker loader/);
+assert.match(tree.textContent, /a dedicated worker started this request: its script or module loader/);
 
 const parser = structuredClone(stackEvent);
 parser.payload = `0100800002080000${'00'.repeat(120)}`;
@@ -175,4 +270,4 @@ await outsidePending;
 await new Promise(resolve => setTimeout(resolve, 0));
 scriptOutside.render(tree, request, [chain]);
 assert.match(tree.textContent, /not in the scanned range/);
-console.log('PASS Initiator panel: frames as text, Wasm, unresolved reason, omitted marker, await, setTimeout and microtask segments, cut chain, navigation stacks, Parser, no record and an outside-scan status');
+console.log('PASS Initiator panel: frames as text, Wasm, unresolved reason, omitted marker, await, setTimeout and microtask segments, cut chain, worker stacks, Promise.then registrations, message segments from another process, no-script ends, promise stacks on with nothing remembered, rejected origins, per-thread budgets, the worker thread limit, navigation stacks, Parser, Worker loader, no record and an outside-scan status');

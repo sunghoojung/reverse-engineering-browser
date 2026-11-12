@@ -373,6 +373,146 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
   return {events, artifacts: [bodyArtifact, ...headerArtifacts, responseArtifact]};
 }
 
+// A request a dedicated worker started (protocol/native-network-v3.md): its
+// version 3 stack names the worker's isolate, and its task chain is a
+// Promise.then registration in the worker, a MessagePort post from the page's
+// renderer (another process) and an event scheduled with no script. Script 7
+// is a different script in each isolate, so a wrong scope would mis-resolve.
+export const WORKER_STACK_HOST = 'w.stack.test';
+export const WORKER_STACK_PROCESSES = [5151, 5152];
+const WORKER_KEY = 0x77n;
+async function workerStackRequest(template, firstTime, artifactsRoot) {
+  const [workerProcess, pageProcess] = WORKER_STACK_PROCESSES;
+  const workerSource = "function work() {\n  fetch('/w');\n}\nfunction start() {\n  ready.then(work);\n}\n";
+  const pageSource = 'function post() {\n  port.postMessage(1);\n}\n';
+  const at = (text, needle) => text.indexOf(needle);
+  const frame = (script, position, start) => {
+    const bytes = Buffer.alloc(16);
+    bytes[0] = 1;
+    bytes.writeUInt32LE(script, 4);
+    bytes.writeUInt32LE(position, 8);
+    bytes.writeUInt32LE(start, 12);
+    return bytes;
+  };
+  const scope = (thread, key) => {
+    const bytes = Buffer.alloc(16);
+    bytes[0] = thread;
+    bytes.writeBigUInt64LE(key, 8);
+    return bytes;
+  };
+  const stack = (process, thread, key, frames, segments) => {
+    const header = Buffer.alloc(48);
+    header.writeUInt32LE(0x4b534252, 0);
+    header.writeUInt16LE(3, 4);
+    header.writeUInt16LE(48, 6);
+    header.writeUInt16LE(16, 8);
+    header.writeUInt32LE(frames.length, 12);
+    header.writeUInt32LE(frames.length, 16);
+    header.writeUInt16LE(segments.length, 26);
+    header.writeUInt16LE(segments.length, 28);
+    header.writeUInt32LE(process, 32);
+    header[36] = thread;
+    header.writeBigUInt64LE(key, 40);
+    return Buffer.concat([header, ...frames, ...segments]);
+  };
+  const segment = (kind, state, registration, recorded, digest) => {
+    const bytes = Buffer.alloc(48);
+    bytes[0] = kind;
+    bytes[1] = state;
+    bytes[3] = registration;
+    bytes.writeUInt32LE(recorded, 4);
+    if (digest) Buffer.from(digest, 'hex').copy(bytes, 16);
+    return bytes;
+  };
+  const work = frame(7, at(workerSource, 'fetch'), at(workerSource, '() {'));
+  const then = frame(7, at(workerSource, 'ready.then'), at(workerSource, '() {\n  ready'));
+  const post = frame(7, at(pageSource, 'port'), at(pageSource, '() {'));
+  const registered = stack(workerProcess, 2, WORKER_KEY, [then], []);
+  const posted = stack(pageProcess, 1, 0n, [post], []);
+  const requestStack = stack(workerProcess, 2, WORKER_KEY, [work], [
+    segment(9, 1, 1, 1, sha256(registered)), segment(10, 1, 0, 1, sha256(posted)), segment(8, 7, 0, 0, null)]);
+  const events = [];
+  const sequences = new Map(WORKER_STACK_PROCESSES.map(process => [process, 1]));
+  let time = BigInt(firstTime);
+  const row = (process, type, payload, fields = {}) => {
+    time += 1000n;
+    const sequence = sequences.get(process);
+    sequences.set(process, sequence + 1);
+    const event = {...template, process_id: process, thread_id: process + 1, sequence_number: String(sequence),
+      monotonic_time_ns: String(time), type, navigation_id: '0', artifact_id: '0', parent_event_id: '0',
+      request_id: '0', status_code: 0, error_code: 0, encoded_data_length: '0', decoded_body_length: '0',
+      resource_type: 0, flags: 0, payload_truncated: false, initiator_process_id: 0, initiator_request_id: 0,
+      payload_size: payload.length, payload: payload.toString('hex'), ...fields};
+    events.push(event);
+    return event;
+  };
+  const workerFrame = String(WORKER_KEY);
+  // The record shapes the renderer sink writes: request stack version 3,
+  // async_task_stack and script_identity version 2.
+  const taskRecord = (process, thread, key, kind, registration, digest, innermost) => {
+    const payload = Buffer.alloc(128);
+    payload.writeUInt16LE(2, 0);
+    payload.writeUInt16LE(128, 2);
+    payload[4] = kind;
+    payload[6] = registration;
+    payload.writeUInt32LE(1, 8);
+    payload.writeUInt32LE(1, 16);
+    Buffer.from(digest, 'hex').copy(payload, 32);
+    innermost.copy(payload, 64);
+    scope(thread, key).copy(payload, 80);
+    return row(process, 'async_task_stack', payload, {frame_id: thread === 1 ? template.frame_id : workerFrame});
+  };
+  const identity = (process, thread, key, parent, source) => {
+    const payload = Buffer.alloc(128);
+    payload.writeUInt16LE(2, 0);
+    payload.writeUInt16LE(128, 2);
+    payload[4] = 1;
+    payload[5] = 0x02;
+    payload.writeUInt32LE(7, 8);
+    payload.writeBigUInt64LE(99n, 24);
+    payload.writeBigUInt64LE(BigInt(Buffer.byteLength(source)), 32);
+    Buffer.from(sha256(Buffer.from(source)), 'hex').copy(payload, 40);
+    scope(thread, key).copy(payload, 72);
+    return row(process, 'script_identity', payload,
+      {parent_event_id: parent.sequence_number, frame_id: thread === 1 ? template.frame_id : workerFrame});
+  };
+  const postedRecord = taskRecord(pageProcess, 1, 0n, 10, 0, sha256(posted), post);
+  const pageIdentity = identity(pageProcess, 1, 0n, postedRecord, pageSource);
+  const registeredRecord = taskRecord(workerProcess, 2, WORKER_KEY, 9, 1, sha256(registered), then);
+  const initiated = row(workerProcess, 'request_initiated', Buffer.from(`GET ${WORKER_STACK_HOST}`),
+    {request_id: '3100', frame_id: workerFrame});
+  const recordPayload = Buffer.alloc(128);
+  recordPayload.writeUInt16LE(3, 0);
+  recordPayload.writeUInt16LE(128, 2);
+  recordPayload[4] = 1;
+  recordPayload[5] = 0x01;
+  recordPayload.writeUInt16LE(3, 6);
+  recordPayload.writeUInt32LE(1, 8);
+  recordPayload.writeUInt32LE(1, 12);
+  recordPayload.writeUInt16LE(3, 22);
+  recordPayload.writeUInt32LE(1, 28);
+  Buffer.from(sha256(requestStack), 'hex').copy(recordPayload, 32);
+  work.copy(recordPayload, 64);
+  scope(2, WORKER_KEY).copy(recordPayload, 80);
+  const record = row(workerProcess, 'request_initiator_stack', recordPayload,
+    {request_id: '3100', frame_id: workerFrame, parent_event_id: initiated.sequence_number});
+  const workerIdentity = identity(workerProcess, 2, WORKER_KEY, registeredRecord, workerSource);
+  const retain = (id, creator, bytes, fields) => artifact(artifactsRoot, {artifact_id: id, session_id: template.session_id,
+    navigation_id: '0', frame_id: creator.frame_id, creator_event_id: creator.sequence_number, execution_context_id: '99',
+    ...fields}, bytes);
+  const stackFields = digest => ({capture_origin: 'request_stack', kind: 'stack', mime_type: 'application/x-reb-stack',
+    url: `reb-stack:sha256-${digest}`});
+  const artifacts = [
+    await retain('350', record, requestStack, stackFields(sha256(requestStack))),
+    await retain('351', postedRecord, posted, stackFields(sha256(posted))),
+    await retain('352', registeredRecord, registered, stackFields(sha256(registered))),
+    await retain('353', pageIdentity, Buffer.from(pageSource), {capture_origin: 'stack_script', kind: 'javascript',
+      mime_type: 'text/javascript', url: 'https://page.stack.test/page.js'}),
+    await retain('354', workerIdentity, Buffer.from(workerSource), {capture_origin: 'stack_script', kind: 'javascript',
+      mime_type: 'text/javascript', url: 'https://page.stack.test/worker.js'})];
+  return {events, artifacts};
+}
+
 // Like the browser, each gap takes its renderer's own sequence slot, so the
 // stream has no hole. The payload is the reason text, as the producers write it.
 function namedBudgetGaps(template, events) {
@@ -400,7 +540,8 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const adjacent = timeAdjacentRequest(network, Number(scrolled.at(-1).sequence_number) + 1, scrolled.at(-1).monotonic_time_ns);
   const lastBrowser = adjacent.filter(event => event.process_id === network.process_id).at(-1);
   const withBodies = await requestBodyRequests(network, Number(lastBrowser.sequence_number) + 1, lastBrowser.monotonic_time_ns, artifacts);
-  const requests = [...scrolled, ...adjacent, ...withBodies.events];
+  const workerStack = await workerStackRequest(network, withBodies.events.at(-1).monotonic_time_ns, artifacts);
+  const requests = [...scrolled, ...adjacent, ...withBodies.events, ...workerStack.events];
   const lines = Array.from({length: SOURCE_LINE_COUNT}, (_, index) => index === 2
     ? `// ${HOSTILE_SOURCE_MARKER}` : `const retainedLine${index} = ${index}; // long line ${'x'.repeat(index % 7 === 0 ? 180 : 12)}`);
   const source = await artifact(artifacts, {artifact_id: '303', session_id: '1', navigation_id: '100', frame_id: '200',
@@ -436,8 +577,12 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   // static arm label, and an inner interpreter linked to its outer handler.
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, ...withBodies.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, ...withBodies.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
+  for (const process of WORKER_STACK_PROCESSES) {
+    assert.equal(retained.filter(event => event.process_id === process).length,
+      workerStack.events.filter(event => event.process_id === process).length, 'worker stack renderers must be their own');
+  }
   const vm = demoEvents.find(event => event.category === 'vm');
   assert(vm, 'demo store must contain a native vm event');
   const events = [...retained, ...namedBudgetGaps(vm, retained)];

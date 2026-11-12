@@ -348,6 +348,8 @@ struct Expectations: Decodable {
   let invocationArtifactId: String
   let minifiedArtifactId: String
   let invocationSiteStore: String
+  let workerStackHost: String
+  let workerStackPostingProcess: Int
 
   static func load() throws -> Expectations {
     let text = try Harness.required(ProcessInfo.processInfo.environment, "REB_RENDERED_UI_EXPECT")
@@ -2803,6 +2805,36 @@ final class OriginTraceRenderedUITests: XCTestCase {
     for selector in ["#session-panel .session-panel-title", "#session-panel .session-panel-action-row"] {
       let exists = try await ui.value("Boolean(document.querySelector(\(String(reflecting: selector))))") as? Bool
       if exists == true { try await assertFullyVisible(ui, selector, "\(context) \(selector)") }
+    }
+  }
+
+  // A dedicated worker's request stack and its async callers resolve in their
+  // own isolates (protocol/native-network-v3.md): a Promise.then registration
+  // in the worker, a MessagePort post from another renderer, and a task
+  // scheduled with no script, with the callers still not shown listed.
+  @MainActor
+  func test30WorkerInitiatorStack() async throws {
+    let expected = try Expectations.load()
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      try await ui.click("#screen-traffic .request-row", containing: expected.workerStackHost)
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      let initiatorCell = try await ui.value("document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"] .request-initiator')?.innerText ?? ''") as? String ?? ""
+      XCTAssertTrue(initiatorCell.contains("worker.js:2"), "\(size.name): the Initiator column names the worker frame: \(initiatorCell)")
+      try await ui.click("#inspector-tab-initiator")
+      try await ui.waitUntil("(document.querySelector('#request-inspector')?.innerText ?? '').includes('MessagePort.postMessage')", "the worker stack did not resolve")
+      let panel = try await ui.value("document.querySelector('#request-inspector').innerText") as? String ?? ""
+      for phrase in ["Started in a dedicated worker.", "work @ worker.js:2:", "Promise.then", "start @ worker.js:5:",
+                     "MessagePort.postMessage · on the document main thread in process \(expected.workerStackPostingProcess)",
+                     "post @ page.js:2:", "scheduled while no script ran",
+                     "Async callers not shown: ServiceWorker.postMessage and Client.postMessage"] {
+        XCTAssertTrue(panel.contains(phrase), "\(size.name): Initiator shows \(phrase): \(panel)")
+      }
+      XCTAssertFalse(panel.contains("Earlier async callers were not recorded"), "\(size.name): a no-script end is not a cut chain")
+      try await assertInert(ui, "\(size.name) worker initiator stack")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) worker initiator stack")
+      try await ui.screenshot("traffic-initiator-worker-\(size.name)")
     }
   }
 

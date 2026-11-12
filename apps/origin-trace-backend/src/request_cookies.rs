@@ -427,6 +427,9 @@ pub(crate) struct Script {
     pub(crate) stack: [u8; 32],
     value: [u8; 32],
     prefix: [u8; NAME_PREFIX],
+    /// The isolate its frame and stack are read in: version 1 is the
+    /// document's; version 2 names it. None when version 2 names no thread.
+    pub(crate) scope: Option<request_stack::Scope>,
 }
 
 /// The C++ core's rules for the renderer's script_cookie record.
@@ -455,9 +458,27 @@ pub(crate) fn decode_script(event: &Value) -> Option<Script> {
         return None;
     }
     let bytes = hex::decode(event["payload"].as_str()?).ok()?;
-    if bytes.len() != 128 || le(&bytes[0..2]) != 1 || le(&bytes[2..4]) != 128 {
+    if bytes.len() != 128 || le(&bytes[2..4]) != 128 {
         return None;
     }
+    let version = le(&bytes[0..2]);
+    if !matches!(version, 1 | 2) {
+        return None;
+    }
+    let frame_id = event["frame_id"].as_str()?.parse::<u64>().ok()?;
+    // Version 2 byte 6: 0 (no thread named) or a stack thread, 2 to 4 only
+    // with the worker's context ID as frame_id.
+    let thread = bytes[6];
+    let scope = if version == 1 {
+        Some(request_stack::Scope::DOCUMENT)
+    } else {
+        request_stack::Scope::of_cookie(thread, frame_id)
+    };
+    let scoped = if version == 1 {
+        thread == 0
+    } else {
+        thread == 0 || scope.is_some()
+    };
     let script = Script {
         api: bytes[4],
         flags: bytes[5],
@@ -469,6 +490,7 @@ pub(crate) fn decode_script(event: &Value) -> Option<Script> {
         stack: bytes[40..72].try_into().ok()?,
         value: bytes[72..104].try_into().ok()?,
         prefix: bytes[104..128].try_into().ok()?,
+        scope,
     };
     let zero = |slice: &[u8]| slice.iter().all(|byte| *byte == 0);
     let write = matches!(script.api, 1 | 3 | 6);
@@ -482,7 +504,9 @@ pub(crate) fn decode_script(event: &Value) -> Option<Script> {
     let stacked = script.flags & 4 != 0;
     let valid = (1..=6).contains(&script.api)
         && script.flags & !0x0f == 0
-        && zero(&bytes[6..8])
+        && scoped
+        && bytes[7] == 0
+        && (script.scope.is_some() || !recorded)
         && script.count != 0
         && truncated == (script.flags & 1 != 0)
         && (truncated || zero(&script.prefix[script.name_length as usize..]))
@@ -533,13 +557,17 @@ fn describe_script(event: &Value, script: &Script) -> Value {
             Value::Null
         },
         "stack_digest": if script.flags & 4 != 0 { json!(hex::encode(script.stack)) } else { Value::Null },
+        "thread": script.scope.map(|scope| scope.name()),
         "stack": Value::Null,
     })
 }
 
 /// A renderer's script identities outside the records `provenance` read, and
 /// whether an identity absent from them is absent from the store.
-pub type IndexedIdentities = (HashMap<u32, request_stack::Identity>, bool);
+pub type IndexedIdentities = (
+    HashMap<request_stack::IdentityKey, request_stack::Identity>,
+    bool,
+);
 
 /// Everything in `events` that touched cookie `name` in `session_id`.
 pub fn provenance(
@@ -558,7 +586,8 @@ pub fn provenance(
     let mut malformed = Vec::new();
     let mut lists: HashMap<String, Option<Vec<Cookie>>> = HashMap::new();
     let mut unread = BTreeSet::new();
-    let mut identities: HashMap<u64, HashMap<u32, request_stack::Identity>> = HashMap::new();
+    let mut identities: HashMap<u64, HashMap<request_stack::IdentityKey, request_stack::Identity>> =
+        HashMap::new();
     for event in events
         .iter()
         .filter(|event| event["session_id"] == session && event["type"] == "script_identity")
@@ -567,17 +596,20 @@ pub fn provenance(
             .as_str()
             .and_then(|payload| hex::decode(payload).ok())
             .and_then(|bytes| request_stack::decode_identity(&bytes));
-        if let (Some((script, identity)), Some(process)) = (decoded, event["process_id"].as_u64()) {
+        if let (Some((isolate, script, identity)), Some(process)) =
+            (decoded, event["process_id"].as_u64())
+        {
             identities
                 .entry(process)
                 .or_default()
-                .insert(script, identity);
+                .insert((process as u32, isolate, script), identity);
         }
     }
     let mut known_identities: HashMap<u64, bool> = HashMap::new();
     let no_identities = HashMap::new();
     let read = |artifact: &Value, limit: usize| evidence::content(root, artifact, limit);
-    let mut stacks: HashMap<(u64, [u8; 16], [u8; 32]), Value> = HashMap::new();
+    let mut stacks: HashMap<(u64, request_stack::Scope, [u8; 16], [u8; 32]), Value> =
+        HashMap::new();
     let mut stacks_unresolved = 0u64;
     let mut ordered: Vec<&Value> = events
         .iter()
@@ -594,9 +626,9 @@ pub fn provenance(
             Some("script_cookie") => match decode_script(event) {
                 Some(script) if names_match(&script, wanted) => {
                     let mut item = describe_script(event, &script);
-                    if script.flags & 2 != 0 {
+                    if let (true, Some(scope)) = (script.flags & 2 != 0, script.scope) {
                         let process = event["process_id"].as_u64().unwrap_or(0);
-                        let key = (process, script.frame, script.stack);
+                        let key = (process, scope, script.frame, script.stack);
                         if let Some(stack) = stacks.get(&key) {
                             item["stack"] = stack.clone();
                         } else if stacks.len() < PROVENANCE_STACKS {
@@ -605,13 +637,14 @@ pub fn provenance(
                             let known = *known_identities.entry(process).or_insert_with(|| {
                                 let (indexed, exhaustive) = indexed_identities(process);
                                 let table = identities.entry(process).or_default();
-                                for (script, identity) in indexed {
-                                    table.entry(script).or_insert(identity);
+                                for (key, identity) in indexed {
+                                    table.entry(key).or_insert(identity);
                                 }
                                 exhaustive
                             });
                             let mut stack = request_stack::resolve_call(
                                 event,
+                                scope,
                                 &script.frame,
                                 (script.flags & 4 != 0).then_some(script.stack),
                                 identities.get(&process).unwrap_or(&no_identities),
@@ -1015,9 +1048,13 @@ mod tests {
         let without = vec![events[0].clone()];
         let resolution_of =
             |origin: &Value| origin["script"][0]["stack"]["frames"][0]["resolution"].clone();
-        let from_index = |_process: u64| -> IndexedIdentities {
+        let from_index = |process: u64| -> IndexedIdentities {
             (
-                HashMap::from([request_stack::decode_identity(&identity).unwrap()]),
+                HashMap::from([{
+                    let (isolate, script, identity) =
+                        request_stack::decode_identity(&identity).unwrap();
+                    ((process as u32, isolate, script), identity)
+                }]),
                 false,
             )
         };
@@ -1034,6 +1071,90 @@ mod tests {
         // Only a whole-store answer can say it is missing.
         let missing = provenance(&without, &artifacts, &root, "7", "sid", &no_index);
         assert_eq!(resolution_of(&missing)["reason"], "script_identity_missing");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn service_worker_cookie_writes_resolve_in_the_workers_isolate() {
+        let root = std::env::temp_dir().join(format!("reb-cookie-worker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("blobs")).unwrap();
+        // Script 77 is a different script in each isolate.
+        let page = "function onPage() {\n  document.cookie = 'sid=1';\n}\n";
+        let worker = "let n = 0;\nfunction inWorker() {\n  cookieStore.set('sid', '1');\n}\n";
+        let position = worker.find("cookieStore").unwrap() as u32;
+        let mut artifacts = Vec::new();
+        for (id, source) in [("31", page), ("32", worker)] {
+            let hash = hex::encode(Sha256::digest(source));
+            std::fs::write(root.join(format!("blobs/{hash}.bin")), source).unwrap();
+            artifacts.push(
+                json!({"artifact_id":id,"session_id":"7","kind":"javascript","url":"https://app.test/a.js",
+                "byte_size":source.len(),"sha256":hash,"content_path":format!("blobs/{hash}.bin")}),
+            );
+        }
+        let identity = |source: &str, thread: u8, key: u64| {
+            let mut bytes = vec![0u8; 128];
+            bytes[0] = 2;
+            bytes[2] = 128;
+            bytes[4] = 1;
+            bytes[5] = 2;
+            bytes[8..12].copy_from_slice(&77u32.to_le_bytes());
+            bytes[24..32].copy_from_slice(&9u64.to_le_bytes());
+            bytes[32..40].copy_from_slice(&(source.len() as u64).to_le_bytes());
+            bytes[40..72].copy_from_slice(&Sha256::digest(source));
+            bytes[72] = thread;
+            bytes[80..88].copy_from_slice(&key.to_le_bytes());
+            bytes
+        };
+        let mut write = script_payload(3, b"sid", b"1");
+        write[0] = 2;
+        write[6] = 4;
+        write[20..24].fill(0);
+        write[32..36].copy_from_slice(&position.to_le_bytes());
+        let start = worker.find("() {").unwrap() as u32;
+        write[36..40].copy_from_slice(&start.to_le_bytes());
+        let mut events = vec![
+            record("script_cookie", 5, 0, &write, "0"),
+            record("script_identity", 6, 0, &identity(page, 1, 0), "0"),
+            record("script_identity", 7, 0, &identity(worker, 4, 0x5157), "0"),
+        ];
+        events[0]["frame_id"] = json!(0x5157u64.to_string());
+        let origin = provenance(&events, &artifacts, &root, "7", "sid", &no_index);
+        let script = &origin["script"][0];
+        assert_eq!(script["thread"], "service_worker");
+        let resolution = &script["stack"]["frames"][0]["resolution"];
+        assert_eq!(
+            (
+                &resolution["status"],
+                &resolution["function_name"],
+                &resolution["line"]
+            ),
+            (&json!("resolved"), &json!("inWorker"), &json!(3)),
+            "{resolution}"
+        );
+        // A worker's record without its context ID names no isolate.
+        events[0]["frame_id"] = json!("0");
+        assert!(decode_script(&events[0]).is_none());
+        // Version 2 that names no thread records no frame; with a frame it is refused.
+        let mut unnamed = script_payload(3, b"sid", b"1");
+        unnamed[0] = 2;
+        unnamed[20..24].fill(0);
+        assert!(decode_script(&record("script_cookie", 5, 0, &unnamed, "0")).is_none());
+        unnamed[5] = 0;
+        unnamed[24..40].fill(0);
+        let bare = decode_script(&record("script_cookie", 5, 0, &unnamed, "0")).unwrap();
+        assert!(bare.scope.is_none());
+        // Version 1 records, written before the thread byte, are the document's.
+        let mut legacy = write.clone();
+        legacy[0] = 1;
+        assert!(decode_script(&record("script_cookie", 5, 0, &legacy, "0")).is_none());
+        legacy[6] = 0;
+        assert_eq!(
+            decode_script(&record("script_cookie", 5, 0, &legacy, "0"))
+                .unwrap()
+                .scope,
+            Some(request_stack::Scope::DOCUMENT)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

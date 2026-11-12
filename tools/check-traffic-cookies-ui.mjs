@@ -208,12 +208,17 @@ assert.deepEqual(selected, ['later']);
 // get_cookie_provenance resolves the write's position; a failed read kept the raw one.
 assert(reads.some(url => url === '/api/cookie-provenance?session_id=7&name=sid'));
 provenanceAnswer = {script: [{process_id: 9, sequence_number: '5', stack: {frames: [{resolution: {status: 'resolved',
-  artifact_id: '21', url: 'https://app.test/static/a.js?v=2', line: 3, column: 3, function_name: 'setSid'}}]}}]};
+  artifact_id: '21', url: 'https://app.test/static/a.js?v=2', line: 3, column: 3, function_name: 'setSid'}}]}},
+  // A service worker's call, beyond the decoded window, names the worker.
+  {process_id: 9, sequence_number: '6', api: 'cookieStore.set', count: 1, frame_id: '20823', thread: 'service_worker',
+    script_frame: {kind: 'javascript', script_id: 4, position: 12}, stack_digest: null, name_prefix_only: false, stack: null}]};
 await new Promise(resolve => setTimeout(resolve, 2100));
 api.renderTrafficCookies(panel, request, rerender, ui);
 await settle();
 const resolved = panel.querySelector('.traffic-cookie-provenance');
 assert.match(resolved.textContent, /document\.cookie set in frame 31 at a\.js:3:3 \(setSid\)/);
+assert.match(resolved.textContent, /cookieStore\.set in a service worker 20823, script 4 at character 12/);
+assert.doesNotMatch(resolved.textContent, /in frame 20823/);
 [...resolved.querySelectorAll('.traffic-cookie-request')].find(button => button.textContent === 'Show in Sources')
   .dispatchEvent(new window.Event('click'));
 assert.deepEqual(opened, ['21']);

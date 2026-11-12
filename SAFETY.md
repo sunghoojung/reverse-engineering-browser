@@ -73,13 +73,50 @@ it.
   arms.
 - Request call stacks (`REB_NATIVE_REQUEST_STACKS`, on by default in the
   packaged app when Network and Artifact are captured) record script IDs and
-  positions of the stack that started each document request or script
-  navigation, and of the stack that scheduled each async task it came from,
-  never names or values. Content capture sessions also retain the source of
+  positions of the stack that started each document or worker request or
+  script navigation, and of the stack that scheduled each async task it came
+  from, including the stack that posted a message to a port, a broadcast
+  channel or a worker, never names or values. `REB_NATIVE_PROMISE_STACKS=1`,
+  off by default everywhere, also records the stack of each promise
+  registration. Content capture sessions also retain the source of
   each script a stack names as an artifact; metadata-only sessions do not.
   Agent-started sessions record them only when the start names
   `request_stacks`.
   See [Native network v3](protocol/native-network-v3.md).
+- A posted message (`MessagePort`, `BroadcastChannel`, or a dedicated worker's
+  `postMessage` either way) carries a task origin to the thread and renderer
+  process that handle it, while request stacks are recorded and capture is
+  active on the posting thread. It is at most 1,544 bytes: an 8-byte header
+  (version, segment count, and whether the chain was cut or went on past 32
+  segments) and up to 32 segments of 48 bytes. Each segment is a task kind; a
+  state (captured, not retained, not recorded, scheduled with no script, or
+  ended at a rejected origin); two flags (the walk stopped at its frame limit,
+  and, for a promise reaction with no recorded registration, whether promise
+  registration stacks were on); a promise registration kind; a frame count;
+  and the SHA-256 digest naming a stack artifact. Segments travel onward: a
+  handler that posts again carries the segments it received after its own, so
+  a segment and its digest can reach every renderer a chain of messages later
+  passes through, never more than 32 segments in one message. Each digest
+  names the artifact that the renderer which walked that segment stored: the
+  poster for its own segment, an earlier renderer in the chain for one the
+  poster had received. The origin names no process, thread, table or serial,
+  and holds no URL, name, source, value or frame. Page JavaScript in no
+  renderer can read it: Blink hands it only to the stack sink, never to a
+  `MessageEvent`. Each receiving renderer process holds the bytes, and a
+  `MessagePort` transferred to a cross-site frame makes that a cross-site
+  process. A compromised receiving renderer would learn how many async tasks
+  of which kinds led to the post, their stack depths and promise registration
+  kinds, whether their stacks were retained or promise stacks were on, and the
+  digests. A digest reveals no strings, but equal digests mean equal stacks,
+  and since a digest covers the walking renderer's frame identities (script
+  IDs and positions) and its process ID, thread kind and isolate key, such a
+  renderer could confirm guessed values of those. A receiver writes the
+  carried digests into the stack artifacts of requests its handler starts, so
+  they are stored in that handler's evidence. On the posting thread itself a
+  receipt links to the posting segment through a record of that thread's last
+  16 posts, which never leaves the thread. An origin that does not validate,
+  or is longer than 1,544 bytes, is rejected without being stored and counted
+  as a `message_task_origin_rejected` gap.
 - Debugger observation rules (Console `watch`) are off until armed on one
   selected live document and never pause it. They record request matches,
   listener dispatch, timers, CSP violations, exceptions and mutations of at most
@@ -369,6 +406,7 @@ of the data-handling policy:
 | In-app agent permission level and per-call decision for the LangGraph and CLI loops | `AgentPermission.requested` (the level and sensitive choice consent sends) and `AgentToolGate` in [`AgentCore.swift`](apps/research-ui/macos/AgentCore.swift), held by `enable` and changed only by `lowerPermission` in [`AgentBridge.swift`](apps/research-ui/macos/AgentBridge.swift) |
 | Tool server content, effect and sensitive-capture gates (`--permission`, `--allow-content`, `--allow-sensitive-capture`) | [`mcp.rs`](apps/origin-trace-backend/src/bin/reb_api/mcp.rs) |
 | Header blocks and cookie lists never returned by the text reads or search, at any level | `WITHHELD_KINDS` in [`artifact_text.rs`](apps/origin-trace-backend/src/artifact_text.rs) |
+| Message task origins bounded before they are read and validated before use | `CloneableMessage` traits and `ShallowClone` in Chromium patch `0047-carry-message-task-origins.patch`, then `DecodeNativeTaskOrigin` in the overlay's `common/native_request_stack.h` |
 | Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |
 
 ## Related documents

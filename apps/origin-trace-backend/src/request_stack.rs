@@ -19,11 +19,14 @@ const SYNC_LIMIT: u32 = 1024;
 const ASYNC_LIMIT: u32 = 32;
 const TASK_LIMIT: u32 = 32;
 const TASK_FRAME_LIMIT: u32 = 256;
+const REGISTRATION_FRAME_LIMIT: u32 = 32;
 const HEADER: usize = 32;
+/// A version 3 stack artifact appends the scope to the header.
+const SCOPED_HEADER: usize = 48;
 const FRAME: usize = 16;
 const SEGMENT: usize = 48;
 pub(crate) const MAX_ARTIFACT: usize =
-    HEADER + FRAME * (SYNC_LIMIT + ASYNC_LIMIT) as usize + SEGMENT * TASK_LIMIT as usize;
+    SCOPED_HEADER + FRAME * (SYNC_LIMIT + ASYNC_LIMIT) as usize + SEGMENT * TASK_LIMIT as usize;
 pub(crate) const MAX_SOURCE: usize = 16 * 1024 * 1024;
 const IDENTITY_SCAN: usize = 4096;
 /// Version 1 records captured no task-attributed callers.
@@ -33,7 +36,88 @@ const ASYNC_NOT_SHOWN_V1: [&str; 4] = [
     "promise.then callbacks",
     "message handlers",
 ];
-const ASYNC_NOT_SHOWN: [&str; 1] = ["MessagePort and worker messages"];
+/// Version 2 records predate message origins.
+const ASYNC_NOT_SHOWN_V2: [&str; 1] = ["MessagePort and worker messages"];
+/// Version 3: callers no record carries, stated with every version 3 stack.
+const ASYNC_NOT_SHOWN: [&str; 5] = [
+    "ServiceWorker.postMessage and Client.postMessage",
+    "window.postMessage to or from another process",
+    "MessagePort.postMessage from a worklet, which has no stack tables",
+    "the task a promise reaction in a worker continues: Blink tracks task attribution only on the \
+     document main thread",
+    "promise reactions a builtin registered (Promise.all, race, any, allSettled and the like): V8 \
+     tags them for neither DevTools nor REB",
+];
+
+/// The isolate a stack's script IDs belong to: script IDs are unique only
+/// within one isolate. Version 1 and 2 stacks are the document main thread's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Scope {
+    pub(crate) thread: u8,
+    pub(crate) isolate_key: u64,
+}
+
+impl Scope {
+    pub const DOCUMENT: Self = Self {
+        thread: 1,
+        isolate_key: 0,
+    };
+    /// A `script_cookie` record's isolate: version 2 byte 6 and, for a worker,
+    /// the record's frame_id, which is the worker's context ID. None when the
+    /// thread was not named, so no frame of it can be read.
+    pub fn of_cookie(thread: u8, frame_id: u64) -> Option<Self> {
+        match thread {
+            1 => Some(Self::DOCUMENT),
+            2..=4 if frame_id != 0 => Some(Self {
+                thread,
+                isolate_key: frame_id,
+            }),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        self.thread_name()
+    }
+    /// A request index row's thread and isolate key; a pre-scope row is the document's.
+    fn of_row(thread: u64, isolate_key: u64) -> Self {
+        match u8::try_from(thread) {
+            Ok(thread @ 2..=4) if isolate_key != 0 => Self {
+                thread,
+                isolate_key,
+            },
+            _ => Self::DOCUMENT,
+        }
+    }
+    /// A 16-byte stack scope: thread 1 to 4, zero reserved, key zero only for 1.
+    pub(crate) fn read(bytes: &[u8]) -> Option<Self> {
+        let scope = Self {
+            thread: bytes[0],
+            isolate_key: u64_at(bytes, 8),
+        };
+        let valid = bytes[1..8].iter().all(|b| *b == 0)
+            && if scope.thread == 1 {
+                scope.isolate_key == 0
+            } else {
+                (2..=4).contains(&scope.thread) && scope.isolate_key != 0
+            };
+        valid.then_some(scope)
+    }
+    fn thread_name(self) -> &'static str {
+        match self.thread {
+            1 => "document",
+            2 => "dedicated_worker",
+            3 => "shared_worker",
+            _ => "service_worker",
+        }
+    }
+    fn to_json(self) -> Value {
+        json!({"thread": self.thread_name(),
+            "isolate_key": (self.isolate_key != 0).then(|| format!("{:016x}", self.isolate_key))})
+    }
+}
+
+/// Where a frame's script ID is read: renderer OS process and isolate.
+pub(crate) type ScriptScope = (u32, Scope);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Frame {
@@ -89,34 +173,67 @@ pub struct Segment {
     pub(crate) kind: u8,
     pub(crate) state: u8,
     pub(crate) flags: u8,
+    pub(crate) registration: u8,
     pub(crate) recorded: u32,
     pub(crate) digest: [u8; 32],
 }
 
 impl Segment {
-    fn read(bytes: &[u8]) -> Option<Self> {
+    /// The task segment rules of include/reb/request_stack.hpp for a version
+    /// 2 or 3 artifact.
+    fn read(bytes: &[u8], version: u16) -> Option<Self> {
         let segment = Self {
             kind: bytes[0],
             state: bytes[1],
             flags: bytes[2],
+            registration: bytes[3],
             recorded: u32_at(bytes, 4),
             digest: bytes[16..48].try_into().unwrap(),
         };
-        let reserved = bytes[3] == 0 && bytes[8..16].iter().all(|b| *b == 0);
-        let shape = if segment.kind == 9 {
-            segment.state == 6
-                && segment.flags == 0
-                && segment.recorded == 0
-                && segment.digest.iter().all(|b| *b == 0)
-        } else {
-            (1..=8).contains(&segment.kind)
-                && matches!(segment.state, 1 | 4 | 5)
-                && segment.flags & !1 == 0
-                && (1..=TASK_FRAME_LIMIT).contains(&segment.recorded)
-                && (segment.flags & 1 == 0 || segment.recorded == TASK_FRAME_LIMIT)
+        let scoped = version == 3;
+        // Bit 1: a version 3 not_recorded microtask recorded with promise stacks on.
+        let known = if scoped && segment.kind == 9 { 3 } else { 1 };
+        let reserved = bytes[8..16].iter().all(|b| *b == 0) && segment.flags & !known == 0;
+        let empty =
+            segment.flags == 0 && segment.recorded == 0 && segment.digest.iter().all(|b| *b == 0);
+        let frames = |limit: u32| {
+            matches!(segment.state, 1 | 4 | 5)
+                && (1..=limit).contains(&segment.recorded)
+                && (segment.flags & 1 == 0 || segment.recorded == limit)
                 && segment.digest.iter().any(|b| *b != 0)
         };
+        let shape = if segment.kind == 9 {
+            if segment.state == 6 {
+                segment.registration == 0
+                    && segment.flags & !2 == 0
+                    && segment.recorded == 0
+                    && segment.digest.iter().all(|b| *b == 0)
+            } else {
+                scoped
+                    && (1..=4).contains(&segment.registration)
+                    && segment.flags & 2 == 0
+                    && frames(REGISTRATION_FRAME_LIMIT)
+            }
+        } else if segment.registration != 0
+            || !(1..=if scoped { 12 } else { 8 }).contains(&segment.kind)
+        {
+            false
+        } else if segment.state == 7 {
+            scoped && empty
+        } else if segment.state == 8 {
+            // A received message whose origin was rejected: kinds 10 to 12.
+            scoped && empty && segment.kind >= 10
+        } else {
+            frames(TASK_FRAME_LIMIT)
+        };
         (reserved && shape).then_some(segment)
+    }
+    fn has_frames(&self) -> bool {
+        self.digest.iter().any(|b| *b != 0)
+    }
+    /// No script was running, or the message's origin was rejected: the chain ends here.
+    fn ends_chain(&self) -> bool {
+        matches!(self.state, 7 | 8)
     }
 }
 
@@ -124,6 +241,7 @@ impl Segment {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     version: u16,
+    pub(crate) scope: Scope,
     task_segments: u32,
     pub(crate) state: u8,
     pub(crate) flags: u8,
@@ -139,19 +257,32 @@ pub struct Record {
 }
 
 pub fn decode_record(payload: &[u8]) -> Option<Record> {
-    if payload.len() != 128 || !matches!(payload[..4], [1 | 2, 0, 128, 0]) {
+    if payload.len() != 128 || !matches!(payload[..4], [1..=3, 0, 128, 0]) {
         return None;
     }
-    let tasks = payload[0] == 2;
+    let scoped = payload[0] == 3;
+    let tasks = payload[0] != 1;
     let known = if tasks { 0x1f } else { 0x0f };
-    if payload[80..].iter().any(|b| *b != 0)
+    if payload[if scoped { 96 } else { 80 }..]
+        .iter()
+        .any(|b| *b != 0)
         || payload[5] & !known != 0
         || (!tasks && payload[6..8] != [0, 0])
     {
         return None;
     }
+    // Version 3: a thread with no worker or document isolate names no scope.
+    let scope = match (scoped, payload[4]) {
+        (false, _) => Scope::DOCUMENT,
+        (true, 3) => payload[80..96]
+            .iter()
+            .all(|b| *b == 0)
+            .then_some(Scope::default())?,
+        (true, _) => Scope::read(&payload[80..96])?,
+    };
     let record = Record {
         version: u16::from(payload[0]),
+        scope,
         task_segments: u32::from(u16_at(payload, 6)),
         state: payload[4],
         flags: payload[5],
@@ -166,6 +297,11 @@ pub fn decode_record(payload: &[u8]) -> Option<Record> {
         innermost: Frame::read(&payload[64..80]),
     };
     let frames = u64::from(record.recorded) + u64::from(record.async_frames);
+    let unwalked = || {
+        record.flags & !(if tasks { 0 } else { 0x08 }) == 0
+            && record.task_segments == 0
+            && payload[8..80].iter().all(|b| *b == 0)
+    };
     let chain = if tasks {
         record.task_segments <= TASK_LIMIT
             && record.async_segments == record.async_frames + record.task_segments
@@ -174,11 +310,9 @@ pub fn decode_record(payload: &[u8]) -> Option<Record> {
         record.async_segments <= record.async_frames
     };
     let valid = match record.state {
-        2 | 3 => {
-            record.flags & !(if tasks { 0 } else { 0x08 }) == 0
-                && record.task_segments == 0
-                && payload[8..80].iter().all(|b| *b == 0)
-        }
+        // 6, version 3: a worker past the renderer's stack table limit.
+        2 | 3 => unwalked(),
+        6 if scoped => unwalked(),
         1 | 4 | 5 => {
             (1..=SYNC_LIMIT).contains(&record.recorded)
                 && u64::from(record.recorded) + u64::from(record.omitted) == u64::from(record.total)
@@ -198,15 +332,41 @@ pub fn decode_record(payload: &[u8]) -> Option<Record> {
     valid.then_some(record)
 }
 
+/// A version 3 artifact's scope: renderer process, thread and isolate key.
+fn artifact_scope(content: &[u8]) -> Option<ScriptScope> {
+    let process = u32_at(content, 32);
+    let scope = Scope::read(&[&content[36..37], &[0u8; 7][..], &content[40..48]].concat())?;
+    (process != 0 && content[37..40].iter().all(|b| *b == 0)).then_some((process, scope))
+}
+
 /// Frames and task chain of a stack artifact that agrees with its record.
-pub fn decode_artifact(content: &[u8], record: &Record) -> Option<(Vec<Frame>, Vec<Segment>)> {
+/// A version 3 artifact names the same process and isolate as the record.
+pub fn decode_artifact(
+    content: &[u8],
+    record: &Record,
+    process_id: u32,
+) -> Option<(Vec<Frame>, Vec<Segment>)> {
     if content.len() < HEADER || content.len() > MAX_ARTIFACT || u32_at(content, 0) != 0x4b53_4252 {
         return None;
     }
+    let version = u16_at(content, 4);
+    // Navigation stacks keep record version 2 and, from the scoped producer,
+    // a version 3 artifact.
+    let expected = match record.version {
+        1 => version == 1,
+        2 => matches!(version, 2 | 3),
+        _ => version == 3,
+    };
+    let header = if version == 3 { SCOPED_HEADER } else { HEADER };
+    if !expected
+        || content.len() < header
+        || (version == 3 && artifact_scope(content) != Some((process_id, record.scope)))
+    {
+        return None;
+    }
     let count = (u64::from(record.recorded) + u64::from(record.async_frames)) as usize;
-    let header_flags = if record.version == 2 { 0x1e } else { 0x06 };
-    if u16_at(content, 4) != record.version
-        || u16_at(content, 6) as usize != HEADER
+    let header_flags = if record.version != 1 { 0x1e } else { 0x06 };
+    if u16_at(content, 6) as usize != header
         || u16_at(content, 8) as usize != FRAME
         || u16_at(content, 10) != u16::from(record.flags & header_flags)
         || u32_at(content, 12) != record.total
@@ -216,12 +376,12 @@ pub fn decode_artifact(content: &[u8], record: &Record) -> Option<(Vec<Frame>, V
         || u32::from(u16_at(content, 26)) != record.async_segments
         || u32::from(u16_at(content, 28)) != record.task_segments
         || u16_at(content, 30) != 0
-        || content.len() != HEADER + FRAME * count + SEGMENT * record.task_segments as usize
+        || content.len() != header + FRAME * count + SEGMENT * record.task_segments as usize
     {
         return None;
     }
-    let chain = HEADER + FRAME * count;
-    let frames: Vec<Frame> = content[HEADER..chain]
+    let chain = header + FRAME * count;
+    let frames: Vec<Frame> = content[header..chain]
         .as_chunks::<FRAME>()
         .0
         .iter()
@@ -231,12 +391,21 @@ pub fn decode_artifact(content: &[u8], record: &Record) -> Option<(Vec<Frame>, V
         .as_chunks::<SEGMENT>()
         .0
         .iter()
-        .map(|chunk| Segment::read(chunk))
+        .map(|chunk| Segment::read(chunk, version))
         .collect();
-    let valid = frames
-        .iter()
-        .enumerate()
-        .all(|(i, frame)| frame.valid(i >= record.recorded as usize))
+    // A segment scheduled with no script, or received with a rejected origin,
+    // ends the chain, neither cut nor truncated.
+    let terminal = segments.as_ref().is_some_and(|segments| {
+        segments
+            .iter()
+            .position(Segment::ends_chain)
+            .is_none_or(|at| at + 1 == segments.len() && record.flags & 0x18 == 0)
+    });
+    let valid = terminal
+        && frames
+            .iter()
+            .enumerate()
+            .all(|(i, frame)| frame.valid(i >= record.recorded as usize))
         && frames.first() == Some(&record.innermost);
     valid
         .then_some(())
@@ -247,8 +416,10 @@ pub fn decode_artifact(content: &[u8], record: &Record) -> Option<(Vec<Frame>, V
 /// The record a stack artifact's own header states, before its frames are
 /// checked against it.
 fn header_record(content: &[u8], innermost: Frame) -> Option<Record> {
+    // Read alone, a version 1 or 2 artifact is the document main thread's.
     (content.len() >= HEADER).then(|| Record {
         version: u16_at(content, 4),
+        scope: Scope::DOCUMENT,
         task_segments: u32::from(u16_at(content, 28)),
         state: 1,
         flags: content[10],
@@ -278,24 +449,40 @@ pub(crate) fn decode_artifact_alone(content: &[u8]) -> Option<(Record, Vec<Frame
         && record.task_segments <= TASK_LIMIT
         && u64::from(record.recorded) + u64::from(record.omitted) == u64::from(record.total);
     let (frames, segments) = bounded
-        .then(|| decode_artifact(content, &record))
+        .then(|| decode_artifact(content, &record, 0))
         .flatten()?;
     Some((record, frames, segments))
 }
 
-pub(crate) fn decode_segment_artifact(content: &[u8], recorded: u32) -> Option<Vec<Frame>> {
+/// A scheduling stack's frames and, for a version 3 artifact, where its
+/// script IDs are read. A version 1 artifact is the document main thread's.
+pub(crate) fn decode_segment_artifact(
+    content: &[u8],
+    recorded: u32,
+) -> Option<(Vec<Frame>, Option<ScriptScope>)> {
     let count = recorded as usize;
-    let shape = content.len() == HEADER + FRAME * count
+    let version = if content.len() >= HEADER {
+        u16_at(content, 4)
+    } else {
+        0
+    };
+    let header = if version == 3 { SCOPED_HEADER } else { HEADER };
+    let shape = content.len() == header + FRAME * count
         && u32_at(content, 0) == 0x4b53_4252
-        && u16_at(content, 4) == 1
-        && u16_at(content, 6) as usize == HEADER
+        && matches!(version, 1 | 3)
+        && u16_at(content, 6) as usize == header
         && u16_at(content, 8) as usize == FRAME
         && u16_at(content, 10) == 0
         && u32_at(content, 12) == recorded
         && u32_at(content, 16) == recorded
         && content[20..32].iter().all(|b| *b == 0);
+    let scope = if version == 3 && shape {
+        Some(artifact_scope(content)?)
+    } else {
+        None
+    };
     let frames: Vec<Frame> = content
-        .get(HEADER..)
+        .get(header..)
         .filter(|_| shape)?
         .as_chunks::<FRAME>()
         .0
@@ -305,26 +492,36 @@ pub(crate) fn decode_segment_artifact(content: &[u8], recorded: u32) -> Option<V
     frames
         .iter()
         .all(|frame| frame.valid(false))
-        .then_some(frames)
+        .then_some((frames, scope))
 }
 
-/// The segment digests a version 2 artifact names, before it is validated.
+/// The segment digests a version 2 or 3 artifact names, before it is validated.
 fn segment_digests(content: &[u8]) -> Vec<String> {
-    if content.len() < HEADER || u16_at(content, 4) != 2 {
-        return Vec::new();
-    }
+    let version = if content.len() >= HEADER {
+        u16_at(content, 4)
+    } else {
+        0
+    };
+    let header = match version {
+        2 => HEADER,
+        3 => SCOPED_HEADER,
+        _ => return Vec::new(),
+    };
     let frames = u32_at(content, 16) as usize + usize::from(u16_at(content, 24));
-    let start = HEADER + FRAME * frames;
+    let start = header + FRAME * frames;
     content
         .get(start..)
         .unwrap_or_default()
         .as_chunks::<SEGMENT>()
         .0
         .iter()
-        .filter(|chunk| chunk[0] != 9)
+        .filter(|chunk| chunk[16..48].iter().any(|b| *b != 0))
         .map(|chunk| hex::encode(&chunk[16..48]))
         .collect()
 }
+
+/// Script IDs are read per renderer process and isolate.
+pub type IdentityKey = (u32, u64, u32);
 
 /// The newest `script_identity` per script ID, from one process's records.
 #[derive(Clone, Debug)]
@@ -370,15 +567,27 @@ pub(crate) fn find_source<'a, T>(
     Ok((identity, found))
 }
 
-pub fn decode_identity(payload: &[u8]) -> Option<(u32, Identity)> {
+/// A script identity's isolate key (zero on the document main thread), its
+/// script ID and what it says about the source. Version 2 names the isolate.
+pub fn decode_identity(payload: &[u8]) -> Option<(u64, u32, Identity)> {
     if payload.len() != 128
-        || payload[..4] != [1, 0, 128, 0]
+        || !matches!(payload[..4], [1 | 2, 0, 128, 0])
         || payload[6..8] != [0, 0]
         || payload[20..24] != [0; 4]
-        || payload[72..].iter().any(|b| *b != 0)
     {
         return None;
     }
+    let scope = if payload[0] == 2 {
+        if payload[88..].iter().any(|b| *b != 0) {
+            return None;
+        }
+        Scope::read(&payload[72..88])?
+    } else {
+        if payload[72..].iter().any(|b| *b != 0) {
+            return None;
+        }
+        Scope::DOCUMENT
+    };
     let (kind, flags) = (payload[4], payload[5]);
     let script = u32_at(payload, 8);
     let length = u64_at(payload, 32);
@@ -398,6 +607,7 @@ pub fn decode_identity(payload: &[u8]) -> Option<(u32, Identity)> {
     };
     (shape && digested).then(|| {
         (
+            scope.isolate_key,
             script,
             Identity {
                 wasm: kind == 2,
@@ -611,13 +821,19 @@ fn state_name(state: u8) -> &'static str {
         2 => "no_script",
         3 => "unsupported_thread",
         4 => "not_retained_artifact_unavailable",
-        _ => "not_retained_budget",
+        5 => "not_retained_budget",
+        _ => "not_walked_thread_limit",
     }
+}
+
+/// A record state with no walk, so no digest, frames or segments.
+fn unwalked_state(state: u8) -> bool {
+    matches!(state, 2 | 3 | 6)
 }
 
 /// A record's summary without its frames: state, depth, digest and innermost frame.
 pub fn summary(record: &Record) -> Value {
-    let walked = record.state != 2 && record.state != 3;
+    let walked = !unwalked_state(record.state);
     let f = &record.innermost;
     json!({
         "state": state_name(record.state),
@@ -640,7 +856,10 @@ pub(crate) fn task_kind(kind: u8) -> &'static str {
         6 => "xhr_send",
         7 => "post_task",
         8 => "event",
-        _ => "microtask",
+        9 => "microtask",
+        10 => "message_port",
+        11 => "broadcast_channel",
+        _ => "worker_message",
     }
 }
 
@@ -649,23 +868,42 @@ fn segment_state(state: u8) -> &'static str {
         1 => "captured",
         4 => "not_retained_artifact_unavailable",
         5 => "not_retained_budget",
+        7 => "no_script",
+        8 => "origin_rejected",
         _ => "not_recorded",
     }
 }
 
-type Sources = HashMap<u32, std::result::Result<Source, &'static str>>;
+/// The call that registered a microtask's promise reaction, when recorded.
+fn registration_name(registration: u8) -> Option<&'static str> {
+    match registration {
+        1 => Some("then"),
+        2 => Some("catch"),
+        3 => Some("finally"),
+        4 => Some("await"),
+        _ => None,
+    }
+}
+
+type Sources = HashMap<IdentityKey, std::result::Result<Source, &'static str>>;
+
+fn identity_key(scope: ScriptScope, script: u32) -> IdentityKey {
+    (scope.0, scope.1.isolate_key, script)
+}
 
 /// Each script's retained source, loaded once for every frame that names it.
 fn load_sources<'a>(
-    frames: impl Iterator<Item = &'a Frame>,
-    identities: &HashMap<u32, Identity>,
+    frames: impl Iterator<Item = (ScriptScope, &'a Frame)>,
+    identities: &HashMap<IdentityKey, Identity>,
     artifacts: &[Value],
     session: &str,
     read: &dyn Fn(&Value, usize) -> Result<Vec<u8>>,
 ) -> Sources {
-    let mut by_script: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
-    for frame in frames.filter(|f| f.script_id != 0) {
-        let offsets = by_script.entry(frame.script_id).or_default();
+    let mut by_script: BTreeMap<IdentityKey, BTreeSet<u32>> = BTreeMap::new();
+    for (scope, frame) in frames.filter(|(_, f)| f.script_id != 0) {
+        let offsets = by_script
+            .entry(identity_key(scope, frame.script_id))
+            .or_default();
         if matches!(frame.kind, 1 | 3) {
             offsets.insert(frame.position);
             offsets.insert(frame.detail);
@@ -684,9 +922,11 @@ fn frame_value(
     index: usize,
     frame: &Frame,
     is_async: bool,
+    scope: ScriptScope,
     sources: &Sources,
-    identities: &HashMap<u32, Identity>,
+    identities: &HashMap<IdentityKey, Identity>,
 ) -> Value {
+    let key = identity_key(scope, frame.script_id);
     let mut value = json!({
         "index": index,
         "kind": frame_kind(frame),
@@ -698,7 +938,7 @@ fn frame_value(
         value["resolution"] = json!({"status": "builtin"});
         return value;
     }
-    let source = sources.get(&frame.script_id);
+    let source = sources.get(&key);
     if frame.kind == 2 {
         value["function_index"] = json!(frame.detail);
         value["module_offset"] = json!(frame.position);
@@ -718,7 +958,7 @@ fn frame_value(
     value["function_position"] = json!(frame.detail);
     value["constructor"] = json!(frame.flags & 1 != 0);
     value["top_level"] = json!(frame.flags & 2 != 0);
-    let identity = identities.get(&frame.script_id);
+    let identity = identities.get(&key);
     value["eval"] = json!(identity.is_some_and(|i| i.eval));
     value["resolution"] = match source {
         Some(Ok(source)) => match (
@@ -756,14 +996,16 @@ fn frame_value(
 pub fn resolve(
     stack_event: &Value,
     record: &Record,
-    identities: &HashMap<u32, Identity>,
+    identities: &HashMap<IdentityKey, Identity>,
     artifacts: &[Value],
     read: &dyn Fn(&Value, usize) -> Result<Vec<u8>>,
 ) -> Value {
     let state = state_name(record.state);
     let session = stack_event["session_id"].as_str().unwrap_or("");
     let digest = hex::encode(record.digest);
-    let tasks = record.version == 2;
+    let tasks = record.version != 1;
+    let process = stack_event["process_id"].as_u64().unwrap_or(0) as u32;
+    let own: ScriptScope = (process, record.scope);
     let mut document = json!({
         "status": "recorded",
         "request": {
@@ -784,28 +1026,36 @@ pub fn resolve(
         "async_truncated": record.flags & 0x04 != 0,
         "task_chain_cut": tasks && record.flags & 0x08 != 0,
         "task_chain_truncated": record.flags & 0x10 != 0,
-        "async_callers_not_shown": if tasks { &ASYNC_NOT_SHOWN[..] } else { &ASYNC_NOT_SHOWN_V1[..] },
+        "async_callers_not_shown": match record.version {
+            1 => &ASYNC_NOT_SHOWN_V1[..],
+            2 => &ASYNC_NOT_SHOWN_V2[..],
+            _ => &ASYNC_NOT_SHOWN[..],
+        },
+        "scope": (record.scope.thread != 0).then(|| record.scope.to_json()),
         "wasm_frames": record.wasm_frames,
-        "digest": (record.state != 2 && record.state != 3).then_some(&digest),
+        "digest": (!unwalked_state(record.state)).then_some(&digest),
         "frames_retained": false,
         "frames": [],
         "task_segments": [],
     });
-    if record.state == 2 || record.state == 3 {
+    if unwalked_state(record.state) {
         return document;
     }
     let decoded = newest(artifacts, session, |a| {
         a["kind"] == "stack" && a["sha256"] == digest.as_str()
     })
     .and_then(|artifact| read(artifact, MAX_ARTIFACT).ok())
-    .and_then(|content| decode_artifact(&content, record));
+    .and_then(|content| decode_artifact(&content, record, process));
     document["frames_retained"] = json!(decoded.is_some());
     let (frames, segments) = decoded.unwrap_or_else(|| (vec![record.innermost], Vec::new()));
-    let segment_frames: Vec<Option<Vec<Frame>>> = segments
+    // A segment's frames are read where its own artifact says they were walked:
+    // a message carries segments from another thread or process.
+    let segment_frames: Vec<Option<(Vec<Frame>, ScriptScope)>> = segments
         .iter()
         .map(|segment| {
             let sha = hex::encode(segment.digest);
-            (segment.kind != 9)
+            segment
+                .has_frames()
                 .then(|| {
                     newest(artifacts, session, |a| {
                         a["kind"] == "stack" && a["sha256"] == sha.as_str()
@@ -814,12 +1064,16 @@ pub fn resolve(
                 .flatten()
                 .and_then(|artifact| read(artifact, MAX_ARTIFACT).ok())
                 .and_then(|content| decode_segment_artifact(&content, segment.recorded))
+                .map(|(frames, scope)| (frames, scope.unwrap_or((process, Scope::DOCUMENT))))
         })
         .collect();
     let sources = load_sources(
-        frames
-            .iter()
-            .chain(segment_frames.iter().flatten().flatten()),
+        frames.iter().map(|frame| (own, frame)).chain(
+            segment_frames
+                .iter()
+                .flatten()
+                .flat_map(|(frames, scope)| frames.iter().map(move |frame| (*scope, frame))),
+        ),
         identities,
         artifacts,
         session,
@@ -833,6 +1087,7 @@ pub fn resolve(
                 index,
                 frame,
                 index >= record.recorded as usize,
+                own,
                 &sources,
                 identities,
             )
@@ -843,34 +1098,48 @@ pub fn resolve(
         .zip(&segment_frames)
         .enumerate()
         .map(|(index, (segment, frames))| {
+            let scope = frames.as_ref().map(|(_, scope)| *scope);
             json!({
                 "index": index,
                 "kind": task_kind(segment.kind),
                 "state": segment_state(segment.state),
+                "registration": registration_name(segment.registration),
                 "recorded": segment.recorded,
                 "bounded": segment.flags & 1 != 0,
-                "digest": (segment.kind != 9).then(|| hex::encode(segment.digest)),
+                // A not_recorded microtask: whether promise stacks were on.
+                "promise_stacks_on": (segment.kind == 9).then_some(segment.flags & 2 != 0),
+                "digest": segment.has_frames().then(|| hex::encode(segment.digest)),
                 "frames_retained": frames.is_some(),
-                "frames": frames.as_deref().unwrap_or_default().iter().enumerate()
-                    .map(|(i, frame)| frame_value(i, frame, false, &sources, identities))
-                    .collect::<Vec<_>>(),
+                "scope": scope.map(|(segment_process, segment_scope)| {
+                    let mut value = segment_scope.to_json();
+                    value["process_id"] = json!(segment_process);
+                    value["elsewhere"] = json!((segment_process, segment_scope) != own);
+                    value["other_process"] = json!(segment_process != process);
+                    value
+                }),
+                "frames": frames.as_ref().map(|(frames, scope)| frames.iter().enumerate()
+                    .map(|(i, frame)| frame_value(i, frame, false, *scope, &sources, identities))
+                    .collect::<Vec<_>>()).unwrap_or_default(),
             })
         })
         .collect();
     document
 }
 
-/// A `script_cookie` call's walked stack by digest, else its innermost frame alone.
+/// A `script_cookie` call's walked stack by digest, else its innermost frame
+/// alone, read in the given isolate.
 pub fn resolve_call(
     event: &Value,
+    scope: Scope,
     innermost: &[u8; FRAME],
     digest: Option<[u8; 32]>,
-    identities: &HashMap<u32, Identity>,
+    identities: &HashMap<IdentityKey, Identity>,
     artifacts: &[Value],
     read: &dyn Fn(&Value, usize) -> Result<Vec<u8>>,
 ) -> Value {
     let mut record = Record {
         version: 1,
+        scope,
         task_segments: 0,
         state: 1,
         flags: 0x08,
@@ -942,7 +1211,7 @@ impl InitiatorFrames {
             .iter()
             .filter_map(|row| {
                 let identity = hex::decode(row["initiator_frame"]["identity"].as_str()?).ok()?;
-                decode_identity(&identity)?.1.sha256.map(hex::encode)
+                decode_identity(&identity)?.2.sha256.map(hex::encode)
             })
             .collect();
         let mut deferred = false;
@@ -972,7 +1241,10 @@ impl InitiatorFrames {
             ) else {
                 continue;
             };
-            let key = format!("{session}:{}:{}", raw["process_id"], raw["frame"]);
+            let key = format!(
+                "{session}:{}:{}:{}",
+                raw["process_id"], raw["isolate_key"], raw["frame"]
+            );
             if let Some(kept) = self.0.get(&key) {
                 row["initiator_frame"] = kept.clone();
                 continue;
@@ -982,16 +1254,26 @@ impl InitiatorFrames {
                 continue;
             }
             fresh += 1;
-            let identities: HashMap<u32, Identity> = raw["identity"]
+            let process = raw["process_id"].as_u64().unwrap_or(0) as u32;
+            let scope = Scope::of_row(
+                raw["thread"].as_u64().unwrap_or(0),
+                raw["isolate_key"]
+                    .as_str()
+                    .and_then(|key| key.parse().ok())
+                    .unwrap_or(0),
+            );
+            let identities: HashMap<IdentityKey, Identity> = raw["identity"]
                 .as_str()
                 .and_then(|hex| hex::decode(hex).ok())
                 .and_then(|bytes| decode_identity(&bytes))
+                .map(|(isolate, script, identity)| ((process, isolate, script), identity))
                 .into_iter()
                 .collect();
             let artifacts = artifacts
                 .get_or_insert_with(|| manifest.take().map_or_else(Vec::new, |f| f(&wanted)));
             let event = json!({"session_id": session, "process_id": raw["process_id"]});
-            let mut stack = resolve_call(&event, &frame, None, &identities, artifacts, &read);
+            let mut stack =
+                resolve_call(&event, scope, &frame, None, &identities, artifacts, &read);
             let resolution = stack["frames"][0]["resolution"].take();
             let pending = matches!(
                 resolution["reason"].as_str(),
@@ -1044,10 +1326,16 @@ pub(crate) fn decode_navigation(payload: &[u8]) -> Option<(Record, &'static str,
 
 /// Decodes `RequestIndex::identities` payloads. A malformed one is left out,
 /// like a malformed identity record in a store scan.
-pub(crate) fn decode_indexed_identities(payloads: &HashMap<u32, String>) -> HashMap<u32, Identity> {
+pub(crate) fn decode_indexed_identities(
+    process: u32,
+    payloads: &crate::request_index::IdentityPayloads,
+) -> HashMap<IdentityKey, Identity> {
     payloads
         .values()
-        .filter_map(|payload| decode_identity(&hex::decode(payload).ok()?))
+        .filter_map(|payload| {
+            let (isolate, script, identity) = decode_identity(&hex::decode(payload).ok()?)?;
+            Some(((process, isolate, script), identity))
+        })
         .collect()
 }
 
@@ -1059,7 +1347,7 @@ fn stored_identities(
     requests: &Mutex<RequestIndex>,
     stack: &Value,
     process_id: u64,
-) -> Result<(HashMap<u32, Identity>, bool)> {
+) -> Result<(HashMap<IdentityKey, Identity>, bool)> {
     let session = stack["session_id"].as_str();
     let mut identities = HashMap::new();
     let mut known = false;
@@ -1068,7 +1356,7 @@ fn stored_identities(
             .blocking_lock()
             .identities(session, process_id as u32)?;
         known = exhaustive;
-        identities = decode_indexed_identities(&indexed);
+        identities = decode_indexed_identities(process_id as u32, &indexed);
     }
     if !known {
         let mut ids = vec![("process_id", process_id)];
@@ -1079,8 +1367,10 @@ fn stored_identities(
         let detail = event_query::read_request_records(store, None, IDENTITY_SCAN, &filter)?;
         known = detail.coverage.complete();
         for event in &detail.records {
-            if let Some((script, identity)) = payload(event).as_deref().and_then(decode_identity) {
-                identities.insert(script, identity);
+            if let Some((isolate, script, identity)) =
+                payload(event).as_deref().and_then(decode_identity)
+            {
+                identities.insert((process_id as u32, isolate, script), identity);
             }
         }
     }
@@ -1113,7 +1403,7 @@ fn resolve_stored(
     record: &Record,
     process_id: u64,
 ) -> Result<Value> {
-    let (identities, known) = if record.state != 2 && record.state != 3 {
+    let (mut identities, mut known) = if !unwalked_state(record.state) {
         stored_identities(store, requests, stack, process_id)?
     } else {
         (HashMap::new(), true)
@@ -1136,7 +1426,7 @@ fn resolve_stored(
     let root = artifacts_root.to_path_buf();
     let read = move |artifact: &Value, limit: usize| evidence::content(&root, artifact, limit);
     // The task chain names its scheduling stacks by digest.
-    if record.version == 2
+    if record.version != 1
         && record.task_segments != 0
         && let Some(content) = newest(&artifacts, stack_session.unwrap_or(""), |a| {
             a["kind"] == "stack" && a["sha256"] == digest.as_str()
@@ -1148,7 +1438,33 @@ fn resolve_stored(
             .filter(|sha| !wanted.contains(sha))
             .collect();
         if !segments.is_empty() {
-            artifacts.extend(select(&segments)?);
+            let selected = select(&segments)?;
+            // A segment a message carried from another renderer reads its
+            // script IDs in that renderer: load its identities and sources too.
+            let others: BTreeSet<u32> = selected
+                .iter()
+                .filter_map(|artifact| read(artifact, MAX_ARTIFACT).ok())
+                .filter(|content| content.len() >= SCOPED_HEADER && u16_at(content, 4) == 3)
+                .filter_map(|content| artifact_scope(&content))
+                .map(|(process, _)| process)
+                .filter(|process| u64::from(*process) != process_id)
+                .collect();
+            artifacts.extend(selected);
+            let mut sources = BTreeSet::new();
+            for other in others {
+                let (found, complete) = stored_identities(store, requests, stack, other.into())?;
+                known &= complete;
+                sources.extend(
+                    found
+                        .values()
+                        .filter_map(|identity| identity.sha256.map(hex::encode))
+                        .filter(|sha| !wanted.contains(sha)),
+                );
+                identities.extend(found);
+            }
+            if !sources.is_empty() {
+                artifacts.extend(select(&sources)?);
+            }
         }
     }
     let mut document = resolve(stack, record, &identities, &artifacts, &read);
@@ -1637,7 +1953,7 @@ pub(crate) mod tests {
         caught_up(&index);
         let (found, known) = stored_identities(&store, &index, &stack, 42).unwrap();
         assert_eq!(found.len(), 1);
-        assert!(found.contains_key(&7));
+        assert!(found.contains_key(&(42, 0, 7)));
         assert!(known);
 
         let mut document = json!({
@@ -1698,7 +2014,7 @@ pub(crate) mod tests {
         let mut deeper = stack.clone();
         deeper[12] = 6;
         assert!(
-            decode_artifact(&deeper, &record).is_none(),
+            decode_artifact(&deeper, &record, 4).is_none(),
             "depth must agree"
         );
         let mut identities = HashMap::new();
@@ -1711,9 +2027,9 @@ pub(crate) mod tests {
             (30, identity_bytes(2, 0, 30, (0, 0), 99, &wasm)),
             (40, identity_bytes(1, 0x11, 40, (0, 0), 99, b"not retained")),
         ] {
-            let (id, identity) = decode_identity(&payload).expect("identity");
-            assert_eq!(id, script);
-            identities.insert(id, identity);
+            let (isolate, id, identity) = decode_identity(&payload).expect("identity");
+            assert_eq!((isolate, id), (0, script));
+            identities.insert((4, isolate, id), identity);
         }
         let artifacts = vec![
             artifact("1", "stack", &stack),
@@ -1799,9 +2115,9 @@ pub(crate) mod tests {
         let mut v1 = bytes.clone();
         v1[0] = 1;
         assert!(decode_record(&v1).is_none(), "version 1 has no task chain");
-        let (_, identity) =
+        let (_, _, identity) =
             decode_identity(&identity_bytes(1, 0x02, 7, (0, 0), 99, source.as_bytes())).unwrap();
-        let identities = HashMap::from([(7, identity)]);
+        let identities = HashMap::from([((4, 0, 7), identity)]);
         let artifacts = vec![
             artifact("1", "stack", &stack),
             artifact("2", "stack", &timer),
@@ -1863,6 +2179,301 @@ pub(crate) mod tests {
         let mut no_target = navigation.clone();
         no_target[88..96].fill(0);
         assert!(decode_navigation(&no_target).is_none());
+    }
+
+    /// A version 3 artifact: the scoped header, the frames, then the segments.
+    pub(crate) fn scoped_artifact(
+        process: u32,
+        thread: u8,
+        key: u64,
+        frames: &[Vec<u8>],
+        segments: &[Vec<u8>],
+        flags: u8,
+    ) -> Vec<u8> {
+        let recorded = frames.len() as u32;
+        let mut a = 0x4b53_4252u32.to_le_bytes().to_vec();
+        a.extend([3, 0, 48, 0, 16, 0, flags, 0]);
+        a.extend([recorded, recorded, 0].iter().flat_map(|v| v.to_le_bytes()));
+        let chain = segments.len() as u16;
+        a.extend([0u16, chain, chain, 0].iter().flat_map(|v| v.to_le_bytes()));
+        a.extend(process.to_le_bytes());
+        a.extend([thread, 0, 0, 0]);
+        a.extend(key.to_le_bytes());
+        for part in frames.iter().chain(segments) {
+            a.extend(part);
+        }
+        a
+    }
+    fn segment_bytes(
+        kind: u8,
+        state: u8,
+        registration: u8,
+        recorded: u32,
+        digest: [u8; 32],
+    ) -> Vec<u8> {
+        let mut bytes = vec![kind, state, 0, registration];
+        bytes.extend(recorded.to_le_bytes());
+        bytes.extend([0; 8]);
+        bytes.extend(digest);
+        bytes
+    }
+
+    #[test]
+    fn worker_and_message_segments_resolve_in_their_own_scope() {
+        // Script 7 is a different script in each isolate.
+        let worker_source = "function work() {\n  fetch('/w');\n}\n";
+        let page_source = "function post() {\n  port.postMessage(1);\n}\n";
+        let at = |text: &str, needle: &str| text.find(needle).unwrap() as u32;
+        let work = frame(
+            1,
+            0,
+            7,
+            at(worker_source, "fetch"),
+            at(worker_source, "() {"),
+        );
+        let post = frame(1, 0, 7, at(page_source, "port"), at(page_source, "() {"));
+        let then = frame(1, 0, 7, at(worker_source, "work"), 0);
+        // The posting stack, walked in the page's renderer (process 5).
+        let posted = scoped_artifact(5, 1, 0, std::slice::from_ref(&post), &[], 0);
+        let posted_digest: [u8; 32] = Sha256::digest(&posted).into();
+        // A .then registration walked in the worker.
+        let registered = scoped_artifact(4, 2, 0x77, std::slice::from_ref(&then), &[], 0);
+        let registered_digest: [u8; 32] = Sha256::digest(&registered).into();
+        let segments = [
+            segment_bytes(9, 1, 1, 1, registered_digest),
+            segment_bytes(10, 1, 0, 1, posted_digest),
+            segment_bytes(8, 7, 0, 0, [0; 32]),
+        ];
+        let stack = scoped_artifact(4, 2, 0x77, std::slice::from_ref(&work), &segments, 0);
+        let digest: [u8; 32] = Sha256::digest(&stack).into();
+        let mut bytes = record_bytes(1, 1, 1, 0, digest);
+        bytes[0] = 3;
+        bytes[5] = 0;
+        bytes[6..8].copy_from_slice(&3u16.to_le_bytes());
+        bytes[22..24].copy_from_slice(&3u16.to_le_bytes());
+        bytes[64..80].copy_from_slice(&work);
+        bytes[80] = 2;
+        bytes[88..96].copy_from_slice(&0x77u64.to_le_bytes());
+        let record = decode_record(&bytes).expect("version 3 record");
+        assert_eq!(
+            record.scope,
+            Scope {
+                thread: 2,
+                isolate_key: 0x77
+            }
+        );
+        for (byte, value) in [(80, 0u8), (80, 5), (84, 1), (100, 1)] {
+            let mut bad = bytes.clone();
+            bad[byte] = value;
+            assert!(decode_record(&bad).is_none(), "scope byte {byte}");
+        }
+        let mut document_key = bytes.clone();
+        document_key[80] = 1;
+        assert!(
+            decode_record(&document_key).is_none(),
+            "the main thread has no key"
+        );
+        let mut worker_identity = identity_bytes(1, 0x02, 7, (0, 0), 99, worker_source.as_bytes());
+        worker_identity[0] = 2;
+        worker_identity[72] = 2;
+        worker_identity[80..88].copy_from_slice(&0x77u64.to_le_bytes());
+        let (isolate, script, worker) = decode_identity(&worker_identity).unwrap();
+        assert_eq!((isolate, script), (0x77, 7));
+        let (_, _, page) = decode_identity(&identity_bytes(
+            1,
+            0x02,
+            7,
+            (0, 0),
+            99,
+            page_source.as_bytes(),
+        ))
+        .unwrap();
+        let identities = HashMap::from([((4, 0x77, 7), worker), ((5, 0, 7), page)]);
+        let artifacts = vec![
+            artifact("1", "stack", &stack),
+            artifact("2", "stack", &posted),
+            artifact("3", "stack", &registered),
+            artifact("4", "javascript", worker_source.as_bytes()),
+            artifact("5", "javascript", page_source.as_bytes()),
+        ];
+        let contents: HashMap<&str, Vec<u8>> = HashMap::from([
+            ("1", stack.clone()),
+            ("2", posted.clone()),
+            ("3", registered.clone()),
+            ("4", worker_source.as_bytes().to_vec()),
+            ("5", page_source.as_bytes().to_vec()),
+        ]);
+        let read =
+            |a: &Value, _limit: usize| Ok(contents[a["artifact_id"].as_str().unwrap()].clone());
+        let event = json!({"session_id": "9", "process_id": 4, "request_id": "3",
+            "frame_id": "119", "sequence_number": "12", "parent_event_id": "11"});
+        assert_eq!(
+            segment_digests(&stack),
+            vec![hex::encode(registered_digest), hex::encode(posted_digest)]
+        );
+        let doc = resolve(&event, &record, &identities, &artifacts, &read);
+        assert_eq!(
+            doc["scope"],
+            json!({"thread": "dedicated_worker", "isolate_key": "0000000000000077"})
+        );
+        assert_eq!(doc["frames"][0]["resolution"]["function_name"], "work");
+        let chain = &doc["task_segments"];
+        assert_eq!(
+            (
+                &chain[0]["kind"],
+                &chain[0]["registration"],
+                &chain[0]["state"]
+            ),
+            (&json!("microtask"), &json!("then"), &json!("captured"))
+        );
+        assert_eq!(chain[0]["scope"]["elsewhere"], false);
+        assert_eq!(chain[0]["frames"][0]["resolution"]["line"], 1);
+        assert_eq!(chain[1]["kind"], "message_port");
+        assert_eq!(
+            (
+                &chain[1]["scope"]["thread"],
+                &chain[1]["scope"]["process_id"],
+                &chain[1]["scope"]["other_process"]
+            ),
+            (&json!("document"), &json!(5), &json!(true))
+        );
+        assert_eq!(chain[1]["frames"][0]["resolution"]["function_name"], "post");
+        assert_eq!(
+            (&chain[2]["kind"], &chain[2]["state"], &chain[2]["digest"]),
+            (&json!("event"), &json!("no_script"), &Value::Null)
+        );
+        assert_eq!(doc["task_chain_cut"], false);
+        assert_eq!(doc["async_callers_not_shown"], json!(ASYNC_NOT_SHOWN));
+        assert!(
+            ASYNC_NOT_SHOWN.iter().any(|line| line.contains("worklet"))
+                && ASYNC_NOT_SHOWN
+                    .iter()
+                    .any(|line| line.contains("promise reaction in a worker"))
+                && ASYNC_NOT_SHOWN.iter().any(|line| line.contains("builtin")),
+            "version 3 states what it cannot show"
+        );
+        // An artifact naming another isolate does not belong to this record.
+        let foreign = scoped_artifact(4, 2, 0x78, std::slice::from_ref(&work), &segments, 0);
+        assert!(decode_artifact(&foreign, &record, 4).is_none());
+        assert!(decode_artifact(&stack, &record, 5).is_none());
+        // A no-script segment ends the chain: it is last and not cut there.
+        let early = scoped_artifact(
+            4,
+            2,
+            0x77,
+            std::slice::from_ref(&work),
+            &[segments[2].clone(), segments[1].clone()],
+            0,
+        );
+        let mut early_bytes = bytes.clone();
+        early_bytes[6..8].copy_from_slice(&2u16.to_le_bytes());
+        early_bytes[22..24].copy_from_slice(&2u16.to_le_bytes());
+        let early_record = decode_record(&early_bytes).unwrap();
+        assert!(decode_artifact(&early, &early_record, 4).is_none());
+        // A registration keeps at most 32 frames and names its call.
+        assert!(Segment::read(&segment_bytes(9, 1, 0, 1, [1; 32]), 3).is_none());
+        assert!(Segment::read(&segment_bytes(9, 1, 1, 33, [1; 32]), 3).is_none());
+        assert!(Segment::read(&segment_bytes(9, 1, 1, 1, [1; 32]), 2).is_none());
+        assert!(Segment::read(&segment_bytes(13, 1, 0, 1, [1; 32]), 3).is_none());
+        assert!(Segment::read(&segment_bytes(10, 1, 0, 1, [1; 32]), 2).is_none());
+        // A worker request with no script on its stack keeps its scope.
+        let mut loader = vec![3, 0, 128, 0, 2, 0];
+        loader.resize(128, 0);
+        loader[80] = 3;
+        loader[88..96].copy_from_slice(&0x79u64.to_le_bytes());
+        assert_eq!(decode_record(&loader).unwrap().scope.thread, 3);
+        let mut pool = vec![3, 0, 128, 0, 3, 0];
+        pool.resize(128, 0);
+        assert_eq!(decode_record(&pool).unwrap().scope, Scope::default());
+        pool[80] = 2;
+        assert!(
+            decode_record(&pool).is_none(),
+            "unsupported_thread names no isolate"
+        );
+
+        // A worker past the renderer's table limit: its scope, nothing walked.
+        let mut limited = loader.clone();
+        limited[4] = 6;
+        let limited_record = decode_record(&limited).expect("thread-limit record");
+        let limited_doc = resolve(&event, &limited_record, &identities, &artifacts, &read);
+        assert_eq!(
+            (
+                &limited_doc["state"],
+                &limited_doc["digest"],
+                &limited_doc["frames"],
+                &limited_doc["scope"]["thread"]
+            ),
+            (
+                &json!("not_walked_thread_limit"),
+                &Value::Null,
+                &json!([]),
+                &json!("shared_worker")
+            )
+        );
+        assert_eq!(summary(&limited_record)["digest"], Value::Null);
+        let mut unscoped = limited.clone();
+        unscoped[80..96].fill(0);
+        assert!(decode_record(&unscoped).is_none(), "it names its worker");
+        let mut version_2 = unscoped.clone();
+        version_2[0] = 2;
+        assert!(decode_record(&version_2).is_none(), "only version 3 has it");
+
+        // A received message whose origin was rejected ends the chain at a
+        // segment of the receiving kind, and nothing follows it.
+        let rejected = segment_bytes(11, 8, 0, 0, [0; 32]);
+        assert!(Segment::read(&rejected, 3).is_some());
+        assert!(Segment::read(&rejected, 2).is_none());
+        assert!(Segment::read(&segment_bytes(1, 8, 0, 0, [0; 32]), 3).is_none());
+        assert!(Segment::read(&segment_bytes(11, 8, 0, 1, [1; 32]), 3).is_none());
+        let chain_of = |segments: &[Vec<u8>], flags: u8| {
+            let artifact =
+                scoped_artifact(4, 2, 0x77, std::slice::from_ref(&work), segments, flags);
+            let mut bytes = bytes.clone();
+            let count = segments.len() as u16;
+            bytes[5] = flags;
+            bytes[6..8].copy_from_slice(&count.to_le_bytes());
+            bytes[22..24].copy_from_slice(&count.to_le_bytes());
+            bytes[32..64].copy_from_slice(&Sha256::digest(&artifact));
+            (artifact, decode_record(&bytes).unwrap())
+        };
+        let (ended, ended_record) = chain_of(&[segments[1].clone(), rejected.clone()], 0);
+        let (_, decoded) =
+            decode_artifact(&ended, &ended_record, 4).expect("ends at the rejection");
+        assert_eq!(segment_state(decoded[1].state), "origin_rejected");
+        let (after, after_record) = chain_of(&[rejected.clone(), segments[1].clone()], 0);
+        assert!(decode_artifact(&after, &after_record, 4).is_none());
+        let (cut, cut_record) = chain_of(std::slice::from_ref(&rejected), 0x08);
+        assert!(decode_artifact(&cut, &cut_record, 4).is_none());
+
+        // A microtask with nothing remembered says whether promise stacks were on.
+        let mut remembered_none = segment_bytes(9, 6, 0, 0, [0; 32]);
+        remembered_none[2] = 2;
+        assert!(Segment::read(&remembered_none, 3).is_some());
+        assert!(Segment::read(&remembered_none, 2).is_none());
+        let mut captured_on = segments[0].clone();
+        captured_on[2] = 2;
+        assert!(Segment::read(&captured_on, 3).is_none());
+        let mut port_on = segments[1].clone();
+        port_on[2] = 2;
+        assert!(Segment::read(&port_on, 3).is_none());
+        let (flagged, flagged_record) =
+            chain_of(&[remembered_none, segment_bytes(9, 6, 0, 0, [0; 32])], 0);
+        let flagged_artifacts = vec![artifact("6", "stack", &flagged)];
+        let flagged_read = |_: &Value, _limit: usize| Ok(flagged.clone());
+        let flagged_doc = resolve(
+            &event,
+            &flagged_record,
+            &identities,
+            &flagged_artifacts,
+            &flagged_read,
+        );
+        assert_eq!(
+            (
+                &flagged_doc["task_segments"][0]["promise_stacks_on"],
+                &flagged_doc["task_segments"][1]["promise_stacks_on"]
+            ),
+            (&json!(true), &json!(false))
+        );
     }
 
     #[test]

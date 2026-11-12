@@ -46,6 +46,9 @@ const TIMELINE_BUCKETS: usize = 120;
 /// Worker tab sets a row links to (protocol/native-network-v3.md `tab_set`).
 const MAX_TAB_SETS: usize = 4096;
 const MAX_SET_TABS: usize = 256;
+/// `script_identity` payloads of one renderer, keyed by isolate key and script
+/// ID: script IDs are unique only within one isolate.
+pub type IdentityPayloads = HashMap<(u64, u32), String>;
 /// `script_identity` records kept for the Initiator column's innermost frame.
 const MAX_IDENTITIES: usize = 16_384;
 const UNIDENTIFIED: &str = "Unidentified network event";
@@ -197,7 +200,9 @@ struct Row {
     stack_state: u8,
     /// A navigation_initiator_link names the renderer stack that started it.
     navigation_script: bool,
-    stack_frame: Option<(String, u32, [u8; 16])>,
+    stack_frame: Option<(String, u32, u64, [u8; 16])>,
+    /// The thread a version 3 stack names: 1 document, 2-4 a worker; else 0.
+    stack_thread: u8,
     /// The newest `request_tab_link`: its set key, kind and tab count.
     tab_set: Option<String>,
     tab_link: (u8, u32),
@@ -726,15 +731,26 @@ fn fold_tab_set(event: &Value, sets: &mut HashMap<String, (u32, Vec<u64>)>) {
 
 fn fold_identity(event: &Value, identities: &mut HashMap<String, String>) {
     let payload = event["payload"].as_str().unwrap_or("");
-    let Some(script) = hex::decode(payload)
+    // Script IDs are unique per isolate; version 2 names a worker's at byte 80.
+    let Some((isolate, script)) = hex::decode(payload)
         .ok()
         .filter(|bytes| bytes.len() == 128)
-        .map(|bytes| u32::from_le_bytes(bytes[8..12].try_into().unwrap()))
+        .map(|bytes| {
+            let isolate = if bytes[0] == 2 {
+                u64::from_le_bytes(bytes[80..88].try_into().unwrap())
+            } else {
+                0
+            };
+            (
+                isolate,
+                u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            )
+        })
     else {
         return;
     };
     let key = format!(
-        "{}:{}:{script}",
+        "{}:{}:{isolate}:{script}",
         text(&event["session_id"]),
         number(&event["process_id"])
     );
@@ -794,6 +810,13 @@ fn in_tab(row: &Row, sets: &HashMap<String, (u32, Vec<u64>)>, scope: &TabScope) 
 fn initiator(row: &Row) -> Option<&'static str> {
     if row.worker_started {
         Some("worker")
+    } else if row.renderer && (2..=4).contains(&row.stack_thread) && row.stack_state != 3 {
+        // A version 3 stack from a worker's isolate (protocol/native-network-v3.md).
+        Some(match row.stack_state {
+            2 => "worker_loader",
+            6 => "worker_unwalked",
+            _ => "worker_script",
+        })
     } else if row.navigation_script || (row.renderer && matches!(row.stack_state, 1 | 4 | 5)) {
         // A walked request_initiator_stack (protocol/native-network-v3.md).
         Some("script")
@@ -810,6 +833,9 @@ fn initiator(row: &Row) -> Option<&'static str> {
 fn initiator_label(row: &Row) -> Option<&'static str> {
     initiator(row).map(|kind| match kind {
         "worker" => "Service worker",
+        "worker_script" => "Worker script",
+        "worker_loader" => "Worker loader",
+        "worker_unwalked" => "Worker, not walked",
         "script" => "Script",
         "parser" => "Parser",
         "renderer" => "Renderer",
@@ -1381,12 +1407,20 @@ impl RequestIndex {
                         let bytes = hex::decode(event["payload"].as_str().unwrap_or(""))
                             .unwrap_or_default();
                         row.stack_state = bytes.get(4).copied().unwrap_or(0);
+                        // Version 3 names the isolate its script IDs belong to.
+                        let scoped = bytes.len() == 128 && bytes[0] == 3;
+                        row.stack_thread = if scoped { bytes[80] } else { 0 };
                         row.stack_frame = (bytes.len() == 128
                             && matches!(row.stack_state, 1 | 4 | 5))
                         .then(|| {
                             (
                                 text(&event["session_id"]),
                                 number(&event["process_id"]) as u32,
+                                if scoped {
+                                    u64::from_le_bytes(bytes[88..96].try_into().unwrap())
+                                } else {
+                                    0
+                                },
                                 bytes[64..80].try_into().unwrap(),
                             )
                         });
@@ -1471,6 +1505,7 @@ impl RequestIndex {
                     stack_state: 0,
                     navigation_script: false,
                     stack_frame: None,
+                    stack_thread: 0,
                     tab_set: None,
                     tab_link: (0, 0),
                     extension: None,
@@ -1846,10 +1881,12 @@ impl RequestIndex {
         });
         document["extension_id"] = json!(row.extension);
         // Raw; the get_requests handler replaces it with the frame's resolution.
-        document["initiator_frame"] = json!(row.stack_frame.as_ref().map(|(session, process, frame)| {
+        document["initiator_frame"] = json!(row.stack_frame.as_ref().map(|(session, process, isolate, frame)| {
             let script = u32::from_le_bytes(frame[4..8].try_into().unwrap());
-            json!({"session_id": session, "process_id": process, "frame": hex::encode(frame),
-                "identity": self.state.as_ref().unwrap().identities.get(&format!("{session}:{process}:{script}"))})
+            json!({"session_id": session, "process_id": process, "isolate_key": isolate.to_string(),
+                "thread": row.stack_thread,
+                "frame": hex::encode(frame),
+                "identity": self.state.as_ref().unwrap().identities.get(&format!("{session}:{process}:{isolate}:{script}"))})
         }));
         document
     }
@@ -1983,13 +2020,9 @@ impl RequestIndex {
         }
     }
 
-    /// `script_identity` payloads of one renderer by script ID, and whether a
-    /// script missing from them is missing from the store.
-    pub fn identities(
-        &mut self,
-        session: &str,
-        process: u32,
-    ) -> Result<(HashMap<u32, String>, bool)> {
+    /// `script_identity` payloads of one renderer by isolate key and script
+    /// ID, and whether a script missing from them is missing from the store.
+    pub fn identities(&mut self, session: &str, process: u32) -> Result<(IdentityPayloads, bool)> {
         self.refresh()?;
         let state = self.state.as_ref().expect("index state");
         let prefix = format!("{session}:{process}:");
@@ -1997,8 +2030,11 @@ impl RequestIndex {
             .identities
             .iter()
             .filter_map(|(key, payload)| {
-                let script = key.strip_prefix(&prefix)?.parse().ok()?;
-                Some((script, payload.clone()))
+                let (isolate, script) = key.strip_prefix(&prefix)?.split_once(':')?;
+                Some((
+                    (isolate.parse().ok()?, script.parse().ok()?),
+                    payload.clone(),
+                ))
             })
             .collect();
         let exhaustive =
@@ -2413,6 +2449,42 @@ mod tests {
         );
         store
     }
+    /// Renderer starts with initiator stacks: a document script, a dedicated
+    /// worker's script and a service worker's loader
+    /// (protocol/native-network-v3.md, version 3 scope at byte 80).
+    fn push_stack_rows(store: &mut Store) {
+        for (request, state, thread, key) in
+            [(20u64, 1u8, 1u8, 0u64), (21, 1, 2, 0x77), (22, 2, 4, 0x78)]
+        {
+            let initiated = store.push(
+                41,
+                request,
+                "request_initiated",
+                b"GET w.example.test",
+                json!({}),
+            );
+            let mut stack = vec![0u8; 128];
+            stack[0] = 3;
+            stack[2] = 128;
+            stack[4] = state;
+            if state == 1 {
+                stack[12] = 1;
+                stack[8] = 1;
+                stack[32] = 9;
+                stack[64] = 1;
+                stack[68] = 7;
+            }
+            stack[80] = thread;
+            stack[88..96].copy_from_slice(&key.to_le_bytes());
+            store.push(
+                41,
+                request,
+                "request_initiator_stack",
+                &stack,
+                json!({"parent_event_id": initiated}),
+            );
+        }
+    }
     fn write(path: &Path, store: &Store) {
         fs::write(path, store.bytes()).unwrap();
     }
@@ -2705,6 +2777,49 @@ mod tests {
         identity[8..12].copy_from_slice(&7u32.to_le_bytes());
         store.push(41, 0, "script_identity", &identity, json!({}));
         store.push(41, 2, "request_initiated", b"GET parser.test", json!({}));
+        // A dedicated worker's version 3 stack names script 7 of its own isolate.
+        let worker_initiated = store.push(41, 3, "request_initiated", b"GET w.test", json!({}));
+        let mut worker_stack = stack.clone();
+        worker_stack[0] = 3;
+        worker_stack[80] = 2;
+        worker_stack[88..96].copy_from_slice(&0x77u64.to_le_bytes());
+        store.push(
+            41,
+            3,
+            "request_initiator_stack",
+            &worker_stack,
+            json!({"parent_event_id": worker_initiated}),
+        );
+        let mut worker_identity = identity.clone();
+        worker_identity[0] = 2;
+        worker_identity[72] = 2;
+        worker_identity[80..88].copy_from_slice(&0x77u64.to_le_bytes());
+        store.push(41, 0, "script_identity", &worker_identity, json!({}));
+        // A worker stack with no script on it is the worker's loader.
+        let loader_initiated = store.push(41, 4, "request_initiated", b"GET l.test", json!({}));
+        let mut loader = vec![0u8; 128];
+        loader[0] = 3;
+        loader[4] = 2;
+        loader[80] = 3;
+        loader[88..96].copy_from_slice(&0x78u64.to_le_bytes());
+        store.push(
+            41,
+            4,
+            "request_initiator_stack",
+            &loader,
+            json!({"parent_event_id": loader_initiated}),
+        );
+        // A worker past the renderer's stack table limit walked nothing.
+        let limited_initiated = store.push(41, 5, "request_initiated", b"GET u.test", json!({}));
+        let mut limited = loader.clone();
+        limited[4] = 6;
+        store.push(
+            41,
+            5,
+            "request_initiator_stack",
+            &limited,
+            json!({"parent_event_id": limited_initiated}),
+        );
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
         let document = page(&mut index, "sort=capture&order=asc");
@@ -2712,10 +2827,28 @@ mod tests {
         assert_eq!(script["initiator"], "script");
         assert_eq!(
             script["initiator_frame"],
-            json!({"session_id": "1", "process_id": 41, "frame": hex::encode(&stack[64..80]),
-                "identity": hex::encode(&identity)})
+            json!({"session_id": "1", "process_id": 41, "isolate_key": "0", "thread": 0,
+                "frame": hex::encode(&stack[64..80]), "identity": hex::encode(&identity)})
         );
         assert_eq!(parser["initiator_frame"], Value::Null);
+        let (worker, loader) = (&document["requests"][2], &document["requests"][3]);
+        assert_eq!(worker["initiator"], "worker_script");
+        assert_eq!(
+            worker["initiator_frame"],
+            json!({"session_id": "1", "process_id": 41, "isolate_key": "119", "thread": 2,
+                "frame": hex::encode(&worker_stack[64..80]),
+                "identity": hex::encode(&worker_identity)})
+        );
+        assert_eq!(loader["initiator"], "worker_loader");
+        let limited = &document["requests"][4];
+        assert_eq!(
+            (&limited["initiator"], &limited["initiator_frame"]),
+            (&json!("worker_unwalked"), &Value::Null)
+        );
+        // Identities of the same script ID stay apart per isolate.
+        let (identities, _) = index.identities("1", 41).unwrap();
+        assert_eq!(identities.len(), 2);
+        assert_eq!(identities[&(0x77, 7)], hex::encode(&worker_identity));
     }
 
     #[test]
@@ -3228,7 +3361,8 @@ mod tests {
             std::env::var_os("REB_REQUEST_INDEX_GOLDEN").expect("REB_REQUEST_INDEX_GOLDEN");
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("events.jsonl");
-        let store = fixture();
+        let mut store = fixture();
+        push_stack_rows(&mut store);
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
         let mut document = page(&mut index, "limit=500");

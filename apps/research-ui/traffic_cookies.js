@@ -420,7 +420,7 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
   const frames = answered ? read.frames : null;
   group('Script access', scripts.map(record => {
     const resolved = record.frame ? frames?.get(`${record.processId}:${record.sequenceNumber}`) : null;
-    const item = entry(`${record.api}${record.count > 1 ? ` × ${record.count}` : ''} in frame ${record.frameId}` +
+    const item = entry(`${record.api}${record.count > 1 ? ` × ${record.count}` : ''} ${trafficCookieCallPlace(record.thread, record.frameId)}` +
       `${resolved ? ` at ${trafficCookieFrameLabel(resolved)}` : record.frame ? `, script ${record.frame.scriptId} at character ${record.frame.position}` : ', no script position'}` +
       `${record.stackDigest ? `, stack ${record.stackDigest.slice(0, 12)}` : ''}${record.nameTruncated ? ' (name matched by its first 24 bytes)' : ''}`);
     if (resolved?.artifact_id && openFrame) {
@@ -430,7 +430,7 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
       item.append(' ', open);
     }
     return item;
-  }).concat(beyondScripts(read, scripts).map(call => entry(`${call.api}${call.count > 1 ? ` × ${call.count}` : ''} in frame ${call.frame_id}` +
+  }).concat(beyondScripts(read, scripts).map(call => entry(`${call.api}${call.count > 1 ? ` × ${call.count}` : ''} ${trafficCookieCallPlace(call.thread, call.frame_id)}` +
     `${call.script_frame ? `, script ${call.script_frame.script_id} at character ${call.script_frame.position}` : ', no script position'}` +
     `${call.stack_digest ? `, stack ${call.stack_digest.slice(0, 12)}` : ''}${call.name_prefix_only ? ' (name matched by its first 24 bytes)' : ''}`))),
   unknownAbsence('No recorded document.cookie or Cookie Store call used this name.'));
@@ -450,6 +450,14 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
   if (notes.length) section.append(trafficNode('p', 'traffic-headers-note', notes.join(' ')));
   return {section, key: JSON.stringify([name, setBy.length, sentWith.length, scripts.length, loading, unread, frames?.size ?? null, read.status,
     read.setBy?.length, read.sentWith?.length, read.script?.length, read.complete, read.unread])};
+}
+
+// Where a script cookie call ran: a worker's record names the worker by its
+// context ID, never a document frame (protocol/native-network-v3.md).
+const TRAFFIC_COOKIE_WORKERS = Object.freeze({dedicated_worker: 'a dedicated worker',
+  shared_worker: 'a shared worker', service_worker: 'a service worker'});
+function trafficCookieCallPlace(thread, frameId) {
+  return Object.hasOwn(TRAFFIC_COOKIE_WORKERS, thread ?? '') ? `in ${TRAFFIC_COOKIE_WORKERS[thread]} ${frameId}` : `in frame ${frameId}`;
 }
 
 // Script calls the store read beyond the event window the view already decoded.

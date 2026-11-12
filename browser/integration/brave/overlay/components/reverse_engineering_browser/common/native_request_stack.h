@@ -21,22 +21,33 @@ namespace reb {
 // protocol/native-network-v3.md. include/reb/request_stack.hpp decodes the same
 // bytes; tests/request_stack_test.cpp keeps the two in step.
 inline constexpr std::uint16_t kNativeRequestStackPayloadVersion = 1;
-// Version 2 adds the task chain; request and navigation stacks use it.
+// Version 2 adds the task chain; navigation stacks use it.
 inline constexpr std::uint16_t kNativeRequestStackTaskPayloadVersion = 2;
+// Version 3 adds the stack scope; request stacks use it.
+inline constexpr std::uint16_t kNativeRequestStackScopePayloadVersion = 3;
+// script_identity and async_task_stack version 2 add the stack scope.
+inline constexpr std::uint16_t kNativeScriptIdentityScopeVersion = 2;
+inline constexpr std::uint16_t kNativeAsyncTaskStackScopeVersion = 2;
 inline constexpr std::uint32_t kNativeRequestStackSyncLimit = 1024;
 inline constexpr std::uint32_t kNativeRequestStackAsyncLimit = 32;
 inline constexpr std::uint32_t kNativeTaskSegmentLimit = 32;
 // Innermost frames kept per task segment: above DevTools' 200, so a framework's
 // wrapper frames do not hide the frames that scheduled the task.
 inline constexpr std::uint32_t kNativeAsyncTaskFrameLimit = 256;
+// Innermost frames kept per promise registration. Registrations are far more
+// frequent than task schedules, so their walk is bounded tighter.
+inline constexpr std::uint32_t kNativePromiseRegistrationFrameLimit = 32;
 inline constexpr std::uint32_t kNativeStackArtifactMagic = 0x4b534252U;
 inline constexpr std::uint16_t kNativeStackArtifactVersion = 1;
 inline constexpr std::uint16_t kNativeStackArtifactTaskVersion = 2;
+// Version 3 appends the stack scope to the header; types 34, 46 and 48 use it.
+inline constexpr std::uint16_t kNativeStackArtifactScopeVersion = 3;
 inline constexpr std::size_t kNativeStackArtifactHeaderSize = 32;
+inline constexpr std::size_t kNativeStackArtifactScopeHeaderSize = 48;
 inline constexpr std::size_t kNativeStackFrameSize = 16;
 inline constexpr std::size_t kNativeTaskSegmentSize = 48;
 inline constexpr std::size_t kNativeStackArtifactMaxBytes =
-    kNativeStackArtifactHeaderSize +
+    kNativeStackArtifactScopeHeaderSize +
     kNativeStackFrameSize * (kNativeRequestStackSyncLimit + kNativeRequestStackAsyncLimit) +
     kNativeTaskSegmentSize * kNativeTaskSegmentLimit;
 inline constexpr std::uint64_t kNativeScriptIdentityMaxSourceBytes = 16ULL * 1024ULL * 1024ULL;
@@ -56,6 +67,9 @@ enum class NativeRequestStackState : std::uint8_t {
   kUnsupportedThread = 3,
   kNotRetainedArtifactUnavailable = 4,
   kNotRetainedBudget = 5,
+  // Version 3: a worker thread found the renderer's stack tables all in use
+  // (kNativeStackThreadLimit), so nothing was walked. The scope is carried.
+  kNotWalkedThreadLimit = 6,
 };
 inline constexpr std::uint8_t kNativeRequestStackArtifactQueued = 1U << 0U;
 inline constexpr std::uint8_t kNativeRequestStackFramesOmitted = 1U << 1U;
@@ -75,14 +89,54 @@ enum class NativeAsyncTaskKind : std::uint8_t {
   kPostTask = 7,
   kEvent = 8,
   kMicrotask = 9,
+  // Version 3 task segments and version 2 async_task_stack records only.
+  kMessagePort = 10,
+  kBroadcastChannel = 11,
+  kWorkerMessage = 12,
 };
+inline constexpr std::uint8_t kNativeAsyncTaskKindLimit = 12;
 enum class NativeTaskSegmentState : std::uint8_t {
   kCaptured = 1,
   kNotRetainedArtifactUnavailable = 4,
   kNotRetainedBudget = 5,
   kNotRecorded = 6,
+  // Version 3: scheduled while no script ran; the chain ends here.
+  kNoScript = 7,
+  // Version 3, kinds 10-12: the message's task origin did not validate, so
+  // the sender is not known; the chain ends here.
+  kOriginRejected = 8,
 };
 inline constexpr std::uint8_t kNativeTaskSegmentBounded = 1U << 0U;
+// Version 3, kind 9 not_recorded: promise registration stacks were on, but
+// the thread remembered no registration for this reaction.
+inline constexpr std::uint8_t kNativeTaskSegmentRegistrationsOn = 1U << 1U;
+// The call that registered a microtask's promise reaction, version 3.
+enum class NativePromiseRegistration : std::uint8_t {
+  kThen = 1,
+  kCatch = 2,
+  kFinally = 3,
+  kAwait = 4,
+};
+
+// The isolate a stack's script IDs belong to. V8 script IDs are unique only
+// within one isolate, so every frame is read with the scope of its record.
+enum class NativeStackThread : std::uint8_t {
+  kDocument = 1,
+  kDedicatedWorker = 2,
+  kSharedWorker = 3,
+  kServiceWorker = 4,
+};
+struct NativeStackScope final {
+  std::uint8_t thread = 0;
+  std::array<std::uint8_t, 7> reserved{};
+  // Zero on the document main thread; else the worker's context ID, the
+  // frame_id its own requests carry.
+  std::uint64_t isolate_key = 0;
+  friend bool operator==(const NativeStackScope&, const NativeStackScope&) = default;
+};
+static_assert(sizeof(NativeStackScope) == 16);
+static_assert(std::has_unique_object_representations_v<NativeStackScope>);
+static_assert(offsetof(NativeStackScope, isolate_key) == 8);
 
 enum class NativeNavigationKind : std::uint8_t {
   kLocation = 1,
@@ -131,6 +185,8 @@ struct NativeRequestStackPayload final {
   std::uint32_t scripts = 0;
   std::array<std::uint8_t, 32> digest{};
   NativeStackFrame innermost{};
+  // Version 3: NativeStackScope, then zero. Navigation stacks (version 2):
+  // NativeNavigationStackTail. Debugger observations: their tail. Else zero.
   std::array<std::uint8_t, 48> reserved1{};
 };
 static_assert(sizeof(NativeRequestStackPayload) == kNativeProbeInlinePayloadSize);
@@ -156,6 +212,7 @@ struct NativeScriptIdentityPayload final {
   std::uint64_t execution_context_id = 0;
   std::uint64_t source_length = 0;
   std::array<std::uint8_t, 32> sha256{};
+  // Version 2: NativeStackScope, then zero.
   std::array<std::uint8_t, 56> reserved2{};
 };
 static_assert(sizeof(NativeScriptIdentityPayload) == kNativeProbeInlinePayloadSize);
@@ -185,12 +242,27 @@ static_assert(offsetof(NativeStackArtifactHeader, total_depth) == 12);
 static_assert(offsetof(NativeStackArtifactHeader, async_frames) == 24);
 static_assert(offsetof(NativeStackArtifactHeader, task_segments) == 28);
 
+// Bytes 32-47 of a version 3 stack artifact header. The renderer process
+// makes a digest name one scope, so a task segment carried to another
+// process still resolves its own frames.
+struct NativeStackArtifactScope final {
+  std::uint32_t process_id = 0;
+  std::uint8_t thread = 0;
+  std::array<std::uint8_t, 3> reserved{};
+  std::uint64_t isolate_key = 0;
+};
+static_assert(sizeof(NativeStackArtifactScope) ==
+              kNativeStackArtifactScopeHeaderSize - kNativeStackArtifactHeaderSize);
+static_assert(std::has_unique_object_representations_v<NativeStackArtifactScope>);
+static_assert(offsetof(NativeStackArtifactScope, isolate_key) == 8);
+
 // One caller of the task chain in a version 2 stack artifact, nearest first.
 struct NativeTaskSegment final {
   std::uint8_t kind = 0;
   std::uint8_t state = 0;
   std::uint8_t flags = 0;
-  std::uint8_t reserved0 = 0;
+  // Version 3, kind 9 with a recorded stack: NativePromiseRegistration. Else zero.
+  std::uint8_t registration = 0;
   std::uint32_t recorded = 0;
   std::array<std::uint8_t, 8> reserved1{};
   std::array<std::uint8_t, 32> digest{};
@@ -207,13 +279,16 @@ struct NativeAsyncTaskStackPayload final {
   std::uint16_t payload_size = 128;
   std::uint8_t kind = 0;
   std::uint8_t flags = 0;
-  std::uint16_t reserved0 = 0;
+  // Version 2, kind 9: NativePromiseRegistration. Else zero.
+  std::uint8_t registration = 0;
+  std::uint8_t reserved0 = 0;
   std::uint32_t recorded = 0;
   std::uint32_t wasm_frames = 0;
   std::uint32_t scripts = 0;
   std::array<std::uint8_t, 12> reserved1{};
   std::array<std::uint8_t, 32> digest{};
   NativeStackFrame innermost{};
+  // Version 2: NativeStackScope, then zero.
   std::array<std::uint8_t, 48> reserved2{};
 };
 static_assert(sizeof(NativeAsyncTaskStackPayload) == kNativeProbeInlinePayloadSize);
@@ -270,19 +345,65 @@ namespace native_request_stack_detail {
   return false;
 }
 
+[[nodiscard]] inline bool IsValidNativeStackScope(const NativeStackScope& scope) noexcept {
+  if (!native_request_stack_detail::AllZero(scope.reserved)) {
+    return false;
+  }
+  if (scope.thread == static_cast<std::uint8_t>(NativeStackThread::kDocument)) {
+    return scope.isolate_key == 0;
+  }
+  return scope.thread >= static_cast<std::uint8_t>(NativeStackThread::kDedicatedWorker) &&
+         scope.thread <= static_cast<std::uint8_t>(NativeStackThread::kServiceWorker) &&
+         scope.isolate_key != 0;
+}
+
+// The scope at the head of a record tail; the rest of the tail is zero.
+template <std::size_t N>
+[[nodiscard]] inline NativeStackScope NativeStackScopeOf(
+    const std::array<std::uint8_t, N>& tail) noexcept {
+  static_assert(N >= sizeof(NativeStackScope));
+  std::array<std::uint8_t, sizeof(NativeStackScope)> head{};
+  std::copy_n(tail.begin(), head.size(), head.begin());
+  return std::bit_cast<NativeStackScope>(head);
+}
+template <std::size_t N>
+[[nodiscard]] inline bool IsZeroAfterNativeStackScope(
+    const std::array<std::uint8_t, N>& tail) noexcept {
+  return native_request_stack_detail::AllZero(
+      std::span<const std::uint8_t>(tail).subspan(sizeof(NativeStackScope)));
+}
+template <std::size_t N>
+inline void SetNativeStackScope(std::array<std::uint8_t, N>& tail,
+                                const NativeStackScope& scope) noexcept {
+  const auto bytes = std::bit_cast<std::array<std::uint8_t, sizeof(NativeStackScope)>>(scope);
+  std::copy(bytes.begin(), bytes.end(), tail.begin());
+}
+
 [[nodiscard]] inline bool IsValidNativeRequestStackPayload(
     const NativeRequestStackPayload& v) noexcept {
   using native_request_stack_detail::AllZero;
-  const bool tasks = v.protocol_version == kNativeRequestStackTaskPayloadVersion;
+  const bool scoped = v.protocol_version == kNativeRequestStackScopePayloadVersion;
+  const bool tasks = scoped || v.protocol_version == kNativeRequestStackTaskPayloadVersion;
   const std::uint8_t known_flags = tasks ? 0x1FU : 0x0FU;
   if ((v.protocol_version != kNativeRequestStackPayloadVersion && !tasks) ||
-      v.payload_size != 128 || (!tasks && v.task_segments != 0) || !AllZero(v.reserved1) ||
-      (v.flags & ~known_flags) != 0) {
+      v.payload_size != 128 || (!tasks && v.task_segments != 0) ||
+      (!scoped && !AllZero(v.reserved1)) || (v.flags & ~known_flags) != 0) {
     return false;
   }
   const auto state = static_cast<NativeRequestStackState>(v.state);
+  // Version 3: a thread with no worker or document isolate has no scope.
+  if (state == NativeRequestStackState::kNotWalkedThreadLimit && !scoped) {
+    return false;
+  }
+  if (scoped && (!IsZeroAfterNativeStackScope(v.reserved1) ||
+                 (state == NativeRequestStackState::kUnsupportedThread
+                      ? NativeStackScopeOf(v.reserved1) != NativeStackScope{}
+                      : !IsValidNativeStackScope(NativeStackScopeOf(v.reserved1))))) {
+    return false;
+  }
   if (state == NativeRequestStackState::kNoScript ||
-      state == NativeRequestStackState::kUnsupportedThread) {
+      state == NativeRequestStackState::kUnsupportedThread ||
+      state == NativeRequestStackState::kNotWalkedThreadLimit) {
     const std::uint8_t allowed = tasks ? 0 : kNativeRequestStackTaskCallersNotCaptured;
     return (v.flags & ~allowed) == 0 && v.task_segments == 0 && v.total_depth == 0 &&
            v.recorded == 0 && v.omitted == 0 && v.async_frames == 0 && v.async_segments == 0 &&
@@ -314,32 +435,71 @@ namespace native_request_stack_detail {
          IsValidNativeStackFrame(v.innermost, false);
 }
 
-[[nodiscard]] inline bool IsValidNativeTaskSegment(const NativeTaskSegment& s) noexcept {
+// artifact_version: the stack artifact's version, 2 or 3.
+[[nodiscard]] inline bool IsValidNativeTaskSegment(
+    const NativeTaskSegment& s,
+    const std::uint16_t artifact_version = kNativeStackArtifactTaskVersion) noexcept {
   using native_request_stack_detail::AllZero;
-  if (s.reserved0 != 0 || !AllZero(s.reserved1) || (s.flags & ~kNativeTaskSegmentBounded) != 0) {
+  const bool scoped = artifact_version == kNativeStackArtifactScopeVersion;
+  const bool microtask = s.kind == static_cast<std::uint8_t>(NativeAsyncTaskKind::kMicrotask);
+  const std::uint8_t known_flags =
+      kNativeTaskSegmentBounded | (scoped && microtask ? kNativeTaskSegmentRegistrationsOn : 0);
+  if (!AllZero(s.reserved1) || (s.flags & ~known_flags) != 0) {
     return false;
   }
-  if (s.kind == static_cast<std::uint8_t>(NativeAsyncTaskKind::kMicrotask)) {
-    return s.state == static_cast<std::uint8_t>(NativeTaskSegmentState::kNotRecorded) &&
-           s.flags == 0 && s.recorded == 0 && AllZero(s.digest);
-  }
   const auto state = static_cast<NativeTaskSegmentState>(s.state);
-  return s.kind >= 1 && s.kind <= 8 &&
-         (state == NativeTaskSegmentState::kCaptured ||
-          state == NativeTaskSegmentState::kNotRetainedArtifactUnavailable ||
-          state == NativeTaskSegmentState::kNotRetainedBudget) &&
-         s.recorded >= 1 && s.recorded <= kNativeAsyncTaskFrameLimit &&
-         ((s.flags & kNativeTaskSegmentBounded) == 0 || s.recorded == kNativeAsyncTaskFrameLimit) &&
-         !AllZero(s.digest);
+  const bool walked = state == NativeTaskSegmentState::kCaptured ||
+                      state == NativeTaskSegmentState::kNotRetainedArtifactUnavailable ||
+                      state == NativeTaskSegmentState::kNotRetainedBudget;
+  const auto frames = [&](const std::uint32_t limit) {
+    return walked && s.recorded >= 1 && s.recorded <= limit &&
+           ((s.flags & kNativeTaskSegmentBounded) == 0 || s.recorded == limit) &&
+           !AllZero(s.digest);
+  };
+  const bool empty = s.flags == 0 && s.recorded == 0 && AllZero(s.digest);
+  if (microtask) {
+    if (state == NativeTaskSegmentState::kNotRecorded) {
+      return s.registration == 0 && (s.flags & ~kNativeTaskSegmentRegistrationsOn) == 0 &&
+             s.recorded == 0 && AllZero(s.digest);
+    }
+    return scoped && s.registration >= 1 && s.registration <= 4 &&
+           (s.flags & kNativeTaskSegmentRegistrationsOn) == 0 &&
+           frames(kNativePromiseRegistrationFrameLimit);
+  }
+  if (s.registration != 0 || s.kind < 1 || s.kind > (scoped ? kNativeAsyncTaskKindLimit : 8)) {
+    return false;
+  }
+  if (state == NativeTaskSegmentState::kNoScript) {
+    return scoped && empty;
+  }
+  if (state == NativeTaskSegmentState::kOriginRejected) {
+    return scoped && empty &&
+           s.kind >= static_cast<std::uint8_t>(NativeAsyncTaskKind::kMessagePort);
+  }
+  return frames(kNativeAsyncTaskFrameLimit);
 }
 
 [[nodiscard]] inline bool IsValidNativeAsyncTaskStackPayload(
     const NativeAsyncTaskStackPayload& v) noexcept {
   using native_request_stack_detail::AllZero;
-  return v.protocol_version == 1 && v.payload_size == 128 && v.kind >= 1 && v.kind <= 8 &&
-         (v.flags & ~kNativeTaskSegmentBounded) == 0 && v.reserved0 == 0 && AllZero(v.reserved1) &&
-         AllZero(v.reserved2) && v.recorded >= 1 && v.recorded <= kNativeAsyncTaskFrameLimit &&
-         ((v.flags & kNativeTaskSegmentBounded) == 0 || v.recorded == kNativeAsyncTaskFrameLimit) &&
+  const bool scoped = v.protocol_version == kNativeAsyncTaskStackScopeVersion;
+  if ((v.protocol_version != 1 && !scoped) || v.payload_size != 128 ||
+      (v.flags & ~kNativeTaskSegmentBounded) != 0 || v.reserved0 != 0 || !AllZero(v.reserved1) ||
+      (scoped ? !IsValidNativeStackScope(NativeStackScopeOf(v.reserved2)) ||
+                    !IsZeroAfterNativeStackScope(v.reserved2)
+              : !AllZero(v.reserved2))) {
+    return false;
+  }
+  const bool microtask = v.kind == static_cast<std::uint8_t>(NativeAsyncTaskKind::kMicrotask);
+  if (microtask ? !scoped || v.registration < 1 || v.registration > 4
+                : v.registration != 0 || v.kind < 1 ||
+                      v.kind > (scoped ? kNativeAsyncTaskKindLimit : 8)) {
+    return false;
+  }
+  const std::uint32_t limit =
+      microtask ? kNativePromiseRegistrationFrameLimit : kNativeAsyncTaskFrameLimit;
+  return v.recorded >= 1 && v.recorded <= limit &&
+         ((v.flags & kNativeTaskSegmentBounded) == 0 || v.recorded == limit) &&
          v.wasm_frames <= v.recorded && v.scripts <= v.recorded && !AllZero(v.digest) &&
          IsValidNativeStackFrame(v.innermost, false);
 }
@@ -373,10 +533,14 @@ namespace native_request_stack_detail {
       kNativeScriptIdentitySourceQueued | kNativeScriptIdentitySourceTooLarge |
       kNativeScriptIdentitySourceUnavailable | kNativeScriptIdentityNotRetained;
   const std::uint8_t retention = v.flags & kRetention;
-  if (v.protocol_version != kNativeRequestStackPayloadVersion || v.payload_size != 128 ||
-      v.reserved0 != 0 || v.reserved1 != 0 || !AllZero(v.reserved2) || v.script_id == 0 ||
-      v.execution_context_id == 0 || (v.flags & ~(kRetention | kNativeScriptIdentityEval)) != 0 ||
-      std::popcount(retention) > 1) {
+  const bool scoped = v.protocol_version == kNativeScriptIdentityScopeVersion;
+  if ((v.protocol_version != kNativeRequestStackPayloadVersion && !scoped) ||
+      v.payload_size != 128 || v.reserved0 != 0 || v.reserved1 != 0 ||
+      (scoped ? !IsValidNativeStackScope(NativeStackScopeOf(v.reserved2)) ||
+                    !IsZeroAfterNativeStackScope(v.reserved2)
+              : !AllZero(v.reserved2)) ||
+      v.script_id == 0 || v.execution_context_id == 0 ||
+      (v.flags & ~(kRetention | kNativeScriptIdentityEval)) != 0 || std::popcount(retention) > 1) {
     return false;
   }
   if (v.kind == static_cast<std::uint8_t>(NativeScriptIdentityKind::kWasm) &&
@@ -400,6 +564,80 @@ namespace native_request_stack_detail {
   }
   return v.source_length != 0 && v.source_length <= kNativeScriptIdentityMaxSourceBytes &&
          !AllZero(v.sha256);
+}
+
+// A message's task origin, carried beside Chromium's sender_stack_trace_id
+// from the posting thread to the one that runs its handler: the posting
+// segment, then at most 31 earlier segments of the sender's chain, nearest
+// first. It names no process, thread or table: the receiver always stores
+// copies. Never stored itself. Page JavaScript never sees it; the receiver
+// treats it as untrusted input, and records an origin that does not validate
+// as rejected; the message itself is unaffected. SAFETY.md lists what it
+// exposes to the receiving renderer.
+inline constexpr std::uint16_t kNativeTaskOriginVersion = 2;
+inline constexpr std::size_t kNativeTaskOriginHeaderSize = 8;
+inline constexpr std::size_t kNativeTaskOriginMaxBytes =
+    kNativeTaskOriginHeaderSize + kNativeTaskSegmentSize * kNativeTaskSegmentLimit;
+// The sender's chain was cut after the last carried segment: a caller was
+// not recorded or no longer remembered.
+inline constexpr std::uint8_t kNativeTaskOriginCut = 1U << 0U;
+// The sender's chain went on past the 32 carried segments.
+inline constexpr std::uint8_t kNativeTaskOriginTruncated = 1U << 1U;
+// What Chromium's CloneableMessage traits put in place of an origin longer
+// than kNativeTaskOriginMaxBytes, without reading it: one zero byte, which
+// never validates, so the receiver records the origin as rejected.
+inline constexpr std::uint8_t kNativeTaskOriginOversize = 0;
+
+struct NativeTaskOriginHeader final {
+  std::uint16_t version = kNativeTaskOriginVersion;
+  std::uint8_t count = 0;
+  std::uint8_t flags = 0;
+  std::array<std::uint8_t, 4> reserved{};
+};
+static_assert(sizeof(NativeTaskOriginHeader) == kNativeTaskOriginHeaderSize);
+static_assert(std::has_unique_object_representations_v<NativeTaskOriginHeader>);
+
+// Validates an origin and copies its segments into `out`; false keeps nothing.
+[[nodiscard]] inline bool DecodeNativeTaskOrigin(
+    std::span<const std::uint8_t> bytes,
+    NativeTaskOriginHeader& header,
+    std::span<NativeTaskSegment, kNativeTaskSegmentLimit> out) noexcept {
+  if (bytes.size() < kNativeTaskOriginHeaderSize || bytes.size() > kNativeTaskOriginMaxBytes) {
+    return false;
+  }
+  std::array<std::uint8_t, kNativeTaskOriginHeaderSize> head{};
+  std::copy_n(bytes.begin(), head.size(), head.begin());
+  header = std::bit_cast<NativeTaskOriginHeader>(head);
+  constexpr std::uint8_t kFlags = kNativeTaskOriginCut | kNativeTaskOriginTruncated;
+  if (header.version != kNativeTaskOriginVersion || header.count == 0 ||
+      header.count > kNativeTaskSegmentLimit || (header.flags & ~kFlags) != 0 ||
+      header.flags == kFlags || !native_request_stack_detail::AllZero(header.reserved) ||
+      ((header.flags & kNativeTaskOriginTruncated) != 0 &&
+       header.count != kNativeTaskSegmentLimit) ||
+      bytes.size() != kNativeTaskOriginHeaderSize + kNativeTaskSegmentSize * header.count) {
+    return false;
+  }
+  for (std::size_t i = 0; i < header.count; ++i) {
+    std::array<std::uint8_t, kNativeTaskSegmentSize> raw{};
+    std::copy_n(bytes.begin() + static_cast<std::ptrdiff_t>(kNativeTaskOriginHeaderSize +
+                                                            i * kNativeTaskSegmentSize),
+                raw.size(), raw.begin());
+    out[i] = std::bit_cast<NativeTaskSegment>(raw);
+    // A chain that ended with no script, or at an origin an earlier receiver
+    // rejected, travels on with that end last, neither cut nor truncated.
+    const bool ends =
+        out[i].state == static_cast<std::uint8_t>(NativeTaskSegmentState::kNoScript) ||
+        out[i].state == static_cast<std::uint8_t>(NativeTaskSegmentState::kOriginRejected);
+    if (!IsValidNativeTaskSegment(out[i], kNativeStackArtifactScopeVersion) ||
+        (ends && (i + 1 != header.count || header.flags != 0))) {
+      return false;
+    }
+  }
+  // The posting segment is this message's own post: walked, or no script.
+  const std::uint8_t posting = out[0].kind;
+  return posting >= static_cast<std::uint8_t>(NativeAsyncTaskKind::kMessagePort) &&
+         posting <= static_cast<std::uint8_t>(NativeAsyncTaskKind::kWorkerMessage) &&
+         out[0].state != static_cast<std::uint8_t>(NativeTaskSegmentState::kOriginRejected);
 }
 
 template <typename T>

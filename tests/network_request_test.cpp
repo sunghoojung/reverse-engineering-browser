@@ -766,6 +766,7 @@ void CheckCookies() {
     }
     value.frame = {1, 0, 0, 77, 1234, 0};
     value.flags = reb::kNativeScriptCookieFrameRecorded;
+    value.thread = 1;  // the document main thread
     return value;
   };
   const auto script_event = [](const reb::NativeScriptCookieSummary& value) {
@@ -803,6 +804,29 @@ void CheckCookies() {
   value.flags |= reb::kNativeScriptCookieTableFull;
   value.count = 1;
   add("script cookie read table full", script_event(value), true);
+  // Version 2 names the isolate: a service worker's cookieStore write names
+  // the worker by its context ID as frame_id.
+  value = script(reb::NativeScriptCookieApi::kCookieStoreSet);
+  value.thread = 4;  // a service worker
+  value.stack_digest.fill(0x22);
+  value.flags |= reb::kNativeScriptCookieStackRecorded;
+  event = script_event(value);
+  event.header.frame_id = 0x5157;
+  add("script cookie service worker", event, true);
+  event.header.frame_id = 0;
+  add("script cookie service worker without its context ID", event, false);
+  value = set;
+  value.thread = 0;
+  value.flags = 0;
+  value.frame = {};
+  add("script cookie thread not named", script_event(value), true);
+  // Version 1 records, written before the thread byte, read as the document's.
+  event = script_event(set);
+  event.inline_payload[0] = std::byte{1};
+  event.inline_payload[6] = std::byte{0};
+  add("script cookie version 1", event, true);
+  event.inline_payload[6] = std::byte{1};
+  add("script cookie version 1 thread byte", event, false);
   struct BadScript {
     const char* name;
     reb::NativeScriptCookieSummary base;
@@ -835,6 +859,8 @@ void CheckCookies() {
        [](auto& v) { v.flags |= reb::kNativeScriptCookieStackRecorded; }},
       {"table full write", set, [](auto& v) { v.flags |= reb::kNativeScriptCookieTableFull; }},
       {"unknown flag", set, [](auto& v) { v.flags |= 0x10; }},
+      {"thread five", set, [](auto& v) { v.thread = 5; }},
+      {"frame without thread", set, [](auto& v) { v.thread = 0; }},
   };
   for (const auto& item : bad_scripts) {
     value = item.base;
@@ -848,8 +874,8 @@ void CheckCookies() {
   event.header.parent_event_id = 3;
   add("script cookie with parent", event, false);
   event = script_event(set);
-  event.inline_payload[6] = std::byte{1};
-  add("script cookie reserved word", event, false);
+  event.inline_payload[7] = std::byte{1};
+  add("script cookie reserved byte", event, false);
 }
 
 std::string Frame(const reb::ArtifactHeader& header,

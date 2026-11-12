@@ -19,6 +19,8 @@ namespace reb {
 // Producer half of "Cookies" in protocol/native-network-v3.md. The core mirror
 // in include/reb/network_cookies.hpp decodes and validates the same bytes.
 inline constexpr std::uint16_t kNativeCookiePayloadVersion = 1;
+// script_cookie version 2 names the isolate of its frame and stack (byte 6).
+inline constexpr std::uint16_t kNativeScriptCookiePayloadVersion = 2;
 // 180 cookies per domain of 4 KiB name and value plus two 1 KiB attributes is
 // about 1.1 MiB; the rest leaves room for excluded and partitioned cookies.
 inline constexpr std::size_t kNativeCookieListLimitBytes = 2U * 1024U * 1024U;
@@ -85,6 +87,10 @@ struct NativeScriptCookieSummary final {
   std::array<std::uint8_t, 32> stack_digest{};
   std::array<std::uint8_t, 32> value_sha256{};
   std::array<std::uint8_t, kNativeScriptCookieNamePrefixBytes> name_prefix{};
+  // NativeStackThread of the calling isolate; 0 when the thread was never
+  // attached, and then no frame or stack is recorded. A worker's record
+  // names the worker's context ID as its frame_id, the stack scope's key.
+  std::uint8_t thread = 0;
 };
 
 // One cookie of a list; the strings are borrowed for the call.
@@ -180,10 +186,11 @@ EncodeNativeScriptCookiePayload(const NativeScriptCookieSummary& value) noexcept
     std::transform(in.begin(), in.end(), out.begin() + static_cast<std::ptrdiff_t>(offset),
                    [](const std::uint8_t byte) { return static_cast<std::byte>(byte); });
   };
-  Put(out, 0, kNativeCookiePayloadVersion, 2);
+  Put(out, 0, kNativeScriptCookiePayloadVersion, 2);
   Put(out, 2, kNativeRequestPayloadSize, 2);
   Put(out, 4, static_cast<std::uint8_t>(value.api), 1);
   Put(out, 5, value.flags, 1);
+  Put(out, 6, value.thread, 1);
   Put(out, 8, value.count, 4);
   Put(out, 12, value.name_length, 4);
   Put(out, 16, value.value_length, 4);

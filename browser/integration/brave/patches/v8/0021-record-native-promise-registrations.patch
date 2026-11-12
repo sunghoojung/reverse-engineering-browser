@@ -1,0 +1,403 @@
+diff --git a/include/v8-native-stack.h b/include/v8-native-stack.h
+index 9f29470..140f45e 100644
+--- a/include/v8-native-stack.h
++++ b/include/v8-native-stack.h
+@@ -118,6 +118,42 @@ struct NativeThrow {
+ // pause-on-exceptions does; walks the stack once.
+ V8_EXPORT NativeThrow DescribeNativeThrow(Isolate* isolate);
+ 
++// REB promise registrations. Inactive unless V8 runs with --reb-promise-stacks
++// (off by default). V8 tags each user .then, .catch, .finally and await with
++// the async task ID DevTools' async stacks use and reports it here as well as
++// to the inspector's delegate, which keeps its own slot. The debugger is never
++// activated. Every callback runs on the isolate thread and must not call into
++// JavaScript.
++enum class NativePromiseRegistration : uint8_t {
++  kThen = 1,
++  kCatch = 2,
++  kFinally = 3,
++  kAwait = 4,
++};
++
++struct NativePromiseCallbacks {
++  // Whether registrations are recorded now. Must not call into V8 or
++  // allocate; false skips the frame scan and the task ID.
++  bool (*active)() = nullptr;
++  // A registration: its stack is the current one, so CaptureNativeStack may
++  // be called. The ID is V8's 26-bit async task ID, which wraps.
++  void (*registered)(uint32_t task_id, NativePromiseRegistration kind) = nullptr;
++  // The reaction for an ID V8 assigned starts and finishes.
++  void (*will_handle)(uint32_t task_id) = nullptr;
++  void (*did_handle)(uint32_t task_id) = nullptr;
++};
++
++V8_EXPORT bool IsNativePromiseStackCaptureEnabled();
++
++// Installs callbacks that outlive the isolate. Installing invalidates the
++// isolate's promise-hook protector, as any promise hook does, and nothing
++// makes it intact again: null removes the callbacks and clears the
++// promise-hook bit they set, but the isolate keeps V8's slower promise path.
++// Installing does nothing when the flag is off or a callback is missing.
++// Isolate thread only.
++V8_EXPORT void SetNativePromiseCallbacks(Isolate* isolate,
++                                         const NativePromiseCallbacks* callbacks);
++
+ }  // namespace v8
+ 
+ #endif  // INCLUDE_V8_NATIVE_STACK_H_
+diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
+index faad5a4..e149294 100644
+--- a/src/codegen/code-stub-assembler.cc
++++ b/src/codegen/code-stub-assembler.cc
+@@ -19299,9 +19299,10 @@ TNode<BoolT> CodeStubAssembler::IsDebugActive() {
+ }
+ 
+ TNode<BoolT> CodeStubAssembler::HasAsyncEventDelegate() {
+-  const TNode<RawPtrT> async_event_delegate = Load<RawPtrT>(ExternalConstant(
+-      ExternalReference::async_event_delegate_address(isolate())));
+-  return WordNotEqual(async_event_delegate, IntPtrConstant(0));
++  // The bit the isolate sets for the inspector's delegate or the REB promise
++  // callbacks (include/v8-native-stack.h), so Promise#then reports to both.
++  return IsSetWord32<Isolate::PromiseHookFields::HasAsyncEventDelegate>(
++      PromiseHookFlags());
+ }
+ 
+ TNode<Uint32T> CodeStubAssembler::PromiseHookFlags() {
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index a296e08..4ed6100 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -7415,7 +7415,8 @@ void Isolate::PromiseHookStateUpdated() {
+   promise_hook_flags_ =
+       (promise_hook_flags_ & PromiseHookFields::HasContextPromiseHook::kMask) |
+       PromiseHookFields::HasIsolatePromiseHook::encode(promise_hook_) |
+-      PromiseHookFields::HasAsyncEventDelegate::encode(async_event_delegate_) |
++      PromiseHookFields::HasAsyncEventDelegate::encode(
++          async_event_delegate_ || reb_promise_callbacks_) |
+       PromiseHookFields::IsDebugActive::encode(debug()->is_active());
+ 
+   if (promise_hook_flags_ != 0) {
+@@ -7887,17 +7888,29 @@ void Isolate::OnAsyncFunctionSuspended(DirectHandle<JSPromise> promise,
+   DCHECK(!promise->has_async_task_id());
+   RunAllPromiseHooks(PromiseHookType::kInit, promise, parent);
+   if (HasAsyncEventDelegate()) {
+-    DCHECK_NE(nullptr, async_event_delegate_);
++    // REB promise registrations share the inspector's task ID.
++    const bool reb = reb_promise_callbacks_ && reb_promise_callbacks_->active();
++    if (!async_event_delegate_ && !reb) return;
+     current_async_task_id_ =
+         JSPromise::GetNextAsyncTaskId(current_async_task_id_);
+     promise->set_async_task_id(current_async_task_id_);
+-    async_event_delegate_->AsyncEventOccurred(debug::kDebugAwait,
+-                                              promise->async_task_id(), false);
++    if (async_event_delegate_) {
++      async_event_delegate_->AsyncEventOccurred(
++          debug::kDebugAwait, promise->async_task_id(), false);
++    }
++    if (reb) {
++      reb_promise_callbacks_->registered(
++          promise->async_task_id(), v8::NativePromiseRegistration::kAwait);
++    }
+   }
+ }
+ 
+ void Isolate::OnPromiseThen(DirectHandle<JSPromise> promise) {
+   if (!HasAsyncEventDelegate()) return;
++  // REB promise registrations need the same scan; it is skipped while they
++  // are inactive and no inspector listens.
++  const bool reb = reb_promise_callbacks_ && reb_promise_callbacks_->active();
++  if (!async_event_delegate_ && !reb) return;
+   Maybe<debug::DebugAsyncActionType> action_type =
+       Nothing<debug::DebugAsyncActionType>();
+   for (JavaScriptStackFrameIterator frame_it(this); !frame_it.done();
+@@ -7927,9 +7940,21 @@ void Isolate::OnPromiseThen(DirectHandle<JSPromise> promise) {
+         current_async_task_id_ =
+             JSPromise::GetNextAsyncTaskId(current_async_task_id_);
+         promise->set_async_task_id(current_async_task_id_);
+-        async_event_delegate_->AsyncEventOccurred(action_type.FromJust(),
+-                                                  promise->async_task_id(),
+-                                                  debug()->IsBlackboxed(info));
++        if (async_event_delegate_) {
++          async_event_delegate_->AsyncEventOccurred(
++              action_type.FromJust(), promise->async_task_id(),
++              debug()->IsBlackboxed(info));
++        }
++        if (reb) {
++          const debug::DebugAsyncActionType action = action_type.FromJust();
++          reb_promise_callbacks_->registered(
++              promise->async_task_id(),
++              action == debug::kDebugPromiseCatch
++                  ? v8::NativePromiseRegistration::kCatch
++              : action == debug::kDebugPromiseFinally
++                  ? v8::NativePromiseRegistration::kFinally
++                  : v8::NativePromiseRegistration::kThen);
++        }
+       }
+       return;
+     }
+@@ -7941,8 +7966,13 @@ void Isolate::OnPromiseBefore(DirectHandle<JSPromise> promise) {
+                  factory()->undefined_value());
+   if (HasAsyncEventDelegate()) {
+     if (promise->has_async_task_id()) {
+-      async_event_delegate_->AsyncEventOccurred(
+-          debug::kDebugWillHandle, promise->async_task_id(), false);
++      if (async_event_delegate_) {
++        async_event_delegate_->AsyncEventOccurred(
++            debug::kDebugWillHandle, promise->async_task_id(), false);
++      }
++      if (reb_promise_callbacks_) {
++        reb_promise_callbacks_->will_handle(promise->async_task_id());
++      }
+     }
+   }
+ }
+@@ -7952,14 +7982,19 @@ void Isolate::OnPromiseAfter(DirectHandle<JSPromise> promise) {
+                  factory()->undefined_value());
+   if (HasAsyncEventDelegate()) {
+     if (promise->has_async_task_id()) {
+-      async_event_delegate_->AsyncEventOccurred(
+-          debug::kDebugDidHandle, promise->async_task_id(), false);
++      if (async_event_delegate_) {
++        async_event_delegate_->AsyncEventOccurred(
++            debug::kDebugDidHandle, promise->async_task_id(), false);
++      }
++      if (reb_promise_callbacks_) {
++        reb_promise_callbacks_->did_handle(promise->async_task_id());
++      }
+     }
+   }
+ }
+ 
+ void Isolate::OnStackTraceCaptured(DirectHandle<StackTraceInfo> stack_trace) {
+-  if (HasAsyncEventDelegate()) {
++  if (HasAsyncEventDelegate() && async_event_delegate_) {
+     async_event_delegate_->AsyncEventOccurred(debug::kDebugStackTraceCaptured,
+                                               stack_trace->id(), false);
+   }
+@@ -8823,6 +8858,29 @@ bool CaptureNativeStack(Isolate* isolate, NativeStackCapture& capture,
+                         callbacks);
+ }
+ 
++bool IsNativePromiseStackCaptureEnabled() {
++  return internal::v8_flags.reb_promise_stacks;
++}
++
++void SetNativePromiseCallbacks(Isolate* isolate,
++                               const NativePromiseCallbacks* callbacks) {
++  if (!isolate) {
++    return;
++  }
++  internal::Isolate* const i_isolate =
++      reinterpret_cast<internal::Isolate*>(isolate);
++  if (!callbacks) {
++    i_isolate->set_reb_promise_callbacks(nullptr);
++    return;
++  }
++  if (!internal::v8_flags.reb_promise_stacks || !callbacks->active ||
++      !callbacks->registered || !callbacks->will_handle ||
++      !callbacks->did_handle) {
++    return;
++  }
++  i_isolate->set_reb_promise_callbacks(callbacks);
++}
++
+ void SetNativeThrowObserver(Isolate* isolate, NativeThrowObserver observer) {
+   if (isolate) {
+     reinterpret_cast<internal::Isolate*>(isolate)->set_native_throw_observer(
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index 8d7f1c7..760ec19 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -90,6 +90,7 @@ class V8Inspector;
+ namespace v8 {
+ 
+ class EmbedderState;
++struct NativePromiseCallbacks;
+ 
+ namespace base {
+ class RandomNumberGenerator;
+@@ -1090,6 +1091,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+     async_event_delegate_ = delegate;
+     PromiseHookStateUpdated();
+   }
++  // REB promise registrations (include/v8-native-stack.h). Shares the
++  // HasAsyncEventDelegate bit, so builtins call the same runtime points.
++  void set_reb_promise_callbacks(const v8::NativePromiseCallbacks* callbacks) {
++    reb_promise_callbacks_ = callbacks;
++    PromiseHookStateUpdated();
++  }
+ 
+   // Async function and promise instrumentation support.
+   void OnAsyncFunctionSuspended(DirectHandle<JSPromise> promise,
+@@ -2996,6 +3003,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+   debug::ConsoleDelegate* console_delegate_ = nullptr;
+ 
+   debug::AsyncEventDelegate* async_event_delegate_ = nullptr;
++  const v8::NativePromiseCallbacks* reb_promise_callbacks_ = nullptr;
+   uint32_t promise_hook_flags_ = 0;
+   uint32_t current_async_task_id_ = 0;
+ 
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index 3c5816f..076472a 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -3445,6 +3445,9 @@ DEFINE_BOOL(async_stack_traces, true,
+             "include async stack traces in Error.stack")
+ DEFINE_BOOL(reb_request_stacks, false,
+             "let the embedder record request initiator stack identities")
++DEFINE_BOOL(reb_promise_stacks, false,
++            "let the embedder record the stacks that register promise "
++            "reactions")
+ DEFINE_BOOL(stack_trace_on_illegal, false,
+             "print stack trace when an illegal exception is thrown")
+ DEFINE_BOOL(abort_on_uncaught_exception, false,
+diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
+index 207e899..655a7b6 100644
+--- a/test/cctest/test-api.cc
++++ b/test/cctest/test-api.cc
+@@ -59,6 +59,7 @@
+ #include "include/v8-initialization.h"
+ #include "include/v8-json.h"
+ #include "include/v8-locker.h"
++#include "include/v8-native-stack.h"
+ #include "include/v8-primitive-object.h"
+ #include "include/v8-regexp.h"
+ #include "include/v8-util.h"
+@@ -33381,3 +33382,137 @@ TEST(RebNativeCompiledScriptDisabledRunsNothing) {
+   CompileRun("eval('8 + 8');");
+   CHECK(reb_compiled_scripts.empty());
+ }
++
++namespace {
++
++// REB promise registrations (include/v8-native-stack.h): what V8 reported.
++struct RebPromiseLog {
++  bool active = true;
++  int active_checks = 0;
++  std::vector<std::pair<uint32_t, v8::NativePromiseRegistration>> registered;
++  std::vector<uint32_t> started;
++  std::vector<uint32_t> finished;
++};
++RebPromiseLog* reb_promise_log = nullptr;
++
++// The isolate's promise-hook bit for async event delegates, which both the
++// inspector's delegate and the REB callbacks set.
++bool RebPromiseHookBit(i::Isolate* isolate) {
++  return i::Isolate::PromiseHookFields::HasAsyncEventDelegate::decode(
++      *reinterpret_cast<uint32_t*>(isolate->promise_hook_flags_address()));
++}
++
++// The callbacks outlive a test's log, so each one checks it is still there.
++bool RebPromiseActive() {
++  if (!reb_promise_log) return false;
++  ++reb_promise_log->active_checks;
++  return reb_promise_log->active;
++}
++void RebPromiseRegistered(uint32_t task_id,
++                          v8::NativePromiseRegistration kind) {
++  if (reb_promise_log) reb_promise_log->registered.emplace_back(task_id, kind);
++}
++void RebPromiseStarted(uint32_t task_id) {
++  if (reb_promise_log) reb_promise_log->started.push_back(task_id);
++}
++void RebPromiseFinished(uint32_t task_id) {
++  if (reb_promise_log) reb_promise_log->finished.push_back(task_id);
++}
++constexpr v8::NativePromiseCallbacks kRebPromiseCallbacks{
++    &RebPromiseActive, &RebPromiseRegistered, &RebPromiseStarted,
++    &RebPromiseFinished};
++
++}  // namespace
++
++TEST(RebNativePromiseRegistrations) {
++  i::FlagScope<bool> promise_stacks(&i::v8_flags.reb_promise_stacks, true);
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  i::Isolate* const i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  const bool hook_before = RebPromiseHookBit(i_isolate);
++  RebPromiseLog log;
++  reb_promise_log = &log;
++  v8::SetNativePromiseCallbacks(isolate, &kRebPromiseCallbacks);
++  CHECK(RebPromiseHookBit(i_isolate));
++  // One registration per user call, in call order; builtins that call then
++  // internally (catch, finally) report as themselves.
++  CompileRun(
++      "var p = Promise.resolve(1);"
++      "p.then(() => {}); p.catch(() => {}); p.finally(() => {});"
++      "async function f() { await 0; } f();");
++  isolate->PerformMicrotaskCheckpoint();
++  CHECK_EQ(4u, log.registered.size());
++  CHECK(log.registered[0].second == v8::NativePromiseRegistration::kThen);
++  CHECK(log.registered[1].second == v8::NativePromiseRegistration::kCatch);
++  CHECK(log.registered[2].second == v8::NativePromiseRegistration::kFinally);
++  CHECK(log.registered[3].second == v8::NativePromiseRegistration::kAwait);
++  std::vector<uint32_t> ids;
++  for (const auto& [id, kind] : log.registered) {
++    CHECK_NE(0u, id);
++    ids.push_back(id);
++  }
++  // Each registered reaction runs between started and finished with its ID.
++  // finally's derived promise also runs a resolve-thenable job under its ID,
++  // so IDs are compared as a set.
++  std::vector<uint32_t> started = log.started;
++  std::sort(ids.begin(), ids.end());
++  std::sort(started.begin(), started.end());
++  started.erase(std::unique(started.begin(), started.end()), started.end());
++  CHECK(std::adjacent_find(ids.begin(), ids.end()) == ids.end());
++  const auto text = [](const std::vector<uint32_t>& values) {
++    std::string out;
++    for (uint32_t value : values) out += std::to_string(value) + " ";
++    return out;
++  };
++  CHECK_WITH_MSG(ids == started,
++                 ("registered " + text(ids) + "started " + text(started) +
++                  "finished " + text(log.finished))
++                     .c_str());
++  CHECK(log.started == log.finished);
++
++  // Inactive: no frame scan, no ID, so no reaction is reported either.
++  log = {};
++  log.active = false;
++  CompileRun("Promise.resolve(2).then(() => {}); (async () => { await 0; })();");
++  isolate->PerformMicrotaskCheckpoint();
++  CHECK_LT(0, log.active_checks);
++  CHECK(log.registered.empty());
++  CHECK(log.started.empty());
++
++  // Null removes the callbacks: the promise-hook bit is as it was and nothing
++  // is reported, but the protector installing invalidated stays invalid.
++  v8::SetNativePromiseCallbacks(isolate, nullptr);
++  CHECK_EQ(hook_before, RebPromiseHookBit(i_isolate));
++  CHECK(!i::Protectors::IsPromiseHookIntact(i_isolate));
++  log = {};
++  CompileRun("Promise.resolve(4).then(() => {}); (async () => { await 0; })();");
++  isolate->PerformMicrotaskCheckpoint();
++  CHECK_EQ(0, log.active_checks);
++  CHECK(log.registered.empty());
++  CHECK(log.started.empty());
++  reb_promise_log = nullptr;
++}
++
++TEST(RebNativePromiseRegistrationsNeedTheFlag) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebPromiseLog log;
++  reb_promise_log = &log;
++  CHECK(!v8::IsNativePromiseStackCaptureEnabled());
++  i::Isolate* const i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  const bool hook_before = RebPromiseHookBit(i_isolate);
++  // Without --reb-promise-stacks the callbacks are not installed, and the
++  // isolate's promise hook state is unchanged.
++  v8::SetNativePromiseCallbacks(isolate, &kRebPromiseCallbacks);
++  CHECK_EQ(hook_before, RebPromiseHookBit(i_isolate));
++  CompileRun("Promise.resolve(3).then(() => {});");
++  isolate->PerformMicrotaskCheckpoint();
++  CHECK_EQ(0, log.active_checks);
++  CHECK(log.registered.empty());
++  // Removing what was never installed is harmless.
++  v8::SetNativePromiseCallbacks(isolate, nullptr);
++  CHECK_EQ(hook_before, RebPromiseHookBit(i_isolate));
++  reb_promise_log = nullptr;
++}

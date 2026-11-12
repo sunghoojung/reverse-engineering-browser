@@ -1,0 +1,339 @@
+diff --git a/third_party/blink/common/messaging/cloneable_message.cc b/third_party/blink/common/messaging/cloneable_message.cc
+index cbdfff6..b5b933c 100644
+--- a/third_party/blink/common/messaging/cloneable_message.cc
++++ b/third_party/blink/common/messaging/cloneable_message.cc
+@@ -68,6 +68,13 @@ CloneableMessage CloneableMessage::ShallowClone() const {
+     token = source_token.Unbind();
+   }
+   clone.sender_agent_cluster_id = sender_agent_cluster_id;
++  // BroadcastChannel fans out through ShallowClone; keep the REB task origin
++  // within its bound (cloneable_message.h).
++  if (reb_task_origin.size() > kRebTaskOriginMaxBytes) {
++    clone.reb_task_origin.assign(1, kRebTaskOriginOversize);
++  } else {
++    clone.reb_task_origin = reb_task_origin;
++  }
+   return clone;
+ }
+ 
+diff --git a/third_party/blink/common/messaging/cloneable_message_mojom_traits.cc b/third_party/blink/common/messaging/cloneable_message_mojom_traits.cc
+index 22497fa..466398e 100644
+--- a/third_party/blink/common/messaging/cloneable_message_mojom_traits.cc
++++ b/third_party/blink/common/messaging/cloneable_message_mojom_traits.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "base/containers/span.h"
+ #include "mojo/public/cpp/base/big_buffer_mojom_traits.h"
++#include "mojo/public/cpp/bindings/array_data_view.h"
+ 
+ namespace mojo {
+ 
+@@ -27,6 +28,17 @@ bool StructTraits<blink::mojom::CloneableMessage::DataView,
+       !data.ReadFileSystemAccessTokens(&out->file_system_access_tokens)) {
+     return false;
+   }
++  // The browser relays BroadcastChannel messages through these traits. A REB
++  // task origin longer than any valid one is not read; see
++  // cloneable_message.h.
++  mojo::ArrayDataView<uint8_t> reb_task_origin;
++  data.GetRebTaskOriginDataView(&reb_task_origin);
++  if (!reb_task_origin.is_null() &&
++      reb_task_origin.size() > blink::kRebTaskOriginMaxBytes) {
++    out->reb_task_origin.assign(1, blink::kRebTaskOriginOversize);
++  } else if (!data.ReadRebTaskOrigin(&out->reb_task_origin)) {
++    return false;
++  }
+ 
+   auto message_bytes = message_view.data();
+   out->owned_encoded_message = {message_bytes.begin(), message_bytes.end()};
+diff --git a/third_party/blink/public/common/messaging/cloneable_message.h b/third_party/blink/public/common/messaging/cloneable_message.h
+index 846be2c..3809571 100644
+--- a/third_party/blink/public/common/messaging/cloneable_message.h
++++ b/third_party/blink/public/common/messaging/cloneable_message.h
+@@ -19,6 +19,13 @@
+ 
+ namespace blink {
+ 
++// The REB task origin (reb_task_origin below; protocol/native-network-v3.md)
++// is at most this long. The Mojo traits and ShallowClone replace a longer
++// one, without reading it, with the single byte kRebTaskOriginOversize,
++// which never validates, so the receiving renderer records it as rejected.
++inline constexpr size_t kRebTaskOriginMaxBytes = 1544;
++inline constexpr uint8_t kRebTaskOriginOversize = 0;
++
+ // This struct represents messages as they are posted over a broadcast channel.
+ // This type can be serialized as a blink::mojom::CloneableMessage struct.
+ struct BLINK_COMMON_EXPORT CloneableMessage {
+@@ -69,6 +76,10 @@ struct BLINK_COMMON_EXPORT CloneableMessage {
+   int64_t stack_trace_debugger_id_second = 0;
+   bool stack_trace_should_pause = false;
+ 
++  // REB task origin of the posting stack, relayed unread; see
++  // protocol/native-network-v3.md.
++  std::vector<uint8_t> reb_task_origin;
++
+   // The sender's agent cluster ID.
+   // See
+   // https://html.spec.whatwg.org/multipage/webappapis.html#integration-with-the-javascript-agent-cluster-formalism
+diff --git a/third_party/blink/public/common/messaging/cloneable_message_mojom_traits.h b/third_party/blink/public/common/messaging/cloneable_message_mojom_traits.h
+index 2d2c19c..e196cde 100644
+--- a/third_party/blink/public/common/messaging/cloneable_message_mojom_traits.h
++++ b/third_party/blink/public/common/messaging/cloneable_message_mojom_traits.h
+@@ -50,6 +50,11 @@ struct BLINK_COMMON_EXPORT
+     return input.stack_trace_should_pause;
+   }
+ 
++  static const std::vector<uint8_t>& reb_task_origin(
++      const blink::CloneableMessage& input) {
++    return input.reb_task_origin;
++  }
++
+   static const base::UnguessableToken& sender_agent_cluster_id(
+       const blink::CloneableMessage& input) {
+     return input.sender_agent_cluster_id;
+diff --git a/third_party/blink/public/mojom/messaging/cloneable_message.mojom b/third_party/blink/public/mojom/messaging/cloneable_message.mojom
+index 68b13e2..476c017 100644
+--- a/third_party/blink/public/mojom/messaging/cloneable_message.mojom
++++ b/third_party/blink/public/mojom/messaging/cloneable_message.mojom
+@@ -44,4 +44,8 @@ struct CloneableMessage {
+   // Tokens required to clone FileSystemFileHandles and/or
+   // FileSystemDirectoryHandles.
+   array<pending_remote<FileSystemAccessTransferToken>> file_system_access_tokens;
++  // REB task origin of the posting stack, empty unless request stacks are
++  // recorded; see protocol/native-network-v3.md. Untrusted; the receiving
++  // renderer validates it.
++  array<uint8> reb_task_origin;
+ };
+diff --git a/third_party/blink/renderer/core/messaging/blink_cloneable_message.h b/third_party/blink/renderer/core/messaging/blink_cloneable_message.h
+index 1c23cd1..5f4b22e 100644
+--- a/third_party/blink/renderer/core/messaging/blink_cloneable_message.h
++++ b/third_party/blink/renderer/core/messaging/blink_cloneable_message.h
+@@ -11,6 +11,7 @@
+ #include "third_party/blink/renderer/bindings/core/v8/serialization/serialized_script_value.h"
+ #include "third_party/blink/renderer/core/core_export.h"
+ #include "third_party/blink/renderer/platform/weborigin/security_origin.h"
++#include "third_party/blink/renderer/platform/wtf/vector.h"
+ #include "v8/include/v8-inspector.h"
+ 
+ namespace blink {
+@@ -31,6 +32,10 @@ struct CORE_EXPORT BlinkCloneableMessage {
+   base::UnguessableToken sender_agent_cluster_id;
+   bool locked_to_sender_agent_cluster = false;
+   uint64_t trace_id;
++  // REB task origin of the posting stack; see protocol/native-network-v3.md.
++  // Moves carry it through cross-thread handoff; Mojo carries it to other
++  // renderers. Untrusted input on receipt.
++  Vector<uint8_t> reb_task_origin;
+ };
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/messaging/blink_cloneable_message_mojom_traits.cc b/third_party/blink/renderer/core/messaging/blink_cloneable_message_mojom_traits.cc
+index 0d9ebba..6e41ef0 100644
+--- a/third_party/blink/renderer/core/messaging/blink_cloneable_message_mojom_traits.cc
++++ b/third_party/blink/renderer/core/messaging/blink_cloneable_message_mojom_traits.cc
+@@ -5,6 +5,8 @@
+ #include "third_party/blink/renderer/core/messaging/blink_cloneable_message_mojom_traits.h"
+ 
+ #include "mojo/public/cpp/base/big_buffer_mojom_traits.h"
++#include "mojo/public/cpp/bindings/array_data_view.h"
++#include "third_party/blink/public/common/messaging/cloneable_message.h"
+ #include "third_party/blink/public/mojom/messaging/cloneable_message.mojom-blink.h"
+ #include "third_party/blink/renderer/platform/blob/blob_data.h"
+ 
+@@ -56,7 +58,17 @@ bool StructTraits<blink::mojom::blink::CloneableMessage::DataView,
+   if (!data.ReadFileSystemAccessTokens(&tokens)) {
+     return false;
+   }
+-  return true;
++  // A REB task origin longer than any valid one is not read; see
++  // third_party/blink/public/common/messaging/cloneable_message.h.
++  mojo::ArrayDataView<uint8_t> reb_task_origin;
++  data.GetRebTaskOriginDataView(&reb_task_origin);
++  if (!reb_task_origin.is_null() &&
++      reb_task_origin.size() > blink::kRebTaskOriginMaxBytes) {
++    out->reb_task_origin.clear();
++    out->reb_task_origin.push_back(blink::kRebTaskOriginOversize);
++    return true;
++  }
++  return data.ReadRebTaskOrigin(&out->reb_task_origin);
+ }
+ 
+ }  // namespace mojo
+diff --git a/third_party/blink/renderer/core/messaging/blink_cloneable_message_mojom_traits.h b/third_party/blink/renderer/core/messaging/blink_cloneable_message_mojom_traits.h
+index b3596b3..adfb8b7 100644
+--- a/third_party/blink/renderer/core/messaging/blink_cloneable_message_mojom_traits.h
++++ b/third_party/blink/renderer/core/messaging/blink_cloneable_message_mojom_traits.h
+@@ -55,6 +55,11 @@ struct CORE_EXPORT StructTraits<blink::mojom::CloneableMessageDataView,
+     return input.sender_stack_trace_id.should_pause;
+   }
+ 
++  static const blink::Vector<uint8_t>& reb_task_origin(
++      const blink::BlinkCloneableMessage& input) {
++    return input.reb_task_origin;
++  }
++
+   static const base::UnguessableToken& sender_agent_cluster_id(
+       const blink::BlinkCloneableMessage& input) {
+     return input.sender_agent_cluster_id;
+diff --git a/third_party/blink/renderer/core/messaging/message_port.cc b/third_party/blink/renderer/core/messaging/message_port.cc
+index c9fd4c6..ddc6d37 100644
+--- a/third_party/blink/renderer/core/messaging/message_port.cc
++++ b/third_party/blink/renderer/core/messaging/message_port.cc
+@@ -25,6 +25,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/messaging/message_port.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack_blink.h"
+ 
+ #include <memory>
+ #include <optional>
+@@ -141,6 +142,8 @@ void MessagePort::postMessage(ScriptState* script_state,
+   ThreadDebugger* debugger = ThreadDebugger::From(script_state->GetIsolate());
+   if (debugger)
+     msg.sender_stack_trace_id = debugger->StoreCurrentStackTrace("postMessage");
++  msg.reb_task_origin = reb::request_stack_blink::PostMessageOrigin(
++      GetExecutionContext(), reb::NativeAsyncTaskKind::kMessagePort);
+ 
+   msg.sender_agent_cluster_id = GetExecutionContext()->GetAgentClusterID();
+   msg.locked_to_sender_agent_cluster = msg.message->IsLockedToAgentCluster();
+@@ -419,6 +422,9 @@ void MessagePort::DispatchMessageEvent(BlinkTransferableMessage message) {
+   ThreadDebugger* debugger = ThreadDebugger::From(isolate);
+   if (debugger)
+     debugger->ExternalAsyncTaskStarted(message.sender_stack_trace_id);
++  const reb::request_stack_blink::MessageTaskScope reb_task(
++      reb::NativeAsyncTaskKind::kMessagePort,
++      base::span(message.reb_task_origin));
+   DispatchEvent(*evt);
+   if (debugger)
+     debugger->ExternalAsyncTaskFinished(message.sender_stack_trace_id);
+diff --git a/third_party/blink/renderer/core/workers/dedicated_worker.cc b/third_party/blink/renderer/core/workers/dedicated_worker.cc
+index 16efe7c..ffa3b61 100644
+--- a/third_party/blink/renderer/core/workers/dedicated_worker.cc
++++ b/third_party/blink/renderer/core/workers/dedicated_worker.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "third_party/blink/renderer/core/workers/dedicated_worker.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_worker_observation_blink.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack_blink.h"
+ 
+ #include <optional>
+ #include <utility>
+@@ -202,6 +203,9 @@ void DedicatedWorker::postMessage(ScriptState* script_state,
+   transferable_message.sender_stack_trace_id =
+       ThreadDebugger::From(script_state->GetIsolate())
+           ->StoreCurrentStackTrace("Worker.postMessage");
++  transferable_message.reb_task_origin =
++      reb::request_stack_blink::PostMessageOrigin(
++          GetExecutionContext(), reb::NativeAsyncTaskKind::kWorkerMessage);
+   uint64_t trace_id = base::trace_event::GetNextGlobalTraceId();
+   transferable_message.trace_id = trace_id;
+   reb::worker_observation::ObserveCreator(
+diff --git a/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc b/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc
+index 5bd7010..91ce6f3 100644
+--- a/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc
++++ b/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc
+@@ -30,6 +30,7 @@
+ 
+ #include "third_party/blink/renderer/core/workers/dedicated_worker_global_scope.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_worker_observation_blink.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack_blink.h"
+ 
+ #include <memory>
+ 
+@@ -457,6 +458,9 @@ void DedicatedWorkerGlobalScope::postMessage(ScriptState* script_state,
+       WorkerThreadDebugger::From(script_state->GetIsolate());
+   transferable_message.sender_stack_trace_id =
+       debugger->StoreCurrentStackTrace("postMessage");
++  transferable_message.reb_task_origin =
++      reb::request_stack_blink::PostMessageOrigin(
++          this, reb::NativeAsyncTaskKind::kWorkerMessage);
+   WorkerObjectProxy().PostMessageToWorkerObject(
+       std::move(transferable_message));
+ 
+diff --git a/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc b/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc
+index 0dbb3e7..45ef484 100644
+--- a/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc
++++ b/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_worker_observation_blink.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack_blink.h"
+ 
+ #include <memory>
+ 
+@@ -303,6 +304,9 @@ void DedicatedWorkerMessagingProxy::PostMessageToWorkerObject(
+   GCedMessagePortArray* ports = MessagePort::EntanglePorts(
+       *GetExecutionContext(), std::move(message.ports));
+   debugger->ExternalAsyncTaskStarted(message.sender_stack_trace_id);
++  const reb::request_stack_blink::MessageTaskScope reb_task(
++      reb::NativeAsyncTaskKind::kWorkerMessage,
++      base::span(message.reb_task_origin));
+   if (message.message->CanDeserializeIn(GetExecutionContext())) {
+     MessageEvent* event = MessageEvent::Create(
+         ports, std::move(message.message), /* origin=*/nullptr,
+diff --git a/third_party/blink/renderer/core/workers/worker_global_scope.cc b/third_party/blink/renderer/core/workers/worker_global_scope.cc
+index 39f0459..348c8a6 100644
+--- a/third_party/blink/renderer/core/workers/worker_global_scope.cc
++++ b/third_party/blink/renderer/core/workers/worker_global_scope.cc
+@@ -27,6 +27,7 @@
+ 
+ #include "third_party/blink/renderer/core/workers/worker_global_scope.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_worker_observation_blink.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack_blink.h"
+ 
+ #include "base/memory/scoped_refptr.h"
+ #include "base/metrics/histogram_functions.h"
+@@ -632,6 +633,9 @@ void WorkerGlobalScope::ReceiveMessage(BlinkTransferableMessage message) {
+   if (debugger) {
+     debugger->ExternalAsyncTaskStarted(message.sender_stack_trace_id);
+   }
++  const reb::request_stack_blink::MessageTaskScope reb_task(
++      reb::NativeAsyncTaskKind::kWorkerMessage,
++      base::span(message.reb_task_origin));
+   if (message.message->CanDeserializeIn(this)) {
+     UserActivation* user_activation = nullptr;
+     if (message.user_activation) {
+diff --git a/third_party/blink/renderer/modules/broadcastchannel/BUILD.gn b/third_party/blink/renderer/modules/broadcastchannel/BUILD.gn
+index d121495..b75ca6c 100644
+--- a/third_party/blink/renderer/modules/broadcastchannel/BUILD.gn
++++ b/third_party/blink/renderer/modules/broadcastchannel/BUILD.gn
+@@ -9,4 +9,6 @@ blink_modules_sources("broadcastchannel") {
+     "broadcast_channel.cc",
+     "broadcast_channel.h",
+   ]
++
++  deps = [ "//brave/components/reverse_engineering_browser:renderer_sink" ]
+ }
+diff --git a/third_party/blink/renderer/modules/broadcastchannel/broadcast_channel.cc b/third_party/blink/renderer/modules/broadcastchannel/broadcast_channel.cc
+index 2df3154..df275a1 100644
+--- a/third_party/blink/renderer/modules/broadcastchannel/broadcast_channel.cc
++++ b/third_party/blink/renderer/modules/broadcastchannel/broadcast_channel.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/modules/broadcastchannel/broadcast_channel.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_request_stack_blink.h"
+ 
+ #include "base/metrics/histogram_functions.h"
+ #include "base/notreached.h"
+@@ -136,6 +137,9 @@ void BroadcastChannel::PostMessageInternal(
+   msg.sender_origin = std::move(sender_origin);
+   msg.sender_agent_cluster_id = sender_agent_cluster_id;
+   msg.locked_to_sender_agent_cluster = msg.message->IsLockedToAgentCluster();
++  // A post deferred until prerender activation runs with no script.
++  msg.reb_task_origin = reb::request_stack_blink::PostMessageOrigin(
++      GetExecutionContext(), reb::NativeAsyncTaskKind::kBroadcastChannel);
+   remote_client_->OnMessage(std::move(msg));
+ }
+ 
+@@ -213,6 +217,9 @@ void BroadcastChannel::OnMessage(BlinkCloneableMessage message) {
+   // must be associated with the responsible document specified by that
+   // target BroadcastChannel object's BroadcastChannel settings object.
+   // </spec>
++  const reb::request_stack_blink::MessageTaskScope reb_task(
++      reb::NativeAsyncTaskKind::kBroadcastChannel,
++      base::span(message.reb_task_origin));
+   DispatchEvent(*event);
+ }
+ 

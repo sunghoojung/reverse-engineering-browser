@@ -243,18 +243,39 @@ def valid_stack_frame(frame: bytes, is_async: bool) -> bool:
     return False
 
 
-def valid_stack_child(event: dict, payload: bytes) -> bool:
+def valid_stack_scope(scope: bytes) -> bool:
+    """16-byte stack scope: thread kind 1-4, zero reserved, key zero only for 1."""
+    thread, key = scope[0], int.from_bytes(scope[8:16], "little")
+    return (not any(scope[1:8])
+            and (key == 0 if thread == 1 else 2 <= thread <= 4 and key != 0))
+
+
+def scoped_tail(tail: bytes, version: int, scoped_version: int) -> bool:
+    """A record tail: the scope then zero from scoped_version on, else all zero."""
+    if version != scoped_version:
+        return not any(tail)
+    return valid_stack_scope(tail[:16]) and not any(tail[16:])
+
+
+def valid_stack_child(event: dict, payload: bytes, versions: tuple = (1,)) -> bool:
     """Envelope of request_initiator_stack and script_identity (native-network-v3.md)."""
-    return (valid_request_child(event, payload) and event["artifact_id"] == "0"
+    return (valid_request_child(event, payload, versions) and event["artifact_id"] == "0"
             and event["initiator_request_id"] == 0 and event["initiator_process_id"] == 0
             and payload[6:8] == b"\0\0")
 
 
 def valid_request_stack(event: dict, payload: bytes) -> bool:
-    """Version 2 adds the task chain count at bytes 6-7."""
-    if (not valid_request_child(event, payload, (1, 2)) or event["artifact_id"] != "0"
+    """Version 2 adds the task chain count at bytes 6-7, version 3 the scope at 80."""
+    if (not valid_request_child(event, payload, (1, 2, 3)) or event["artifact_id"] != "0"
             or event["initiator_request_id"] != 0 or event["initiator_process_id"] != 0
-            or event["request_id"] == "0" or any(payload[80:])):
+            or event["request_id"] == "0"):
+        return False
+    if payload[0] == 3:
+        scope_ok = (not any(payload[80:96]) if payload[4] == 3
+                    else valid_stack_scope(payload[80:96]))
+        if not scope_ok or any(payload[96:]):
+            return False
+    elif any(payload[80:]):
         return False
     return valid_stack_summary(payload)
 
@@ -280,12 +301,19 @@ def valid_navigation_stack(event: dict, payload: bytes) -> bool:
 
 
 def valid_async_task_stack(event: dict, payload: bytes) -> bool:
-    kind, flags = payload[4], payload[5]
+    """Version 2 adds message kinds 10-12, promise registrations (kind 9) and the scope."""
+    version, kind, flags, registration = payload[0], payload[4], payload[5], payload[6]
     recorded, wasm, scripts = (int.from_bytes(payload[i:i + 4], "little") for i in (8, 12, 16))
-    return (parentless_stack_envelope(event, payload) and payload[:4] == b"\x01\x00\x80\x00"
-            and 1 <= kind <= 8 and flags & ~1 == 0 and payload[6:8] == b"\0\0"
-            and not any(payload[20:32]) and not any(payload[80:]) and 1 <= recorded <= 256
-            and (not flags & 1 or recorded == 256) and wasm <= recorded and scripts <= recorded
+    scoped = version == 2
+    if kind == 9:
+        kinds_ok, limit = scoped and 1 <= registration <= 4, 32
+    else:
+        kinds_ok, limit = registration == 0 and 1 <= kind <= (12 if scoped else 8), 256
+    return (parentless_stack_envelope(event, payload) and version in (1, 2)
+            and payload[1:4] == b"\x00\x80\x00" and kinds_ok and flags & ~1 == 0
+            and payload[7] == 0 and not any(payload[20:32]) and scoped_tail(payload[80:], version, 2)
+            and 1 <= recorded <= limit and (not flags & 1 or recorded == limit)
+            and wasm <= recorded and scripts <= recorded
             and any(payload[32:64]) and valid_stack_frame(payload[64:80], False))
 
 
@@ -354,7 +382,7 @@ def valid_observation(event: dict, payload: bytes) -> bool:
 
 def valid_stack_summary(payload: bytes) -> bool:
     """Bytes 0-79 shared by request, navigation and debugger observation stacks."""
-    tasks = payload[0] == 2
+    tasks = payload[0] in (2, 3)
     task_segments = int.from_bytes(payload[6:8], "little")
     state, flags = payload[4], payload[5]
     total, recorded, omitted = (int.from_bytes(payload[i:i + 4], "little") for i in (8, 12, 16))
@@ -364,7 +392,9 @@ def valid_stack_summary(payload: bytes) -> bool:
     digest, innermost = payload[32:64], payload[64:80]
     if flags & ~(0x1F if tasks else 0x0F) or (not tasks and task_segments):
         return False
-    if state in (2, 3):
+    # Version 3 adds not_walked_thread_limit (6): a worker past the renderer's
+    # stack table limit, nothing walked.
+    if state in (2, 3) or (state == 6 and payload[0] == 3):
         return (flags & ~(0 if tasks else 0x08) == 0 and task_segments == 0
                 and not any(payload[8:80]))
     if state not in (1, 4, 5):
@@ -380,7 +410,9 @@ def valid_stack_summary(payload: bytes) -> bool:
 
 
 def valid_script_identity(event: dict, payload: bytes) -> bool:
-    if not valid_stack_child(event, payload) or event["request_id"] != "0" or any(payload[72:]):
+    """Version 2 adds the scope at byte 72."""
+    if (not valid_stack_child(event, payload, (1, 2)) or event["request_id"] != "0"
+            or not scoped_tail(payload[72:], payload[0], 2)):
         return False
     kind, flags = payload[4], payload[5]
     script_id = int.from_bytes(payload[8:12], "little")
@@ -583,7 +615,7 @@ def valid_script_cookie(event: dict, payload: bytes) -> bool:
     """The native-network-v3.md script_cookie renderer record."""
     if not (event["protocol_version"] == 3 and event["category"] == "network"
             and event["flags"] == 0 and not event["payload_truncated"] and len(payload) == 128
-            and payload[:4] == bytes((1, 0, 128, 0))
+            and payload[0] in (1, 2) and payload[1:4] == bytes((0, 128, 0))
             and event["session_id"] != "0" and event["sequence_number"] != "0"
             and 1 <= event["process_id"] <= 0xFFFFFFFF
             and all(event[key] == "0" for key in ("parent_event_id", "request_id", "artifact_id",
@@ -600,7 +632,15 @@ def valid_script_cookie(event: dict, payload: bytes) -> bool:
     count, name_length, value_length, string_length = at(8, 4), at(12, 4), at(16, 4), at(20, 4)
     kind, frame_flags, combinator, script_id = payload[24], payload[25], at(26, 2), at(28, 4)
     stack, value_digest, prefix = payload[40:72], payload[72:104], payload[104:128]
-    if not 1 <= api <= 6 or flags & ~0x0F or any(payload[6:8]) or count == 0:
+    if not 1 <= api <= 6 or flags & ~0x0F or payload[7] or count == 0:
+        return False
+    # Version 2 byte 6: the isolate's stack thread, 0 when none was named
+    # (then no frame or stack), 2 to 4 with the worker's context ID as frame_id.
+    thread = payload[6]
+    if payload[0] == 1 and thread != 0:
+        return False
+    if thread > 4 or (thread == 0 and payload[0] == 2 and flags & 6) or (
+            thread >= 2 and event["frame_id"] == "0"):
         return False
     write = api in (1, 3, 6)
     truncated = name_length > 24

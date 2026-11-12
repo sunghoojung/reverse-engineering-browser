@@ -97,13 +97,14 @@ function flowLinkKind(model) {
 }
 
 /**
- * Builds the workspace on `root` (the Flow screen). `graph` is the flow graph
- * panel. The app's callbacks: `getRequest()` the request it shows,
- * `selectRequest(id)`, `findRendererRequest(process, request)` the captured
- * row a renderer request names, `selectTraceRow(key)` and `focusTraceRow()`
- * in Lineage, and `openSource({artifact_id, offset})`.
+ * Builds the workspace on `root` (the Flow screen) and its Graph pane, the
+ * flow graph panel; `openFrame(node)` and `graphAvailable()` are that
+ * panel's `open` and `available`. The app's callbacks: `getRequest()` the
+ * request it shows, `selectRequest(id)`, `findRendererRequest(process,
+ * request)` the captured row a renderer request names, `selectTraceRow(key)`
+ * and `focusTraceRow()` in Lineage, and `openSource({artifact_id, offset})`.
  */
-function createFlowWorkspace({root, graph, storage = null, getRequest, selectRequest, findRendererRequest, selectTraceRow, focusTraceRow, openSource}) {
+function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, getRequest, selectRequest, findRendererRequest, selectTraceRow, focusTraceRow, openSource}) {
   // The graph's setters act for the host and never report back as a pick;
   // called silently, they answer with the selection they made. `intended`
   // is a key the graph could not select yet: its later `host` report is
@@ -122,6 +123,12 @@ function createFlowWorkspace({root, graph, storage = null, getRequest, selectReq
   const $ = selector => root.querySelector(selector);
   const make = (tag, className = '', text = '') => { const element = doc.createElement(tag); if (className) element.className = className; if (text) element.textContent = text; return element; };
   const button = (className, text, label) => { const element = make('button', className, text); element.type = 'button'; if (label) element.setAttribute('aria-label', label); return element; };
+  const graph = createFlowGraphPanel({
+    host: $('#flow-graph-host'), open: openFrame, available: graphAvailable,
+    onSelect: (info, {cause}) => graphPicked(info, {cause}),
+    onFollow: info => graphPicked(info, {followed: true}),
+    hostKeys: flowWorkspaceKey
+  });
 
   const body = $('#flow-body');
   const panes = Object.fromEntries(FLOW_PANES.map(name => [name, $(`#flow-pane-${name}`)]));
@@ -1012,11 +1019,13 @@ function createFlowWorkspace({root, graph, storage = null, getRequest, selectReq
   renderTrail(); renderHistoryButtons(); renderCfgChrome();
 
   return {
-    /** Called whenever the Flow screen renders: visibility, session and the app's selected request. */
-    sync({visible: shown, session: nextSession = null, request = null}) {
+    /** Called whenever the Flow screen renders: visibility, session, the
+     * app's selected request and how many captured requests a script
+     * started, which the graph asks again for when it grows. */
+    sync({visible: shown, session: nextSession = null, request = null, stacks = null}) {
       const wasVisible = visible;
       visible = Boolean(shown);
-      if (!visible) { if (wasVisible) releaseCfg(); return; }
+      if (!visible) { graph.hide(); if (wasVisible) releaseCfg(); return; }
       if (String(nextSession ?? '') !== String(session ?? '')) {
         session = nextSession ? String(nextSession) : null;
         loadPrefs(session);
@@ -1050,6 +1059,7 @@ function createFlowWorkspace({root, graph, storage = null, getRequest, selectReq
       requestTag.hidden = !request;
       const parts = request ? [request.renderer?.request ? `#${request.renderer.request}` : null, request.status ? String(request.status) : null, request.renderer ? `renderer ${request.renderer.process}` : null].filter(Boolean) : [];
       requestMeta.textContent = parts.join(' · '); requestMeta.hidden = !parts.length;
+      graph.show({session, request: request?.renderer ?? null, stacks});
       timeline.sync(session);
       if (!wasVisible) { applyLayout(); if (cfg.fn && !cfg.loaded) loadCfg(cfg.fn, {offset: cfg.mark}); }
       else renderTabs();
@@ -1058,8 +1068,6 @@ function createFlowWorkspace({root, graph, storage = null, getRequest, selectReq
     setLineage(models) { lineageModels = models.slice(0, 256); if (!related.hidden) renderRelated(); },
     /** A Lineage row the researcher picked. */
     lineageSelected: lineagePicked,
-    graphSelected: (info, how) => graphPicked(info, {cause: how.cause}),
-    graphFollowed: info => graphPicked(info, {followed: true}),
     reveal
   };
 }

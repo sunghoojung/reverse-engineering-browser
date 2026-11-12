@@ -2427,8 +2427,10 @@ The canvas announces this list through `aria-describedby`.
 
 ### Workspace API
 
-The Flow workspace hosts this view as its Graph pane. `createFlowGraphPanel`
-takes, besides `host`, `open` and `available`:
+The Flow workspace creates this view as its Graph pane, with the app's `open`
+and `available`, and shows or hides it from its own `sync`, which the app
+calls with the session, the selected request and the stack count.
+`createFlowGraphPanel` takes, besides `host`, `open` and `available`:
 - `onSelect(info | null, {cause})`, called whenever the selected card, its
   chosen row or the lit request changes, and with `null` when the selection
   clears. A change to the same card and row is not reported twice. `cause`
@@ -2447,8 +2449,8 @@ takes, besides `host`, `open` and `available`:
   it a Wasm card opens in Sources, as before. Enter on a call row still
   follows the call.
 - `hostKeys(event)`, asked on every key the canvas receives before it acts;
-  `true` leaves the key to the host, unhandled. The app passes the Flow
-  workspace's `flowWorkspaceKey`.
+  `true` leaves the key to the host, unhandled. The Flow workspace passes
+  its `flowWorkspaceKey`.
 
 `info` is:
 

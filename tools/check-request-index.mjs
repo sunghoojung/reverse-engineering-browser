@@ -20,8 +20,8 @@ assert(model.length >= 10, 'the fixture covers every row shape');
 golden.rows.forEach((row, index) => {
   const expected = model[index], shown = view.trafficIndexRequest(row, 'live');
   for (const field of ['id', 'path', 'method', 'status', 'time', 'type', 'targetKind', 'hostOnly', 'failed', 'interrupted',
-    'tabId', 'operation', 'targetMalformed', 'transferSize', 'resourceSize', 'fromCache', 'fromServiceWorker', 'mimeType',
-    'protocol', 'responseTimestamp', 'errorCode', 'loaderObserved', 'initiator', 'mainFrame']) {
+    'tabId', 'operation', 'targetMalformed', 'transferSize', 'resourceSize', 'fromCache', 'fromServiceWorker', 'memoryCache',
+    'staticData', 'mimeType', 'protocol', 'responseTimestamp', 'errorCode', 'loaderObserved', 'initiator', 'mainFrame']) {
     assert.deepEqual(shown[field], expected[field], `${expected.id} ${field}`);
   }
   for (const field of ['target', 'host', 'urlTruncated', 'targetLength']) {

@@ -238,8 +238,13 @@ function trafficSizeCell(request) {
   const exact = value => `${value.toLocaleString('en-US')} ${value === 1 ? 'byte' : 'bytes'}`;
   const transfer = Number.isSafeInteger(request?.transferSize) ? request.transferSize : null;
   const resource = Number.isSafeInteger(request?.resourceSize) ? request.resourceSize : null;
-  const served = request?.fromServiceWorker ? '(service worker)' : request?.fromCache ? '(disk cache)' : null;
-  const lines = [served === '(service worker)' ? 'Served by a service worker.' : served ? 'Served from the HTTP cache.' : '',
+  const served = request?.memoryCache ? '(memory cache)' : request?.fromServiceWorker ? '(service worker)'
+    : request?.fromCache ? '(disk cache)' : null;
+  const notes = {'(memory cache)': request?.staticData
+    ? 'Decoded in the renderer from a data: URL, so no request was made.'
+    : 'Served from the memory cache: Blink reused a resource it held, so no request was made.',
+  '(service worker)': 'Served by a service worker.', '(disk cache)': 'Served from the HTTP cache.'};
+  const lines = [served ? notes[served] : '',
     transfer === null ? 'Transferred: no completion record.' : `Transferred: ${exact(transfer)}.`,
     resource === null ? 'Resource: not recorded.' : `Resource: ${exact(resource)}.`].filter(Boolean);
   return {transfer: served ?? (transfer === null ? '—' : trafficBytesLabel(transfer)), served: Boolean(served),
@@ -427,7 +432,8 @@ function trafficIndexRequest(row, origin) {
     targetLength: row.target_length, targetMalformed: row.target_malformed,
     firstTimestamp: BigInt(row.first_time_ns), lastTimestamp: BigInt(row.last_time_ns),
     transferSize: row.transfer_size, resourceSize: row.resource_size, fromCache: row.from_cache,
-    fromServiceWorker: row.from_service_worker, mimeType: row.mime_type, protocol: row.protocol,
+    fromServiceWorker: row.from_service_worker, memoryCache: row.memory_cache === true, staticData: row.static_data === true,
+    mimeType: row.mime_type, protocol: row.protocol,
     responseTimestamp: row.response_time_ns === null ? null : BigInt(row.response_time_ns), errorCode: row.error_code,
     loaderObserved: row.loader_observed, initiator: row.initiator, mainFrame: row.main_frame, browserInternal: row.browser_internal,
     events: [], details: [], indexRow: row};
@@ -516,7 +522,8 @@ function renderTrafficRows(container, requests, options) {
     const time = value => typeof value === 'bigint' ? String(value) : null;
     const key = JSON.stringify([request.path, request.method, request.status, request.time,
       request.type, request.origin, request.hostOnly, request.failed, request.targetKind, request.operation, researcherName,
-      request.tabLinkLabel, request.transferSize, request.resourceSize, request.fromCache, request.fromServiceWorker, request.mimeType, request.protocol,
+      request.tabLinkLabel, request.transferSize, request.resourceSize, request.fromCache, request.fromServiceWorker,
+      request.memoryCache, request.staticData, request.mimeType, request.protocol,
       request.initiator, trafficInitiatorFrame(request)?.title, request.errorCode, request.loaderObserved, time(request.firstTimestamp), time(request.lastTimestamp),
       time(request.responseTimestamp), scaleKey]);
     // Reuse the row itself on lifecycle changes, preserving focus and its single
@@ -681,7 +688,10 @@ function renderTrafficDetails(container, request, notice = '', targetView = null
       ? (Number.isInteger(request.provisionalStatus) ? `Pending · provisional HTTP ${request.provisionalStatus}` : 'Pending')
       : request.status, trafficOriginLabel(request), request.id,
     trafficTabText(request),
-    `${request.hostOnly
+    `${request.memoryCache ? request.staticData
+      ? 'Blink decoded this data: URL in the renderer and made no request, so no browser records, headers or response body exist for it. '
+      : 'Blink answered this load from a resource it already held (the memory cache) and made no request, so no browser records, headers or response body exist for it. '
+      : ''}${request.hostOnly
       ? 'Native capture recorded method, host, status and lifecycle timing. URL path, query, headers and body bytes are recorded only in content capture sessions.'
       : 'Native capture recorded method, URL path and query, status and lifecycle timing; the Headers tab shows retained headers.'} The request body is on the Payload tab. Response bodies are on the Response tab.${request.targetMalformed ? ' The URL target record is malformed and was not interpreted.' : ''}${request.urlTruncated && !fullTarget ? ' Request URL truncated.' : ''}${request.documentUrlTruncated ? ' Document URL truncated.' : ''}${request.methodTruncated ? ' Method truncated.' : ''}`];
   // Captured values stay mono; coverage notes read as prose; Source is provenance.

@@ -9,6 +9,8 @@
   const WEBUI_REQUEST_CLASS = 67;
   // Traffic no tab caused (#425): extension workers and DevTools loads.
   const NO_TAB_CLASSES = Object.freeze({65: 'extension', 66: 'devtools'});
+  // Memory-cache reuses a renderer counted past its budget, always with that renderer.
+  const MEMORY_CACHE_CLASS = 68;
   const INTERNAL_URL = /^(?:brave|chrome|chrome-search|chrome-untrusted|devtools):/i;
 
   // Same rules as include/reb/network_scope.hpp and tools/validate-evidence-store.py.
@@ -28,8 +30,10 @@
     const count = view.getBigUint64(8, true);
     if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 16 || bytes[5] || bytes[6] || bytes[7] ||
         count === 0n || !(exclusionClass in INTERNAL_SCHEME_CLASSES || exclusionClass === WEBUI_RENDERER_CLASS ||
-          exclusionClass === WEBUI_REQUEST_CLASS || exclusionClass in NO_TAB_CLASSES) ||
-        ([WEBUI_RENDERER_CLASS, 66, WEBUI_REQUEST_CLASS].includes(exclusionClass) && event.initiator_process_id !== 0)) return null;
+          exclusionClass === WEBUI_REQUEST_CLASS || exclusionClass in NO_TAB_CLASSES ||
+          exclusionClass === MEMORY_CACHE_CLASS) ||
+        ([WEBUI_RENDERER_CLASS, 66, WEBUI_REQUEST_CLASS].includes(exclusionClass) && event.initiator_process_id !== 0) ||
+        (exclusionClass === MEMORY_CACHE_CLASS && event.initiator_process_id === 0)) return null;
     return {exclusionClass, count, producer: `${event.session_id}:${event.initiator_process_id}`};
   }
 
@@ -42,10 +46,14 @@
       const key = `${value.producer}:${value.exclusionClass}`;
       if (!newest.has(key) || newest.get(key).count < value.count) newest.set(key, value);
     }
-    const totals = {requests: 0n, renderers: 0n, byScheme: new Map(), extension: 0n, devtools: 0n};
+    const totals = {requests: 0n, renderers: 0n, byScheme: new Map(), extension: 0n, devtools: 0n, memoryCache: 0n};
     for (const {exclusionClass, count} of newest.values()) {
       if (exclusionClass === WEBUI_RENDERER_CLASS) {
         totals.renderers += count;
+        continue;
+      }
+      if (exclusionClass === MEMORY_CACHE_CLASS) {
+        totals.memoryCache += count;
         continue;
       }
       if (exclusionClass in NO_TAB_CLASSES) {
@@ -72,6 +80,9 @@
     }
     if (totals?.devtools > 0n) {
       parts.push(`${totals.devtools} DevTools ${totals.devtools === 1n ? 'load' : 'loads'} not recorded`);
+    }
+    if (totals?.memoryCache > 0n) {
+      parts.push(`${totals.memoryCache} memory-cache ${totals.memoryCache === 1n ? 'reuse' : 'reuses'} not recorded`);
     }
     return parts.join(' · ');
   }

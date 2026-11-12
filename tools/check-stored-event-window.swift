@@ -50,6 +50,7 @@ enum StoredEventWindowChecks {
     let children = [
       "request_target", "request_body", "response_body", "request_headers", "response_headers", "cookie_list",
       "request_initiator_stack", "request_tab_link", "tab_set", "capture_exclusion", "request_watch_match",
+      "memory_cache_reuse",
     ]
     var family = event(sequence: 1, category: "network", type: "request_started")
     for (offset, type) in children.enumerated() { family += event(sequence: offset + 2, category: "network", type: type) }

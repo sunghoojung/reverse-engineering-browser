@@ -67,6 +67,10 @@ globalThis.RebDebuggerSidebar = Object.freeze({
   open: () => debuggerSidebarController?.setOpen(true),
   close: () => debuggerSidebarController?.setOpen(false),
   isOpen: () => Boolean(debuggerSidebarController?.isOpen()),
+  // Opens on one observation record (session_id, process_id, sequence_number,
+  // type and frame_id): its kind is listed and its row selected once a read
+  // holds it. Traffic's watched requests link here.
+  showObservation: record => Boolean(debuggerSidebarController?.reveal(record)),
   // The Sources tree scope, while the sidebar is open and a thread allows one.
   sourceScope: () => debuggerSidebarController?.sourceScope() ?? null
 });
@@ -285,6 +289,7 @@ function createDebuggerList({id, label, onActive = null, onChoose, render}) {
       paint();
     },
     focus() { element.focus({preventScroll: true}); },
+    scrollTo(key) { reveal(key); paint(); },
     release() { if (frame > 0 && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame); frame = 0; space.replaceChildren(); items = []; options = []; tops = [0]; signature = ''; active = null; }
   };
 }
@@ -405,7 +410,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
   const view = {
     // `readSerial` numbers the read whose answer `document` is; readsStarted()
     // counts reads begun, so an action can tell which reads followed it.
-    status: 'loading', document: null, error: null, updatedAt: null, readSerial: 0, thread: null, kind: null,
+    status: 'loading', document: null, error: null, updatedAt: null, readSerial: 0, thread: null, kind: null, reveal: null,
     readsStarted: () => readsStarted,
     observations: blankObservations(),
     // Asks for a read soon. From a render, or the promises it queued, it does
@@ -782,6 +787,19 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     isOpen: () => open,
     // Counts closes and departures from Sources, so work begun before one can tell.
     stops: () => stops,
+    // An observed-frame scope that excludes the record is cleared; any other
+    // thread scope does not filter Observations, so it stays.
+    reveal(record) {
+      if (!record || !Object.hasOwn(DEBUGGER_OBSERVATION_KINDS, record.type)) return false;
+      const thread = view.thread;
+      if (thread?.kind === 'observed' && !(thread.session_id === record.session_id &&
+          String(thread.process_id) === String(record.process_id) && thread.frame_id === record.frame_id)) view.thread = null;
+      view.kind = record.type;
+      view.reveal = {key: debuggerRecordKey(record), record, after: readsStarted};
+      hooks.refreshTree?.();
+      if (open) read(); else setOpen(true);
+      return true;
+    },
     sectionsChanged: () => render(),
     sourceScope() {
       const thread = view.thread;
@@ -965,7 +983,7 @@ function debuggerWatchSection() {
     own.clear = debuggerButton('Clear rules', 'secondary-button', () => send(view, own, null));
     actions.append(arm, own.clear);
     element.append(field('Requests', requests, 'One per line: an optional method, then text the URL contains.'),
-      field('Event listeners', events, 'Event types, separated by commas.'), switches, dom, actions, output);
+      field('Event listeners', events, 'Event types, separated by commas.'), switches, dom, limits, actions, output);
     element.addEventListener('submit', event => { event.preventDefault(); send(view, own, 'arm'); });
     return own;
   }
@@ -1095,6 +1113,8 @@ function debuggerObservationsSection() {
   // one Traffic lookup in flight.
   let list = null, controls = null, detail = null, selected = null, detailTimer = 0, notice = null, revealKey = null, shown = [], opening = null;
   const stacks = new Map();
+  // A record another workspace asked for that the rows read for it lack.
+  let unlisted = null;
   // Read once per record; a failed read is tried again only after a pause.
   function resolution(view, record) {
     const key = debuggerRecordKey(record);
@@ -1136,6 +1156,7 @@ function debuggerObservationsSection() {
   // A row the researcher chose is marked at once and brings its details into view.
   function choose(view, item, how) {
     if (!item) return;
+    unlisted = null;
     if (selected?.key !== item.key) notice = null;
     if (opening && opening.key !== item.key) cancelOpening();
     selected = item;
@@ -1338,6 +1359,15 @@ function debuggerObservationsSection() {
       const current = Boolean(observations.query) && observations.key === `${view.kind ?? 'all'}|${view.thread?.kind === 'observed' ? view.thread.key : 'all'}`;
       // Until the new filter is read, the rows read before stay, named as what they are.
       const items = observations.query ? rows(view) : [];
+      // A record asked for by showObservation is chosen once a read made after
+      // the ask lists its kind; one that read does not hold is named instead.
+      const wanted = view.reveal;
+      let revealing = null;
+      if (wanted && current && view.status === 'ready' && view.readSerial > wanted.after) {
+        view.reveal = null;
+        revealing = items.find(item => item.key === wanted.key) ?? null;
+        if (!revealing) unlisted = {at: observations.key, record: wanted.record};
+      }
       const notes = [];
       const scope = view.thread?.kind === 'observed' ? ` in frame ${view.thread.frame_id}` : '';
       const kind = view.kind ? DEBUGGER_OBSERVATION_KINDS[view.kind].filter.toLowerCase() : 'records';
@@ -1347,6 +1377,9 @@ function debuggerObservationsSection() {
         const before = observations.query.type ? DEBUGGER_OBSERVATION_KINDS[observations.query.type].filter.toLowerCase() : 'records';
         const where = observations.query.thread ? ` in frame ${observations.query.thread.frame_id}` : '';
         notes.push(debuggerNote(`The ${kind}${scope} were not read. The rows below are the ${before}${where} read before.`, 'warning'));
+      }
+      if (current && unlisted?.at === observations.key) {
+        notes.push(debuggerNote(`Observation #${unlisted.record.sequence_number} of renderer ${unlisted.record.process_id} is not among these ${kind}. Show older records reads older ones.`, 'warning'));
       }
       const malformed = answer.observations_malformed + observations.refused + (loaded?.refused ?? 0);
       if (malformed > 0) notes.push(debuggerNote(`${malformed} ${malformed === 1 ? 'record' : 'records'} in these reads ${malformed === 1 ? 'was' : 'were'} malformed and ${malformed === 1 ? 'is' : 'are'} not shown.`, 'warning'));
@@ -1369,6 +1402,7 @@ function debuggerObservationsSection() {
       list.element.hidden = !items.length;
       shown = items;
       list.set(items, {selectedKey: selected?.key ?? null});
+      if (revealing) { choose(view, revealing, 'reveal'); list.scrollTo(revealing.key); list.focus(); }
       const end = loaded ? loaded.bottom : observations.query?.next_before ?? null;
       controls.more.hidden = !current || end === null || items.length >= DEBUGGER_SIDEBAR.rows;
       controls.more.disabled = observations.loadingOlder;

@@ -448,6 +448,40 @@ const pendingWindow = t => {
   assert(t.stats.inspector > drawn, 'The inspector is drawn again for the new tabs');
 }
 {
+  // A watch match's rule comes from the backend's decode beside the record;
+  // where none came (the stored-evidence window's own window), the index row
+  // names it, on every path that rebuilds the row.
+  const watch = {session_id: '1', process_id: 7, sequence_number: '3', frame_id: '9', rule: 2, method_matched: true};
+  const shownWatch = {sessionId: '1', processId: 7, sequenceNumber: '3', frameId: '9', rule: 2, methodMatched: true};
+  const read = indexFixture({windowCount: 1});
+  read.setIndexRows([{...read.row(5, 2), watch}]);
+  read.api.renderRequests(); await quiet();
+  read.api.selectTrafficRow('request-5');
+  await quiet();
+  read.pending[0].gate.resolve(read.answer({events: eventsOf('5', 2), query: {limited: false, budget_exhausted: false, next_after: '9'}}));
+  await quiet();
+  assert.equal(JSON.stringify(read.state.trafficLoaded.get('request-5').watch), JSON.stringify(shownWatch), 'The store copy keeps the index row\'s watch');
+  const t = indexFixture({windowCount: 2});
+  t.state.requests = t.state.nativeRequests = t.state.nativeRequests.map(request =>
+    ({...request, events: [{}, {}], details: [], origin: 'live', watch: null}));
+  const whole = t.state.requests[1], other = t.state.requests[0];
+  t.setIndexRows([{...t.row(1, 2), watch}, t.row(0, 2)]);
+  t.api.renderRequests(); await quiet();
+  t.api.selectTrafficRow(whole.id);
+  assert.equal(t.state.selectedRequestId, whole.id, 'A row the window holds whole selects without a store read');
+  const shown = () => t.state.requests.find(request => request.id === whole.id);
+  assert.equal(JSON.stringify(shown().watch), JSON.stringify(shownWatch), 'The selected window row is marked watched');
+  t.state.nativeRequests = t.state.nativeRequests.map(request => ({...request, watch: null}));
+  t.api.rebuildTrafficRequests();
+  assert.equal(shown().watch?.rule, 2, 'A later poll keeps the watch mark');
+  assert.equal(t.state.requests.find(request => request.id === other.id).watch, null, 'Only the watched row is marked');
+  // A rule the record's own decode names is never replaced.
+  const decoded = {...shownWatch, rule: 4};
+  t.state.nativeRequests = t.state.nativeRequests.map(request => ({...request, watch: request.id === whole.id ? decoded : null}));
+  t.api.rebuildTrafficRequests();
+  assert.equal(shown().watch.rule, 4, 'The record\'s own decode wins');
+}
+{
   // A store read finishing after the researcher moved to the filter box leaves focus there.
   const t = indexFixture({windowCount: 1});
   t.setIndexRows([t.row(5, 2)]);

@@ -674,6 +674,37 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   assert.equal(sidebar.querySelector('[data-debugger-section="later"]'), null, 'a removed section leaves');
   assert.doesNotMatch(sidebar.querySelector(nativeAvailability).textContent, /Paused frames/,
     'a removed native section is no longer named');
+  // A request a watch rule matched is marked on its Traffic row and in General
+  // with its rule, captured text stays text, and Show in debugger opens its
+  // observation: Sources, the Requests kind, the record chosen, and an
+  // observed-frame scope that would hide it cleared.
+  runInContext(`showScreen('traffic'); state.requests = [{id: 'watched', path: '<img id=watch-injected src=x>', method: 'POST', status: 200, type: 'xhr',
+    origin: 'live', hostOnly: true, tabId: '0', events: [], details: [], operation: 'request_completed', time: 1,
+    watch: {sessionId: '1', processId: 42, sequenceNumber: '4995', frameId: '7101', rule: 0, methodMatched: true}},
+    {id: 'plain', path: 'plain.invalid', method: 'GET', status: 200, type: 'xhr', origin: 'live', hostOnly: true, tabId: '0', events: [], details: [],
+    operation: 'request_completed', time: 1, watch: null}];
+    state.selectedRequestId = 'watched'; state.trafficDetailOpen = true; state.inspectorTab = 'general'; renderRequests(); renderInspector();`, context);
+  const watchedRow = document.querySelector('#request-rows .request-row[data-request-id="watched"]');
+  assert.equal(watchedRow.querySelector('.request-watched')?.textContent, 'Watched', 'the watched row carries its mark');
+  assert.match(watchedRow.getAttribute('aria-label'), /Request watch rule 1 matched, method too/);
+  assert.equal(document.querySelector('#request-rows .request-row[data-request-id="plain"] .request-watched'), null, 'only the watched row');
+  assert.equal(document.querySelector('#watch-injected'), null, 'captured paths never become elements');
+  const watchSection = document.querySelector('#exchange-inspector .traffic-watch');
+  assert.match(watchSection.textContent, /Request watch rule 1 matched, method too/);
+  assert.match(watchSection.textContent, /request_watch_match #4995 · renderer 42 · frame 7101/);
+  const readsBeforeShow = context.__debuggerRequests.length;
+  watchSection.querySelector('.traffic-watch-open').click();
+  await settle();
+  assert.equal(document.querySelector('#screen-sources').hidden, false, 'Show in debugger opens Sources');
+  assert.equal(sidebar.hidden, false);
+  const shownRead = context.__debuggerRequests.slice(readsBeforeShow).find(url => url.startsWith('/api/native-debugger'));
+  assert.match(shownRead, /^\/api\/native-debugger\?limit=128&type=request_watch_match$/, `the frame 200 scope is cleared: ${shownRead}`);
+  assert.equal(sidebar.querySelector('#debugger-observations [aria-selected="true"]')?.dataset.key, '1:42:4995', 'the observation is chosen');
+  assert.match(sidebar.querySelector('.debugger-detail').textContent, /sequence 4995/);
+  runInContext(`showScreen('traffic'); state.requests = state.requests.map(request => ({...request, watch: null})); renderRequests(); renderInspector();`, context);
+  assert.equal(document.querySelector('#exchange-inspector .traffic-watch'), null, 'a row without a match has no watch section');
+  runInContext(`showScreen('sources')`, context);
+  await settle();
   // Closing stops every read and releases rows and the tree scope.
   toggle.click();
   await settle();

@@ -4307,6 +4307,13 @@ input[type="file"]:hover::file-selector-button { background: var(--panel-3); }
 #screen-traffic .traffic-general-value[data-kind="provenance"]::before { content: ""; width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--faint); }
 #screen-traffic .traffic-general-value[data-origin="live"]::before { background: var(--green); }
 #screen-traffic .traffic-general-value[data-origin="demo"]::before { background: var(--amber); }
+/* A request a debugger watch rule matched: a chip on its row and a section in General. */
+.request-name > .request-watched { flex: 0 0 auto; padding: 0 4px; border-radius: 3px; background: color-mix(in srgb, var(--cyan) 16%, transparent); color: var(--cyan); font: 600 9px/14px var(--sans); }
+#screen-traffic .traffic-watch { padding-top: 0; }
+#screen-traffic .traffic-watch-record { color: var(--muted); }
+#screen-traffic .traffic-watch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 8px; }
+#screen-traffic .traffic-watch-status { margin: 0; color: var(--amber); font: 12px/16px var(--sans); }
+#screen-traffic .traffic-watch-status:empty { display: none; }
 
 /* Rows share the tree's columns, so values and types align whatever each
    type label's width. Detail values wrap instead of hiding evidence. */

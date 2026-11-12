@@ -958,5 +958,31 @@ await check('a busy read leaves the arm outcome', async () => {
   ui.close();
 });
 
+// Traffic's watched request opens its observation: the kind is listed and the
+// record chosen once a read holds it, or the list says that read lacks it.
+await check('showObservation chooses the record Traffic names', async () => {
+  const store = createStore(6);
+  const matched = {type: 'request_watch_match', request_id: '5100', detail: {rule: 0, method_matched: true}};
+  store.add(1, matched);
+  store.add(4);
+  const ui = mount({store});
+  // linkedom keeps no focus, so the focus calls are what is checked; WebKit focus is test33's.
+  const focused = [];
+  ui.window.Element.prototype.focus = function focus() { focused.push(this.id); };
+  const target = {...store.records[6]};
+  assert.equal(ui.context.RebDebuggerSidebar.showObservation(target), true);
+  assert.equal(ui.sidebar.hidden, false, 'it opens the sidebar');
+  const list = () => ui.sidebar.querySelector('#debugger-observations');
+  await until(() => list()?.querySelector('[aria-selected="true"]'), 'the record is chosen');
+  assert(ui.reads().every(entry => new URL(entry.url, 'http://local').searchParams.get('type') === 'request_watch_match'), 'its kind is read');
+  assert.equal(list().querySelector('[aria-selected="true"]').dataset.key, '1:42:7');
+  assert.match(ui.text('.debugger-detail'), /sequence 7/);
+  assert(focused.includes('debugger-observations'), 'focus moves to the list it chose in');
+  assert.equal(ui.context.RebDebuggerSidebar.showObservation({...target, sequence_number: '999'}), true);
+  await until(() => /Observation #999 of renderer 42 is not among these requests/.test(ui.text('.debugger-observation-notes')), 'an absent record is named');
+  assert.equal(ui.context.RebDebuggerSidebar.showObservation({...target, type: 'gap'}), false, 'only an observation kind');
+  ui.close();
+});
+
 console.log(`PASS debugger sidebar: ${results.length} cases with real timers (offline DOM model; no rendered layout claimed)`);
 for (const name of results) console.log(`  ${name}`);

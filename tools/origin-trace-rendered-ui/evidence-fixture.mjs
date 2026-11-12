@@ -640,7 +640,8 @@ async function bodyCaseRequests(template, firstSequence, firstTime, artifactsRoo
   // of the same URL while the page's request was open.
   const page = rendered('63', 'request_initiated', hex(`GET ${WORKER_ANSWER_HOST}`), {scheme_class: 2, loader_kind: 16});
   rendered('63', 'request_target', requestTargetPayload('/feed?x=1'), {parent_event_id: page.sequence_number});
-  const worker = {initiator_process_id: workerRenderer, initiator_request_id: 7, tab_id: 0};
+  // The worker controls the fixture tab's page, so its fetch has that tab.
+  const worker = {initiator_process_id: workerRenderer, initiator_request_id: 7, tab_id: FIXTURE_TAB_ID};
   const fetched = browser('3101', 'request_started', hex(`GET ${WORKER_ANSWER_HOST}`), {...worker, flags: 4, resource_type: 13});
   browser('3101', 'request_target', requestTargetPayload('/feed?x=1'), {...worker, parent_event_id: fetched.sequence_number});
   const feed = Buffer.from('{"feed":[1,2,3]}');

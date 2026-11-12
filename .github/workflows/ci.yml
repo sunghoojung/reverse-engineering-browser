@@ -7,7 +7,8 @@ name: Continuous integration
 # - sccache plus the Cargo registry. Only main, the schedule and manual runs
 #   save them; pull requests restore main's newest entries and never evict
 #   them from the 10 GB repository quota. Each compiler cache is capped at
-#   500M.
+#   500M, and CI keeps only line tables in debug builds, which shrinks both
+#   the cache and the link.
 # - Parallel C++ compilation. Cargo stays one invocation at a time.
 # - Whole Rust suites run under cargo-nextest, which runs the tests of every
 #   test binary at once instead of one binary after another.
@@ -47,6 +48,10 @@ concurrency:
 env:
   CXX_x86_64_unknown_linux_gnu: g++-14
   CXX_aarch64_apple_darwin: clang++
+  # Line tables keep file and line numbers in panics and backtraces. Full
+  # debug info made each compiler cache entry reach its cap and slowed every
+  # link.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   lint:

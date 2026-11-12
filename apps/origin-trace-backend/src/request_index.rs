@@ -46,6 +46,9 @@ const TIMELINE_BUCKETS: usize = 120;
 /// Worker tab sets a row links to (protocol/native-network-v3.md `tab_set`).
 const MAX_TAB_SETS: usize = 4096;
 const MAX_SET_TABS: usize = 256;
+/// `script_identity` payloads of one renderer, keyed by isolate key and script
+/// ID: script IDs are unique only within one isolate.
+pub type IdentityPayloads = HashMap<(u64, u32), String>;
 /// `script_identity` records kept for the Initiator column's innermost frame.
 const MAX_IDENTITIES: usize = 16_384;
 const UNIDENTIFIED: &str = "Unidentified network event";
@@ -2018,11 +2021,7 @@ impl RequestIndex {
 
     /// `script_identity` payloads of one renderer by isolate key and script
     /// ID, and whether a script missing from them is missing from the store.
-    pub fn identities(
-        &mut self,
-        session: &str,
-        process: u32,
-    ) -> Result<(HashMap<(u64, u32), String>, bool)> {
+    pub fn identities(&mut self, session: &str, process: u32) -> Result<(IdentityPayloads, bool)> {
         self.refresh()?;
         let state = self.state.as_ref().expect("index state");
         let prefix = format!("{session}:{process}:");

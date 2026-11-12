@@ -491,8 +491,8 @@ void NativeRequestStackWalk::SetProvider(const NativeRequestStackProvider provid
   if (!provider || g_provider.load(std::memory_order_acquire)) {
     return;
   }
-  // The main thread's tables were attached first; release publishes them to
-  // nothing else, but keeps "a loaded provider implies attached main tables".
+  // Tables are thread-local, so nothing is published through the provider;
+  // release/acquire only orders EnablePromiseRegistrations before it.
   g_provider.store(provider, std::memory_order_release);
 }
 

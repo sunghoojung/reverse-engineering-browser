@@ -1281,7 +1281,7 @@ pub(crate) fn decode_navigation(payload: &[u8]) -> Option<(Record, &'static str,
 /// like a malformed identity record in a store scan.
 pub(crate) fn decode_indexed_identities(
     process: u32,
-    payloads: &HashMap<(u64, u32), String>,
+    payloads: &crate::request_index::IdentityPayloads,
 ) -> HashMap<IdentityKey, Identity> {
     payloads
         .values()

@@ -349,6 +349,7 @@ fn is_network(event: &Value) -> bool {
                     | "request_initiator_stack"
                     | "navigation_initiator_link"
                     | "request_watch_match"
+                    | "memory_cache_reuse"
             )
         )
 }

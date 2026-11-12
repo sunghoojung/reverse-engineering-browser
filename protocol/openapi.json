@@ -2213,7 +2213,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, navigation_initiator_stack, navigation_initiator_link, async_task_stack, request_extension_link, script_compiled, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, navigation_initiator_stack, navigation_initiator_link, async_task_stack, request_extension_link, script_compiled, memory_cache_reuse, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -2745,7 +2745,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, navigation_initiator_stack, navigation_initiator_link, async_task_stack, request_extension_link, script_compiled, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, navigation_initiator_stack, navigation_initiator_link, async_task_stack, request_extension_link, script_compiled, memory_cache_reuse, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -18285,6 +18285,10 @@
           "resource_size",
           "from_cache",
           "from_service_worker",
+          "memory_cache",
+          "static_data",
+          "race_network",
+          "end_lost",
           "mime_type",
           "protocol",
           "response_time_ns",
@@ -18349,6 +18353,7 @@
             "type": "boolean"
           },
           "status": {
+            "description": "The HTTP status, or failed, incomplete (observation ended or a service worker's end was lost), pending, or finished: a memory-cache reuse that carried no HTTP status, such as an MHTML archive resource (protocol/request-index-v1.md).",
             "oneOf": [
               {
                 "type": "integer",
@@ -18359,7 +18364,8 @@
                 "enum": [
                   "pending",
                   "failed",
-                  "incomplete"
+                  "incomplete",
+                  "finished"
                 ]
               }
             ]
@@ -18558,11 +18564,27 @@
           },
           "from_cache": {
             "type": "boolean",
-            "description": "A response_started record says the response came from the HTTP cache."
+            "description": "A response_started record, or the renderer's own completion, says the response came from the HTTP cache."
           },
           "from_service_worker": {
             "type": "boolean",
-            "description": "A response_started record says a service worker served the response."
+            "description": "A response_started record, or the renderer's own completion, says a service worker served the response or ended the request without one (protocol/native-network-v3.md)."
+          },
+          "memory_cache": {
+            "type": "boolean",
+            "description": "The row is a memory_cache_reuse record: Blink answered the load from a resource it held and made no request (protocol/native-network-v3.md)."
+          },
+          "static_data": {
+            "type": "boolean",
+            "description": "A memory-cache row whose resource Blink decoded in place: a data: URL or MHTML archive resource."
+          },
+          "race_network": {
+            "type": "boolean",
+            "description": "A service worker race route: the renderer's own completion flagged from_service_worker sits on a row with browser records. failed, interrupted, status and error_code are that completion's, what the page received; the worker or the network may have answered, and the records do not say which (protocol/native-network-v3.md)."
+          },
+          "end_lost": {
+            "type": "boolean",
+            "description": "A service_worker_end_lost gap names this row: the renderer lost the end of a request its service worker handled, so a row with no response reads incomplete, not pending."
           },
           "mime_type": {
             "type": [
@@ -26711,7 +26733,8 @@
               "navigation_initiator_link",
               "async_task_stack",
               "request_extension_link",
-              "script_compiled"
+              "script_compiled",
+              "memory_cache_reuse"
             ]
           },
           "status_code": {
@@ -34070,7 +34093,7 @@
           },
           "exclusions": {
             "type": "array",
-            "description": "Evidence the capture counted instead of recording, by class, from capture_exclusion records (protocol/native-network-v3.md). Requests are chrome, chrome_untrusted, brave, devtools and chrome_search scheme loads, webui_request requests WebUI renderers sent through the browser proxy, extension_worker requests of extension workers and devtools_load requests of the DevTools factory; webui_renderer counts renderer processes with WebUI bindings or a WebUI process lock that were not admitted. These are named exclusions, never gaps or drops. Empty when nothing was excluded or REB_CAPTURE_BROWSER_INTERNAL=1 recorded browser-internal loads.",
+            "description": "Evidence the capture counted instead of recording, by class, from capture_exclusion records (protocol/native-network-v3.md). Requests are chrome, chrome_untrusted, brave, devtools and chrome_search scheme loads, webui_request requests WebUI renderers sent through the browser proxy, extension_worker requests of extension workers and devtools_load requests of the DevTools factory; webui_renderer counts renderer processes with WebUI bindings or a WebUI process lock that were not admitted; memory_cache_reuse counts the memory-cache reuses a renderer did not record past its 4,096 per configuration, which would have been tab rows; non_ordinary_page_reuse counts its reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns. These are named exclusions, never gaps or drops. Empty when nothing was excluded or REB_CAPTURE_BROWSER_INTERNAL=1 recorded browser-internal loads.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -34091,14 +34114,17 @@
                     "webui_renderer",
                     "extension_worker",
                     "devtools_load",
-                    "webui_request"
+                    "webui_request",
+                    "memory_cache_reuse",
+                    "non_ordinary_page_reuse"
                   ]
                 },
                 "unit": {
                   "type": "string",
                   "enum": [
                     "requests",
-                    "renderer_processes"
+                    "renderer_processes",
+                    "reuses"
                   ]
                 },
                 "count": {
@@ -34227,6 +34253,7 @@
                     "named_gap",
                     "browser_internal_excluded",
                     "no_tab_traffic_excluded",
+                    "memory_cache_reuse_not_recorded",
                     "network_tab_unresolved",
                     "bounded_scope"
                   ]

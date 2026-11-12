@@ -6,6 +6,7 @@
 #include <span>
 #include <string_view>
 #include "reb/event.hpp"
+#include "reb/tab_link.hpp"
 namespace reb {
 // Scheme classes and capture exclusions, see protocol/native-network-v3.md.
 // The overlay's common/native_network_scope.h is the producer half;
@@ -38,6 +39,9 @@ enum class ExclusionClass : std::uint8_t {
   kExtensionWorker = 65,
   kDevToolsLoad = 66,
   kWebUiRequest = 67,
+  // 68 and 69 belong to another part of the contract.
+  kMemoryCacheReuse = 70,
+  kNonOrdinaryPageReuse = 71,
 };
 
 inline constexpr std::uint16_t kCaptureExclusionPayloadVersion = 1;
@@ -52,7 +56,7 @@ inline constexpr std::size_t kCaptureExclusionPayloadSize = 16;
 }
 
 [[nodiscard]] constexpr bool IsKnownExclusionClass(const std::uint8_t value) noexcept {
-  return IsBrowserInternalSchemeClass(value) || (value >= 64 && value <= 67);
+  return IsBrowserInternalSchemeClass(value) || (value >= 64 && value <= 71);
 }
 
 // The record types that may name the scheme of their request.
@@ -60,7 +64,8 @@ inline constexpr std::size_t kCaptureExclusionPayloadSize = 16;
   return header.category == EventCategory::kNetwork &&
          (header.type == EventType::kRequestInitiated ||
           header.type == EventType::kRequestStarted ||
-          header.type == EventType::kRequestCompleted || header.type == EventType::kRequestFailed);
+          header.type == EventType::kRequestCompleted || header.type == EventType::kRequestFailed ||
+          header.type == EventType::kMemoryCacheReuse);
 }
 
 struct CaptureExclusionPayload final {
@@ -109,7 +114,85 @@ struct CaptureExclusionPayload final {
          ((value.exclusion_class != static_cast<std::uint8_t>(ExclusionClass::kWebUiRenderer) &&
            value.exclusion_class != static_cast<std::uint8_t>(ExclusionClass::kDevToolsLoad) &&
            value.exclusion_class != static_cast<std::uint8_t>(ExclusionClass::kWebUiRequest)) ||
-          h.initiator_process_id == 0);
+          h.initiator_process_id == 0) &&
+         // Only a renderer counts the reuses it did not record.
+         ((value.exclusion_class != static_cast<std::uint8_t>(ExclusionClass::kMemoryCacheReuse) &&
+           value.exclusion_class !=
+               static_cast<std::uint8_t>(ExclusionClass::kNonOrdinaryPageReuse)) ||
+          h.initiator_process_id != 0);
+}
+
+// memory_cache_reuse (type 52), see "Memory-cache reuse" in
+// protocol/native-network-v3.md.
+inline constexpr std::uint16_t kMemoryCacheReusePayloadVersion = 1;
+inline constexpr std::size_t kMemoryCacheReusePayloadSize = 128;
+inline constexpr std::size_t kMemoryCacheReuseHostSize = 120;
+inline constexpr std::uint8_t kMemoryCacheReuseStaticData = 1U << 0U;
+inline constexpr std::uint8_t kMemoryCacheReuseHostTruncated = 1U << 1U;
+// Blink ResourceType at the pin, kImage to kDictionary.
+inline constexpr std::uint8_t kMemoryCacheReuseResourceTypeLimit = 15;
+
+struct MemoryCacheReusePayload final {
+  std::uint16_t version = kMemoryCacheReusePayloadVersion;
+  std::uint16_t size = kMemoryCacheReusePayloadSize;
+  std::uint8_t resource_type = 0;
+  std::uint8_t flags = 0;
+  std::uint8_t host_length = 0;
+  std::uint8_t reserved = 0;
+  std::array<std::uint8_t, kMemoryCacheReuseHostSize> host{};
+};
+
+[[nodiscard]] inline bool DecodeMemoryCacheReusePayload(std::span<const std::byte> bytes,
+                                                        MemoryCacheReusePayload& value) noexcept {
+  if (bytes.size() < kMemoryCacheReusePayloadSize)
+    return false;
+  const auto at = [bytes](const std::size_t offset) {
+    return std::to_integer<std::uint8_t>(bytes[offset]);
+  };
+  value.version = static_cast<std::uint16_t>(at(0) | (at(1) << 8U));
+  value.size = static_cast<std::uint16_t>(at(2) | (at(3) << 8U));
+  value.resource_type = at(4);
+  value.flags = at(5);
+  value.host_length = at(6);
+  value.reserved = at(7);
+  for (std::size_t index = 0; index < value.host.size(); ++index)
+    value.host[index] = at(8 + index);
+  return true;
+}
+
+[[nodiscard]] constexpr bool IsValidMemoryCacheReusePayload(
+    const MemoryCacheReusePayload& value) noexcept {
+  constexpr std::uint8_t kKnownFlags = kMemoryCacheReuseStaticData | kMemoryCacheReuseHostTruncated;
+  if (value.version != kMemoryCacheReusePayloadVersion ||
+      value.size != kMemoryCacheReusePayloadSize || value.resource_type == 0 ||
+      value.resource_type > kMemoryCacheReuseResourceTypeLimit ||
+      (value.flags & static_cast<std::uint8_t>(~kKnownFlags)) != 0 ||
+      value.host_length > kMemoryCacheReuseHostSize || value.reserved != 0 ||
+      ((value.flags & kMemoryCacheReuseHostTruncated) != 0 &&
+       value.host_length != kMemoryCacheReuseHostSize)) {
+    return false;
+  }
+  for (std::size_t index = 0; index < value.host.size(); ++index) {
+    const std::uint8_t byte = value.host[index];
+    if (index < value.host_length ? byte < 0x21 || byte > 0x7e : byte != 0)
+      return false;
+  }
+  return true;
+}
+
+[[nodiscard]] inline bool IsValidMemoryCacheReuseEvent(const EventRecord& event) noexcept {
+  const auto& h = event.header;
+  MemoryCacheReusePayload value;
+  return h.category == EventCategory::kNetwork && h.type == EventType::kMemoryCacheReuse &&
+         h.payload_size == kMemoryCacheReusePayloadSize && h.flags == 0 && h.session_id != 0 &&
+         h.sequence_number != 0 && h.process_id != 0 && h.navigation_id == 0 &&
+         h.artifact_id == 0 && h.parent_event_id == 0 && h.browser_context_id_high == 0 &&
+         h.browser_context_id_low == 0 && h.encoded_data_length == 0 &&
+         h.decoded_body_length >= 0 && h.status_code >= 0 && h.error_code == 0 &&
+         h.resource_type == 0 && h.initiator_request_id == 0 && h.initiator_process_id == 0 &&
+         h.scheme_class != 0 && IsRendererLoaderKind(h.loader_kind) &&
+         DecodeMemoryCacheReusePayload(event.inline_payload, value) &&
+         IsValidMemoryCacheReusePayload(value);
 }
 }  // namespace reb
 #endif

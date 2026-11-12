@@ -23,7 +23,8 @@
 namespace reb {
 
 inline constexpr std::uint32_t kNativeProbeQueueMagic = 0x52454251;
-inline constexpr std::uint16_t kNativeProbeQueueVersion = 3;
+// Version 4 adds the memory-cache counter after the scheme counters.
+inline constexpr std::uint16_t kNativeProbeQueueVersion = 4;
 // More headroom for bursts that overflowed 1,024 slots; not a no-loss guarantee.
 // A producer that stays ahead of the consumer can still drop.
 inline constexpr std::size_t kNativeProbeQueueCapacity = 8192;
@@ -162,12 +163,15 @@ class alignas(64) NativeProbeQueue final {
     return dropped_.load(std::memory_order_relaxed);
   }
 
-  // Browser-internal requests the producer did not record, per scheme class.
+  // Browser-internal requests the producer did not record, per scheme class,
+  // memory-cache reuses past its budget and those in pages that are not
+  // ordinary (protocol/native-network-v3.md).
   // Like drops they are counts, never records; the consumer reports them.
-  void CountExclusion(const NativeSchemeClass scheme_class) noexcept {
-    if (!IsBrowserInternalSchemeClass(scheme_class))
+  void CountExclusion(const std::uint8_t exclusion_class) noexcept {
+    const std::size_t slot = NativeRendererExclusionSlot(exclusion_class);
+    if (slot >= excluded_.size())
       return;
-    auto& count = excluded_[static_cast<std::size_t>(scheme_class) - 16];
+    auto& count = excluded_[slot];
     std::uint64_t value = count.load(std::memory_order_relaxed);
     while (value != std::numeric_limits<std::uint64_t>::max() &&
            !count.compare_exchange_weak(value, value + 1, std::memory_order_relaxed,
@@ -222,8 +226,9 @@ class alignas(64) NativeProbeQueue final {
   [[maybe_unused]] std::array<std::byte, 56> dropped_padding_{};
   alignas(64) std::atomic<bool> notification_pending_{false};
   [[maybe_unused]] std::array<std::byte, 63> notification_padding_{};
-  alignas(64) std::array<std::atomic<std::uint64_t>, kNativeSchemeExclusionSlots> excluded_{};
-  [[maybe_unused]] std::array<std::byte, 64 - 8 * kNativeSchemeExclusionSlots> excluded_padding_{};
+  alignas(64) std::array<std::atomic<std::uint64_t>, kNativeRendererExclusionSlots> excluded_{};
+  [[maybe_unused]] std::array<std::byte, 64 - 8 * kNativeRendererExclusionSlots>
+      excluded_padding_{};
   alignas(64) std::array<Slot, kNativeProbeQueueCapacity> slots_{};
 };
 

@@ -152,6 +152,15 @@ it.
   The backend's request index keeps a private derived copy of those paths
   beside the event store; capture clear removes it
   ([request index v1](protocol/request-index-v1.md)).
+  A load Blink answers from a resource it already holds (its memory cache, or
+  a `data:` URL or MHTML archive resource it decodes itself) makes no request
+  and is still recorded as one row: its host, status, decoded size, Blink
+  resource type and frame always, and its path and query only in content
+  capture and only as a 116-byte prefix, which for a `data:` URL is the start
+  of the data itself. At most 4,096 are recorded per renderer configuration;
+  the rest, and those in pages that are not ordinary, such as an SVG image's
+  own document, are counted
+  ([Native network v3](protocol/native-network-v3.md#memory-cache-reuse)).
 - Browser-internal pages (WebUI, DevTools) and extension background workers are
   counted, not recorded. `REB_CAPTURE_BROWSER_INTERNAL=1` and
   `REB_CAPTURE_EXTENSION_TRAFFIC=1` record them, extension traffic under its

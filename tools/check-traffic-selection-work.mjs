@@ -286,6 +286,36 @@ const eventsOf = (id, records) => Array.from({length: records}, (_, sequence) =>
   assert.equal(t.document.activeElement?.dataset?.requestId, 'request-5', 'With focus on nothing, the row takes focus');
 }
 {
+  // A service_worker_end_lost gap has no request ID, so the row's store read
+  // lacks it; the selected copy keeps End lost from the index row.
+  const t = indexFixture({windowCount: 1});
+  t.setIndexRows([{...t.row(5, 2), end_lost: true}]);
+  t.api.renderRequests(); await quiet();
+  t.api.selectTrafficRow('request-5');
+  await quiet();
+  t.pending[0].gate.resolve(t.answer({events: eventsOf('5', 2), query: {limited: false, budget_exhausted: false, next_after: '9'}}));
+  await quiet();
+  assert.equal(t.state.trafficLoaded.get('request-5').endLost, true, 'The store copy keeps the index row\'s End lost');
+}
+{
+  // The window can hold the row whole and still lack the gap: selecting it, and
+  // the rebuild after a later poll, keep End lost from the index row.
+  const t = indexFixture({windowCount: 2});
+  t.state.requests = t.state.nativeRequests = t.state.nativeRequests.map(request =>
+    ({...request, events: [{}, {}], details: [], origin: 'live', rank: 2, status: 'pending'}));
+  const whole = t.state.requests[1];
+  t.setIndexRows([{...t.row(1, 2), end_lost: true}, t.row(0, 2)]);
+  t.api.renderRequests(); await quiet();
+  t.api.selectTrafficRow(whole.id);
+  assert.equal(t.state.selectedRequestId, whole.id, 'A row the window holds whole selects without a store read');
+  const shown = () => t.state.requests.find(request => request.id === whole.id);
+  assert.deepEqual([shown().endLost, shown().status], [true, 'incomplete'], 'The selected window row reads End lost');
+  t.state.nativeRequests = t.state.nativeRequests.map(request => ({...request, endLost: false, status: 'pending'}));
+  t.api.rebuildTrafficRequests();
+  assert.deepEqual([shown().endLost, shown().status], [true, 'incomplete'], 'A later poll keeps End lost');
+  assert.equal(t.state.requests.find(request => request.id !== whole.id).endLost, false, 'Only the named row is marked');
+}
+{
   // A store read finishing after the researcher moved to the filter box leaves focus there.
   const t = indexFixture({windowCount: 1});
   t.setIndexRows([t.row(5, 2)]);

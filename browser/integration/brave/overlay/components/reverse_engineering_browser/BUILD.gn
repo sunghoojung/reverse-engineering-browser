@@ -121,6 +121,7 @@ component("renderer_sink") {
     "renderer/native_request_stack.h",
     "renderer/native_script_cookie_sink.cc",
     "renderer/native_script_cookie_sink.h",
+    "renderer/native_service_worker_starts.h",
     "renderer/native_worker_observation_sink.cc",
     "renderer/native_worker_observation_sink.h",
     "renderer/native_worker_source_sink.cc",

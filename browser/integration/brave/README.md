@@ -42,7 +42,8 @@ The source candidate now activates the existing opt-in transport before profile
 startup and snapshots owned-profile request admission before Shields decisions.
 It records bounded lifecycle metadata and explicit incomplete teardown/handoff
 observations. See [the startup contract and coverage matrix](../../../protocol/native-network-startup-v1.md)
-for unsupported SW-synthetic/renderer-memory-cache paths and the required patched
+for paths the proxy cannot see (network v3 finishes service-worker, `data:` and
+memory-cache answers in the renderer) and the required patched
 browser build/runtime acceptance. Source/component checks do not prove complete
 initial traffic capture.
 

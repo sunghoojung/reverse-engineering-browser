@@ -807,7 +807,7 @@ void NativeProbeHost::ReportExclusions() {
     const std::uint64_t count = queue_->ExclusionCount(slot);
     if (count > reported_exclusions_[slot]) {
       reported_exclusions_[slot] = count;
-      session_->EmitExclusion(renderer_os_pid_, static_cast<std::uint8_t>(16 + slot), count);
+      session_->EmitExclusion(renderer_os_pid_, NativeRendererExclusionClass(slot), count);
     }
   }
 }
@@ -825,8 +825,10 @@ std::uint32_t NativeProbeHost::FrameTab(
 }
 
 bool NativeProbeHost::IsWorkerRequestStart(const NativeProbeEvent& event) {
+  // A memory-cache reuse starts its own row, so it links like a start.
   return event.header.category == NativeProbeCategory::kNetwork &&
-         event.header.type == NativeProbeType::kRequestInitiated &&
+         (event.header.type == NativeProbeType::kRequestInitiated ||
+          event.header.type == NativeProbeType::kMemoryCacheReuse) &&
          IsNativeWorkerOwner(static_cast<NativeLoaderKind>(event.header.loader_kind));
 }
 

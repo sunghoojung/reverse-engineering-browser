@@ -2287,6 +2287,10 @@ int main() {
   Run<&BrowserInternalExclusion>();
   Run<&RendererAnsweredRequests>();
   Run<&RendererFetchOwners>();
+  Run<&ServiceWorkerRequestEnds>();
+  Run<&ServiceWorkerStartSequenceLock>();
+  Run<&RequestTargetRanges>();
+  Run<&MemoryCacheReuses>();
   Run<&ScriptCookieAccess>();
   Run<&CanvasCreatorAdmission>();
   Run<&RuntimeCreatorAdmission>();

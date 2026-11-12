@@ -1290,8 +1290,16 @@ Protocol is available from the header menu.
   sublabel only when the path was captured. The full URL is the tooltip.
 - **Status** colors 3xx, 4xx and 5xx apart. Failed names its net error,
   Pending has no response yet, and No loader means only the renderer recorded
-  the request. Once `response_started` arrives the row shows that HTTP code,
-  and until a terminal record follows, Time reads a dash and the tooltip says so.
+  the request. End lost means the request's service worker ended it but the
+  renderer had reused the slot holding its start, so its outcome is unknown
+  (a `service_worker_end_lost` gap). Finished is a memory-cache reuse whose
+  resource carried no HTTP status, such as an MHTML archive resource; it
+  completed. Once `response_started` arrives the row
+  shows that HTTP code, and until a terminal record follows, Time reads a dash
+  and the tooltip says so. A service worker race route shows what the page
+  received, which the worker or the network may have answered (the records do
+  not say which), and General says the browser records are the network
+  attempt's.
 - **Type** comes from the resource type, then the response MIME type when the
   resource type says only "other". Its tooltip has the MIME type.
 - **Initiator** names a script start's innermost frame as `file:line` when the
@@ -1301,8 +1309,12 @@ Protocol is available from the header menu.
   Browser.
 - **Size** is the terminal record's `encoded_data_length` (transferred) and
   `decoded_body_length` (resource), or (disk cache) and (service worker) from
-  the response flags. A served row shows its resource size only when the column
-  is wide enough for both. Units are decimal; the tooltip has exact bytes.
+  the response or renderer completion flags, or (memory cache) for a
+  `memory_cache_reuse` row, whose tooltip and General coverage say Blink reused
+  a resource it held, or decoded a `data:` URL or MHTML archive resource, and
+  made no request. A served
+  row shows its resource size only when the column is wide enough for both.
+  Units are decimal; the tooltip has exact bytes.
 - **Waterfall** draws each request from its first to its last record, lighter
   until `response_started`, over the matching requests or the selected range.
   A bar at the end of the scale is pulled inside its cell at its 2 px minimum.
@@ -1386,7 +1398,9 @@ never merge rows. A row is hidden only by an explicit, counted, reversible
 filter: **Hide internal** in Traffic, shared with Sources' "Hide browser-internal",
 covers `chrome:`, `devtools:` and other internal schemes
 ([native network v3](../../protocol/native-network-v3.md)), and the footer
-reports what capture excluded. Sources reads retained artifact bytes only. A failed
+reports what capture excluded, including memory-cache reuses past a renderer's
+budget ("N memory-cache reuses not recorded") and, apart, those in SVG images
+or popups that no tab owns. Sources reads retained artifact bytes only. A failed
 refresh preserves the last valid catalog, and a detached pending load is
 cancelled and cannot restore obsolete source text. Artifact loads have a
 10-second deadline, including body reads; a timed-out load can be retried

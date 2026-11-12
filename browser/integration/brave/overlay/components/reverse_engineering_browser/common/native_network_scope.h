@@ -6,6 +6,8 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_NETWORK_SCOPE_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_NETWORK_SCOPE_H_
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -39,10 +41,64 @@ enum class NativeSchemeClass : std::uint8_t {
 
 inline constexpr std::uint8_t kNativeWebUiRendererExclusion = 64;
 inline constexpr std::uint8_t kNativeWebUiRequestExclusion = 67;
+// Classes 68 and 69 belong to another part of the contract.
+inline constexpr std::uint8_t kNativeMemoryCacheReuseExclusion = 70;
+// Reuses in a page that is not ordinary (an SVG image's own document or a
+// page popup), which no tab owns; counted apart from the budget's overflow.
+inline constexpr std::uint8_t kNativeNonOrdinaryPageReuseExclusion = 71;
 inline constexpr std::uint16_t kNativeCaptureExclusionPayloadVersion = 1;
 inline constexpr std::uint32_t kNativeCaptureExclusionPayloadSize = 16;
 // One counter per browser-internal scheme class, 16 to 20.
 inline constexpr std::size_t kNativeSchemeExclusionSlots = 5;
+// The renderer's probe queue counters: the scheme classes, then classes 70 and 71.
+inline constexpr std::size_t kNativeRendererExclusionSlots = kNativeSchemeExclusionSlots + 2;
+
+// The queue slot of a class the renderer counts, or kNativeRendererExclusionSlots.
+[[nodiscard]] constexpr std::size_t NativeRendererExclusionSlot(
+    const std::uint8_t exclusion_class) noexcept {
+  if (exclusion_class >= 16 && exclusion_class < 16 + kNativeSchemeExclusionSlots)
+    return exclusion_class - 16U;
+  if (exclusion_class == kNativeMemoryCacheReuseExclusion)
+    return kNativeSchemeExclusionSlots;
+  return exclusion_class == kNativeNonOrdinaryPageReuseExclusion ? kNativeSchemeExclusionSlots + 1
+                                                                 : kNativeRendererExclusionSlots;
+}
+
+[[nodiscard]] constexpr std::uint8_t NativeRendererExclusionClass(const std::size_t slot) noexcept {
+  if (slot < kNativeSchemeExclusionSlots)
+    return static_cast<std::uint8_t>(16 + slot);
+  return slot == kNativeSchemeExclusionSlots ? kNativeMemoryCacheReuseExclusion
+                                             : kNativeNonOrdinaryPageReuseExclusion;
+}
+
+// memory_cache_reuse (type 52), "Memory-cache reuse" in
+// protocol/native-network-v3.md.
+inline constexpr std::uint16_t kNativeMemoryCacheReusePayloadVersion = 1;
+inline constexpr std::uint32_t kNativeMemoryCacheReusePayloadSize = 128;
+inline constexpr std::size_t kNativeMemoryCacheReuseHostSize = 120;
+inline constexpr std::uint8_t kNativeMemoryCacheReuseStaticData = 1U << 0U;
+inline constexpr std::uint8_t kNativeMemoryCacheReuseHostTruncated = 1U << 1U;
+// Records one renderer configuration admits; later reuses count as class 70.
+inline constexpr std::uint32_t kNativeMemoryCacheReuseBudget = 4096;
+
+// resource_type is Blink's ResourceType, 1 to 15 at the pin.
+[[nodiscard]] inline std::array<std::byte, kNativeProbeInlinePayloadSize>
+EncodeNativeMemoryCacheReusePayload(const std::uint8_t resource_type,
+                                    const bool static_data,
+                                    const std::string_view host) noexcept {
+  std::array<std::byte, kNativeProbeInlinePayloadSize> payload{};
+  const std::size_t length = std::min(host.size(), kNativeMemoryCacheReuseHostSize);
+  payload[0] = static_cast<std::byte>(kNativeMemoryCacheReusePayloadVersion);
+  payload[2] = static_cast<std::byte>(kNativeMemoryCacheReusePayloadSize);
+  payload[4] = static_cast<std::byte>(resource_type);
+  payload[5] =
+      static_cast<std::byte>((static_data ? kNativeMemoryCacheReuseStaticData : 0U) |
+                             (length != host.size() ? kNativeMemoryCacheReuseHostTruncated : 0U));
+  payload[6] = static_cast<std::byte>(length);
+  for (std::size_t index = 0; index < length; ++index)
+    payload[8 + index] = static_cast<std::byte>(static_cast<unsigned char>(host[index]));
+  return payload;
+}
 
 // Schemes arrive canonical and lower case from GURL and KURL.
 [[nodiscard]] constexpr NativeSchemeClass ClassifyNativeScheme(

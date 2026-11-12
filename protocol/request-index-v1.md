@@ -16,8 +16,9 @@ keeps one summary per request for the whole session.
 ## Rows
 
 The backend folds every network lifecycle record (`request_initiated` through
-`request_failed`) and every `request_target` and `request_body` child of the
-event store, in store order, into one row per request. Row identity, method,
+`request_failed`, and `memory_cache_reuse`, which is a whole row on its own)
+and every `request_target` and `request_body` child of the event store, in
+store order, into one row per request. Row identity, method,
 path, status, type, time, tab and the target join follow `requestsFromEvents`
 in `apps/research-ui/evidence_models.js`; `make request-index-check` replays one
 fixture through both and requires equal rows, sort orders, search and filter
@@ -31,11 +32,15 @@ Rows also carry what the lifecycle records hold beyond the row model:
 | Field | Source |
 | --- | --- |
 | `transfer_size`, `resource_size` | The last terminal record's `encoded_data_length` and `decoded_body_length`; null when negative or absent |
-| `from_cache`, `from_service_worker` | `response_started` flags 2 and 4 |
+| `from_cache`, `from_service_worker` | `response_started` flags 2 and 4, or those flags on a renderer `request_completed` or `request_failed` ([requests answered in the renderer](native-network-v3.md#requests-answered-in-the-renderer)) |
+| `memory_cache`, `static_data` | The row is a `memory_cache_reuse` record, and its static-data flag ([native network v3](native-network-v3.md#memory-cache-reuse)) |
+| `race_network` | A renderer `request_completed` or `request_failed` with flag 4 (`from_service_worker`) on a row that also has browser records: a service worker race route, whose response the worker or the network may have answered (the records do not say which). Its `failed`, `interrupted`, `status` and `error_code` are that completion's, what the page received, not the browser records' network attempt ([service worker ends](native-network-v3.md#service-worker-ends-without-a-response)) |
+| `status` | As `requestsFromEvents`: the HTTP status, else `failed`, `incomplete` or `pending`; a `memory_cache_reuse` row with no HTTP status (an MHTML archive resource, which carries none) is `finished`, because the load completed |
+| `end_lost` | A `gap` with payload `service_worker_end_lost` names the row by `initiator_process_id` and `initiator_request_id`; a row with no response and no end then has status `incomplete` instead of `pending` |
 | `mime_type`, `protocol` | The latest `response_started` payload, `mime; protocol=alpn` or `synthetic_shields; mime`: the MIME essence lowercased, and the ALPN token |
 | `response_time_ns` | The first `response_started` record's time |
 | `error_code` | The last non-zero `error_code` |
-| `loader_observed` | Any lifecycle record other than `request_initiated` |
+| `loader_observed` | Any lifecycle record other than `request_initiated` and `memory_cache_reuse` |
 | `initiator` | `worker` when `request_started` has flag 4; else, for a `request_initiated` record or a non-zero `initiator_process_id` whose version 3 `request_initiator_stack` names a dedicated, shared or service worker (thread 2 to 4), `worker_loader` when no script was on that worker's stack, `worker_unwalked` when the renderer's 32 worker stack tables were in use (state 6), else `worker_script`; else `script` when its `request_initiator_stack` walked frames, `parser` when no script was on the stack, else `renderer` ([native network v3](native-network-v3.md#request-initiator-stacks)); else `script` for a navigation with a `navigation_initiator_link`; else `browser` for a versioned browser record, else null |
 | `initiator_frame` | The innermost frame of that walked stack resolved alone through its `script_identity` and retained source, as `get_request_stack` resolves frames: URL, line, column and function name, or a reason; the index keeps 16,384 identities, the handler resolves at most 64 new frames per answer, from the whole artifact manifest, and keeps settled outcomes, so a later source artifact shows once the index next changes; else null |
 | `tab_ids`, `tab_link` | The row's own `tab_id` plus the tabs of the set its newest `request_tab_link` names, from the `tab_set` parts indexed so far, and that link's kind, tab count and whether every part arrived ([native network v3](native-network-v3.md#request-owners-and-tabs)); at most 4,096 sets of 256 tabs |
@@ -44,7 +49,12 @@ Rows also carry what the lifecycle records hold beyond the row model:
 | `browser_internal` | The row's scheme class is browser-internal (16 to 20, [native network v3](native-network-v3.md#scheme-class)); without a scheme class, not `loader_observed`, a host-only target and a single-label host other than `localhost`, as WebUI loads are |
 
 `type` follows the pinned `blink::mojom::ResourceType`; a request whose type says
-only "other" is classed by its MIME type.
+only "other" is classed by its MIME type, and a memory-cache row by its Blink
+`ResourceType`.
+
+A start of a hostless URL (`data:`, `blob:`) or a browser scheme names its
+scheme, as `scopedNetworkTarget` does: `data:` alone, with its target child
+the whole URL, or `chrome://host`.
 
 Each row also names its root event (`request_started`, else
 `request_initiated`, else the first record with a request ID), the

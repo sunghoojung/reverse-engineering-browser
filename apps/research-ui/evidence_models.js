@@ -39,19 +39,22 @@
           'script_identity', 'capture_exclusion', 'tab_set', 'request_tab_link', 'navigation_initiator_stack',
           'navigation_initiator_link', 'async_task_stack',
           'request_extension_link', 'request_watch_match', 'listener_dispatch', 'timer_observation',
-          'csp_violation', 'exception_observation', 'dom_mutation'
+          'csp_violation', 'exception_observation', 'dom_mutation', 'memory_cache_reuse'
         ])
       };
       // Scheme classes of protocol/native-network-v3.md; absent means 0.
       const requestSchemeClassNames = new Map([[1, 'http'], [2, 'https'], [3, 'ws'], [4, 'wss'], [5, 'data'],
         [6, 'blob'], [7, 'file'], [8, 'chrome-extension'], [15, 'other'], [16, 'chrome'], [17, 'chrome-untrusted'],
         [18, 'brave'], [19, 'devtools'], [20, 'chrome-search']]);
-      const schemeClassTypes = new Set(['request_initiated', 'request_started', 'request_completed', 'request_failed']);
-      // Loader kinds: browser 1..10 on request_started, renderer 16..21 on request_initiated.
+      const schemeClassTypes = new Set(['request_initiated', 'request_started', 'request_completed', 'request_failed',
+        'memory_cache_reuse']);
+      // Loader kinds: browser 1..10 on request_started, renderer 16..21 on
+      // request_initiated and memory_cache_reuse.
       const loaderKindValid = event => event.protocol_version === 3 && event.category === 'network' &&
         Number.isInteger(event.loader_kind) && (event.type === 'request_started'
           ? event.loader_kind >= 1 && event.loader_kind <= 10
-          : event.type === 'request_initiated' && event.loader_kind >= 16 && event.loader_kind <= 21);
+          : ['request_initiated', 'memory_cache_reuse'].includes(event.type) && event.loader_kind >= 16 &&
+            event.loader_kind <= 21);
       const uint64Fields = [
         'session_id', 'sequence_number', 'monotonic_time_ns', 'navigation_id',
         'frame_id', 'artifact_id', 'parent_event_id', 'request_id'
@@ -71,7 +74,7 @@
       const lifecycleRanks = new Map([
         ['request_initiated', 1], ['request_started', 2], ['request_redirected', 3],
         ['response_started', 4], ['response_completed', 5], ['request_completed', 5],
-        ['request_failed', 5]
+        ['request_failed', 5], ['memory_cache_reuse', 5]
       ]);
       const networkLifecycleTypes = new Set(lifecycleRanks.keys());
       // Children of a lifecycle record (protocol/native-network-v2.md and v3).
@@ -946,6 +949,28 @@
         }
       }
 
+      // memory_cache_reuse (protocol/native-network-v3.md): the same rules as
+      // include/reb/network_scope.hpp, the Python validator and the request index.
+      function decodeMemoryCacheReuse(event) {
+        if (event?.type !== 'memory_cache_reuse' || event.protocol_version !== 3 || event.category !== 'network' ||
+            event.flags !== 0 || event.payload_size !== 128 || typeof event.payload !== 'string' ||
+            !/^[0-9a-f]{256}$/i.test(event.payload) || !(event.status_code >= 0) || event.error_code !== 0 ||
+            event.resource_type !== 0 || event.initiator_request_id !== 0 || event.initiator_process_id !== 0 ||
+            !(event.process_id > 0) || !(event.scheme_class > 0) || !(event.loader_kind >= 16 && event.loader_kind <= 21) ||
+            ['navigation_id', 'artifact_id', 'parent_event_id', 'encoded_data_length'].some(key => event[key] !== '0') ||
+            ['browser_context_id_high', 'browser_context_id_low'].some(key => (event[key] ?? '0') !== '0') ||
+            String(event.decoded_body_length).startsWith('-') ||
+            ['session_id', 'sequence_number'].some(key => typeof event[key] !== 'string' || event[key] === '0')) return null;
+        const bytes = Uint8Array.from(event.payload.match(/../g), byte => Number.parseInt(byte, 16));
+        const [resourceType, flags, length] = [bytes[4], bytes[5], bytes[6]];
+        if (bytes[0] !== 1 || bytes[1] !== 0 || bytes[2] !== 128 || bytes[3] !== 0 || resourceType < 1 || resourceType > 15 ||
+            (flags & ~3) !== 0 || length > 120 || bytes[7] !== 0 || ((flags & 2) !== 0 && length !== 120) ||
+            bytes.slice(8, 8 + length).some(byte => byte < 0x21 || byte > 0x7e) ||
+            bytes.slice(8 + length).some(byte => byte !== 0)) return null;
+        return {resourceType, staticData: (flags & 1) !== 0, hostTruncated: (flags & 2) !== 0,
+          host: String.fromCharCode(...bytes.slice(8, 8 + length))};
+      }
+
       // Native JavaScript invocation records, protocol/native-js-invocation-v1.md:
       // the same rules as the C++, Python, Rust and Swift readers. A row keeps
       // kinds, IDs and lengths; digests are only marked as retained.
@@ -1088,6 +1113,7 @@
           (event.type !== 'wasm_dispatch_overflow' && event.type !== 'wasm_indirect_overflow' ||
             decodeWasmOverflow(event) !== null) &&
           (event.type !== 'js_dispatch_observation' || decodeNativeJsObservation(event) !== null) &&
+          (event.type !== 'memory_cache_reuse' || decodeMemoryCacheReuse(event) !== null) &&
           (!event.type.startsWith('js_invocation_') || decodeNativeJsInvocation(event) !== null) &&
           (!['wasm_guest_dispatch','wasm_guest_invocation'].includes(event.type) || decodeNativeGuestRecord(event) !== null);
       }
@@ -1443,7 +1469,7 @@
         const keys = new Map();
         for (const event of events) {
           if (event.protocol_version < 2 || integerText(event, 'request_id') === '0') continue;
-          if (event.type === 'request_initiated') {
+          if (event.type === 'request_initiated' || event.type === 'memory_cache_reuse') {
             const fallbackKey = legacyBrowserRequestKey(event);
             if (fallbackKey) keys.set(fallbackKey, rendererRequestIdentity(event));
             continue;
@@ -1465,7 +1491,7 @@
         }
 
         const requestId = integerText(event, 'request_id');
-        if (event.type === 'request_initiated' || event.type === 'request_initiator_stack') {
+        if (['request_initiated', 'request_initiator_stack', 'memory_cache_reuse'].includes(event.type)) {
           return rendererRequestIdentity(event);
         }
         const hasInitiator = event.initiator_process_id > 0;
@@ -1493,7 +1519,15 @@
         return 'other';
       }
 
+      // Blink ResourceType at the pin, from a memory_cache_reuse record.
+      function memoryCacheTypeFilter(resourceType) {
+        return {1: 'img', 2: 'css', 3: 'js', 4: 'font', 10: 'media', 11: 'media'}[resourceType] ?? 'other';
+      }
+
       function resourceTypeFilter(event, previous, payload, response) {
+        if (event.type === 'memory_cache_reuse') {
+          return memoryCacheTypeFilter(decodeMemoryCacheReuse(event)?.resourceType);
+        }
         if (/^application\/wasm(?:;|$)/i.test(payload)) return 'wasm';
         if (event.protocol_version >= 2 && event.type === 'request_started') {
           return resourceTypeFilters.get(event.resource_type) ?? 'other';
@@ -1545,13 +1579,26 @@
         return method ? {method, value: `${scheme}:`, kind: 'host', schemeOnly: true} : target;
       }
 
+      // A reuse names its host, or its scheme for a URL with no web host. Blink
+      // keeps only GET resources in the memory cache, and preloads and static
+      // data are GET too.
+      function memoryCacheTarget(event) {
+        const reuse = decodeMemoryCacheReuse(event);
+        const scheme = requestSchemeClassNames.get(event.scheme_class);
+        if (!reuse || !scheme) return null;
+        if (event.scheme_class <= 4) return {method: 'GET', value: reuse.host, kind: 'host'};
+        return reuse.host ? {method: 'GET', value: `${scheme}://${reuse.host}`, kind: 'host'}
+          : {method: 'GET', value: `${scheme}:`, kind: 'host', schemeOnly: true};
+      }
+
       function requestsFromEvents(events, origin = 'live') {
         const requests = new Map();
         const lifecycleEvents = events.filter(event => event.category === 'network' && networkLifecycleTypes.has(event.type));
         const browserRequestKeys = buildBrowserRequestKeys(lifecycleEvents);
         lifecycleEvents.forEach(event => {
           const payload = decodePayload(event);
-          const target = scopedNetworkTarget(networkTargetFromPayload(payload, event.type), payload, event);
+          const target = event.type === 'memory_cache_reuse' ? memoryCacheTarget(event)
+            : scopedNetworkTarget(networkTargetFromPayload(payload, event.type), payload, event);
           const id = requestIdentity(event, browserRequestKeys);
           const previous = requests.get(id);
           const timestamp = integerValue(event, 'monotonic_time_ns');
@@ -1583,11 +1630,23 @@
           const versioned = event.protocol_version >= 2;
           const response = versioned && event.type === 'response_started' ? responseMetadata(payload) : null;
           const ended = versioned && incomingRank === 5;
+          // A renderer completion carries the response's cache and service-worker
+          // flags, and a service worker's end without a response its own.
+          const answered = response !== null || (versioned && ['request_completed', 'request_failed'].includes(event.type));
+          // A memory-cache reuse is the renderer's own row; no loader made it.
+          const rendererRow = event.type === 'request_initiated' || event.type === 'memory_cache_reuse';
           // Initiator inputs: 1 renderer record, 2 service-worker start, 4 versioned record.
           const initiatorBits = (previous?.initiatorBits ?? 0) |
-            (event.type === 'request_initiated' || (versioned && event.initiator_process_id > 0) ? 1 : 0) |
+            (rendererRow || (versioned && event.initiator_process_id > 0) ? 1 : 0) |
             (versioned && event.type === 'request_started' && (event.flags & 4) !== 0 ? 2 : 0) | (versioned ? 4 : 0);
-          const loaderObserved = Boolean(previous?.loaderObserved) || event.type !== 'request_initiated';
+          const loaderObserved = Boolean(previous?.loaderObserved) || !rendererRow;
+          // A renderer completion with from_service_worker is what the page
+          // received; the browser's records on such a row are a race network
+          // request (protocol/native-network-v3.md).
+          const workerAnswer = versioned && ['request_completed', 'request_failed'].includes(event.type) &&
+            (event.flags & 4) !== 0 && event.initiator_process_id === 0 && !browserContextToken(event)
+            ? {failed: event.type === 'request_failed', code: numericStatus, errorCode: event.error_code}
+            : previous?.workerAnswer ?? null;
           requests.set(id, {
             id,
             path: updatesTarget ? target.value : previous?.path ?? 'Unidentified network event',
@@ -1612,6 +1671,9 @@
             interrupted,
             rank,
             statusRank: hasNewerStatus ? incomingRank : previousStatusRank,
+            code: hasNewerStatus ? numericStatus : previous?.code ?? 0,
+            workerAnswer,
+            endLost: false,
             targetRank,
             tabId: event.protocol_version === 3 && event.tab_id > 0
               ? String(event.tab_id) : previous?.tabId ?? '0',
@@ -1620,8 +1682,11 @@
             lastTimestamp,
             transferSize: ended ? nonNegativeLength(event, 'encoded_data_length') : previous?.transferSize ?? null,
             resourceSize: ended ? nonNegativeLength(event, 'decoded_body_length') : previous?.resourceSize ?? null,
-            fromCache: Boolean(previous?.fromCache) || (response !== null && (event.flags & 2) !== 0),
-            fromServiceWorker: Boolean(previous?.fromServiceWorker) || (response !== null && (event.flags & 4) !== 0),
+            fromCache: Boolean(previous?.fromCache) || (answered && (event.flags & 2) !== 0),
+            fromServiceWorker: Boolean(previous?.fromServiceWorker) || (answered && (event.flags & 4) !== 0),
+            memoryCache: Boolean(previous?.memoryCache) || event.type === 'memory_cache_reuse',
+            staticData: Boolean(previous?.staticData) || Boolean(event.type === 'memory_cache_reuse' &&
+              decodeMemoryCacheReuse(event)?.staticData),
             mimeType: response ? response.mimeType : previous?.mimeType ?? null,
             protocol: response ? response.protocol : previous?.protocol ?? null,
             responseTimestamp: previous?.responseTimestamp ?? (response ? timestamp : null),
@@ -1633,6 +1698,29 @@
           });
         });
         const rows = [...requests.values()];
+        for (const row of rows) {
+          const answer = row.workerAnswer;
+          row.raceNetwork = Boolean(answer) && row.browserObserved;
+          if (!answer) continue;
+          const code = answer.code > 0 ? answer.code : row.code;
+          row.failed = answer.failed;
+          row.interrupted = false;
+          row.status = answer.failed ? 'failed' : code > 0 ? code : 'pending';
+          row.errorCode = answer.errorCode;
+        }
+        // A reuse is a finished load; an MHTML archive resource has no HTTP status.
+        for (const row of rows) if (row.memoryCache && row.status === 'pending') row.status = 'finished';
+        // A service worker's end the renderer could not join to its start
+        // names the row by process and request ID, as a request_tab_link does.
+        const byId = new Map(rows.map(row => [row.id, row]));
+        for (const event of events) {
+          if (event.category !== 'network' || event.type !== 'gap' || !(event.initiator_process_id > 0) ||
+              decodePayload(event) !== 'service_worker_end_lost') continue;
+          const row = byId.get(correlatedRendererIdentity(event));
+          if (!row) continue;
+          row.endLost = true;
+          if (row.rank < 5 && !row.failed && !row.interrupted) row.status = 'incomplete';
+        }
         attachRequestDetails(rows, events, browserRequestKeys);
         // A walked initiator stack tells script starts from parser starts (protocol/native-network-v3.md).
         for (const row of rows) {

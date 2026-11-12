@@ -72,6 +72,52 @@ assert.equal(row.path, 'https://example.test/sw?q=1');
 assert(!row.hostOnly && row.status === 200 && row.browserObserved === false);
 assert(!scope.isBrowserInternalRequest(row));
 
+// A service worker that ended a request without a response: the renderer's
+// failure with from_service_worker finishes the row, never Pending.
+const swFailStart = renderer({sequence_number: '23', request_id: '16'}, 'GET example.test');
+const swFailTarget = strip(Object.assign(target(24, 23, '/api?id=7', 2), {request_id: '16'}));
+const swFailed = renderer({type: 'request_failed', sequence_number: '25', request_id: '16', error_code: -2, flags: 4,
+  monotonic_time_ns: '2003'}, 'failed');
+[row] = model.requestsFromEvents([swFailStart, swFailTarget, swFailed], 'live');
+assert.equal(row.path, 'https://example.test/api?id=7');
+assert(row.failed && row.status === 'failed' && row.time !== 'pending' && row.fromServiceWorker && row.errorCode === -2);
+assert(model.isBrokerEvent(swFailed));
+
+// A lost end names its row by process and request ID; the row reads
+// incomplete with endLost, never Pending.
+const lostStart = renderer({sequence_number: '26', request_id: '17'}, 'GET example.test');
+const lostGap = strip(Object.assign(renderer({type: 'gap', sequence_number: '27', request_id: '0', frame_id: '0',
+  scheme_class: undefined, initiator_process_id: 31, initiator_request_id: 17}, 'service_worker_end_lost')));
+[row] = model.requestsFromEvents([lostStart, lostGap], 'live');
+assert(row.endLost && row.status === 'incomplete' && !row.failed && row.time === 'pending');
+// A race network request: the worker's network error is what the page got,
+// over the browser attempt's 200.
+const raceStart = renderer({sequence_number: '28', request_id: '18'}, 'GET example.test');
+const raceBrowser = (type, sequence, extra) => strip(Object.assign(renderer({type, process_id: 2, sequence_number: sequence,
+  request_id: '940', initiator_process_id: 31, initiator_request_id: 18, browser_context_id_high: '3', browser_context_id_low: '4',
+  scheme_class: type === 'request_started' ? 2 : undefined, frame_id: '77'}, type === 'request_started' ? 'GET example.test' : 'completed'), extra));
+const raceFailed = renderer({type: 'request_failed', sequence_number: '29', request_id: '18', error_code: -2, flags: 4,
+  monotonic_time_ns: '2004'}, 'failed');
+[row] = model.requestsFromEvents([raceStart, raceBrowser('request_started', '5'), raceBrowser('request_completed', '6',
+  {status_code: 200, monotonic_time_ns: '2003'}), raceFailed], 'live');
+assert(row.raceNetwork && row.failed && row.status === 'failed' && row.errorCode === -2 && row.fromServiceWorker);
+
+// Memory-cache reuses are complete rows of their own, with their target child.
+const reuse = (name, fields) => Object.assign(golden(name), {process_id: 31, frame_id: '77'}, fields);
+const cached = reuse('memory-cache image', {sequence_number: '50', request_id: '60'});
+[row] = model.requestsFromEvents([cached], 'live');
+assert(row.memoryCache && !row.staticData && row.hostOnly && row.path === 'cdn.example.test' && row.method === 'GET');
+assert(row.status === 200 && row.time === '0.000 ms' && row.type === 'img' && row.resourceSize === 5120 &&
+  row.transferSize === 0 && row.loaderObserved === false && row.initiator === 'renderer');
+[row] = model.requestsFromEvents([cached, strip(Object.assign(target(51, 50, '/logo.png?v=2', 2), {request_id: '60'}))], 'live');
+assert.equal(row.path, 'https://cdn.example.test/logo.png?v=2');
+const decoded = reuse('memory-cache static data', {sequence_number: '52', request_id: '61'});
+[row] = model.requestsFromEvents([decoded], 'live');
+assert(row.memoryCache && row.staticData && row.schemeOnly && row.path === 'data:');
+[row] = model.requestsFromEvents([decoded, strip(Object.assign(target(53, 52, 'image/png;base64,AAAA'), {request_id: '61'}))], 'live');
+assert(row.path === 'data:image/png;base64,AAAA' && row.targetKind === 'url' && row.host === 'data:');
+assert(!scope.isBrowserInternalRequest(row));
+
 // Opted-in internal records name their scheme and are browser-internal.
 const internal = renderer({scheme_class: 16, sequence_number: '30', request_id: '7'}, 'GET newtab');
 [row] = model.requestsFromEvents([internal], 'live');
@@ -116,6 +162,14 @@ assert.equal(scope.captureExclusionNotice(scope.captureExclusionTotals([])), '')
 const proxied = scope.captureExclusionTotals([webui, golden('webui requests at the proxy'), golden('webui requests with a producer')]);
 assert.deepEqual([proxied.requests, proxied.renderers, [...proxied.byScheme]], [3n, 2n, [['webui', 3n]]]);
 assert.equal(scope.captureExclusionNotice(proxied), '3 browser-internal requests not recorded · 2 WebUI renderers not admitted');
+// Memory-cache reuses past a renderer's budget are their own count, never browser-internal.
+const reuses = scope.captureExclusionTotals([golden('memory-cache reuses of a renderer'),
+  golden('memory-cache reuses with no renderer'), golden('non-ordinary-page reuses of a renderer')]);
+// Lost tab rows and reuses no tab owned stay apart.
+assert.deepEqual([reuses.memoryCache, reuses.nonOrdinaryPage, reuses.requests], [4097n, 3n, 0n]);
+assert.equal(scope.captureExclusionNotice(reuses),
+  '4097 memory-cache reuses not recorded · 3 memory-cache reuses in SVG images or popups not recorded');
 
 console.log(`PASS network scope wire: ${cases.length} C++ golden records agree with Python and the UI readers; ` +
-  'data:, service-worker and opted-in internal rows finish with their own records; the browser-internal view is counted and reversible');
+  'data:, service-worker, service-worker failure, memory-cache and opted-in internal rows finish with their own records; ' +
+  'the browser-internal view and memory-cache exclusions are counted');

@@ -29,6 +29,12 @@ export const REQUEST_BODY_MARKER = '<img src=x onerror="window.__rebInjected=4">
 export const METADATA_BODY_HOST = 'api.metadata.test';
 // A content-session response body (native-network-v3.md) whose JSON carries markup.
 export const RESPONSE_BODY_HOST = 'api.response.test';
+// Rows only the renderer finishes (protocol/native-network-v3.md).
+export const MEMORY_CACHE_HOST = 'cdn.memory.test';
+export const MEMORY_CACHE_TARGET = '/sprite.png?v=3';
+export const SERVICE_WORKER_FAILED_HOST = 'api.worker.test';
+// A service worker's end the renderer could not join to its start: End lost.
+export const SERVICE_WORKER_LOST_HOST = 'api.lost.test';
 const FIXTURE_TAB_ID = 1;
 export const RESPONSE_BODY_MARKER = '<img src=x onerror="window.__rebInjected=9">';
 export const HEADER_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=7">';
@@ -513,6 +519,44 @@ async function workerStackRequest(template, firstTime, artifactsRoot) {
   return {events, artifacts};
 }
 
+// A memory-cache reuse with its content target, and a page request its service
+// worker ended without a response, in a renderer stream of their own.
+function rendererAnsweredRequests(template, events) {
+  const processId = 4343;
+  assert(!events.some(event => event.session_id === template.session_id && event.process_id === processId), 'renderer stream must be its own');
+  let sequence = 0, time = BigInt(events.at(-1).monotonic_time_ns);
+  const row = (type, payload, extra) => {
+    sequence += 1;
+    time += 1000n;
+    const event = {...template, process_id: processId, thread_id: processId, sequence_number: String(sequence),
+      monotonic_time_ns: String(time), tab_id: FIXTURE_TAB_ID, type, navigation_id: '0', artifact_id: '0',
+      parent_event_id: '0', status_code: 0, error_code: 0, encoded_data_length: '0', decoded_body_length: '0',
+      resource_type: 0, flags: 0, browser_context_id_high: '0', browser_context_id_low: '0', initiator_request_id: 0,
+      initiator_process_id: 0, payload_truncated: false, payload_size: payload.length / 2, payload, ...extra};
+    delete event.scheme_class;
+    delete event.loader_kind;
+    return Object.assign(event, extra);
+  };
+  const reusePayload = Buffer.alloc(128);
+  reusePayload.writeUInt16LE(1, 0);
+  reusePayload.writeUInt16LE(128, 2);
+  reusePayload[4] = 1;
+  reusePayload[6] = MEMORY_CACHE_HOST.length;
+  reusePayload.write(MEMORY_CACHE_HOST, 8, 'ascii');
+  const reused = row('memory_cache_reuse', reusePayload.toString('hex'),
+    {request_id: '5000', scheme_class: 2, loader_kind: 16, status_code: 200, decoded_body_length: '2048'});
+  const target = row('request_target', requestTargetPayload(MEMORY_CACHE_TARGET), {request_id: '5000', parent_event_id: reused.sequence_number});
+  const start = row('request_initiated', hex(`GET ${SERVICE_WORKER_FAILED_HOST}`), {request_id: '5001', scheme_class: 2, loader_kind: 16});
+  const startTarget = row('request_target', requestTargetPayload('/api?id=7'), {request_id: '5001', parent_event_id: start.sequence_number});
+  const failed = row('request_failed', hex('failed'), {request_id: '5001', scheme_class: 2, error_code: -2, flags: 4});
+  const lostStart = row('request_initiated', hex(`GET ${SERVICE_WORKER_LOST_HOST}`), {request_id: '5002', scheme_class: 2, loader_kind: 16});
+  const lostTarget = row('request_target', requestTargetPayload('/lost?id=9'), {request_id: '5002', parent_event_id: lostStart.sequence_number});
+  // The gap has no request ID of its own, so the store read of the row lacks it.
+  const lost = row('gap', hex('service_worker_end_lost'), {request_id: '0', frame_id: '0',
+    initiator_process_id: processId, initiator_request_id: 5002});
+  return [reused, target, start, startTarget, failed, lostStart, lostTarget, lost];
+}
+
 // Like the browser, each gap takes its renderer's own sequence slot, so the
 // stream has no hole. The payload is the reason text, as the producers write it.
 function namedBudgetGaps(template, events) {
@@ -541,7 +585,8 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const lastBrowser = adjacent.filter(event => event.process_id === network.process_id).at(-1);
   const withBodies = await requestBodyRequests(network, Number(lastBrowser.sequence_number) + 1, lastBrowser.monotonic_time_ns, artifacts);
   const workerStack = await workerStackRequest(network, withBodies.events.at(-1).monotonic_time_ns, artifacts);
-  const requests = [...scrolled, ...adjacent, ...withBodies.events, ...workerStack.events];
+  const answered = rendererAnsweredRequests(network, [...demoEvents, ...scrolled, ...adjacent, ...withBodies.events, ...workerStack.events]);
+  const requests = [...scrolled, ...adjacent, ...withBodies.events, ...workerStack.events, ...answered];
   const lines = Array.from({length: SOURCE_LINE_COUNT}, (_, index) => index === 2
     ? `// ${HOSTILE_SOURCE_MARKER}` : `const retainedLine${index} = ${index}; // long line ${'x'.repeat(index % 7 === 0 ? 180 : 12)}`);
   const source = await artifact(artifacts, {artifact_id: '303', session_id: '1', navigation_id: '100', frame_id: '200',

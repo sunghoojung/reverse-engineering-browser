@@ -121,8 +121,19 @@ all of them as `capture_exclusion` records unless
 `--reb-capture-browser-internal` is set. Chromium patch
 `0026-finish-renderer-answered-requests` keeps a `renderer/native_renderer_request.h`
 value in Blink's loader so `data:`, `blob:` and service-worker answers get a
-renderer completion. See
-[Native network v3](../../../../../../protocol/native-network-v3.md).
+renderer completion. Chromium patch `0038-record-synchronous-requests-on-calling-thread`
+records a synchronous load's start on its calling thread and hands it to the
+pool thread that sends it. Chromium patch `0039-finish-service-worker-ends` has
+`content::ServiceWorkerSubresourceLoader` finish a request it ends without a
+response, race network requests included, through
+`renderer/native_service_worker_starts.h`: 1,024 sequence-locked slots of
+recorded http(s) starts indexed by the request ID's low 10 bits. Chromium patch
+`0040-record-memory-cache-reuse` records each
+`ResourceFetcher::DidLoadResourceFromMemoryCache` in an ordinary page as a
+`memory_cache_reuse` record once the sink admits it, 4,096 per configuration,
+with the rest counted in the queue (version 4) as class 70 and those of pages
+that are not ordinary as class 71.
+See [Native network v3](../../../../../../protocol/native-network-v3.md).
 
 Each request names the tab that caused it. Brave patch
 `0017-link-requests-to-tab-owners` records a factory's tab when it is created;

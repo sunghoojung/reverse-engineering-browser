@@ -105,6 +105,8 @@ enum class EventType : std::uint16_t {
   kRequestExtensionLink = 50,
   // One successful V8 compile. See protocol/native-compiled-scripts-v1.md.
   kScriptCompiled = 51,
+  // A load Blink answered from a resource it held; see protocol/native-network-v3.md.
+  kMemoryCacheReuse = 52,
 };
 
 enum class EventFlag : std::uint16_t {

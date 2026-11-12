@@ -59,15 +59,18 @@ inline constexpr std::size_t kExtensionIdSize = 32;
   return value >= 17 && value <= 19;
 }
 
-// Browser kinds only on request_started, renderer kinds only on request_initiated.
+// Browser kinds only on request_started, renderer kinds only on request_initiated
+// and memory_cache_reuse.
 [[nodiscard]] constexpr bool IsValidLoaderKind(const EventHeader& header) noexcept {
   if (header.loader_kind == 0)
     return true;
   if (header.category != EventCategory::kNetwork)
     return false;
-  return header.type == EventType::kRequestStarted     ? IsBrowserLoaderKind(header.loader_kind)
-         : header.type == EventType::kRequestInitiated ? IsRendererLoaderKind(header.loader_kind)
-                                                       : false;
+  return header.type == EventType::kRequestStarted ? IsBrowserLoaderKind(header.loader_kind)
+         : header.type == EventType::kRequestInitiated ||
+                 header.type == EventType::kMemoryCacheReuse
+             ? IsRendererLoaderKind(header.loader_kind)
+             : false;
 }
 
 namespace tab_link_detail {

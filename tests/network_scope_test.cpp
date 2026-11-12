@@ -34,6 +34,16 @@ void Case(const std::string& name, const reb::EventRecord& event, const bool val
 
 static_assert(static_cast<std::uint16_t>(reb::EventType::kCaptureExclusion) ==
               static_cast<std::uint16_t>(reb::NativeProbeType::kCaptureExclusion));
+static_assert(static_cast<std::uint16_t>(reb::EventType::kMemoryCacheReuse) ==
+              static_cast<std::uint16_t>(reb::NativeProbeType::kMemoryCacheReuse));
+static_assert(static_cast<std::uint8_t>(reb::ExclusionClass::kMemoryCacheReuse) ==
+              reb::kNativeMemoryCacheReuseExclusion);
+static_assert(static_cast<std::uint8_t>(reb::ExclusionClass::kNonOrdinaryPageReuse) ==
+              reb::kNativeNonOrdinaryPageReuseExclusion);
+static_assert(reb::kMemoryCacheReusePayloadSize == reb::kNativeMemoryCacheReusePayloadSize &&
+              reb::kMemoryCacheReuseHostSize == reb::kNativeMemoryCacheReuseHostSize &&
+              reb::kMemoryCacheReuseStaticData == reb::kNativeMemoryCacheReuseStaticData &&
+              reb::kMemoryCacheReuseHostTruncated == reb::kNativeMemoryCacheReuseHostTruncated);
 static_assert(offsetof(reb::EventHeader, scheme_class) ==
               offsetof(reb::NativeProbeHeader, scheme_class));
 static_assert(sizeof(reb::EventHeader) == sizeof(reb::NativeProbeHeader));
@@ -109,7 +119,16 @@ void Exclusions() {
   Case("devtools loads with a producer", Exclusion(66, 1, 4242), false);
   Case("webui requests at the proxy", Exclusion(67, 3, 0), true);
   Case("webui requests with a producer", Exclusion(67, 1, 4242), false);
-  Case("exclusion class above the table", Exclusion(68, 1, 0), false);
+  Case("memory-cache reuses of a renderer", Exclusion(70, 4097, 4242), true);
+  Case("memory-cache reuses with no renderer", Exclusion(70, 1, 0), false);
+  Case("non-ordinary-page reuses of a renderer", Exclusion(71, 3, 4242), true);
+  Case("non-ordinary-page reuses with no renderer", Exclusion(71, 1, 0), false);
+  Case("exclusion class above the table", Exclusion(72, 1, 4242), false);
+  // Classes 68 and 69 are defined by another change; the range keeps them valid.
+  for (const std::uint8_t code : {std::uint8_t{68}, std::uint8_t{69}}) {
+    Check(reb::IsValidEvent(Exclusion(code, 1, 0)) && reb::IsValidEvent(Exclusion(code, 1, 4242)),
+          "class " + std::to_string(code) + " stays valid");
+  }
   Case("zero count", Exclusion(16, 0, 4242), false);
   Case("unknown class", Exclusion(21, 1, 4242), false);
   Case("http is never excluded", Exclusion(2, 1, 4242), false);
@@ -151,11 +170,120 @@ void Exclusions() {
   Check(json.find("scheme_class") == std::string::npos, "zero scheme class is absent");
 }
 
+// The producer's encoder in the envelope the renderer sink writes.
+reb::EventRecord Reuse(const std::uint8_t resource_type,
+                       const bool static_data,
+                       const std::string_view host,
+                       const std::uint8_t scheme_class = 2) {
+  reb::NativeProbeEvent event;
+  event.header.category = reb::NativeProbeCategory::kNetwork;
+  event.header.type = reb::NativeProbeType::kMemoryCacheReuse;
+  event.header.session_id = 9;
+  event.header.sequence_number = 44;
+  event.header.monotonic_time_ns = 1002;
+  event.header.process_id = 7;
+  event.header.thread_id = 8;
+  event.header.frame_id = 0x6161;
+  event.header.request_id = 6000;
+  event.header.status_code = 200;
+  event.header.decoded_body_length = 5120;
+  event.header.scheme_class = scheme_class;
+  event.header.loader_kind = 16;
+  event.header.payload_size = reb::kNativeMemoryCacheReusePayloadSize;
+  event.inline_payload = reb::EncodeNativeMemoryCacheReusePayload(resource_type, static_data, host);
+  return std::bit_cast<reb::EventRecord>(event);
+}
+
+void MemoryCacheReuses() {
+  Case("memory-cache image", Reuse(1, false, "cdn.example.test"), true);
+  Case("memory-cache static data", Reuse(1, true, "", 5), true);
+  Case("memory-cache dictionary", Reuse(15, false, "example.test"), true);
+  const std::string long_host(200, 'h');
+  const auto truncated = Reuse(3, false, long_host);
+  reb::MemoryCacheReusePayload value;
+  Check(reb::DecodeMemoryCacheReusePayload(truncated.inline_payload, value) &&
+            value.host_length == 120 && value.flags == reb::kMemoryCacheReuseHostTruncated &&
+            value.resource_type == 3,
+        "long host keeps 120 bytes");
+  Case("memory-cache long host", truncated, true);
+  auto event = Reuse(1, false, "example.test");
+  event.header.tab_id = 5;
+  Case("memory-cache with the drain's tab", event, true);
+  event.header.loader_kind = 17;
+  event.header.frame_id = 0x77;
+  Case("memory-cache in a dedicated worker", event, true);
+  Case("memory-cache resource type 0", Reuse(0, false, "example.test"), false);
+  Case("memory-cache resource type above the table", Reuse(16, false, "example.test"), false);
+  Case("memory-cache without a scheme", Reuse(1, false, "example.test", 0), false);
+  event = Reuse(1, false, "example.test");
+  event.header.loader_kind = 3;
+  Case("memory-cache with a browser loader kind", event, false);
+  event.header.loader_kind = 0;
+  Case("memory-cache without a loader kind", event, false);
+  event = Reuse(1, false, "example.test");
+  event.inline_payload[5] = std::byte{4};
+  Case("memory-cache unknown flag", event, false);
+  event = Reuse(1, false, "example.test");
+  event.inline_payload[5] = std::byte{2};
+  Case("memory-cache truncated short host", event, false);
+  event = Reuse(1, false, "example.test");
+  event.inline_payload[7] = std::byte{1};
+  Case("memory-cache dirty reserved byte", event, false);
+  event = Reuse(1, false, "example.test");
+  event.inline_payload[8 + 12] = std::byte{'x'};
+  Case("memory-cache byte after the host", event, false);
+  event = Reuse(1, false, "example.test");
+  event.inline_payload[8 + 3] = std::byte{' '};
+  Case("memory-cache space in the host", event, false);
+  event = Reuse(1, false, "example.test");
+  event.inline_payload[6] = std::byte{121};
+  Case("memory-cache host length above 120", event, false);
+  event = Reuse(1, false, "example.test");
+  event.inline_payload[0] = std::byte{2};
+  Case("memory-cache payload version 2", event, false);
+  event = Reuse(1, false, "example.test");
+  event.header.payload_size = 127;
+  Case("memory-cache short payload", event, false);
+  event = Reuse(1, false, "example.test");
+  event.header.parent_event_id = 3;
+  Case("memory-cache with a parent", event, false);
+  event = Reuse(1, false, "example.test");
+  event.header.encoded_data_length = 10;
+  Case("memory-cache with transferred bytes", event, false);
+  event = Reuse(1, false, "example.test");
+  event.header.error_code = -2;
+  Case("memory-cache with an error", event, false);
+  event = Reuse(1, false, "example.test");
+  event.header.status_code = -1;
+  Case("memory-cache negative status", event, false);
+  event = Reuse(1, false, "example.test");
+  event.header.decoded_body_length = -1;
+  Case("memory-cache negative size", event, false);
+  event = Reuse(1, false, "example.test");
+  event.header.resource_type = 4;
+  Case("memory-cache envelope resource type", event, false);
+  event = Reuse(1, false, "example.test");
+  event.header.flags = 2;
+  Case("memory-cache envelope flags", event, false);
+  event = Reuse(1, false, "example.test");
+  event.header.initiator_process_id = 7;
+  Case("memory-cache with initiator fields", event, false);
+  event = Reuse(1, false, "example.test");
+  event.header.category = reb::EventCategory::kVm;
+  Case("memory-cache outside network", event, false);
+  std::string json;
+  reb::WriteEventJson(Reuse(1, false, "example.test"), json);
+  Check(json.find("\"type\":\"memory_cache_reuse\"") != std::string::npos &&
+            json.find("\"scheme_class\":2,\"loader_kind\":16,") != std::string::npos,
+        "memory-cache JSON");
+}
+
 }  // namespace
 
 int main(const int argc, char** argv) {
   SchemeClasses();
   Exclusions();
+  MemoryCacheReuses();
   if (argc == 2 && std::string_view(argv[1]) == "--golden") {
     std::string json;
     std::cout << '[';
@@ -170,7 +298,8 @@ int main(const int argc, char** argv) {
   }
   if (failures == 0) {
     std::cout << "PASS network scope: " << golden.size()
-              << " scheme class and capture exclusion records; overlay and core agree\n";
+              << " scheme class, capture exclusion and memory-cache records; overlay and core "
+                 "agree\n";
   }
   return failures == 0 ? 0 : 1;
 }

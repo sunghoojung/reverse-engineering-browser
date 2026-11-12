@@ -92,8 +92,8 @@ queue drop prevents the terminal observation, completeness remains unknown.
 | Shields cancellation or synthetic stub | Start plus failure/stub provenance, including pre-network rejection |
 | Network-service HTTP cache through this proxy | Response/cache metadata when callbacks cross the proxy |
 | Dedicated/shared/service-worker requests through this proxy | Lifecycle metadata. Renderer-issued subresources carry the worker process id; the worker main script does not claim a renderer initiator. Frame/tab ownership may still be unknown |
-| Service-worker synthetic responses / CacheStorage interception | Not covered when Chromium uses a separate single-request/intercepting loader |
-| Renderer memory-cache reuse | Not covered when no browser URL loader is created |
+| Service-worker synthetic responses / CacheStorage interception | Not covered when Chromium uses a separate single-request/intercepting loader. A page's subresource request its service worker answers, or ends without a response, is finished by the renderer ([network v3](native-network-v3.md#requests-answered-in-the-renderer)) |
+| Renderer memory-cache reuse | No browser URL loader is created; the renderer records it as `memory_cache_reuse` ([network v3](native-network-v3.md#memory-cache-reuse)) |
 | WebSocket, WebTransport, other non-URLLoader traffic | Not added by this change |
 | Headers and arbitrary response bodies | Not retained by native metadata; existing separately authorized artifact paths only |
 | URL path and query, request bodies | [Native network v2](native-network-v2.md): body summary always; path, query and body bytes only with request content capture |

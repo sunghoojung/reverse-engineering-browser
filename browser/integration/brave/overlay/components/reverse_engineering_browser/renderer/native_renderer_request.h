@@ -51,6 +51,17 @@ struct NativeRendererRequest final {
   }
 };
 
+// Whether content::ServiceWorkerSubresourceLoader ends a request itself, so the
+// renderer finishes it (protocol/native-network-v3.md): it sent no response (a
+// sent one carries from_service_worker, and the loader's client finishes that
+// row), it has not ended the request already, and no race network request it
+// started answered the page (the browser proxy recorded that answer).
+[[nodiscard]] constexpr bool NativeServiceWorkerEndsRequest(const bool response_sent,
+                                                            const bool completed,
+                                                            const bool network_answered) noexcept {
+  return !response_sent && !completed && !network_answered;
+}
+
 }  // namespace reb
 
 #endif  // BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_RENDERER_NATIVE_RENDERER_REQUEST_H_

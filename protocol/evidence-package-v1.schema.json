@@ -597,7 +597,8 @@
             "navigation_initiator_link",
             "async_task_stack",
             "request_extension_link",
-            "script_compiled"
+            "script_compiled",
+            "memory_cache_reuse"
           ]
         },
         "status_code": {

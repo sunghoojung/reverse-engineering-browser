@@ -1,0 +1,196 @@
+diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
+index 08de5bd..5f7d7f2 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
+@@ -118,12 +118,43 @@ bool RedirectRequiresLoaderRestart(const GURL& original_url,
+   return original_url.scheme() != redirect_url.scheme();
+ }
+ 
++// request_initiated and the records that join it, on the thread that starts
++// the request; see protocol/native-network-v3.md.
++reb::NativeRendererRequest RecordNativeRequestStart(
++    const int request_id,
++    const network::ResourceRequest& request) {
++  const reb::NativeRendererRequest start =
++      reb::NativeProbeSink::Get().RecordRequestInitiated(
++          request_id, request.method, request.url.scheme(), request.url.host());
++  // The JavaScript invocation that started this request, when one is
++  // current; see protocol/native-js-invocation-v1.md.
++  reb::NativeProbeSink::Get().RecordNativeJsInvocationRequest(request_id);
++  // The stack that started it.
++  reb::NativeRequestStackWalk::Record(request_id, start.initiated_sequence);
++  // A Console request watch; see protocol/native-debugger-observation-v1.md.
++  if (start.initiated_sequence != 0 &&
++      reb::NativeDebuggerWatch::Armed(reb::kNativeWatchRequests)) {
++    reb::NativeDebuggerWatch::Request(request_id, start.initiated_sequence,
++                                      request.method,
++                                      request.url.possibly_invalid_spec());
++  }
++  return start;
++}
++
+ }  // namespace
+ 
+ ResourceRequestSender::ResourceRequestSender() = default;
+ 
+ ResourceRequestSender::~ResourceRequestSender() = default;
+ 
++void ResourceRequestSender::UseNativeSyncStart(
++    const int request_id,
++    const reb::NativeRendererRequest& start) {
++  reb_sync_start_ = true;
++  reb_sync_request_id_ = request_id;
++  reb_request_ = start;
++}
++
+ void ResourceRequestSender::SendSync(
+     std::unique_ptr<network::ResourceRequest> request,
+     const net::NetworkTrafficAnnotationTag& traffic_annotation,
+@@ -143,6 +174,12 @@ void ResourceRequestSender::SendSync(
+   DCHECK(loader_options & network::mojom::kURLLoadOptionSynchronous);
+   DCHECK(request->load_flags & net::LOAD_IGNORE_LIMITS);
+ 
++  // The pool thread below sends the request, but this thread runs the script
++  // and owns the fetch, so the request's start is recorded here.
++  const int reb_request_id = GenerateRequestId();
++  const reb::NativeRendererRequest reb_start =
++      RecordNativeRequestStart(reb_request_id, *request);
++
+   std::unique_ptr<network::PendingSharedURLLoaderFactory> pending_factory =
+       url_loader_factory->Clone();
+   base::WaitableEvent redirect_or_response_event(
+@@ -172,7 +209,8 @@ void ResourceRequestSender::SendSync(
+                           CrossThreadUnretained(terminate_sync_load_event),
+                           timeout, std::move(download_to_blob_registry),
+                           cors_exempt_header_list,
+-                          std::move(resource_load_info_notifier_wrapper)));
++                          std::move(resource_load_info_notifier_wrapper),
++                          reb_request_id, reb_start));
+ 
+   // `redirect_or_response_event` will signal when each redirect completes, and
+   // when the final response is complete.
+@@ -278,23 +316,11 @@ int ResourceRequestSender::SendAsync(
+                       weak_factory_.GetWeakPtr()));
+   used_code_cache_fetcher_ = !!code_cache_fetcher_;
+ 
+-  // Compute a unique request_id for this renderer process.
+-  int request_id = GenerateRequestId();
+-  reb_request_ = reb::NativeProbeSink::Get().RecordRequestInitiated(
+-      request_id, request->method, request->url.scheme(), request->url.host());
+-  // The JavaScript invocation that started this request, when one is
+-  // current; see protocol/native-js-invocation-v1.md.
+-  reb::NativeProbeSink::Get().RecordNativeJsInvocationRequest(request_id);
+-  // The stack that started it; see protocol/native-network-v3.md.
+-  reb::NativeRequestStackWalk::Record(request_id,
+-                                      reb_request_.initiated_sequence);
+-  // A Console request watch; see protocol/native-debugger-observation-v1.md.
+-  if (reb_request_.initiated_sequence != 0 &&
+-      reb::NativeDebuggerWatch::Armed(reb::kNativeWatchRequests)) {
+-    reb::NativeDebuggerWatch::Request(request_id,
+-                                      reb_request_.initiated_sequence,
+-                                      request->method,
+-                                      request->url.possibly_invalid_spec());
++  // Compute a unique request_id for this renderer process. A synchronous
++  // load already has one, and its start was recorded on the calling thread.
++  int request_id = reb_sync_start_ ? reb_sync_request_id_ : GenerateRequestId();
++  if (!reb_sync_start_) {
++    reb_request_ = RecordNativeRequestStart(request_id, *request);
+   }
+   request_info_ = std::make_unique<PendingRequestInfo>(
+       std::move(client), request->destination, KURL(request->url),
+diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h
+index f8d5249..5fa6443 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h
++++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h
+@@ -120,6 +120,12 @@ class BLINK_PLATFORM_EXPORT ResourceRequestSender {
+       base::RepeatingCallback<void(size_t)>
+           did_buffer_load_while_in_bfcache_callback);
+ 
++  // A synchronous load's request ID and the start SendSync recorded for it
++  // on the calling thread; the next SendAsync uses both and records nothing
++  // more at its start. See protocol/native-network-v3.md.
++  void UseNativeSyncStart(int request_id,
++                          const reb::NativeRendererRequest& start);
++
+   // Cancels the current request and `request_info_` will be released.
+   virtual void Cancel(scoped_refptr<base::SequencedTaskRunner> task_runner);
+ 
+@@ -252,6 +258,9 @@ class BLINK_PLATFORM_EXPORT ResourceRequestSender {
+ 
+   // Native capture state of this request; see protocol/native-network-v3.md.
+   reb::NativeRendererRequest reb_request_;
++  // Set by UseNativeSyncStart.
++  bool reb_sync_start_ = false;
++  int reb_sync_request_id_ = 0;
+ 
+   scoped_refptr<base::SequencedTaskRunner> loading_task_runner_;
+ 
+diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context.cc
+index 27408c1..3988035 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context.cc
+@@ -114,11 +114,16 @@ void SyncLoadContext::StartAsyncWithWaitableEvent(
+     mojo::PendingRemote<mojom::blink::BlobRegistry> download_to_blob_registry,
+     const Vector<String>& cors_exempt_header_list,
+     std::unique_ptr<ResourceLoadInfoNotifierWrapper>
+-        resource_load_info_notifier_wrapper) {
++        resource_load_info_notifier_wrapper,
++    const int reb_request_id,
++    const reb::NativeRendererRequest& reb_start) {
+   scoped_refptr<SyncLoadContext> context(base::AdoptRef(new SyncLoadContext(
+       request.get(), std::move(pending_url_loader_factory), response,
+       context_for_redirect, redirect_or_response_event, abort_event, timeout,
+       std::move(download_to_blob_registry), loading_task_runner)));
++  // ResourceRequestSender::SendSync recorded the start on the calling thread.
++  context->resource_request_sender_->UseNativeSyncStart(reb_request_id,
++                                                        reb_start);
+   context->resource_request_sender_->SendAsync(
+       std::move(request), std::move(loading_task_runner), traffic_annotation,
+       loader_options, cors_exempt_header_list, context,
+diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context.h b/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context.h
+index c13b69a..57474be 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context.h
++++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context.h
+@@ -57,6 +57,9 @@ class BLINK_PLATFORM_EXPORT SyncLoadContext : public ResourceRequestClient {
+   // If |download_to_blob_registry| is not null, it is used to
+   // redirect the download to a blob, with the resulting blob populated in
+   // |response|.
++  // `reb_request_id` and `reb_start` are the request ID and native capture
++  // start that ResourceRequestSender::SendSync recorded on the calling
++  // thread; see protocol/native-network-v3.md.
+   static void StartAsyncWithWaitableEvent(
+       std::unique_ptr<network::ResourceRequest> request,
+       scoped_refptr<base::SingleThreadTaskRunner> loading_task_runner,
+@@ -73,7 +76,9 @@ class BLINK_PLATFORM_EXPORT SyncLoadContext : public ResourceRequestClient {
+       mojo::PendingRemote<mojom::blink::BlobRegistry> download_to_blob_registry,
+       const Vector<String>& cors_exempt_header_list,
+       std::unique_ptr<ResourceLoadInfoNotifierWrapper>
+-          resource_load_info_notifier_wrapper);
++          resource_load_info_notifier_wrapper,
++      int reb_request_id,
++      const reb::NativeRendererRequest& reb_start);
+ 
+   SyncLoadContext(const SyncLoadContext&) = delete;
+   SyncLoadContext& operator=(const SyncLoadContext&) = delete;
+diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context_unittest.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context_unittest.cc
+index 0e6c59d..8f13e9f 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context_unittest.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_context_unittest.cc
+@@ -17,6 +17,7 @@
+ #include "services/network/test/test_url_loader_factory.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ #include "third_party/blink/public/platform/resource_load_info_notifier_wrapper.h"
++#include "third_party/blink/public/platform/web_url_request_util.h"
+ #include "third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h"
+ #include "third_party/blink/renderer/platform/loader/fetch/url_loader/sync_load_response.h"
+ #include "third_party/blink/renderer/platform/wtf/shared_buffer.h"
+@@ -116,7 +117,8 @@ class SyncLoadContextTest : public testing::Test {
+             Vector<String>() /* cors_exempt_header_list */,
+             std::make_unique<ResourceLoadInfoNotifierWrapper>(
+                 /*resource_load_info_notifier=*/nullptr,
+-                task_environment_.GetMainThreadTaskRunner())));
++                task_environment_.GetMainThreadTaskRunner()),
++            GenerateRequestId(), reb::NativeRendererRequest()));
+   }
+ 
+   static void RunSyncLoadContextViaDataPipe(

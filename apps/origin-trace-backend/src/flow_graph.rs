@@ -567,17 +567,13 @@ impl Builder<'_> {
             "script_id": frame.script_id,
             "status": "unresolved",
         });
-        let resolved = sha.as_deref().and_then(|sha| self.resolved.get(sha));
-        let reason = match (&identity, resolved) {
-            (None, _) => Some("script_identity_missing"),
-            (Some(_), None) if sha.is_none() => Some("source_unavailable"),
-            (Some(identity), None) => Some(if identity.wasm || identity.retained {
-                "source_artifact_missing"
-            } else {
-                "source_not_retained"
-            }),
-            (Some(_), Some(resolved)) => resolved.reason,
+        let sources = self.resolved;
+        let source = request_stack::find_source(identity.as_ref(), |_, sha| sources.get(sha));
+        let reason = match source {
+            Ok((_, resolved)) => resolved.reason,
+            Err(reason) => Some(reason),
         };
+        let resolved = source.ok().map(|(_, resolved)| resolved);
         if let Some(resolved) = resolved {
             value["artifact_id"] = resolved.artifact_id.clone();
             value["url"] = resolved.url.clone();
@@ -608,17 +604,15 @@ impl Builder<'_> {
                 if let Some(&(line, column)) = at.and_then(|at| resolved.lines.get(&at)) {
                     // Sources numbers the artifact itself; line and column
                     // add the script's start in its document.
+                    let (document_line, document_column) = identity.document_position(line, column);
                     value["artifact_line"] = json!(line);
                     value["artifact_column"] = json!(column);
-                    value["line"] = json!(u64::from(identity.start_line) + line);
-                    value["column"] = json!(if line == 1 {
-                        u64::from(identity.start_column) + column
-                    } else {
-                        column
-                    });
+                    value["line"] = json!(document_line);
+                    value["column"] = json!(document_column);
                 } else if top_level {
-                    value["line"] = json!(u64::from(identity.start_line) + 1);
-                    value["column"] = json!(u64::from(identity.start_column) + 1);
+                    let (line, column) = identity.document_position(1, 1);
+                    value["line"] = json!(line);
+                    value["column"] = json!(column);
                 } else {
                     value["status"] = json!("unresolved");
                     value["reason"] = json!("position_outside_source");
@@ -675,17 +669,11 @@ impl Builder<'_> {
         if caller.kind == 2 {
             return Some((0, u64::from(caller.position)));
         }
-        let identity = self.identity(process, caller.script_id)?;
-        let resolved = self.resolved.get(identity.sha256.as_deref()?)?;
+        let identity = self.identity(process, caller.script_id);
+        let (identity, resolved) =
+            request_stack::find_source(identity, |_, sha| self.resolved.get(sha)).ok()?;
         let &(line, column) = resolved.lines.get(&caller.position)?;
-        Some((
-            u64::from(identity.start_line) + line,
-            if line == 1 {
-                u64::from(identity.start_column) + column
-            } else {
-                column
-            },
-        ))
+        Some(identity.document_position(line, column))
     }
 
     /// Adds one stack's use of an edge. A stack that walks an edge twice (a

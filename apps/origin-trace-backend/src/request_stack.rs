@@ -334,6 +334,36 @@ pub struct Identity {
     pub(crate) sha256: Option<String>,
 }
 
+impl Identity {
+    /// A one-based line and column of the script's artifact as a position in
+    /// its document: the script's start line is added, and its start column
+    /// only on its first line.
+    pub(crate) fn document_position(&self, line: u64, column: u64) -> (u64, u64) {
+        let column = if line == 1 {
+            u64::from(self.start_column) + column
+        } else {
+            column
+        };
+        (u64::from(self.start_line) + line, column)
+    }
+}
+
+/// The retained source of a frame's script, which `find` looks up by the
+/// script's identity and digest, or the first reason there is none.
+pub(crate) fn find_source<'a, T>(
+    identity: Option<&'a Identity>,
+    find: impl FnOnce(&'a Identity, &str) -> Option<T>,
+) -> std::result::Result<(&'a Identity, T), &'static str> {
+    let identity = identity.ok_or("script_identity_missing")?;
+    let sha = identity.sha256.as_deref().ok_or("source_unavailable")?;
+    let found = find(identity, sha).ok_or(if identity.wasm || identity.retained {
+        "source_artifact_missing"
+    } else {
+        "source_not_retained"
+    })?;
+    Ok((identity, found))
+}
+
 pub fn decode_identity(payload: &[u8]) -> Option<(u32, Identity)> {
     if payload.len() != 128
         || payload[..4] != [1, 0, 128, 0]
@@ -544,16 +574,11 @@ fn load_source(
     session: &str,
     read: &dyn Fn(&Value, usize) -> Result<Vec<u8>>,
 ) -> std::result::Result<Source, &'static str> {
-    let identity = identity.ok_or("script_identity_missing")?;
-    let sha = identity.sha256.as_deref().ok_or("source_unavailable")?;
-    let kind = if identity.wasm { "wasm" } else { "javascript" };
-    let artifact = newest(artifacts, session, |a| {
-        a["kind"] == kind && a["sha256"] == sha
-    })
-    .ok_or(if identity.wasm || identity.retained {
-        "source_artifact_missing"
-    } else {
-        "source_not_retained"
+    let (identity, artifact) = find_source(identity, |identity, sha| {
+        let kind = if identity.wasm { "wasm" } else { "javascript" };
+        newest(artifacts, session, |a| {
+            a["kind"] == kind && a["sha256"] == sha
+        })
     })?;
     let bytes = read(artifact, MAX_SOURCE).map_err(|_| "source_artifact_unreadable")?;
     let mut source = Source {
@@ -699,18 +724,15 @@ fn frame_value(
                     .then(|| source.positions.get(&frame.detail))
                     .flatten()
                     .and_then(|&(byte, _, _)| function_name(text, byte));
+                let (document_line, document_column) = identity.document_position(line, column);
                 json!({
                     "status": "resolved",
                     "artifact_id": source.artifact_id,
                     "url": source.url,
                     "artifact_line": line,
                     "artifact_column": column,
-                    "line": u64::from(identity.start_line) + line,
-                    "column": if line == 1 {
-                        u64::from(identity.start_column) + column
-                    } else {
-                        column
-                    },
+                    "line": document_line,
+                    "column": document_column,
                     "function_name": name,
                 })
             }

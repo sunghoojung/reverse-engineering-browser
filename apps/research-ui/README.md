@@ -1075,8 +1075,11 @@ omitted-frames marker, and each async task it came from (`setTimeout`,
 stack that scheduled it, naming the thread or process a message came from; a
 frame opens Sources at its position, a request started with no script on the
 stack reads "Parser" ("Worker loader" in a worker), a chain that reaches a task
-scheduled with no script says so, and the async callers still not shown are
-listed.
+scheduled with no script, or a message whose task origin was rejected, says
+so, a microtask without its registration says whether promise stacks were off
+or on with nothing remembered, a budget note names the thread's own budget,
+a worker past the renderer's 32 stack tables says nothing was walked, and the
+async callers still not shown are listed.
 Content capture sessions add the path and query and bounded request body
 bytes, which Payload parses, response bodies, and request and response header
 blocks ([native network v3](../../protocol/native-network-v3.md)). Response
@@ -1293,8 +1296,9 @@ Protocol is available from the header menu.
   resource type says only "other". Its tooltip has the MIME type.
 - **Initiator** names a script start's innermost frame as `file:line` when the
   request index resolves it through retained source (tooltip: URL, column and
-  function), else Script, Parser, Worker script or Worker loader from the
-  initiator stack, Renderer without one, Service worker or Browser.
+  function), else Script, Parser, Worker script, Worker loader or Worker, not
+  walked from the initiator stack, Renderer without one, Service worker or
+  Browser.
 - **Size** is the terminal record's `encoded_data_length` (transferred) and
   `decoded_body_length` (resource), or (disk cache) and (service worker) from
   the response flags. A served row shows its resource size only when the column

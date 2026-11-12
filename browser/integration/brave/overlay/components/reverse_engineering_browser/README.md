@@ -265,11 +265,14 @@ their task chain; `renderer/native_request_stack_blink.h` holds the Blink-side
 hooks and `common/native_navigation_initiator_hook.h` carries a navigation's
 renderer stack to the browser link (event 47). Every table belongs to one
 thread: the document main thread and each dedicated, shared and service worker
-attach their own, so walks take no lock; only attach, detach and the
-transport's routing of a browser refusal to its owning thread take the registry
-lock. `common/native_request_stack.h` also defines the task origin a posted
-message carries, and the sink records promise registrations under
-`--reb-promise-stacks`. See the
+are named without allocating, and get their own tables at their first walk
+while capture is active (at most 32 workers per renderer), so later walks take
+no lock; only that first walk, detach and the transport's routing of a
+browser refusal to its owning thread take the registry lock.
+`common/native_request_stack.h` also defines the task origin a posted message
+carries and validates it as untrusted input, and the sink records promise
+registrations under `--reb-promise-stacks`. `script_cookie` records name the
+same thread scope (`common/native_network_cookies.h`). See the
 [contract](../../../../../../protocol/native-network-v3.md).
 
 Renderer code never writes files or sockets directly.

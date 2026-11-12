@@ -1190,9 +1190,9 @@ no values, no debugger.
   it a request start costs one atomic load and nothing is walked.
 - The renderer walks, for a request whose `request_initiated` record was
   admitted, on the document main thread and on each dedicated, shared and
-  service worker thread ([threads](#threads)). Worklets, the background loader
-  thread and the pool thread synchronous XHR uses have no tables and record
-  `unsupported_thread`.
+  service worker thread ([threads](#threads)), up to 32 workers with tables
+  per renderer. Worklets, the background loader thread and the pool thread
+  synchronous XHR uses have no tables and record `unsupported_thread`.
 - V8 flag `--reb-promise-stacks`, off by default everywhere including the
   packaged app, adds [promise registrations](#promise-registrations). The
   launcher adds it for `REB_NATIVE_PROMISE_STACKS=1` with request stacks on.
@@ -1228,7 +1228,8 @@ frame and renderer `request_id`. Payload 128 bytes, little endian:
 | 2 `no_script` | No JavaScript or Wasm was on the stack: the parser, a preload, a worker's script or module loader, or a start the loader deferred |
 | 3 `unsupported_thread` | A thread with no tables: a worklet, the background loader thread, or the pool thread synchronous XHR issues its request on. Version 1 and 2 producers also used it for workers |
 | 4 `not_retained_artifact_unavailable` | Frames walked; Artifact category off or no artifact path |
-| 5 `not_retained_budget` | Frames walked; this configuration already sent 1,024 stacks |
+| 5 `not_retained_budget` | Frames walked; this thread already sent 1,024 stack artifacts in this configuration for requests, navigations, cookie writes and debugger observations, which share that thread's budget |
+| 6 `not_walked_thread_limit` | Version 3: nothing was walked, because 32 other workers in this renderer held stack tables ([threads](#threads)); the scope names the worker |
 
 Flags: bit 0 the stack artifact was queued with this record; bit 1 frames were
 omitted; bit 2 the `await` chain reached 32 frames and may continue. Bit 3 in
@@ -1242,10 +1243,11 @@ Validation, shared by the C++ core, the Python validator and the backend:
 - States 1, 4 and 5 have a nonzero digest, an innermost frame, recorded at
   least 1, `recorded + omitted == total` and `recorded <= 1024`. Omitted is
   nonzero exactly when bit 1 is set, and then recorded is 1,024.
-- States 2 and 3 have every count, the digest and the innermost frame zero;
+- States 2, 3 and 6 have every count, the digest and the innermost frame zero;
   only bit 3 may be set, and from version 2 no flag.
 - Version 3: bytes 80-95 are a valid stack scope, all zero for state 3, and
-  bytes 96-127 are zero. Earlier versions: bytes 80-127 are zero.
+  bytes 96-127 are zero. Earlier versions: bytes 80-127 are zero, and state 6
+  does not exist.
 - Bit 0 only with state 1. Version 1: async segments never exceed async
   frames. From version 2: async segments equal async frames plus task
   segments, and bit 4 needs 32 task segments. Wasm frames and distinct scripts never exceed
@@ -1286,25 +1288,70 @@ the document main thread's. A worker's records carry its context ID as
 
 Each thread with tables keeps its own frame buffer, digest, script, segment,
 task attribution and promise registration tables and its own budgets; only that
-thread's walks read or write them, so a walk takes no lock. Blink attaches the
-document main thread when it installs the provider, and each dedicated, shared
-and service worker thread in `WorkerThread::InitializeOnWorkerThread` once its
-global scope exists; a second attach on a thread does nothing. The worker
-thread's tables and Blink's frame buffer for V8 are freed in
-`PerformShutdownOnWorkerThread`, so a worker costs its tables only while it
-lives. Nothing is allocated in a walk.
+thread's walks read or write them, so a walk takes no lock after its first.
+
+- Naming. Blink names the document main thread's isolate at V8 initialization
+  and each dedicated, shared and service worker's in
+  `WorkerThread::InitializeOnWorkerThread`, once its global scope exists,
+  with or without `--reb-request-stacks` (`AttachThread`). Naming is two
+  thread-local stores: nothing is allocated and no lock is taken, under
+  `WorkerThread::lock_` or anywhere else. A second call keeps the first name.
+  The name is what `script_cookie` records carry (byte 6), so it exists without
+  the provider too. Worklets, the background loader thread and the pool
+  thread synchronous XHR uses are never named.
+- Tables. A named thread's tables (539,528 bytes) and Blink's buffer for V8's
+  frames (1,056 frames of 16 bytes, 16,896 bytes) are allocated by its first
+  walk while capture is active, never by naming, so a worker that never walks
+  under an active configuration costs nothing. With `--reb-promise-stacks`
+  the tables also hold the 2,048-entry registration ring (114,688 bytes). That
+  first walk runs from script, outside every Blink lock, and takes the
+  registry lock once to register the tables. A walk allocates nothing else.
+- Limit. At most 32 worker threads per renderer process have tables
+  (`kNativeStackThreadLimit`), so at most 17,805,568 bytes of worker tables
+  and buffers, or 21,475,584 with promise stacks; the document main thread is not counted. A worker that
+  walks while 32 others hold tables walks nothing: its requests record state
+  6 `not_walked_thread_limit` with its scope, its schedules and received
+  messages are not remembered, and one `request_stack_thread_limit` gap per
+  configuration counts the thread. Its place is taken by the first walk after
+  a worker's tables are freed.
+- Shutdown. `PerformShutdownOnWorkerThread` frees a worker's tables and Blink's
+  buffer and forgets its name and its place.
 
 A browser refusal (`NativeStackArtifactRefused`) arrives on the transport's
-sequence and is routed to the thread whose walk queued that artifact: each
-queued stack artifact names its table in an 8,192-slot owner ring (one slot per
-artifact, written by the walking thread as a seqlock and read with acquire
-ordering), and the refusal is pushed into that table's 256-entry mailbox
-under the registry lock that attach and detach also take; the mailbox has one
-producer, and its owner drains it at its next walk (release on publish,
-acquire on read). A thread more than 256 refusals behind cannot tell which it
-missed: it forgets every digest and stops calling any remembered segment or
-registration captured. A refusal whose owner left the ring, or whose thread
-detached, changes nothing.
+sequence for the record that created a stack artifact. Every refusal is either
+applied or covered, and a cover is counted; none is lost unseen. The order:
+
+1. Before `CaptureGeneratedArtifact` sends an artifact, the walk adds its
+   creator sequence, digest and budget to the thread's queued index and
+   writes the table's ordinal into an 8,192-slot owner ring slot (a seqlock:
+   creator cleared, table stored, creator published with release).
+2. The browser refuses only an artifact it received, so the refusal follows
+   step 1. Under the registry lock it goes to the table the owner ring names
+   (creator read with acquire, table read, creator read again after an
+   acquire fence). When 8,192 newer artifacts reused the slot, it goes to
+   every table with a scope instead; each looks the creator up in its own
+   queued index, so only the owner acts on it.
+3. Each table's mailbox is a 256-entry single-producer, single-consumer ring
+   that never overwrites: the producer reads the consumer's published tail with
+   acquire and stores an entry only into a free slot (entry relaxed, head with
+   release). With every slot in use it sets the table's overflow flag with
+   release instead.
+4. The owning thread drains at the start of its next walk: head with acquire,
+   the entries below it copied, the tail published with release (only then
+   can the producer reuse those slots), then the overflow flag exchanged.
+   Each found refusal refunds its budget, forgets its digest and, in one scan
+   of the segment and registration rings per drain however many arrived, stops
+   calling captured any segment or registration on that digest. An overflow
+   instead forgets every digest, stops calling any remembered segment or
+   registration captured, and counts a `request_stack_refusals_overflowed`
+   gap.
+
+The queued index holds 4,096 entries, more than the three budgets' 3,072 that
+can be outstanding in one configuration (each refusal removes its entry and
+refunds its budget), so an entry is never displaced; it is cleared when the
+configuration changes, when an older configuration's refusals no longer
+matter. A refusal for a thread that has detached changes nothing: its
+segments are gone with it.
 
 ### Stack artifact
 
@@ -1423,7 +1470,8 @@ not reach them all; `coverage` says what was read:
 
 The document adds `scope` (`thread`: `document`, `dedicated_worker`,
 `shared_worker` or `service_worker`, and `isolate_key` as 16 hex digits or
-null), null for `unsupported_thread`. The request index keys identities by
+null), null for `unsupported_thread`. `not_walked_thread_limit` keeps its
+scope and has no digest, frames or segments. The request index keys identities by
 process, isolate key and script ID, so a worker row's Initiator column frame
 resolves in the worker's isolate.
 
@@ -1440,24 +1488,31 @@ records.
   separators and an "N frames omitted" marker, opening Sources at a resolved
   frame, and "Request initiator chain" from the request's initiator edges.
   `no_script` reads "Parser", or "Worker loader" for a worker; a worker stack
-  says which worker kind started it. The Traffic table's Initiator column reads
-  "Worker script" and "Worker loader" for version 3 worker stacks. Captured
-  values are inserted as text.
+  says which worker kind started it, and `not_walked_thread_limit` says no
+  stack was walked because 32 other workers held tables. The Traffic table's
+  Initiator column reads "Worker script", "Worker loader" and "Worker, not
+  walked" for version 3 worker stacks. Budget notes name the thread's own
+  budget and which one: request stacks, scheduling stacks or promise
+  registration stacks. Captured values are inserted as text.
 
 ### Hot path and bounds
 
 - Flag off: one atomic load per request start.
 - Flag on, inactive session or category off: the existing `request_initiated`
   checks; no walk.
-- Active: one V8 walk into the thread's frame buffer (1,056 frames, allocated
-  with its tables), one SHA-256 of at most 16,944 bytes, one 320-byte record.
-  First sightings add one artifact, and for each new script one record and one
-  source copy. Draining routed refusals is one acquire load when none arrived.
-- Memory: about 520 KiB per attached thread (tables, refusal mailbox and
-  Blink's frame buffer), plus a 112 KiB registration ring per thread with
-  `--reb-promise-stacks`, allocated when the thread attaches and freed when a
-  worker stops. The owner ring is 128 KiB of process-static storage, untouched
-  until a stack artifact is queued.
+- Active: one V8 walk into the thread's frame buffer (1,056 frames), one
+  SHA-256 of at most 18,480 bytes, one 320-byte record. First sightings add
+  one artifact, and for each new script one record and one source copy.
+  Draining routed refusals is two loads when none arrived; a drain that found
+  some does one scan of the 2,048-entry segment ring (and the registration
+  ring) however many it applies, plus a bounded index lookup per refusal.
+- Memory: 556,424 bytes per thread with tables (539,528 of tables, refusal
+  mailbox and queued index, 16,896 of Blink's frame buffer), plus 114,688 for
+  the registration ring with `--reb-promise-stacks`. Allocated by the thread's
+  first walk while capture is active, never when it is named, and freed when a
+  worker stops; at most 32 workers per renderer have them
+  ([threads](#threads)). The owner ring is 128 KiB of process-static storage,
+  untouched until a stack artifact is queued.
 
 ### Validation
 
@@ -1467,16 +1522,22 @@ malformed records.
 `make native-probe-admission-check` drives the real renderer sink with a
 fixture provider: disabled, 150 and 5,000 frames, Wasm and `await` frames,
 repeated stacks, table eviction, budgets and script identity, and on a second
-thread a dedicated worker's own tables, scope, frame IDs and identities,
-refusals routed from the transport's thread, mailbox overflow, a thread with
-no tables and detach.
+thread a dedicated worker's own tables, scope, frame IDs and identities; that
+naming allocates nothing and a thread's first active walk makes its tables;
+refusals routed from the transport's thread; a counted mailbox overflow; a
+refusal whose owner slot 8,192 newer artifacts reused, which still reaches its
+owner; refusals racing walks on two threads, after which every refused stack
+is sent again (also clean under `REB_PROBE_TEST_SANITIZERS=thread`); the
+32-worker limit, its state 6 records and its gap once per configuration; a
+thread with no tables and detach.
 `make request-stack-wire-check` compares the C++ verdicts with the Python
 validator and the Initiator decoder and renders the Initiator panel in a DOM
 model. The backend's `request_stack` tests resolve inline, `eval`, Wasm and
 `await` frames, resolve stored frames whose only source is a compiled script
 artifact, resolve one script ID to different sources in a worker and in
 another renderer, and refuse to guess unresolved ones. `make
-request-index-check` covers the worker Initiator column labels.
+request-index-check` covers the worker Initiator column labels, `worker_unwalked`
+included.
 
 ### Acceptance
 
@@ -1542,13 +1603,21 @@ thread, so in a worker a microtask's chain is cut after its microtask segment.
 Kinds 10 to 12 exist from task segment version 3 and `async_task_stack`
 version 2.
 
-Not shown: `ServiceWorker.postMessage` and `Client.postMessage`, whose browser
-path carries no origin; `window.postMessage` to or from a frame in another
-process (kind 5 covers same-process frames); a microtask's registering call
-without `--reb-promise-stacks`, for a registration made before the capture
-started, or after 2,048 later registrations on its thread; registrations by
-builtins (a promise combinator shows as a combinator frame instead); and a
-worker microtask's task attribution parent.
+Not shown, and listed with every version 3 stack (`async_callers_not_shown`):
+`ServiceWorker.postMessage` and `Client.postMessage`, whose browser path
+carries no origin; `window.postMessage` to or from a frame in another process
+(kind 5 covers same-process frames); `MessagePort.postMessage` from a
+worklet, which has no tables, so its message carries no origin and the
+handler's chain is cut; the task a promise reaction in a worker continues,
+since Blink tracks task attribution only on the document main thread, so a
+worker microtask's chain is cut after its kind 9 segment; and reactions a
+builtin registered (`Promise.all`, `race`, `any`, `allSettled` and the like),
+which V8 tags for neither DevTools nor REB, so they read `not_recorded` (a
+combinator still shows as its frame in an `await` chain). A microtask's
+registering call is also `not_recorded` without `--reb-promise-stacks`, when
+capture was off at registration, or after 2,048 later registrations on its
+thread; version 3 kind 9 `not_recorded` segments say which with flag bit 1.
+A worker past the [thread limit](#threads) carries no origin either.
 
 #### Schedules with no script
 
@@ -1601,24 +1670,26 @@ it.
 | Offset | Size | Field |
 | ---: | ---: | --- |
 | 0 | 1 | task kind: 1 to 9, and in version 3 also 10 to 12 |
-| 1 | 1 | state: 1 captured, 4 not retained (Artifact off, or the browser refused its artifact), 5 not retained (budget), 6 not recorded (kind 9 only), 7 `no_script` (version 3, not kind 9) |
-| 2 | 1 | flags: bit 0 the walk stopped at its frame limit |
+| 1 | 1 | state: 1 captured, 4 not retained (Artifact off, or the browser refused its artifact), 5 not retained (the thread's scheduling budget, or its registration budget for kind 9), 6 not recorded (kind 9 only), 7 `no_script` (version 3, not kind 9), 8 `origin_rejected` (version 3, kinds 10 to 12) |
+| 2 | 1 | flags: bit 0 the walk stopped at its frame limit; bit 1, version 3 kind 9 in state 6 only, promise registration stacks were on but no registration was remembered |
 | 3 | 1 | version 3, kind 9 in state 1, 4 or 5: the registration (1 to 4, as in `async_task_stack`); else zero |
-| 4 | 4 | frames in its stack: 1 to 256, or 1 to 32 for a kind 9 registration; 0 in states 6 and 7 |
+| 4 | 4 | frames in its stack: 1 to 256, or 1 to 32 for a kind 9 registration; 0 in states 6, 7 and 8 |
 | 8 | 8 | reserved, zero |
-| 16 | 32 | its `async_task_stack` artifact digest; zero in states 6 and 7 |
+| 16 | 32 | its `async_task_stack` artifact digest; zero in states 6, 7 and 8 |
 
-A state 7 segment is the last one, and its artifact has neither bit 3 nor bit
-4 set. Segments carried by a message keep the state they had when posted.
+A state 7 or 8 segment is the last one, and its artifact has neither bit 3 nor
+bit 4 set. Segments carried by a message keep the state they had when posted.
 
 Each thread remembers 2,048 segments and 4,096 task attribution IDs per
 configuration; a task scheduled inside a microtask stores a kind 9 segment in
 front of itself, so the hop keeps its registration. A chain that reaches a
 forgotten segment, a microtask whose attribution names none, or a message
-with no valid origin, sets bit 3 and stops; 32 segments set bit 4. When the
+that carried no origin, sets bit 3 and stops; a message whose origin was
+rejected ends at its `origin_rejected` segment; 32 segments set bit 4, and so
+does a copy of a sender's chain that went on past the 32 it carried. When the
 browser refuses a stack artifact, every segment and registration that thread
 remembers naming that digest changes from state 1 to state 4, so later chains
-stop claiming it. Artifacts already sent keep the state they were written with.
+stop claiming it ([refusal order](#threads)). Artifacts already sent keep the state they were written with.
 
 #### Message task origins
 
@@ -1709,8 +1780,13 @@ on each promise creation, `then` and reaction. In an active capture each user
 registration adds V8's own scan to the first user frame, which allocates a
 small vector per frame scanned as it does for DevTools, plus one walk of up to
 32 frames, one SHA-256 and one table entry, a few microseconds. The flag is
-therefore off by default, including in the packaged app; the Initiator tab
-says so on every microtask segment it lacks.
+therefore off by default, including in the packaged app. On each microtask
+segment without a registration the Initiator tab says which applies: flag bit
+1 clear, promise registration stacks were off; set, they were on but the
+thread remembered no registration (a builtin registered it, capture was off
+then, or 2,048 later registrations replaced it). `SetNativePromiseCallbacks`
+with null removes the callbacks and restores the isolate's promise-hook bit;
+the V8 cctests do that before they end.
 
 ### Script navigations
 
@@ -1770,10 +1846,14 @@ each segment under its separator (`setTimeout`, `MessagePort.postMessage`,
 `Promise.then`, `await`, `Microtask` and so on), "on a dedicated worker in
 process N" for a segment walked elsewhere, the stated end of a `no_script`
 segment, "Earlier async callers were not recorded" for a cut chain, and lists
-`async_callers_not_shown`: for version 3, `ServiceWorker.postMessage` and
-`Client.postMessage`, and `window.postMessage` to or from another process. A
-microtask segment without its registration says that
-`REB_NATIVE_PROMISE_STACKS=1` records it.
+`async_callers_not_shown`: for version 3 the five callers listed under
+[task chain](#task-chain). Each segment adds `promise_stacks_on` (kind 9 only,
+flag bit 1, else null). A microtask segment without its registration says
+whether promise registration stacks were off (and that
+`REB_NATIVE_PROMISE_STACKS=1` records them) or on with nothing remembered; an
+`origin_rejected` segment says its sender is not known; a `not_retained_budget`
+segment names its thread's scheduling budget, or its registration budget for
+a microtask.
 
 ### Hot path and bounds
 
@@ -1782,9 +1862,9 @@ microtask segment without its registration says that
 - Active: a scheduling walk of at most 256 frames, one SHA-256 of at most
   4,144 bytes, one ring entry, and an artifact only for a new stack. A
   top-level callback inside a task allocates one task state. A message post
-  adds at most 32 ring reads and 1,560 bytes in the message; a receipt on
-  another thread at most 32 ring writes. A schedule with no script running
-  costs the session checks only.
+  adds at most 32 ring reads and 1,544 bytes in the message; a receipt at
+  most 32 ring writes, or one gap record when its origin is rejected. A
+  schedule with no script running costs the session checks only.
 - Fixed per-thread tables, part of the [thread](#threads) allocation: 2,048
   segments, 4,096 task attribution IDs, 8 pending form submissions, and with
   `--reb-promise-stacks` 2,048 registrations.
@@ -1802,20 +1882,30 @@ retention, navigation kinds and form submissions through the real sink.
 `make native-network-capture-check` emits and validates the browser link. The
 backend resolves segment frames and navigation stacks. The same suites check
 task segment version 3, `async_task_stack` version 2 and task origins for
-parity and malformed input; the admission suite drives no-script schedules,
-message origins on the posting thread and on another thread (copies, wrong or
-missing origin, a no-script post, the 32-segment bound, Network off) and
-promise registrations (flag off, a thread attached before the flag, the
-registration in the microtask segment and in the hop of a task scheduled in a
-reaction, dedupe, the 32-frame bound, an unknown reaction, the budget and
-capture off). `make request-stack-wire-check` renders a worker stack with a
+parity and malformed input (the version 1 origin that named a process and
+table, reserved header bytes, cut with truncated, truncated below 32, a
+carried `origin_rejected`, the oversize marker and an origin above 1,544
+bytes); the admission suite drives no-script schedules, message origins (that
+nothing beyond the segments crosses, copies on the posting thread and on
+another thread, forged same-table, damaged, oversize and wrong-kind origins
+rejected with a gap each, a missing origin cut, a worker that posts and shuts
+down before the page receives, a no-script post, cut and truncated ends
+carried apart, Network off) and promise registrations (flag off, tables made
+before the flag, the registration in the microtask segment and in the hop of
+a task scheduled in a reaction, dedupe, the 32-frame bound, an unknown
+reaction marked with promise stacks on, the budget and capture off, where an
+attached worker never makes its tables). The Mojo traits and `ShallowClone`
+bound are Chromium code no host harness compiles; the harness covers what the
+receiver does with their oversize marker. `make request-stack-wire-check` renders a worker stack with a
 `Promise.then` registration, a message segment from another process and a
 no-script end. The standalone V8 runtime check
 (`tools/check-native-v8-runtime.py`) compiles the pinned V8 with every V8
 patch and runs `test-api/RebNativePromiseRegistrations` (one report per user
 `.then`, `.catch`, `.finally` and `await`, each reaction started and finished
-with its ID, nothing while inactive) and
-`test-api/RebNativePromiseRegistrationsNeedTheFlag`.
+with its ID, nothing while inactive, then removal restoring the promise-hook
+bit with nothing reported) and
+`test-api/RebNativePromiseRegistrationsNeedTheFlag` (nothing installed without
+the flag, and removal harmless).
 
 ### Acceptance
 
@@ -1843,3 +1933,9 @@ Still required before declaring this browser-ready:
    and off, and with DevTools open, before changing its default.
 8. An image `load` handler's `fetch` ends its chain with `no_script` instead of
    no segment.
+9. A service worker's `cookieStore.set` shows the worker's script in Cookie
+   provenance, not a page script with the same ID; a `BroadcastChannel`
+   message whose origin a test build corrupts reads `origin_rejected` with one
+   `message_task_origin_rejected` gap; a page that starts 40 workers which
+   each `fetch` shows `Worker, not walked` for the workers past 32 and one
+   `request_stack_thread_limit` gap per such worker.

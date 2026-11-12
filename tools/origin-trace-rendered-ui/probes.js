@@ -85,10 +85,12 @@
         issues.push(`cut off: ${describe(control)} shows ${Math.round(visible.width)}x${Math.round(visible.height)} of ${Math.round(rect.width)}x${Math.round(rect.height)}px inside ${describe(cutter)}`);
         continue;
       }
-      // Scrolled out of a usable scroll container. A sliver under two pixels
-      // is too: hit testing snaps to device pixels there, so its center can
-      // land on the neighbouring row that is drawn exactly where it should be.
-      if (visible.width < 2 || visible.height < 2) continue;
+      if (visible.width === 0 || visible.height === 0) continue; // scrolled out of a usable scroll container
+      // Nearly scrolled out: under 2 px of a box at least that large shows in
+      // its scroller. Hit testing snaps to device pixels there, so the sliver's
+      // center can land on the neighbouring row drawn where it should be. A
+      // control whose own box is that small is still checked.
+      if ((rect.width >= 2 && visible.width < 2) || (rect.height >= 2 && visible.height < 2)) continue;
       inView.push({control, visible});
       if (control.matches('button,summary,[role=tab]') && control.scrollWidth > control.clientWidth + 1 && !ellipsized(control) &&
           getComputedStyle(control).overflowX !== 'visible') {

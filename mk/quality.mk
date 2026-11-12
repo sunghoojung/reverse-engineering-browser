@@ -343,6 +343,7 @@ javascript-check: capture-completeness-check
 	node tools/check-native-console-document-start.mjs
 	node tools/check-source-format-ui.mjs
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only
+	node tools/check-rendered-ui-probes.mjs
 	node tools/check-evidence-names.mjs
 	node tools/check-origin-trace-launcher.mjs --cleanup-only
 	node tools/check-origin-trace-package.mjs --contract-only

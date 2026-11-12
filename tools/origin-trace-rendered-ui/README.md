@@ -42,7 +42,11 @@ window. Clicks and keys both reactivate the host before sending `NSEvent`s to
 the window and wait for WebKit's document focus notification. This keeps input
 out of the asynchronous gap after native activation. Option+Tab is used when Full Keyboard Access is off,
 matching Safari, so every control is a stop. [`probes.js`](probes.js) inspects
-the DOM and computed layout and scrolls targets into view.
+the DOM and computed layout and scrolls targets into view. It skips a row its
+scroller shows by under 2 px, where hit testing snaps onto the next row, but
+still checks a control whose own box is that small;
+[`check-rendered-ui-probes.mjs`](../check-rendered-ui-probes.mjs), part of
+`make lint`, checks both against modelled boxes.
 
 No smoke flag or test hook exists in the product, and nothing here uses the
 Chrome DevTools Protocol. The evidence is synthetic; this suite does not

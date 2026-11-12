@@ -1811,8 +1811,10 @@ segment without a registration the Initiator tab says which applies: flag bit
 1 clear, promise registration stacks were off; set, they were on but the
 thread remembered no registration (a builtin registered it, capture was off
 then, or 2,048 later registrations replaced it). `SetNativePromiseCallbacks`
-with null removes the callbacks and restores the isolate's promise-hook bit;
-the V8 cctests do that before they end.
+with null removes the callbacks and clears the promise-hook bit they set, but
+the promise-hook protector that installing invalidated stays invalid, so the
+isolate keeps V8's slower promise path; Blink installs them once per isolate
+and never removes them. The V8 cctests remove them before they end.
 
 ### Script navigations
 
@@ -1931,7 +1933,7 @@ no-script end. The standalone V8 runtime check
 patch and runs `test-api/RebNativePromiseRegistrations` (one report per user
 `.then`, `.catch`, `.finally` and `await`, each reaction started and finished
 with its ID, nothing while inactive, then removal restoring the promise-hook
-bit with nothing reported) and
+bit with nothing reported and the protector still invalid) and
 `test-api/RebNativePromiseRegistrationsNeedTheFlag` (nothing installed without
 the flag, and removal harmless).
 

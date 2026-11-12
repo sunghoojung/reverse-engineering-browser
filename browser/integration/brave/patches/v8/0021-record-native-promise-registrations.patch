@@ -1,8 +1,8 @@
 diff --git a/include/v8-native-stack.h b/include/v8-native-stack.h
-index 9f29470..6d7a127 100644
+index 9f29470..140f45e 100644
 --- a/include/v8-native-stack.h
 +++ b/include/v8-native-stack.h
-@@ -118,6 +118,39 @@ struct NativeThrow {
+@@ -118,6 +118,42 @@ struct NativeThrow {
  // pause-on-exceptions does; walks the stack once.
  V8_EXPORT NativeThrow DescribeNativeThrow(Isolate* isolate);
  
@@ -33,9 +33,12 @@ index 9f29470..6d7a127 100644
 +
 +V8_EXPORT bool IsNativePromiseStackCaptureEnabled();
 +
-+// Installs callbacks that outlive the isolate; null removes them and restores
-+// the isolate's promise hook state. Installing does nothing when the flag is
-+// off or a callback is missing. Isolate thread only.
++// Installs callbacks that outlive the isolate. Installing invalidates the
++// isolate's promise-hook protector, as any promise hook does, and nothing
++// makes it intact again: null removes the callbacks and clears the
++// promise-hook bit they set, but the isolate keeps V8's slower promise path.
++// Installing does nothing when the flag is off or a callback is missing.
++// Isolate thread only.
 +V8_EXPORT void SetNativePromiseCallbacks(Isolate* isolate,
 +                                         const NativePromiseCallbacks* callbacks);
 +
@@ -249,7 +252,7 @@ index 3c5816f..076472a 100644
              "print stack trace when an illegal exception is thrown")
  DEFINE_BOOL(abort_on_uncaught_exception, false,
 diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
-index 207e899..0859e59 100644
+index 207e899..a3d0e86 100644
 --- a/test/cctest/test-api.cc
 +++ b/test/cctest/test-api.cc
 @@ -59,6 +59,7 @@
@@ -260,7 +263,7 @@ index 207e899..0859e59 100644
  #include "include/v8-primitive-object.h"
  #include "include/v8-regexp.h"
  #include "include/v8-util.h"
-@@ -33381,3 +33382,129 @@ TEST(RebNativeCompiledScriptDisabledRunsNothing) {
+@@ -33381,3 +33382,130 @@ TEST(RebNativeCompiledScriptDisabledRunsNothing) {
    CompileRun("eval('8 + 8');");
    CHECK(reb_compiled_scripts.empty());
  }
@@ -355,10 +358,11 @@ index 207e899..0859e59 100644
 +  CHECK(log.registered.empty());
 +  CHECK(log.started.empty());
 +
-+  // Null removes the callbacks and restores the isolate: the promise-hook bit
-+  // is as it was, and nothing is reported.
++  // Null removes the callbacks: the promise-hook bit is as it was and nothing
++  // is reported, but the protector installing invalidated stays invalid.
 +  v8::SetNativePromiseCallbacks(isolate, nullptr);
 +  CHECK_EQ(hook_before, i_isolate->HasAsyncEventDelegate());
++  CHECK(!i::Protectors::IsPromiseHookIntact(i_isolate));
 +  log = {};
 +  CompileRun("Promise.resolve(4).then(() => {}); (async () => { await 0; })();");
 +  isolate->PerformMicrotaskCheckpoint();

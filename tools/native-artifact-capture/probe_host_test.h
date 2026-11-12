@@ -959,6 +959,16 @@ void NativeProbeHostWorkerTabLinks() {
             session.named_gaps.back().first == reb::NativeProbeCategory::kNetwork &&
             session.named_gaps.back().second == reb::kNativeSharedDecisionEvictedGap,
         "Only the evicted answer its other half could have decided otherwise is a named gap");
+  // A memory-cache reuse never reaches the proxy, so the drain decides it alone.
+  const reb::NativeToken128 reused_worker{0xf7, 0xf8};
+  resolver.ServiceWorkerStarted(16, reused_worker, {}, "https://reused.test/");
+  counted_now = session.exclusions.size();
+  start(reb::NativeLoaderKind::kServiceWorker, reused_worker.fold(), 86,
+        NativeProbeType::kMemoryCacheReuse);
+  resolver.ServiceWorkerControlleeAdded(16, "late", std::vector<std::uint32_t>{21});
+  Check(events.empty() && session.exclusions.size() == counted_now + 1 &&
+            session.exclusions.back().exclusion_class == 68 && proxy(16, 86).exclusion_class == 0,
+        "A pageless worker's memory-cache reuse is counted and leaves no shared answer behind");
 
   // A client whose navigation never committed names no tab but is a page.
   resolver.ServiceWorkerControlleeAdded(11, "uncommitted", std::vector<std::uint32_t>{});
@@ -983,5 +993,5 @@ void NativeProbeHostWorkerTabLinks() {
   std::cout
       << "PASS production NativeProbeHost links worker requests to tab sets, registrants and "
          "worklet documents under one creator depth, takes one class 68 answer per request with "
-         "its browser half, and keeps tombstoned frame tabs\n";
+         "its browser half, decides a memory-cache reuse alone, and keeps tombstoned frame tabs\n";
 }

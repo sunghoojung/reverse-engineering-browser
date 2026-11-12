@@ -200,14 +200,16 @@ NativeFactoryOwnerTab NativeTabRegistry::NoteFactory(content::RenderFrameHost* f
           .prefetch_without_page = owner.cause == NativeFactoryOwnerCause::kPrefetchWithoutPage};
 }
 
-void NativeTabRegistry::NoteStartingServiceWorker(const url::Origin& origin) {
+bool NativeTabRegistry::NoteStartingServiceWorker(const url::Origin& origin) {
   const NativeFactoryOwner owner = CurrentNativeFactoryOwner();
   const NativeToken128 token{owner.service_worker_token_high, owner.service_worker_token_low};
-  if (owner.cause == NativeFactoryOwnerCause::kServiceWorker && token.valid() &&
-      owner.service_worker_version_id >= 0) {
-    NativeTabResolver::Get().ServiceWorkerStarted(owner.service_worker_version_id, token,
-                                                  ExtensionOf(origin), {});
+  if (owner.cause != NativeFactoryOwnerCause::kServiceWorker || !token.valid() ||
+      owner.service_worker_version_id < 0) {
+    return false;
   }
+  NativeTabResolver::Get().ServiceWorkerStarted(owner.service_worker_version_id, token,
+                                                ExtensionOf(origin), {});
+  return true;
 }
 
 void NativeTabRegistry::ObserveContext(content::BrowserContext* context) {

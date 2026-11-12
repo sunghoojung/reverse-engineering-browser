@@ -32,6 +32,12 @@ struct NativeFactoryScope final {
   std::uint32_t tab_id = 0;
   NativeBrowserRequestOwner owner;
   bool record_browser_internal = false;
+  // A starting service worker's bundle for new scripts. Only
+  // ServiceWorkerScriptLoaderFactory uses it, for the scripts the worker
+  // imports, and ServiceWorkerNewScriptLoader passes the renderer's request id
+  // on, so each request is also the renderer's own record, which the drain
+  // counts (Chromium patch 0045, protocol/native-network-v3.md).
+  bool worker_script_requests = false;
 };
 
 struct NativeFactoryPolicy final {
@@ -103,23 +109,26 @@ struct NativeRequestExclusion final {
     const int factory_type,
     const std::string_view url_scheme,
     const NativeTabResolver::RendererRequest request) noexcept {
-  const bool renderer_issued = NativeRendererIssuedRequestId(factory_type);
+  // The drain also sees, and counts, a renderer-issued request and a script a
+  // starting worker imports through its new-scripts bundle.
+  const bool renderer_record =
+      NativeRendererIssuedRequestId(factory_type) || scope.worker_script_requests;
   if (scope.exclusion != 0) {
     return {scope.exclusion,
-            scope.exclusion != kNativeExtensionWorkerExclusion || !renderer_issued};
+            scope.exclusion != kNativeExtensionWorkerExclusion || !renderer_record};
   }
   // Decided per request: a version stops being pageless when a page first uses
-  // it. A renderer-issued request shares one answer with its renderer record.
+  // it. A request with a renderer record shares one answer with it.
   if (scope.owner.service_worker_without_caller && scope.tab_id == 0 &&
-      (renderer_issued
+      (renderer_record
            ? NativeTabResolver::Get().SharedServiceWorkerNoPage(request,
                                                                 scope.owner.service_worker_version)
            : NativeTabResolver::Get().ServiceWorkerHasNoPage(scope.owner.service_worker_version))) {
-    return {kNativeServiceWorkerNoPageExclusion, !renderer_issued};
+    return {kNativeServiceWorkerNoPageExclusion, !renderer_record};
   }
   const NativeSchemeClass scheme = ClassifyNativeScheme(url_scheme);
   if (IsBrowserInternalSchemeClass(scheme) && !scope.record_browser_internal) {
-    return {static_cast<std::uint8_t>(scheme), !renderer_issued};
+    return {static_cast<std::uint8_t>(scheme), !renderer_record};
   }
   return {};
 }

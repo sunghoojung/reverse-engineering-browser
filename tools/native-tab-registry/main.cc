@@ -100,6 +100,7 @@ void Factories() {
     Check(script.tab_id == 0 && script.owner.service_worker_without_caller &&
               script.owner.service_worker_version == -1,
           "A job with no caller sets the no-caller flag");
+    Check(!script.worker_script_requests, "A job's script factory is no worker's import bundle");
     const auto counted = reb::NativeProxyRequestExclusion(
         script, static_cast<int>(Factory::kServiceWorkerScript), "https", {1, 2});
     Check(counted.exclusion_class == 68 && counted.counted_here,
@@ -160,13 +161,34 @@ void Factories() {
                                                .service_worker_token_low = worker_token.low});
     const auto subresource = ScopeOf(owned, nullptr, Factory::kServiceWorkerSubResource);
     Check(subresource.owner.service_worker_without_caller &&
-              subresource.owner.service_worker_version == 307,
+              subresource.owner.service_worker_version == 307 &&
+              !subresource.worker_script_requests,
           "A starting worker's subresource factory knows its version");
+    // Its new-scripts bundle carries the renderer's request ids, so an import
+    // shares the drain's answer and the drain alone counts it.
+    const auto scripts = ScopeOf(owned, nullptr, Factory::kServiceWorkerScript);
+    Check(scripts.worker_script_requests && scripts.owner.service_worker_version == 307,
+          "A starting worker's new-scripts factory is its import bundle");
+    const auto imported = reb::NativeProxyRequestExclusion(
+        scripts, static_cast<int>(Factory::kServiceWorkerScript), "https", {1, 3});
+    Check(imported.exclusion_class == 68 && !imported.counted_here,
+          "An import of a pageless starting worker is left out for the drain to count");
   }
   Check(
       resolver.Resolve(reb::NativeLoaderKind::kServiceWorker, Native(worker_token).fold(), kSession)
               .status == reb::NativeTabResolution::Status::kNoPage,
       "The drain finds the worker before OnVersionStartedRunning, and it has no page");
+  // A page arrives before the import's renderer record drains: the record still
+  // takes the proxy's answer, so the import is left out whole and counted once.
+  resolver.ServiceWorkerControlleeAdded(307, "late", std::vector<std::uint32_t>{50});
+  const reb::NativeTabResolver::RendererRequest import_record{1, 3}, later_record{1, 5};
+  Check(resolver.Resolve(reb::NativeLoaderKind::kServiceWorker, Native(worker_token).fold(),
+                         kSession, &import_record)
+                    .status == reb::NativeTabResolution::Status::kNoPage &&
+            resolver.Resolve(reb::NativeLoaderKind::kServiceWorker, Native(worker_token).fold(),
+                             kSession, &later_record)
+                    .status == reb::NativeTabResolution::Status::kLinked,
+        "The import's renderer record takes the proxy's answer; a later request has the page");
   const auto extension_token = Token(0x41, 0x42);
   {
     const reb::ScopedNativeFactoryOwner owner({.service_worker_version_id = 308,
@@ -177,6 +199,13 @@ void Factories() {
                                   url::Origin("chrome-extension", std::string(32, 'd')));
     Check(excluded.exclusion == reb::kNativeExtensionWorkerExclusion,
           "An extension worker's factory is class 65");
+    const auto scripts = ScopeOf(owned, nullptr, Factory::kServiceWorkerScript,
+                                 url::Origin("chrome-extension", std::string(32, 'd')));
+    const auto imported = reb::NativeProxyRequestExclusion(
+        scripts, static_cast<int>(Factory::kServiceWorkerScript), "https", {1, 4});
+    Check(
+        imported.exclusion_class == reb::kNativeExtensionWorkerExclusion && !imported.counted_here,
+        "An extension worker's import is class 65, counted by the drain with its record");
   }
   Check(resolver.Resolve(reb::NativeLoaderKind::kServiceWorker, Native(extension_token).fold(),
                          kSession)

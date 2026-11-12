@@ -142,7 +142,8 @@ Brave patch `0020-scope-native-proxy-factories` moves that decision to
 WebUI and browser prefetch factories instead of recording them, decides once
 per request (Brave patch `0022`, after the capture state) whether a service
 worker no page used is counted, sharing that answer with the drain for a
-renderer-issued request, and records
+renderer-issued request and for a script a starting worker imports through its
+new-scripts bundle (the drain decides a memory-cache reuse alone), and records
 extension workers under their extension id with
 `--reb-capture-extension-traffic`. Frameless factories read the owner content
 scopes around their creation through the `factory_owner_hook` component:

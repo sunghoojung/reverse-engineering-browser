@@ -843,10 +843,12 @@ bool NativeProbeHost::IsExcludedRequestRecord(const NativeProbeEvent& event) con
 void NativeProbeHost::EmitWorkerRequest(NativeProbeEvent& event) {
   const auto kind = static_cast<NativeLoaderKind>(event.header.loader_kind);
   // A service worker's http(s) and ws(s) requests reach the proxy, whose
-  // browser half takes the same class 68 answer as this record.
+  // browser half takes the same class 68 answer as this record. A memory-cache
+  // reuse never reaches it, so it is decided here alone.
   const NativeTabResolver::RendererRequest request{
       renderer_process_id_, static_cast<std::uint32_t>(event.header.request_id)};
-  const bool shared = kind == NativeLoaderKind::kServiceWorker && event.header.scheme_class >= 1 &&
+  const bool shared = event.header.type == NativeProbeType::kRequestInitiated &&
+                      kind == NativeLoaderKind::kServiceWorker && event.header.scheme_class >= 1 &&
                       event.header.scheme_class <= 4;
   const NativeTabResolution resolution = NativeTabResolver::Get().Resolve(
       kind, event.header.frame_id, event.header.session_id, shared ? &request : nullptr);

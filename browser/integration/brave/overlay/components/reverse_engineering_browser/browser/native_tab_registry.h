@@ -49,8 +49,9 @@ class NativeTabRegistry final {
   NativeFactoryOwnerTab NoteFactory(content::RenderFrameHost* frame);
   // A starting service worker's factory names its token and version (Chromium
   // patch 0045); `origin` is the worker's, for an extension's id. Called for
-  // every frameless factory, before its exclusion is decided.
-  void NoteStartingServiceWorker(const url::Origin& origin);
+  // every frameless factory, before its exclusion is decided. True when the
+  // factory is that worker's own.
+  bool NoteStartingServiceWorker(const url::Origin& origin);
   // Starts observing the context's default partition once. Workers that
   // already run are enumerated; clients added before this call are not.
   void ObserveContext(content::BrowserContext* context);

@@ -1206,6 +1206,68 @@ void SetPayload(NativeProbeEvent& event,
 
 namespace {
 constinit thread_local NativeFetchOwner g_fetch_owner;
+
+// The newest recorded http(s) starts by request ID, for the service-worker
+// loader, which knows only that ID (protocol/native-network-v3.md). Each slot
+// is a sequence lock: its version is odd while a writer fills it.
+struct ServiceWorkerStart final {
+  std::atomic<std::uint32_t> version{0};
+  std::atomic<std::uint32_t> request_id{0};
+  std::atomic<std::uint64_t> generation{0};
+  std::atomic<std::uint64_t> sequence{0};
+  std::atomic<std::uint64_t> time_ns{0};
+  std::atomic<std::uint64_t> frame_id{0};
+  std::atomic<std::uint32_t> thread_id{0};
+  std::atomic<std::uint8_t> scheme_class{0};
+};
+constexpr std::size_t kServiceWorkerStartSlots = 1024;
+static_assert((kServiceWorkerStartSlots & (kServiceWorkerStartSlots - 1)) == 0);
+static_assert(sizeof(ServiceWorkerStart) == 48);
+// Zero-initialized storage: no constructor runs and no page is touched until
+// a start is kept.
+constinit std::array<ServiceWorkerStart, kServiceWorkerStartSlots> g_service_worker_starts{};
+
+ServiceWorkerStart& ServiceWorkerStartSlot(const std::uint32_t request_id) noexcept {
+  return g_service_worker_starts[request_id & (kServiceWorkerStartSlots - 1)];
+}
+
+void KeepServiceWorkerStart(const NativeRendererRequest& start) noexcept {
+  ServiceWorkerStart& slot = ServiceWorkerStartSlot(start.request_id);
+  std::uint32_t version = slot.version.load(std::memory_order_relaxed);
+  // A writer that finds the slot busy skips it; that end is then reported lost.
+  if ((version & 1U) != 0 ||
+      !slot.version.compare_exchange_strong(version, version + 1, std::memory_order_relaxed)) {
+    return;
+  }
+  std::atomic_thread_fence(std::memory_order_release);
+  slot.request_id.store(start.request_id, std::memory_order_relaxed);
+  slot.generation.store(start.generation, std::memory_order_relaxed);
+  slot.sequence.store(start.initiated_sequence, std::memory_order_relaxed);
+  slot.time_ns.store(start.initiated_time_ns, std::memory_order_relaxed);
+  slot.frame_id.store(start.frame_id, std::memory_order_relaxed);
+  slot.thread_id.store(start.thread_id, std::memory_order_relaxed);
+  slot.scheme_class.store(static_cast<std::uint8_t>(start.scheme_class), std::memory_order_relaxed);
+  slot.version.store(version + 2, std::memory_order_release);
+}
+
+// A consistent copy of the slot, or false while a writer holds it.
+bool ReadServiceWorkerStart(const std::uint32_t request_id, NativeRendererRequest& out) noexcept {
+  const ServiceWorkerStart& slot = ServiceWorkerStartSlot(request_id);
+  const std::uint32_t version = slot.version.load(std::memory_order_acquire);
+  if ((version & 1U) != 0) {
+    return false;
+  }
+  out.request_id = slot.request_id.load(std::memory_order_relaxed);
+  out.generation = slot.generation.load(std::memory_order_relaxed);
+  out.initiated_sequence = slot.sequence.load(std::memory_order_relaxed);
+  out.initiated_time_ns = slot.time_ns.load(std::memory_order_relaxed);
+  out.frame_id = slot.frame_id.load(std::memory_order_relaxed);
+  out.thread_id = slot.thread_id.load(std::memory_order_relaxed);
+  out.scheme_class =
+      static_cast<NativeSchemeClass>(slot.scheme_class.load(std::memory_order_relaxed));
+  std::atomic_thread_fence(std::memory_order_acquire);
+  return slot.version.load(std::memory_order_relaxed) == version;
+}
 }  // namespace
 
 NativeFetchOwnerScope::NativeFetchOwnerScope(const NativeFetchOwner& owner) noexcept
@@ -1288,6 +1350,7 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   expires_at_monotonic_ns_.store(active ? expires_at_monotonic_ns : 0, std::memory_order_relaxed);
   capture_canvas_images_.store(active && capture_canvas_images, std::memory_order_relaxed);
   compiled_script_source_bytes_.store(0, std::memory_order_relaxed);
+  memory_cache_reuses_.store(0, std::memory_order_relaxed);
   frame_id_provider_.store(active ? frame_id_provider : nullptr, std::memory_order_relaxed);
   capture_request_content_.store(active && network_scope.capture_request_content,
                                  std::memory_order_relaxed);
@@ -2041,7 +2104,7 @@ NativeRendererRequest NativeProbeSink::RecordRequestInitiated(
   const NativeSchemeClass scheme_class = ClassifyNativeScheme(scheme);
   if (IsBrowserInternalSchemeClass(scheme_class) && !capture_browser_internal) {
     if (exclusion_counter) {
-      exclusion_counter(scheme_class, session_id, config_generation);
+      exclusion_counter(static_cast<std::uint8_t>(scheme_class), session_id, config_generation);
     }
     return {};
   }
@@ -2054,18 +2117,7 @@ NativeRendererRequest NativeProbeSink::RecordRequestInitiated(
   event.header.session_id = session_id;
   event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
   event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
-  // The fetch's own context when the loader named it; otherwise the running
-  // script's frame, which a parser or worker load does not have.
-  if (const NativeFetchOwner owner = NativeFetchOwnerScope::Current();
-      owner.kind != NativeLoaderKind::kNotRecorded) {
-    event.header.frame_id = owner.context_id;
-    event.header.loader_kind = static_cast<std::uint8_t>(owner.kind);
-  } else {
-    const NativeProbeFrameIdProvider frame_id_provider =
-        frame_id_provider_.load(std::memory_order_relaxed);
-    event.header.frame_id = frame_id_provider ? frame_id_provider() : 0;
-    event.header.loader_kind = static_cast<std::uint8_t>(NativeLoaderKind::kScriptContext);
-  }
+  NameRequestOwner(event.header, NativeFetchOwnerScope::Current());
   event.header.request_id = static_cast<std::uint64_t>(static_cast<std::uint32_t>(request_id));
   event.header.scheme_class = static_cast<std::uint8_t>(scheme_class);
   SetPayload(event, method, " ");
@@ -2097,7 +2149,67 @@ NativeRendererRequest NativeProbeSink::RecordRequestInitiated(
   request.thread_id = event.header.thread_id;
   request.request_id = static_cast<std::uint32_t>(event.header.request_id);
   request.scheme_class = scheme_class;
+  if (scheme_class == NativeSchemeClass::kHttp || scheme_class == NativeSchemeClass::kHttps) {
+    KeepServiceWorkerStart(request);
+  }
   return request;
+}
+
+void NativeProbeSink::NameRequestOwner(NativeProbeHeader& header,
+                                       const NativeFetchOwner& owner) const noexcept {
+  // The fetch's own context when the loader named it; otherwise the running
+  // script's frame, which a parser or worker load does not have.
+  if (owner.kind != NativeLoaderKind::kNotRecorded) {
+    header.frame_id = owner.context_id;
+    header.loader_kind = static_cast<std::uint8_t>(owner.kind);
+    return;
+  }
+  const NativeProbeFrameIdProvider frame_id_provider =
+      frame_id_provider_.load(std::memory_order_relaxed);
+  header.frame_id = frame_id_provider ? frame_id_provider() : 0;
+  header.loader_kind = static_cast<std::uint8_t>(NativeLoaderKind::kScriptContext);
+}
+
+void NativeProbeSink::EmitRendererTarget(const NativeRendererRequest& start,
+                                         const std::string_view target_prefix,
+                                         const std::size_t target_length,
+                                         const int port,
+                                         const std::uint64_t config_generation,
+                                         const NativeRendererProbeEmitter emitter) noexcept {
+  // The same child the browser records after request_started, here of the
+  // renderer's own start record.
+  NativeRequestTarget target;
+  target.scheme = start.scheme_class == NativeSchemeClass::kHttps  ? NativeRequestScheme::kHttps
+                  : start.scheme_class == NativeSchemeClass::kHttp ? NativeRequestScheme::kHttp
+                  : start.scheme_class == NativeSchemeClass::kWss  ? NativeRequestScheme::kWss
+                  : start.scheme_class == NativeSchemeClass::kWs   ? NativeRequestScheme::kWs
+                                                                   : NativeRequestScheme::kOther;
+  target.port = port > 0 && port <= 65535 ? static_cast<std::uint16_t>(port) : 0;
+  target.target_length = static_cast<std::uint32_t>(
+      std::min<std::size_t>(target_length, std::numeric_limits<std::uint32_t>::max()));
+  std::copy_n(target_prefix.begin(),
+              std::min({target_prefix.size(), target_length, target.prefix.size()}),
+              target.prefix.begin());
+  // The renderer has no artifact channel for the rest of a long target.
+  if (target_length > target.prefix.size()) {
+    target.retention = target.scheme == NativeRequestScheme::kOther
+                           ? NativeRequestTargetRetention::kNotRetainedUrl
+                           : NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
+  }
+  NativeProbeEvent child;
+  child.header.category = NativeProbeCategory::kNetwork;
+  child.header.type = NativeProbeType::kRequestTarget;
+  child.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  child.header.monotonic_time_ns = start.initiated_time_ns;
+  child.header.session_id = start.session_id;
+  child.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  child.header.thread_id = start.thread_id;
+  child.header.frame_id = start.frame_id;
+  child.header.request_id = start.request_id;
+  child.header.parent_event_id = start.initiated_sequence;
+  child.header.payload_size = static_cast<std::uint32_t>(kNativeRequestPayloadSize);
+  child.inline_payload = EncodeNativeRequestTargetPayload(target);
+  static_cast<void>(emitter(child, config_generation));
 }
 
 void NativeProbeSink::RecordRendererRequestComplete(
@@ -2128,42 +2240,8 @@ void NativeProbeSink::RecordRendererRequestComplete(
       monotonic_time_ns >= expires_at_monotonic_ns) {
     return;
   }
-  const auto process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
   if (capture_request_content) {
-    // The same child the browser records after request_started, here of the
-    // renderer's own start record.
-    NativeRequestTarget target;
-    target.scheme = request.scheme_class == NativeSchemeClass::kHttps  ? NativeRequestScheme::kHttps
-                    : request.scheme_class == NativeSchemeClass::kHttp ? NativeRequestScheme::kHttp
-                    : request.scheme_class == NativeSchemeClass::kWss  ? NativeRequestScheme::kWss
-                    : request.scheme_class == NativeSchemeClass::kWs   ? NativeRequestScheme::kWs
-                                                                     : NativeRequestScheme::kOther;
-    target.port = port > 0 && port <= 65535 ? static_cast<std::uint16_t>(port) : 0;
-    target.target_length = static_cast<std::uint32_t>(
-        std::min<std::size_t>(target_length, std::numeric_limits<std::uint32_t>::max()));
-    std::copy_n(target_prefix.begin(),
-                std::min({target_prefix.size(), target_length, target.prefix.size()}),
-                target.prefix.begin());
-    // The renderer has no artifact channel for the rest of a long target.
-    if (target_length > target.prefix.size()) {
-      target.retention = target.scheme == NativeRequestScheme::kOther
-                             ? NativeRequestTargetRetention::kNotRetainedUrl
-                             : NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
-    }
-    NativeProbeEvent child;
-    child.header.category = NativeProbeCategory::kNetwork;
-    child.header.type = NativeProbeType::kRequestTarget;
-    child.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
-    child.header.monotonic_time_ns = request.initiated_time_ns;
-    child.header.session_id = request.session_id;
-    child.header.process_id = process_id;
-    child.header.thread_id = request.thread_id;
-    child.header.frame_id = request.frame_id;
-    child.header.request_id = request.request_id;
-    child.header.parent_event_id = request.initiated_sequence;
-    child.header.payload_size = static_cast<std::uint32_t>(kNativeRequestPayloadSize);
-    child.inline_payload = EncodeNativeRequestTargetPayload(target);
-    static_cast<void>(emitter(child, config_generation));
+    EmitRendererTarget(request, target_prefix, target_length, port, config_generation, emitter);
   }
   NativeProbeEvent event;
   event.header.category = NativeProbeCategory::kNetwork;
@@ -2172,7 +2250,7 @@ void NativeProbeSink::RecordRendererRequestComplete(
   event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
   event.header.monotonic_time_ns = monotonic_time_ns;
   event.header.session_id = request.session_id;
-  event.header.process_id = process_id;
+  event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
   event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
   // The start's frame and request id give this record the start's row.
   event.header.frame_id = request.frame_id;
@@ -2185,6 +2263,124 @@ void NativeProbeSink::RecordRendererRequestComplete(
   event.header.scheme_class = static_cast<std::uint8_t>(request.scheme_class);
   SetPayload(event, error_code == 0 ? "completed" : "failed");
   static_cast<void>(emitter(event, config_generation));
+}
+
+void NativeProbeSink::RecordServiceWorkerRequestEnd(const std::int32_t request_id,
+                                                    const std::string_view target,
+                                                    const std::size_t target_length,
+                                                    const int port,
+                                                    const std::int32_t error_code) noexcept {
+  if (!emitter_.load(std::memory_order_acquire)) [[likely]] {
+    return;
+  }
+  const std::uint64_t config_generation = config_generation_.load(std::memory_order_acquire);
+  if ((config_generation & 1U) != 0) {
+    return;
+  }
+  const auto id = static_cast<std::uint32_t>(request_id);
+  NativeRendererRequest start;
+  // One retry covers a writer that was filling the slot when the read began.
+  const bool read = ReadServiceWorkerStart(id, start) || ReadServiceWorkerStart(id, start);
+  if (read && start.generation != config_generation) {
+    // Not recorded in this configuration, so this one has no row to finish.
+    return;
+  }
+  if (read && start.request_id == id) {
+    start.session_id = session_id_.load(std::memory_order_relaxed);
+    start.flags = static_cast<std::uint16_t>(NativeProbeFlag::kFromServiceWorker);
+    // RecordRendererRequestComplete drops it if the configuration changed.
+    RecordRendererRequestComplete(start, target, target_length, port, error_code, 0, 0);
+    return;
+  }
+  // A later start of this configuration took the slot, so this end has no
+  // start to join; protocol/native-network-v3.md names the loss.
+  NativeProbeEvent gap;
+  gap.header.category = NativeProbeCategory::kNetwork;
+  gap.header.type = NativeProbeType::kGap;
+  gap.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  gap.header.monotonic_time_ns = MonotonicTimeNs();
+  gap.header.session_id = session_id_.load(std::memory_order_relaxed);
+  gap.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  gap.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  SetPayload(gap, "service_worker_end_lost");
+  static_cast<void>(EmitStatus(gap, config_generation));
+}
+
+void NativeProbeSink::RecordMemoryCacheReuse(const NativeMemoryCacheReuse& reuse) noexcept {
+  if (!emitter_.load(std::memory_order_acquire)) [[likely]] {
+    return;
+  }
+  const std::uint64_t config_generation = config_generation_.load(std::memory_order_acquire);
+  if ((config_generation & 1U) != 0) {
+    return;
+  }
+  const std::uint64_t monotonic_time_ns = MonotonicTimeNs();
+  const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
+  const std::uint64_t expires_at_monotonic_ns =
+      expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
+  const bool capture_browser_internal = capture_browser_internal_.load(std::memory_order_relaxed);
+  const bool capture_request_content = capture_request_content_.load(std::memory_order_relaxed);
+  const NativeProbeExclusionCounter exclusion_counter =
+      exclusion_counter_.load(std::memory_order_relaxed);
+  const NativeRendererProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (config_generation_.load(std::memory_order_acquire) != config_generation || !emitter ||
+      (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0 ||
+      monotonic_time_ns >= expires_at_monotonic_ns) {
+    return;
+  }
+  const NativeSchemeClass scheme_class = ClassifyNativeScheme(reuse.scheme);
+  if (IsBrowserInternalSchemeClass(scheme_class) && !capture_browser_internal) {
+    if (exclusion_counter) {
+      exclusion_counter(static_cast<std::uint8_t>(scheme_class), session_id, config_generation);
+    }
+    return;
+  }
+  // Reuses can be frequent, so a configuration records a bounded number and
+  // counts the rest.
+  std::uint32_t recorded = memory_cache_reuses_.load(std::memory_order_relaxed);
+  do {
+    if (recorded >= kNativeMemoryCacheReuseBudget) {
+      if (exclusion_counter) {
+        exclusion_counter(kNativeMemoryCacheReuseExclusion, session_id, config_generation);
+      }
+      return;
+    }
+  } while (!memory_cache_reuses_.compare_exchange_weak(recorded, recorded + 1,
+                                                       std::memory_order_relaxed));
+
+  NativeProbeEvent event;
+  event.header.category = NativeProbeCategory::kNetwork;
+  event.header.type = NativeProbeType::kMemoryCacheReuse;
+  event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  event.header.monotonic_time_ns = monotonic_time_ns;
+  event.header.session_id = session_id;
+  event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  NameRequestOwner(event.header, reuse.owner);
+  event.header.request_id =
+      static_cast<std::uint64_t>(static_cast<std::uint32_t>(reuse.request_id));
+  event.header.status_code = std::max(reuse.status_code, 0);
+  event.header.decoded_body_length = std::max<std::int64_t>(reuse.decoded_body_length, 0);
+  event.header.scheme_class = static_cast<std::uint8_t>(scheme_class);
+  event.header.payload_size = kNativeMemoryCacheReusePayloadSize;
+  event.inline_payload =
+      EncodeNativeMemoryCacheReusePayload(reuse.resource_type, reuse.static_data, reuse.host);
+  if (emitter(event, config_generation) != NativeProbeEmitStatus::kAdmitted ||
+      !capture_request_content) {
+    return;
+  }
+  NativeRendererRequest row;
+  row.session_id = session_id;
+  row.initiated_sequence = event.header.sequence_number;
+  row.initiated_time_ns = monotonic_time_ns;
+  row.frame_id = event.header.frame_id;
+  row.thread_id = event.header.thread_id;
+  row.request_id = static_cast<std::uint32_t>(event.header.request_id);
+  row.scheme_class = scheme_class;
+  EmitRendererTarget(row, reuse.target, reuse.target_length, reuse.port, config_generation,
+                     emitter);
 }
 
 void NativeProbeSink::NoteVmDispatchLoss(const std::uint64_t generation,

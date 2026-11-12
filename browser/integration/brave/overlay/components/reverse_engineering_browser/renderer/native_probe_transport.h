@@ -74,7 +74,7 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
 
   [[nodiscard]] NativeProbeEmitStatus EmitEvent(const NativeProbeEvent& event,
                                                 std::uint64_t config_generation) noexcept;
-  static void CountExclusion(NativeSchemeClass scheme_class,
+  static void CountExclusion(std::uint8_t exclusion_class,
                              std::uint64_t session_id,
                              std::uint64_t config_generation) noexcept;
   static bool EmitNativeGuest(const NativeGuestCapture& capture, std::uint64_t generation) noexcept;

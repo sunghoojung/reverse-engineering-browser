@@ -28,6 +28,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_vm_finding.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_dispatch.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_fetch_owner.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_renderer_request.h"
 
 namespace reb {
@@ -58,8 +59,9 @@ using NativeRendererProbeEmitter =
 
 using NativeProbeFrameIdProvider = std::uint64_t (*)() noexcept;
 
-// Counts one browser-internal request the configuration did not record.
-using NativeProbeExclusionCounter = void (*)(NativeSchemeClass scheme_class,
+// Counts one request or memory-cache reuse the configuration did not record:
+// a browser-internal scheme class, or kNativeMemoryCacheReuseExclusion.
+using NativeProbeExclusionCounter = void (*)(std::uint8_t exclusion_class,
                                              std::uint64_t session_id,
                                              std::uint64_t config_generation) noexcept;
 
@@ -70,6 +72,25 @@ struct NativeNetworkScope final {
   // --reb-capture-browser-internal: record internal schemes instead of counting.
   bool capture_browser_internal = false;
   NativeProbeExclusionCounter exclusion_counter = nullptr;
+};
+
+// One ResourceFetcher::DidLoadResourceFromMemoryCache, as Blink reports it.
+// Every view is borrowed for the call; see protocol/native-network-v3.md.
+struct NativeMemoryCacheReuse final {
+  // A fresh renderer request ID, so the reuse is a Traffic row of its own.
+  std::int32_t request_id = 0;
+  NativeFetchOwner owner;
+  std::string_view scheme;
+  std::string_view host;
+  // The URL's path and query: a prefix of target_length bytes.
+  std::string_view target;
+  std::size_t target_length = 0;
+  int port = -1;
+  // Blink ResourceType, 1 to 15 at the pin.
+  std::uint8_t resource_type = 0;
+  bool static_data = false;
+  std::int32_t status_code = 0;
+  std::int64_t decoded_body_length = 0;
 };
 
 // Trusted native detector output only. Registration is not exposed to page JS.
@@ -425,6 +446,20 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                                      std::int32_t error_code,
                                      std::int64_t encoded_data_length,
                                      std::int64_t decoded_body_length) noexcept;
+  // A request content::ServiceWorkerSubresourceLoader ended without sending a
+  // response or handing it to the network: the renderer completion, with
+  // from_service_worker, of the http(s) start this process recorded under
+  // request_id; or a service_worker_end_lost gap when a later start of the
+  // same configuration took its slot. One atomic load while inactive.
+  void RecordServiceWorkerRequestEnd(std::int32_t request_id,
+                                     std::string_view target,
+                                     std::size_t target_length,
+                                     int port,
+                                     std::int32_t error_code) noexcept;
+  // One memory_cache_reuse record and, in content sessions, its target. Past
+  // kNativeMemoryCacheReuseBudget records a configuration counts the reuse as
+  // exclusion class 68 instead. Callers check IsCaptureArmed first.
+  void RecordMemoryCacheReuse(const NativeMemoryCacheReuse& reuse) noexcept;
   // Copies one guest step the caller already observed. The instruction
   // pointer, opcode, and handler index are not read from V8, Wasm, canvas,
   // or a static handler table. At most kNativeVmDispatchSampleBudget samples
@@ -475,6 +510,16 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
 
   [[nodiscard]] NativeProbeEmitStatus EmitStatus(const NativeProbeEvent& event,
                                                  std::uint64_t generation) const noexcept;
+  // The fetch's own document or worker, or the running script's frame
+  // (loader kind script_context) when no owner reached the loader.
+  void NameRequestOwner(NativeProbeHeader& header, const NativeFetchOwner& owner) const noexcept;
+  // The content-mode request_target child of a renderer row's start record.
+  void EmitRendererTarget(const NativeRendererRequest& start,
+                          std::string_view target_prefix,
+                          std::size_t target_length,
+                          int port,
+                          std::uint64_t config_generation,
+                          NativeRendererProbeEmitter emitter) noexcept;
 
   // Writes a gap into the renderer sequence slot a record already took but
   // could not deliver, so the broker sees an explicit omission there. A full
@@ -765,6 +810,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<bool> capture_request_content_{false};
   std::atomic<bool> capture_browser_internal_{false};
   std::atomic<NativeProbeExclusionCounter> exclusion_counter_{nullptr};
+  // memory_cache_reuse records admitted in this configuration, at most
+  // kNativeMemoryCacheReuseBudget.
+  std::atomic<std::uint32_t> memory_cache_reuses_{0};
   // Source bytes queued in this configuration, across every thread.
   std::atomic<std::uint64_t> compiled_script_source_bytes_{0};
   // Monotonic generation claims are never reset: an old capture cannot spend

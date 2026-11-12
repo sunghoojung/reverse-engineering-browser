@@ -117,6 +117,8 @@ enum class NativeProbeType : std::uint16_t {
   kRequestExtensionLink = 50,
   // See protocol/native-compiled-scripts-v1.md.
   kScriptCompiled = 51,
+  // A load Blink answered from a resource it held; see protocol/native-network-v3.md.
+  kMemoryCacheReuse = 52,
 };
 
 enum class NativeProbeFlag : std::uint16_t {

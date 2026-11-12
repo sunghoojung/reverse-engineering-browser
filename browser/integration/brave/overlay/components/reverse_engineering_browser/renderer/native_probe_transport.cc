@@ -339,7 +339,7 @@ NativeProbeEmitStatus NativeProbeTransport::EmitEvent(
   return NativeProbeEmitStatus::kAdmitted;
 }
 
-void NativeProbeTransport::CountExclusion(const NativeSchemeClass scheme_class,
+void NativeProbeTransport::CountExclusion(const std::uint8_t exclusion_class,
                                           const std::uint64_t session_id,
                                           const std::uint64_t config_generation) noexcept {
   auto& transport = Get();
@@ -352,7 +352,7 @@ void NativeProbeTransport::CountExclusion(const NativeSchemeClass scheme_class,
   if (!queue || !NativeProbeSink::Get().CanAdmitEvent(scope, config_generation)) {
     return;
   }
-  queue->CountExclusion(scheme_class);
+  queue->CountExclusion(exclusion_class);
   if (!queue->MarkNotificationPending()) {
     return;
   }

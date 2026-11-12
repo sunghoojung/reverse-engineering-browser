@@ -541,10 +541,13 @@ void NativeProbeHostBrowserInternalScope() {
         "Renderer configuration carries the request content and browser-internal gates");
   auto mapping = client.region.Map();
   auto* queue = static_cast<reb::NativeProbeQueue*>(mapping.memory());
-  queue->CountExclusion(reb::NativeSchemeClass::kChrome);
-  queue->CountExclusion(reb::NativeSchemeClass::kChrome);
-  queue->CountExclusion(reb::NativeSchemeClass::kDevTools);
-  queue->CountExclusion(reb::NativeSchemeClass::kHttps);
+  const auto count = [&](const reb::NativeSchemeClass scheme_class) {
+    queue->CountExclusion(static_cast<std::uint8_t>(scheme_class));
+  };
+  count(reb::NativeSchemeClass::kChrome);
+  count(reb::NativeSchemeClass::kChrome);
+  count(reb::NativeSchemeClass::kDevTools);
+  count(reb::NativeSchemeClass::kHttps);
   host.EventsAvailable();
   host.EventsAvailable();
   Check(session.exclusions.size() == 2 && session.exclusions[0].process == 123 &&
@@ -552,10 +555,17 @@ void NativeProbeHostBrowserInternalScope() {
             session.exclusions[1].exclusion_class == 19 && session.exclusions[1].count == 1 &&
             events.empty(),
         "Each changed class is reported once with its cumulative count, without records");
-  queue->CountExclusion(reb::NativeSchemeClass::kChrome);
+  count(reb::NativeSchemeClass::kChrome);
   host.EventsAvailable();
   Check(session.exclusions.size() == 3 && session.exclusions[2].count == 3,
         "A later count supersedes the earlier report");
+  queue->CountExclusion(reb::kNativeMemoryCacheReuseExclusion);
+  queue->CountExclusion(reb::kNativeMemoryCacheReuseExclusion);
+  host.EventsAvailable();
+  Check(session.exclusions.size() == 4 && session.exclusions[3].process == 123 &&
+            session.exclusions[3].exclusion_class == 68 && session.exclusions[3].count == 2 &&
+            events.empty(),
+        "Memory-cache reuses past the renderer's budget are reported as class 68");
 
   NativeProbeEvent record;
   record.header.category = reb::NativeProbeCategory::kNetwork;
@@ -626,10 +636,11 @@ void NativeProbeHostWorkerTabLinks() {
   auto* queue = static_cast<reb::NativeProbeQueue*>(mapping.memory());
   auto& resolver = reb::NativeTabResolver::Get();
   std::uint64_t sequence = 900;
-  const auto start = [&](reb::NativeLoaderKind kind, std::uint64_t context, std::uint64_t request) {
+  const auto start = [&](reb::NativeLoaderKind kind, std::uint64_t context, std::uint64_t request,
+                         const NativeProbeType type = NativeProbeType::kRequestInitiated) {
     NativeProbeEvent record;
     record.header.category = reb::NativeProbeCategory::kNetwork;
-    record.header.type = NativeProbeType::kRequestInitiated;
+    record.header.type = type;
     record.header.session_id = kSession;
     record.header.process_id = 123;
     record.header.thread_id = 4;
@@ -639,10 +650,15 @@ void NativeProbeHostWorkerTabLinks() {
     record.header.frame_id = context;
     record.header.loader_kind = static_cast<std::uint8_t>(kind);
     record.header.scheme_class = 2;
-    record.header.payload_size = 3;
-    record.inline_payload[0] = std::byte{'G'};
-    record.inline_payload[1] = std::byte{'E'};
-    record.inline_payload[2] = std::byte{'T'};
+    if (type == NativeProbeType::kMemoryCacheReuse) {
+      record.header.payload_size = reb::kNativeMemoryCacheReusePayloadSize;
+      record.inline_payload = reb::EncodeNativeMemoryCacheReusePayload(3, false, "a.test");
+    } else {
+      record.header.payload_size = 3;
+      record.inline_payload[0] = std::byte{'G'};
+      record.inline_payload[1] = std::byte{'E'};
+      record.inline_payload[2] = std::byte{'T'};
+    }
     Check(queue->TryPush(record), "Renderer ring admits the request start");
     events.clear();
     host.EventsAvailable();
@@ -677,6 +693,15 @@ void NativeProbeHostWorkerTabLinks() {
   start(reb::NativeLoaderKind::kDedicatedWorker, nested.fold(), 42);
   Check(events.size() == 2 && events[1].header.type == NativeProbeType::kRequestTabLink,
         "A set already sent in this session is named, not sent again");
+  start(reb::NativeLoaderKind::kDedicatedWorker, nested.fold(), 47,
+        NativeProbeType::kMemoryCacheReuse);
+  Check(events.size() == 2 && events[0].header.type == NativeProbeType::kMemoryCacheReuse &&
+            events[0].header.tab_id == 7 &&
+            events[1].header.type == NativeProbeType::kRequestTabLink &&
+            events[1].header.initiator_request_id == 47 &&
+            events[1].header.parent_event_id == events[0].header.sequence_number &&
+            std::ranges::all_of(events, valid),
+        "A worker's memory-cache reuse links to the worker's tab like a request start");
 
   const reb::NativeToken128 shared{0x71, 0x72};
   resolver.SharedWorkerCreated(shared, {});

@@ -212,9 +212,10 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
   }
   writer_thread_.task_runner()->PostTask(
       FROM_HERE, base::BindOnce(&NativeProbeSocketClient::Run, base::Unretained(this)));
-  LOG(INFO) << "Native capture armed before profile startup; network metadata scope is proxy-only; "
-               "service-worker synthetic and renderer memory-cache coverage unavailable; "
-               "request path and body content "
+  // Renderers record what the proxy never sees once they bind; see
+  // protocol/native-network-v3.md "Requests answered in the renderer".
+  LOG(INFO) << "Native capture armed before profile startup; renderers finish service-worker, "
+               "data: and memory-cache answers once they bind; request path and body content "
             << (NativeProbeSession::Get().capture_request_content() ? "enabled" : "disabled");
   return true;
 }

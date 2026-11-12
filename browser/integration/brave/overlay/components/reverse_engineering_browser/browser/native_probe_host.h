@@ -164,7 +164,7 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   base::WritableSharedMemoryMapping queue_mapping_;
   raw_ptr<NativeProbeQueue> queue_ = nullptr;
   std::uint64_t reported_dropped_events_ = 0;
-  std::array<std::uint64_t, kNativeSchemeExclusionSlots> reported_exclusions_{};
+  std::array<std::uint64_t, kNativeRendererExclusionSlots> reported_exclusions_{};
   std::uint32_t renderer_os_pid_ = 0;
   // Requests of extension workers; their later renderer records are dropped too.
   std::array<std::uint64_t, 64> excluded_requests_{};

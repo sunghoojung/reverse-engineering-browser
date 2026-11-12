@@ -24,7 +24,7 @@ use std::{
 pub const SIDECAR_SUFFIX: &str = ".requests-v1";
 const FORMAT: &str = "reb-request-index-v1";
 /// Sidecar row layout; a sidecar of another layout is rebuilt from byte 0.
-const LAYOUT: u32 = 6;
+const LAYOUT: u32 = 7;
 /// Bounds one call; a larger store reports partial coverage and continues next call.
 const SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const RECORD_BYTES: usize = 4096;
@@ -126,6 +126,10 @@ static HOST: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("host pattern")
 });
+/// A start payload that names only its method, as a hostless URL's does.
+static METHOD_ONLY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^([A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,31}) $").expect("method pattern")
+});
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 struct Root {
@@ -185,6 +189,12 @@ struct Row {
     decoded: Option<i64>,
     cache: bool,
     worker_served: bool,
+    /// A `memory_cache_reuse` row (protocol/native-network-v3.md) and its
+    /// static-data flag.
+    memory_cache: bool,
+    static_data: bool,
+    /// The target names only a scheme (`data:`); its child then gives the URL.
+    scheme_only: bool,
     mime: Option<String>,
     protocol: Option<String>,
     response_ns: Option<u64>,
@@ -614,9 +624,115 @@ fn rank(kind: &str) -> Option<u8> {
         "request_started" => 2,
         "request_redirected" => 3,
         "response_started" => 4,
-        "response_completed" | "request_completed" | "request_failed" => 5,
+        "response_completed" | "request_completed" | "request_failed" | "memory_cache_reuse" => 5,
         _ => return None,
     })
+}
+/// Blink `ResourceType` at the pin, from a `memory_cache_reuse` record; port
+/// of `memoryCacheTypeFilter`.
+fn memory_cache_resource(kind: u8) -> &'static str {
+    match kind {
+        1 => "img",
+        2 => "css",
+        3 => "js",
+        4 => "font",
+        10 | 11 => "media",
+        _ => "other",
+    }
+}
+/// Scheme class names of protocol/native-network-v3.md.
+fn scheme_name(class: u8) -> Option<&'static str> {
+    Some(match class {
+        1 => "http",
+        2 => "https",
+        3 => "ws",
+        4 => "wss",
+        5 => "data",
+        6 => "blob",
+        7 => "file",
+        8 => "chrome-extension",
+        15 => "other",
+        16 => "chrome",
+        17 => "chrome-untrusted",
+        18 => "brave",
+        19 => "devtools",
+        20 => "chrome-search",
+        _ => return None,
+    })
+}
+/// A `memory_cache_reuse` payload: Blink resource type, static data and host.
+/// Port of `decodeMemoryCacheReuse`; the C++ core and Python share its rules.
+fn memory_cache(event: &Value) -> Option<(u8, bool, String)> {
+    let bytes = hex::decode(event["payload"].as_str()?).ok()?;
+    let (kind, flags, length) = (*bytes.get(4)?, *bytes.get(5)?, usize::from(*bytes.get(6)?));
+    let host = bytes.get(8..8 + length)?;
+    (event["type"] == "memory_cache_reuse"
+        && event["protocol_version"] == 3
+        && event["flags"] == 0
+        && bytes.len() == 128
+        && bytes[..4] == [1, 0, 128, 0]
+        && (1..=15).contains(&kind)
+        && flags & !3 == 0
+        && length <= 120
+        && bytes[7] == 0
+        && (flags & 2 == 0 || length == 120)
+        && host.iter().all(|b| (0x21..=0x7e).contains(b))
+        && bytes[8 + length..].iter().all(|b| *b == 0))
+    .then(|| {
+        (
+            kind,
+            flags & 1 != 0,
+            String::from_utf8_lossy(host).into_owned(),
+        )
+    })
+}
+type RowTarget = (Option<String>, String);
+/// A reuse names its host, or its scheme for a URL with no web host; Blink
+/// keeps only GET resources in the memory cache. Port of `memoryCacheTarget`;
+/// the flag marks a scheme-only target.
+fn memory_cache_target(event: &Value, host: &str) -> (Option<RowTarget>, bool) {
+    let class = event["scheme_class"].as_u64().unwrap_or(0) as u8;
+    let Some(scheme) = scheme_name(class) else {
+        return (None, false);
+    };
+    let (value, scheme_only) = match (class <= 4, host.is_empty()) {
+        (true, _) => (host.to_owned(), false),
+        (false, false) => (format!("{scheme}://{host}"), false),
+        (false, true) => (format!("{scheme}:"), true),
+    };
+    (Some((Some("GET".into()), value)), scheme_only)
+}
+/// Hostless URLs (`data:`, `blob:`) and browser schemes name their scheme;
+/// port of `scopedNetworkTarget`.
+fn scoped_target(
+    target: Option<RowTarget>,
+    payload: &str,
+    event: &Value,
+) -> (Option<RowTarget>, bool) {
+    let class = event["scheme_class"].as_u64().unwrap_or(0) as u8;
+    let scheme = match scheme_name(class) {
+        Some(scheme)
+            if class > 4
+                && matches!(
+                    event["type"].as_str(),
+                    Some("request_initiated" | "request_started")
+                ) =>
+        {
+            scheme
+        }
+        _ => return (target, false),
+    };
+    match target {
+        Some((Some(method), value)) => (Some((Some(method), format!("{scheme}://{value}"))), false),
+        Some(target) => (Some(target), false),
+        None => match METHOD_ONLY.captures(payload) {
+            Some(found) => (
+                Some((Some(found[1].to_owned()), format!("{scheme}:"))),
+                true,
+            ),
+            None => (None, false),
+        },
+    }
 }
 /// blink::mojom::ResourceType at the pin; port of `resourceTypeFilters`.
 fn resource(code: i64) -> &'static str {
@@ -952,7 +1068,7 @@ fn correlated_identity(event: &Value) -> String {
 }
 /// Port of `requestIdentity` over the browser keys learned so far.
 fn request_identity(event: &Value, keys: &HashMap<String, String>) -> String {
-    if event["type"] == "request_initiated" {
+    if event["type"] == "request_initiated" || event["type"] == "memory_cache_reuse" {
         return renderer_identity(event);
     }
     let request = text(&event["request_id"]);
@@ -976,7 +1092,7 @@ fn learn_keys(event: &Value, keys: &mut HashMap<String, String>) {
     if text(&event["request_id"]) == "0" || keys.len() >= MAX_KEYS {
         return;
     }
-    if event["type"] == "request_initiated" {
+    if event["type"] == "request_initiated" || event["type"] == "memory_cache_reuse" {
         if let Some(key) = legacy_key(event) {
             keys.insert(key, renderer_identity(event));
         }
@@ -1105,7 +1221,7 @@ fn view(row: &Row) -> View {
             Some(scheme) => format!("{scheme}://{base}{port}{}", found.text),
             None => format!("{base}{}", found.text),
         };
-        target_kind = if found.scheme.is_some() {
+        target_kind = if found.scheme.is_some() || row.scheme_only {
             "url"
         } else {
             "path"
@@ -1493,6 +1609,9 @@ impl RequestIndex {
                     decoded: None,
                     cache: false,
                     worker_served: false,
+                    memory_cache: false,
+                    static_data: false,
+                    scheme_only: false,
                     mime: None,
                     protocol: None,
                     response_ns: None,
@@ -1517,7 +1636,11 @@ impl RequestIndex {
         let row = &mut state.rows[ordinal as usize];
         let payload =
             payload_text(&hex::decode(event["payload"].as_str().unwrap_or("")).unwrap_or_default());
-        let target = network_target(&payload, kind);
+        let reuse = memory_cache(&event);
+        let (target, scheme_only) = match &reuse {
+            Some((_, _, host)) => memory_cache_target(&event, host),
+            None => scoped_target(network_target(&payload, kind), &payload, &event),
+        };
         let version = event["protocol_version"].as_u64().unwrap_or(0);
         let time = unsigned(&event["monotonic_time_ns"]).unwrap_or(0);
         row.first_ns = row.first_ns.min(time);
@@ -1537,6 +1660,7 @@ impl RequestIndex {
         if let Some((method, value)) = target.filter(|_| incoming >= row.target_rank) {
             row.target_rank = incoming;
             row.path = value;
+            row.scheme_only = scheme_only;
             if let Some(method) = method {
                 row.method = method;
             }
@@ -1553,16 +1677,27 @@ impl RequestIndex {
         {
             row.scheme_class = class as u8;
         }
-        row.loader |= kind != "request_initiated";
-        row.renderer |= kind == "request_initiated" || number(&event["initiator_process_id"]) > 0;
+        // A memory-cache reuse is the renderer's own row; no loader made it.
+        let renderer_row = kind == "request_initiated" || kind == "memory_cache_reuse";
+        row.loader |= !renderer_row;
+        row.renderer |= renderer_row || number(&event["initiator_process_id"]) > 0;
         if kind == "request_started" {
             row.worker_started |= flags & 4 != 0;
             row.main_frame |= number(&event["resource_type"]) == 0;
         }
         let response = (kind == "response_started").then(|| response_metadata(&payload));
-        if let Some((mime, protocol)) = &response {
+        // A renderer completion carries the response's cache and service-worker
+        // flags, and a service worker's end without a response its own.
+        if response.is_some() || matches!(kind, "request_completed" | "request_failed") {
             row.cache |= flags & 2 != 0;
             row.worker_served |= flags & 4 != 0;
+        }
+        if let Some((blink_type, static_data, _)) = &reuse {
+            row.memory_cache = true;
+            row.static_data = *static_data;
+            row.resource = memory_cache_resource(*blink_type).into();
+        }
+        if let Some((mime, protocol)) = &response {
             row.mime = mime.clone();
             row.protocol = protocol.clone();
             row.response_ns.get_or_insert(time);
@@ -1880,6 +2015,8 @@ impl RequestIndex {
             "main_frame": row.main_frame, "browser_internal": view.internal,
         });
         document["extension_id"] = json!(row.extension);
+        document["memory_cache"] = json!(row.memory_cache);
+        document["static_data"] = json!(row.static_data);
         // Raw; the get_requests handler replaces it with the frame's resolution.
         document["initiator_frame"] = json!(row.stack_frame.as_ref().map(|(session, process, isolate, frame)| {
             let script = u32::from_le_bytes(frame[4..8].try_into().unwrap());
@@ -2485,6 +2622,87 @@ mod tests {
             );
         }
     }
+    fn reuse(kind: u8, static_data: bool, host: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0; 128];
+        bytes[..4].copy_from_slice(&[1, 0, 128, 0]);
+        (bytes[4], bytes[5], bytes[6]) = (kind, u8::from(static_data), host.len() as u8);
+        bytes[8..8 + host.len()].copy_from_slice(host);
+        bytes
+    }
+    /// Rows only the renderer finishes (protocol/native-network-v3.md): a
+    /// `data:` load, memory-cache reuses and a service worker's failure.
+    fn renderer_answered(store: &mut Store) {
+        let class = |class: u8| json!({"scheme_class": class, "loader_kind": 16, "tab_id": 3});
+        let start = store.push(51, 30, "request_initiated", b"GET ", class(5));
+        store.push(
+            51,
+            30,
+            "request_target",
+            &target(0, 0, b"text/plain,hi", 13),
+            json!({"parent_event_id": start, "tab_id": 3}),
+        );
+        store.push(
+            51,
+            30,
+            "request_completed",
+            b"completed",
+            merge(
+                class(5),
+                json!({"status_code": 200, "decoded_body_length": "2", "loader_kind": 0}),
+            ),
+        );
+        let reused = store.push(
+            51,
+            31,
+            "memory_cache_reuse",
+            &reuse(1, false, b"cdn.example.test"),
+            merge(
+                class(2),
+                json!({"status_code": 200, "decoded_body_length": "5120"}),
+            ),
+        );
+        store.push(
+            51,
+            31,
+            "request_target",
+            &target(2, 0, b"/logo.png?v=2", 13),
+            json!({"parent_event_id": reused, "tab_id": 3}),
+        );
+        store.push(
+            51,
+            32,
+            "memory_cache_reuse",
+            &reuse(2, true, b""),
+            merge(
+                class(5),
+                json!({"status_code": 200, "decoded_body_length": "40"}),
+            ),
+        );
+        let start = store.push(
+            51,
+            33,
+            "request_initiated",
+            b"GET sw.example.test",
+            class(2),
+        );
+        store.push(
+            51,
+            33,
+            "request_target",
+            &target(2, 0, b"/api?id=7", 9),
+            json!({"parent_event_id": start, "tab_id": 3}),
+        );
+        store.push(
+            51,
+            33,
+            "request_failed",
+            b"failed",
+            merge(
+                class(2),
+                json!({"error_code": -2, "flags": 4, "loader_kind": 0}),
+            ),
+        );
+    }
     fn write(path: &Path, store: &Store) {
         fs::write(path, store.bytes()).unwrap();
     }
@@ -2502,6 +2720,97 @@ mod tests {
             .iter()
             .map(|row| row["id"].as_str().unwrap().to_owned())
             .collect()
+    }
+
+    #[test]
+    fn renderer_answered_rows_name_their_scheme_and_memory_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events.jsonl");
+        let mut store = Store {
+            events: Vec::new(),
+            sequence: 0,
+        };
+        renderer_answered(&mut store);
+        write(&path, &store);
+        let document = page(&mut RequestIndex::new(&path), "limit=50&sort=start");
+        let rows = document["requests"].as_array().unwrap();
+        let summary = |row: &Value| {
+            json!([
+                row["path"],
+                row["target_kind"],
+                row["status"],
+                row["type"],
+                row["memory_cache"],
+                row["static_data"],
+                row["from_service_worker"],
+                row["loader_observed"],
+                row["initiator"]
+            ])
+        };
+        assert_eq!(
+            rows.iter().map(summary).collect::<Vec<_>>(),
+            [
+                json!([
+                    "data:text/plain,hi",
+                    "url",
+                    200,
+                    "other",
+                    false,
+                    false,
+                    false,
+                    true,
+                    "renderer"
+                ]),
+                json!([
+                    "https://cdn.example.test/logo.png?v=2",
+                    "url",
+                    200,
+                    "img",
+                    true,
+                    false,
+                    false,
+                    false,
+                    "renderer"
+                ]),
+                json!([
+                    "data:", "host", 200, "css", true, true, false, false, "renderer"
+                ]),
+                json!([
+                    "https://sw.example.test/api?id=7",
+                    "url",
+                    "failed",
+                    "other",
+                    false,
+                    false,
+                    true,
+                    true,
+                    "renderer"
+                ]),
+            ]
+        );
+        assert_eq!(rows[1]["resource_size"], 5120);
+        assert_eq!(rows[1]["transfer_size"], 0);
+        assert_eq!(rows[1]["host"], "cdn.example.test");
+        assert_eq!(rows[0]["host"], "data:");
+        assert!(rows.iter().all(|row| row["tab_ids"] == json!(["3"])));
+        // A malformed reuse payload names no target and is no memory-cache row.
+        let mut bad = Store {
+            events: Vec::new(),
+            sequence: 0,
+        };
+        let mut payload = reuse(1, false, b"cdn.example.test");
+        payload[5] = 4;
+        bad.push(
+            51,
+            34,
+            "memory_cache_reuse",
+            &payload,
+            json!({"scheme_class": 2, "loader_kind": 16}),
+        );
+        write(&path, &bad);
+        let document = page(&mut RequestIndex::new(&path), "limit=50");
+        assert_eq!(document["requests"][0]["memory_cache"], false);
+        assert_eq!(document["requests"][0]["path"], UNIDENTIFIED);
     }
 
     #[test]
@@ -3363,6 +3672,7 @@ mod tests {
         let path = root.path().join("events.jsonl");
         let mut store = fixture();
         push_stack_rows(&mut store);
+        renderer_answered(&mut store);
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
         let mut document = page(&mut index, "limit=500");

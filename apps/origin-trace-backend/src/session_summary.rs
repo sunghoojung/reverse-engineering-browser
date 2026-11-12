@@ -369,6 +369,7 @@ fn exclusion_class(code: u8) -> Option<(&'static str, &'static str)> {
         65 => ("extension_worker", "requests"),
         66 => ("devtools_load", "requests"),
         67 => ("webui_request", "requests"),
+        68 => ("memory_cache_reuse", "reuses"),
         _ => return None,
     })
 }
@@ -564,6 +565,17 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         item["count"] = json!(no_tab.to_string());
         checks.push(item);
     }
+    if let Some(&reuses) = excluded.get(&68) {
+        let mut item = check(
+            "memory_cache_reuse_not_recorded",
+            "info",
+            format!(
+                "{reuses} memory-cache reuses were counted, not recorded: each renderer records at most 4,096 per capture configuration. This is a named exclusion, not a gap."
+            ),
+        );
+        item["count"] = json!(reuses.to_string());
+        checks.push(item);
+    }
     // Internal-scheme loads and the requests WebUI renderers sent through the proxy.
     let internal_request = |class: u8| class < 64 || class == 67;
     let requests: u64 = excluded
@@ -754,6 +766,8 @@ mod tests {
             exclusion(8, 41, 65, 2),
             exclusion(9, 0, 66, 1),
             exclusion(11, 0, 67, 3),
+            exclusion(12, 41, 68, 4),
+            exclusion(13, 41, 68, 9),
         ]
         .map(|event| event.to_string())
         .to_vec();
@@ -787,8 +801,17 @@ mod tests {
                 {"class": "extension_worker", "unit": "requests", "count": "2"},
                 {"class": "devtools_load", "unit": "requests", "count": "1"},
                 {"class": "webui_request", "unit": "requests", "count": "3"},
+                {"class": "memory_cache_reuse", "unit": "reuses", "count": "9"},
             ])
         );
+        let reuses = summary["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == "memory_cache_reuse_not_recorded")
+            .unwrap();
+        assert_eq!(reuses["severity"], "info");
+        assert_eq!(reuses["count"], "9");
         let checks = summary["checks"].as_array().unwrap();
         assert_eq!(checks[0]["code"], "network_tab_unresolved");
         assert_eq!(checks[0]["severity"], "error");

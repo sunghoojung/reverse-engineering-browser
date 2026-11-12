@@ -16,6 +16,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_tab_link.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_script_cookie_sink.h"
+#include "third_party/blink/public/common/messaging/cloneable_message.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/frame/frame.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
@@ -44,7 +45,12 @@ inline std::uint64_t FrameId(const blink::Frame* frame) {
                          token.value().GetLowForSerialization());
 }
 
-// Blink's buffer for V8's frames, one per attached thread, freed with its tables.
+// The Mojo traits bound an origin before reading it; see cloneable_message.h.
+static_assert(blink::kRebTaskOriginMaxBytes == kNativeTaskOriginMaxBytes);
+static_assert(blink::kRebTaskOriginOversize == kNativeTaskOriginOversize);
+
+// Blink's buffer for V8's frames, made with a thread's tables by its first
+// active walk and freed with them.
 using V8StackFrames = std::array<v8::NativeStackFrame, kNativeRequestStackFrameCapacity>;
 inline void* AllocateV8StackFrames() {
   return new V8StackFrames();

@@ -155,15 +155,16 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
   // A MessagePort, BroadcastChannel or worker postMessage: walks the posting
   // stack like RecordAsyncTask and writes the message's task origin, the
   // posting segment then the sender's chain, into `out`. Returns its size, or
-  // 0 when nothing is carried.
+  // 0 when nothing is carried (inactive, or a thread without tables).
   [[nodiscard]] static std::size_t PostMessageOrigin(
       NativeAsyncTaskKind kind,
       bool script_running,
       std::span<std::uint8_t, kNativeTaskOriginMaxBytes> out) noexcept;
-  // The segment a received message's handler runs under: the posting segment
-  // itself when this thread posted it and still remembers it, else copies of
-  // the carried segments. An empty or invalid origin while capture is active
-  // cuts the chain there. 0 while inactive.
+  // The segment a received message's handler runs under: copies of the
+  // carried segments, stored in this thread's ring. While capture is active,
+  // an empty origin cuts the chain there (the sender carried nothing), and
+  // one that does not validate ends it with an origin_rejected segment and a
+  // message_task_origin_rejected gap. 0 while inactive or without tables.
   [[nodiscard]] static std::uint64_t ReceiveMessageOrigin(
       NativeAsyncTaskKind kind,
       std::span<const std::uint8_t> origin) noexcept;

@@ -102,6 +102,9 @@ enum class NativeTaskSegmentState : std::uint8_t {
   kNotRecorded = 6,
   // Version 3: scheduled while no script ran; the chain ends here.
   kNoScript = 7,
+  // Version 3, kinds 10-12: the message's task origin did not validate, so
+  // the sender is not known; the chain ends here.
+  kOriginRejected = 8,
 };
 inline constexpr std::uint8_t kNativeTaskSegmentBounded = 1U << 0U;
 // The call that registered a microtask's promise reaction, version 3.
@@ -461,6 +464,10 @@ inline void SetNativeStackScope(std::array<std::uint8_t, N>& tail,
   if (state == NativeTaskSegmentState::kNoScript) {
     return scoped && empty;
   }
+  if (state == NativeTaskSegmentState::kOriginRejected) {
+    return scoped && empty &&
+           s.kind >= static_cast<std::uint8_t>(NativeAsyncTaskKind::kMessagePort);
+  }
   return frames(kNativeAsyncTaskFrameLimit);
 }
 
@@ -552,28 +559,32 @@ inline void SetNativeStackScope(std::array<std::uint8_t, N>& tail,
 }
 
 // A message's task origin, carried beside Chromium's sender_stack_trace_id
-// from the posting renderer to the one that runs its handler: the posting
+// from the posting thread to the one that runs its handler: the posting
 // segment, then at most 31 earlier segments of the sender's chain, nearest
-// first. Never stored. The receiver treats it as untrusted input and drops an
-// origin that does not validate; the message itself is unaffected.
-inline constexpr std::uint16_t kNativeTaskOriginVersion = 1;
-inline constexpr std::size_t kNativeTaskOriginHeaderSize = 24;
+// first. It names no process, thread or table: the receiver always stores
+// copies. Never stored itself. Page JavaScript never sees it; the receiver
+// treats it as untrusted input, and records an origin that does not validate
+// as rejected; the message itself is unaffected. SAFETY.md lists what it
+// exposes to the receiving renderer.
+inline constexpr std::uint16_t kNativeTaskOriginVersion = 2;
+inline constexpr std::size_t kNativeTaskOriginHeaderSize = 8;
 inline constexpr std::size_t kNativeTaskOriginMaxBytes =
     kNativeTaskOriginHeaderSize + kNativeTaskSegmentSize * kNativeTaskSegmentLimit;
-// The sender's chain continued past the carried segments, or was cut there.
+// The sender's chain was cut after the last carried segment: a caller was
+// not recorded or no longer remembered.
 inline constexpr std::uint8_t kNativeTaskOriginCut = 1U << 0U;
+// The sender's chain went on past the 32 carried segments.
+inline constexpr std::uint8_t kNativeTaskOriginTruncated = 1U << 1U;
+// What Chromium's CloneableMessage traits put in place of an origin longer
+// than kNativeTaskOriginMaxBytes, without reading it: one zero byte, which
+// never validates, so the receiver records the origin as rejected.
+inline constexpr std::uint8_t kNativeTaskOriginOversize = 0;
 
 struct NativeTaskOriginHeader final {
   std::uint16_t version = kNativeTaskOriginVersion;
   std::uint8_t count = 0;
   std::uint8_t flags = 0;
-  // The sender's OS process and segment table; with the serial they let a
-  // receiver on the same thread link the posting segment directly.
-  std::uint32_t process_id = 0;
-  std::uint64_t table = 0;
-  // The posting segment's serial in that table; 0 when it was scheduled with
-  // no script running and so has no table entry.
-  std::uint64_t serial = 0;
+  std::array<std::uint8_t, 4> reserved{};
 };
 static_assert(sizeof(NativeTaskOriginHeader) == kNativeTaskOriginHeaderSize);
 static_assert(std::has_unique_object_representations_v<NativeTaskOriginHeader>);
@@ -589,9 +600,12 @@ static_assert(std::has_unique_object_representations_v<NativeTaskOriginHeader>);
   std::array<std::uint8_t, kNativeTaskOriginHeaderSize> head{};
   std::copy_n(bytes.begin(), head.size(), head.begin());
   header = std::bit_cast<NativeTaskOriginHeader>(head);
+  constexpr std::uint8_t kFlags = kNativeTaskOriginCut | kNativeTaskOriginTruncated;
   if (header.version != kNativeTaskOriginVersion || header.count == 0 ||
-      header.count > kNativeTaskSegmentLimit || (header.flags & ~kNativeTaskOriginCut) != 0 ||
-      header.process_id == 0 || header.table == 0 ||
+      header.count > kNativeTaskSegmentLimit || (header.flags & ~kFlags) != 0 ||
+      header.flags == kFlags || !native_request_stack_detail::AllZero(header.reserved) ||
+      ((header.flags & kNativeTaskOriginTruncated) != 0 &&
+       header.count != kNativeTaskSegmentLimit) ||
       bytes.size() != kNativeTaskOriginHeaderSize + kNativeTaskSegmentSize * header.count) {
     return false;
   }
@@ -601,18 +615,18 @@ static_assert(std::has_unique_object_representations_v<NativeTaskOriginHeader>);
                                                             i * kNativeTaskSegmentSize),
                 raw.size(), raw.begin());
     out[i] = std::bit_cast<NativeTaskSegment>(raw);
+    // Only the receiver records a rejected origin; a sender never carries one.
     const bool no_script =
         out[i].state == static_cast<std::uint8_t>(NativeTaskSegmentState::kNoScript);
     if (!IsValidNativeTaskSegment(out[i], kNativeStackArtifactScopeVersion) ||
+        out[i].state == static_cast<std::uint8_t>(NativeTaskSegmentState::kOriginRejected) ||
         (no_script && (i + 1 != header.count || header.flags != 0))) {
       return false;
     }
   }
   const std::uint8_t posting = out[0].kind;
   return posting >= static_cast<std::uint8_t>(NativeAsyncTaskKind::kMessagePort) &&
-         posting <= static_cast<std::uint8_t>(NativeAsyncTaskKind::kWorkerMessage) &&
-         (header.serial == 0) ==
-             (out[0].state == static_cast<std::uint8_t>(NativeTaskSegmentState::kNoScript));
+         posting <= static_cast<std::uint8_t>(NativeAsyncTaskKind::kWorkerMessage);
 }
 
 template <typename T>

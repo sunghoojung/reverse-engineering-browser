@@ -971,8 +971,26 @@ reb::NativeStackScope WorkerScope(const reb::NativeStackThread thread, const std
                "overflow, unattached and detached threads\n";
 }
 
+// Receives `origin` as `kind`, then starts a request inside its handler and
+// returns that request's stack record. A rejected origin's gap comes first.
+NativeRequestStackPayload HandlerStack(NativeProbeQueue& queue,
+                                       const reb::NativeAsyncTaskKind kind,
+                                       const std::span<const std::uint8_t> origin,
+                                       const std::int32_t request,
+                                       const bool rejected = false) {
+  const auto handle = NativeRequestStackWalk::ReceiveMessageOrigin(kind, origin);
+  if (rejected) {
+    assert(GapReason(Pop(queue)) == "message_task_origin_rejected");
+  }
+  const auto saved = NativeRequestStackWalk::EnterAsyncTask(handle);
+  const auto stack = StackPayload(Start(queue, request).second);
+  NativeRequestStackWalk::ExitAsyncTask(saved);
+  return stack;
+}
+
 // MessagePort, BroadcastChannel and worker messages carry the posting stack
-// and the sender's chain to the thread that runs the handler.
+// and the sender's chain to the thread that runs the handler, which stores
+// copies; the origin names no process, thread or table.
 [[gnu::noinline]] void NativeMessageOrigins() {
   using reb::NativeAsyncTaskKind;
   NativeProbeQueue queue;
@@ -995,71 +1013,152 @@ reb::NativeStackScope WorkerScope(const reb::NativeStackThread thread, const std
   const auto posted = TaskPayload(Pop(queue));
   assert(posted.kind == 10 && posted.protocol_version == reb::kNativeAsyncTaskStackScopeVersion);
   Drain(queue);
-  const std::span<const std::uint8_t> bytes(origin.data(), size);
+  const std::vector<std::uint8_t> bytes(origin.begin(), origin.begin() + size);
   reb::NativeTaskOriginHeader header;
   std::array<reb::NativeTaskSegment, reb::kNativeTaskSegmentLimit> carried{};
   assert(reb::DecodeNativeTaskOrigin(bytes, header, carried) && header.count == 2 &&
          carried[0].kind == 10 && carried[1].kind == 1 && header.flags == 0);
-
-  // Received on the posting thread: the posting segment itself.
-  const auto local =
-      NativeRequestStackWalk::ReceiveMessageOrigin(NativeAsyncTaskKind::kMessagePort, bytes);
-  assert(local == header.serial);
-  saved = NativeRequestStackWalk::EnterAsyncTask(local);
-  StackPayload(Start(queue, 7100).second);
-  auto chain = GeneratedChain();
-  assert(chain.size() == 2 && chain[0].kind == 10 && chain[1].kind == 1 &&
-         chain[0].digest == posted.digest);
-  Drain(queue);
-  NativeRequestStackWalk::ExitAsyncTask(saved);
-
-  // An origin naming another kind, or none, cuts the chain at the handler.
-  for (const auto& wrong : {bytes, std::span<const std::uint8_t>()}) {
-    saved = NativeRequestStackWalk::EnterAsyncTask(NativeRequestStackWalk::ReceiveMessageOrigin(
-        NativeAsyncTaskKind::kBroadcastChannel, wrong));
-    const auto cut = StackPayload(Start(queue, 7101).second);
-    assert(cut.task_segments == 0 && (cut.flags & reb::kNativeRequestStackTaskChainCut) != 0);
-    Drain(queue);
-    NativeRequestStackWalk::ExitAsyncTask(saved);
+  // Exactly what crosses: version, count and flags, then per segment its
+  // kind, state, flags, registration, frame count and digest. Every other
+  // byte is zero; no process ID, table or serial.
+  const auto zero = [](const auto& range) {
+    return std::all_of(range.begin(), range.end(), [](const std::uint8_t b) { return b == 0; });
+  };
+  assert(header.version == 2 && zero(header.reserved) && carried[0].digest == posted.digest &&
+         carried[0].recorded == posted.recorded);
+  for (std::size_t i = 0; i < header.count; ++i) {
+    assert(zero(carried[i].reserved1));
   }
+
+  // Received on the posting thread: copies, so the same chain.
+  auto stack = HandlerStack(queue, NativeAsyncTaskKind::kMessagePort, bytes, 7100);
+  auto chain = GeneratedChain();
+  assert(stack.task_segments == 2 && chain[0] == carried[0] && chain[1] == carried[1]);
+  Drain(queue);
+
+  // An origin that does not validate is rejected and counted: the handler's
+  // chain ends at an origin_rejected segment of the receiving kind. Forged:
+  // the version 1 header that named this process, table and posting serial,
+  // which no longer links to anything; a header byte where a table would go;
+  // a damaged segment; the oversize marker the Mojo traits leave in place of
+  // an origin longer than 1,544 bytes; and anything longer still.
+  std::vector<std::uint8_t> same_table(24 + bytes.size() - reb::kNativeTaskOriginHeaderSize, 0);
+  same_table[0] = 1;
+  same_table[2] = 2;
+  const auto pid = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  std::memcpy(same_table.data() + 4, &pid, sizeof(pid));
+  const std::uint64_t table = 1;
+  std::memcpy(same_table.data() + 8, &table, sizeof(table));
+  std::memcpy(same_table.data() + 16, &timer, sizeof(timer));
+  std::copy(bytes.begin() + reb::kNativeTaskOriginHeaderSize, bytes.end(), same_table.begin() + 24);
+  auto named = bytes;
+  named[4] = 1;
+  auto damaged = bytes;
+  damaged[reb::kNativeTaskOriginHeaderSize + 8] = 1;
+  std::vector<std::uint8_t> oversize{reb::kNativeTaskOriginOversize};
+  std::vector<std::uint8_t> too_long(reb::kNativeTaskOriginMaxBytes + 1, 0);
+  std::copy(bytes.begin(), bytes.end(), too_long.begin());
+  std::int32_t request = 7110;
+  for (const auto* forged : {&same_table, &named, &damaged, &oversize, &too_long}) {
+    stack = HandlerStack(queue, NativeAsyncTaskKind::kMessagePort, *forged, request++, true);
+    chain = GeneratedChain();
+    assert(stack.task_segments == 1 &&
+           (stack.flags & (reb::kNativeRequestStackTaskChainCut |
+                           reb::kNativeRequestStackTaskChainTruncated)) == 0 &&
+           chain[0].kind == 10 &&
+           chain[0].state ==
+               static_cast<std::uint8_t>(reb::NativeTaskSegmentState::kOriginRejected));
+    Drain(queue);
+  }
+  // A valid origin posted through another kind is rejected the same way.
+  stack = HandlerStack(queue, NativeAsyncTaskKind::kBroadcastChannel, bytes, request++, true);
+  assert(stack.task_segments == 1 && GeneratedChain()[0].kind == 11 &&
+         GeneratedChain()[0].state ==
+             static_cast<std::uint8_t>(reb::NativeTaskSegmentState::kOriginRejected));
+  Drain(queue);
+  // No origin: the sender carried nothing, so the caller is unknown and the
+  // chain is cut there, with no gap.
+  stack = HandlerStack(queue, NativeAsyncTaskKind::kMessagePort, {}, request++);
+  assert(stack.task_segments == 0 && (stack.flags & reb::kNativeRequestStackTaskChainCut) != 0);
+  Drain(queue);
 
   TestThread thread;
   const auto worker = WorkerScope(reb::NativeStackThread::kDedicatedWorker, 0x8888);
   thread.Run([&] {
     NativeRequestStackWalk::AttachThread(worker);
     // Received on a worker: copies of the carried segments, same digests.
-    const auto copied =
-        NativeRequestStackWalk::ReceiveMessageOrigin(NativeAsyncTaskKind::kMessagePort, bytes);
-    assert(copied != 0 && copied != header.serial);
-    const auto inside = NativeRequestStackWalk::EnterAsyncTask(copied);
-    StackPayload(Start(queue, 7102).second);
+    const auto copied = HandlerStack(queue, NativeAsyncTaskKind::kMessagePort, bytes, 7102);
     const auto copy = GeneratedChain();
-    assert(copy.size() == 2 && copy[0] == carried[0] && copy[1] == carried[1] &&
+    assert(copied.task_segments == 2 && copy[0] == carried[0] && copy[1] == carried[1] &&
            GeneratedScope().thread == 2);
     Drain(queue);
-    NativeRequestStackWalk::ExitAsyncTask(inside);
   });
 
-  // Posted with no script running: a no_script segment and no serial.
+  // A worker posts to the page and shuts down before the page dispatches the
+  // message: the origin already holds the segments, so the page's handler
+  // still shows the worker's posting stack.
+  std::vector<std::uint8_t> from_worker;
+  reb::NativeAsyncTaskStackPayload worker_post;
+  {
+    TestThread short_lived;
+    short_lived.Run([&] {
+      NativeRequestStackWalk::AttachThread(
+          WorkerScope(reb::NativeStackThread::kDedicatedWorker, 0x8889));
+      scenario.task_seed = 9420;
+      std::array<std::uint8_t, reb::kNativeTaskOriginMaxBytes> out{};
+      const auto n =
+          NativeRequestStackWalk::PostMessageOrigin(NativeAsyncTaskKind::kWorkerMessage, true, out);
+      assert(n == reb::kNativeTaskOriginHeaderSize + reb::kNativeTaskSegmentSize);
+      worker_post = TaskPayload(Pop(queue));
+      assert(worker_post.kind == 12 &&
+             reb::NativeStackScopeOf(worker_post.reserved2).isolate_key == 0x8889);
+      Drain(queue);
+      from_worker.assign(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(n));
+      NativeRequestStackWalk::DetachThread();
+    });
+  }
+  stack = HandlerStack(queue, NativeAsyncTaskKind::kWorkerMessage, from_worker, 7103);
+  chain = GeneratedChain();
+  assert(stack.task_segments == 1 && chain[0].kind == 12 && chain[0].state == 1 &&
+         chain[0].digest == worker_post.digest && chain[0].recorded == worker_post.recorded);
+  Drain(queue);
+
+  // Posted with no script running: one no_script segment.
   const auto quiet =
       NativeRequestStackWalk::PostMessageOrigin(NativeAsyncTaskKind::kWorkerMessage, false, origin);
   assert(quiet == reb::kNativeTaskOriginHeaderSize + reb::kNativeTaskSegmentSize &&
          Drain(queue) == 0);
   const std::vector<std::uint8_t> quiet_bytes(origin.begin(), origin.begin() + quiet);
   thread.Run([&] {
-    const auto handle = NativeRequestStackWalk::ReceiveMessageOrigin(
-        NativeAsyncTaskKind::kWorkerMessage, quiet_bytes);
-    const auto inside = NativeRequestStackWalk::EnterAsyncTask(handle);
-    const auto ended = StackPayload(Start(queue, 7103).second);
+    const auto ended = HandlerStack(queue, NativeAsyncTaskKind::kWorkerMessage, quiet_bytes, 7104);
     const auto copy = GeneratedChain();
     assert(ended.task_segments == 1 && (ended.flags & reb::kNativeRequestStackTaskChainCut) == 0 &&
            copy[0].kind == 12 &&
            copy[0].state == static_cast<std::uint8_t>(reb::NativeTaskSegmentState::kNoScript));
     Drain(queue);
-    NativeRequestStackWalk::ExitAsyncTask(inside);
   });
 
-  // 40 nested timers, then a post: 32 carried segments and the cut flag.
+  // A post inside a handler whose own caller is unknown carries that cut.
+  saved = NativeRequestStackWalk::EnterAsyncTask(
+      NativeRequestStackWalk::ReceiveMessageOrigin(NativeAsyncTaskKind::kMessagePort, {}));
+  scenario.task_seed = 9430;
+  const auto cut_size =
+      NativeRequestStackWalk::PostMessageOrigin(NativeAsyncTaskKind::kMessagePort, true, origin);
+  NativeRequestStackWalk::ExitAsyncTask(saved);
+  Drain(queue);
+  const std::vector<std::uint8_t> cut_bytes(origin.begin(), origin.begin() + cut_size);
+  assert(reb::DecodeNativeTaskOrigin(cut_bytes, header, carried) && header.count == 1 &&
+         header.flags == reb::kNativeTaskOriginCut);
+  thread.Run([&] {
+    const auto received = HandlerStack(queue, NativeAsyncTaskKind::kMessagePort, cut_bytes, 7105);
+    assert(received.task_segments == 1 &&
+           (received.flags & reb::kNativeRequestStackTaskChainCut) != 0 &&
+           (received.flags & reb::kNativeRequestStackTaskChainTruncated) == 0);
+    Drain(queue);
+  });
+
+  // 40 nested timers, then a post: 32 carried segments, marked truncated
+  // rather than cut, and the receiver says the same.
   std::uint64_t nested = 0;
   for (std::uint32_t i = 0; i < 40; ++i) {
     const auto outer = NativeRequestStackWalk::EnterAsyncTask(nested);
@@ -1075,30 +1174,34 @@ reb::NativeStackScope WorkerScope(const reb::NativeStackThread thread, const std
   Drain(queue);
   assert(long_size == reb::kNativeTaskOriginMaxBytes);
   const std::vector<std::uint8_t> long_bytes(origin.begin(), origin.begin() + long_size);
+  assert(reb::DecodeNativeTaskOrigin(long_bytes, header, carried) &&
+         header.flags == reb::kNativeTaskOriginTruncated);
   thread.Run([&] {
-    const auto inside =
-        NativeRequestStackWalk::EnterAsyncTask(NativeRequestStackWalk::ReceiveMessageOrigin(
-            NativeAsyncTaskKind::kBroadcastChannel, long_bytes));
-    const auto bounded = StackPayload(Start(queue, 7104).second);
+    const auto bounded =
+        HandlerStack(queue, NativeAsyncTaskKind::kBroadcastChannel, long_bytes, 7106);
     assert(bounded.task_segments == 32 &&
-           (bounded.flags & reb::kNativeRequestStackTaskChainCut) != 0 &&
+           (bounded.flags & reb::kNativeRequestStackTaskChainTruncated) != 0 &&
+           (bounded.flags & reb::kNativeRequestStackTaskChainCut) == 0 &&
            GeneratedChain()[0].kind == 11);
     Drain(queue);
-    NativeRequestStackWalk::ExitAsyncTask(inside);
     NativeRequestStackWalk::DetachThread();
   });
 
-  // Network off: nothing is walked or carried.
+  // Network off: nothing is walked, carried or counted.
   Configure(queue, 72, kForever, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kRuntime));
   assert(
       NativeRequestStackWalk::PostMessageOrigin(NativeAsyncTaskKind::kMessagePort, true, origin) ==
           0 &&
       NativeRequestStackWalk::ReceiveMessageOrigin(NativeAsyncTaskKind::kMessagePort, bytes) == 0 &&
+      NativeRequestStackWalk::ReceiveMessageOrigin(NativeAsyncTaskKind::kMessagePort, damaged) ==
+          0 &&
       Drain(queue) == 0);
   scenario = {};
   transport.Disable();
-  std::cout << "PASS message origins: same-thread link, cross-thread copies, wrong or missing "
-               "origin cut, no-script post, 32-segment bound, network off\n";
+  std::cout << "PASS message origins: nothing beyond the segments crosses, copies on every "
+               "thread, forged, damaged, oversize and wrong-kind origins rejected and counted, "
+               "missing origin cut, a worker that posts and detaches first, no-script post, cut "
+               "and truncated ends carried apart, network off\n";
 }
 
 // --reb-promise-stacks: a registration's stack, sent once per digest, names

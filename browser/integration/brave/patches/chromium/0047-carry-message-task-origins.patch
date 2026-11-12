@@ -1,35 +1,70 @@
 diff --git a/third_party/blink/common/messaging/cloneable_message.cc b/third_party/blink/common/messaging/cloneable_message.cc
-index cbdfff6..b808347 100644
+index cbdfff6..b5b933c 100644
 --- a/third_party/blink/common/messaging/cloneable_message.cc
 +++ b/third_party/blink/common/messaging/cloneable_message.cc
-@@ -68,6 +68,8 @@ CloneableMessage CloneableMessage::ShallowClone() const {
+@@ -68,6 +68,13 @@ CloneableMessage CloneableMessage::ShallowClone() const {
      token = source_token.Unbind();
    }
    clone.sender_agent_cluster_id = sender_agent_cluster_id;
-+  // BroadcastChannel fans out through ShallowClone; keep the REB task origin.
-+  clone.reb_task_origin = reb_task_origin;
++  // BroadcastChannel fans out through ShallowClone; keep the REB task origin
++  // within its bound (cloneable_message.h).
++  if (reb_task_origin.size() > kRebTaskOriginMaxBytes) {
++    clone.reb_task_origin.assign(1, kRebTaskOriginOversize);
++  } else {
++    clone.reb_task_origin = reb_task_origin;
++  }
    return clone;
  }
  
 diff --git a/third_party/blink/common/messaging/cloneable_message_mojom_traits.cc b/third_party/blink/common/messaging/cloneable_message_mojom_traits.cc
-index 22497fa..e4aad0d 100644
+index 22497fa..466398e 100644
 --- a/third_party/blink/common/messaging/cloneable_message_mojom_traits.cc
 +++ b/third_party/blink/common/messaging/cloneable_message_mojom_traits.cc
-@@ -24,7 +24,8 @@ bool StructTraits<blink::mojom::CloneableMessage::DataView,
-   if (!data.ReadEncodedMessage(&message_view) || !data.ReadBlobs(&out->blobs) ||
-       !data.ReadSenderAgentClusterId(&sender_agent_cluster_id) ||
-       !data.ReadSenderOrigin(&out->sender_origin) ||
--      !data.ReadFileSystemAccessTokens(&out->file_system_access_tokens)) {
-+      !data.ReadFileSystemAccessTokens(&out->file_system_access_tokens) ||
-+      !data.ReadRebTaskOrigin(&out->reb_task_origin)) {
+@@ -6,6 +6,7 @@
+ 
+ #include "base/containers/span.h"
+ #include "mojo/public/cpp/base/big_buffer_mojom_traits.h"
++#include "mojo/public/cpp/bindings/array_data_view.h"
+ 
+ namespace mojo {
+ 
+@@ -27,6 +28,17 @@ bool StructTraits<blink::mojom::CloneableMessage::DataView,
+       !data.ReadFileSystemAccessTokens(&out->file_system_access_tokens)) {
      return false;
    }
++  // The browser relays BroadcastChannel messages through these traits. A REB
++  // task origin longer than any valid one is not read; see
++  // cloneable_message.h.
++  mojo::ArrayDataView<uint8_t> reb_task_origin;
++  data.GetRebTaskOriginDataView(&reb_task_origin);
++  if (!reb_task_origin.is_null() &&
++      reb_task_origin.size() > blink::kRebTaskOriginMaxBytes) {
++    out->reb_task_origin.assign(1, blink::kRebTaskOriginOversize);
++  } else if (!data.ReadRebTaskOrigin(&out->reb_task_origin)) {
++    return false;
++  }
  
+   auto message_bytes = message_view.data();
+   out->owned_encoded_message = {message_bytes.begin(), message_bytes.end()};
 diff --git a/third_party/blink/public/common/messaging/cloneable_message.h b/third_party/blink/public/common/messaging/cloneable_message.h
-index 846be2c..4d68385 100644
+index 846be2c..3809571 100644
 --- a/third_party/blink/public/common/messaging/cloneable_message.h
 +++ b/third_party/blink/public/common/messaging/cloneable_message.h
-@@ -69,6 +69,10 @@ struct BLINK_COMMON_EXPORT CloneableMessage {
+@@ -19,6 +19,13 @@
+ 
+ namespace blink {
+ 
++// The REB task origin (reb_task_origin below; protocol/native-network-v3.md)
++// is at most this long. The Mojo traits and ShallowClone replace a longer
++// one, without reading it, with the single byte kRebTaskOriginOversize,
++// which never validates, so the receiving renderer records it as rejected.
++inline constexpr size_t kRebTaskOriginMaxBytes = 1544;
++inline constexpr uint8_t kRebTaskOriginOversize = 0;
++
+ // This struct represents messages as they are posted over a broadcast channel.
+ // This type can be serialized as a blink::mojom::CloneableMessage struct.
+ struct BLINK_COMMON_EXPORT CloneableMessage {
+@@ -69,6 +76,10 @@ struct BLINK_COMMON_EXPORT CloneableMessage {
    int64_t stack_trace_debugger_id_second = 0;
    bool stack_trace_should_pause = false;
  
@@ -93,14 +128,33 @@ index 1c23cd1..5f4b22e 100644
  
  }  // namespace blink
 diff --git a/third_party/blink/renderer/core/messaging/blink_cloneable_message_mojom_traits.cc b/third_party/blink/renderer/core/messaging/blink_cloneable_message_mojom_traits.cc
-index 0d9ebba..d5ff52e 100644
+index 0d9ebba..6e41ef0 100644
 --- a/third_party/blink/renderer/core/messaging/blink_cloneable_message_mojom_traits.cc
 +++ b/third_party/blink/renderer/core/messaging/blink_cloneable_message_mojom_traits.cc
-@@ -56,7 +56,7 @@ bool StructTraits<blink::mojom::blink::CloneableMessage::DataView,
+@@ -5,6 +5,8 @@
+ #include "third_party/blink/renderer/core/messaging/blink_cloneable_message_mojom_traits.h"
+ 
+ #include "mojo/public/cpp/base/big_buffer_mojom_traits.h"
++#include "mojo/public/cpp/bindings/array_data_view.h"
++#include "third_party/blink/public/common/messaging/cloneable_message.h"
+ #include "third_party/blink/public/mojom/messaging/cloneable_message.mojom-blink.h"
+ #include "third_party/blink/renderer/platform/blob/blob_data.h"
+ 
+@@ -56,7 +58,17 @@ bool StructTraits<blink::mojom::blink::CloneableMessage::DataView,
    if (!data.ReadFileSystemAccessTokens(&tokens)) {
      return false;
    }
 -  return true;
++  // A REB task origin longer than any valid one is not read; see
++  // third_party/blink/public/common/messaging/cloneable_message.h.
++  mojo::ArrayDataView<uint8_t> reb_task_origin;
++  data.GetRebTaskOriginDataView(&reb_task_origin);
++  if (!reb_task_origin.is_null() &&
++      reb_task_origin.size() > blink::kRebTaskOriginMaxBytes) {
++    out->reb_task_origin.clear();
++    out->reb_task_origin.push_back(blink::kRebTaskOriginOversize);
++    return true;
++  }
 +  return data.ReadRebTaskOrigin(&out->reb_task_origin);
  }
  

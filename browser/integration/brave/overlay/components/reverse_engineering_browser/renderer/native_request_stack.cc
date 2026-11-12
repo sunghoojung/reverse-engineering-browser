@@ -54,8 +54,11 @@ struct NativeRequestStackTables final {
     std::uint8_t state = 0;
     std::uint8_t flags = 0;
     std::uint8_t registration = 0;
-    // Earlier callers were not recorded: the chain is cut after this one.
-    bool cut_after = false;
+    // How the chain ends after this one: 0 (it goes on through parent),
+    // kNativeRequestStackTaskChainCut (earlier callers were not recorded) or
+    // kNativeRequestStackTaskChainTruncated (a sender's chain went on past
+    // the 32 segments its message carried).
+    std::uint8_t end_after = 0;
   };
   struct Attribution final {
     std::uint64_t generation = 0;
@@ -87,8 +90,7 @@ struct NativeRequestStackTables final {
   };
   NativeStackScope scope;
   std::uint32_t process_id = 0;
-  // Process-unique; a message origin names it so a receiver on this thread
-  // links the posting segment directly.
+  // Process-unique; the owner ring names it so a refusal reaches this table.
   std::uint64_t ordinal = 0;
   void* embedder_frames = nullptr;
   // Registry list, guarded by the registry lock.
@@ -151,10 +153,12 @@ static_assert((kNativeStackRefusalMailbox & (kNativeStackRefusalMailbox - 1)) ==
 static_assert((kNativeStackOwnerRing & (kNativeStackOwnerRing - 1)) == 0);
 
 // A segment handle with the top bit set names no ring entry. Bits 0-7 hold
-// the task kind; bit 62 set means the caller is unknown (the chain is cut),
-// clear means the task was scheduled with no script running.
+// the task kind. Bit 62 set means the caller is unknown (the chain is cut);
+// bit 61 set means a received message's origin was rejected; neither means
+// the task was scheduled with no script running. Each ends the chain.
 constexpr std::uint64_t kSyntheticSegment = 1ULL << 63U;
 constexpr std::uint64_t kUnknownCaller = 1ULL << 62U;
+constexpr std::uint64_t kRejectedOrigin = 1ULL << 61U;
 
 std::uint64_t NoScriptHandle(const NativeAsyncTaskKind kind) noexcept {
   return kSyntheticSegment | static_cast<std::uint8_t>(kind);
@@ -593,8 +597,9 @@ std::array<std::uint8_t, 48> ScopeTail(const NativeRequestStackTables* state) no
 }
 
 // Writes the chain from `next`, nearest first, after `count` segments already
-// in `out`. Stops at 32 (bit 4), a forgotten or unknown caller (bit 3), or a
-// segment scheduled with no script running, which ends the chain.
+// in `out`. Stops at 32 (bit 4), a forgotten or unknown caller (bit 3), a
+// carried chain's end (its own bit), or a segment scheduled with no script
+// running or received with a rejected origin, which ends the chain.
 void AppendChainFrom(const NativeRequestStackTables& state,
                      std::uint64_t next,
                      const std::uint64_t generation,
@@ -615,10 +620,12 @@ void AppendChainFrom(const NativeRequestStackTables& state,
         flags |= kNativeRequestStackTaskChainCut;
         return;
       }
-      NativeTaskSegment no_script;
-      no_script.kind = static_cast<std::uint8_t>(next & 0xffU);
-      no_script.state = static_cast<std::uint8_t>(NativeTaskSegmentState::kNoScript);
-      static_cast<void>(push(no_script));
+      NativeTaskSegment last;
+      last.kind = static_cast<std::uint8_t>(next & 0xffU);
+      last.state = static_cast<std::uint8_t>((next & kRejectedOrigin) != 0
+                                                 ? NativeTaskSegmentState::kOriginRejected
+                                                 : NativeTaskSegmentState::kNoScript);
+      static_cast<void>(push(last));
       return;
     }
     const NativeRequestStackTables::Segment* entry = FindSegment(state, next, generation);
@@ -636,8 +643,8 @@ void AppendChainFrom(const NativeRequestStackTables& state,
     if (!push(segment)) {
       return;
     }
-    if (entry->cut_after) {
-      flags |= kNativeRequestStackTaskChainCut;
+    if (entry->end_after != 0) {
+      flags |= entry->end_after;
       return;
     }
     next = entry->parent;
@@ -996,10 +1003,6 @@ std::size_t NativeRequestStackWalk::PostMessageOrigin(
   }
   const std::uint64_t generation =
       NativeProbeSink::Get().config_generation_.load(std::memory_order_acquire);
-  NativeTaskOriginHeader header;
-  header.process_id = state->process_id;
-  header.table = state->ordinal;
-  header.serial = (segment & kSyntheticSegment) != 0 ? 0 : segment;
   std::uint16_t count = 0;
   std::uint8_t flags = 0;
   AppendChainFrom(*state, segment, generation, out.data() + kNativeTaskOriginHeaderSize, count,
@@ -1007,8 +1010,12 @@ std::size_t NativeRequestStackWalk::PostMessageOrigin(
   if (count == 0) {
     return 0;
   }
+  // Only the segments and how the chain ends: no process, thread or table.
+  NativeTaskOriginHeader header;
   header.count = static_cast<std::uint8_t>(count);
-  header.flags = flags != 0 ? kNativeTaskOriginCut : 0;
+  header.flags = static_cast<std::uint8_t>(
+      ((flags & kNativeRequestStackTaskChainCut) != 0 ? kNativeTaskOriginCut : 0) |
+      ((flags & kNativeRequestStackTaskChainTruncated) != 0 ? kNativeTaskOriginTruncated : 0));
   std::memcpy(out.data(), &header, sizeof(header));
   return kNativeTaskOriginHeaderSize + kNativeTaskSegmentSize * count;
 }
@@ -1028,29 +1035,29 @@ std::uint64_t NativeRequestStackWalk::ReceiveMessageOrigin(
   if (!state) {
     return 0;
   }
-  NativeTaskOriginHeader header;
-  std::array<NativeTaskSegment, kNativeTaskSegmentLimit> carried{};
-  // No origin, or one that does not validate: the poster is unknown.
-  if (!DecodeNativeTaskOrigin(origin, header, carried) ||
-      carried[0].kind != static_cast<std::uint8_t>(kind)) {
+  // No origin: the sender carried nothing (inactive, a thread without
+  // tables, or a worklet), so its caller is unknown.
+  if (origin.empty()) {
     return kSyntheticSegment | kUnknownCaller | static_cast<std::uint8_t>(kind);
   }
-  if (header.process_id == state->process_id && header.table == state->ordinal) {
-    if (header.serial == 0) {
-      return NoScriptHandle(kind);
-    }
-    // Posted on this thread and still remembered: the same chain, no copy.
-    const auto* posted = FindSegment(*state, header.serial, generation);
-    if (posted && posted->kind == carried[0].kind && posted->digest == carried[0].digest) {
-      return header.serial;
-    }
+  NativeTaskOriginHeader header;
+  std::array<NativeTaskSegment, kNativeTaskSegmentLimit> carried{};
+  // Forged, damaged, oversize (cleared by the Mojo traits) or posted through
+  // another kind: nothing of it is kept.
+  if (!DecodeNativeTaskOrigin(origin, header, carried) ||
+      carried[0].kind != static_cast<std::uint8_t>(kind)) {
+    EmitGap("message_task_origin_rejected", RequestFrameId(), generation);
+    return kSyntheticSegment | kRejectedOrigin | static_cast<std::uint8_t>(kind);
   }
-  // Another thread or process posted it: store copies, farthest first, so
+  // Copies on every thread, the posting one included, farthest first, so
   // each points at the one before it in the chain. A no-script last segment
   // stays a synthetic handle.
   std::size_t count = header.count;
   std::uint64_t parent = 0;
-  bool cut = (header.flags & kNativeTaskOriginCut) != 0;
+  std::uint8_t end = (header.flags & kNativeTaskOriginCut) != 0 ? kNativeRequestStackTaskChainCut
+                     : (header.flags & kNativeTaskOriginTruncated) != 0
+                         ? kNativeRequestStackTaskChainTruncated
+                         : 0;
   if (carried[count - 1].state == static_cast<std::uint8_t>(NativeTaskSegmentState::kNoScript)) {
     parent = NoScriptHandle(static_cast<NativeAsyncTaskKind>(carried[count - 1].kind));
     --count;
@@ -1064,9 +1071,9 @@ std::uint64_t NativeRequestStackWalk::ReceiveMessageOrigin(
     segment.state = carried[i].state;
     segment.flags = carried[i].flags;
     segment.registration = carried[i].registration;
-    segment.cut_after = cut;
+    segment.end_after = end;
     parent = StoreSegment(*state, segment, generation);
-    cut = false;
+    end = 0;
   }
   return parent;
 }
@@ -1532,7 +1539,7 @@ void NativeRequestStackWalk::AsyncTaskFramesReady(std::uint32_t recorded,
     hop.flags = microtask.flags;
     hop.registration = microtask.registration;
     hop.parent = AttributedSegment(state, task_attribution_, generation_);
-    hop.cut_after = hop.parent == 0;
+    hop.end_after = hop.parent == 0 ? kNativeRequestStackTaskChainCut : 0;
     segment.parent = StoreSegment(state, hop, generation_);
   } else {
     segment.parent = g_current_segment;

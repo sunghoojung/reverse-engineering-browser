@@ -265,7 +265,8 @@ request: `ResourceFetcher::DidLoadResourceFromMemoryCache`, the reuse DevTools
 shows as "(memory cache)". It runs when a document first uses a resource
 another document loaded (the memory cache), a matching preload, or a `data:`
 image, style sheet, script or font that `ResourceFetcher` decoded itself
-(static data). Chromium patch `0040-record-memory-cache-reuse` records each
+(static data), and when DevTools emulates the load of a resource loaded before
+it opened (`EmulateLoadStartedForInspector`). Chromium patch `0040-record-memory-cache-reuse` records each
 call after its detached and observer check as one `memory_cache_reuse`
 (type 52) record, with a fresh renderer request ID, so it is a Traffic row of
 its own. In content sessions it has a `request_target` child, as above, with

@@ -369,16 +369,31 @@ void HeaderBlocks() {
   assert(Headers(over_budget).state ==
          static_cast<std::uint8_t>(HeaderState::kNotCapturedSessionBudget));
 
+  // The early-hints factory gate (patch 0058) opens only for a current,
+  // unexpired content session with the Network category: no header record
+  // exists without that category, and the session's expiry closes it.
+  base::test_now_ns = 199;
+  assert(reb::NativeNetworkHeadersObserved());
+  base::test_now_ns = 200;
+  assert(!reb::NativeNetworkHeadersObserved());
+  base::test_now_ns = 100;
+  sink.SetEmitter(Emit, 30, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kArtifact), 200,
+                  true);
+  assert(!reb::NativeNetworkHeadersObserved());
+  sink.SetEmitter(Emit, 30, mask, 200, true);
+  assert(reb::NativeNetworkHeadersObserved());
+
   // Ending the session removes the hook observer, and with it the factory gate.
   sink.SetEmitter(nullptr, 0, 0, 0, true);
   events.clear();
   reb::NotifyNativeNetworkHeaders(kRaw, "reb-0000000000000257", Raw({{"a", "b"}}));
   assert(events.empty() && !reb::NativeNetworkHeadersObserved());
-  std::cout << "PASS native header blocks: metadata-only none, provisional/network/response over "
-               "two redirect hops, out-of-order raw request, early hints, pseudo-headers, "
-               "200 KiB retained whole, network headers before rewrite, sharing, unattributed "
-               "count, DevTools-owned ID, block limit, unavailable/refused/URL, session budget, "
-               "factory observer gate only in content sessions\n";
+  std::cout
+      << "PASS native header blocks: metadata-only none, provisional/network/response over "
+         "two redirect hops, out-of-order raw request, early hints, pseudo-headers, "
+         "200 KiB retained whole, network headers before rewrite, sharing, unattributed "
+         "count, DevTools-owned ID, block limit, unavailable/refused/URL, session budget, "
+         "early-hints factory gate only in a current, unexpired content session with Network\n";
 }
 
 void RequestContent() {

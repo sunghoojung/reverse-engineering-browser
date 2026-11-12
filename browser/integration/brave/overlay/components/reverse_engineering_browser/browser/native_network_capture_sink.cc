@@ -456,7 +456,14 @@ void NativeNetworkCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
     finished_devtools_ids_ = {};
     finished_devtools_next_ = 0;
   }
-  SetNativeNetworkHeadersObserver(emitter && capture_content ? &ForwardNetworkHeaders : nullptr);
+  // Header records are Network records, so without that category nothing
+  // observes them; the expiry also closes the early-hints factory gate.
+  SetNativeNetworkHeadersObserver(
+      emitter && capture_content &&
+              (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) != 0
+          ? &ForwardNetworkHeaders
+          : nullptr,
+      expires_at_monotonic_ns);
   {
     base::AutoLock lock(navigation_lock_);
     navigation_initiators_ = {};

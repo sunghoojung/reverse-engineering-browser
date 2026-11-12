@@ -60,7 +60,7 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | `memory_cache_reuse` payload version 2 | flag bit 2 `source_named` | Request scope and tabs |
 | `response_body` payload version 2 | flag bit 7 `snapshots_withheld` | Response bodies |
 | Chromium patch 0062 | `name-memory-cache-reuse-sources` | Request scope and tabs |
-| Chromium patch 0058 | `observe-network-headers-without-devtools-observers` | Headers and cookies |
+| Chromium patch 0058 | `observe-early-hints-preload-headers` | Headers and cookies |
 | `script_cookie` version 3, flag bit 4 | a `document.cookie` read named per cookie | Headers and cookies |
 
 Traffic detail tabs, in order: General, Headers, Payload, Preview, Response,
@@ -535,13 +535,20 @@ neither Shields nor an extension's `webRequest` or `declarativeNetRequest` acts
 on them. While native capture runs for the owned profile it first attaches
 Brave's proxy with a request handler that answers every hook with `net::OK`, so
 no header, referrer, block or redirect decision changes. Capture itself still
-adds four things, none visible to the page or the server beyond timing:
+adds five things, none visible to the page, the server or DevTools beyond
+timing:
 
 - In content sessions the proxy gives a preload without one a `reb-` DevTools
   request ID (Brave patch 0018), so the network service also sends SSL info
   with the response and transfer-size updates. `NavigationEarlyHintsManager`'s
   `PreloadURLLoaderClient` reads only the response head's cache flags and
   records transfer sizes to UMA.
+- In a current content session with the Network category, Chromium patch 0058
+  gives the preload factory an agentless DevTools observer, so the network
+  service reports the preload's raw headers and cookie lists to the capture
+  hook and marks its response head `emitted_extra_info`. Only the throttles
+  and `PreloadURLLoaderClient` see that head, and no DevTools agent sees a
+  preload ([binding](#network-service-binding-at-the-pinned-chromium)).
 - In content sessions the response body is teed for artifact capture, as for
   any request; the manager still drains its own copy.
 - Each preload's messages take an extra hop through the proxy on the UI thread.
@@ -1458,39 +1465,68 @@ gets:
 | Dedicated worker subresources | `DedicatedWorkerHost` uses `CreateForFrame` of its ancestor frame | Yes | Unchanged |
 | Service worker subresources and imported scripts | `EmbeddedWorkerInstance::CreateFactoryBundle`: `MakeSelfOwned(devtools_worker_token)` | Yes | Unchanged |
 | Speculation-rules prefetch from a live document | `MaybeMakeSelfOwnedNetworkServiceDevToolsObserverForPrefetch`, per request | Yes | Unchanged |
-| Dedicated and shared worker main scripts | `WorkerScriptFetcher::CreateScriptLoader`, only when `RenderFrameDevToolsAgentHost::GetFor` finds a host for the ancestor frame, so only while DevTools is attached to it | No | Agentless observer |
-| Shared worker subresources | `SharedWorkerHost::CreateNetworkFactoryParamsForSubresources` passes `mojo::NullRemote()` | No | Agentless observer |
-| Service worker main script and update check | `ServiceWorkerContextWrapper::GetLoaderFactoryForBrowserInitiatedRequest`: `StoragePartitionImpl::CreateURLLoaderFactoryParams` sets none | No | Agentless observer, except through a header client (below) |
+| Dedicated and shared worker main scripts | `WorkerScriptFetcher::CreateScriptLoader`, only when `RenderFrameDevToolsAgentHost::GetFor` finds a host for the ancestor frame, so only while DevTools is attached to it | No | Not changed (below) |
+| Shared worker subresources | `SharedWorkerHost::CreateNetworkFactoryParamsForSubresources` passes `mojo::NullRemote()` | No | Not changed (below) |
+| Service worker main script and update check | `ServiceWorkerContextWrapper::GetLoaderFactoryForBrowserInitiatedRequest`: `StoragePartitionImpl::CreateURLLoaderFactoryParams` sets none | No | Not changed (below) |
 | Early-hints preloads | `URLLoaderFactoryParamsHelper::CreateForEarlyHintsPreload` passes `mojo::NullRemote()` | No | Agentless observer |
-| Browser-initiated prefetch, or one whose initiating document is gone | `MaybeMakeSelfOwnedNetworkServiceDevToolsObserverForPrefetch` returns `mojo::NullRemote()` | No | Agentless observer |
+| Browser-initiated prefetch, or one whose initiating document is gone | `MaybeMakeSelfOwnedNetworkServiceDevToolsObserverForPrefetch` returns `mojo::NullRemote()` | No | Not changed (below) |
 | Downloads | `CreatePendingSharedURLLoaderFactory` wraps the storage partition's browser-process factory, whose params set none | No | Not changed (below) |
 | CORS preflights | The network service's `PreflightController`, with `credentials_mode = kOmit`: it sends no cookie and stores none | Reported through `OnCorsPreflightRequest`, not hooked | No Traffic row |
 
-Chromium patch `0058-observe-network-headers-without-devtools-observers.patch`
-gives each "No" factory above, except downloads, an agentless observer:
-`NetworkServiceDevToolsObserver::MakeSelfOwned(std::string())`. Every method
-of that class resolves its DevTools agent from its ID or frame tree node and
-returns when there is none; the empty ID names no agent, so DevTools dispatch
-is unchanged and only the hook (patch 0025, before that lookup) sees the raw
-notifications. It is created only while `reb::NativeNetworkHeadersObserved()`
-says a content session registered the hook observer, and on the UI thread, so
-a factory built without such a session is built exactly as stock. Content
-capture is a launch option and the session starts in `PreProfileInit`, before
-any owned-profile factory exists; a factory created after a session ended
-keeps no observer.
+Capture never changes what a page or a real DevTools session observes, and an
+observer is observable: with any observer and a `devtools_request_id`,
+`URLLoader::DispatchOnRawRequest` sets `emitted_devtools_raw_request_`, the
+response head carries it as `emitted_extra_info`, Blink copies it
+(`WebURLResponse`) and `InspectorNetworkAgent` reports it as `hasExtraInfo` on
+`Network.responseReceived` and redirects. An agentless observer would make
+that `true` with no `*ExtraInfo` event ever following, and a CDP client that
+waits for them would stall. So a factory gets one only where no DevTools agent
+can see its response heads:
 
-Not built, with the reason:
+- **Early-hints preloads: built.** Content gives preloads no DevTools
+  instrumentation (`TODO(crbug.com/40188470)` in
+  `NavigationRequest::CreateNavigationEarlyHintsManagerParams`) and
+  `NavigationEarlyHintsManager::MaybePreloadHintedResource` sets no
+  `devtools_request_id`; only the Brave proxy's `reb-` ID names the request.
+  The head goes to the throttles and `PreloadURLLoaderClient`, whose
+  `OnReceiveResponse` reads `network_accessed` and `was_fetched_via_cache` and
+  whose `OnReceiveRedirect` ignores it; the `PreloadedResource` it reports keeps
+  no head. The page's later use of the cached resource is another request,
+  whose head the network service builds for that loader.
+- **Shared worker subresources: not built.** `WorkerFetchContext` gives a
+  worker request a DevTools ID whenever the worker's network agent is on, and
+  that agent reports `hasExtraInfo` from the head.
+- **Worker main scripts, service worker main scripts and update checks: not
+  built.** DevTools can attach to the worker target alone, without the frame
+  host that gives the main script its observer, and the head reaches the
+  worker's own reporting.
+- **Browser-initiated prefetches: not built.** A prefetch can be served to a
+  navigation, which forwards the head's `emitted_extra_info` to the frame's
+  DevTools.
+- **Downloads: not built.** They load through the storage partition's single
+  browser-process factory, which every browser-internal fetch of every
+  profile shares and which is created once.
+- **A service worker script fetched through a header client** (an extension's
+  `webRequest` with `extraHeaders`, or DevTools' Fetch interception) builds its
+  params inside `NavigationURLLoaderImpl::CreateURLLoaderFactoryWithHeaderClient`.
 
-- Downloads load through the storage partition's single browser-process
-  factory, which every browser-internal fetch of every profile shares and
-  which is created once. Giving it an observer would put one on all browser
-  traffic to reach requests that save a file rather than load a page. A
-  download keeps its provisional headers and says so.
-- A service worker script fetched while an extension's `webRequest` listener
-  with `extraHeaders`, or DevTools' Fetch interception, attached a header
-  client: `NavigationURLLoaderImpl::CreateURLLoaderFactoryWithHeaderClient`
-  builds those params itself, and the capture profile has no such extension.
-  Such a request reads as having no network block, with the reason below.
+A request of a kind not built keeps its provisional headers, reads
+`not_reported` and is counted as such.
+`tools/check-header-observer-patch.py` (`make lint`) refuses an agentless
+observer in any other function, or one without the gate.
+
+Chromium patch `0058-observe-early-hints-preload-headers.patch` gives the
+early-hints factory `NetworkServiceDevToolsObserver::MakeSelfOwned(std::string())`.
+Every method of that class resolves its DevTools agent from its ID or frame
+tree node and returns when there is none, and the empty ID names no agent, so
+only the hook (patch 0025, before that lookup) sees the raw notifications. It
+is created on the UI thread only while `reb::NativeNetworkHeadersObserved()`
+holds: a content session is current, its Network category is on and its
+expiry has not passed. Otherwise the factory is built exactly as stock. The
+factory belongs to the navigation's `NavigationEarlyHintsManager`, which lives
+until the navigation commits or ends, and its observer lives as long as the
+factory; a preload still running when the session ends keeps it until the
+preload completes, and the hook then forwards nothing.
 
 Every request with a provisional block and no `network` block says why on its
 Headers and Cookies tabs and is counted in the session summary (see
@@ -1826,8 +1862,8 @@ provenance. Values are inserted as text after a size and SHA-256 check.
 ### Bounds and hot path
 
 - Disabled or metadata-only: unchanged. The proxy adds no ID, the hook
-  costs one atomic load per DevTools raw notification, and patch 0058's
-  factories cost one atomic load each and are built as stock.
+  costs one atomic load per DevTools raw notification, and an early-hints
+  factory costs one atomic load and is built as stock.
 - 320 KiB per block: Chromium's 256 KiB response header bound
   (`HttpStreamParser::kMaxHeaderBufSize`, `kSpdyMaxHeaderListSize`) plus the
   byte `: ` normalization can add to a line of at least 4 bytes. Request blocks
@@ -1922,15 +1958,17 @@ aggregation, a full table and the configuration-end remainder, and per-name
 reads: the page's split, a name held twice, the empty jar, the 360-name bound,
 a table that fills during a read, unrecorded names in the remainder, and reads
 that allocate nothing. The capture check also asserts that
-`NativeNetworkHeadersObserved`, the gate of patch 0058, is set only while a
-content session registered the observer.
+`NativeNetworkHeadersObserved`, the gate of patch 0058, holds only for a
+current content session with the Network category before its expiry.
+`tools/check-header-observer-patch.py` refuses an agentless observer outside
+the early-hints factory or without that gate.
 `make native-tests` and `make network-request-wire-check` compare the C++
 verdicts with the Python validator and the shipped decoders. The backend's
 `request_headers`, `request_cookies` and `session_summary` tests and
 `tools/check-traffic-headers-ui.mjs`, `check-traffic-cookies-ui.mjs` and
 `check-native-only-ui.mjs` check each missing-block reason, the per-name read
-coverage, the refusal counts and the footer. Patch 0058 was replayed after
-patch 0036 on the pinned sources; it has not been compiled.
+coverage, the refusal counts and the footer. Patch 0058 was replayed on the
+pinned sources; it has not been compiled.
 
 ### Acceptance
 
@@ -1949,11 +1987,10 @@ Still required before declaring this browser-ready:
    script position.
 5. On the same fixture, read `document.cookie` from two script positions and
    confirm each cookie's provenance lists both reads with their counts.
-6. Fetch a cookie-carrying URL from a shared worker's subresource, a
-   dedicated and a shared worker's main script, a service worker's main script
-   and update check, and an early-hints preload, and confirm each has a
-   `network` block and both cookie lists, with DevTools closed and then open
-   (DevTools must show what it showed before patch 0058).
+6. Serve a 103 with a cookie-carrying `Link` preload and confirm the preload
+   has a `network` block and both cookie lists. With DevTools open on the
+   page, and on a shared worker that fetches a subresource, confirm
+   `hasExtraInfo` and the `*ExtraInfo` events match a build without patch 0058.
 
 ## Request initiator stacks
 

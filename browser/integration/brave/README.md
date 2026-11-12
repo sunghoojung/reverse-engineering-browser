@@ -260,14 +260,17 @@ sessions also record request and response header blocks per hop
 names each admitted request for the network service's raw header notifications
 and keeps the network's response headers before Brave's rewrite, and Chromium
 patch `0025` forwards those notifications, with their sent and received cookie
-lists, to the overlay. Chromium patch `0058` gives the factories Chromium
-builds without a DevTools observer (shared-worker subresources, worker and
-service-worker main scripts, early-hints and browser prefetches) an agentless
-one in those sessions only, so their sent headers and cookies are reported
-too. Not built, on purpose: downloads (they share the browser-process factory
-with all browser traffic), service-worker scripts fetched through an
-extension's or DevTools' header client, and value digests for
-`document.cookie` reads (names only); the
+lists, to the overlay. Chromium patch `0058` gives the early-hints preload
+factory, which Chromium builds without a DevTools observer, an agentless one
+while a content session with the Network category is current, so preloads
+report their sent headers and cookies too; no DevTools agent ever sees a
+preload. Not built, on purpose, because an observer there would change what
+DevTools reports (`hasExtraInfo` with no ExtraInfo event): shared-worker
+subresources, worker and service-worker main scripts and update checks, and
+browser-initiated prefetches. Also not built: downloads (they share the
+browser-process factory with all browser traffic), service-worker scripts
+fetched through a header client, and value digests for `document.cookie`
+reads (names only); the
 [contract](../../../protocol/native-network-v3.md#network-service-binding-at-the-pinned-chromium)
 gives each reason, and such a request says why on its Headers tab. Chromium patch `0028` records
 `document.cookie` and Cookie Store API calls in the renderer for the same

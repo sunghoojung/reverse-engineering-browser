@@ -43,13 +43,15 @@ using NativeNetworkHeadersObserver =
              const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers,
              NativeNetworkCookies cookies);
 
+// `expires_at_monotonic_ns` is the session's expiry on the TimeTicks clock.
 COMPONENT_EXPORT(REB_NETWORK_HEADERS_HOOK)
-void SetNativeNetworkHeadersObserver(NativeNetworkHeadersObserver observer) noexcept;
+void SetNativeNetworkHeadersObserver(NativeNetworkHeadersObserver observer,
+                                     std::uint64_t expires_at_monotonic_ns = 0) noexcept;
 
-// Whether a content-capture session registered an observer; one atomic load.
-// Chromium patch 0058 gives a loader factory that Chromium creates without a
-// DevTools observer an agentless one only then, so a factory created while no
-// session captures headers is built exactly as without the patch.
+// Whether a current, unexpired content-capture session with the Network
+// category registered an observer. Chromium patch 0058 gives the early-hints
+// preload factory an agentless DevTools observer only then, so a factory
+// created outside such a session is built exactly as without the patch.
 COMPONENT_EXPORT(REB_NETWORK_HEADERS_HOOK)
 bool NativeNetworkHeadersObserved() noexcept;
 

@@ -1015,9 +1015,10 @@ impl App {
                 let store = self.options.store.clone();
                 let artifacts = self.options.artifacts.clone();
                 let instance = self.instance_id.clone();
+                let mut index = self.requests.clone().lock_owned().await;
                 let mut summary = self
                     .blocking(move || {
-                        session_summary::build(
+                        let mut summary = session_summary::build(
                             &store,
                             &artifacts,
                             &session_summary::CaptureState {
@@ -1028,7 +1029,13 @@ impl App {
                                 artifact_receiver_configured: state.3,
                                 artifact_receiver_connected: state.4,
                             },
-                        )
+                        )?;
+                        // Per request, so it comes from the request index's rows.
+                        session_summary::add_response_bodies(
+                            &mut summary,
+                            index.response_bodies()?,
+                        );
+                        Ok(summary)
                     })
                     .await?;
                 summary["capture_state"] = json!(state.5);

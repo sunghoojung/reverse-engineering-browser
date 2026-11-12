@@ -1239,15 +1239,29 @@ blocks ([native network v3](../../protocol/native-network-v3.md)). Response
 digest, then its bytes in the shared code view with pretty print (the Oxc
 layout for JavaScript and JSON, else the in-page one with the reason), raw
 ranges of laid-out tokens, wrap, find, copy and hex, read 2 MiB at a time and
-rechecked by SHA-256. Preview reads every remaining range itself. Text that is
+rechecked by SHA-256. Hex shows 256 KiB at a time with **Previous** and
+**Next**, paged to the end of the retained body; a window past the loaded
+bytes reads the next range itself, and Copy copies the window shown. A body
+still arriving says how many bytes had arrived, when, and whether it was sealed
+at the 16 MiB limit. Preview reads every remaining range itself. Text that is
 not valid UTF-8 shows with replacement characters and a notice, and a cut,
 partial, aborted or cancelled body may end inside a character without reading
 as binary. Preview shows the
 same JSON tree as Payload, opening 100 children or ranges at a time, a raster image whose signature matches its bytes, or text;
 HTML and SVG stay source and are never rendered. Script and Wasm responses show
-their Sources artifact in any session. A request with no body record says why:
-metadata-only session, redirect, or never seen by the browser proxy (service
-worker, memory cache).
+their Sources artifact in any session. A request with no body record names its
+exact case, which the request index decides alike (`responseBodyCase`): reused
+from the memory cache, served by a service worker, answered in the renderer,
+redirected, failed or cancelled before any response, a metadata-only session,
+still pending, and the rest
+([bodies the proxy never sees](../../protocol/native-network-v3.md#bodies-the-proxy-never-sees)).
+A memory-cache reuse that names the request whose response it reused shows
+that request's retained bytes, labelled as the reused request's, with
+**Open the request it reused**; one whose source was not recorded or not
+retained says so. A service worker's answer lists the worker's own requests
+for the same URL made while it was open, from the request index, each with
+**Open the worker's request** and its body case; the records do not say whether
+the worker answered with those bytes, so they are never shown as the page's.
 `tools/check-traffic-response-ui.mjs` covers both tabs in a DOM model.
 **Headers** shows General (URL, method, status, remote address, referrer
 policy), then response and request headers per redirect hop, newest first.

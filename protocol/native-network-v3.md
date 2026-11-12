@@ -57,6 +57,8 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | Probe queue version 4 | the memory-cache counters | Request scope and tabs |
 | Chromium patch 0038 | `record-synchronous-requests-on-calling-thread` | Request scope and tabs |
 | Chromium patch 0039, 0040 | `finish-service-worker-ends`, `record-memory-cache-reuse` | Request scope and tabs |
+| `memory_cache_reuse` payload version 2 | flag bit 2 `source_named` | Request scope and tabs |
+| Chromium patch 0062 | `name-memory-cache-reuse-sources` | Request scope and tabs |
 
 Traffic detail tabs, in order: General, Headers, Payload, Preview, Response,
 Cookies, Initiator, Timing, Signals, Evidence.
@@ -332,7 +334,27 @@ handles each call after its detached and observer check:
 
 The record names no method: Blink adds only GET resources to the memory cache
 (`ShouldResourceBeAddedToMemoryCache`), and static data is GET too, so
-consumers show GET. A reuse a worker owns is linked to its tabs by the drain
+consumers show GET.
+
+The reuse also names the request that loaded the resource. At the pin
+`URLLoader::Context` keeps the `int` its `ResourceRequestSender::SendAsync`
+returns, which is the `GenerateRequestId` value that request's
+`request_initiated` record carries, and `WebURLResponse::Create` sets it as
+the response's `ResourceResponse::RequestId()`. The memory cache is per
+renderer process and Blink reuses only a resource whose status is `kCached`,
+whose response is that load's, so Chromium patch
+`0062-name-memory-cache-reuse-sources` passes
+`resource.GetResponse().RequestId()` to the sink. A revalidation that Blink
+answers `304` keeps the first response's request ID, because
+`Resource::RevalidationSucceeded` only updates its headers, so the named
+request is the one whose bytes Blink holds. Static data had no request, and
+`GenerateRequestId` counts from 0, which is also what a response no request
+set carries, so a reuse names a source only for an ID above 0 that is not
+static data. The source names a row as a `request_tab_link` names a renderer
+record: `initiator_process_id` (the record's own process) and
+`initiator_request_id`. A reuse's own row stays keyed by its own request ID;
+consumers never join it to its source by those fields, and they leave them
+out of its legacy browser key. A reuse a worker owns is linked to its tabs by the drain
 with a `request_tab_link`, as a worker request start is.
 
 ##### `memory_cache_reuse` (type 52)
@@ -351,10 +373,10 @@ record. Payload size 128, little endian:
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `1` |
+| 0 | 2 | payload version, `2` (`1` in older captures) |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | resource type: Blink `ResourceType` at the pin, 1 to 15 |
-| 5 | 1 | flags: bit 0 `static_data`, bit 1 `host_truncated` |
+| 5 | 1 | flags: bit 0 `static_data`, bit 1 `host_truncated`, bit 2 `source_named` (version 2) |
 | 6 | 1 | host length, 0 to 120 |
 | 7 | 1 | reserved, zero |
 | 8 | 120 | host as KURL gives it, zero after its length |
@@ -372,7 +394,11 @@ record. Payload size 128, little endian:
 
 Bit 0 marks static data (a `data:` URL or MHTML archive resource Blink decoded
 in place). Bit 1 marks a host longer than 120 bytes, and then the length is
-120. Host bytes are printable ASCII. Other bits and reserved bytes are zero.
+120. Bit 2, in version 2 only and never with bit 0, says the envelope's
+`initiator_process_id` equals its `process_id` and its nonzero
+`initiator_request_id` is the source request above; without bit 2 both are
+zero. Host bytes are printable ASCII. Other bits and reserved bytes are zero.
+Version 1 records, which name no source, stay valid.
 
 A browser-internal URL (class 16 to 20) is counted per class as a request
 would be, unless the configuration opts in, and returns its budget charge.
@@ -1113,10 +1139,77 @@ launcher passes for content sessions.
 
 ### Bodies the proxy never sees
 
-Service-worker and memory-cache answers and requests that failed before a
-response have no browser `response_started`, so they have no `response_body`
-record. Traffic says the proxy recorded no response for them; it never shows
-an empty body.
+Some requests have no browser `response_started`, so they have no
+`response_body` record. Each request instead has one body case, which Traffic's
+`responseBodyCase` and the request index decide alike
+([request index v1](request-index-v1.md)): the state of the newest
+`response_body` record of its final `response_started`, or `malformed`, else in
+this order:
+
+| Case | The request |
+| --- | --- |
+| `source_artifact` | A script or Wasm response: kinds 1 and 2 are its body |
+| `no_record` | Has a response but no body record: a metadata session, a body still arriving, or a record outside what was read |
+| `memory_cache` | Is a `memory_cache_reuse`: Blink answered from a resource it held and made no request |
+| `service_worker` | Ended with a renderer completion flagged `from_service_worker`: the worker answered in the renderer |
+| `redirected` | Was redirected and has no later response |
+| `failed_before_response`, `cancelled_before_response` | Failed before any response, with `ERR_ABORTED` for the second |
+| `interrupted` | The proxy's observation ended first (`proxy_destroyed`, `redirect_handoff`) |
+| `end_lost` | A `service_worker_end_lost` gap names it |
+| `pending` | Has no response and no end yet |
+| `renderer_answered` | Was finished by the renderer without a URL loader (`data:`, `blob:` and other local schemes) |
+| `no_response` | Ended with no response record otherwise |
+
+The Response and Preview tabs say which case applies, and never show an
+absent body as empty. `get_requests` gives every row its case as
+`response_body`, and `get_session_summary` counts the cases in
+`response_bodies`, with a `response_bodies_not_observed` check when service
+workers, the memory cache or the renderer answered some.
+
+Where those bytes are retained under another request, Traffic shows or links
+them instead of nothing:
+
+- A version 2 `memory_cache_reuse` names the request whose response Blink
+  reused ([memory-cache reuse](#memory-cache-reuse)). Its row's
+  `memory_cache_source` is that row and its `response_body`, and Response and
+  Preview show that row's retained body, the bytes Blink held, labelled as the
+  reused request's, with a control that opens it. A source this session did
+  not record, or whose body was not retained, is named with the reason.
+- A service worker answer has no digest of its own to match. Traffic lists the
+  requests the service worker itself made (`request_started` flag 4) for the
+  same host, path and query that started while the page's request was open,
+  read through `get_requests` with that time range, and links each with its
+  body case. The records do not say whether the worker answered with those
+  bytes, so they are linked, never shown as the page's body. A worker that
+  built its response or read Cache Storage made no such request.
+- A `shared` record already names the earlier artifact with the same digest.
+
+#### Service-worker bodies are not retained for the page's request
+
+At the pin no response a service worker sends a page passes through
+`BraveProxyingURLLoaderFactory`, which wraps only the network factories
+`ContentBrowserClient::WillCreateURLLoaderFactory` hands it:
+
+- A controlled page's subresource request goes to
+  `content::ServiceWorkerSubresourceLoader` in the page's renderer. It
+  dispatches the fetch event over `blink.mojom.ControllerServiceWorker` and
+  sends the worker's response to the page's `URLLoaderClient` from the stream
+  or blob the worker's renderer gave it (`StartResponse`); the browser sees
+  neither.
+- A controlled navigation is answered by
+  `content::ServiceWorkerMainResourceLoader`, which the navigation's
+  interceptor chain runs instead of the network factory, so the proxied
+  network loader is never created for it.
+- Only a fallback or race network request reaches the network factory, and
+  its records are the network attempt's
+  ([service worker ends](#service-worker-ends-without-a-response)).
+
+Retaining those bytes would mean a second tee in one of those loaders, one in
+the renderer, which may not open harness sockets or send artifacts, and one in
+a browser loader the proxy does not own. Both are second capture paths, which
+#428 rules out. When the worker took the bytes from its own `fetch`, that
+request passes through the proxy and its body is retained under the worker's
+row, which Traffic links as above.
 
 ### Agent access
 
@@ -1133,10 +1226,14 @@ binary is refused and oversized JSON returns a structural summary.
   `response_started` in the Preview and Response tabs (order above). Response
   shows the state, codings, lengths and digest, then the bytes as
   syntax-colored text with pretty print, wrap, find, copy and hex (always hex
-  for binary). Preview shows a bounded
+  for binary), hex in 256 KiB windows paged to the end of the retained body,
+  reading the next 2 MiB range when a window passes the bytes loaded. A
+  partial record says how many bytes had arrived and when, and whether the
+  body was sealed at the 16 MiB limit. Preview shows a bounded
   JSON tree, a raster image whose signature matches its bytes, plain text, or
   markup as source. HTML and SVG are never rendered. Reads are ranged 2 MiB at a
-  time and rechecked by size and SHA-256.
+  time and rechecked by size and SHA-256. Both tabs name the body case and its
+  links ([bodies the proxy never sees](#bodies-the-proxy-never-sees)).
 
 ### Validation
 

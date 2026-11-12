@@ -1432,6 +1432,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const rows = state.trafficIndex?.answer?.()?.rows ?? [];
         const lost = new Set(rows.filter(row => row.endLost).map(row => row.id));
         if (lost.size) for (const request of state.requests) if (lost.has(request.id)) markTrafficEndLost(request);
+        const indexed = new Map(rows.filter(row => row.memoryCacheSourceRow).map(row => [row.id, row]));
+        if (indexed.size) for (const request of state.requests) if (indexed.has(request.id)) copyTrafficBodyFacts(request, indexed.get(request.id));
+      }
+
+      // The index alone knows the row a reuse names and that row's body
+      // (protocol/request-index-v1.md); copied like End lost, in place.
+      function copyTrafficBodyFacts(request, indexed) {
+        if (!indexed) return;
+        if (indexed.memoryCacheSourceRow) request.memoryCacheSourceRow = indexed.memoryCacheSourceRow;
+        if (indexed.responseBodyIndex) request.responseBodyIndex = indexed.responseBodyIndex;
       }
 
       function renderShellStatus() {
@@ -3534,6 +3544,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const retained = state.requests.find(request => request.id === id);
         if (retained && (!indexed || trafficRecordCount(retained) >= indexed.indexRow.records)) {
           if (indexed?.endLost) markTrafficEndLost(retained);
+          copyTrafficBodyFacts(retained, indexed);
           selectRequest(id);
           focusRequestRow(id);
         } else if (indexed) loadTrafficRequest(indexed, true);
@@ -3558,6 +3569,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           Object.assign(request, {tabIds: indexed.tabIds, tabLink: indexed.tabLink, tabLinkLabel: indexed.tabLinkLabel,
             extensionId: indexed.extensionId, tabReason: indexed.tabReason, recordsPartial: partial});
           if (indexed.endLost) markTrafficEndLost(request);
+          copyTrafficBodyFacts(request, indexed);
           retainTrafficRequest(request);
           rebuildTrafficRequests();
           if (select) {
@@ -4019,7 +4031,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // Response and Preview tabs, protocol/native-network-v3.md.
       const trafficResponse = createTrafficResponse({getArtifacts: () => state.artifacts, getEvents: () => state.events,
         contentSession: () => state.requestContentCaptureEnabled, readable: () => location.protocol !== 'file:',
-        lookup: (record, request) => trafficArtifacts.lookup(record, trafficStoreOffset(request)), onChange: () => renderInspector()});
+        lookup: (record, request) => trafficArtifacts.lookup(record, trafficStoreOffset(request)), onChange: () => renderInspector(),
+        getRequests: () => state.requests,
+        // Rows open while the answered request was, of which the response view
+        // keeps the service worker's own requests for the same URL.
+        related: request => {
+          if (!state.trafficIndex?.search || !request.host) return {status: 'ready', rows: []};
+          return state.trafficIndex.search({from_ns: String(request.firstTimestamp ?? 0n), to_ns: String(request.lastTimestamp ?? 0n),
+            sort: 'start', limit: '500'}, AbortSignal.timeout(10000));
+        },
+        open: id => selectTrafficRow(id)});
       // get_request_stack positions are one-based; Sources reveals zero-based ones.
       function openResolvedFrame(resolution) {
         const line = Number.isSafeInteger(resolution.artifact_line) && resolution.artifact_line > 0 ? resolution.artifact_line - 1 : null;

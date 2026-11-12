@@ -593,9 +593,18 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `browser_internal_excluded` | Capture counted `chrome:`, `devtools:` and other browser-internal requests, requests WebUI renderers sent (`webui_request`), or WebUI renderers, instead of recording them; `count` is the requests. Not a gap. |
 | `no_tab_traffic_excluded` | Capture counted extension-worker requests, DevTools loads, requests of service workers no page used in this browser, and browser-initiated prefetches with no page, instead of recording them; `count` is the requests. Not a gap. `REB_CAPTURE_EXTENSION_TRAFFIC=1` records the extension requests instead. |
 | `memory_cache_reuse_not_recorded` | Renderers counted memory-cache reuses past their 4,096 records per capture configuration instead of recording them; `count` is the reuses. Not a gap. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are the separate `non_ordinary_page_reuse` exclusion. |
+| `response_bodies_not_observed` | `count` responses never reached the browser proxy, so their bodies are not retained under their own request: the message counts those a service worker served, those reused from the memory cache and those answered in the renderer. Traffic links a reuse to the request whose response it reused, and a service worker answer to the worker's own fetch of the same URL, where those were retained. |
 | `network_tab_unresolved` | Severity `error`: `count` request rows have no tab, and the message counts them by reason. A capture bug; `request_tabs.unresolved_requests` names up to 16 by `process_id` and `request_id`, each with its `reason`. |
 | `network_tab_no_document` | Severity `warning`: `count` request rows come from a context with no parent document (a shared storage worklet), which the capture does not link; their reason is `no_document`. |
 | `bounded_scope` | Only the newest 64 MiB of events were summarized. |
+
+`response_bodies` counts every request's response body case from the request
+index's rows ([request index v1](request-index-v1.md)): `cases` lists each case
+with its `count` and `meaning`, such as `captured`, `partial`, `not_modified`,
+`redirected`, `aborted`, `cancelled`, `empty`, `service_worker`, `memory_cache`,
+`failed_before_response` and `cancelled_before_response`
+([native network v3](native-network-v3.md#bodies-the-proxy-never-sees)).
+`complete` is false while the index is still reading the store.
 
 `exclusions` lists those counts by class and unit; see
 [native network v3](native-network-v3.md#browser-internal-exclusion).

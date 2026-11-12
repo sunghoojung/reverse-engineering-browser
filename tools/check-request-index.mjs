@@ -10,9 +10,10 @@ assert(path && fs.existsSync(path), 'set REB_REQUEST_INDEX_GOLDEN to the golden 
 const golden = JSON.parse(fs.readFileSync(path, 'utf8'));
 const load = (files, names) => new Function(`${files.map(file => fs.readFileSync(new URL(file, root), 'utf8')).join('\n')}\nreturn {${names}};`)();
 const {requestsFromEvents} = load(['apps/research-ui/evidence_models.js'], 'requestsFromEvents');
-const view = load(['apps/research-ui/request_stack.js', 'apps/research-ui/traffic_view.js', 'apps/research-ui/traffic_filter.js'], `trafficSortedRequests, trafficSearchRequests,
+const view = load(['apps/research-ui/request_stack.js', 'apps/research-ui/traffic_view.js', 'apps/research-ui/traffic_filter.js',
+  'apps/research-ui/traffic_response.js'], `trafficSortedRequests, trafficSearchRequests,
   trafficRequestDomain, trafficIndexRequest, trafficParseFilter, trafficApplyFilter, trafficBrowserInternal, trafficSizeCell, trafficWaterfall,
-  trafficInitiatorFrame, trafficStatusCell`);
+  trafficInitiatorFrame, trafficStatusCell, responseBodyCase`);
 
 const model = requestsFromEvents(golden.events, 'live');
 // Tabs and the unresolved reason come from tab sets and links, as Traffic attaches them.
@@ -25,8 +26,16 @@ golden.rows.forEach((row, index) => {
   for (const field of ['id', 'path', 'method', 'status', 'time', 'type', 'targetKind', 'hostOnly', 'failed', 'interrupted',
     'tabId', 'operation', 'targetMalformed', 'transferSize', 'resourceSize', 'fromCache', 'fromServiceWorker', 'memoryCache',
     'staticData', 'raceNetwork', 'endLost', 'mimeType', 'protocol', 'responseTimestamp', 'errorCode', 'loaderObserved', 'initiator', 'mainFrame',
-    'tabReason']) {
+    'tabReason', 'memoryCacheSource']) {
     assert.deepEqual(shown[field], expected[field], `${expected.id} ${field}`);
+  }
+  // Why the body is or is not retained, decided from the row's own records.
+  assert.equal(row.response_body.case, view.responseBodyCase(expected), `${expected.id} body case`);
+  assert.equal(view.responseBodyCase(shown), row.response_body.case, `${expected.id} index row carries its case`);
+  if (expected.responseBody && !expected.responseBody.malformed) {
+    assert.equal(row.response_body.artifact_id, expected.responseBody.artifactId === '0' ? null : expected.responseBody.artifactId,
+      `${expected.id} body artifact`);
+    assert.equal(row.response_body.record_sequence, expected.responseBody.sequenceNumber, `${expected.id} newest body record`);
   }
   for (const field of ['target', 'host', 'urlTruncated', 'targetLength']) {
     assert.deepEqual(shown[field], expected[field] ?? (field === 'urlTruncated' ? false : null), `${expected.id} ${field}`);
@@ -52,6 +61,18 @@ const archive = shownRows.find(row => row.memoryCache && row.status === 'finishe
 const archiveCell = archive && view.trafficStatusCell(archive);
 assert(archiveCell && archiveCell.text === 'Finished' && archiveCell.title.startsWith('No HTTP status: archive resource') &&
   archive.time !== 'pending', 'an archive reuse reads Finished with no HTTP status');
+// Every body case the fixture holds, and a reuse naming the request whose
+// response it reused, which the index answers with that request's body.
+const cases = new Set(golden.rows.map(row => row.response_body.case));
+for (const kind of ['captured', 'not_modified', 'malformed', 'redirected', 'cancelled_before_response', 'service_worker',
+  'memory_cache', 'failed_before_response', 'renderer_answered', 'pending', 'end_lost', 'no_record']) {
+  assert(cases.has(kind), `the fixture has a ${kind} row`);
+}
+const named = golden.rows.find(row => row.memory_cache_source);
+assert(named && named.memory_cache_source.found && named.memory_cache_source.response_body.case === 'captured' &&
+  named.memory_cache_source.response_body.artifact_id === '78' && named.memory_cache_source.response_body.partial_index === 0,
+'a reuse names its source row and that row\'s ended body, not its snapshot');
+assert.equal(golden.rows.find(row => row.id === named.memory_cache_source.id)?.response_body.case, 'captured');
 for (const [sort, orders] of Object.entries(golden.orders)) {
   for (const [direction, sign] of [['asc', 1], ['desc', -1]]) {
     assert.deepEqual(orders[direction], view.trafficSortedRequests(model, sort, sign).map(request => request.id), `${sort} ${direction}`);

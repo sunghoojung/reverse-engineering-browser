@@ -203,6 +203,24 @@ for (const tab of ['response', 'preview']) {
   assert.match(panel.textContent, /recorded no response for this request/);
   assert.doesNotMatch(panel.textContent, /cdp-body-needle|cdp-header-needle/);
 }
+// A row with native records names its exact body case in both tabs: a
+// service worker's answer and a memory-cache reuse never read as a missing
+// or empty body (protocol/native-network-v3.md "Bodies the proxy never sees").
+for (const [fields, pattern] of [[`fromServiceWorker: true`, /Served by a service worker/],
+  [`memoryCache: true`, /Reused from the memory cache/]]) {
+  for (const tab of ['response', 'preview']) {
+    runInContext(`state.requests = [{id: 'native', path: 'cdn.invalid', method: 'GET', status: 200, type: 'img', origin: 'live',
+      hostOnly: true, tabId: '0', events: [{}], rank: 5, operation: 'request_completed', time: 1, ${fields}}];
+      state.selectedRequestId = 'native'; state.inspectorTab = ${JSON.stringify(tab)}; renderInspector();`, context);
+    const panel = document.getElementById('response-inspector');
+    assert.match(panel.textContent, pattern, `${tab}: ${pattern}`);
+    assert.doesNotMatch(panel.textContent, /Empty body|recorded no response/, `${tab} names the case`);
+  }
+}
+// Hex is paged by range, never cut at a fixed read.
+const responseSource = sources.find(([file]) => file === 'traffic_response.js')[1];
+assert(!/subarray\(0, TRAFFIC_RESPONSE_HEX_BYTES\)/.test(responseSource), 'Response hex is paged, not a fixed first read');
+assert(/function hexPager/.test(responseSource), 'Response hex has a range pager');
 // The Headers tab reads native header records only, never a CDP exchange.
 runInContext(`state.inspectorTab = 'headers'; renderInspector();`, context);
 const headersPanel = document.getElementById('headers-inspector');

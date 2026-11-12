@@ -38,7 +38,7 @@ diff --git a/test/inspector/debugger/reb-ignore-debugger-statements.js b/test/in
 new file mode 100644
 --- /dev/null
 +++ b/test/inspector/debugger/reb-ignore-debugger-statements.js
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,48 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.

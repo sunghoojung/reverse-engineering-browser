@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -141,6 +142,29 @@ def binary_dependencies(deps):
     raise ValueError("Missing DEPS dictionary")
 
 
+# Chromium's //build adds these for a newer Clang than the pinned release.
+# Each only disables a warning Clang 23 does not have, so dropping it changes
+# no diagnostic, while passing it fails -Werror as an unknown warning option.
+DROPPED_COMPILER_FLAGS = ("-Wno-stringop-overread",)
+COMPILER_DRIVERS = ("clang", "clang++")
+
+
+def compiler_wrapper(real):
+    """A driver that drops DROPPED_COMPILER_FLAGS; it names the real binary's
+    digest so a content-checked compiler cache still sees compiler changes."""
+    digest = hashlib.sha256(real.resolve().read_bytes()).hexdigest()
+    patterns = "|".join(DROPPED_COMPILER_FLAGS)
+    return (
+        "#!/bin/sh\n"
+        f"# Standalone V8 profile driver for {real} (sha256 {digest}).\n"
+        "for argument do\n"
+        "  shift\n"
+        f"  case \"$argument\" in {patterns}) ;; *) set -- \"$@\" \"$argument\" ;; esac\n"
+        "done\n"
+        f"exec {shlex.quote(str(real))} \"$@\"\n"
+    )
+
+
 def create_clang_toolchain_view(destination, system_base, resource_dir, builtins):
     """Expose the real distro archive at Chromium's expected x64 runtime path."""
     if not builtins.is_file() or not (resource_dir / "include").is_dir():
@@ -148,7 +172,15 @@ def create_clang_toolchain_view(destination, system_base, resource_dir, builtins
     if builtins.read_bytes()[:8] != b"!<arch>\n":
         raise ValueError("Compiler-reported builtins must be a real archive")
     destination.mkdir()
-    (destination / "bin").symlink_to(system_base / "bin", target_is_directory=True)
+    bin_view = destination / "bin"
+    bin_view.mkdir()
+    for tool in (system_base / "bin").iterdir():
+        if tool.name not in COMPILER_DRIVERS:
+            (bin_view / tool.name).symlink_to(tool)
+    for name in COMPILER_DRIVERS:
+        driver = bin_view / name
+        driver.write_text(compiler_wrapper(system_base / "bin" / name))
+        driver.chmod(0o755)
     resource_view = destination / "lib/clang/23"
     runtime_view = resource_view / "lib/x86_64-unknown-linux-gnu"
     runtime_view.mkdir(parents=True)
@@ -218,10 +250,22 @@ def self_test():
         (resource / "include").mkdir(parents=True)
         builtins = root / "libclang_rt.builtins-x86_64.a"
         builtins.write_bytes(b"!<arch>\n")
+        for name in (*COMPILER_DRIVERS, "ld.lld"):
+            tool = system / "bin" / name
+            tool.write_text("#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\"\n")
+            tool.chmod(0o755)
         view = create_clang_toolchain_view(root / "view", system, resource, builtins)
         linked = view / "lib/clang/23/lib/x86_64-unknown-linux-gnu/libclang_rt.builtins.a"
         assert linked.resolve() == builtins and linked.read_bytes() == builtins.read_bytes()
-        assert (view / "bin").resolve() == system / "bin"
+        assert (view / "bin/ld.lld").resolve() == system / "bin/ld.lld"
+        for name in COMPILER_DRIVERS:
+            seen = subprocess.check_output(
+                [str(view / "bin" / name), "-c", "a b.cc", *DROPPED_COMPILER_FLAGS,
+                 "-Wno-unused-parameter"], text=True).splitlines()
+            # The real driver runs under its own name with every other argument intact.
+            assert seen == [str(system / "bin" / name), "-c", "a b.cc", "-Wno-unused-parameter"], seen
+            assert hashlib.sha256((system / "bin" / name).read_bytes()).hexdigest() in (
+                view / "bin" / name).read_text()
         builtins.write_text("not an archive")
         try:
             create_clang_toolchain_view(root / "invalid", system, resource, builtins)
@@ -479,7 +523,7 @@ def main():
         receipt["system_clang_runtime"] = {
             "system_base": str(system_clang_base), "resource_dir": str(resource_dir),
             "builtins": str(builtins), "builtins_sha256": hashlib.sha256(builtins.read_bytes()).hexdigest(),
-            "view": str(clang_base),
+            "view": str(clang_base), "dropped_compiler_flags": list(DROPPED_COMPILER_FLAGS),
         }
         v8_pin = (ROOT / "browser/config/v8.rev").read_text().strip()
         assert re.fullmatch(r"[0-9a-f]{40}", v8_pin)

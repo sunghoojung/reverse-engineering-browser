@@ -187,10 +187,18 @@ mod tests {
         let busy = state(&path, &json!({}), None, &every, &pause).unwrap();
         assert_eq!(busy["watch"]["state"], "busy");
         assert_eq!(busy["threads"]["console"], "idle");
-        let error = action(&json!({"action":"resume","target_id":"22","lease_id":"1"}), &pause)
-            .unwrap_err();
+        let error = action(
+            &json!({"action":"resume","target_id":"22","lease_id":"1"}),
+            &pause,
+        )
+        .unwrap_err();
         assert_eq!(error.status, 503, "no peer is configured");
-        assert!(action(&json!({"action":"resume"}), &pause).unwrap_err().status == 400);
+        assert!(
+            action(&json!({"action":"resume"}), &pause)
+                .unwrap_err()
+                .status
+                == 400
+        );
         assert!(
             action(
                 &json!({"action":"set_breakpoint","target_id":"22",

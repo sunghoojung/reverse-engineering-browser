@@ -2068,6 +2068,10 @@
             {
               "path": "apps/origin-trace-backend/src/request_stack.rs",
               "symbol": "document"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/request_stack.rs",
+              "symbol": "observation_document"
             }
           ]
         },
@@ -23723,7 +23727,7 @@
               "observed": {
                 "type": "array",
                 "maxItems": 64,
-                "description": "Native frames of the newest 2,048 observation records, newest first: the exact identity a thread scope filters by.",
+                "description": "Native frames of the observation records among the newest 2,048 records that are observations or gaps of any kind, within the newest 64 MiB of the store, newest first: the exact identity a thread scope filters by.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,

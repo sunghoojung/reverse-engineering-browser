@@ -33,10 +33,12 @@ The application does not launch, attach to or emulate a Chrome DevTools
 Protocol debugger. Historical `cdp-attached` provenance labels and recorded
 event schemas remain readable for old captures; they do not enable an
 attachment or any live control. Words of the removed debugger (breakpoint,
-call stack, step over and the like) appear only in the debugger sidebar's
-statement of the pausing availability `get_native_debugger` reports, which is
-text and never a control; `make native-only-check` and the rendered suite
-check both.
+call stack, step over and the like) appear only inside the debugger sidebar:
+in its statement of the pausing availability `get_native_debugger` reports,
+which is text and never a control, and in sections registered as presenting
+that debugger (`native: 'pausing'`), whose every control stays disabled while
+the backend reports it unsupported. `make native-only-check` and the rendered
+suite check both.
 
 The Findings **Native observations** tab displays native Wasm module offsets,
 function indexes and unsigned selectors/default arms. These are physical Wasm
@@ -236,46 +238,70 @@ so opening one closes the other; below a 1,112 px window it overlays the editor
 as Details does. It is phase 1 of [native debugger v1](../../docs/product/native-debugger-v1.md):
 native observation records that never pause the page, read from
 `get_native_debugger` ([native debugger observation v1](../../protocol/native-debugger-observation-v1.md)).
-The header says "Observes, never pauses" and the status line says when the
-state was read. While it is open and Sources is showing, it reads every 2
-seconds, or four times as long as the last read took, up to 30 seconds. Closed
-or behind another workspace, it runs no timer and sends nothing. A failed or
-malformed read keeps the last state, marks each section "last read" and dims
-it, and says why. A window without a backend says it cannot read.
+The header says "Observes, never pauses" and the status line says what the
+sidebar reads and when it last read; only a change of that state is
+announced, not the time of each read. In a live window, while it is open and
+Sources is showing, it reads every 2 seconds, or four times as long as the
+last read took, up to 30 seconds. The stored-evidence window (`reb://`)
+answers the same reads from its fixed store, so it reads once when opened and
+again only on **Read again**. A window without a backend (`file:`) sends
+nothing and says it cannot read. Closed or behind another workspace, the
+sidebar runs no timer and sends nothing. One read is in flight at a time: a
+newer read, closing, leaving Sources or a cleared or replaced store aborts it.
+A failed or malformed read keeps the last state, marks each section "last
+read" and dims it, and says why.
 
 Each section is a collapsible pane:
 
 - **Threads**, the Threads view: Console documents (top, child and
   out-of-process frames, as the Console listing derives them), observed frames
-  (the session, renderer and frame of the newest 2,048 observation records,
-  with the origin of a retained document of that exact frame when there is one)
-  and workers that started requests, each with its kind, origin, frame, process
-  and state. Arrow keys, Home, End and the Page keys move through the list, and
-  Enter, Space or a click selects or clears a thread. An observed frame scopes
+  (the session, renderer and frame of the observation records among the
+  newest 2,048 records that are observations or gaps of any kind, within the
+  newest 64 MiB of the store, with the origin of a retained document of that exact frame when there is one)
+  and workers that started requests (from the newest 2,048 request records).
+  Each row gives the origin a line of its own; the selected thread's kind,
+  origin, frame, process and state are listed in full below the list. Arrow
+  keys, Home, End and the Page keys move through the list, and Enter, Space, a
+  click or a double-click selects or clears a thread once. An observed frame scopes
   Observations and the Sources tree to that exact session and frame, and the
   tree says so. A Console document scopes only Watch rules, because it carries
   no native frame ID; a worker scopes nothing, because rules match only a
   document's main thread and compiled worker scripts carry frame 0.
 - **Watch rules**: what the renderer confirmed armed, rule by rule. When the
   Console is connected to a live capture document, selected and confirmed in
-  the Console as before, a form arms request rules (an optional method, then
-  URL text), event types, timers, CSP violations and exceptions there through
-  that connection's `watch` command, or clears them with `unwatch`. Arming
-  replaces the set and keeps the DOM rules the Console armed on the same
-  document. A refused set leaves nothing armed, and nothing is retried. Without
-  a live connection the section says how to get one and shows no form.
+  the Console as before, one form, drawn for that document and naming it on
+  its button, arms request rules (an optional method, then URL text), event
+  types, timers, CSP violations and exceptions there through that
+  connection's `watch` command, or clears them with `unwatch`. When the
+  Console holds another document by the time the form is submitted, nothing
+  is sent, the section says so, and the form is drawn again for the new
+  document. Arming replaces the set and keeps the DOM rules the Console armed
+  on the same document. A refused set leaves nothing armed, and nothing is
+  retried. Without a live connection the section says how to get one and
+  shows no form.
 - **Observations**: the newest records, 128 at a time and up to 4,096 with
-  **Show older records**, filtered by kind. Each row names the kind, what
-  happened, its monotonic time, category, renderer process, frame, sequence and
-  request. Selecting a row lists every identifier and resolves its own frame
-  (listener, timer callback or throw site) and its stack with
+  **Show older records**, filtered by kind. A note says how much of the store
+  the rows were read from: the whole store, or its newest bytes and why the
+  read stopped. An empty list says that no record exists only when the whole
+  store was read. Each row names the kind, what happened, its monotonic time,
+  category, renderer process, frame, sequence and request. Selecting a row
+  brings its details into view, lists every identifier and resolves its own
+  frame (listener, timer callback or throw site) and its stack with
   `get_request_stack`. Enter or **Open …** opens that position in Sources; a
-  watched request opens its Traffic row on the Initiator tab when that exact
-  row is loaded. Malformed records, a renderer's `debugger_observation_budget`
-  gap and store sequence gaps are stated above the list.
+  watched request opens its Traffic row on the Initiator tab through Traffic's
+  own row selection, after locating it in the request index when it is
+  outside the block Traffic holds. Once older pages are loaded, each read adds
+  the records written since, reading at most two more pages to reach them,
+  and keeps the scroll position and selection. When more was written, or the
+  list holds 4,096 records, the list stays as it is, names the byte span it
+  does not hold, and **Show newest** returns to the newest page. Malformed
+  records, a renderer's `debugger_observation_budget` gap and store sequence
+  gaps are stated above the list, which is as tall as its rows up to a cap.
 - **Pausing**: one statement of the availability `get_native_debugger` reports.
   Today it is unsupported, so the sidebar offers no control to stop, step or
-  inspect a paused frame.
+  inspect a paused frame. When sections registered with `native: 'pausing'`
+  exist, the statement names them: available, their controls are there;
+  unsupported, those controls stay disabled.
 
 Threads and Observations mount only the rows in view, and captured names such
 as event types and hosts are inserted as text.
@@ -299,17 +325,28 @@ const remove = globalThis.RebDebuggerSidebar.addSection({
 
 `view` holds `status` (`loading`, `ready`, `disconnected`, `malformed` or
 `unavailable`), `document` (the last valid `get_native_debugger` answer, or
-null), `error`, `updatedAt`, the selected `thread`, `selectThread(thread)` and
-`refresh()`. A section that throws shows the error in its own pane only.
-`addSection` throws a `TypeError` for a malformed section and returns a
-function that removes exactly that registration. Only a `native: 'pausing'`
-section (marked `data-debugger-native="pausing"`) and the Pausing statement may
-use the paused-state vocabulary; while the backend reports the debugger
-unsupported, any step, resume, pause or breakpoint button there must be
-disabled. The built-in ids are `threads`, `watch-rules`, `observations` and
-`pausing`; registering `pausing` again replaces the phase 1 statement. `make native-only-check`
-drives the production sidebar in a DOM model and `test31DebuggerSidebar` in
-the packaged app.
+null), `error`, `updatedAt`, the selected `thread`, `selectThread(thread)`,
+`refresh()`, `repaint()` and `nativeSections()`. `refresh()` reads again; called
+while sections render it does nothing, because a render follows a read and a
+section that refreshed from `render` would otherwise read back to back.
+`repaint()` renders again from the last read without a read. A section whose
+`summary` throws keeps its body, and one whose `render` throws shows the error
+in its own pane only. `addSection` throws a `TypeError` for a malformed section
+and returns a function that removes exactly that registration.
+
+Only a `native: 'pausing'` section (marked `data-debugger-native="pausing"`)
+and the Pausing statement (`data-debugger-native="availability"`) may use the
+paused-state vocabulary, and only inside `#debugger-sidebar`; the guards treat
+a marker anywhere else, or with another value, as a failure. While the backend
+reports the debugger unsupported, every control in such a section must be
+disabled. Such a section either replaces the Pausing statement, by
+registering the id `pausing`, or follows it with its own id and an order above
+40; `nativeSections()` lists the others, and the statement names them. The
+built-in ids are `threads`, `watch-rules`, `observations` and `pausing`.
+`make native-only-check` drives the production sidebar in DOM models
+(`tools/check-native-only-ui.mjs`, and `tools/check-debugger-sidebar.mjs` with
+real timers and a stub backend) and `test31DebuggerSidebar` drives it in the
+packaged app.
 
 ## Local passive security report
 

@@ -41,8 +41,10 @@ operation: `type` (one of the six below), a thread scope of `session_id`,
 `observations_query.next_before`) and `limit` (1 to 256). The scope matches the
 record envelope exactly. Console documents carry no native frame ID, so the
 scope names a `threads.observed` frame: the session, renderer and frame of the
-newest 2,048 observation records, at most 64. `observation_budget_gaps` lists
-the newest `debugger_observation_budget` gaps (above) in that scan, at most 16.
+observation records among the newest 2,048 records that are observations or
+gaps of any kind, within the newest 64 MiB of the store, at most 64.
+`observation_budget_gaps` lists the newest `debugger_observation_budget` gaps
+(above) in that scan, at most 16.
 
 `get_request_stack` with `process_id` and `observation_sequence` reads one
 record of types 40 to 45 and resolves its stack like a request's. It adds

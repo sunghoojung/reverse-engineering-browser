@@ -28,7 +28,8 @@ value is read, and records carry identities, kinds and positions only.
 
 **Debugger** in the Sources toolbar opens the sidebar
 ([Origin Trace guide](../../apps/research-ui/README.md#debugger-sidebar)). It
-reads `get_native_debugger` only while open and visible and never pauses.
+reads `get_native_debugger` only while open and visible, polling in a live
+window and reading once in the stored-evidence window, and never pauses.
 
 - **Threads** is the Threads view. It lists every thread with its kind, origin,
   frame, process and state. An observed frame (the session, renderer and frame
@@ -37,14 +38,17 @@ reads `get_native_debugger` only while open and visible and never pauses.
   Watch rules.
 - **Watch rules** shows what the renderer confirmed armed. Arming and clearing
   go only through the Console's live connection to the document the researcher
-  selected and confirmed there, with its `watch` and `unwatch` commands;
-  `native_debugger_action` has no watch action.
+  selected and confirmed there, with its `watch` and `unwatch` commands, from
+  one form drawn for that document; a form drawn for another document sends
+  nothing. `native_debugger_action` has no watch action.
 - **Observations** lists the newest records per kind, with their identities,
-  and opens a record's own frame (`get_request_stack` with
-  `observation_sequence`) in Sources, or a watched request in Traffic.
+  says how much of the store they were read from, and opens a record's own
+  frame (`get_request_stack` with `observation_sequence`) in Sources, or a
+  watched request in Traffic through Traffic's own row selection.
 - **Pausing** states the availability `get_native_debugger` reports and offers
   no control. Phase 3 adds its paused-state sections through the sidebar's
-  section registry (`RebDebuggerSidebar.addSection`).
+  section registry (`RebDebuggerSidebar.addSection` with `native: 'pausing'`);
+  they replace the statement (id `pausing`) or follow it, and it names them.
 
 ## Phase 2: proposed policy (for maintainer approval)
 

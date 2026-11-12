@@ -225,7 +225,11 @@ neither kind; Traffic shows them with their request.
   session configuration is refunded, because the receiver stores one blob per
   SHA-256. It defaults to 256 MiB and is set per session with
   `--reb-request-content-budget-bytes` (1 MiB to 4 GiB), which the launcher
-  takes from `REB_REQUEST_CONTENT_BUDGET_MIB`. There is no body count; the
+  takes from `REB_REQUEST_CONTENT_BUDGET_MIB`, set by the app start panel's
+  **Request content budget** or the start option `request_content_budget_mib`.
+  The session summary's budget checks carry the budget in force and the unique
+  request content retained, and `get_session_context` reports the limit as
+  `capture_options.content_limits`. There is no body count; the
   launcher raises a content session's receiver to 65,536 artifacts and
   256 MiB plus the budget. Each refusal is a named state, never silence.
 - The request is never delayed, consumed or altered. Content sessions read

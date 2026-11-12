@@ -2167,12 +2167,18 @@ async fn session_summary_counts_every_capture_refusal_by_reason() {
         .unwrap();
     assert_eq!(response["reason"], "not_captured_session_budget");
     assert_eq!(response["count"], "2");
+    // The remedy is the start panel control for the next session, never an
+    // environment variable; this backend is not live, so the budget is unknown.
+    let message = response["message"].as_str().unwrap();
     assert!(
-        response["message"]
-            .as_str()
-            .unwrap()
-            .contains("REB_RESPONSE_BODY_BUDGET_MIB")
+        message.contains(
+            "Raise Response body budget in the start panel (New Live Session…) for the next session"
+        ),
+        "{message}"
     );
+    assert!(!message.contains("REB_"), "{message}");
+    assert!(response["budget_mib"].is_null());
+    assert_eq!(response["retained_bytes"], "0");
     assert_eq!(
         summary["checks"]
             .as_array()

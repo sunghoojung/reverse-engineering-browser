@@ -36,6 +36,69 @@ pub struct CaptureState<'a> {
     pub capture_stopped: bool,
     pub artifact_receiver_configured: bool,
     pub artifact_receiver_connected: bool,
+    /// `session_context::content_limits`: the budgets this session runs with,
+    /// or null when unknown or without request content.
+    pub content_limits: Value,
+}
+
+/// A content session's two byte budgets: which refusals and which retained
+/// artifact kinds each one counts (native-network-v2.md, native-network-v3.md).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Budget {
+    RequestContent,
+    ResponseBody,
+}
+impl Budget {
+    fn of_refusal(category: &str, reason: &str) -> Option<Self> {
+        // Header blocks and cookie lists have their own fixed 64 MiB budget,
+        // which no start panel control sets, so they are not named here.
+        match (category, reason) {
+            ("response_body", "not_captured_session_budget") => Some(Self::ResponseBody),
+            ("request_body", "not_captured_session_budget")
+            | ("request_target", "not_retained_session_budget") => Some(Self::RequestContent),
+            _ => None,
+        }
+    }
+    fn of_kind(kind: &str) -> Option<Self> {
+        match kind {
+            "request_body" | "request_target" => Some(Self::RequestContent),
+            "response_body" => Some(Self::ResponseBody),
+            _ => None,
+        }
+    }
+    /// The start option, as content_limits and start_live_session name it.
+    fn option(self) -> &'static str {
+        match self {
+            Self::RequestContent => "request_content_budget_mib",
+            Self::ResponseBody => "response_body_budget_mib",
+        }
+    }
+    /// The start panel control that sets it.
+    fn control(self) -> &'static str {
+        match self {
+            Self::RequestContent => "Request content budget",
+            Self::ResponseBody => "Response body budget",
+        }
+    }
+    fn contents(self) -> &'static str {
+        match self {
+            Self::RequestContent => "request bodies and full targets",
+            Self::ResponseBody => "response bodies",
+        }
+    }
+}
+
+/// Unique bytes a budget's artifacts hold in the scanned manifest. The browser
+/// charges unique bytes, so identical content counts once; a digest is kept
+/// as its first 64 bits, which cannot collide in a manifest this size.
+#[derive(Default)]
+struct Retained {
+    digests: HashSet<u64>,
+    bytes: u64,
+}
+
+fn mib(bytes: u64) -> String {
+    format!("{:.1} MiB", bytes as f64 / 1_048_576.0)
 }
 
 #[derive(Default)]
@@ -442,15 +505,45 @@ fn response_refusal(state: u8) -> Option<&'static str> {
     })
 }
 
-fn content_meaning(category: &str, reason: &str, count: u64) -> String {
-    let what = match category {
+/// A budget refusal names the budget in force, what this session retained
+/// against it, and the remedy: the start panel control, or the start option,
+/// for the next session.
+fn budget_meaning(
+    budget: Budget,
+    what: &str,
+    count: u64,
+    budget_mib: &Value,
+    retained: u64,
+    complete: bool,
+) -> String {
+    let size = budget_mib
+        .as_u64()
+        .map(|value| format!("{value} MiB "))
+        .unwrap_or_default();
+    format!(
+        "{count} {what} arrived after this session's {size}{} was used; {}{} of unique {} are retained. Raise {} in the start panel (New Live Session…) for the next session; an agent's start_live_session sets {}.",
+        budget.control().to_ascii_lowercase(),
+        if complete { "" } else { "at least " },
+        mib(retained),
+        budget.contents(),
+        budget.control(),
+        budget.option(),
+    )
+}
+
+fn content_noun(category: &str) -> &'static str {
+    match category {
         "request_body" => "request bodies",
         "response_body" => "response bodies",
         "request_headers" => "request header blocks",
         "response_headers" => "response header blocks",
         "cookie_list" => "cookie lists",
         _ => "full request targets",
-    };
+    }
+}
+
+fn content_meaning(category: &str, reason: &str, count: u64) -> String {
+    let what = content_noun(category);
     let headers = matches!(
         category,
         "request_headers" | "response_headers" | "cookie_list"
@@ -470,10 +563,7 @@ fn content_meaning(category: &str, reason: &str, count: u64) -> String {
         }
         "captured_truncated" => "were longer than 16 MiB, so only their first 16 MiB is retained",
         "not_captured_type" => {
-            "were images, audio, video or fonts that page elements load, which are kept only with REB_CAPTURE_RESPONSE_MEDIA=1"
-        }
-        "not_captured_session_budget" if category == "response_body" => {
-            "arrived after the session's response body byte budget was used. Start a new session, or raise REB_RESPONSE_BODY_BUDGET_MIB"
+            "were images, audio, video or fonts that page elements load, which are kept only when Capture media and fonts is on in the start panel (New Live Session…) for the next session, or an agent's start_live_session sets response_media"
         }
         "not_captured_body_kind" => {
             "had a part the browser does not read, so they are described but not read"
@@ -486,9 +576,6 @@ fn content_meaning(category: &str, reason: &str, count: u64) -> String {
         }
         "not_captured_url" | "not_retained_url" => {
             "had no HTTP(S) or WebSocket origin, or exceeded Chromium's URL limit"
-        }
-        "not_captured_session_budget" | "not_retained_session_budget" => {
-            "arrived after the session's request-content byte budget was used. Start a new session, or raise REB_REQUEST_CONTENT_BUDGET_MIB"
         }
         "not_captured_artifact_unavailable" | "not_retained_artifact_unavailable" => {
             "had no artifact channel: the Artifact category was off or the receiver was disconnected"
@@ -503,6 +590,7 @@ struct ArtifactCounts {
     total: u64,
     by_kind: BTreeMap<String, u64>,
     items: Vec<Value>,
+    retained: BTreeMap<Budget, Retained>,
 }
 impl ArtifactCounts {
     fn record(&mut self, artifact: &Value) {
@@ -511,6 +599,19 @@ impl ArtifactCounts {
             .by_kind
             .entry(artifact["kind"].as_str().unwrap_or("").to_owned())
             .or_default() += 1;
+        if let (Some(budget), Some(digest), Some(size)) = (
+            Budget::of_kind(artifact["kind"].as_str().unwrap_or("")),
+            artifact["sha256"]
+                .as_str()
+                .and_then(|text| text.get(..16))
+                .and_then(|prefix| u64::from_str_radix(prefix, 16).ok()),
+            artifact["byte_size"].as_u64(),
+        ) {
+            let retained = self.retained.entry(budget).or_default();
+            if retained.digests.insert(digest) {
+                retained.bytes = retained.bytes.saturating_add(size);
+            }
+        }
         // The manifest is read newest first.
         if self.items.len() < ARTIFACTS {
             let mut item = json!({});
@@ -717,14 +818,38 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         checks.push(item);
     }
     for ((category, reason), count) in &refusals.content {
-        let mut item = check(
-            "request_content_not_retained",
-            "warning",
-            content_meaning(category, reason, *count),
-        );
+        let budget = Budget::of_refusal(category, reason);
+        let message = match budget {
+            Some(budget) => budget_meaning(
+                budget,
+                content_noun(category),
+                *count,
+                &state.content_limits[budget.option()],
+                stored
+                    .retained
+                    .get(&budget)
+                    .map_or(0, |retained| retained.bytes),
+                !artifact_page.exhausted,
+            ),
+            None => content_meaning(category, reason, *count),
+        };
+        let mut item = check("request_content_not_retained", "warning", message);
         item["category"] = json!(category);
         item["reason"] = json!(reason);
         item["count"] = json!(count.to_string());
+        // The budget in force (null when this backend does not know it) and
+        // the unique bytes retained against it in the scanned manifest.
+        if let Some(budget) = budget {
+            item["budget_mib"] = state.content_limits[budget.option()].clone();
+            item["retained_bytes"] = json!(
+                stored
+                    .retained
+                    .get(&budget)
+                    .map_or(0, |retained| retained.bytes)
+                    .to_string()
+            );
+            item["retained_complete"] = json!(!artifact_page.exhausted);
+        }
         checks.push(item);
     }
     let blocks: u64 = header_coverage.unattributed_blocks.values().sum();
@@ -1199,6 +1324,7 @@ mod tests {
             capture_stopped: false,
             artifact_receiver_configured: true,
             artifact_receiver_connected: true,
+            content_limits: Value::Null,
         };
         let summary = build(&store, &artifacts, &state).unwrap();
         let events = &summary["events"];
@@ -1324,6 +1450,7 @@ mod tests {
                 capture_stopped: false,
                 artifact_receiver_configured: false,
                 artifact_receiver_connected: false,
+                content_limits: Value::Null,
             };
             build(&store, &artifacts, &state).unwrap()["checks"]
                 .as_array()
@@ -1359,6 +1486,7 @@ mod tests {
                 capture_stopped: false,
                 artifact_receiver_configured: false,
                 artifact_receiver_connected: false,
+                content_limits: Value::Null,
             };
             build(&store, &artifacts, &state).unwrap()["checks"]
                 .as_array()
@@ -1468,6 +1596,7 @@ mod tests {
             capture_stopped: false,
             artifact_receiver_configured: false,
             artifact_receiver_connected: false,
+            content_limits: Value::Null,
         };
         let summary = build(&store, &artifacts, &state).unwrap();
         let checks = summary["checks"].as_array().unwrap();
@@ -1539,6 +1668,153 @@ mod tests {
     }
 
     #[test]
+    fn budget_refusals_name_the_budget_what_it_holds_and_the_control() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("events.jsonl");
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let child = |sequence: u64, kind: &str, set: &dyn Fn(&mut Vec<u8>)| {
+            let mut payload = vec![0u8; 128];
+            set(&mut payload);
+            let mut event = event(sequence, "network", kind, 5, "");
+            event["payload"] = json!(hex::encode(&payload));
+            event["payload_size"] = json!(128);
+            event.to_string()
+        };
+        let lines = [
+            child(1, "response_body", &|p| {
+                p[0] = 1;
+                p[4] = 12;
+            }),
+            child(2, "response_body", &|p| {
+                p[0] = 1;
+                p[4] = 12;
+            }),
+            child(3, "response_body", &|p| {
+                p[0] = 1;
+                p[4] = 9;
+            }),
+            child(4, "request_body", &|p| p[5] = 10),
+            child(5, "request_target", &|p| {
+                p[0] = 2;
+                p[9] = 4;
+            }),
+            // A header block past its own fixed budget, which no start panel
+            // control sets.
+            header(6, 1, 0, false, 1, 7, 0, 0).to_string(),
+        ];
+        std::fs::write(&store, lines.join("\n") + "\n").unwrap();
+        // Two distinct response bodies and a repeat of one, one request body
+        // and one full target: the repeat is stored once and counted once.
+        let row = |id: u64, kind: &str, digest: char, size: u64| {
+            let hash = digest.to_string().repeat(64);
+            json!({"protocol_version":1,"artifact_id":id.to_string(),"session_id":"9","navigation_id":"0",
+                "frame_id":"5","parent_artifact_id":"0","creator_event_id":"1","execution_context_id":"0",
+                "capture_origin":if kind == "response_body" {"network_response"} else {"network_request"},
+                "kind":kind,"url":"https://owned.example/x","mime_type":"application/json",
+                "byte_size":size,"sha256":hash,"sensitive":true,"content_path":format!("blobs/{hash}.bin")})
+            .to_string()
+        };
+        let manifest = [
+            row(1, "response_body", 'a', 3 * 1_048_576),
+            row(2, "response_body", 'b', 1_048_576),
+            row(3, "response_body", 'a', 3 * 1_048_576),
+            row(4, "request_body", 'c', 524_288),
+            row(5, "request_target", 'd', 524_288),
+        ];
+        std::fs::write(artifacts.join("manifest.jsonl"), manifest.join("\n") + "\n").unwrap();
+        let summarize = |content_limits: Value| {
+            let state = CaptureState {
+                instance_id: "1:2",
+                capture_mode: "live",
+                broker_connected: true,
+                capture_stopped: false,
+                artifact_receiver_configured: true,
+                artifact_receiver_connected: true,
+                content_limits,
+            };
+            build(&store, &artifacts, &state).unwrap()
+        };
+        let summary = summarize(json!({"version":1,"request_content_budget_mib":4,
+            "response_body_budget_mib":4,"response_media":false}));
+        let find = |summary: &Value, category: &str, reason: &str| {
+            summary["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|check| check["category"] == category && check["reason"] == reason)
+                .cloned()
+                .unwrap()
+        };
+        let response = find(&summary, "response_body", "not_captured_session_budget");
+        assert_eq!(response["count"], "2");
+        assert_eq!(response["budget_mib"], 4);
+        assert_eq!(response["retained_bytes"], (4 * 1_048_576).to_string());
+        assert_eq!(response["retained_complete"], true);
+        assert_eq!(
+            response["message"],
+            "2 response bodies arrived after this session's 4 MiB response body budget was used; 4.0 MiB of unique response bodies are retained. Raise Response body budget in the start panel (New Live Session…) for the next session; an agent's start_live_session sets response_body_budget_mib."
+        );
+        // Request bodies and full targets share the request content budget.
+        for (category, reason, noun) in [
+            (
+                "request_body",
+                "not_captured_session_budget",
+                "request bodies",
+            ),
+            (
+                "request_target",
+                "not_retained_session_budget",
+                "full request targets",
+            ),
+        ] {
+            let check = find(&summary, category, reason);
+            assert_eq!(check["budget_mib"], 4, "{category}");
+            assert_eq!(check["retained_bytes"], "1048576", "{category}");
+            let message = check["message"].as_str().unwrap();
+            assert!(message.starts_with(&format!("1 {noun} arrived after this session's 4 MiB request content budget was used; 1.0 MiB of unique request bodies and full targets are retained.")), "{message}");
+            assert!(message.contains("Raise Request content budget in the start panel (New Live Session…) for the next session"), "{message}");
+            assert!(message.contains("request_content_budget_mib"), "{message}");
+            assert!(!message.contains("REB_"), "{message}");
+        }
+        let headers = find(&summary, "request_headers", "not_captured_session_budget");
+        assert!(headers.get("budget_mib").is_none(), "{headers}");
+        assert!(headers.get("retained_bytes").is_none(), "{headers}");
+        assert!(
+            headers["message"]
+                .as_str()
+                .unwrap()
+                .contains("64 MiB of header blocks"),
+            "{headers}"
+        );
+        let media = find(&summary, "response_body", "not_captured_type");
+        assert!(
+            media.get("budget_mib").is_none(),
+            "media is not a budget refusal"
+        );
+        let media = media["message"].as_str().unwrap();
+        assert!(media.contains("Capture media and fonts is on in the start panel (New Live Session…) for the next session"), "{media}");
+        assert!(
+            media.contains("response_media") && !media.contains("REB_"),
+            "{media}"
+        );
+        // A backend that does not know the budget says so rather than guessing.
+        let unknown = find(
+            &summarize(Value::Null),
+            "response_body",
+            "not_captured_session_budget",
+        );
+        assert!(unknown["budget_mib"].is_null());
+        assert_eq!(unknown["retained_bytes"], (4 * 1_048_576).to_string());
+        assert!(
+            unknown["message"]
+                .as_str()
+                .unwrap()
+                .contains("after this session's response body budget was used; 4.0 MiB")
+        );
+    }
+
+    #[test]
     fn scope_gaps_are_named_incompleteness_not_drops() {
         for reason in [
             "native_wasm_dispatch_worker_unsupported",
@@ -1577,6 +1853,7 @@ mod tests {
             capture_stopped: false,
             artifact_receiver_configured: false,
             artifact_receiver_connected: false,
+            content_limits: Value::Null,
         };
         let summary = build(&store, &artifacts, &state).unwrap();
         let gap = summary["checks"]
@@ -1658,6 +1935,7 @@ mod tests {
             capture_stopped: false,
             artifact_receiver_configured: false,
             artifact_receiver_connected: false,
+            content_limits: Value::Null,
         };
         let summary = build(&store, &artifacts, &state).unwrap();
         assert_eq!(
@@ -1750,6 +2028,7 @@ mod tests {
             capture_stopped: false,
             artifact_receiver_configured: false,
             artifact_receiver_connected: false,
+            content_limits: Value::Null,
         };
         let summary = build(
             &root.path().join("events.jsonl"),

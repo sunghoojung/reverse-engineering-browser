@@ -35810,6 +35810,22 @@
                 "lists": {
                   "$ref": "#/components/schemas/Uint64String",
                   "description": "network_headers_unattributed: cookie lists that arrived for a request no longer tracked."
+                },
+                "budget_mib": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "description": "On a request_content_not_retained check for a session budget: the budget in force in MiB, as get_session_context capture_options.content_limits reports it, or null when this backend does not know it."
+                },
+                "retained_bytes": {
+                  "$ref": "#/components/schemas/Uint64String",
+                  "description": "On a session budget check: the unique bytes of that budget's artifacts (request_body and request_target, or response_body) in the scanned manifest, identical content counted once as the browser charges it."
+                },
+                "retained_complete": {
+                  "type": "boolean",
+                  "description": "False when the manifest scan stopped at its bound, so retained_bytes is a lower bound."
                 }
               }
             }

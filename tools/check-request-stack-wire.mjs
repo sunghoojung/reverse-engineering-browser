@@ -97,13 +97,56 @@ assert.deepEqual(lines, [
   'setTimeout',
   'schedule @ page:30:5',
   'Microtask',
-  'the call that registered it is not recorded',
+  'the call that registered it is not recorded; REB_NATIVE_PROMISE_STACKS=1 records it',
   'Earlier async callers were not recorded'
 ]);
 assert.equal(tree.querySelectorAll('img').length, 0, 'captured names are text, never markup');
 assert.match(tree.textContent, /Async callers not shown: MessagePort and worker messages\./);
 tree.querySelector('.request-stack-open').dispatchEvent(new window.Event('click'));
 assert.equal(opened.resolution.artifact_line, 3);
+
+// A version 3 stack walked in a dedicated worker: a .then registration, a
+// MessagePort post from another renderer, then a task with no script.
+const workerEvent = structuredClone(stackEvent);
+workerEvent.payload = `03${workerEvent.payload.slice(2, 10)}00${workerEvent.payload.slice(12, 160)}02${'00'.repeat(7)}7700000000000000${'00'.repeat(32)}`;
+const workerRecord = decodeRequestStackRecord(workerEvent);
+assert.equal(workerRecord?.thread, 'dedicated_worker', 'a version 3 worker record decodes its thread');
+let workerPending = null;
+const workerPanel = createRequestStackPanel({
+  load: () => workerPending = Promise.resolve({status: 'recorded', state: 'captured',
+    request: {sequence_number: workerEvent.sequence_number}, frames_retained: true, frames: [frames[0]],
+    scope: {thread: 'dedicated_worker', isolate_key: '0000000000000077'},
+    task_segments: [
+      {index: 0, kind: 'microtask', registration: 'then', state: 'captured', recorded: 1, bounded: false, frames_retained: true,
+        scope: {thread: 'dedicated_worker', process_id: 4, elsewhere: false, other_process: false}, frames: [taskSegments[0].frames[0]]},
+      {index: 1, kind: 'message_port', registration: null, state: 'captured', recorded: 1, bounded: false, frames_retained: true,
+        scope: {thread: 'document', process_id: 5, elsewhere: true, other_process: true}, frames: [taskSegments[0].frames[0]]},
+      {index: 2, kind: 'event', registration: null, state: 'no_script', recorded: 0, bounded: false, frames_retained: false, scope: null, frames: []}
+    ],
+    task_chain_cut: false,
+    async_callers_not_shown: ['ServiceWorker.postMessage and Client.postMessage', 'window.postMessage to or from another process']}),
+  refresh: () => {}, open: () => {}
+});
+workerPanel.render(tree, {events: [initiated], details: [workerEvent]}, [chain]);
+assert.match(tree.textContent, /Started in a dedicated worker\./);
+await workerPending;
+await new Promise(resolve => setTimeout(resolve, 0));
+workerPanel.render(tree, {events: [initiated], details: [workerEvent]}, [chain]);
+assert.deepEqual([...tree.querySelectorAll('li')].map(item => item.textContent), [
+  '<img src=x onerror=alert(1)> @ page:13:10',
+  'Promise.then',
+  'schedule @ page:30:5',
+  'MessagePort.postMessage · on the document main thread in process 5',
+  'schedule @ page:30:5',
+  'Event or observer',
+  'scheduled while no script ran (the browser, the parser or a native callback); the chain ends here'
+]);
+assert.match(tree.textContent, /Async callers not shown: ServiceWorker\.postMessage and Client\.postMessage, window\.postMessage to or from another process\./);
+const workerLoader = structuredClone(workerEvent);
+workerLoader.payload = `0300800002000000${'00'.repeat(72)}02${'00'.repeat(7)}7700000000000000${'00'.repeat(32)}`;
+panel.render(tree, {events: [initiated], details: [workerLoader]}, [chain]);
+assert.match(tree.textContent, /Request call stack\s*Worker loader/);
+assert.match(tree.textContent, /a dedicated worker started this request: its script or module loader/);
 
 const parser = structuredClone(stackEvent);
 parser.payload = `0100800002080000${'00'.repeat(120)}`;
@@ -175,4 +218,4 @@ await outsidePending;
 await new Promise(resolve => setTimeout(resolve, 0));
 scriptOutside.render(tree, request, [chain]);
 assert.match(tree.textContent, /not in the scanned range/);
-console.log('PASS Initiator panel: frames as text, Wasm, unresolved reason, omitted marker, await, setTimeout and microtask segments, cut chain, navigation stacks, Parser, no record and an outside-scan status');
+console.log('PASS Initiator panel: frames as text, Wasm, unresolved reason, omitted marker, await, setTimeout and microtask segments, cut chain, worker stacks, Promise.then registrations, message segments from another process, no-script ends, navigation stacks, Parser, Worker loader, no record and an outside-scan status');

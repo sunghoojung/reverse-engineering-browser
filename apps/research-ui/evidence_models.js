@@ -1638,7 +1638,11 @@
           if (row.initiator !== 'renderer') continue;
           const stack = row.details.find(event => event.type === 'request_initiator_stack');
           const stackState = typeof stack?.payload === 'string' ? Number.parseInt(stack.payload.slice(8, 10), 16) : 0;
-          if ([1, 4, 5].includes(stackState)) row.initiator = 'script';
+          // Version 3 names the thread whose isolate walked it: 2-4 are workers.
+          const thread = typeof stack?.payload === 'string' && stack.payload.startsWith('03')
+            ? Number.parseInt(stack.payload.slice(160, 162), 16) : 0;
+          if (thread >= 2 && thread <= 4 && stackState !== 3) row.initiator = stackState === 2 ? 'worker_loader' : 'worker_script';
+          else if ([1, 4, 5].includes(stackState)) row.initiator = 'script';
           else if (stackState === 2) row.initiator = 'parser';
         }
         return rows;

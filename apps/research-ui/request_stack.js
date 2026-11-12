@@ -5,7 +5,7 @@ const REQUEST_STACK_STATES = Object.freeze({1: 'captured', 2: 'no_script', 3: 'u
   4: 'not_retained_artifact_unavailable', 5: 'not_retained_budget'});
 
 const REQUEST_STACK_NOTES = Object.freeze({
-  unsupported_thread: 'Stacks are recorded only on the document main thread. This request started in a worker or worklet.',
+  unsupported_thread: 'Stacks are recorded on the document main thread and in dedicated, shared and service workers. This request started on another thread: a worklet, or a loader thread that runs no script.',
   not_retained_artifact_unavailable: 'The stack was walked but its frames were not retained: the Artifact category was off.',
   not_retained_budget: 'The stack was walked but its frames were not retained: this renderer already sent 1,024 stacks in this capture.'
 });
@@ -27,6 +27,19 @@ function requestStackBytes(event) {
   return Uint8Array.from(hex.match(/../g), byte => Number.parseInt(byte, 16));
 }
 
+const REQUEST_STACK_THREADS = Object.freeze({1: 'document', 2: 'dedicated_worker', 3: 'shared_worker', 4: 'service_worker'});
+const REQUEST_STACK_THREAD_NAMES = Object.freeze({document: 'the document main thread',
+  dedicated_worker: 'a dedicated worker', shared_worker: 'a shared worker', service_worker: 'a service worker'});
+
+/* The 16-byte stack scope at `at`: its thread kind, or null when malformed. */
+function requestStackScope(bytes, at) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset + at, 16);
+  const thread = REQUEST_STACK_THREADS[bytes[at]];
+  const key = view.getBigUint64(8, true);
+  if (!thread || bytes.subarray(at + 1, at + 8).some(Boolean) || (thread === 'document') !== (key === 0n)) return null;
+  return thread;
+}
+
 function requestStackFrameValid(bytes, at, isAsync) {
   const view = new DataView(bytes.buffer, bytes.byteOffset + at, 16);
   const [kind, flags, combinator, script, detail] =
@@ -39,7 +52,8 @@ function requestStackFrameValid(bytes, at, isAsync) {
 }
 
 /* The request_initiator_stack payload rules of include/reb/request_stack.hpp,
- * or null for a malformed record. Version 2 adds the task chain. */
+ * or null for a malformed record. Version 2 adds the task chain, version 3
+ * the scope: the thread whose isolate the frames' script IDs belong to. */
 function decodeRequestStackRecord(event) {
   const bytes = requestStackBytes(event);
   if (!bytes || event.category !== 'network' || event.type !== 'request_initiator_stack' ||
@@ -48,17 +62,21 @@ function decodeRequestStackRecord(event) {
       BigInt(event.parent_event_id) === 0n || BigInt(event.parent_event_id) >= BigInt(event.sequence_number)) return null;
   const view = new DataView(bytes.buffer);
   const version = view.getUint16(0, true);
-  const tasks = version === 2;
+  const scoped = version === 3;
+  const tasks = version === 2 || scoped;
   const taskSegments = view.getUint16(6, true);
-  if ((version !== 1 && !tasks) || view.getUint16(2, true) !== 128 || (!tasks && taskSegments !== 0) ||
-      bytes.subarray(80).some(Boolean)) return null;
   const state = REQUEST_STACK_STATES[bytes[4]];
+  if ((version !== 1 && !tasks) || view.getUint16(2, true) !== 128 || (!tasks && taskSegments !== 0) ||
+      bytes.subarray(scoped ? 96 : 80).some(Boolean)) return null;
+  // A thread with no worker or document isolate (state 3) names no scope.
+  const thread = scoped && state !== 'unsupported_thread' ? requestStackScope(bytes, 80) : null;
+  if (scoped && (state === 'unsupported_thread' ? bytes.subarray(80, 96).some(Boolean) : !thread)) return null;
   const flags = bytes[5];
   const [total, recorded, omitted] = [8, 12, 16].map(at => view.getUint32(at, true));
   const [asyncFrames, segments] = [view.getUint16(20, true), view.getUint16(22, true)];
   const [wasm, scripts] = [view.getUint32(24, true), view.getUint32(28, true)];
   if (!state || (flags & ~(tasks ? 0x1f : 0x0f)) !== 0) return null;
-  const record = {state, total, recorded, omitted, asyncFrames, segments, wasm, taskSegments,
+  const record = {state, thread, total, recorded, omitted, asyncFrames, segments, wasm, taskSegments,
     framesOmitted: Boolean(flags & 2), asyncTruncated: Boolean(flags & 4),
     chainCut: tasks && Boolean(flags & 8), chainTruncated: Boolean(flags & 16)};
   if (state === 'no_script' || state === 'unsupported_thread') {
@@ -123,10 +141,16 @@ const REQUEST_STACK_SEPARATORS = Object.freeze({await: 'await', promise_all: 'Pr
 const REQUEST_STACK_TASKS = Object.freeze({set_timeout: 'setTimeout', set_interval: 'setInterval',
   request_animation_frame: 'requestAnimationFrame', request_idle_callback: 'requestIdleCallback',
   post_message: 'postMessage', xhr_send: 'XMLHttpRequest.send', post_task: 'scheduler.postTask',
-  event: 'Event or observer', microtask: 'Microtask'});
+  event: 'Event or observer', microtask: 'Microtask', message_port: 'MessagePort.postMessage',
+  broadcast_channel: 'BroadcastChannel.postMessage', worker_message: 'Worker postMessage'});
+
+// A microtask whose registering call was recorded reads as that call.
+const REQUEST_STACK_REGISTRATIONS = Object.freeze({then: 'Promise.then', catch: 'Promise.catch',
+  finally: 'Promise.finally', await: 'await'});
 
 const REQUEST_STACK_TASK_NOTES = Object.freeze({
-  not_recorded: 'the call that registered it is not recorded',
+  not_recorded: 'the call that registered it is not recorded; REB_NATIVE_PROMISE_STACKS=1 records it',
+  no_script: 'scheduled while no script ran (the browser, the parser or a native callback); the chain ends here',
   not_retained_artifact_unavailable: 'frames not retained: the Artifact category was off',
   not_retained_budget: 'frames not retained: this renderer already sent 1,024 scheduling stacks',
   artifact_missing: 'frames artifact missing'
@@ -200,12 +224,19 @@ function createRequestStackPanel({open, refresh, load = null}) {
     }
     // Each async task that led here, nearest first, with the stack that scheduled it.
     for (const segment of stack.task_segments ?? []) {
-      list.append(row(REQUEST_STACK_TASKS[segment.kind] ?? 'Async task', 'request-stack-separator'));
+      const label = REQUEST_STACK_REGISTRATIONS[segment.registration] ?? REQUEST_STACK_TASKS[segment.kind] ?? 'Async task';
+      // A segment a message carried names the thread or process that posted it.
+      const where = segment.scope && segment.scope.elsewhere
+        ? ` · on ${REQUEST_STACK_THREAD_NAMES[segment.scope.thread] ?? 'another thread'}${segment.scope.other_process ? ` in process ${segment.scope.process_id}` : ''}`
+        : '';
+      list.append(row(`${label}${where}`, 'request-stack-separator'));
       const frames = segment.frames ?? [];
       const reason = REQUEST_STACK_TASK_NOTES[segment.state === 'captured' && !segment.frames_retained ? 'artifact_missing' : segment.state];
       if (reason && (!frames.length || !segment.frames_retained)) list.append(row(reason, 'request-stack-note'));
       for (const frame of frames) list.append(frameItem(frame));
-      if (segment.bounded) list.append(row('stopped at 256 frames', 'request-stack-separator'));
+      if (segment.bounded) {
+        list.append(row(`stopped at ${segment.kind === 'microtask' ? 32 : 256} frames`, 'request-stack-separator'));
+      }
     }
     if (stack.task_chain_cut) list.append(row('Earlier async callers were not recorded', 'request-stack-separator'));
     return list;
@@ -292,8 +323,11 @@ function createRequestStackPanel({open, refresh, load = null}) {
       return nodes;
     }
     if (record.state === 'no_script') {
-      nodes.push(row('Parser', 'request-stack-parser'));
-      nodes.push(note('No JavaScript was running when the renderer started this request: the HTML parser, a preload, or a start the loader deferred.'));
+      const worker = record.thread && record.thread !== 'document';
+      nodes.push(row(worker ? 'Worker loader' : 'Parser', 'request-stack-parser'));
+      nodes.push(note(worker
+        ? `No JavaScript was running when ${REQUEST_STACK_THREAD_NAMES[record.thread]} started this request: its script or module loader, or a start the loader deferred.`
+        : 'No JavaScript was running when the renderer started this request: the HTML parser, a preload, or a start the loader deferred.'));
       return nodes;
     }
     if (record.state === 'unsupported_thread') {
@@ -304,6 +338,7 @@ function createRequestStackPanel({open, refresh, load = null}) {
     const entry = resolved(key, {process_id: String(stackEvent.process_id), request_id: stackEvent.request_id,
       session_id: stackEvent.session_id}, stackEvent.sequence_number);
     if (REQUEST_STACK_NOTES[record.state]) nodes.push(note(REQUEST_STACK_NOTES[record.state]));
+    if (record.thread && record.thread !== 'document') nodes.push(note(`Started in ${REQUEST_STACK_THREAD_NAMES[record.thread]}.`));
     if (!entry || entry.status === 'loading') {
       nodes.push(note(`${record.total} synchronous frames${record.asyncFrames ? ` and ${record.asyncFrames} async frames` : ''}${record.taskSegments ? ` after ${record.taskSegments} async tasks` : ''}. Resolving frames from retained sources.`));
       return nodes;

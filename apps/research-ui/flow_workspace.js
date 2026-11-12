@@ -843,9 +843,16 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     if (pane) active = pane === 'lineage' && currentSideTab() === 'cfg' && event.target.closest('#flow-pane-cfg') ? 'cfg' : pane;
   });
 
-  // Related rail (focus mode): what is linked to the selection, each entry a jump.
+  // Related rail (focus mode): what is linked to the selection, each entry a
+  // jump. It is rebuilt only when what it lists changes, so an evidence poll
+  // neither redraws it nor moves keyboard focus out of it.
+  let relatedKey = null;
   function renderRelated() {
-    if (related.hidden) return;
+    if (related.hidden) { relatedKey = null; return; }
+    const key = JSON.stringify([lineageModels.map(model => model.key), flowSelectionKey(selection), selection.request?.label ?? null, graphInfo,
+      timeline.selection()?.key ?? null, timeline.summary(), cfg.fn?.key ?? null, cfg.fn?.label ?? null]);
+    if (key === relatedKey) return;
+    relatedKey = key;
     const sections = [];
     const section = (title, pane, entries, action) => {
       const block = make('section', 'flow-related-section');

@@ -2123,7 +2123,8 @@ request renamed is not a pick. In focus mode a tab bar names what each pane
 holds, and the **Related** rail lists what links to the selection: its
 lineage links, its samples, the function's sampled sites and the graph card
 with its row, callers, callees and request where the graph reports them.
-Every entry jumps.
+Every entry jumps. The rail is rebuilt only when what it lists changes, so an
+evidence poll leaves keyboard focus where it is.
 
 ### Layout
 

@@ -493,7 +493,7 @@ function createBlockGraphView(root, options = {}) {
       canvas.width = 0; canvas.height = 0; minimap.width = 300; minimap.height = 220;
       setState('empty', '');
     },
-    measurements: () => ({...m}), setResult, setState, fit, select, focus: () => canvas.focus(), hasGraph: () => Boolean(layout), getSelected: () => selectedBlock, tools, setTitle(text) { title.textContent = text; stats.textContent = ''; }, setStats(text) { stats.textContent = text; }
+    measurements: () => ({...m}), setResult, setState, select, focus: () => canvas.focus(), hasGraph: () => Boolean(layout), tools, setTitle(text) { title.textContent = text; stats.textContent = ''; }
   };
 }
 
@@ -684,7 +684,6 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
   button.addEventListener('click', toggle);
   closeOn?.addEventListener('click', () => { if (isOpen) close(); });
   return {
-    toggle,
     /** Called when the selected source may have changed. */
     sync(next) {
       const valid = isWasmSource(next);
@@ -694,7 +693,7 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
       if (isOpen && (!valid || changed)) close();
     },
     setScreenVisible(visible) { if (screenVisible === visible) return; screenVisible = visible; if (!visible && isOpen) close(); },
-    isOpen: () => isOpen, view
+    isOpen: () => isOpen
   };
 }
 
@@ -736,7 +735,8 @@ function createVmBlockGraph({host, button, getReport, getObservedPath, onReveal}
   }
   function open() { isOpen = true; host.hidden = false; button.setAttribute('aria-pressed', 'true'); view.activate(); render(); }
   function close() { isOpen = false; generation += 1; host.hidden = true; button.setAttribute('aria-pressed', 'false'); runner.cancel(); view.release(); }
-  return {toggle: () => (isOpen ? close() : open()), close, isOpen: () => isOpen, refresh: () => render(), view};
+  return {toggle: () => (isOpen ? close() : open()), close, refresh: () => render()};
 }
 
-if (typeof module === 'object' && module?.exports) module.exports = {vmStaticBlockGraph, vmObservedBlockGraph, BLOCK_GRAPH_KIND, BLOCK_GRAPH_LIMITS, BLOCK_GRAPH_CACHE_BYTES};
+// The offline check reads the graph builders.
+if (typeof module === 'object' && module?.exports) module.exports = {vmStaticBlockGraph, vmObservedBlockGraph, BLOCK_GRAPH_KIND};

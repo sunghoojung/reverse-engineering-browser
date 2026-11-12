@@ -577,7 +577,7 @@ const blockGraphLayout = (() => {
   const transfer = ({graph, starts, layout}) => [graph.offsets, graph.ends, graph.firstRow, graph.rowCount, graph.instructionCount, graph.flags, graph.from, graph.to, graph.kind,
     starts, layout.x, layout.y, layout.w, layout.h, layout.pointStart, layout.points, layout.box, layout.back].map(array => array.buffer);
 
-  return {METRICS, KIND, TRISKEL, wasmGraph, rowStarts, nodeSizes, layoutGraph, run, runAsync, withTriskel, transfer};
+  return {METRICS, wasmGraph, rowStarts, nodeSizes, layoutGraph, runAsync, withTriskel, transfer};
 })();
 
 if (typeof module === 'object' && module?.exports) module.exports = blockGraphLayout;

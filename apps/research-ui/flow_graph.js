@@ -50,8 +50,6 @@ const FLOW_GRAPH_SINKS = new Set(['request', 'navigation', 'cookie_write']);
  * is measured per tag. */
 const FLOW_GRAPH_CARD = Object.freeze({head: 32, location: 22, gap: 2, row: 19, foot: 9, pad: 12, radius: 8, minW: 184, maxW: 440, rows: 8});
 const FLOW_GRAPH_MEASURE = Object.freeze({row: 6.93, head: 7.53, badge: 6.32, pill: 7});
-/* Tint strengths when the stylesheet gives none, as alpha over the surface. */
-const FLOW_GRAPH_ALPHA = Object.freeze({head: 0.14, tag: 0.08, tagLine: 0, row: 0.06, band: 0.06, bandLine: 0.3, border: 0.45});
 
 function flowGraphFile(url) {
   const text = String(url ?? '');
@@ -314,9 +312,8 @@ function createFlowGraphRunner() {
         reject = fail;
         const local = async () => {
           // A shell that cannot start workers still lays out, on this thread.
-          if (typeof flowGraphLayout === 'undefined') { reject = null; fail(Error('The layout worker could not start.')); return; }
           try {
-            const layout = engine === 'triskel' && typeof fetch === 'function' ? await flowGraphLayout.layoutWithTriskel(graph, metrics, flowGraphLayout.fetchTriskel) : flowGraphLayout.layoutGraph(graph, metrics);
+            const layout = await flowGraphLayout.runAsync({graph, metrics, engine});
             if (id !== serial) return;
             reject = null; resolve(layout);
           } catch (error) { if (id === serial) { reject = null; fail(error); } }
@@ -360,7 +357,7 @@ function flowGraphAlpha(color, alpha) {
  * given, takes Enter or a double-click on a Wasm card instead of Sources. The
  * README's Flow graph section documents `info` and the returned methods.
  */
-function createFlowGraphPanel({host, open = () => {}, available = () => true, fetchGraph = null, onSelect = null, onFollow = null}) {
+function createFlowGraphPanel({host, open = () => {}, available = () => true, onSelect = null, onFollow = null}) {
   const make = (tag, className = '', text = '') => { const element = document.createElement(tag); if (className) element.className = className; if (text) element.textContent = text; return element; };
   const button = (label, action, aria, className = 'flow-graph-tool') => { const element = make('button', className, label); element.type = 'button'; element.setAttribute('aria-label', aria ?? label); element.addEventListener('click', action); return element; };
   host.classList.add('flow-graph');
@@ -483,34 +480,30 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     text: '--text', muted: '--muted', faint: '--faint', accent: '--accent', soft: '--accent-soft', mono: '--mono', sans: '--sans',
     site: '--flow-site', note: '--flow-note', mark: '--flow-mark', viewport: '--flow-viewport'};
   const alphaNames = {head: '--flow-tint-head', tag: '--flow-tint-tag', tagLine: '--flow-tint-tag-line', row: '--flow-tint-row', band: '--flow-tint-band', bandLine: '--flow-tint-band-line', border: '--flow-tint-border'};
-  let tokens = {kind: {}, ink: {}, edge: {}, rowInk: {}, realm: [], alpha: {...FLOW_GRAPH_ALPHA}};
+  let tokens = {kind: {}, ink: {}, edge: {}, rowInk: {}, realm: [], alpha: {}};
+  // Without a 2D context (an offline DOM) cards take the default advances.
   let measure = FLOW_GRAPH_MEASURE;
   const pillWidths = new Map();
   const readTokens = () => {
-    const style = globalThis.getComputedStyle?.(host) ?? {getPropertyValue: () => ''};
-    const read = name => style.getPropertyValue(name).trim(), color = (name, fallback = '#888') => read(name) || fallback;
-    const next = {};
-    for (const [key, name] of Object.entries(tokenNames)) next[key] = color(name, key === 'mono' ? 'monospace' : key === 'sans' ? 'sans-serif' : '#888');
+    const style = getComputedStyle(host);
+    const read = name => style.getPropertyValue(name).trim();
+    const next = {kind: {}, ink: {}, edge: {}, rowInk: {}, alpha: {}};
+    for (const [key, name] of Object.entries(tokenNames)) next[key] = read(name);
     // A kind's hue tints its card; its ink is the text in that colour.
-    next.kind = {}; next.ink = {};
-    for (const [kind, stem] of Object.entries(FLOW_GRAPH_KIND_TOKENS)) { next.kind[kind] = color(`--flow-${stem}`); next.ink[kind] = color(`--flow-${stem}-ink`, next.kind[kind]); }
-    next.edge = {}; next.rowInk = {};
-    for (const family of FLOW_GRAPH_EDGE_FAMILIES) { next.edge[family] = color(`--flow-edge-${family}`); next.rowInk[family] = color(`--flow-ink-${family}`, next.edge[family]); }
-    next.realm = Array.from({length: FLOW_GRAPH_REALM_HUES}, (_, index) => color(`--flow-realm-${index}`));
-    next.alpha = {};
-    for (const [key, name] of Object.entries(alphaNames)) { const value = Number.parseFloat(read(name)); next.alpha[key] = Number.isFinite(value) ? value : FLOW_GRAPH_ALPHA[key]; }
+    for (const [kind, stem] of Object.entries(FLOW_GRAPH_KIND_TOKENS)) { next.kind[kind] = read(`--flow-${stem}`); next.ink[kind] = read(`--flow-${stem}-ink`); }
+    for (const family of FLOW_GRAPH_EDGE_FAMILIES) { next.edge[family] = read(`--flow-edge-${family}`); next.rowInk[family] = read(`--flow-ink-${family}`); }
+    next.realm = Array.from({length: FLOW_GRAPH_REALM_HUES}, (_, index) => read(`--flow-realm-${index}`));
+    for (const [key, name] of Object.entries(alphaNames)) next.alpha[key] = Number.parseFloat(read(name));
     tokens = next; miniKey = ''; labelSides = null; pillWidths.clear();
     if (ctx) {
       // Monospace: one advance per font sizes every card.
-      const advance = font => { ctx.font = font; return ctx.measureText('0000000000').width / 10 || 0; };
-      measure = {row: advance(`11.5px ${tokens.mono}`) || FLOW_GRAPH_MEASURE.row, head: advance(`600 12.5px ${tokens.mono}`) || FLOW_GRAPH_MEASURE.head,
-        badge: advance(`10.5px ${tokens.mono}`) || FLOW_GRAPH_MEASURE.badge, pill: FLOW_GRAPH_MEASURE.pill, pillWidth: pillWidth};
+      const advance = font => { ctx.font = font; return ctx.measureText('0000000000').width / 10; };
+      measure = {row: advance(`11.5px ${tokens.mono}`), head: advance(`600 12.5px ${tokens.mono}`), badge: advance(`10.5px ${tokens.mono}`), pill: FLOW_GRAPH_MEASURE.pill, pillWidth};
     }
   };
   /** The kind pill's text width: small capitals, letter-spaced. */
   function pillWidth(tag) {
-    if (!ctx) return tag.length * FLOW_GRAPH_MEASURE.pill;
-    if (!pillWidths.has(tag)) { setPillFont(); pillWidths.set(tag, ctx.measureText(tag.toUpperCase()).width || tag.length * FLOW_GRAPH_MEASURE.pill); clearLetterSpacing(); }
+    if (!pillWidths.has(tag)) { setPillFont(); pillWidths.set(tag, ctx.measureText(tag.toUpperCase()).width); clearLetterSpacing(); }
     return pillWidths.get(tag);
   }
   const setPillFont = () => { ctx.font = `600 9.5px ${tokens.sans}`; if ('letterSpacing' in ctx) ctx.letterSpacing = '0.6px'; };
@@ -536,8 +529,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
   const history = [];
   let hover = {node: -1, row: -1, edge: -1}, edgeBounds = null, edgeFlat = [];
   let view = {x: 0, y: 0, z: 1}, cssW = 0, cssH = 0, dpr = 1, frame = 0, needsStart = false, miniKey = '', miniBase = null, miniFit = null;
-  const metrics = {...(typeof flowGraphLayout !== 'undefined' ? flowGraphLayout.METRICS : {nodeW: 220, nodeH: 34, margin: 40})};
-  const ROUTE = typeof flowGraphLayout !== 'undefined' ? flowGraphLayout.ROUTE : {MOVE: 0, CURVE: 1, LINE: 2, CORNER: 3};
+  const metrics = flowGraphLayout.METRICS, ROUTE = flowGraphLayout.ROUTE;
 
   const requestDraw = () => { if (visible && !frame) frame = requestAnimationFrame(() => { frame = 0; draw(); }); };
   function resize() {
@@ -603,11 +595,9 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     else setBanner('loading', 'Refreshing the flow graph…');
     refresh.disabled = true;
     try {
-      const doc = fetchGraph ? await fetchGraph(requested, controller.signal) : await (async () => {
-        const response = await fetch(`/api/flow-graph?${new URLSearchParams({session_id: requested})}`, {cache: 'no-store', signal: AbortSignal.any ? AbortSignal.any([controller.signal, AbortSignal.timeout(45000)]) : controller.signal});
-        if (!response.ok) { let message = `The flow graph route returned ${response.status}.`; try { message = (await response.json()).error ?? message; } catch {} throw Error(message); }
-        return response.json();
-      })();
+      const response = await fetch(`/api/flow-graph?${new URLSearchParams({session_id: requested})}`, {cache: 'no-store', signal: AbortSignal.any ? AbortSignal.any([controller.signal, AbortSignal.timeout(45000)]) : controller.signal});
+      if (!response.ok) { let message = `The flow graph route returned ${response.status}.`; try { message = (await response.json()).error ?? message; } catch {} throw Error(message); }
+      const doc = await response.json();
       if (mine !== generation) return;
       const next = flowGraphModel(doc);
       // A refresh keeps the selection, the expanded chains and the view
@@ -1865,7 +1855,6 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     },
     highlightRequest,
     focus() { canvas.focus({preventScroll: true}); },
-    isVisible: () => visible,
     /** Selects (and by default centres) the card that holds `key`, a
      * flowGraphNodeKey(); says whether it is in the graph. */
     select: (key, options) => selectKey(key, options),
@@ -1875,13 +1864,6 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, fe
     resize: () => resize(),
     /** Marks the Wasm card (and row) a timeline sample points to, apart from
      * the selection; null clears it. Says whether a card took the mark. */
-    setMark,
-    // For the offline checks: the current state without drawing.
-    snapshot: () => ({status: status_, model, display, cards, layout, selected, selectedRow, highlight, matches, details: detailsOpen, menu: !menu.hidden, view: {...view}, mark: markTarget ? {...markTarget} : null})
+    setMark
   };
-}
-
-if (typeof module === 'object' && module?.exports) {
-  module.exports = {flowGraphModel, flowGraphNodeKey, flowGraphDisplay, flowGraphCards, flowGraphDistinctStacks, flowGraphLayoutInput, flowGraphPathsThrough, flowGraphHighlight, flowGraphNodeName, flowGraphNodeDetail,
-    flowGraphNodeLocation, flowGraphEdgeNote, flowGraphEdgeSites, flowGraphEdgeFamily, flowGraphContextLabel, flowGraphAlpha, createFlowGraphPanel, FLOW_GRAPH_CARD};
 }

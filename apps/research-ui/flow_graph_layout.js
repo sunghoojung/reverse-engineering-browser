@@ -1,5 +1,5 @@
 /* Vertical layout for the session flow graph. Runs off the main thread as a
- * Web Worker; also loads as CommonJS for the offline checks.
+ * Web Worker, and on the page where a shell cannot start one.
  *
  * The graph reads top to bottom like a disassembler's CFG: each realm is a
  * full-width band, and the bands are stacked in call order, so a realm that
@@ -750,11 +750,10 @@ const flowGraphLayout = (() => {
   }
   const transfer = layout => [layout.x.buffer, layout.y.buffer, layout.w.buffer, layout.h.buffer, layout.layer.buffer, layout.back.buffer,
     layout.routes.buffer, layout.routeTypes.buffer, layout.routeStart.buffer];
-  return {METRICS, ROUTE: {MOVE, CURVE, LINE, CORNER}, TRISKEL, layoutGraph, layoutWithTriskel, assemble, triskelRequest, waypointRoute, fetchTriskel, run, runAsync, transfer, adjacency, alignBands};
+  return {METRICS, ROUTE: {MOVE, CURVE, LINE, CORNER}, runAsync, transfer};
 })();
 
-if (typeof module === 'object' && module?.exports) module.exports = flowGraphLayout;
-else if (typeof self !== 'undefined' && typeof document === 'undefined') {
+if (typeof importScripts === 'function') {
   self.onmessage = async event => {
     try {
       const layout = await flowGraphLayout.runAsync(event.data);

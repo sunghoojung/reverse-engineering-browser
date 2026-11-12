@@ -2417,7 +2417,7 @@ The canvas announces this list through `aria-describedby`.
 ### Workspace API
 
 The Flow workspace hosts this view as its Graph pane. `createFlowGraphPanel`
-takes, besides `host`, `open`, `available` and `fetchGraph`:
+takes, besides `host`, `open` and `available`:
 - `onSelect(info | null, {requested})`, called whenever the selected card,
   its chosen row or the lit request changes, and with `null` when the
   selection clears. A change to the same card and row is not reported twice.
@@ -2449,8 +2449,7 @@ takes, besides `host`, `open`, `available` and `fetchGraph`:
 | `callers` | up to eight cards on drawn edges into this one, most stacks first, each `{key, name, kind, note, count}` with `note` the edge kind |
 | `callees` | the same for drawn edges out of this card |
 
-The panel returns, besides `show`, `hide`, `highlightRequest`, `focus`,
-`isVisible` and `snapshot`:
+The panel returns, besides `show`, `hide`, `highlightRequest` and `focus`:
 - `select(key, {reveal = true} = {})` selects the card that holds `key`, any
   member's key for a chain, and centres it unless `reveal` is false. It
   returns whether the card is in the graph. Asked before the graph is drawn,

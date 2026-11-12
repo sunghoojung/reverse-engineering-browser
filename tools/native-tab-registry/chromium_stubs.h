@@ -256,7 +256,7 @@ class StoragePartition {
 
 class BrowserContext {
  public:
-  explicit BrowserContext(bool owned) : owned_(owned) {}
+  explicit BrowserContext(bool owned_profile) : owned_(owned_profile) {}
   StoragePartition* GetDefaultStoragePartition() { return &partition_; }
   bool owned() const { return owned_; }
 

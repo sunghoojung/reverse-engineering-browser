@@ -907,8 +907,8 @@ void NativeProbeHostWorkerTabLinks() {
   // One class 68 answer per renderer-issued request, whichever half asks first.
   reb::NativeFactoryScope worker_scope;
   worker_scope.owner.service_worker_without_caller = true;
-  const auto proxy = [&](std::int64_t version, std::uint32_t request) {
-    worker_scope.owner.service_worker_version = version;
+  const auto proxy = [&](std::int64_t version_id, std::uint32_t request) {
+    worker_scope.owner.service_worker_version = version_id;
     return reb::NativeProxyRequestExclusion(
         worker_scope, static_cast<int>(reb::NativeUrlLoaderFactoryKind::kServiceWorkerSubResource),
         "https", {1, request});

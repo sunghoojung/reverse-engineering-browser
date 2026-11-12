@@ -390,7 +390,7 @@ bool NativeTabResolver::SharedServiceWorkerNoPage(const RendererRequest request,
     shared_order_.pop_front();
     const auto entry = shared_decisions_.find(oldest);
     if (entry != shared_decisions_.end() && entry->second.serial == serial) {
-      shared_evicted_ += entry->second.changeable ? 1 : 0;
+      shared_evicted_ += entry->second.changeable ? 1U : 0U;
       shared_decisions_.erase(entry);
     }
   }
@@ -398,7 +398,7 @@ bool NativeTabResolver::SharedServiceWorkerNoPage(const RendererRequest request,
 }
 
 std::uint64_t NativeTabResolver::TakeEvictedSharedDecisions() {
-  return std::exchange(shared_evicted_, 0);
+  return std::exchange(shared_evicted_, std::uint64_t{0});
 }
 
 NativeTabResolution NativeTabResolver::Resolve(const NativeLoaderKind owner_kind,

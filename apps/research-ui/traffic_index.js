@@ -119,7 +119,9 @@ function createTrafficIndex({fetcher = (input, init) => fetch(input, init), onCh
       if (!document || document.format !== 'reb-request-index-v1' || !Array.isArray(document.requests)) {
         throw new Error('the request index answer is malformed');
       }
-      return {status: 'ready', rows: document.requests.map(row => trafficIndexRequest(row, answer?.origin ?? 'live'))};
+      // `capped`: more rows matched than the answer holds, so the rest were not read.
+      return {status: 'ready', capped: Number(document.matching) > document.requests.length,
+        rows: document.requests.map(row => trafficIndexRequest(row, answer?.origin ?? 'live'))};
     },
     // Each member is read forward from the row's first offset, up to its record count.
     // `partial` means some records were not read, so a missing one is unknown, not absent.

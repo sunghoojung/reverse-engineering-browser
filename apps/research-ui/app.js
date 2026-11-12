@@ -1432,7 +1432,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const rows = state.trafficIndex?.answer?.()?.rows ?? [];
         const lost = new Set(rows.filter(row => row.endLost).map(row => row.id));
         if (lost.size) for (const request of state.requests) if (lost.has(request.id)) markTrafficEndLost(request);
-        const indexed = new Map(rows.filter(row => row.memoryCacheSourceRow).map(row => [row.id, row]));
+        // Every row's body answer: a window row can lack its response_started.
+        const indexed = new Map(rows.map(row => [row.id, row]));
         if (indexed.size) for (const request of state.requests) if (indexed.has(request.id)) copyTrafficBodyFacts(request, indexed.get(request.id));
       }
 

@@ -1257,11 +1257,17 @@ still pending, and the rest
 ([bodies the proxy never sees](../../protocol/native-network-v3.md#bodies-the-proxy-never-sees)).
 A memory-cache reuse that names the request whose response it reused shows
 that request's retained bytes, labelled as the reused request's, with
-**Open the request it reused**; one whose source was not recorded or not
-retained says so. A service worker's answer lists the worker's own requests
-for the same URL made while it was open, from the request index, each with
-**Open the worker's request** and its body case; the records do not say whether
-the worker answered with those bytes, so they are never shown as the page's.
+**Open the request it reused** and the source's state (complete, cut at
+16 MiB, a snapshot and when it was recorded, stopped, or not retained); a
+named row on another host or started after the reuse is not its source, and
+one not recorded says so. A service worker's answer lists the worker's own
+requests for the same URL made while it was open, from the request index, each
+with **Open the worker's request** and its body case; the records do not say
+whether the worker answered with those bytes, so they are never shown as the
+page's, and no match says what was searched. A refused end shows the newest
+retained snapshot of the same response under **Earlier snapshot**. When the
+loaded records lack a row's final response or body record, the request index's
+answer decides.
 `tools/check-traffic-response-ui.mjs` covers both tabs in a DOM model.
 **Headers** shows General (URL, method, status, remote address, referrer
 policy), then response and request headers per redirect hop, newest first.

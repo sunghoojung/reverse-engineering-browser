@@ -1154,13 +1154,24 @@ this order:
 | `no_record` | Has a response but no body record: a metadata session, a body still arriving, or a record outside what was read |
 | `memory_cache` | Is a `memory_cache_reuse`: Blink answered from a resource it held and made no request |
 | `service_worker` | Ended with a renderer completion flagged `from_service_worker`: the worker answered in the renderer |
-| `redirected` | Was redirected and has no later response |
-| `failed_before_response`, `cancelled_before_response` | Failed before any response, with `ERR_ABORTED` for the second |
+| `failed_before_response`, `cancelled_before_response` | Failed before any response, with `ERR_ABORTED` for the second, after a redirect or not |
 | `interrupted` | The proxy's observation ended first (`proxy_destroyed`, `redirect_handoff`) |
 | `end_lost` | A `service_worker_end_lost` gap names it |
-| `pending` | Has no response and no end yet |
+| `pending` | Has no response and no end yet, after a redirect or not |
+| `redirected` | Was redirected, then ended with no other response |
 | `renderer_answered` | Was finished by the renderer without a URL loader (`data:`, `blob:` and other local schemes) |
 | `no_response` | Ended with no response record otherwise |
+
+A redirect does not decide the case: a request that fails, is cancelled, ends
+its observation or is still open after a redirect is that, so "every response
+was a redirect" is said only of one that then ended. A newest record that names
+no bytes (a refusal or a malformed record) does not hide the newest retained
+`partial` of the same response, which the receiver keeps: the row's
+`response_body.earlier_snapshot` names it, and Response and Preview open it
+under "Earlier snapshot". The loaded records decide only while they hold the
+row's final `response_started` and its body record; otherwise Traffic takes the
+index's answer, because a live row's `response_started` can leave the retained
+window while its later records stay.
 
 The Response and Preview tabs say which case applies, and never show an
 absent body as empty. `get_requests` gives every row its case as
@@ -1172,18 +1183,30 @@ Where those bytes are retained under another request, Traffic shows or links
 them instead of nothing:
 
 - A version 2 `memory_cache_reuse` names the request whose response Blink
-  reused ([memory-cache reuse](#memory-cache-reuse)). Its row's
-  `memory_cache_source` is that row and its `response_body`, and Response and
-  Preview show that row's retained body, the bytes Blink held, labelled as the
-  reused request's, with a control that opens it. A source this session did
-  not record, or whose body was not retained, is named with the reason.
+  reused ([memory-cache reuse](#memory-cache-reuse)). A renderer request ID
+  names a row only within its process and session, and a process ID can be
+  reused within a session, so the named row is the source only when it was
+  requested from the reuse's host (a 120-byte reuse host as a prefix) and
+  started before the reuse; otherwise `memory_cache_source.found` is false
+  with `reason` `host_differs` or `started_after`, and `not_recorded` when no
+  such row exists. A found source's `response_body` is shown in Response and
+  Preview, labelled as the reused request's, with a control that opens it, and
+  with its state: complete, cut at 16 MiB, a snapshot with how much had
+  arrived and when relative to the reuse, stopped mid-body, or not retained.
+  For a `multipart/x-mixed-replace` source Blink holds the last part while the
+  retained body has every part, which the view says.
 - A service worker answer has no digest of its own to match. Traffic lists the
   requests the service worker itself made (`request_started` flag 4) for the
   same host, path and query that started while the page's request was open,
   read through `get_requests` with that time range, and links each with its
   body case. The records do not say whether the worker answered with those
-  bytes, so they are linked, never shown as the page's body. A worker that
-  built its response or read Cache Storage made no such request.
+  bytes, so they are linked, never shown as the page's body. When none is
+  found, Traffic says what it searched (that time range of the index, or the
+  loaded rows when the index could not be read) and when the search stopped at
+  its 500-row page; a row without a path (a metadata session records the host
+  alone) is not searched. A worker that fetched before the page's request
+  opened, fetched another URL, read Cache Storage or built its response leaves
+  no match, so no match is never a claim that the bytes are nowhere.
 - A `shared` record already names the earlier artifact with the same digest.
 
 #### Service-worker bodies are not retained for the page's request

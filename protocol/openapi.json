@@ -18783,14 +18783,16 @@
                 "null"
               ],
               "additionalProperties": false,
-              "description": "A version 2 memory_cache_reuse names the renderer request whose response Blink reused (ResourceResponse::RequestId()). id is that row, found whether this session recorded it, and its body what that row retained, which holds the bytes Blink reused. Null for every other row and for a reuse that names none.",
+              "description": "A version 2 memory_cache_reuse names the renderer request whose response Blink reused (ResourceResponse::RequestId()). found is true only when that row exists, was requested from the reuse's web host and started before the reuse; reason says why not. A found source carries its body, which holds what was retained of the bytes Blink reused. Null for every other row and for a reuse that names none.",
               "required": [
                 "id",
                 "found",
+                "reason",
                 "response_body",
                 "method",
                 "path",
-                "type"
+                "type",
+                "mime_type"
               ],
               "properties": {
                 "id": {
@@ -18822,6 +18824,25 @@
                   ]
                 },
                 "type": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "not_recorded",
+                    "host_differs",
+                    "started_after",
+                    null
+                  ],
+                  "description": "Why the named row is not this reuse's load: none was recorded, it was requested from another host (a renderer process ID reused within the session), or it started after the reuse. Null when found."
+                },
+                "mime_type": {
                   "type": [
                     "string",
                     "null"
@@ -34825,7 +34846,8 @@
             "sha256",
             "record_sequence",
             "record_time_ns",
-            "response_started"
+            "response_started",
+            "earlier_snapshot"
           ],
           "properties": {
             "case": {
@@ -34937,6 +34959,57 @@
                 }
               },
               "description": "The final response_started record, the creator of a script, Wasm or response body artifact."
+            },
+            "earlier_snapshot": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "description": "When the newest record names no bytes (a refusal or a malformed record), the newest retained partial of the same response, which the receiver still holds; else null.",
+              "required": [
+                "artifact_id",
+                "body_length",
+                "captured_length",
+                "partial_index",
+                "sha256",
+                "record_sequence",
+                "record_time_ns"
+              ],
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]{0,19}$"
+                },
+                "body_length": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "captured_length": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "partial_index": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                },
+                "sha256": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "record_sequence": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]{0,19}$"
+                },
+                "record_time_ns": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                }
+              }
             }
           }
         },

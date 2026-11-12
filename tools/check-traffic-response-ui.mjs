@@ -88,7 +88,11 @@ const ended = {rank: 5, events: [{}]};
 for (const [input, expected] of [
   [{responseStarted: {}, type: 'xhr', events: [{}]}, 'no_record'], [{responseStarted: {}, type: 'js', events: [{}]}, 'source_artifact'],
   [{memoryCache: true, ...ended}, 'memory_cache'], [{fromServiceWorker: true, ...ended}, 'service_worker'],
-  [{fromServiceWorker: true, rank: 3, events: [{}]}, 'pending'], [{redirected: true, rank: 3, events: [{}]}, 'redirected'],
+  [{fromServiceWorker: true, rank: 3, events: [{}]}, 'pending'], [{redirected: true, ...ended}, 'redirected'],
+  // A redirect followed by a failure, a cancel, an ended observation or no end yet is that.
+  [{redirected: true, failed: true, errorCode: -105, ...ended}, 'failed_before_response'],
+  [{redirected: true, failed: true, errorCode: -3, ...ended}, 'cancelled_before_response'],
+  [{redirected: true, interrupted: true, ...ended}, 'interrupted'], [{redirected: true, rank: 3, events: [{}]}, 'pending'],
   [{failed: true, errorCode: -105, ...ended}, 'failed_before_response'], [{failed: true, errorCode: -3, ...ended}, 'cancelled_before_response'],
   [{failed: true, fromServiceWorker: true, errorCode: -2, ...ended}, 'failed_before_response'],
   [{interrupted: true, ...ended}, 'interrupted'], [{endLost: true, rank: 1, events: [{}]}, 'end_lost'], [{rank: 1, events: [{}]}, 'pending'],
@@ -103,7 +107,8 @@ for (const [input, pattern] of [
   [{failed: true, fromServiceWorker: true, errorCode: -2, ...ended}, /service worker ended this request without a response \(net error -2\)/],
   [{failed: true, errorCode: -105, ...ended}, /^Failed before any response \(net error -105\)/],
   [{failed: true, errorCode: -3, ...ended}, /^Cancelled before any response/],
-  [{redirected: true, rank: 3, events: [{}]}, /discards redirect bodies/],
+  [{redirected: true, ...ended}, /^Every response was a redirect, and the request ended without another/],
+  [{redirected: true, failed: true, errorCode: -105, ...ended}, /^Failed before any response/],
   [{interrupted: true, ...ended}, /^Observation ended before any response/],
   [{endLost: true, rank: 1, events: [{}]}, /reused the slot that held its start/],
   [{rank: 1, events: [{}]}, /^No response yet/],
@@ -121,6 +126,19 @@ assert.match(capture({responseStarted: {monotonicTimeNs: '1000000000'}, response
 /^Still arriving: 1,200 bytes had arrived 2\.5 s after the response started, at snapshot 3\. All of them are retained/);
 assert.match(capture({responseBody: record(null, {state: 'partial', partialIndex: 1, bodyLength: String(17 * 1024 * 1024),
   capturedLength: String(16 * 1024 * 1024)})}, true), /The first 16,777,216 bytes reached the 16 MiB capture limit .*later bytes are only counted/);
+// A seal recorded by the chunk that reached exactly 16 MiB is still a seal.
+assert.match(capture({responseBody: record(null, {state: 'partial', partialIndex: 1, bodyLength: String(16 * 1024 * 1024),
+  capturedLength: String(16 * 1024 * 1024)})}, true), /reached the 16 MiB capture limit .*may still be arriving/);
+assert.doesNotMatch(capture({responseBody: record(null, {state: 'partial', partialIndex: 1, bodyLength: String(16 * 1024 * 1024),
+  capturedLength: String(16 * 1024 * 1024)})}, true), /All of them are retained in this snapshot/);
+// A live row whose response_started left the retained window takes the index's answer.
+const indexBody = {case: 'captured', artifact_id: '77', body_length: '9', captured_length: '9', partial_index: 0, shared: false,
+  sha256: 'a'.repeat(64), record_sequence: '31', record_time_ns: '100', response_started: {session_id: '7', process_id: 42, sequence_number: '30'}};
+const leftWindow = {...ended, browserObserved: true, events: [{}], responseBodyIndex: indexBody};
+assert.equal(api.responseBodyCase(leftWindow), 'captured', 'the index answers when the loaded records lack the response');
+assert.match(capture(leftWindow, true), /^Retained in full\./);
+assert.equal(api.responseBodyCase({...leftWindow, responseStarted: {sequenceNumber: '30'}, responseBody: record(null, {state: 'empty',
+  bodyLength: '0', capturedLength: '0'})}), 'empty', 'loaded records that hold the body record decide');
 const states = {captured_truncated: /16 MiB capture limit/, partial: /had arrived, at snapshot 2\. All of them are retained/,
   aborted: /network failed mid-body/, cancelled: /stopped reading/, empty: /Empty body/, not_modified: /304/,
   redirected: /discards redirect bodies/, not_captured_type: /REB_CAPTURE_RESPONSE_MEDIA=1/,
@@ -451,12 +469,74 @@ assert.match(panel.textContent, /\(one request\)\. The records do not say whethe
 panel.querySelector('.traffic-response-open').click();
 assert.deepEqual(opened, ['w1']);
 assert.match(panel.querySelector('.traffic-response-open').textContent, /Open the worker's request \(retained in full\)/);
+// No match is said with what was searched, never as proof the bytes are nowhere.
 relatedAnswer = async () => ({status: 'ready', rows: []});
 await showLinked({...answered, id: 'S7:R42:951'});
-await until(() => /made no recorded request for this URL/.test(panel.textContent), 'no worker fetch is said');
+await until(() => /No request the service worker made for this URL started while this request was open, among the request index's rows of this request's time range\./.test(panel.textContent), 'no worker fetch is said');
+assert.doesNotMatch(panel.textContent, /retained nowhere/);
+assert.match(panel.textContent, /fetched before this request opened, fetched another URL, read Cache Storage or built the response/);
+relatedAnswer = async () => ({status: 'ready', rows: [], capped: true});
+await showLinked({...answered, id: 'S7:R42:953'});
+await until(() => /cut at its first 500 rows, so later ones were not searched/.test(panel.textContent), 'a capped search is said');
 relatedAnswer = async () => {throw new Error('offline');};
 await showLinked({...answered, id: 'S7:R42:952'});
-await until(() => /could not be looked up/.test(panel.textContent), 'a failed lookup is said');
+await until(() => /among the loaded rows only: the request index could not be read/.test(panel.textContent), 'a failed lookup is said');
+// A metadata-only row has no path, so nothing is searched or claimed.
+const searches = [];
+relatedAnswer = async target => {searches.push(target.id); return {status: 'ready', rows: workerRows};};
+await showLinked({...answered, id: 'S7:R42:954', target: undefined, hostOnly: true, path: 'api.fixture.test'});
+assert.match(panel.textContent, /has no path to match \(a metadata-only session records the host alone\)/);
+assert.deepEqual(searches, [], 'nothing is searched without a path');
+
+// A refused end does not hide a snapshot of the same response that is retained.
+const snapshotBytes = retain('data: kept\n\n', 'text/event-stream');
+const refusedEnd = request(record(null, {state: 'not_captured_session_budget', bodyLength: '90', capturedLength: '0', artifactId: '0'}),
+  {responseBodyEarlier: record(snapshotBytes, {state: 'partial', partialIndex: 4, bodyLength: '40'})});
+await showLinked(refusedEnd);
+assert.match(panel.textContent, /Not retained: this session had used its response body budget/);
+assert.match(panel.textContent, /Earlier snapshot.*Snapshot 4: 12 bytes of the 40 bytes that had arrived\. The receiver retains it, and it is shown below\./);
+assert.match(panel.querySelector('.traffic-response-code').textContent, /data: kept/, 'the earlier snapshot opens');
+assert.match(panel.textContent, /Artifact \(earlier snapshot\)/);
+// The index names it when the loaded records lack it.
+await showLinked({...refusedEnd, responseBodyEarlier: null, events: [], responseBodyIndex: {case: 'not_captured_session_budget',
+  artifact_id: null, body_length: '90', captured_length: '0', record_sequence: '33', response_started: {session_id: '7', process_id: 42, sequence_number: '30'},
+  earlier_snapshot: {artifact_id: snapshotBytes.artifact_id, body_length: '40', captured_length: '12', partial_index: 4,
+    sha256: snapshotBytes.sha256, record_sequence: '32', record_time_ns: '0'}}});
+assert.match(panel.querySelector('.traffic-response-code').textContent, /data: kept/, 'the index\'s earlier snapshot opens');
+// A record-backed index answer for a row whose response left the window opens its bytes.
+await showLinked({...leftWindow, id: 'left-window', responseBodyIndex: {...indexBody, artifact_id: jsonArtifact.artifact_id,
+  body_length: String(jsonArtifact.byte_size), captured_length: String(jsonArtifact.byte_size), sha256: jsonArtifact.sha256}});
+assert.match(panel.textContent, /Retained in full\..*Read from the request index/s);
+assert.match(panel.querySelector('.traffic-response-code').textContent, /"challenge"/);
+
+// The reuse states what was retained of its source, and guards the link.
+const sourceRow = (body, extra = {}) => reuse({id: 'S7:R42:41', found: true, path: '/r/41', type: 'xhr', response_body: body, ...extra});
+const truncated = {...sourceBody, case: 'captured_truncated', body_length: String(20 * 1024 * 1024), captured_length: String(16 * 1024 * 1024)};
+await showLinked(sourceRow(truncated));
+assert.match(panel.textContent, /Source body.*Truncated: the first 16,777,216 bytes of 20,971,520 bytes are retained\./s);
+assert.match(panel.textContent, /What was retained of that request's body is shown here; its state is below\./);
+assert.doesNotMatch(panel.textContent, /the bytes Blink held/);
+await showLinked({...sourceRow({...sourceBody, case: 'partial', partial_index: 2, captured_length: '10', body_length: '10',
+  record_time_ns: '1500000000'}), firstTimestamp: 3000000000n});
+assert.match(panel.textContent, /Partial: snapshot 2 holds 10 bytes of the 10 bytes that had arrived, recorded 1\.5 s before this reuse\./);
+await showLinked(sourceRow(sourceBody));
+assert.match(panel.textContent, /Source body.*Complete: \d+ bytes\./s);
+await showLinked(sourceRow(sourceBody, {mime_type: 'multipart/x-mixed-replace; boundary=x'}));
+assert.match(panel.textContent, /Blink holds its last part, while the retained body has every part/);
+for (const [reason, pattern] of [['host_differs', /requested from another host/], ['started_after', /started after this reuse/]]) {
+  await showLinked(reuse({id: 'S7:R42:41', found: false, reason, response_body: null}));
+  assert.match(panel.textContent, pattern, reason);
+  assert(!panel.querySelector('.traffic-response-open'), `${reason}: no link is offered`);
+}
+// Without the index the same guards apply to the loaded rows.
+windowRows = [{id: 'S7:R42:41', type: 'xhr', path: 'other.test', hostOnly: true, firstTimestamp: 1n, events: [{}],
+  responseStarted: {sequenceNumber: '60', sessionId: '7', processId: 42}, responseBody: record(sourceBytes, {parentEventId: '60'})}];
+await showLinked({...reuse(), host: 'cdn.fixture.test', firstTimestamp: 5n});
+assert.match(panel.textContent, /requested from another host/);
+windowRows = [{...windowRows[0], path: 'cdn.fixture.test', firstTimestamp: 9n}];
+await showLinked({...reuse(), host: 'cdn.fixture.test', firstTimestamp: 5n});
+assert.match(panel.textContent, /started after this reuse/);
+windowRows = [];
 
 // Hex pages by range to the end of the retained body, a window at a time.
 const longBinary = new Uint8Array(2 * 1024 * 1024 + 300 * 1024);

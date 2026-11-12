@@ -685,7 +685,7 @@ fn body_case_meaning(case: &str) -> &'static str {
         "cancelled" => "the page or browser stopped reading; what arrived is retained",
         "empty" => "the body had no bytes",
         "not_modified" => "HTTP 304: the server sent no body",
-        "redirected" => "every response was a redirect, whose body Chromium discards",
+        "redirected" => "redirected, then ended with no other response; Chromium discards redirect bodies",
         "not_captured_type" => {
             "images, audio, video or fonts that page elements load, kept only with REB_CAPTURE_RESPONSE_MEDIA=1"
         }

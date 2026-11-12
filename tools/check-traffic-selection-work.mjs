@@ -313,7 +313,7 @@ const eventsOf = (id, records) => Array.from({length: records}, (_, sequence) =>
   w.state.requests = w.state.nativeRequests = w.state.nativeRequests.map(request =>
     ({...request, events: [{}, {}], details: [], origin: 'live', rank: 2, status: 'pending'}));
   const whole = w.state.requests[1];
-  w.setIndexRows([{...w.row(1, 2), memory_cache_source: source}, w.row(0, 2)]);
+  w.setIndexRows([{...w.row(1, 2), memory_cache_source: source}, {...w.row(0, 2), response_body: {case: 'captured', artifact_id: '9'}}]);
   w.api.renderRequests(); await quiet();
   w.api.selectTrafficRow(whole.id);
   const held = () => w.state.requests.find(request => request.id === whole.id);
@@ -321,6 +321,9 @@ const eventsOf = (id, records) => Array.from({length: records}, (_, sequence) =>
   w.state.nativeRequests = w.state.nativeRequests.map(request => ({...request, memoryCacheSourceRow: null}));
   w.api.rebuildTrafficRequests();
   assert.deepEqual(held().memoryCacheSourceRow, source, 'A later poll keeps the reuse\'s source');
+  // Every window row takes its row's body answer: its response_started may have left the window.
+  const other = w.state.requests.find(request => request.id !== whole.id);
+  assert.equal(other.responseBodyIndex?.case, 'captured', 'A window row without a reuse source keeps its index body answer');
 }
 {
   // The window can hold the row whole and still lack the gap: selecting it, and

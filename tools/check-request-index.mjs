@@ -37,6 +37,9 @@ golden.rows.forEach((row, index) => {
       `${expected.id} body artifact`);
     assert.equal(row.response_body.record_sequence, expected.responseBody.sequenceNumber, `${expected.id} newest body record`);
   }
+  // A newest record without bytes names the snapshot of the same response still retained.
+  assert.equal(row.response_body.earlier_snapshot?.artifact_id ?? null, expected.responseBodyEarlier?.artifactId ?? null,
+    `${expected.id} earlier snapshot`);
   for (const field of ['target', 'host', 'urlTruncated', 'targetLength']) {
     assert.deepEqual(shown[field], expected[field] ?? (field === 'urlTruncated' ? false : null), `${expected.id} ${field}`);
   }
@@ -65,7 +68,8 @@ assert(archiveCell && archiveCell.text === 'Finished' && archiveCell.title.start
 // response it reused, which the index answers with that request's body.
 const cases = new Set(golden.rows.map(row => row.response_body.case));
 for (const kind of ['captured', 'not_modified', 'malformed', 'redirected', 'cancelled_before_response', 'service_worker',
-  'memory_cache', 'failed_before_response', 'renderer_answered', 'pending', 'end_lost', 'no_record']) {
+  'memory_cache', 'failed_before_response', 'renderer_answered', 'pending', 'end_lost', 'no_record', 'partial',
+  'captured_truncated', 'aborted', 'cancelled', 'empty', 'no_response', 'not_captured_session_budget']) {
   assert(cases.has(kind), `the fixture has a ${kind} row`);
 }
 const named = golden.rows.find(row => row.memory_cache_source);
@@ -73,6 +77,13 @@ assert(named && named.memory_cache_source.found && named.memory_cache_source.res
   named.memory_cache_source.response_body.artifact_id === '78' && named.memory_cache_source.response_body.partial_index === 0,
 'a reuse names its source row and that row\'s ended body, not its snapshot');
 assert.equal(golden.rows.find(row => row.id === named.memory_cache_source.id)?.response_body.case, 'captured');
+// A redirect that then fails, is cancelled or stays open reads as that, in both models.
+const byId = new Map(golden.rows.map(row => [row.id, row.response_body.case]));
+for (const [id, kind] of [['S1:R62:9', 'failed_before_response'], ['S1:R62:10', 'cancelled_before_response'],
+  ['S1:R62:11', 'pending'], ['S1:R62:8', 'not_modified'], ['S1:R61:25', 'redirected']]) {
+  assert.equal(byId.get(id), kind, `${id} after a redirect`);
+}
+assert(golden.rows.some(row => row.response_body.earlier_snapshot?.artifact_id === '85'), 'a refused end keeps its snapshot');
 for (const [sort, orders] of Object.entries(golden.orders)) {
   for (const [direction, sign] of [['asc', 1], ['desc', -1]]) {
     assert.deepEqual(orders[direction], view.trafficSortedRequests(model, sort, sign).map(request => request.id), `${sort} ${direction}`);

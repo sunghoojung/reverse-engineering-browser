@@ -145,6 +145,7 @@ native-only-check: $(UI_STARTUP_DEPS)
 	node tools/check-session-panel.mjs
 	node tools/check-source-search.mjs
 	node tools/check-invocation-sites-ui.mjs
+	node tools/check-debugger-pause-ui.mjs
 	node tools/check-native-only-startup.cjs
 	node tools/check-native-only-launch.mjs
 	python3 tools/native-js-invocation-site.py --self-test

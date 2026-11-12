@@ -88,7 +88,7 @@ enum StoredEvidenceBackendChecks {
     let debugger = call(request("/api/native-debugger"))
     precondition(debugger.status == 200 && debugger.json["availability"] as? String == "unsupported", "\(debugger)")
     let action = call(request("/api/native-debugger/actions", method: "POST",
-      body: #"{"action":"resume","target_id":"22","document_epoch":"3","lease_id":"1"}"#))
+      body: #"{"action":"resume","target_id":"22","lease_id":"1"}"#))
     precondition(action.status == 503 && action.json["code"] as? String == "dependency_unavailable", "\(action)")
 
     precondition(backend.running)

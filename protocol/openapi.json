@@ -87,6 +87,19 @@
         "description": "Under --permission full, start_live_session refuses these options before launching anything unless this flag is also set. The legacy --allow-session-start flag keeps accepting them with confirm_sensitive_capture, as before."
       }
     },
+    "paused_values": {
+      "flag": "--allow-content",
+      "operations": [
+        "get_native_debugger",
+        "native_debugger_action"
+      ],
+      "keys": [
+        "function_name",
+        "name",
+        "text"
+      ],
+      "description": "The native debugger reads values out of a page while it is paused. Those values and the page-derived names they are keyed by are omitted below --allow-content, which --permission full implies: a property name or a paused function name can carry a secret as well as its value. The gate is content admission itself, not the --omit-content flag, so the raw-flag path (--allow-effects alone, which sets neither flag) omits them too. Identifiers, counts, origins and URLs are returned at every level, as elsewhere."
+    },
     "content_reads": {
       "flag": "--allow-content",
       "conflicts": "--omit-content",
@@ -5292,7 +5305,7 @@
       "get": {
         "operationId": "get_native_debugger",
         "summary": "Read Phase 1 threads, watch rules and observations, and the pausing debugger state",
-        "description": "Phase 1 is served: threads lists Console documents, recorded workers and the native frames observation records came from (observed), watch is what the renderer confirmed armed through the Console watch command, and observations are the newest decoded records; wait on them with wait_for_events. type, the thread scope (session_id, process_id and frame_id together, an observed frame) and before select and page the observations; observations_query echoes the read and its byte scope. observation_budget_gaps names renderers that refused later records after 1,024 in one capture configuration. availability unsupported with reason browser_debugger_unsupported means no Brave build serves the pausing debugger; that is not an empty breakpoint list, and no frames, scopes or values are invented. policy proposed_pending_approval means docs/product/native-debugger-v1.md has not been approved into SAFETY.md.",
+        "description": "Phase 1 is served: threads lists Console documents, recorded workers and the native frames observation records came from (observed), watch is what the renderer confirmed armed through the Console watch command, and observations are the newest decoded records; wait on them with wait_for_events. type, the thread scope (session_id, process_id and frame_id together, an observed frame) and before select and page the observations; observations_query echoes the read and its byte scope. observation_budget_gaps names renderers that refused later records after 1,024 in one capture configuration. The pausing fields come from the debugger peer: a state command that never pauses, steps, resumes or renews a lease, which is why this read carries a state-dependent browser-control effect, like get_live_wasm. availability unsupported means no peer answered; its reason says which case. That is not an empty breakpoint list, and no document, frames, scopes or values are invented. See protocol/native-debugger-pause-v1.md.",
         "tags": [
           "native-debugger"
         ],
@@ -5342,7 +5355,14 @@
         "x-reb-execution": {
           "kind": "operation",
           "effects": [],
-          "state_dependent_effects": [],
+          "state_dependent_effects": [
+            {
+              "effects": [
+                "browser-control"
+              ],
+              "when": "A native debugger command socket is configured. The read sends one state command to that peer. No page is paused, stepped or resumed, no breakpoint changes and no lease is renewed."
+            }
+          ],
           "uncertainties": [
             "Unsupported is not an idle debugger: nothing is attached and no page is paused by this backend."
           ],
@@ -5353,11 +5373,15 @@
             }
           ],
           "confirmations": [],
-          "notes": "Reads local state only. The pausing debugger is a proposal behind --reb-native-debugger, off by default; see docs/product/native-debugger-v1.md.",
+          "notes": "Reads the phase 1 records locally and the pausing state from the peer. The pausing debugger needs --reb-native-debugger, off by default; see protocol/native-debugger-pause-v1.md.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/native_debugger.rs",
               "symbol": "state"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/native_debugger_pause.rs",
+              "symbol": "NativeDebuggerPause::state"
             }
           ]
         },
@@ -5436,7 +5460,7 @@
       "post": {
         "operationId": "native_debugger_action",
         "summary": "Set breakpoints, pause on exceptions, step, resume, or evaluate on a paused frame",
-        "description": "Every action names one selected live document (target_id) and its document_epoch; navigation makes the epoch stale. A pause holds a lease of at most 60 seconds that resumes the page visibly when it expires. Paused values are bounded, ephemeral and never added to evidence. Commands are never retried. Until a Brave build serves the debugger the response is 503 and nothing is sent.",
+        "description": "Select one live document with confirm_pause, then set breakpoints, pause on exceptions, step, resume, evaluate on a paused frame or read a scope. Every action names that document by target_id, which is one document generation: a navigation retires it, clears the authorization and hands out a new id, so a retired id is stale_document and nothing is remapped. A pause starts a lease of at most 60 seconds that the browser itself ends by resuming the page, with or without a client. Paused values are bounded, ephemeral and never added to evidence. Commands are never retried. Until a Brave build serves the debugger the response is 503 and nothing is sent. See protocol/native-debugger-pause-v1.md.",
         "tags": [
           "native-debugger"
         ],
@@ -5451,6 +5475,16 @@
           }
         },
         "responses": {
+          "200": {
+            "description": "The command reached the debugger. status says what it did or exactly what it refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeDebuggerActionResult"
+                }
+              }
+            }
+          },
           "400": {
             "description": "Invalid or unconfirmed input. Nothing was sent.",
             "content": {
@@ -5472,7 +5506,17 @@
             }
           },
           "408": {
-            "description": "The request body deadline was exceeded. Nothing was sent.",
+            "description": "The request body deadline was exceeded, or the peer did not finish its reply. Whether a sent command ran is unknown and it is not retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The peer disconnected or answered something this contract does not describe. Whether the command ran is unknown and it is not retried.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5502,7 +5546,7 @@
             }
           }
         },
-        "x-max-body-bytes": 65536,
+        "x-max-body-bytes": 16384,
         "x-source": "apps/origin-trace-backend/src/native_debugger.rs",
         "x-reb-execution": {
           "kind": "action-dependent",
@@ -5525,6 +5569,10 @@
             {
               "path": "apps/origin-trace-backend/src/app.rs",
               "symbol": "App::post"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/native_debugger_pause.rs",
+              "symbol": "NativeDebuggerPause::action"
             }
           ]
         },
@@ -23529,6 +23577,485 @@
           }
         ]
       },
+      "NativeDebuggerDocument": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_id",
+          "frame"
+        ],
+        "description": "The one authorized document. target_id is the Console document id get_native_console and the threads list use, which is itself one document generation: a navigation retires it and hands out a new one, so there is no second identity to keep in step.",
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "frame": {
+            "enum": [
+              "top",
+              "child"
+            ],
+            "description": "A same-process iframe is an ordinary selection; the inspector session belongs to its local root either way."
+          }
+        }
+      },
+      "NativeDebuggerLease": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "lease_id",
+          "state",
+          "expires_in_ms"
+        ],
+        "description": "The browser holds this deadline and resumes the page without being asked, so a client that stops calling cannot leave a page frozen.",
+        "properties": {
+          "lease_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "released",
+              "expired"
+            ]
+          },
+          "expires_in_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 60000,
+            "description": "0 for any state but active."
+          }
+        }
+      },
+      "NativeDebuggerBreakpoint": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "breakpoint_id",
+          "kind",
+          "resolved",
+          "hits",
+          "script_id",
+          "line",
+          "column",
+          "condition_set",
+          "logpoint"
+        ],
+        "description": "One script breakpoint. The DevTools XHR, event listener, DOM and CSP breakpoints belong to Blink's DOMDebugger domain, which an inspector session does not dispatch, so this contract does not claim them; native debugger observation v1 records all four without pausing. A logpoint never pauses.",
+        "properties": {
+          "breakpoint_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "kind": {
+            "enum": [
+              "line",
+              "conditional",
+              "logpoint"
+            ]
+          },
+          "resolved": {
+            "type": "boolean",
+            "description": "False while V8 has not bound a script breakpoint to a location."
+          },
+          "hits": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "script_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647,
+            "description": "The bound line, which can differ from the requested one."
+          },
+          "column": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          },
+          "condition_set": {
+            "type": "boolean"
+          },
+          "logpoint": {
+            "type": "boolean"
+          }
+        }
+      },
+      "NativeDebuggerScope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "object_id"
+        ],
+        "properties": {
+          "type": {
+            "enum": [
+              "global",
+              "local",
+              "with",
+              "closure",
+              "catch",
+              "block",
+              "script",
+              "eval",
+              "module",
+              "wasm_expression_stack",
+              "other"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "x-max-utf8-bytes": 128
+          },
+          "object_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$",
+            "description": "Read with get_properties. The id is gone the moment the pause ends."
+          }
+        }
+      },
+      "NativeDebuggerFrame": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "index",
+          "function_name",
+          "script_id",
+          "line",
+          "column",
+          "this_object_id",
+          "scopes"
+        ],
+        "description": "One paused call frame. It names no URL: script_id resolves through the session's script_identity records, as a request stack frame does.",
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1055
+          },
+          "function_name": {
+            "type": "string",
+            "x-max-utf8-bytes": 128
+          },
+          "script_id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          },
+          "column": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          },
+          "this_object_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "scopes": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/NativeDebuggerScope"
+            }
+          }
+        }
+      },
+      "NativeDebuggerPause": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason",
+          "breakpoint_id",
+          "lease_id",
+          "frames_recorded",
+          "async_frames",
+          "frames_truncated",
+          "frames_omitted",
+          "frames"
+        ],
+        "properties": {
+          "reason": {
+            "enum": [
+              "breakpoint",
+              "exception",
+              "step",
+              "pause",
+              "debugger_statement"
+            ],
+            "description": "debugger_statement cannot occur while quiet_mode is true."
+          },
+          "breakpoint_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "lease_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "frames_recorded": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1024
+          },
+          "async_frames": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32
+          },
+          "frames_omitted": {
+            "type": "boolean",
+            "description": "True when this view left the call stack out to stay inside the reply bound. frames_recorded still says how many there are."
+          },
+          "frames_truncated": {
+            "type": "boolean"
+          },
+          "frames": {
+            "type": "array",
+            "maxItems": 1056,
+            "description": "Innermost first. At most 1,024 synchronous and 32 async frames, the request-stack bound.",
+            "items": {
+              "$ref": "#/components/schemas/NativeDebuggerFrame"
+            }
+          }
+        }
+      },
+      "NativeDebuggerValue": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "text",
+          "truncated",
+          "object_id",
+          "threw"
+        ],
+        "description": "A bounded, ephemeral rendering of one page value. Never added to evidence, logged or exported.",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "text": {
+            "type": "string",
+            "x-max-utf8-bytes": 2048
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "object_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "threw": {
+            "type": "boolean"
+          }
+        }
+      },
+      "NativeDebuggerProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "object_id",
+          "offset",
+          "next_offset",
+          "total",
+          "items"
+        ],
+        "properties": {
+          "object_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1048576
+          },
+          "next_offset": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[1-9][0-9]{0,19}$",
+            "description": "Null on the last page."
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4096
+          },
+          "items": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name",
+                "kind",
+                "text",
+                "truncated",
+                "object_id"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "x-max-utf8-bytes": 128
+                },
+                "kind": {
+                  "type": "string",
+                  "maxLength": 32
+                },
+                "text": {
+                  "type": "string",
+                  "x-max-utf8-bytes": 2048
+                },
+                "truncated": {
+                  "type": "boolean"
+                },
+                "object_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^[1-9][0-9]{0,19}$"
+                }
+              }
+            }
+          }
+        }
+      },
+      "NativeDebuggerActionResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "status",
+          "active_indication",
+          "paused",
+          "resumed",
+          "lease",
+          "pause",
+          "breakpoint",
+          "value",
+          "properties"
+        ],
+        "description": "One command's outcome. status ok means it ran; every other status names exactly what was refused, and nothing is retried. No command result carries a pause: a step cannot know the next one, and the current one is read from the state, so pause is null here.",
+        "properties": {
+          "action": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "stale_document",
+              "not_authorized",
+              "not_paused",
+              "stale_lease",
+              "unknown_breakpoint",
+              "unknown_object",
+              "limit",
+              "invalid_input",
+              "evaluation_error",
+              "unsupported",
+              "busy",
+              "expired"
+            ]
+          },
+          "active_indication": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "const": "Debugger active (detectable)"
+              }
+            ],
+            "description": "The notice every result carries while a document is selected, in the same words the state read and the interface use. Null when nothing is authorized."
+          },
+          "paused": {
+            "type": "boolean",
+            "description": "Whether the page is stopped after this command."
+          },
+          "resumed": {
+            "type": "boolean",
+            "description": "Whether this command let the page run again."
+          },
+          "lease": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NativeDebuggerLease"
+              }
+            ]
+          },
+          "pause": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NativeDebuggerPause"
+              }
+            ],
+            "description": "The pause in force when this reply was written. After a step or a resume that is usually null, because the page has not stopped again yet; read get_native_debugger for the next pause."
+          },
+          "breakpoint": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NativeDebuggerBreakpoint"
+              }
+            ]
+          },
+          "value": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NativeDebuggerValue"
+              }
+            ]
+          },
+          "properties": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NativeDebuggerProperties"
+              }
+            ]
+          }
+        }
+      },
       "NativeDebuggerState": {
         "type": "object",
         "additionalProperties": false,
@@ -23540,8 +24067,14 @@
           "policy",
           "detectable",
           "lease_limit_ms",
+          "active_indication",
+          "quiet_mode",
+          "document",
+          "last_clear",
+          "exceptions",
           "lease",
           "paused",
+          "pause",
           "breakpoints",
           "threads",
           "watch",
@@ -23565,8 +24098,10 @@
               "string",
               "null"
             ],
+            "description": "browser_debugger_unsupported: no command socket is configured. peer_unavailable: a socket is configured and the peer did not answer a readable state. A browser without the experiment opens no socket at all, so there is no third answer.",
             "enum": [
               "browser_debugger_unsupported",
+              "peer_unavailable",
               null
             ]
           },
@@ -23574,10 +24109,67 @@
             "const": "--reb-native-debugger"
           },
           "policy": {
+            "const": "approved",
+            "description": "The SAFETY.md paragraph for a pausing debugger is in force."
+          },
+          "active_indication": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64,
+            "description": "The words the interface shows wherever the debugger is on, repeated here so an HTTP or MCP client carries the same notice: Debugger active (detectable) while a document is authorized, null when none is."
+          },
+          "quiet_mode": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "True when the browser ignores the page's own debugger statements, so those never pause. Null when no peer answered."
+          },
+          "document": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NativeDebuggerDocument"
+              }
+            ],
+            "description": "The one selected and confirmed live document, pinned to its generation. Null when nothing is authorized."
+          },
+          "last_clear": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last authorization ended, for the authorization being read: a fresh selection has none, so replacing one leaves this null on the document that replaced it. navigated means the page moved on, not that the client released it; idle means no command touched it for the idle bound.",
             "enum": [
-              "proposed_pending_approval",
-              "approved"
+              "navigated",
+              "released",
+              "replaced",
+              "peer_lost",
+              "idle",
+              null
             ]
+          },
+          "exceptions": {
+            "enum": [
+              "none",
+              "uncaught",
+              "all"
+            ]
+          },
+          "pause": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NativeDebuggerPause"
+              }
+            ],
+            "description": "The current pause. Null whenever paused is false; never an invented frame."
           },
           "detectable": {
             "const": true
@@ -23591,25 +24183,10 @@
                 "type": "null"
               },
               {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "lease_id",
-                  "expires_in_ms"
-                ],
-                "properties": {
-                  "lease_id": {
-                    "type": "string",
-                    "pattern": "^[1-9][0-9]{0,19}$"
-                  },
-                  "expires_in_ms": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 60000
-                  }
-                }
+                "$ref": "#/components/schemas/NativeDebuggerLease"
               }
-            ]
+            ],
+            "description": "The current or last lease of this authorization. An expired lease stays visible so the interface can say the browser resumed the page."
           },
           "paused": {
             "type": "boolean"
@@ -23617,8 +24194,9 @@
           "breakpoints": {
             "type": "array",
             "maxItems": 64,
+            "description": "Every breakpoint of this authorization, all kinds together.",
             "items": {
-              "type": "object"
+              "$ref": "#/components/schemas/NativeDebuggerBreakpoint"
             }
           },
           "threads": {
@@ -24287,49 +24865,114 @@
             "required": [
               "action",
               "target_id",
-              "document_epoch",
-              "script_id",
-              "line",
-              "column",
               "confirm_pause"
             ],
             "properties": {
               "action": {
                 "type": "string",
-                "const": "set_breakpoint"
+                "const": "select_document"
               },
               "target_id": {
                 "type": "string",
                 "pattern": "^[1-9][0-9]{0,19}$"
               },
-              "document_epoch": {
+              "confirm_pause": {
+                "const": true
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "current-document",
+                  "condition": "target_id must name a document generation the browser currently has; a retired one is stale and nothing is attached."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirm_pause",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "Authorizes one live document for the debugger, pinned to this generation. It attaches the inspector session; it does not pause. A second selection replaces the first.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger_pause.rs",
+                  "symbol": "NativeDebuggerPause::action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "release_document"
+              },
+              "target_id": {
                 "type": "string",
                 "pattern": "^[1-9][0-9]{0,19}$"
-              },
-              "script_id": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 4294967295
-              },
-              "line": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 4294967295
-              },
-              "column": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 4294967295
-              },
-              "condition": {
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id names the document selected with confirmation; a retired generation is stale and nothing runs."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Clears the authorization, drops every breakpoint this connection set and resumes the page if it was paused.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger_pause.rs",
+                  "symbol": "NativeDebuggerPause::action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "confirm_pause"
+            ],
+            "properties": {
+              "action": {
                 "type": "string",
-                "minLength": 1,
-                "x-max-utf8-bytes": 1024
+                "const": "pause"
               },
-              "log_message": {
+              "target_id": {
                 "type": "string",
-                "minLength": 1,
-                "x-max-utf8-bytes": 1024
+                "pattern": "^[1-9][0-9]{0,19}$"
               },
               "confirm_pause": {
                 "const": true
@@ -24350,7 +24993,7 @@
                 },
                 {
                   "id": "selected-document",
-                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                  "condition": "target_id names the document selected with confirmation; a retired generation is stale and nothing runs."
                 }
               ],
               "confirmations": [
@@ -24360,7 +25003,96 @@
                   "when": {}
                 }
               ],
-              "notes": "A line, conditional (condition) or logpoint (log_message, never pauses) breakpoint. A pause starts the lease.",
+              "notes": "Stops the page at the next statement it runs, as the DevTools pause button does. The pause starts the lease.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_debugger_pause.rs",
+                  "symbol": "NativeDebuggerPause::action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "target_id",
+              "script_id",
+              "line",
+              "column",
+              "confirm_pause"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "set_breakpoint"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              },
+              "script_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647
+              },
+              "line": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647
+              },
+              "column": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "condition": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 1024
+              },
+              "log_message": {
+                "type": "string",
+                "minLength": 1,
+                "x-max-utf8-bytes": 1024
+              },
+              "confirm_pause": {
+                "const": true
+              }
+            },
+            "not": {
+              "required": [
+                "condition",
+                "log_message"
+              ]
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "debugger-experiment",
+                  "condition": "A Brave build started with --reb-native-debugger serving the debugger peer. Otherwise 503 and nothing is sent."
+                },
+                {
+                  "id": "selected-document",
+                  "condition": "target_id names the document selected with confirmation; a retired generation is stale and nothing runs."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirm_pause",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "A line, conditional (condition) or logpoint (log_message, never pauses) breakpoint, never both at once. A pause starts the lease.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/native_debugger.rs",
@@ -24375,7 +25107,6 @@
             "required": [
               "action",
               "target_id",
-              "document_epoch",
               "breakpoint_id"
             ],
             "properties": {
@@ -24384,10 +25115,6 @@
                 "const": "remove_breakpoint"
               },
               "target_id": {
-                "type": "string",
-                "pattern": "^[1-9][0-9]{0,19}$"
-              },
-              "document_epoch": {
                 "type": "string",
                 "pattern": "^[1-9][0-9]{0,19}$"
               },
@@ -24410,7 +25137,7 @@
                 },
                 {
                   "id": "selected-document",
-                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                  "condition": "target_id names the document selected with confirmation; a retired generation is stale and nothing runs."
                 }
               ],
               "confirmations": [],
@@ -24429,7 +25156,6 @@
             "required": [
               "action",
               "target_id",
-              "document_epoch",
               "mode",
               "confirm_pause"
             ],
@@ -24439,10 +25165,6 @@
                 "const": "pause_on_exceptions"
               },
               "target_id": {
-                "type": "string",
-                "pattern": "^[1-9][0-9]{0,19}$"
-              },
-              "document_epoch": {
                 "type": "string",
                 "pattern": "^[1-9][0-9]{0,19}$"
               },
@@ -24473,7 +25195,7 @@
                 },
                 {
                   "id": "selected-document",
-                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                  "condition": "target_id names the document selected with confirmation; a retired generation is stale and nothing runs."
                 }
               ],
               "confirmations": [
@@ -24498,7 +25220,6 @@
             "required": [
               "action",
               "target_id",
-              "document_epoch",
               "lease_id"
             ],
             "properties": {
@@ -24507,10 +25228,6 @@
                 "const": "resume"
               },
               "target_id": {
-                "type": "string",
-                "pattern": "^[1-9][0-9]{0,19}$"
-              },
-              "document_epoch": {
                 "type": "string",
                 "pattern": "^[1-9][0-9]{0,19}$"
               },
@@ -24533,7 +25250,7 @@
                 },
                 {
                   "id": "selected-document",
-                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                  "condition": "target_id names the document selected with confirmation; a retired generation is stale and nothing runs."
                 }
               ],
               "confirmations": [],
@@ -24552,7 +25269,6 @@
             "required": [
               "action",
               "target_id",
-              "document_epoch",
               "lease_id"
             ],
             "properties": {
@@ -24561,10 +25277,6 @@
                 "const": "step_over"
               },
               "target_id": {
-                "type": "string",
-                "pattern": "^[1-9][0-9]{0,19}$"
-              },
-              "document_epoch": {
                 "type": "string",
                 "pattern": "^[1-9][0-9]{0,19}$"
               },
@@ -24587,7 +25299,7 @@
                 },
                 {
                   "id": "selected-document",
-                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                  "condition": "target_id names the document selected with confirmation; a retired generation is stale and nothing runs."
                 }
               ],
               "confirmations": [],
@@ -24606,7 +25318,6 @@
             "required": [
               "action",
               "target_id",
-              "document_epoch",
               "lease_id"
             ],
             "properties": {
@@ -24615,10 +25326,6 @@
                 "const": "step_into"
               },
               "target_id": {
-                "type": "string",
-                "pattern": "^[1-9][0-9]{0,19}$"
-              },
-              "document_epoch": {
                 "type": "string",
                 "pattern": "^[1-9][0-9]{0,19}$"
               },
@@ -24641,7 +25348,7 @@
                 },
                 {
                   "id": "selected-document",
-                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                  "condition": "target_id names the document selected with confirmation; a retired generation is stale and nothing runs."
                 }
               ],
               "confirmations": [],
@@ -24660,7 +25367,6 @@
             "required": [
               "action",
               "target_id",
-              "document_epoch",
               "lease_id"
             ],
             "properties": {
@@ -24669,10 +25375,6 @@
                 "const": "step_out"
               },
               "target_id": {
-                "type": "string",
-                "pattern": "^[1-9][0-9]{0,19}$"
-              },
-              "document_epoch": {
                 "type": "string",
                 "pattern": "^[1-9][0-9]{0,19}$"
               },
@@ -24695,7 +25397,7 @@
                 },
                 {
                   "id": "selected-document",
-                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                  "condition": "target_id names the document selected with confirmation; a retired generation is stale and nothing runs."
                 }
               ],
               "confirmations": [],
@@ -24714,7 +25416,6 @@
             "required": [
               "action",
               "target_id",
-              "document_epoch",
               "lease_id"
             ],
             "properties": {
@@ -24723,10 +25424,6 @@
                 "const": "release_lease"
               },
               "target_id": {
-                "type": "string",
-                "pattern": "^[1-9][0-9]{0,19}$"
-              },
-              "document_epoch": {
                 "type": "string",
                 "pattern": "^[1-9][0-9]{0,19}$"
               },
@@ -24749,7 +25446,7 @@
                 },
                 {
                   "id": "selected-document",
-                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                  "condition": "target_id names the document selected with confirmation; a retired generation is stale and nothing runs."
                 }
               ],
               "confirmations": [],
@@ -24768,7 +25465,6 @@
             "required": [
               "action",
               "target_id",
-              "document_epoch",
               "lease_id",
               "call_frame_index",
               "expression"
@@ -24779,10 +25475,6 @@
                 "const": "evaluate_on_frame"
               },
               "target_id": {
-                "type": "string",
-                "pattern": "^[1-9][0-9]{0,19}$"
-              },
-              "document_epoch": {
                 "type": "string",
                 "pattern": "^[1-9][0-9]{0,19}$"
               },
@@ -24817,7 +25509,7 @@
                 },
                 {
                   "id": "selected-document",
-                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                  "condition": "target_id names the document selected with confirmation; a retired generation is stale and nothing runs."
                 }
               ],
               "confirmations": [],
@@ -24836,7 +25528,6 @@
             "required": [
               "action",
               "target_id",
-              "document_epoch",
               "lease_id",
               "object_id",
               "offset"
@@ -24847,10 +25538,6 @@
                 "const": "get_properties"
               },
               "target_id": {
-                "type": "string",
-                "pattern": "^[1-9][0-9]{0,19}$"
-              },
-              "document_epoch": {
                 "type": "string",
                 "pattern": "^[1-9][0-9]{0,19}$"
               },
@@ -24882,7 +25569,7 @@
                 },
                 {
                   "id": "selected-document",
-                  "condition": "target_id and document_epoch name the document selected with confirmation; a navigated document is stale and nothing runs."
+                  "condition": "target_id names the document selected with confirmation; a retired generation is stale and nothing runs."
                 }
               ],
               "confirmations": [],

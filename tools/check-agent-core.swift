@@ -229,8 +229,17 @@ enum AgentCoreChecks {
     let unlisted = try! await agent.callTool(name: "capture_action", arguments: ["action": "pause"], approved: true)
     check(unlisted["isError"] as? Bool == true, "an unlisted tool is refused")
     try! agent.appendTranscript(["role": "user", "text": "What was captured?"])
+    // A paused page's values are ephemeral, so the row that carried them is
+    // kept without its result rather than written to a file that outlives
+    // the pause.
+    try! agent.appendTranscript(["role": "tool", "name": "native_debugger_action",
+      "arguments": ["body": ["action": "get_properties"]],
+      "result": "{\"properties\":{\"items\":[{\"name\":\"sessionSecret\"}]}}"])
     let file = transcripts.appendingPathComponent("session-test-1.jsonl")
-    check(((try? String(contentsOf: file, encoding: .utf8)) ?? "").contains("What was captured?"), "rows reach the transcript")
+    let written = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
+    check(written.contains("What was captured?"), "rows reach the transcript")
+    check(written.contains("native_debugger_action") && !written.contains("sessionSecret"),
+      "a paused page value is not written to the transcript")
     check((try! FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as! NSNumber).intValue == 0o600, "the transcript is user-only")
     check((try! FileManager.default.attributesOfItem(atPath: transcripts.path)[.posixPermissions] as! NSNumber).intValue == 0o700, "its directory is user-only")
     agent.setPanelVisible(false)

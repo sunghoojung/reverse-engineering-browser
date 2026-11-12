@@ -1,0 +1,175 @@
+/* Paused-state sections of the Sources debugger sidebar
+ * (protocol/native-debugger-pause-v1.md). Only the classes debugger_pause.js
+ * creates; the sidebar owns everything around them. */
+.debugger-pause-active {
+  margin: 0 0 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--bg);
+  background: var(--amber);
+}
+
+.debugger-pause-active[data-active="no"] {
+  color: var(--muted);
+  background: var(--panel-3);
+}
+
+.debugger-pause-unsupported,
+.debugger-pause-empty {
+  margin: 0;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.debugger-pause-notice {
+  margin: 6px 0 0;
+  padding: 4px 6px;
+  border-left: 2px solid var(--red);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.debugger-pause-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 2px 0;
+  font-size: 11px;
+}
+
+.debugger-pause-label {
+  flex: 0 0 38%;
+  color: var(--faint);
+}
+
+.debugger-pause-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text);
+  font-family: var(--code-font);
+  overflow-wrap: anywhere;
+}
+
+.debugger-pause-name {
+  flex: 0 0 38%;
+  color: var(--cyan);
+  font-family: var(--code-font);
+  overflow-wrap: anywhere;
+}
+
+.debugger-pause-threw {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--red);
+  font-family: var(--code-font);
+  overflow-wrap: anywhere;
+}
+
+.debugger-pause-state {
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.debugger-pause-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.debugger-pause-control,
+.debugger-pause-read,
+.debugger-pause-remove,
+.debugger-pause-more,
+.debugger-pause-watch-add,
+.debugger-pause-scope-title {
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.debugger-pause-control:disabled,
+.debugger-pause-read:disabled,
+.debugger-pause-remove:disabled,
+.debugger-pause-more:disabled,
+.debugger-pause-watch-add:disabled {
+  color: var(--faint);
+  cursor: default;
+  opacity: 0.6;
+}
+
+.debugger-pause-control:focus-visible,
+.debugger-pause-read:focus-visible,
+.debugger-pause-remove:focus-visible,
+.debugger-pause-more:focus-visible,
+.debugger-pause-watch-add:focus-visible,
+.debugger-pause-scope-title:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.debugger-pause-list {
+  margin: 4px 0 0;
+  padding: 0 0 0 2px;
+  list-style: none;
+}
+
+.debugger-pause-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  padding: 3px 0;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11px;
+}
+
+.debugger-pause-frame {
+  display: block;
+  color: var(--text);
+  font-family: var(--code-font);
+  overflow-wrap: anywhere;
+}
+
+.debugger-pause-scope {
+  margin-top: 6px;
+}
+
+.debugger-pause-scope-title {
+  display: block;
+  width: 100%;
+  text-align: left;
+}
+
+.debugger-pause-watch-form {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.debugger-pause-watch-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--code-font);
+  font-size: 11px;
+}
+
+.debugger-pause-watch-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}

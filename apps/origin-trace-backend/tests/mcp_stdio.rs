@@ -22,12 +22,23 @@ impl Server {
         Self::start_on(0)
     }
     fn start_on(port: u16) -> Self {
-        Self::start_config(port, None)
+        Self::start_config(port, None, None)
     }
-    fn start_config(port: u16, active_endpoint: Option<&std::path::Path>) -> Self {
+    /// A backend that serves the pausing debugger through this peer socket.
+    fn start_with_debugger(socket: &std::path::Path) -> Self {
+        Self::start_config(0, None, Some(socket))
+    }
+    fn start_config(
+        port: u16,
+        active_endpoint: Option<&std::path::Path>,
+        debugger_socket: Option<&std::path::Path>,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let endpoint = root.path().join("endpoint");
         let mut command = Command::new(env!("CARGO_BIN_EXE_origin-trace-backend"));
+        if let Some(socket) = debugger_socket {
+            command.arg("--native-debugger-socket").arg(socket);
+        }
         if let Some(active_endpoint) = active_endpoint {
             command
                 .arg("--active-endpoint-file")
@@ -1392,7 +1403,7 @@ async fn instance_precondition_rejects_duplicate_headers_before_body_dispatch() 
 fn live_backend_publishes_the_canonical_alias_without_idle_takeover() {
     let root = tempfile::tempdir().unwrap();
     let canonical = root.path().join("canonical.endpoint");
-    let live = Server::start_config(0, Some(&canonical));
+    let live = Server::start_config(0, Some(&canonical), None);
     assert_eq!(
         std::fs::read_to_string(&canonical).unwrap().trim(),
         live.url
@@ -2340,4 +2351,249 @@ fn ending_its_own_session_returns_a_connection_to_where_it_started() {
         researcher.request("tools/call", end)["result"]["isError"],
         false
     );
+}
+
+/// The pausing debugger through the projection. Every pausing action controls
+/// the browser, so the action tool is hidden without `--allow-effects`, and
+/// the read sends one command to the peer, so it is classified like
+/// `get_live_wasm` rather than as a pure local read.
+/// See protocol/native-debugger-pause-v1.md.
+#[test]
+fn the_native_debugger_tools_are_effectful_and_refuse_without_a_peer() {
+    let server = Server::start();
+    let mut read_only = Mcp::start(&server.url, false);
+    let names = tool_names(&read_only.request("tools/list", json!({})));
+    for hidden in ["native_debugger_action", "get_native_debugger"] {
+        assert!(
+            !names.iter().any(|name| name == hidden),
+            "{hidden} is listed without --allow-effects"
+        );
+    }
+
+    let mut effects = Mcp::start(&server.url, true);
+    let listed = effects.request("tools/list", json!({}));
+    let names = tool_names(&listed);
+    assert!(names.iter().any(|name| name == "native_debugger_action"));
+    assert!(names.iter().any(|name| name == "get_native_debugger"));
+
+    let tool = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "native_debugger_action")
+        .expect("the action tool is listed");
+    let schema = serde_json::to_string(&tool["inputSchema"]).unwrap();
+    for action in [
+        "select_document",
+        "release_document",
+        "set_breakpoint",
+        "remove_breakpoint",
+        "pause_on_exceptions",
+        "pause",
+        "resume",
+        "step_over",
+        "step_into",
+        "step_out",
+        "release_lease",
+        "evaluate_on_frame",
+        "get_properties",
+    ] {
+        assert!(schema.contains(action), "the projection omits {action}");
+    }
+    // The DOMDebugger kinds are deliberately absent: an in-process
+    // V8InspectorSession cannot dispatch that domain, so the contract has no
+    // action a client could call and get a working breakpoint from.
+    for absent in [
+        "set_xhr_breakpoint",
+        "set_event_listener_breakpoint",
+        "set_dom_breakpoint",
+        "set_csp_breakpoint",
+    ] {
+        assert!(
+            !schema.contains(absent),
+            "the projection still offers {absent}"
+        );
+    }
+
+    let state = effects.request("tools/call", json!({"name": "get_native_debugger"}));
+    let structured = &state["result"]["structuredContent"];
+    assert_eq!(structured["availability"], "unsupported");
+    assert_eq!(structured["reason"], "browser_debugger_unsupported");
+    assert_eq!(structured["policy"], "approved");
+    assert_eq!(structured["paused"], false);
+    assert_eq!(structured["pause"], Value::Null);
+
+    // Without a peer the command is refused and nothing is sent.
+    let refused = effects.request(
+        "tools/call",
+        json!({"name": "native_debugger_action", "arguments": {"body": {
+            "action": "select_document", "target_id": "22", "confirm_pause": true}}}),
+    );
+    assert!(
+        tool_text(&refused).contains("no page paused, stepped or resumed"),
+        "{refused}"
+    );
+
+    // An unconfirmed selection never reaches the socket layer at all, and the
+    // refusal names every action this contract defines.
+    let unconfirmed = effects.request(
+        "tools/call",
+        json!({"name": "native_debugger_action", "arguments": {"body": {
+            "action": "select_document", "target_id": "22"}}}),
+    );
+    let refusal = &unconfirmed["result"]["structuredContent"];
+    assert_eq!(unconfirmed["result"]["isError"], true, "{unconfirmed}");
+    assert_eq!(
+        refusal["details"]["missing_fields"],
+        json!(["confirm_pause"])
+    );
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("No request was sent")
+    );
+    let allowed: Vec<&str> = refusal["details"]["allowed_actions"]
+        .as_array()
+        .expect("the refusal lists the actions")
+        .iter()
+        .map(|action| action.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        allowed,
+        [
+            "evaluate_on_frame",
+            "get_properties",
+            "pause",
+            "pause_on_exceptions",
+            "release_document",
+            "release_lease",
+            "remove_breakpoint",
+            "resume",
+            "select_document",
+            "set_breakpoint",
+            "step_into",
+            "step_out",
+            "step_over",
+        ],
+        "the refusal names every action the contract defines"
+    );
+}
+
+/// True when any string anywhere in `value` is exactly `needle`.
+fn contains_string(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(text) => text == needle,
+        Value::Array(items) => items.iter().any(|item| contains_string(item, needle)),
+        Value::Object(fields) => fields.values().any(|field| contains_string(field, needle)),
+        _ => false,
+    }
+}
+
+/// Values read out of a paused page are captured content, and so are the
+/// page-derived names they are keyed by: a property name carries a secret as
+/// well as its value. Below --allow-content both are omitted, and at full
+/// access both come back. See x-reb-mcp.paused_values.
+#[test]
+fn paused_page_values_and_their_names_need_allow_content() {
+    use origin_trace_backend::native_debugger_pause::{
+        Engine, FIXTURE_SCRIPT_ID, FIXTURE_TARGET, Peer,
+    };
+    let peer = Peer::spawn(Engine::new()).unwrap();
+    let server = Server::start_with_debugger(peer.socket());
+    let target = FIXTURE_TARGET.to_string();
+
+    // Arm and pause through the peer, the way a researcher would.
+    peer.with_engine(|engine| {
+        assert_eq!(
+            engine.command_by_action(
+                FIXTURE_TARGET,
+                0,
+                &json!({"action": "select_document", "confirm_pause": true}),
+            ),
+            "ok"
+        );
+        assert_eq!(
+            engine.command_by_action(
+                FIXTURE_TARGET,
+                0,
+                &json!({"action": "set_breakpoint", "script_id": FIXTURE_SCRIPT_ID, "line": 7,
+                    "column": 4, "condition": "item === 2", "confirm_pause": true}),
+            ),
+            "ok"
+        );
+        engine.run();
+    });
+    assert!(peer.with_engine(|engine| engine.is_paused()));
+
+    // The third case is the raw-flag path: --allow-effects on its own sets
+    // neither --omit-content nor --allow-content, and must still withhold
+    // what --permission full is required for.
+    for (level, flags, content) in [
+        ("auto", vec!["--permission", "auto"], false),
+        ("full", vec!["--permission", "full"], true),
+        ("effects-only", vec!["--allow-effects"], false),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_reb-api"));
+        command
+            .args(["mcp", "--base-url", &server.url, "--timeout", "15"])
+            .args(&flags)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut mcp = Mcp::from_command(&mut command);
+        let state = mcp.request("tools/call", json!({"name": "get_native_debugger"}));
+        let structured = &state["result"]["structuredContent"];
+        assert_eq!(structured["paused"], true, "{level}");
+        assert_eq!(
+            structured["active_indication"], "Debugger active (detectable)",
+            "{level}"
+        );
+        let frame = &structured["pause"]["frames"][0];
+        let scope = frame["scopes"][0]["object_id"].as_str().unwrap().to_owned();
+        let lease = structured["lease"]["lease_id"].as_str().unwrap().to_owned();
+        if content {
+            assert_eq!(frame["function_name"], "collect", "{level}");
+        } else {
+            assert_eq!(frame["function_name"]["omitted"], "string", "{level}");
+            assert!(!state.to_string().contains("collect"), "{state}");
+        }
+        // Identifiers and positions are returned at every level.
+        assert_eq!(frame["script_id"], FIXTURE_SCRIPT_ID, "{level}");
+        assert_eq!(frame["line"], 7, "{level}");
+
+        let read = mcp.request(
+            "tools/call",
+            json!({"name": "native_debugger_action", "arguments": {"body": {
+                "action": "get_properties", "target_id": target, "lease_id": lease,
+                "object_id": scope, "offset": 0}}}),
+        );
+        let items = &read["result"]["structuredContent"]["properties"]["items"];
+        if content {
+            let names: Vec<&str> = items
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, ["item", "items", "total"], "{level}");
+            assert_eq!(items[0]["text"], "2", "{level}");
+        } else {
+            assert_eq!(items[0]["name"]["omitted"], "string", "{level}");
+            assert_eq!(items[0]["text"]["omitted"], "string", "{level}");
+            // No string anywhere in the result is a name or value from the
+            // page, however it is nested.
+            for page in ["item", "items", "total", "collect"] {
+                assert!(
+                    !contains_string(&read, page),
+                    "{level}: {page} reached the model: {read}"
+                );
+            }
+        }
+        assert_eq!(
+            items.as_array().unwrap().len(),
+            3,
+            "{level}: the count is not a secret"
+        );
+    }
 }

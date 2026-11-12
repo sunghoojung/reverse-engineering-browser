@@ -816,35 +816,69 @@ fn compact_len(value: &Value) -> usize {
 /// Every row and identifier stays, so an in-app agent can still cite evidence,
 /// but source, bytecode, bodies and long strings never reach its provider. A
 /// small response is otherwise inlined whole.
-fn omit_content_fields(value: &Value, key: Option<&str>, string_chars: usize) -> Value {
-    if key.is_some_and(omitted_content_key) {
+/// `page_keys` are the extra keys one operation declares as page content in
+/// `x-reb-mcp.paused_values`. A property name read out of a paused page can
+/// carry a secret as well as its value, so it is omitted with the values.
+/// With `fields` false only those keys are omitted: that is the case of a
+/// caller that may read stored content but is not allowed values out of a
+/// paused page.
+fn omit_content_fields(
+    value: &Value,
+    key: Option<&str>,
+    string_chars: usize,
+    page_keys: &[String],
+    fields: bool,
+) -> Value {
+    if fields && key.is_some_and(omitted_content_key) {
         return content_omission(value);
     }
+    let page_key = key.is_some_and(|name| page_keys.iter().any(|listed| listed == name));
     match value {
         Value::String(text)
-            if key.is_some_and(omitted_string_key) || !short_string(text, string_chars) =>
+            if page_key
+                || (fields
+                    && (key.is_some_and(omitted_string_key)
+                        || !short_string(text, string_chars))) =>
         {
             string_omission(text)
         }
         Value::Array(items) => Value::Array(
             items
                 .iter()
-                .map(|item| omit_content_fields(item, key, string_chars))
+                .map(|item| omit_content_fields(item, key, string_chars, page_keys, fields))
                 .collect(),
         ),
-        Value::Object(fields) => Value::Object(
-            fields
+        Value::Object(fields_of) => Value::Object(
+            fields_of
                 .iter()
                 .map(|(name, child)| {
                     (
                         name.clone(),
-                        omit_content_fields(child, Some(name), string_chars),
+                        omit_content_fields(child, Some(name), string_chars, page_keys, fields),
                     )
                 })
                 .collect(),
         ),
         other => other.clone(),
     }
+}
+
+/// The page-content keys `name` declares, empty for every other operation.
+fn paused_value_keys(spec: &Value, name: &str) -> Vec<String> {
+    let policy = &spec["x-reb-mcp"]["paused_values"];
+    if policy["flag"] != "--allow-content"
+        || !policy["operations"]
+            .as_array()
+            .is_some_and(|operations| operations.iter().any(|listed| listed == name))
+    {
+        return Vec::new();
+    }
+    policy["keys"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|key| key.as_str().map(str::to_owned))
+        .collect()
 }
 
 fn structural_summary(bytes: &[u8], limit: usize, string_chars: usize, value: &Value) -> Value {
@@ -1205,12 +1239,25 @@ async fn call_tool(
             completed.bytes = serde_json::to_vec(&value).expect("session context JSON");
         }
     }
-    if omit_content
+    // Values read out of a paused page, and the page-derived names they are
+    // keyed by, are gated on content admission itself rather than on the omit
+    // flag: `--allow-effects` alone sets neither flag, and without this the
+    // raw-flag path would hand a model exactly what `--permission full` is
+    // required for.
+    let page_keys = paused_value_keys(spec, name);
+    let omit_page_values = !allow_content && !page_keys.is_empty();
+    if (omit_content || omit_page_values)
         && completed.status == 200
         && !completed.unreadable
         && let Ok(value) = serde_json::from_slice::<Value>(&completed.bytes)
     {
-        let omitted = omit_content_fields(&value, None, projection.summary_string_chars);
+        let omitted = omit_content_fields(
+            &value,
+            None,
+            projection.summary_string_chars,
+            &page_keys,
+            omit_content,
+        );
         completed.bytes = serde_json::to_vec(&omitted).expect("omitted content JSON");
     }
     project_completed(
@@ -2417,7 +2464,7 @@ mod tests {
             "long_note": "x".repeat(400),
             "kept_value": 7
         });
-        let result = super::omit_content_fields(&document, None, 160);
+        let result = super::omit_content_fields(&document, None, 160, &[], true);
         assert_eq!(result["events"].as_array().unwrap().len(), 2);
         assert_eq!(result["events"][0]["sequence_number"], "41");
         assert_eq!(result["events"][0]["url"], "https://owned.example/a");
@@ -2429,6 +2476,29 @@ mod tests {
         assert_eq!(result["long_note"]["omitted"], "string");
         assert_eq!(result["kept_value"], 7);
         assert!(!result.to_string().contains("SECRET"));
+
+        // With the content fields allowed, only the keys an operation
+        // declares as paused page values are dropped. That is the path a
+        // caller takes with --allow-effects and neither content flag.
+        let paused = json!({
+            "pause": {"frames": [{"function_name": "collect", "script_id": 4, "line": 7}]},
+            "properties": {"items": [{"name": "sessionSecret", "text": "value", "object_id": "2"}]}
+        });
+        let keys = [
+            "function_name".to_owned(),
+            "name".to_owned(),
+            "text".to_owned(),
+        ];
+        let gated = super::omit_content_fields(&paused, None, 160, &keys, false);
+        assert_eq!(
+            gated["pause"]["frames"][0]["function_name"]["omitted"],
+            "string"
+        );
+        assert_eq!(gated["pause"]["frames"][0]["line"], 7);
+        assert_eq!(gated["properties"]["items"][0]["name"]["omitted"], "string");
+        assert_eq!(gated["properties"]["items"][0]["text"]["omitted"], "string");
+        assert_eq!(gated["properties"]["items"][0]["object_id"], "2");
+        assert!(!gated.to_string().contains("sessionSecret"));
     }
 
     #[test]

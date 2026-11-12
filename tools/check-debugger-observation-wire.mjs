@@ -42,6 +42,7 @@ for (const {name, valid, event} of cases) {
     assert.deepEqual(model.requestsFromEvents([event], 'live'), [], `A watch match is not a request row: ${name}`);
   }
 }
-assert.deepEqual([...types].sort(), ['csp_violation', 'dom_mutation', 'exception_observation', 'listener_dispatch',
+assert.deepEqual([...types].sort(), ['csp_violation', 'debugger_attached', 'debugger_breakpoint',
+  'debugger_paused', 'debugger_resumed', 'dom_mutation', 'exception_observation', 'listener_dispatch',
   'request_watch_match', 'timer_observation']);
 console.log(`PASS debugger observation wire: ${cases.length} C++ and Python verdicts agree; the UI poll accepts all ${types.size} record types`);

@@ -2211,8 +2211,13 @@ graph and followed like a click on it, with its CFG and a trail entry. What
 the graph selects for the host, reported with cause `host` or `replay` (a
 queued `select` landing, the stack of the request the app shows, a trail
 entry reselected), updates the Related rail and the pane head but is not a
-pick, unless it is the card a Related pick asked for before the graph was
-drawn.
+pick. A Related pick of a card the graph has not drawn yet is no pick either:
+the graph selects it once drawn and a notice says so. Every setter the
+workspace calls is silent, so only the researcher's own picks come back: the
+graph's and the block graph view's setters, the timeline's `select`, and the
+app's Lineage row selection. The app counts its request changes in
+`state.requestRevision`; a change the workspace asked for itself, during its
+own pick or while restoring a trail entry, is not an app pick.
 
 ## Flow graph
 

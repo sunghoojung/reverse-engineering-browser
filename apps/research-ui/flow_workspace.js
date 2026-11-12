@@ -101,24 +101,12 @@ function flowLinkKind(model) {
  * flow graph panel; `openFrame(node)` and `graphAvailable()` are that
  * panel's `open` and `available`. The app's callbacks: `getRequest()` the
  * request it shows, `selectRequest(id)`, `findRendererRequest(process,
- * request)` the captured row a renderer request names, `selectTraceRow(key)`
+ * request)` the captured row a renderer request names, `selectTraceRow(model)`
  * and `focusTraceRow()` in Lineage, and `openSource({artifact_id, offset})`.
+ * Every setter the workspace calls, on the app, a pane or the graph, is
+ * silent: only the researcher's own picks come back as callbacks.
  */
 function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, getRequest, selectRequest, findRendererRequest, selectTraceRow, focusTraceRow, openSource}) {
-  // The graph's setters act for the host and never report back as a pick;
-  // called silently, they answer with the selection they made. `intended`
-  // is a key the graph could not select yet: its later `host` report is
-  // that pick.
-  let intended = null;
-  // A pick the researcher makes through the workspace (a Related entry, a
-  // lineage step that lights its request) drives the graph, and the card the
-  // graph selects in answer is that pick.
-  function graphIntent(name, ...args) {
-    const info = graph[name](...args);
-    if (name === 'select' && !info) { intended = String(args[0]); return; }
-    intended = null;
-    graphPicked(info ?? graph.selection());
-  }
   const doc = document;
   const $ = selector => root.querySelector(selector);
   const make = (tag, className = '', text = '') => { const element = doc.createElement(tag); if (className) element.className = className; if (text) element.textContent = text; return element; };
@@ -153,12 +141,13 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   let sizes = {...FLOW_SIZE_DEFAULTS}, prefs = flowWorkspacePrefs(storage);
   // Selection, trail and history.
   let selection = {request: null, call: null, fn: null, site: null, sample: null, step: null, graphKey: null};
-  let history = [], cursor = -1, restoring = false, graphInfo = null, lineageModels = [];
-  // Above zero while one pick makes several changes that are one trail entry.
-  let batching = 0;
-  // `{id}` of the app's request after restoring an entry that names another
-  // (or none); the app still showing it is not a pick.
-  let heldRequest = null;
+  let history = [], cursor = -1, graphInfo = null, lineageModels = [];
+  // Above zero while the workspace makes a change of its own: a pick that
+  // changes several things, which is one trail entry, or a trail entry being
+  // restored. A request revision the app makes meanwhile is that change's.
+  let changing = 0;
+  // The app's request revision this workspace has accounted for.
+  let requestRevision = null;
   // Short feedback for a key that did nothing visible; it clears itself.
   let flashTimer = 0;
   const flash = text => {
@@ -199,11 +188,10 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     return first;
   }
   function cfgPicked(offset, block, graphDoc) {
-    if (restoring) return;
     const start = graphDoc?.offsets?.[block] ?? offset;
     const keepSample = selection.sample && selection.site && flowBlockAt(graphDoc, selection.site.offset) === block;
     setSelection({site: {offset: keepSample ? selection.site.offset : start, kind: keepSample ? selection.site.kind : 'block', label: keepSample ? selection.site.label : `loc_${Number(start).toString(16)}`},
-      sample: keepSample ? selection.sample : null}, {pane: 'cfg'});
+      sample: keepSample ? selection.sample : null});
     if (!keepSample) graph.setMark(cfg.fn ? {artifact_id: cfg.fn.artifact_id, function_index: cfg.fn.function_index, offset: start} : null);
     renderCfgSamples();
   }
@@ -350,10 +338,9 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   // request stays as the app selected it, and its lineage step with it.
   const noCrumbs = {call: null, fn: null, site: null, sample: null, graphKey: null};
   function timelinePicked(info) {
-    if (restoring) return;
     if (!info) {
       // The sample's function and site go with it, unless a graph card holds them.
-      setSelection({call: null, sample: null, ...(selection.graphKey ? {} : {fn: null, site: null})}, {pane: 'timeline'});
+      setSelection({call: null, sample: null, ...(selection.graphKey ? {} : {fn: null, site: null})});
       graph.setMark(null); renderCfgSamples(); renderLineageSelected(); return;
     }
     const callCrumb = info.track ? {key: `call:${info.track.key}`, label: `call #${info.track.invocation}`} : null;
@@ -363,28 +350,36 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
       // The selected graph card stays only when it is the sample's function.
       const sameCard = graphInfo?.key && graphInfo.key === selection.graphKey && String(graphInfo.artifact_id) === String(sample.artifact_id) && graphInfo.function_index === sample.function_index;
       setSelection({...noCrumbs, call: callCrumb, fn, site: {offset: sample.offset, kind: sample.kind, label: `${flowHexOffset(sample.offset)} ${sample.kind}`}, sample: {key: info.key, label: `sample ${sample.ordinal}`},
-        graphKey: sameCard ? selection.graphKey : null}, {pane: 'timeline'});
+        graphKey: sameCard ? selection.graphKey : null});
       graph.setMark({artifact_id: sample.artifact_id, function_index: sample.function_index, offset: sample.offset});
       openCfg(fn, sample.offset, {auto: true});
     } else if (info.type === 'call') {
-      setSelection({...noCrumbs, call: callCrumb}, {pane: 'timeline'});
+      setSelection({...noCrumbs, call: callCrumb});
       graph.setMark(null);
     } else {
+      // The chip's request is the request crumb now, in the same trail entry.
       const known = findRendererRequest(info.process, info.request.request);
-      // The chip's request is the request crumb now, in the same trail entry;
-      // the app's selection catches up and only refreshes its label.
-      const request = known?.id ? requestCrumb(known, info.request.request) : null;
-      setSelection({...noCrumbs, call: callCrumb, ...(request ? requestPatch(request) : {})}, {pane: 'timeline'});
+      change(() => setSelection({...noCrumbs, call: callCrumb, ...(known ? requestPatch(showAppRequest(known.id), known.id) : {})}));
       graph.setMark(null);
-      if (known?.id) selectRequest(known.id);
-      else flash('This request is not in the captured request list, so Lineage cannot open it.');
+      if (!known) flash('This request is not in the captured request list, so Lineage cannot open it.');
     }
     renderCfgSamples(); renderLineageSelected(); renderRelated();
   }
-  /** A request crumb for a captured request row the workspace selects itself. */
-  const requestCrumb = (known, renderer) => ({id: known.id, label: renderer ? `${known.label} #${renderer}` : known.label, renderer: renderer ?? null});
-  /** A new request: its lineage step was the old request's. */
-  const requestPatch = request => (request.id === selection.request?.id ? {} : {request, step: null});
+  /** The trail crumb of the request the app shows. */
+  const requestCrumb = request => (request ? {id: request.id, label: request.label, renderer: request.renderer?.request ?? null} : null);
+  /** Asks the app to show a request, inside a change of the workspace's own
+   * so the revision it makes is not an app pick, and returns the crumb of
+   * the request the app now shows. */
+  function showAppRequest(id) {
+    selectRequest(id);
+    return requestCrumb(getRequest());
+  }
+  /** The selection patch for the request the app shows, when it is the one
+   * asked for; a new request drops the old one's lineage step. */
+  function requestPatch(shown, wanted) {
+    if (shown?.id !== wanted) return {};
+    return shown.id === selection.request?.id ? {request: shown} : {request: shown, step: null};
+  }
   /** A function crumb for a Wasm function, named from the graph when it knows. */
   function fnFor(artifactId, functionIndex) {
     const named = graphInfo && String(graphInfo.artifact_id) === String(artifactId) && graphInfo.function_index === functionIndex ? graphInfo.name : null;
@@ -401,29 +396,35 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     applyLayout();
   }
 
-  // Graph pane: selection API used with feature detection.
-  function graphPicked(info, {followed = false, cause = 'pick'} = {}) {
+  // Graph pane.
+  /** What the graph selects, shown in the Related rail and the pane head. */
+  function graphShown(info) {
     graphInfo = info ?? null;
-    // What the graph selects for the host (cause host or replay) is not a
-    // pick, unless it is the key a researcher's pick asked for before the
-    // graph was laid out.
-    let pick = cause === 'pick';
-    if (!pick && intended !== null && info?.key === intended) { intended = null; pick = true; }
-    if (restoring || !pick) { renderRelated(); renderTabs(); return; }
-    intended = null;
+    renderRelated(); renderTabs();
+  }
+  /** A setter's answer: the card it selected, else what the graph selects
+   * now. A setter called before the graph is drawn answers null and is
+   * reported with cause `host` once the graph lands. */
+  const graphAnswer = info => info ?? graph.selection();
+  /** A change of the graph's selection. Only the researcher's own (cause
+   * `pick`) is a pick; what the graph selects for the host or puts back
+   * (`host`, `replay`) is only shown. */
+  function graphPicked(info, {followed = false, cause = 'pick'} = {}) {
+    if (cause !== 'pick') { graphShown(info); return; }
+    graphInfo = info ?? null;
     // A card replaces a picked sample, so the timeline lets go of it too.
     if (info && selection.sample) { timeline.clear(); graph.setMark(null); }
     // Clearing the card clears its own crumbs; a sample's stay.
-    if (!info) { setSelection(selection.graphKey ? {graphKey: null, fn: null, site: null} : {graphKey: null}, {pane: 'graph'}); renderRelated(); return; }
+    if (!info) { setSelection(selection.graphKey ? {graphKey: null, fn: null, site: null} : {graphKey: null}); renderRelated(); return; }
     const wasm = info.kind === 'wasm' && info.artifact_id && Number.isSafeInteger(info.function_index);
     if (wasm) {
       const fn = fnFor(info.artifact_id, info.function_index);
       const site = /^\+0x[0-9a-f]+$/i.test(info.row?.site ?? '') ? {offset: Number.parseInt(info.row.site.slice(3), 16), kind: info.row.op ?? 'site', label: `${info.row.site} ${info.row.op ?? ''}`.trim()} : null;
-      setSelection({...noCrumbs, graphKey: info.key ?? null, fn, site}, {pane: 'graph'});
+      setSelection({...noCrumbs, graphKey: info.key ?? null, fn, site});
       openCfg(fn, site?.offset ?? null, {auto: true});
       if (followed) reveal('cfg', {focus: true});
     } else {
-      setSelection({...noCrumbs, graphKey: info.key ?? null, fn: info.key ? {key: info.key, artifact_id: null, function_index: null, name: info.name ?? null, label: info.name || info.kind || 'card'} : null}, {pane: 'graph'});
+      setSelection({...noCrumbs, graphKey: info.key ?? null, fn: info.key ? {key: info.key, artifact_id: null, function_index: null, name: info.name ?? null, label: info.name || info.kind || 'card'} : null});
       if (followed && info.request) reveal('lineage', {focus: true});
     }
     renderRelated();
@@ -431,11 +432,10 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
 
   // Lineage pane.
   function lineagePicked(model) {
-    if (restoring || !model) return;
     // The step, the card its request lights and its call are one pick and
     // one trail entry.
-    batch(() => {
-      setSelection({step: model.key}, {pane: 'lineage'});
+    change(() => {
+      setSelection({step: model.key});
       const step = model.step;
       if (!step) return;
       // A renderer request record names the stack that made it; the
@@ -443,7 +443,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
       const own = getRequest();
       const rendererKey = step.operation === 'request_initiated' && step.request_id && step.request_id !== '0'
         ? {process: step.event.process_id, request: String(step.request_id)} : own?.renderer ?? null;
-      if (rendererKey && step.category === 'network') graphIntent('highlightRequest', rendererKey);
+      if (rendererKey && step.category === 'network') graphPicked(graphAnswer(graph.highlightRequest(rendererKey)));
       // A tracked call's start or settle record selects that call's track.
       const tracked = timeline.callAt(`${step.event.process_id}:${step.event.sequence_number}`);
       // A step that names neither a card nor a call is a detail of the
@@ -451,7 +451,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
       if (!tracked) return;
       if (selection.sample) graph.setMark(null);
       timeline.select(tracked.key, {silent: true});
-      setSelection({...noCrumbs, call: {key: tracked.key, label: tracked.label}}, {pane: 'lineage'});
+      setSelection({...noCrumbs, call: {key: tracked.key, label: tracked.label}});
     });
     renderLineageSelected(); renderRelated();
   }
@@ -491,20 +491,21 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
 
   // Selection and history.
   /** Every change is a trail entry in the pane the researcher is working in;
-   * Back returns there. (`pane` names the change's source for readers only.) */
+   * Back returns there. */
   function setSelection(patch, {record = true} = {}) {
     const before = flowSelectionKey(selection);
     selection = {...selection, ...patch};
     if (flowSelectionKey(selection) === before) return;
     renderTrail();
-    if (record && !restoring && !batching) pushHistory(active);
+    if (record && !changing) pushHistory(active);
     renderTabs();
   }
-  /** Runs one pick that changes several things as a single trail entry. */
-  function batch(run) {
-    batching += 1;
-    try { run(); } finally { batching -= 1; }
-    if (!batching && !restoring) pushHistory(active);
+  /** Runs one change of the workspace's own: a pick that changes several
+   * things, recorded as one trail entry, or with `record: false` a restore. */
+  function change(run, {record = true} = {}) {
+    changing += 1;
+    try { run(); } finally { changing -= 1; }
+    if (record && !changing) pushHistory(active);
   }
   function snapshot(pane) { return {selection: {...selection}, pane, sample: timeline.selection()?.key ?? null}; }
   function pushHistory(pane) {
@@ -523,28 +524,26 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   }
   /** Restores one trail entry: its selection in every pane, then its pane. */
   function restore(entry) {
-    restoring = true;
-    try {
+    change(() => {
       const target = entry.selection;
-      const current = getRequest();
-      if (target.request?.id && current?.id !== target.request.id) selectRequest(target.request.id);
       // The app keeps its own request when the entry had none or its request
-      // is no longer listed; that request is held, so the next render's sync
-      // neither counts it as a pick nor truncates Forward.
-      const shown = getRequest()?.id ?? null, wanted = target.request?.id ?? null;
-      heldRequest = shown !== wanted ? {id: shown} : null;
-      if (heldRequest) flash(!wanted ? 'This trail entry had no request; Lineage still shows the selected one.'
+      // is no longer listed. It made no new revision, so its next render is
+      // not a pick and Forward stays.
+      const wanted = target.request?.id ?? null;
+      const shown = (wanted ? showAppRequest(wanted) : requestCrumb(getRequest()))?.id ?? null;
+      if (shown !== wanted) flash(!wanted ? 'This trail entry had no request; Lineage still shows the selected one.'
         : `This trail entry\u2019s request is no longer in the request list${shown === null ? '' : '; Lineage still shows the selected request'}.`);
       selection = {...target};
-      if (target.step) selectTraceRow(target.step);
-      if (target.sample) timeline.select(target.sample.key, {silent: true});
-      else if (target.call) timeline.select(target.call.key, {silent: true});
+      const step = target.step && lineageModels.find(model => model.key === target.step);
+      if (step) selectTraceRow(step);
+      if (target.sample) timeline.select(target.sample.key);
+      else if (target.call) timeline.select(target.call.key);
       else timeline.clear();
       if (target.fn?.function_index !== null && target.fn?.function_index !== undefined && target.fn.artifact_id) loadCfg(target.fn, {offset: target.site?.offset ?? null});
-      if (target.graphKey) graph.select(target.graphKey, {reveal: true, silent: false});
+      if (target.graphKey) graphShown(graphAnswer(graph.select(target.graphKey)));
       graph.setMark(target.sample && target.fn?.artifact_id ? {artifact_id: target.fn.artifact_id, function_index: target.fn.function_index, offset: target.site?.offset ?? null} : null);
       reveal(entry.pane, {focus: true, record: false});
-    } finally { restoring = false; }
+    }, {record: false});
     renderTrail(); renderHistoryButtons(); renderCfgSamples(); renderLineageSelected(); renderRelated();
   }
   function back() { if (cursor <= 0) { flash('This is the start of the trail.'); return false; } cursor -= 1; restore(history[cursor]); return true; }
@@ -572,9 +571,9 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   /** A crumb or Related entry jumps to its item in its pane. */
   function jump(crumb) {
     if (crumb.kind === 'site' || (crumb.kind === 'fn' && crumb.pane === 'cfg')) { if (selection.fn) loadCfg(selection.fn, {offset: selection.site?.offset ?? null}); }
-    if (crumb.kind === 'fn' && crumb.pane === 'graph' && selection.fn?.key) graph.select(selection.fn.key, {reveal: true, silent: false});
-    if (crumb.kind === 'call' && selection.call) timeline.select(selection.call.key, {silent: true});
-    if (crumb.kind === 'sample' && selection.sample) timeline.select(selection.sample.key, {silent: true});
+    if (crumb.kind === 'fn' && crumb.pane === 'graph' && selection.fn?.key) graphShown(graphAnswer(graph.select(selection.fn.key)));
+    if (crumb.kind === 'call' && selection.call) timeline.select(selection.call.key);
+    if (crumb.kind === 'sample' && selection.sample) timeline.select(selection.sample.key);
     if (crumb.pane === 'timeline') timelineOpen = true;
     reveal(crumb.pane, {focus: true});
   }
@@ -711,7 +710,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     applyLayout();
     if (name === 'cfg' && cfg.fn && !cfg.loaded) loadCfg(cfg.fn, {offset: cfg.mark});
     if (focus) focusPaneContent(name);
-    if (record && before !== name && !restoring && !batching) pushHistory(name);
+    if (record && before !== name && !changing) pushHistory(name);
     return true;
   }
   /** Keyboard focus on the pane's working control, else the pane itself. */
@@ -856,7 +855,8 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     if (lineageModels.length) {
       const entries = steps.map(model => {
         const {line, kind} = flowLinkKind(model);
-        const item = entry(model.title, model.confidence, () => { selectTraceRow(model.key); reveal('lineage', {focus: true}); }, 'flow-related-link');
+        // A link here is picked as its Lineage row is.
+        const item = entry(model.title, model.confidence, () => { if (selectTraceRow(model)) lineagePicked(model); reveal('lineage', {focus: true}); }, 'flow-related-link');
         const sample = make('span', 'flow-link-line'); sample.dataset.line = line; sample.dataset.kind = kind; sample.setAttribute('aria-hidden', 'true');
         item.prepend(sample);
         return item;
@@ -886,14 +886,20 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     if (cfg.fn) {
       const sites = timeline.samplesFor(cfg.fn.artifact_id, cfg.fn.function_index);
       if (sites.length) section(`CFG · ${cfg.fn.label}`, 'cfg', sites.slice(0, FLOW_WORKSPACE_LIMITS.related).map(site => entry(`${flowHexOffset(site.offset)} ${site.kind}`, `×${site.samples.length}`, () => {
-        setSelection({site: {offset: site.offset, kind: site.kind, label: `${flowHexOffset(site.offset)} ${site.kind}`}}, {pane: 'cfg'});
+        setSelection({site: {offset: site.offset, kind: site.kind, label: `${flowHexOffset(site.offset)} ${site.kind}`}});
         loadCfg(cfg.fn, {offset: site.offset}); reveal('cfg', {focus: true});
       })), {label: 'Open', key: '2', aria: 'Open CFG', run: () => reveal('cfg', {focus: true})});
     }
     // The graph card: its row, and its callers and callees when the graph says.
     if (graphInfo) {
-      // Each card entry is a pick: the graph selects it and the workspace follows.
-      const pickCard = key => batch(() => { if (key) graphIntent('select', key, {reveal: true}); reveal('graph', {focus: true}); });
+      // Each card entry is a pick: the graph selects it and the workspace
+      // follows. A graph still laying out selects it once drawn, as the host's.
+      const pickCard = key => change(() => {
+        const info = key ? graph.select(key) : null;
+        if (info) graphPicked(info);
+        else if (key) flash('The graph has not drawn this card yet; it is selected once the graph is drawn.');
+        reveal('graph', {focus: true});
+      });
       const entries = [entry(graphInfo.name || graphInfo.kind || 'card', [graphInfo.kind, graphInfo.location].filter(Boolean).join(' · '), () => pickCard(graphInfo.key))];
       if (graphInfo.row) entries.push(entry(`${graphInfo.row.op ?? 'call'} ${graphInfo.row.target ?? ''}`.trim(), graphInfo.row.site ?? '', () => reveal('graph', {focus: true})));
       for (const [label, list] of [['called by', graphInfo.callers], ['calls', graphInfo.callees]]) {
@@ -904,7 +910,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
         const known = findRendererRequest(graphInfo.request.process, graphInfo.request.request);
         entries.push(entry(known?.label ?? `request #${graphInfo.request.request}`, known ? 'trace its lineage' : 'not in the request list', () => {
           // The card made this request, so its crumbs stay beside it.
-          if (known?.id) batch(() => { setSelection(requestPatch(requestCrumb(known, graphInfo.request.request)), {pane: 'lineage'}); selectRequest(known.id); reveal('lineage', {focus: true}); });
+          if (known) change(() => { setSelection(requestPatch(showAppRequest(known.id), known.id)); reveal('lineage', {focus: true}); });
           else flash('This request is not in the captured request list.');
         }));
       }
@@ -1022,7 +1028,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     /** Called whenever the Flow screen renders: visibility, session, the
      * app's selected request and how many captured requests a script
      * started, which the graph asks again for when it grows. */
-    sync({visible: shown, session: nextSession = null, request = null, stacks = null}) {
+    sync({visible: shown, session: nextSession = null, request = null, revision = null, stacks = null}) {
       const wasVisible = visible;
       visible = Boolean(shown);
       if (!visible) { graph.hide(); if (wasVisible) releaseCfg(); return; }
@@ -1032,29 +1038,29 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
         // The old session's CFG read, layout, decoded result and names must
         // never land in or be reused by this one.
         cfg.generation += 1; cfg.abort?.abort(); cfg.abort = null; cfg.runner?.cancel();
-        history = []; cursor = -1; heldRequest = null; graphInfo = null; cfg.fn = null; cfg.key = null; cfg.result = null; cfg.mark = null; cfg.loaded = false; cfg.error = null;
+        // The app's request in this session is a pick of its own.
+        history = []; cursor = -1; requestRevision = null; graphInfo = null; cfg.fn = null; cfg.key = null; cfg.result = null; cfg.mark = null; cfg.loaded = false; cfg.error = null;
         cfg.names.clear(); nameReads.clear();
         if (cfg.view) cfg.view.release();
         selection = {request: null, call: null, fn: null, site: null, sample: null, step: null, graphKey: null};
         renderCfgChrome();
       }
-      const crumb = request ? {id: request.id, label: request.label ?? `${request.method ?? ''} ${request.path ?? ''}`.trim(), renderer: request.renderer?.request ?? null} : null;
-      // A request a restored entry did not have stays held until the app
-      // selects another one.
-      if (heldRequest && heldRequest.id !== (crumb?.id ?? null)) heldRequest = null;
-      if (!restoring && !heldRequest) {
-        if ((crumb?.id ?? null) !== (selection.request?.id ?? null)) {
-          // The app chose another request: a new pick, and nothing below the
-          // old request is a recorded relationship of it.
-          if (selection.sample) { timeline.clear(); graph.setMark(null); }
-          setSelection({...noCrumbs, request: crumb, step: null}, {pane: 'lineage', record: Boolean(crumb)});
-        } else if (crumb && (crumb.label !== selection.request.label || crumb.renderer !== selection.request.renderer)) {
-          // The same request, named afresh: no pick, so no trail entry; the
-          // entry that holds it takes the new name too.
-          selection = {...selection, request: crumb};
-          if (history[cursor]?.selection.request?.id === crumb.id) history[cursor] = {...history[cursor], selection: {...history[cursor].selection, request: crumb}};
-          renderTrail(); renderTabs();
-        }
+      const crumb = requestCrumb(request);
+      // A revision the app made while the workspace changed something is
+      // that change's own; any other is the app's pick, unless it chose the
+      // request the trail already shows.
+      const fresh = revision !== requestRevision;
+      requestRevision = revision;
+      if (fresh && !changing && crumb?.id !== selection.request?.id) {
+        // Nothing below the old request is a recorded relationship of the new one.
+        if (selection.sample) { timeline.clear(); graph.setMark(null); }
+        setSelection({...noCrumbs, request: crumb, step: null}, {record: Boolean(crumb)});
+      } else if (crumb && crumb.id === selection.request?.id && (crumb.label !== selection.request.label || crumb.renderer !== selection.request.renderer)) {
+        // The same request, named afresh: no pick, so no trail entry; the
+        // entry that holds it takes the new name too.
+        selection = {...selection, request: crumb};
+        if (history[cursor]?.selection.request?.id === crumb.id) history[cursor] = {...history[cursor], selection: {...history[cursor].selection, request: crumb}};
+        renderTrail(); renderTabs();
       }
       requestTag.hidden = !request;
       const parts = request ? [request.renderer?.request ? `#${request.renderer.request}` : null, request.status ? String(request.status) : null, request.renderer ? `renderer ${request.renderer.process}` : null].filter(Boolean) : [];

@@ -109,6 +109,9 @@
         sourceOriginalHighlighter: null,
         sourcePagedFind: null,
         selectedRequestId: standalonePreview ? '81' : null,
+        // Counts the changes of the selected request, so Flow can tell the
+        // app's own picks from a request it asked for itself.
+        requestRevision: 0,
         inspectorTab: 'general',
         fieldTab: 'body',
         selectedField: null,

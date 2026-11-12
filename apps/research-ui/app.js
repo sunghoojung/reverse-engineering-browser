@@ -46,11 +46,7 @@ const flowWorkspace = createFlowWorkspace({
   getRequest: () => flowWorkspaceRequest(),
   selectRequest: id => flowWorkspaceSelectRequest(id),
   findRendererRequest: (process, request) => flowWorkspaceRendererRequest(process, request),
-  selectTraceRow: key => {
-    const row = [...elements.backtraceSteps.querySelectorAll('.trace-row')].find(candidate => candidate.dataset.traceKey === key);
-    if (!row) return false;
-    row.click(); return true;
-  },
+  selectTraceRow,
   focusTraceRow: () => {
     const rows = [...elements.backtraceSteps.querySelectorAll('.trace-row')];
     const target = rows.find(row => row.dataset.traceKey === state.selectedTraceRow) ?? rows[0] ?? (elements.traceLoad.disabled ? null : elements.traceLoad);
@@ -1481,6 +1477,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.trafficRenderedView = null;
         state.originTraceController?.abort();
         state.trafficSelectionNotice = state.selectedRequestId === null ? '' : 'The selected request left the retained capture window. Choose another request.';
+        if (state.selectedRequestId !== null) state.requestRevision += 1;
         state.selectedRequestId = null;
         state.selectedField = null;
         state.originTrace = null;
@@ -3428,6 +3425,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.originTraceController?.abort();
         // A store read still running for another row must not select it afterwards.
         if (state.trafficLoadingId !== id) cancelTrafficLoad();
+        if (state.selectedRequestId !== id) state.requestRevision += 1;
         state.selectedRequestId = id;
         retainTrafficRequest(request);
         state.trafficDetailOpen = true;
@@ -4347,6 +4345,21 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (sourceLink.status !== 'ready') panel.append(textElement('p', 'trace-detail-message', sourceLink.message));
       }
 
+      /** Selects a Lineage row and shows its details. A click on it is also
+       * the researcher's pick, which the click handler reports to Flow. */
+      function selectTraceRow(model) {
+        const rows = [...elements.backtraceSteps.querySelectorAll('.trace-row')];
+        if (!rows.some(row => row.dataset.traceKey === model.key)) return false;
+        state.selectedTraceRow = model.key;
+        for (const row of rows) {
+          const active = row.dataset.traceKey === model.key;
+          row.setAttribute('aria-pressed', String(active));
+          row.tabIndex = active ? 0 : -1;
+        }
+        traceStepDetails(model);
+        return true;
+      }
+
       function traceStepElement(model) {
         const item = document.createElement('li'); item.className = `trace-step${model.gap ? ' gap' : ''}`;
         const row = document.createElement('button'); row.type = 'button'; row.className = 'trace-row';
@@ -4362,12 +4375,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         row.append(line, textElement('span', 'step-index', model.index), copy,
           textElement('span', `trace-link-type ${model.style}`, model.confidence));
         row.addEventListener('click', () => {
-          state.selectedTraceRow = model.key;
-          elements.backtraceSteps.querySelectorAll('.trace-row').forEach(candidate => {
-            const active = candidate === row;
-            candidate.setAttribute('aria-pressed', String(active)); candidate.tabIndex = active ? 0 : -1;
-          });
-          traceStepDetails(model);
+          selectTraceRow(model);
           flowWorkspace.lineageSelected(model);
         });
         row.addEventListener('keydown', event => {
@@ -4408,7 +4416,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       /** Shows the Flow workspace's panes for the selected request, or hides them. */
       function renderFlowWorkspace() {
         const showing = !document.querySelector('#screen-backtrace').hidden;
-        flowWorkspace.sync({visible: showing, session: flowGraphSession(), request: showing ? flowWorkspaceRequest() : null, stacks: flowGraphStackCount()});
+        flowWorkspace.sync({visible: showing, session: flowGraphSession(), request: showing ? flowWorkspaceRequest() : null, revision: state.requestRevision, stacks: flowGraphStackCount()});
       }
       /** Traffic's Trace origin and Evidence's Show in Flow: Flow with the
        * request selected and its Lineage showing. */
@@ -8923,6 +8931,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.artifactReceiverConnected = false;
         state.artifactReceiverError = null;
         state.sourceNotice = null;
+        if (state.selectedRequestId !== null) state.requestRevision += 1;
         state.selectedRequestId = null;
         state.selectedField = null;
         state.lastUpdatedLabel = 'start a live capture';

@@ -113,21 +113,32 @@ const flowGraphLayout = (() => {
         const v = stack.pop();
         for (let k = adj.outStart[v]; k < adj.outStart[v + 1]; k += 1) {
           const e = adj.outEdges[k]; if (back[e]) continue;
-          const w = to[e]; if (layer[w] <= layer[v]) { layer[w] = layer[v] + 1; stack.push(w); }
+          const w = to[e]; if (layer[w] <= layer[v]) { layer[w] = layer[v] + 1; bucket(w); stack.push(w); }
         }
       }
     };
+    const buckets = [];
+    const bucket = v => (buckets[layer[v]] ??= []).push(v);
+    for (let v = 0; v < count; v += 1) bucket(v);
     // Nodes only ever move down, so one pass over the layers in order sees
-    // every node at its final layer.
-    let maxLayer = 0; for (let v = 0; v < count; v += 1) maxLayer = Math.max(maxLayer, layer[v]);
-    for (let l = 0; l <= maxLayer; l += 1) {
+    // every node at its final layer. Each layer's nodes are bucketed once: a
+    // node moved down joins its new layer's bucket and is skipped in the old.
+    for (let l = 0; l < buckets.length; l += 1) {
       const byLane = new Map();
-      for (let v = 0; v < count; v += 1) if (layer[v] === l) { if (!byLane.has(laneOf[v])) byLane.set(laneOf[v], []); byLane.get(laneOf[v]).push(v); }
+      for (const v of buckets[l] ?? []) {
+        if (layer[v] !== l) continue;
+        if (!byLane.has(laneOf[v])) byLane.set(laneOf[v], []);
+        byLane.get(laneOf[v]).push(v);
+      }
       for (const [key, group] of byLane) {
         const room = capOf(key);
         if (group.length <= room) continue;
         group.sort((a, b) => below[b] - below[a] || (weight?.[b] ?? 0) - (weight?.[a] ?? 0) || a - b);
-        for (const v of group.slice(room)) { layer[v] = l + 1; push(v); maxLayer = Math.max(maxLayer, l + 1 + below[v]); }
+        for (const v of group.slice(room)) {
+          layer[v] = l + 1;
+          bucket(v);
+          push(v);
+        }
       }
     }
   }
@@ -271,12 +282,30 @@ const flowGraphLayout = (() => {
       outs.forEach((list, v) => spread(v, list, e => otherX(to[e]), outX));
       ins.forEach((list, v) => spread(v, list, e => otherX(from[e]), inX));
     }
+    // Each band's cards by left edge, and its widest card, to find the
+    // cards over an x range by binary search.
+    const byX = members.map(list => Int32Array.from(list).sort((a, b) => x[a] - x[b]));
+    const widest = members.map(list => list.reduce((max, v) => Math.max(max, nodeW[v]), 0));
+    /** The cards of `band` whose left edge is within its widest card of
+     * [x0, x1]: every card that can overlap a narrow range, and a few more. */
+    function cardsNear(band, x0, x1) {
+      const list = byX[band], from = x0 - widest[band];
+      let low = 0, high = list.length;
+      while (low < high) {
+        const mid = (low + high) >> 1;
+        if (x[list[mid]] < from) low = mid + 1;
+        else high = mid;
+      }
+      const found = [];
+      for (let i = low; i < list.length && x[list[i]] <= x1; i += 1) found.push(list[i]);
+      return found;
+    }
     // Nothing of a card in [y0, y1] at x, other than the edge's own ends.
     const clearColumn = (cx, y0, y1, a, b) => {
       const low = Math.min(y0, y1), high = Math.max(y0, y1);
       for (let band = 0; band < bands; band += 1) {
         if (bottom[band] < low || top[band] > high) continue;
-        for (const v of members[band]) {
+        for (const v of cardsNear(band, cx - 4, cx + 4)) {
           if (v === a || v === b) continue;
           if (cx > x[v] - 4 && cx < x[v] + nodeW[v] + 4 && high > y[v] - 2 && low < y[v] + nodeH[v] + 2) return false;
         }
@@ -284,14 +313,17 @@ const flowGraphLayout = (() => {
       return true;
     };
     // A height in the gap under (or over) a card's row that a run across
-    // [x0, x1] can take without touching a card of its band.
+    // [x0, x1] can take without touching a card of its band. The run reaches
+    // a side gutter, so its cards are found once, in card order, as each
+    // step moves past the first one in the way.
     const rowGap = (band, v, down, x0, x1, slot) => {
       let at = down ? y[v] + nodeH[v] + 14 + slot * 3 : y[v] - 14 - slot * 3;
       const low = Math.min(x0, x1) - 6, high = Math.max(x0, x1) + 6;
+      const across = members[band].filter(u => u !== v && high > x[u] && low < x[u] + nodeW[u]);
       for (let guard = 0; guard < 32; guard += 1) {
         let moved = false;
-        for (const u of members[band]) {
-          if (u === v || high <= x[u] || low >= x[u] + nodeW[u] || at <= y[u] - 8 || at >= y[u] + nodeH[u] + 8) continue;
+        for (const u of across) {
+          if (at <= y[u] - 8 || at >= y[u] + nodeH[u] + 8) continue;
           at = down ? y[u] + nodeH[u] + 14 : y[u] - 14; moved = true;
         }
         if (!moved) break;
@@ -342,6 +374,272 @@ const flowGraphLayout = (() => {
     return {x, y, lanes, width: m.margin * 2 + laneW, height, routes: Float32Array.from(points), routeTypes: Uint8Array.from(kinds), routeStart};
   }
 
+  /** Layers inside each realm, from its own calls: cycles broken by a
+   * depth-first walk, longest-path layers with roots pulled down, wide layers
+   * wrapped. `back` marks the calls inside a realm that close a cycle; calls
+   * between realms are set by band order. */
+  function layerCards(graph, m) {
+    const {count, from, to} = graph;
+    const intra = [];
+    for (let e = 0; e < from.length; e += 1) if (graph.lane[from[e]] === graph.lane[to[e]]) intra.push(e);
+    const innerFrom = Int32Array.from(intra, e => from[e]), innerTo = Int32Array.from(intra, e => to[e]);
+    const adj = adjacency(count, innerFrom, innerTo);
+    const innerBack = backEdges(count, innerFrom, innerTo, adj, graph.weight);
+    const layer = layers(count, innerFrom, innerTo, adj, innerBack);
+    boundLayers(count, layer, graph.lane, adj, innerTo, innerBack, graph.weight, m.wrap);
+    const back = new Uint8Array(from.length);
+    intra.forEach((e, i) => { back[e] = innerBack[i]; });
+    return {layer, back};
+  }
+
+  /** Bands in call order: each card's band, each band's last layer, and the
+   * calls between bands that run back up. */
+  function orderBands(graph, cards) {
+    const {count, from, to, layer, back} = cards;
+    const keys = laneOrder(count, graph, from, to, back, layer);
+    const index = new Map(keys.map((key, band) => [key, band]));
+    const bandOf = Int32Array.from({length: count}, (_, v) => index.get(graph.lane[v]));
+    // A call into a band drawn above its caller runs back up.
+    for (let e = 0; e < from.length; e += 1) if (bandOf[from[e]] !== bandOf[to[e]]) back[e] = bandOf[to[e]] < bandOf[from[e]] ? 1 : 0;
+    const lastLayer = new Int32Array(keys.length);
+    for (let v = 0; v < count; v += 1) lastLayer[bandOf[v]] = Math.max(lastLayer[bandOf[v]], layer[v]);
+    let maxLayer = 0;
+    for (const value of lastLayer) maxLayer = Math.max(maxLayer, value);
+    return {count: keys.length, keys, bandOf, lastLayer, maxLayer};
+  }
+
+  /** The items to place: cards 0..count-1, then one waypoint per layer a long
+   * call passes inside its band, at most m.maxDummies in all, and the links
+   * between items. A call between bands links its two cards, the upper end
+   * first, so a card in another band pulls sideways. */
+  function insertWaypoints(cards, bands, m) {
+    const {count, from, to, layer, back, w} = cards, {bandOf} = bands;
+    const band = Array.from(bandOf), itemLayer = Array.from(layer);
+    const firstDummy = new Int32Array(from.length).fill(-1), dummyCount = new Uint32Array(from.length);
+    const linkFrom = [], linkTo = [];
+    const link = (a, b) => { linkFrom.push(a); linkTo.push(b); };
+    let budget = m.maxDummies;
+    for (let e = 0; e < from.length; e += 1) {
+      const a = from[e], b = to[e];
+      if (bandOf[a] !== bandOf[b]) {
+        if (bandOf[a] < bandOf[b]) link(a, b); else link(b, a);
+        continue;
+      }
+      if (back[e]) continue;
+      const span = layer[b] - layer[a];
+      if (span <= 1 || span - 1 > budget) { link(a, b); continue; }
+      budget -= span - 1;
+      firstDummy[e] = band.length;
+      dummyCount[e] = span - 1;
+      let previous = a;
+      for (let l = layer[a] + 1; l < layer[b]; l += 1) {
+        const id = band.length;
+        band.push(bandOf[a]);
+        itemLayer.push(l);
+        link(previous, id);
+        previous = id;
+      }
+      link(previous, b);
+    }
+    const total = band.length, width = new Float64Array(total), height = new Float64Array(total);
+    for (let id = 0; id < total; id += 1) {
+      width[id] = id >= count ? m.dummyW : w[id];
+      height[id] = id >= count ? 0 : cards.h[id];
+    }
+    const source = Int32Array.from(linkFrom), target = Int32Array.from(linkTo);
+    return {count: total, cards: count, band, layer: itemLayer, width, height, firstDummy, dummyCount, from: source, to: target, adj: adjacency(total, source, target)};
+  }
+
+  /** Each band's layers as cells of items, first in depth-first discovery
+   * order from the heaviest roots. */
+  function orderCells(items, bands, weight) {
+    const {adj, to: linkTo} = items, discovery = new Int32Array(items.count).fill(-1), stack = [];
+    let next = 0;
+    const visit = start => {
+      if (discovery[start] >= 0) return;
+      stack.push(start);
+      while (stack.length) {
+        const id = stack.pop();
+        if (discovery[id] >= 0) continue;
+        discovery[id] = next++;
+        for (let k = adj.outStart[id + 1]; k > adj.outStart[id]; k -= 1) {
+          const child = linkTo[adj.outEdges[k - 1]];
+          if (discovery[child] < 0) stack.push(child);
+        }
+      }
+    };
+    const roots = [];
+    for (let id = 0; id < items.count; id += 1) if (adj.inStart[id + 1] === adj.inStart[id]) roots.push(id);
+    roots.sort((a, b) => (weight?.[b] ?? 0) - (weight?.[a] ?? 0) || a - b);
+    roots.forEach(visit);
+    for (let id = 0; id < items.count; id += 1) visit(id);
+    const cells = Array.from({length: bands.count}, (_, band) => Array.from({length: bands.lastLayer[band] + 1}, () => []));
+    for (let id = 0; id < items.count; id += 1) cells[items.band[id]][items.layer[id]].push(id);
+    for (const bandCells of cells) for (const cell of bandCells) cell.sort((a, b) => discovery[a] - discovery[b]);
+    return {cells, discovery};
+  }
+
+  /** Each band's rows, from the band's own top: a layer's height and top. */
+  function bandRows(cells, items, bands, m) {
+    const height = cells.map(bandCells => new Float64Array(bandCells.length)), top = cells.map(bandCells => new Float64Array(bandCells.length + 1));
+    for (let v = 0; v < items.cards; v += 1) {
+      const band = bands.bandOf[v], l = items.layer[v];
+      height[band][l] = Math.max(height[band][l], items.height[v]);
+    }
+    for (let band = 0; band < bands.count; band += 1) for (let l = 0; l < cells[band].length; l += 1) top[band][l + 1] = top[band][l] + height[band][l] + m.gapY;
+    return {height, top};
+  }
+
+  /** Item centres local to each band and the bands' offsets: alternating
+   * sweeps order each cell by its neighbours' mean position and place it by
+   * a weighted isotonic fit, and the bands shift to line up the calls
+   * between them. */
+  function placeItems(cards, items, bands, order, m) {
+    const {from, to, back} = cards, {bandOf} = bands, {cells, discovery} = order;
+    const {band: itemBand, width, adj, from: linkFrom, to: linkTo} = items;
+    const local = new Float64Array(items.count), bandX = new Float64Array(bands.count), bandW = new Float64Array(bands.count);
+    const gutter = new Float64Array(bands.count), backIn = new Uint32Array(bands.count);
+    for (let e = 0; e < from.length; e += 1) if (back[e] && from[e] !== to[e] && bandOf[from[e]] === bandOf[to[e]]) backIn[bandOf[from[e]]] += 1;
+    for (let band = 0; band < bands.count; band += 1) gutter[band] = backIn[band] ? m.lanePadX / 2 + m.gutter + Math.min(backIn[band], m.gutterSlots) * m.gutterStep : 0;
+    const crossEdges = [];
+    for (let e = 0; e < from.length; e += 1) if (bandOf[from[e]] !== bandOf[to[e]]) crossEdges.push(e);
+    const isDummy = id => id >= items.cards;
+    // Waypoints of a bundle of long edges run close together, like a bus.
+    const gapOf = (a, b) => (isDummy(a) && isDummy(b) ? m.busGap : isDummy(a) || isDummy(b) ? m.dummyGap : m.gapX);
+    const center = id => bandX[itemBand[id]] + local[id];
+    /** Each band from x = 0, then shifted to line up the calls between bands. */
+    function alignAll() {
+      for (let band = 0; band < bands.count; band += 1) {
+        let left = Infinity, right = -Infinity;
+        for (const cell of cells[band]) for (const id of cell) { left = Math.min(left, local[id] - width[id] / 2); right = Math.max(right, local[id] + width[id] / 2); }
+        if (left === Infinity) { left = 0; right = 0; }
+        for (const cell of cells[band]) for (const id of cell) local[id] -= left;
+        bandW[band] = right - left;
+      }
+      const pairs = crossEdges.map(e => ({a: bandOf[from[e]], ca: local[from[e]], b: bandOf[to[e]], cb: local[to[e]]}));
+      bandX.set(alignBands(Array.from(bandW, (value, band) => value + gutter[band]), pairs));
+    }
+    /** Orders one cell by where its neighbours on the side swept from sit,
+     * then places it as near there as the spacing allows. */
+    function placeCell(band, l, down) {
+      const cell = cells[band][l];
+      const desired = new Float64Array(cell.length), weight = new Float64Array(cell.length), keyed = cell.map((id, i) => i);
+      const left = bandX[band], right = bandX[band] + bandW[band];
+      cell.forEach((id, i) => {
+        let sum = 0, n = 0;
+        // A neighbour in another band pulls toward the nearer edge of this
+        // one, never past it: otherwise two bands chase each other apart.
+        const pull = other => {
+          if (itemBand[other] === band) { sum += center(other); n += 1; }
+          else { sum += 0.35 * Math.max(left, Math.min(right, center(other))); n += 0.35; }
+        };
+        if (down) for (let k = adj.inStart[id]; k < adj.inStart[id + 1]; k += 1) pull(linkFrom[adj.inEdges[k]]);
+        else for (let k = adj.outStart[id]; k < adj.outStart[id + 1]; k += 1) pull(linkTo[adj.outEdges[k]]);
+        desired[i] = n ? sum / n : center(id);
+        weight[i] = n ? (isDummy(id) ? 3 : 1) * Math.min(1, n) : 0.05;
+      });
+      // A card with no neighbour this way packs beside the ones that have
+      // one, instead of holding the band open.
+      let connected = 0, mass = 0;
+      for (let i = 0; i < cell.length; i += 1) if (weight[i] > 0.05) { connected += desired[i]; mass += 1; }
+      if (mass) for (let i = 0; i < cell.length; i += 1) if (weight[i] <= 0.05) desired[i] = connected / mass;
+      keyed.sort((a, b) => desired[a] - desired[b] || discovery[cell[a]] - discovery[cell[b]]);
+      const sorted = keyed.map(i => cell[i]);
+      cells[band][l] = sorted;
+      const fitted = fitRow(sorted, Float64Array.from(keyed, i => desired[i]), Float64Array.from(keyed, i => weight[i]), width, gapOf);
+      sorted.forEach((id, i) => { local[id] = fitted[i] - bandX[band]; });
+    }
+    /** Every band's layers once, top down or bottom up. */
+    function sweep(down) {
+      for (let step = 0; step <= bands.maxLayer; step += 1) {
+        for (let band = 0; band < bands.count; band += 1) {
+          const l = down ? step : bands.lastLayer[band] - step;
+          if (l >= 0 && l <= bands.lastLayer[band] && cells[band][l].length) placeCell(band, l, down);
+        }
+      }
+      alignAll();
+    }
+    // Start packed left to right.
+    for (const bandCells of cells) {
+      for (const cell of bandCells) {
+        let at = 0;
+        cell.forEach((id, i) => { if (i) at += (width[cell[i - 1]] + width[id]) / 2 + gapOf(cell[i - 1], id); local[id] = at; });
+      }
+    }
+    alignAll();
+    for (let pass = 0; pass < SWEEPS; pass += 1) sweep(pass % 2 === 0);
+    // A last down sweep keeps single calls straight under their caller.
+    sweep(true);
+    return {local, bandX, bandW, gutter, crossEdges, center};
+  }
+
+  /** Ports: a card's calls leave its bottom and enter its top in the order
+   * of where they go, so bundles do not cross at the card. Back edges take
+   * the right end, toward the gutter they run up; a self call has its own
+   * loop on the card's right edge instead. */
+  function assignPorts(cards, bands, items, place, m) {
+    const {count, from, to, w, back} = cards, {bandOf} = bands, {local, center} = place;
+    const outPort = new Float64Array(from.length), inPort = new Float64Array(from.length);
+    const nextX = e => (items.firstDummy[e] >= 0 ? center(items.firstDummy[e]) : center(to[e]));
+    const previousX = e => (items.firstDummy[e] >= 0 ? center(items.firstDummy[e] + items.dummyCount[e] - 1) : center(from[e]));
+    const spread = (v, list, key, target) => {
+      if (!list.length) return;
+      list.sort((a, b) => key(a) - key(b) || a - b);
+      const step = list.length > 1 ? Math.min(m.portGap, w[v] * 0.6 / (list.length - 1)) : 0;
+      list.forEach((e, i) => { target[e] = local[v] + (i - (list.length - 1) / 2) * step; });
+    };
+    const outs = Array.from({length: count}, () => []), ins = Array.from({length: count}, () => []);
+    for (let e = 0; e < from.length; e += 1) {
+      if (from[e] === to[e]) continue;
+      outs[from[e]].push(e);
+      ins[to[e]].push(e);
+    }
+    for (let v = 0; v < count; v += 1) {
+      spread(v, outs[v], e => (back[e] && bandOf[to[e]] === bandOf[v] ? Infinity : nextX(e)), outPort);
+      spread(v, ins[v], e => (back[e] && bandOf[from[e]] === bandOf[v] ? Infinity : previousX(e)), inPort);
+    }
+    return {outPort, inPort};
+  }
+
+  /** Routes of the calls inside each band, in band-local units; a call
+   * between bands is routed by stackBands and is null here. */
+  function routeBands(cards, bands, items, rows, place, ports, box, m) {
+    const {from, to, w, h, layer, back} = cards, {bandOf} = bands, {lx, ly} = box;
+    const routes = new Array(from.length).fill(null), slots = new Uint32Array(bands.count);
+    for (let e = 0; e < from.length; e += 1) {
+      const a = from[e], b = to[e], band = bandOf[a];
+      if (band !== bandOf[b]) continue;
+      const points = [], types = [], push = (px, py, type) => { points.push(px, py); types.push(type); };
+      const sx = ports.outPort[e], sy = ly[a] + h[a], top = rows.top[band], height = rows.height[band];
+      if (a === b) {
+        // Recursion: out of the right edge low, up through the gap beside
+        // the card and back in at its right edge under the header.
+        const right = lx[a] + w[a], loop = Math.min(m.gapX * 0.66, 20), low = ly[a] + Math.max(30, h[a] - 14);
+        push(right, low, MOVE); push(right + loop, low, CORNER); push(right + loop, ly[a] + 15, CORNER); push(right, ly[a] + 15, LINE);
+      } else if (back[e]) {
+        // Down out of the source, along the gap under its layer, up the
+        // band's gutter, along the gap over the target's layer and down in.
+        const slot = slots[band]++ % m.gutterSlots;
+        const gx = place.bandW[band] + m.lanePadX / 2 + m.gutter / 2 + slot * m.gutterStep;
+        const below = top[layer[a]] + height[layer[a]] + m.gapY * 0.3 + slot * 3, above = ly[b] - m.gapY * 0.3 - slot * 3;
+        push(sx, sy, MOVE); push(sx, below, CORNER); push(gx, below, CORNER); push(gx, above, CORNER); push(ports.inPort[e], above, CORNER); push(ports.inPort[e], ly[b], LINE);
+      } else {
+        // Straight down to the bottom of the caller's row first, so the bend
+        // into the next row is in the gap, clear of a taller card beside it.
+        const rowBottom = top[layer[a]] + height[layer[a]];
+        push(sx, sy, MOVE);
+        if (rowBottom > sy + 0.5) push(sx, rowBottom, LINE);
+        for (let d = 0; d < items.dummyCount[e]; d += 1) {
+          const id = items.firstDummy[e] + d, l = items.layer[id], dx = place.local[id];
+          push(dx, top[l], CURVE); push(dx, top[l] + height[l], LINE);
+        }
+        push(ports.inPort[e], ly[b], CURVE);
+      }
+      routes[e] = {points, types};
+    }
+    return routes;
+  }
+
   /**
    * graph: {count, lane: Int32Array (lane key per node), from, to, weight?, w?, h?}
    * Returns node boxes (top-left, with per-node w and h), band boxes in
@@ -350,236 +648,32 @@ const flowGraphLayout = (() => {
   function layoutGraph(graph, metrics = METRICS) {
     const m = {...METRICS, ...metrics};
     const {count, from, to} = graph;
-    const edgeCount = from.length;
-    const nodeW = Float32Array.from({length: count}, (_, v) => graph.w?.[v] ?? m.nodeW);
-    const nodeH = Float32Array.from({length: count}, (_, v) => graph.h?.[v] ?? m.nodeH);
-    // Layers come from the calls inside each realm.
-    const intra = [];
-    for (let e = 0; e < edgeCount; e += 1) if (graph.lane[from[e]] === graph.lane[to[e]]) intra.push(e);
-    const innerFrom = Int32Array.from(intra, e => from[e]), innerTo = Int32Array.from(intra, e => to[e]);
-    const adj = adjacency(count, innerFrom, innerTo);
-    const innerBack = backEdges(count, innerFrom, innerTo, adj, graph.weight);
-    const layer = layers(count, innerFrom, innerTo, adj, innerBack);
-    boundLayers(count, layer, graph.lane, adj, innerTo, innerBack, graph.weight, m.wrap);
-    const back = new Uint8Array(edgeCount);
-    intra.forEach((e, i) => { back[e] = innerBack[i]; });
-    const laneKeys = laneOrder(count, graph, from, to, back, layer);
-    const laneIndex = new Map(laneKeys.map((key, index) => [key, index]));
-    const bands = laneKeys.length;
-    const bandOf = Int32Array.from({length: count}, (_, v) => laneIndex.get(graph.lane[v]));
-    // A call into a band drawn above its caller runs back up.
-    for (let e = 0; e < edgeCount; e += 1) if (bandOf[from[e]] !== bandOf[to[e]]) back[e] = bandOf[to[e]] < bandOf[from[e]] ? 1 : 0;
-    const maxLayerOf = new Int32Array(bands);
-    for (let v = 0; v < count; v += 1) maxLayerOf[bandOf[v]] = Math.max(maxLayerOf[bandOf[v]], layer[v]);
-    let maxLayer = 0; for (const value of maxLayerOf) maxLayer = Math.max(maxLayer, value);
-
-    // Items: cards 0..count-1, then one waypoint per layer a long edge passes.
-    const itemBand = [], itemLayer = [];
-    for (let v = 0; v < count; v += 1) { itemBand.push(bandOf[v]); itemLayer.push(layer[v]); }
-    const firstDummy = new Int32Array(edgeCount).fill(-1), dummyCount = new Uint32Array(edgeCount);
-    const links = [];
-    let budget = m.maxDummies;
-    for (let e = 0; e < edgeCount; e += 1) {
-      const a = from[e], b = to[e];
-      // A card in another band pulls sideways, the upper end first.
-      if (bandOf[a] !== bandOf[b]) { if (bandOf[a] < bandOf[b]) links.push(a, b); else links.push(b, a); continue; }
-      if (back[e]) continue;
-      const span = layer[b] - layer[a];
-      if (span > 1 && span - 1 <= budget) {
-        budget -= span - 1; firstDummy[e] = itemBand.length; dummyCount[e] = span - 1;
-        let previous = a;
-        for (let l = layer[a] + 1; l < layer[b]; l += 1) {
-          const id = itemBand.length;
-          itemBand.push(itemBand[a]); itemLayer.push(l);
-          links.push(previous, id); previous = id;
-        }
-        links.push(previous, b);
-      } else links.push(a, b);
-    }
-    const items = itemBand.length, isDummy = id => id >= count;
-    const width = new Float64Array(items), height = new Float64Array(items);
-    for (let id = 0; id < items; id += 1) { width[id] = isDummy(id) ? m.dummyW : nodeW[id]; height[id] = isDummy(id) ? 0 : nodeH[id]; }
-    // Neighbours above and below each item.
-    const upStart = new Uint32Array(items + 1), downStart = new Uint32Array(items + 1);
-    for (let k = 0; k < links.length; k += 2) { downStart[links[k] + 1] += 1; upStart[links[k + 1] + 1] += 1; }
-    for (let id = 0; id < items; id += 1) { upStart[id + 1] += upStart[id]; downStart[id + 1] += downStart[id]; }
-    const upList = new Uint32Array(links.length / 2), downList = new Uint32Array(links.length / 2);
-    { const upFill = upStart.slice(0, items), downFill = downStart.slice(0, items);
-      for (let k = 0; k < links.length; k += 2) { downList[downFill[links[k]]++] = links[k + 1]; upList[upFill[links[k + 1]]++] = links[k]; } }
-
-    // Cells, first in depth-first discovery order from the heaviest roots.
-    const discovery = new Int32Array(items).fill(-1);
-    { let next = 0; const stack = [];
-      const roots = [];
-      for (let id = 0; id < items; id += 1) if (upStart[id + 1] === upStart[id]) roots.push(id);
-      roots.sort((a, b) => (graph.weight?.[b] ?? 0) - (graph.weight?.[a] ?? 0) || a - b);
-      const visit = start => {
-        if (discovery[start] >= 0) return;
-        stack.push(start);
-        while (stack.length) {
-          const id = stack.pop();
-          if (discovery[id] >= 0) continue;
-          discovery[id] = next++;
-          for (let k = downStart[id + 1]; k > downStart[id]; k -= 1) if (discovery[downList[k - 1]] < 0) stack.push(downList[k - 1]);
-        }
-      };
-      roots.forEach(visit);
-      for (let id = 0; id < items; id += 1) visit(id);
-    }
-    const cells = Array.from({length: bands}, (_, band) => Array.from({length: maxLayerOf[band] + 1}, () => []));
-    for (let id = 0; id < items; id += 1) cells[itemBand[id]][itemLayer[id]].push(id);
-    cells.forEach(bandCells => bandCells.forEach(cell => cell.sort((a, b) => discovery[a] - discovery[b])));
-
-    // Rows of each band, from the band's own top.
-    const layerH = cells.map(bandCells => new Float64Array(bandCells.length)), layerTop = cells.map(bandCells => new Float64Array(bandCells.length + 1));
-    for (let v = 0; v < count; v += 1) layerH[bandOf[v]][layer[v]] = Math.max(layerH[bandOf[v]][layer[v]], height[v]);
-    for (let band = 0; band < bands; band += 1) for (let l = 0; l < cells[band].length; l += 1) layerTop[band][l + 1] = layerTop[band][l] + layerH[band][l] + m.gapY;
-
-    // Horizontal placement: centres local to each band, bands shifted to line
-    // up the calls between them.
-    const local = new Float64Array(items), bandX = new Float64Array(bands), bandW = new Float64Array(bands);
-    const gutterOf = new Float64Array(bands), backIn = new Uint32Array(bands);
-    for (let e = 0; e < edgeCount; e += 1) if (back[e] && from[e] !== to[e] && bandOf[from[e]] === bandOf[to[e]]) backIn[bandOf[from[e]]] += 1;
-    for (let band = 0; band < bands; band += 1) gutterOf[band] = backIn[band] ? m.lanePadX / 2 + m.gutter + Math.min(backIn[band], m.gutterSlots) * m.gutterStep : 0;
-    const crossEdges = [];
-    for (let e = 0; e < edgeCount; e += 1) if (bandOf[from[e]] !== bandOf[to[e]]) crossEdges.push(e);
-    // Waypoints of a bundle of long edges run close together, like a bus.
-    const gapOf = (a, b) => isDummy(a) && isDummy(b) ? m.busGap : isDummy(a) || isDummy(b) ? m.dummyGap : m.gapX;
-    const center = id => bandX[itemBand[id]] + local[id];
-    const placeBands = () => {
-      for (let band = 0; band < bands; band += 1) {
-        let left = Infinity, right = -Infinity;
-        for (const cell of cells[band]) for (const id of cell) { left = Math.min(left, local[id] - width[id] / 2); right = Math.max(right, local[id] + width[id] / 2); }
-        if (left === Infinity) { left = 0; right = 0; }
-        for (const cell of cells[band]) for (const id of cell) local[id] -= left;
-        bandW[band] = right - left;
-      }
-      const offsets = alignBands(Array.from(bandW, (value, band) => value + gutterOf[band]),
-        crossEdges.map(e => ({a: bandOf[from[e]], ca: local[from[e]], b: bandOf[to[e]], cb: local[to[e]]})));
-      bandX.set(offsets);
-    };
-    const placeCell = (band, l, desired, weight) => {
-      const cell = cells[band][l];
-      if (!cell.length) return;
-      const fitted = fitRow(cell, desired, weight, width, gapOf);
-      cell.forEach((id, i) => { local[id] = fitted[i] - bandX[band]; });
-    };
-    // Start packed left to right.
-    cells.forEach(bandCells => bandCells.forEach(cell => { let at = 0; cell.forEach((id, i) => { if (i) at += (width[cell[i - 1]] + width[id]) / 2 + gapOf(cell[i - 1], id); local[id] = at; }); }));
-    placeBands();
-    const sweep = (down, both = false) => {
-      for (let step = 0; step <= maxLayer; step += 1) {
-        for (let band = 0; band < bands; band += 1) {
-          const l = down ? step : maxLayerOf[band] - step;
-          if (l < 0 || l > maxLayerOf[band]) continue;
-          const cell = cells[band][l];
-          if (!cell.length) continue;
-          const desired = new Float64Array(cell.length), weight = new Float64Array(cell.length), keyed = new Array(cell.length);
-          const left = bandX[band], right = bandX[band] + bandW[band];
-          cell.forEach((id, i) => {
-            let sum = 0, n = 0;
-            // A neighbour in another band pulls toward the nearer edge of
-            // this one, never past it: otherwise two bands chase each other
-            // apart.
-            const add = (startArr, list) => {
-              for (let k = startArr[id]; k < startArr[id + 1]; k += 1) {
-                const other = list[k];
-                if (itemBand[other] === band) { sum += center(other); n += 1; } else { sum += 0.35 * Math.max(left, Math.min(right, center(other))); n += 0.35; }
-              }
-            };
-            if (down || both) add(upStart, upList);
-            if (!down || both) add(downStart, downList);
-            const at = center(id);
-            desired[i] = n ? sum / n : at;
-            weight[i] = n ? (isDummy(id) ? 3 : 1) * Math.min(1, n) : 0.05;
-            keyed[i] = i;
-          });
-          // A card with no neighbour this way packs beside the ones that
-          // have one, instead of holding the band open.
-          let connected = 0, mass = 0;
-          for (let i = 0; i < cell.length; i += 1) if (weight[i] > 0.05) { connected += desired[i]; mass += 1; }
-          if (mass) for (let i = 0; i < cell.length; i += 1) if (weight[i] <= 0.05) desired[i] = connected / mass;
-          keyed.sort((a, b) => desired[a] - desired[b] || discovery[cell[a]] - discovery[cell[b]]);
-          const sorted = keyed.map(i => cell[i]), sortedDesired = Float64Array.from(keyed, i => desired[i]), sortedWeight = Float64Array.from(keyed, i => weight[i]);
-          cells[band][l] = sorted;
-          placeCell(band, l, sortedDesired, sortedWeight);
-        }
-      }
-      placeBands();
-    };
-    for (let pass = 0; pass < SWEEPS; pass += 1) sweep(pass % 2 === 0);
-    // A last down sweep keeps single calls straight under their caller.
-    sweep(true);
-
+    const w = Float32Array.from({length: count}, (_, v) => graph.w?.[v] ?? m.nodeW);
+    const h = Float32Array.from({length: count}, (_, v) => graph.h?.[v] ?? m.nodeH);
+    const cards = {count, from, to, w, h, ...layerCards(graph, m)};
+    const bands = orderBands(graph, cards);
+    const items = insertWaypoints(cards, bands, m);
+    const order = orderCells(items, bands, graph.weight);
+    const rows = bandRows(order.cells, items, bands, m);
+    const place = placeItems(cards, items, bands, order, m);
     // Band-local boxes.
     const lx = new Float64Array(count), ly = new Float64Array(count);
-    for (let v = 0; v < count; v += 1) { lx[v] = local[v] - width[v] / 2; ly[v] = layerTop[bandOf[v]][layer[v]]; }
-    const lc = id => local[id];
-
-    // Ports: a card's edges leave its bottom and enter its top in the order of
-    // where they go, so bundles do not cross at the card. Back edges take the
-    // right end, toward the gutter they run up.
-    const outPort = new Float64Array(edgeCount), inPort = new Float64Array(edgeCount);
-    const nextX = e => firstDummy[e] >= 0 ? center(firstDummy[e]) : center(to[e]);
-    const previousX = e => firstDummy[e] >= 0 ? center(firstDummy[e] + dummyCount[e] - 1) : center(from[e]);
-    const spread = (v, list, key, target) => {
-      if (!list.length) return;
-      list.sort((a, b) => key(a) - key(b) || a - b);
-      const step = list.length > 1 ? Math.min(m.portGap, nodeW[v] * 0.6 / (list.length - 1)) : 0, mid = lc(v);
-      list.forEach((e, i) => { target[e] = mid + (i - (list.length - 1) / 2) * step; });
-    };
-    {
-      const outs = Array.from({length: count}, () => []), ins = Array.from({length: count}, () => []);
-      for (let e = 0; e < edgeCount; e += 1) { if (from[e] === to[e]) continue; outs[from[e]].push(e); ins[to[e]].push(e); }
-      // A self call has its own loop on the card's right edge.
-      for (let v = 0; v < count; v += 1) {
-        spread(v, outs[v], e => back[e] && bandOf[to[e]] === bandOf[v] ? Infinity : nextX(e), outPort);
-        spread(v, ins[v], e => back[e] && bandOf[from[e]] === bandOf[v] ? Infinity : previousX(e), inPort);
-      }
+    for (let v = 0; v < count; v += 1) {
+      lx[v] = place.local[v] - w[v] / 2;
+      ly[v] = rows.top[bands.bandOf[v]][cards.layer[v]];
     }
-
-    // Routes inside each band, in band-local units.
-    const routes = new Array(edgeCount).fill(null), bandSlot = new Uint32Array(bands);
-    for (let e = 0; e < edgeCount; e += 1) {
-      const a = from[e], b = to[e], band = bandOf[a];
-      if (band !== bandOf[b]) continue;
-      const points = [], types = [], push = (px, py, type) => { points.push(px, py); types.push(type); };
-      const sx = outPort[e], sy = ly[a] + nodeH[a], rows = layerTop[band], heights = layerH[band];
-      if (a === b) {
-        // Recursion: out of the right edge low, up through the gap beside
-        // the card and back in at its right edge under the header.
-        const right = lx[a] + nodeW[a], loop = Math.min(m.gapX * 0.66, 20), low = ly[a] + Math.max(30, nodeH[a] - 14);
-        push(right, low, MOVE); push(right + loop, low, CORNER); push(right + loop, ly[a] + 15, CORNER); push(right, ly[a] + 15, LINE);
-      } else if (back[e]) {
-        // Down out of the source, along the gap under its layer, up the
-        // band's gutter, along the gap over the target's layer and down in.
-        const slot = bandSlot[band]++ % m.gutterSlots;
-        const gx = bandW[band] + m.lanePadX / 2 + m.gutter / 2 + slot * m.gutterStep;
-        const below = rows[layer[a]] + heights[layer[a]] + m.gapY * 0.3 + slot * 3, above = ly[b] - m.gapY * 0.3 - slot * 3;
-        push(sx, sy, MOVE); push(sx, below, CORNER); push(gx, below, CORNER); push(gx, above, CORNER); push(inPort[e], above, CORNER); push(inPort[e], ly[b], LINE);
-      } else {
-        // Straight down to the bottom of the caller's row first, so the bend
-        // into the next row is in the gap, clear of a taller card beside it.
-        const rowBottom = rows[layer[a]] + heights[layer[a]];
-        push(sx, sy, MOVE);
-        if (rowBottom > sy + 0.5) push(sx, rowBottom, LINE);
-        for (let d = 0; d < dummyCount[e]; d += 1) {
-          const id = firstDummy[e] + d, l = itemLayer[id], dx = lc(id);
-          push(dx, rows[l], CURVE); push(dx, rows[l] + heights[l], LINE);
-        }
-        push(inPort[e], ly[b], CURVE);
-      }
-      routes[e] = {points, types};
-    }
+    const ports = assignPorts(cards, bands, items, place, m);
+    const routes = routeBands(cards, bands, items, rows, place, ports, {lx, ly}, m);
     // A back edge into a first-row card runs over it through the band's top
     // pad, which the band already has.
-    const contentBands = laneKeys.map((key, band) => {
-      const rowsTop = layerTop[band], last = cells[band].length - 1;
-      return {key, w: bandW[band] + gutterOf[band], h: last >= 0 ? rowsTop[last] + layerH[band][last] : 0, cards: bandW[band]};
+    const contentBands = bands.keys.map((key, band) => {
+      const last = order.cells[band].length - 1;
+      return {key, w: place.bandW[band] + place.gutter[band], h: last >= 0 ? rows.top[band][last] + rows.height[band][last] : 0, cards: place.bandW[band]};
     });
-    const content = {bands: contentBands, bandOf, lx, ly, routes, outPort: crossPorts(outPort, crossEdges, edgeCount), inPort: crossPorts(inPort, crossEdges, edgeCount), offsets: Float64Array.from(bandX)};
-    const stacked = stackBands(graph, nodeW, nodeH, content, m);
-    return {...stacked, w: nodeW, h: nodeH, layer, back, top: m.margin, waypoints: items - count, content};
+    const content = {bands: contentBands, bandOf: bands.bandOf, lx, ly, routes, outPort: crossPorts(ports.outPort, place.crossEdges, from.length),
+      inPort: crossPorts(ports.inPort, place.crossEdges, from.length), offsets: Float64Array.from(place.bandX)};
+    const stacked = stackBands(graph, w, h, content, m);
+    return {...stacked, w, h, layer: cards.layer, back: cards.back, top: m.margin, waypoints: items.count - count, content};
   }
   /** Ports of calls between bands only; the rest are in their routes. */
   function crossPorts(ports, crossEdges, edgeCount) {

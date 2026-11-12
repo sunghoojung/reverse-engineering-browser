@@ -2275,14 +2275,15 @@ NativeMemoryCacheAdmission NativeProbeSink::AdmitMemoryCacheReuse(
       monotonic_time_ns >= expires_at_monotonic_ns) {
     return {};
   }
-  const auto count_not_recorded = [&] {
+  const auto count_not_recorded = [&](const std::uint8_t exclusion_class) {
     if (exclusion_counter) {
-      exclusion_counter(kNativeMemoryCacheReuseExclusion, session_id, config_generation);
+      exclusion_counter(exclusion_class, session_id, config_generation);
     }
   };
-  // An SVG image's own document or a page popup belongs to no tab.
+  // An SVG image's own document or a page popup belongs to no tab, so its
+  // count is kept apart from the budget's overflow.
   if (!ordinary_page) {
-    count_not_recorded();
+    count_not_recorded(kNativeNonOrdinaryPageReuseExclusion);
     return {};
   }
   // Reuses can be frequent, so a configuration records a bounded number and
@@ -2297,7 +2298,7 @@ NativeMemoryCacheAdmission NativeProbeSink::AdmitMemoryCacheReuse(
     }
     const std::uint32_t used = word_tag == tag ? static_cast<std::uint32_t>(word) : 0;
     if (used >= kNativeMemoryCacheReuseBudget) {
-      count_not_recorded();
+      count_not_recorded(kNativeMemoryCacheReuseExclusion);
       return {};
     }
     if (memory_cache_budget_.compare_exchange_weak(word, (std::uint64_t{tag} << 32U) | (used + 1U),

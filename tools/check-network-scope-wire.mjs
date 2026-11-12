@@ -164,9 +164,11 @@ assert.deepEqual([proxied.requests, proxied.renderers, [...proxied.byScheme]], [
 assert.equal(scope.captureExclusionNotice(proxied), '3 browser-internal requests not recorded · 2 WebUI renderers not admitted');
 // Memory-cache reuses past a renderer's budget are their own count, never browser-internal.
 const reuses = scope.captureExclusionTotals([golden('memory-cache reuses of a renderer'),
-  golden('memory-cache reuses with no renderer')]);
-assert.deepEqual([reuses.memoryCache, reuses.requests], [4097n, 0n]);
-assert.equal(scope.captureExclusionNotice(reuses), '4097 memory-cache reuses not recorded');
+  golden('memory-cache reuses with no renderer'), golden('non-ordinary-page reuses of a renderer')]);
+// Lost tab rows and reuses no tab owned stay apart.
+assert.deepEqual([reuses.memoryCache, reuses.nonOrdinaryPage, reuses.requests], [4097n, 3n, 0n]);
+assert.equal(scope.captureExclusionNotice(reuses),
+  '4097 memory-cache reuses not recorded · 3 memory-cache reuses in SVG images or popups not recorded');
 
 console.log(`PASS network scope wire: ${cases.length} C++ golden records agree with Python and the UI readers; ` +
   'data:, service-worker, service-worker failure, memory-cache and opted-in internal rows finish with their own records; ' +

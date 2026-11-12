@@ -487,9 +487,11 @@ void MemoryCacheReuses() {
   // Browser-internal URLs are counted like requests unless the session opts in.
   record(reuse_of(6003, "chrome", 3));
   assert(Drain(queue) == 0 && queue.ExclusionCount(0) == 1 && queue.ExclusionCount(5) == 0);
-  // An SVG image's own document or a page popup belongs to no tab: counted.
+  // An SVG image's own document or a page popup belongs to no tab: counted
+  // as class 71, apart from the budget's overflow.
   assert(!record(image, /*ordinary=*/false).admitted());
-  assert(Drain(queue) == 0 && queue.ExclusionCount(5) == 1);
+  assert(Drain(queue) == 0 && queue.ExclusionCount(5) == 0 && queue.ExclusionCount(6) == 1 &&
+         reb::NativeRendererExclusionClass(6) == reb::kNativeNonOrdinaryPageReuseExclusion);
 
   // Metadata sessions record the reuse without its path, at most 4,096 per
   // configuration; the rest are counted as class 70. An internal URL counted
@@ -510,7 +512,8 @@ void MemoryCacheReuses() {
   for (int index = 0; index < 1000; ++index) {
     assert(!sink.AdmitMemoryCacheReuse(true).admitted());
   }
-  assert(allocations == before && metadata.ExclusionCount(5) == 1010);
+  assert(allocations == before && metadata.ExclusionCount(5) == 1010 &&
+         metadata.ExclusionCount(6) == 0);
   // A new configuration starts a fresh count, and a reuse admitted by the
   // replaced one is never recorded into it.
   ConfigureScope(metadata, false, false, 68);

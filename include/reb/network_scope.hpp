@@ -41,6 +41,7 @@ enum class ExclusionClass : std::uint8_t {
   kWebUiRequest = 67,
   // 68 and 69 belong to another part of the contract.
   kMemoryCacheReuse = 70,
+  kNonOrdinaryPageReuse = 71,
 };
 
 inline constexpr std::uint16_t kCaptureExclusionPayloadVersion = 1;
@@ -55,7 +56,7 @@ inline constexpr std::size_t kCaptureExclusionPayloadSize = 16;
 }
 
 [[nodiscard]] constexpr bool IsKnownExclusionClass(const std::uint8_t value) noexcept {
-  return IsBrowserInternalSchemeClass(value) || (value >= 64 && value <= 70);
+  return IsBrowserInternalSchemeClass(value) || (value >= 64 && value <= 71);
 }
 
 // The record types that may name the scheme of their request.
@@ -115,7 +116,9 @@ struct CaptureExclusionPayload final {
            value.exclusion_class != static_cast<std::uint8_t>(ExclusionClass::kWebUiRequest)) ||
           h.initiator_process_id == 0) &&
          // Only a renderer counts the reuses it did not record.
-         (value.exclusion_class != static_cast<std::uint8_t>(ExclusionClass::kMemoryCacheReuse) ||
+         ((value.exclusion_class != static_cast<std::uint8_t>(ExclusionClass::kMemoryCacheReuse) &&
+           value.exclusion_class !=
+               static_cast<std::uint8_t>(ExclusionClass::kNonOrdinaryPageReuse)) ||
           h.initiator_process_id != 0);
 }
 

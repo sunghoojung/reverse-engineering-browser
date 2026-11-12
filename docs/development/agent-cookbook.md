@@ -62,8 +62,9 @@ checks:
 - `browser_internal_excluded`: `chrome:`, `devtools:` and WebUI pages were
   counted, not recorded. Not a loss; see `exclusions`.
 - `memory_cache_reuse_not_recorded`: a renderer passed its 4,096 memory-cache
-  rows for the capture, or reused resources in a page that is not ordinary
-  (an SVG image's own document); those reuses were counted, not recorded.
+  rows for the capture; later reuses were counted, not recorded. Reuses in a
+  page that is not ordinary (an SVG image's own document), which no tab owns,
+  are the separate `non_ordinary_page_reuse` exclusion.
 - `network_tab_unresolved` (error): requests without a tab. Read one with
   `get_events` and the `process_id` and `request_id` from `request_tabs`.
   Extension traffic recorded by opt-in counts as `extension_rows`, not as

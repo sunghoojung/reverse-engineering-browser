@@ -34093,7 +34093,7 @@
           },
           "exclusions": {
             "type": "array",
-            "description": "Evidence the capture counted instead of recording, by class, from capture_exclusion records (protocol/native-network-v3.md). Requests are chrome, chrome_untrusted, brave, devtools and chrome_search scheme loads, webui_request requests WebUI renderers sent through the browser proxy, extension_worker requests of extension workers and devtools_load requests of the DevTools factory; webui_renderer counts renderer processes with WebUI bindings or a WebUI process lock that were not admitted; memory_cache_reuse counts the memory-cache reuses a renderer did not record, past its 4,096 per configuration or in a page that is not ordinary (an SVG image's own document or a page popup). These are named exclusions, never gaps or drops. Empty when nothing was excluded or REB_CAPTURE_BROWSER_INTERNAL=1 recorded browser-internal loads.",
+            "description": "Evidence the capture counted instead of recording, by class, from capture_exclusion records (protocol/native-network-v3.md). Requests are chrome, chrome_untrusted, brave, devtools and chrome_search scheme loads, webui_request requests WebUI renderers sent through the browser proxy, extension_worker requests of extension workers and devtools_load requests of the DevTools factory; webui_renderer counts renderer processes with WebUI bindings or a WebUI process lock that were not admitted; memory_cache_reuse counts the memory-cache reuses a renderer did not record past its 4,096 per configuration, which would have been tab rows; non_ordinary_page_reuse counts its reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns. These are named exclusions, never gaps or drops. Empty when nothing was excluded or REB_CAPTURE_BROWSER_INTERNAL=1 recorded browser-internal loads.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -34115,7 +34115,8 @@
                     "extension_worker",
                     "devtools_load",
                     "webui_request",
-                    "memory_cache_reuse"
+                    "memory_cache_reuse",
+                    "non_ordinary_page_reuse"
                   ]
                 },
                 "unit": {

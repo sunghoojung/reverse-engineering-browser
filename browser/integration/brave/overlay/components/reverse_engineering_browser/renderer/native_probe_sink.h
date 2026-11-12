@@ -60,7 +60,8 @@ using NativeRendererProbeEmitter =
 using NativeProbeFrameIdProvider = std::uint64_t (*)() noexcept;
 
 // Counts one request or memory-cache reuse the configuration did not record:
-// a browser-internal scheme class, or kNativeMemoryCacheReuseExclusion.
+// a browser-internal scheme class, kNativeMemoryCacheReuseExclusion or
+// kNativeNonOrdinaryPageReuseExclusion.
 using NativeProbeExclusionCounter = void (*)(std::uint8_t exclusion_class,
                                              std::uint64_t session_id,
                                              std::uint64_t config_generation) noexcept;
@@ -468,9 +469,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                                      std::int32_t error_code) noexcept;
   // Charges one memory-cache reuse to the configuration's budget, after the
   // Network category, expiry and page checks, so the caller converts nothing
-  // for a reuse it will not record. A reuse in a page that is not ordinary, or
-  // past kNativeMemoryCacheReuseBudget, is counted as exclusion class 70
-  // instead. Callers check IsCaptureArmed first.
+  // for a reuse it will not record. A reuse in a page that is not ordinary is
+  // counted as exclusion class 71, one past kNativeMemoryCacheReuseBudget as
+  // class 70, instead. Callers check IsCaptureArmed first.
   [[nodiscard]] NativeMemoryCacheAdmission AdmitMemoryCacheReuse(bool ordinary_page) noexcept;
   // One memory_cache_reuse record and, in content sessions, its target, into
   // the configuration that admitted it. A browser-internal URL is counted per

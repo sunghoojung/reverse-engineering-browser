@@ -43,25 +43,32 @@ inline constexpr std::uint8_t kNativeWebUiRendererExclusion = 64;
 inline constexpr std::uint8_t kNativeWebUiRequestExclusion = 67;
 // Classes 68 and 69 belong to another part of the contract.
 inline constexpr std::uint8_t kNativeMemoryCacheReuseExclusion = 70;
+// Reuses in a page that is not ordinary (an SVG image's own document or a
+// page popup), which no tab owns; counted apart from the budget's overflow.
+inline constexpr std::uint8_t kNativeNonOrdinaryPageReuseExclusion = 71;
 inline constexpr std::uint16_t kNativeCaptureExclusionPayloadVersion = 1;
 inline constexpr std::uint32_t kNativeCaptureExclusionPayloadSize = 16;
 // One counter per browser-internal scheme class, 16 to 20.
 inline constexpr std::size_t kNativeSchemeExclusionSlots = 5;
-// The renderer's probe queue counters: the scheme classes, then class 70.
-inline constexpr std::size_t kNativeRendererExclusionSlots = kNativeSchemeExclusionSlots + 1;
+// The renderer's probe queue counters: the scheme classes, then classes 70 and 71.
+inline constexpr std::size_t kNativeRendererExclusionSlots = kNativeSchemeExclusionSlots + 2;
 
 // The queue slot of a class the renderer counts, or kNativeRendererExclusionSlots.
 [[nodiscard]] constexpr std::size_t NativeRendererExclusionSlot(
     const std::uint8_t exclusion_class) noexcept {
   if (exclusion_class >= 16 && exclusion_class < 16 + kNativeSchemeExclusionSlots)
     return exclusion_class - 16U;
-  return exclusion_class == kNativeMemoryCacheReuseExclusion ? kNativeSchemeExclusionSlots
-                                                             : kNativeRendererExclusionSlots;
+  if (exclusion_class == kNativeMemoryCacheReuseExclusion)
+    return kNativeSchemeExclusionSlots;
+  return exclusion_class == kNativeNonOrdinaryPageReuseExclusion ? kNativeSchemeExclusionSlots + 1
+                                                                 : kNativeRendererExclusionSlots;
 }
 
 [[nodiscard]] constexpr std::uint8_t NativeRendererExclusionClass(const std::size_t slot) noexcept {
-  return slot < kNativeSchemeExclusionSlots ? static_cast<std::uint8_t>(16 + slot)
-                                            : kNativeMemoryCacheReuseExclusion;
+  if (slot < kNativeSchemeExclusionSlots)
+    return static_cast<std::uint8_t>(16 + slot);
+  return slot == kNativeSchemeExclusionSlots ? kNativeMemoryCacheReuseExclusion
+                                             : kNativeNonOrdinaryPageReuseExclusion;
 }
 
 // memory_cache_reuse (type 52), "Memory-cache reuse" in

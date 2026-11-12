@@ -566,6 +566,11 @@ void NativeProbeHostBrowserInternalScope() {
             session.exclusions[3].exclusion_class == 70 && session.exclusions[3].count == 2 &&
             events.empty(),
         "Memory-cache reuses past the renderer's budget are reported as class 70");
+  queue->CountExclusion(reb::kNativeNonOrdinaryPageReuseExclusion);
+  host.EventsAvailable();
+  Check(session.exclusions.size() == 5 && session.exclusions[4].exclusion_class == 71 &&
+            session.exclusions[4].count == 1 && events.empty(),
+        "Reuses in pages that are not ordinary are reported apart, as class 71");
 
   NativeProbeEvent record;
   record.header.category = reb::NativeProbeCategory::kNetwork;

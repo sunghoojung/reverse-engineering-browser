@@ -371,6 +371,7 @@ fn exclusion_class(code: u8) -> Option<(&'static str, &'static str)> {
         67 => ("webui_request", "requests"),
         // 68 and 69 belong to another part of the contract.
         70 => ("memory_cache_reuse", "reuses"),
+        71 => ("non_ordinary_page_reuse", "reuses"),
         _ => return None,
     })
 }
@@ -571,7 +572,7 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
             "memory_cache_reuse_not_recorded",
             "info",
             format!(
-                "{reuses} memory-cache reuses were counted, not recorded: each renderer records at most 4,096 per capture configuration, and none in a page that is not ordinary (an SVG image's own document or a page popup). This is a named exclusion, not a gap."
+                "{reuses} memory-cache reuses were counted, not recorded: each renderer records at most 4,096 per capture configuration. This is a named exclusion, not a gap. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are counted apart as non_ordinary_page_reuse."
             ),
         );
         item["count"] = json!(reuses.to_string());
@@ -769,6 +770,7 @@ mod tests {
             exclusion(11, 0, 67, 3),
             exclusion(12, 41, 70, 4),
             exclusion(13, 41, 70, 9),
+            exclusion(14, 41, 71, 2),
         ]
         .map(|event| event.to_string())
         .to_vec();
@@ -803,6 +805,7 @@ mod tests {
                 {"class": "devtools_load", "unit": "requests", "count": "1"},
                 {"class": "webui_request", "unit": "requests", "count": "3"},
                 {"class": "memory_cache_reuse", "unit": "reuses", "count": "9"},
+                {"class": "non_ordinary_page_reuse", "unit": "reuses", "count": "2"},
             ])
         );
         let reuses = summary["checks"]
@@ -812,6 +815,7 @@ mod tests {
             .find(|check| check["code"] == "memory_cache_reuse_not_recorded")
             .unwrap();
         assert_eq!(reuses["severity"], "info");
+        // Reuses in pages no tab owns are not the budget's overflow.
         assert_eq!(reuses["count"], "9");
         let checks = summary["checks"].as_array().unwrap();
         assert_eq!(checks[0]["code"], "network_tab_unresolved");

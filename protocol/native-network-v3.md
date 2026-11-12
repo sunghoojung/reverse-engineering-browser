@@ -49,7 +49,8 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | V8 patch 0021 | `record-native-promise-registrations` | Navigation and async task callers |
 | Event type 52 | `memory_cache_reuse` | Request scope and tabs |
 | Exclusion class 70 | `memory_cache_reuse` (68 and 69 belong to another part) | Request scope and tabs |
-| Probe queue version 4 | the memory-cache counter | Request scope and tabs |
+| Exclusion class 71 | `non_ordinary_page_reuse` | Request scope and tabs |
+| Probe queue version 4 | the memory-cache counters | Request scope and tabs |
 | Chromium patch 0038 | `record-synchronous-requests-on-calling-thread` | Request scope and tabs |
 | Chromium patch 0039, 0040 | `finish-service-worker-ends`, `record-memory-cache-reuse` | Request scope and tabs |
 
@@ -157,8 +158,10 @@ Exclusion classes 16 to 20 count requests of that scheme class. Class 64
 `initiator_process_id` 0. Classes 65 `extension_worker` and 66
 `devtools_load` count requests (see [below](#traffic-no-tab-caused)). Class 70
 `memory_cache_reuse` counts the [memory-cache reuses](#memory-cache-reuse) a
-renderer did not record, past its budget or in a page that is not ordinary,
-always with its `initiator_process_id`. Consumers keep 68 and 69 valid. The count is cumulative within the session for
+renderer did not record past its budget, which would have been tab rows, and
+class 71 `non_ordinary_page_reuse` those in a page that is not ordinary, which
+no tab owns; both always have its `initiator_process_id`. Consumers keep 68
+and 69 valid. The count is cumulative within the session for
 one `(initiator_process_id, class)`, so a later record supersedes an earlier
 one and a lost record loses nothing that a later one reports. Consumers take
 the newest count per producer and class and sum by class. An exclusion is
@@ -305,8 +308,9 @@ handles each call after its detached and observer check:
    page that is not ordinary (`Page::IsOrdinary`, checked by
    `FetchContext::IsOrdinaryPageForNativeCapture`: an SVG image's own document,
    whose `IsolatedSVGDocumentHost` frame the browser never registers, or a
-   page popup) belongs to no tab. It, and every reuse past the budget, is
-   counted as exclusion class 70 and nothing else is done.
+   page popup) belongs to no tab: it is counted as exclusion class 71 and
+   charges no budget. A reuse past the budget is counted as class 70. Either
+   way nothing else is done.
 2. Only an admitted reuse takes a fresh renderer request ID, its fetch owner,
    and bounded prefixes of its host and, in content sessions only, its target
    (`NativeRequestTargetRange` keeps the range inside the URL whatever the
@@ -361,11 +365,12 @@ in place). Bit 1 marks a host longer than 120 bytes, and then the length is
 
 A browser-internal URL (class 16 to 20) is counted per class as a request
 would be, unless the configuration opts in, and returns its budget charge.
-Each renderer configuration records at most 4,096 reuses. Every later one, and
-every reuse in a page that is not ordinary, is counted, not recorded: the
-queue's counter for exclusion class 70 `memory_cache_reuse`, which the browser
-reports as a cumulative `capture_exclusion` of that renderer like the scheme
-counters. The count is tagged with the admitting configuration's generation,
+Each renderer configuration records at most 4,096 reuses. Every later one is
+counted, not recorded, in the queue's counter for exclusion class 70
+`memory_cache_reuse`, and every reuse in a page that is not ordinary in the one
+for class 71 `non_ordinary_page_reuse`, so a researcher can tell lost tab rows
+from reuses no tab owned. The browser reports each as a cumulative
+`capture_exclusion` of that renderer like the scheme counters. The count is tagged with the admitting configuration's generation,
 so a reuse still in flight from a replaced configuration neither charges nor
 resets the new one's budget, and one it admitted is not recorded into the new
 configuration.
@@ -616,7 +621,8 @@ proxy at the pin (`NavigationRequest` creates their factory without
 - `get_session_summary` lists `exclusions` by class and adds the info checks
   `browser_internal_excluded` and `no_tab_traffic_excluded`, `request_tabs`
   (with `extension_rows`), and the error check `network_tab_unresolved`. Class
-  70 is its own info check, `memory_cache_reuse_not_recorded`. The backend keeps
+  70 is its own info check, `memory_cache_reuse_not_recorded`; class 71 is listed
+  in `exclusions` only, since no tab lost a row. The backend keeps
   types 36 to 38, 50 and 52 in its network window.
 - Traffic has no Unattributed group. A row is in every tab its records or link
   name, with a marker such as "Service worker · 2 tabs"; All tabs counts it
@@ -636,7 +642,8 @@ proxy at the pin (`NavigationRequest` creates their factory without
   a type from its resource type, and Traffic labels it "(memory cache)" in Size, with a General
   note that no request was made (from the memory cache, or decoded from a
   `data:` URL or MHTML archive for static data). The footer shows
-  "N memory-cache reuses not recorded" for class 70.
+  "N memory-cache reuses not recorded" for class 70 and "N memory-cache
+  reuses in SVG images or popups not recorded" for class 71.
 - A row a service worker ended without a response is failed like any other,
   with "(service worker)" in Size. A row whose renderer completion carries
   `from_service_worker` takes its outcome from that completion; with browser
@@ -662,10 +669,10 @@ on one start slot, where any accepted mix of two starts fails (accepting every
 read, or ignoring the odd version, fails it); target ranges with empty and
 invalid components; and memory-cache reuses with their owner, host, status,
 size, target, static data, a 200-byte host, counted internal URLs that return
-their charge, a page that is not ordinary, the 4,096 budget and its class 70
+their charge, a page that is not ordinary and its class 71 count, the 4,096 budget and its class 70
 count at no allocation, a new configuration's fresh budget, a reuse admitted
 by a replaced configuration, and the inactive path.
-`tests/network_scope_test.cpp` also checks type 52 and class 70 for parity and
+`tests/network_scope_test.cpp` also checks type 52 and classes 70 and 71 for parity and
 malformed records and keeps 68 and 69 valid, and `make network-scope-wire-check`
 drives the Traffic model through memory-cache rows, a service-worker failure, a
 race network row and a lost end. `make request-index-check` holds the index to
@@ -685,7 +692,7 @@ native-artifact-capture-check` drives the real `NativeProbeHost` drain and
 `NativeTabResolver` through tombstoned frames, nested dedicated workers, shared
 worker clients, a service worker with 30 clients, last clients, counted and
 opted-in extension workers, renderers locked to an internal scheme, a worker's
-memory-cache reuse and the class 70 report. `make
+memory-cache reuse and the class 70 and 71 reports. `make
 native-probe-admission-check` covers the renderer fetch owner.
 
 ### Acceptance
@@ -731,7 +738,7 @@ Still required before declaring this browser-ready:
    network status. A second document loading the first one's script, image
    and style sheet, and a `data:` image, show "(memory cache)" rows on their
    tab; a `data:` image inside an SVG used as an `<img>` adds no row and one
-   `memory_cache_reuse` exclusion; a page that reuses more than 4,096
+   `non_ordinary_page_reuse` exclusion; a page that reuses more than 4,096
    resources reports the rest as `memory_cache_reuse` exclusions.
 
 ## Response bodies

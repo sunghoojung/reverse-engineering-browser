@@ -38,6 +38,8 @@ static_assert(static_cast<std::uint16_t>(reb::EventType::kMemoryCacheReuse) ==
               static_cast<std::uint16_t>(reb::NativeProbeType::kMemoryCacheReuse));
 static_assert(static_cast<std::uint8_t>(reb::ExclusionClass::kMemoryCacheReuse) ==
               reb::kNativeMemoryCacheReuseExclusion);
+static_assert(static_cast<std::uint8_t>(reb::ExclusionClass::kNonOrdinaryPageReuse) ==
+              reb::kNativeNonOrdinaryPageReuseExclusion);
 static_assert(reb::kMemoryCacheReusePayloadSize == reb::kNativeMemoryCacheReusePayloadSize &&
               reb::kMemoryCacheReuseHostSize == reb::kNativeMemoryCacheReuseHostSize &&
               reb::kMemoryCacheReuseStaticData == reb::kNativeMemoryCacheReuseStaticData &&
@@ -119,7 +121,9 @@ void Exclusions() {
   Case("webui requests with a producer", Exclusion(67, 1, 4242), false);
   Case("memory-cache reuses of a renderer", Exclusion(70, 4097, 4242), true);
   Case("memory-cache reuses with no renderer", Exclusion(70, 1, 0), false);
-  Case("exclusion class above the table", Exclusion(71, 1, 4242), false);
+  Case("non-ordinary-page reuses of a renderer", Exclusion(71, 3, 4242), true);
+  Case("non-ordinary-page reuses with no renderer", Exclusion(71, 1, 0), false);
+  Case("exclusion class above the table", Exclusion(72, 1, 4242), false);
   // Classes 68 and 69 are defined by another change; the range keeps them valid.
   for (const std::uint8_t code : {std::uint8_t{68}, std::uint8_t{69}}) {
     Check(reb::IsValidEvent(Exclusion(code, 1, 0)) && reb::IsValidEvent(Exclusion(code, 1, 4242)),

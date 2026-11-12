@@ -1399,7 +1399,8 @@ filter: **Hide internal** in Traffic, shared with Sources' "Hide browser-interna
 covers `chrome:`, `devtools:` and other internal schemes
 ([native network v3](../../protocol/native-network-v3.md)), and the footer
 reports what capture excluded, including memory-cache reuses past a renderer's
-budget ("N memory-cache reuses not recorded"). Sources reads retained artifact bytes only. A failed
+budget ("N memory-cache reuses not recorded") and, apart, those in SVG images
+or popups that no tab owns. Sources reads retained artifact bytes only. A failed
 refresh preserves the last valid catalog, and a detached pending load is
 cancelled and cannot restore obsolete source text. Artifact loads have a
 10-second deadline, including body reads; a timed-out load can be retried

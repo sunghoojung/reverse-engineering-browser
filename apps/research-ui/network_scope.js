@@ -12,6 +12,8 @@
   // Memory-cache reuses a renderer did not record, always with that renderer.
   // Classes 68 and 69 belong to another part of the contract.
   const MEMORY_CACHE_CLASS = 70;
+  // Those in a page that is not ordinary (an SVG image's own document, a popup), which no tab owns.
+  const NON_ORDINARY_PAGE_CLASS = 71;
   const INTERNAL_URL = /^(?:brave|chrome|chrome-search|chrome-untrusted|devtools):/i;
 
   // Same rules as include/reb/network_scope.hpp and tools/validate-evidence-store.py.
@@ -32,9 +34,9 @@
     if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 16 || bytes[5] || bytes[6] || bytes[7] ||
         count === 0n || !(exclusionClass in INTERNAL_SCHEME_CLASSES || exclusionClass === WEBUI_RENDERER_CLASS ||
           exclusionClass === WEBUI_REQUEST_CLASS || exclusionClass in NO_TAB_CLASSES ||
-          exclusionClass === MEMORY_CACHE_CLASS) ||
+          exclusionClass === MEMORY_CACHE_CLASS || exclusionClass === NON_ORDINARY_PAGE_CLASS) ||
         ([WEBUI_RENDERER_CLASS, 66, WEBUI_REQUEST_CLASS].includes(exclusionClass) && event.initiator_process_id !== 0) ||
-        (exclusionClass === MEMORY_CACHE_CLASS && event.initiator_process_id === 0)) return null;
+        ([MEMORY_CACHE_CLASS, NON_ORDINARY_PAGE_CLASS].includes(exclusionClass) && event.initiator_process_id === 0)) return null;
     return {exclusionClass, count, producer: `${event.session_id}:${event.initiator_process_id}`};
   }
 
@@ -47,7 +49,7 @@
       const key = `${value.producer}:${value.exclusionClass}`;
       if (!newest.has(key) || newest.get(key).count < value.count) newest.set(key, value);
     }
-    const totals = {requests: 0n, renderers: 0n, byScheme: new Map(), extension: 0n, devtools: 0n, memoryCache: 0n};
+    const totals = {requests: 0n, renderers: 0n, byScheme: new Map(), extension: 0n, devtools: 0n, memoryCache: 0n, nonOrdinaryPage: 0n};
     for (const {exclusionClass, count} of newest.values()) {
       if (exclusionClass === WEBUI_RENDERER_CLASS) {
         totals.renderers += count;
@@ -55,6 +57,10 @@
       }
       if (exclusionClass === MEMORY_CACHE_CLASS) {
         totals.memoryCache += count;
+        continue;
+      }
+      if (exclusionClass === NON_ORDINARY_PAGE_CLASS) {
+        totals.nonOrdinaryPage += count;
         continue;
       }
       if (exclusionClass in NO_TAB_CLASSES) {
@@ -84,6 +90,9 @@
     }
     if (totals?.memoryCache > 0n) {
       parts.push(`${totals.memoryCache} memory-cache ${totals.memoryCache === 1n ? 'reuse' : 'reuses'} not recorded`);
+    }
+    if (totals?.nonOrdinaryPage > 0n) {
+      parts.push(`${totals.nonOrdinaryPage} memory-cache ${totals.nonOrdinaryPage === 1n ? 'reuse' : 'reuses'} in SVG images or popups not recorded`);
     }
     return parts.join(' · ');
   }

@@ -358,6 +358,13 @@ struct Expectations: Decodable {
   let debuggerProcess: Int
   let debuggerFrame: String
   let debuggerArtifactId: String
+  let bodyCaseProcess: Int
+  let reusedHost: String
+  let reusedMarker: String
+  let workerAnswerHost: String
+  let partialHost: String
+  let hexBodyHost: String
+  let hexBodyBytes: Int
 
   static func load() throws -> Expectations {
     let text = try Harness.required(ProcessInfo.processInfo.environment, "REB_RENDERED_UI_EXPECT")
@@ -1834,6 +1841,94 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let strip = try await ui.value("document.querySelector('#selected-status').textContent") as? String ?? ""
       XCTAssertEqual(strip, "end lost", "\(size.name): the selected strip agrees")
       try await ui.screenshot("traffic-service-worker-lost-\(size.name)")
+    }
+  }
+
+  // protocol/native-network-v3.md "Bodies the proxy never sees": a memory-cache
+  // reuse shows the retained bytes of the request it names and opens it, a
+  // service worker's answer names the worker's own fetch of the same URL, a
+  // stream still arriving says how much had arrived, and hex pages by range.
+  @MainActor
+  func test34ResponseBodyCases() async throws {
+    let expected = try Expectations.load()
+    let panel = "document.querySelector('#response-inspector').innerText"
+    let code = "(document.querySelector('#response-inspector .traffic-response-code')?.innerText ?? '')"
+    let row = { (request: Int) in "#screen-traffic .request-row[data-request-id$=\":R\(expected.bodyCaseProcess):\(request)\"]" }
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      try await ui.click(row(62))
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      try await ui.click("#inspector-tab-response")
+      try await ui.waitUntil("document.querySelector('#response-inspector .traffic-response-code') !== null",
+        "\(size.name): the reused request's bytes did not load")
+      let reused = try await ui.json("""
+        ({text: document.querySelector('#response-inspector .traffic-response-code').innerText,
+          panel: document.querySelector('#response-inspector').innerText,
+          state: document.querySelector('#response-inspector').dataset.state,
+          open: document.querySelector('#response-inspector .traffic-response-open')?.textContent ?? ''})
+        """)
+      XCTAssertEqual(reused["state"] as? String, "memory_cache", "\(size.name): the reuse's body case")
+      let reusedPanel = reused["panel"] as? String ?? ""
+      for phrase in ["Reused from the memory cache", "That request's retained body is shown here", "Artifact (reused request)"] {
+        XCTAssertTrue(reusedPanel.contains(phrase), "\(size.name): the reuse names \(phrase): \(reusedPanel)")
+      }
+      let escaped = expected.reusedMarker.replacingOccurrences(of: "\"", with: "\\\"")
+      XCTAssertTrue((reused["text"] as? String ?? "").contains(escaped), "\(size.name): the reused bytes are literal text")
+      XCTAssertTrue((reused["open"] as? String ?? "").hasPrefix("Open the request it reused"), "\(size.name): \(reused)")
+      try await assertInert(ui, "\(size.name) reused response")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) reused response")
+      try await ui.screenshot("traffic-response-memory-cache-\(size.name)")
+      // The link selects the request whose response Blink reused.
+      try await ui.click("#response-inspector .traffic-response-open")
+      try await ui.waitUntil("document.querySelector(\(String(reflecting: row(61))))?.getAttribute('aria-selected') === 'true'",
+        "\(size.name): the reuse did not open its source request")
+
+      // A service worker's answer: no body for the page's request, and the
+      // worker's own request for the same URL while it was open.
+      try await ui.click(row(63))
+      try await ui.click("#inspector-tab-response")
+      try await ui.waitUntil("\(panel).includes('requested this URL while this request was open')",
+        "\(size.name): the worker's own fetch was not found")
+      let answered = try await ui.value(panel) as? String ?? ""
+      XCTAssertTrue(answered.contains("Served by a service worker") && answered.contains("The records do not say whether it answered with those bytes"),
+        "\(size.name): \(answered)")
+      let workerLink = try await ui.value("document.querySelector('#response-inspector .traffic-response-open')?.textContent ?? ''") as? String ?? ""
+      XCTAssertTrue(workerLink.contains("Open the worker's request (retained in full)"), "\(size.name): \(workerLink)")
+      let shownCode = try await ui.value("document.querySelectorAll('#response-inspector .traffic-response-code').length") as? Int
+      XCTAssertEqual(shownCode, 0, "\(size.name): the worker's bytes are not shown as the page's")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) service worker answer")
+      try await ui.screenshot("traffic-response-service-worker-\(size.name)")
+
+      // A stream still arriving says how much had arrived at its snapshot.
+      try await ui.click("#screen-traffic .request-row", containing: expected.partialHost)
+      try await ui.click("#inspector-tab-response")
+      try await ui.waitUntil("\(panel).includes('Still arriving: 1,100 bytes had arrived')", "\(size.name): the partial body is not said")
+      let partial = try await ui.value(panel) as? String ?? ""
+      XCTAssertTrue(partial.contains("at snapshot 2") && partial.contains("The record of the ended body replaces it"), "\(size.name): \(partial)")
+      try await ui.screenshot("traffic-response-partial-\(size.name)")
+
+      // Hex pages by range to the end of the body, one 256 KiB window at a time.
+      try await ui.click("#screen-traffic .request-row", containing: expected.hexBodyHost)
+      try await ui.click("#inspector-tab-response")
+      try await ui.waitUntil("\(code).startsWith('00000000')", "\(size.name): the binary body did not open as hex")
+      let first = try await ui.value(panel) as? String ?? ""
+      XCTAssertTrue(first.contains("Hex shows bytes 0 to 262,143 of 614,400 bytes"), "\(size.name): \(first.prefix(400))")
+      try await ui.click("#response-inspector [data-control='hex-next']")
+      try await ui.waitUntil("\(code).startsWith('00040000')", "\(size.name): Next did not show the second window")
+      try await ui.click("#response-inspector [data-control='hex-next']")
+      try await ui.waitUntil("\(panel).includes('Hex shows bytes 524,288 to 614,399 of 614,400 bytes')",
+        "\(size.name): the last window does not end the body")
+      let stopped = try await ui.value("document.querySelector('#response-inspector [data-control=\"hex-next\"]').getAttribute('aria-disabled')") as? String
+      XCTAssertEqual(stopped, "true", "\(size.name): Next stops at the end of the body")
+      // The keyboard steps back.
+      _ = try await ui.value("(document.querySelector('#response-inspector [data-control=\"hex-previous\"]').focus(), true)")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("\(code).startsWith('00040000')", "\(size.name): Return on Previous did not step back")
+      try await assertInert(ui, "\(size.name) hex window")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) hex window")
+      try await ui.screenshot("traffic-response-hex-\(size.name)")
+      try await ui.click("#inspector-tab-general")
     }
   }
 

@@ -38,6 +38,17 @@ export const SERVICE_WORKER_LOST_HOST = 'api.lost.test';
 const FIXTURE_TAB_ID = 1;
 // A service worker's install-time fetch, linked to the tab that registered it.
 export const REGISTRANT_HOST = 'sw.install.test';
+// Body cases (protocol/native-network-v3.md "Bodies the proxy never sees"): a
+// retained response and the memory-cache reuse naming it, a service worker's
+// answer and its own fetch of the same URL, a partial stream and a binary body
+// past one hex window, in renderer stream BODY_CASE_PROCESS.
+export const BODY_CASE_PROCESS = 4949;
+export const REUSED_HOST = 'cdn.reused.test';
+export const REUSED_MARKER = '<img src=x onerror="window.__rebInjected=10">';
+export const WORKER_ANSWER_HOST = 'feed.worker.test';
+export const PARTIAL_HOST = 'events.partial.test';
+export const HEX_BODY_HOST = 'blob.hex.test';
+export const HEX_BODY_BYTES = 600 * 1024;
 export const RESPONSE_BODY_MARKER = '<img src=x onerror="window.__rebInjected=9">';
 export const HEADER_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=7">';
 export const COOKIE_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=8">';
@@ -559,6 +570,103 @@ function rendererAnsweredRequests(template, events) {
   return [reused, target, start, startTarget, failed, lostStart, lostTarget, lost];
 }
 
+function responseBodyRecord(state, length, captured, digest, partial = 0, contentType = 'application/json') {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = state;
+  payload[5] = 0x40;
+  payload[6] = contentType.length;
+  payload.writeBigUInt64LE(BigInt(length), 8);
+  payload.writeBigUInt64LE(BigInt(captured), 16);
+  payload.writeUInt16LE(partial, 28);
+  if (digest) digest.copy(payload, 32);
+  payload.write(contentType, 64, 'ascii');
+  return payload.toString('hex');
+}
+
+async function bodyCaseRequests(template, firstSequence, firstTime, artifactsRoot) {
+  const renderer = BODY_CASE_PROCESS, workerRenderer = BODY_CASE_PROCESS + 1;
+  let browserSequence = firstSequence, rendererSequence = 0, time = BigInt(firstTime);
+  const events = [], artifacts = [];
+  const base = {...template, navigation_id: '0', artifact_id: '0', parent_event_id: '0', status_code: 0, error_code: 0,
+    encoded_data_length: '0', decoded_body_length: '0', resource_type: 0, flags: 0, payload_truncated: false, tab_id: FIXTURE_TAB_ID};
+  const record = (fields, type, payload, extra = {}) => {
+    time += 1000n;
+    const event = {...base, ...fields, monotonic_time_ns: String(time), type, payload_size: payload.length / 2, payload, ...extra};
+    events.push(event);
+    return event;
+  };
+  const browser = (request, type, payload, extra = {}) => record({sequence_number: String(browserSequence++), request_id: request,
+    browser_context_id_high: '5', browser_context_id_low: '6'}, type, payload, extra);
+  const rendered = (request, type, payload, extra = {}) => {
+    rendererSequence += 1;
+    const event = record({process_id: renderer, thread_id: renderer, sequence_number: String(rendererSequence), request_id: request,
+      browser_context_id_high: '0', browser_context_id_low: '0', initiator_process_id: 0, initiator_request_id: 0}, type, payload, extra);
+    delete event.scheme_class;
+    delete event.loader_kind;
+    return Object.assign(event, extra);
+  };
+  const retain = async (id, creator, bytes, mime, url) => {
+    const stored = await artifact(artifactsRoot, {artifact_id: id, session_id: template.session_id, navigation_id: '0',
+      frame_id: template.frame_id, creator_event_id: creator.sequence_number, execution_context_id: '0',
+      capture_origin: 'network_response', kind: 'response_body', mime_type: mime, sensitive: true, url}, bytes);
+    artifacts.push(stored);
+    return createHash('sha256').update(bytes).digest();
+  };
+  // A body a later reuse names, then the reuse (payload version 2, bit 2).
+  const sprite = Buffer.from(JSON.stringify({sprite: 'cache', note: REUSED_MARKER}));
+  const owner = {initiator_process_id: renderer, initiator_request_id: 61};
+  rendered('61', 'request_initiated', hex(`GET ${REUSED_HOST}`), {scheme_class: 2, loader_kind: 16});
+  browser('3100', 'request_started', hex(`GET ${REUSED_HOST}`), {...owner, resource_type: 13});
+  const loaded = browser('3100', 'response_started', hex('application/json'), {...owner, status_code: 200});
+  const spriteDigest = await retain('330', loaded, sprite, 'application/json', `https://${REUSED_HOST}/sprite.json`);
+  browser('3100', 'response_body', responseBodyRecord(1, sprite.length, sprite.length, spriteDigest),
+    {...owner, parent_event_id: loaded.sequence_number, artifact_id: '330'});
+  browser('3100', 'request_completed', hex('completed'), {...owner, status_code: 200, decoded_body_length: String(sprite.length)});
+  const reuse = Buffer.alloc(128);
+  reuse.writeUInt16LE(2, 0);
+  reuse.writeUInt16LE(128, 2);
+  reuse[4] = 5;
+  reuse[5] = 4;
+  reuse[6] = REUSED_HOST.length;
+  reuse.write(REUSED_HOST, 8, 'ascii');
+  rendered('62', 'memory_cache_reuse', reuse.toString('hex'), {scheme_class: 2, loader_kind: 16, status_code: 200,
+    decoded_body_length: String(sprite.length), initiator_process_id: renderer, initiator_request_id: 61});
+  // The page's request its service worker answered, and the worker's own fetch
+  // of the same URL while the page's request was open.
+  const page = rendered('63', 'request_initiated', hex(`GET ${WORKER_ANSWER_HOST}`), {scheme_class: 2, loader_kind: 16});
+  rendered('63', 'request_target', requestTargetPayload('/feed?x=1'), {parent_event_id: page.sequence_number});
+  const worker = {initiator_process_id: workerRenderer, initiator_request_id: 7, tab_id: 0};
+  const fetched = browser('3101', 'request_started', hex(`GET ${WORKER_ANSWER_HOST}`), {...worker, flags: 4, resource_type: 13});
+  browser('3101', 'request_target', requestTargetPayload('/feed?x=1'), {...worker, parent_event_id: fetched.sequence_number});
+  const feed = Buffer.from('{"feed":[1,2,3]}');
+  const feedStarted = browser('3101', 'response_started', hex('application/json'), {...worker, status_code: 200});
+  const feedDigest = await retain('331', feedStarted, feed, 'application/json', `https://${WORKER_ANSWER_HOST}/feed?x=1`);
+  browser('3101', 'response_body', responseBodyRecord(1, feed.length, feed.length, feedDigest),
+    {...worker, parent_event_id: feedStarted.sequence_number, artifact_id: '331'});
+  browser('3101', 'request_completed', hex('completed'), {...worker, status_code: 200});
+  rendered('63', 'request_completed', hex('completed'), {scheme_class: 2, status_code: 200, flags: 4,
+    decoded_body_length: String(feed.length)});
+  // An event stream still open: its second snapshot.
+  const stream = Buffer.from('data: one\n\n'.repeat(100));
+  browser('3102', 'request_started', hex(`GET ${PARTIAL_HOST}`), {resource_type: 13});
+  const opened = browser('3102', 'response_started', hex('text/event-stream'), {status_code: 200});
+  const streamDigest = await retain('332', opened, stream, 'text/event-stream', `https://${PARTIAL_HOST}/events`);
+  browser('3102', 'response_body', responseBodyRecord(3, stream.length, stream.length, streamDigest, 2, 'text/event-stream'),
+    {parent_event_id: opened.sequence_number, artifact_id: '332'});
+  // A binary body longer than one 256 KiB hex window.
+  const blob = Buffer.alloc(HEX_BODY_BYTES);
+  for (let offset = 0; offset < blob.length; offset += 1) blob[offset] = (offset * 13 + 1) & 0xff;
+  browser('3103', 'request_started', hex(`GET ${HEX_BODY_HOST}`), {resource_type: 13});
+  const binary = browser('3103', 'response_started', hex('application/octet-stream'), {status_code: 200});
+  const blobDigest = await retain('333', binary, blob, 'application/octet-stream', `https://${HEX_BODY_HOST}/blob.bin`);
+  browser('3103', 'response_body', responseBodyRecord(1, blob.length, blob.length, blobDigest, 0, 'application/octet-stream'),
+    {parent_event_id: binary.sequence_number, artifact_id: '333'});
+  browser('3103', 'request_completed', hex('completed'), {status_code: 200, decoded_body_length: String(blob.length)});
+  return {events, artifacts};
+}
+
 // A renderer-only service-worker request linked to the fixture tab as its
 // registrant (request_tab_link kind 5), and two requests of a service worker no
 // page used, counted as class 68 (protocol/native-network-v3.md).
@@ -715,7 +823,11 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
     workerStack.events.at(-1).monotonic_time_ns);
   const answered = rendererAnsweredRequests(network,
     [...demoEvents, ...scrolled, ...adjacent, ...withBodies.events, ...workerStack.events, ...registrant]);
-  const requests = [...scrolled, ...adjacent, ...withBodies.events, ...workerStack.events, ...registrant, ...answered];
+  const lastRegistrant = registrant.filter(event => event.process_id === network.process_id).at(-1);
+  const bodyCases = await bodyCaseRequests(network, Number(lastRegistrant.sequence_number) + 1, answered.at(-1).monotonic_time_ns, artifacts);
+  assert(![...demoEvents, ...scrolled, ...adjacent, ...withBodies.events, ...workerStack.events, ...registrant, ...answered]
+    .some(event => event.process_id === BODY_CASE_PROCESS), 'the body case renderer stream must be its own');
+  const requests = [...scrolled, ...adjacent, ...withBodies.events, ...workerStack.events, ...registrant, ...answered, ...bodyCases.events];
   const lines = Array.from({length: SOURCE_LINE_COUNT}, (_, index) => index === 2
     ? `// ${HOSTILE_SOURCE_MARKER}` : `const retainedLine${index} = ${index}; // long line ${'x'.repeat(index % 7 === 0 ? 180 : 12)}`);
   const source = await artifact(artifacts, {artifact_id: '303', session_id: '1', navigation_id: '100', frame_id: '200',
@@ -752,7 +864,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
   const debuggerRecords = await debuggerObservations(network, artifacts);
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, ...withBodies.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   for (const process of WORKER_STACK_PROCESSES) {
     assert.equal(retained.filter(event => event.process_id === process).length,

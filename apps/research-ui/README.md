@@ -2202,16 +2202,17 @@ The workspace passes `onSelect` and `onFollow` to `createFlowGraphPanel` and
 calls its `select`, `setMark`, `resize` and `highlightRequest` only when the
 panel has them, so it also runs with a graph that offers none. A Wasm card
 opens its CFG; a sample marks its function's card; Back and Forward reselect
-the card a trail entry named. What the graph reports while the workspace
-drives it is never applied as it arrives, so nothing loops, but a pick made
-through the workspace is applied once the call returns: a lineage request
-step lights that request's stack and the card the graph selects for it
-becomes the selection, in the same trail entry as the step, and a card,
-caller or callee in the Related rail is selected in the graph and followed
-like a click on it, with its CFG and a trail entry. What the graph selects
-for the host, reported with `requested: true` (a queued `select` landing, the
-stack of the request the app shows), updates the Related rail and the pane
-head but is not a pick.
+the card a trail entry named. The graph's setters never report back as a
+pick, so nothing loops. A pick made through the workspace uses the setter's
+answer: a lineage request step lights that request's stack and the card the
+graph selects for it becomes the selection, in the same trail entry as the
+step, and a card, caller or callee in the Related rail is selected in the
+graph and followed like a click on it, with its CFG and a trail entry. What
+the graph selects for the host, reported with cause `host` or `replay` (a
+queued `select` landing, the stack of the request the app shows, a trail
+entry reselected), updates the Related rail and the pane head but is not a
+pick, unless it is the card a Related pick asked for before the graph was
+drawn.
 
 ## Flow graph
 
@@ -2422,15 +2423,20 @@ The canvas announces this list through `aria-describedby`.
 
 The Flow workspace hosts this view as its Graph pane. `createFlowGraphPanel`
 takes, besides `host`, `open` and `available`:
-- `onSelect(info | null, {requested})`, called whenever the selected card,
-  its chosen row or the lit request changes, and with `null` when the
-  selection clears. A change to the same card and row is not reported twice.
-  `requested` is true when the graph changed the selection for the host, not
-  the researcher: a key `select` queued before the graph was drawn, selected
-  once it lands; the stack of the request `show` names, lit on a new request
-  or after a refresh, or cleared when `show` names none; a refresh keeping the
-  selection; or a new session clearing it. The Flow workspace records no
-  trail entry for those.
+- `onSelect(info | null, {cause})`, called whenever the selected card, its
+  chosen row or the lit request changes, and with `null` when the selection
+  clears. A change to the same card and row is not reported twice. `cause`
+  says who changed it:
+  - `pick`: the researcher, in the graph (a click, a key, the menu, Details,
+    Find, **Request stack**);
+  - `host`: the graph acting for the host: the stack of the request `show`
+    names, lit on a new request or cleared when `show` names none, a new
+    session clearing the selection, a setter called with `silent: false`, or a
+    setter called before the graph was drawn, applied once it lands;
+  - `replay`: the graph putting back what it had: a refresh keeping the
+    selection or the lit request, or a layout redone after the view was
+    hidden.
+  The Flow workspace records no trail entry for `host` or `replay`.
 - `onFollow(info)`, called on Enter or a double-click on a Wasm card. Without
   it a Wasm card opens in Sources, as before. Enter on a call row still
   follows the call.
@@ -2453,12 +2459,23 @@ takes, besides `host`, `open` and `available`:
 | `callers` | up to eight cards on drawn edges into this one, most stacks first, each `{key, name, kind, note, count}` with `note` the edge kind |
 | `callees` | the same for drawn edges out of this card |
 
-The panel returns, besides `show`, `hide`, `highlightRequest` and `focus`:
-- `select(key, {reveal = true} = {})` selects the card that holds `key`, any
-  member's key for a chain, and centres it unless `reveal` is false. It
-  returns whether the card is in the graph. Asked before the graph is drawn,
-  it returns `false` and selects the key once the graph lands, reported with
-  `requested: true`.
+The panel returns, besides `show`, `hide` and `focus`, the methods below.
+Its setters, `select`, `highlightRequest` and `setMark`, act for the host: a
+change they make is never a `pick`. By default they are silent and their
+return value is the answer; with `silent: false` the change is also reported
+with cause `host`. One called before the graph is
+drawn returns `null` and is applied once the graph lands, reported then with
+cause `host`, since the call could not answer. After a layout the first of a
+queued key, a queued or lit request and the kept card that is in the graph
+wins, in that order.
+- `select(key, {reveal = true, silent = true} = {})` selects the card that
+  holds `key`, any member's key for a chain, and centres it unless `reveal`
+  is false. It returns the card's `info`, or `null` when the key is not in
+  the graph.
+- `highlightRequest(request, {reveal = true, silent = true} = {})` lights the
+  stack of the renderer request `{process, request}` and selects the row that
+  made it. It returns that card's `info`, or `null` when the request has no
+  stack here, which clears the selection.
 - `selection()` returns the current `info`, or `null`.
 - `resize()` re-measures the stage after the host changed its size, such as
   when a pane opens, closes or is dragged.
@@ -2468,7 +2485,8 @@ The panel returns, besides `show`, `hide`, `highlightRequest` and `focus`:
   the mark colour, and its row whose call site is at module offset `offset`, if
   it shows one, gets the mark's band. IDs may be numbers or strings; `offset`
   may be `null`. It returns whether a card took the mark; `null` clears it.
-  The mark survives a refresh and shows on the minimap.
+  The mark survives a refresh and shows on the minimap. It never changes the
+  selection.
 
 ### Layout
 

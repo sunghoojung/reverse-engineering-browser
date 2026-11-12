@@ -404,7 +404,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   const engineLabel = make('span', 'flow-graph-engine', '');
   const limits = make('span', 'flow-graph-limits', FLOW_GRAPH_LIMITS);
   const legend = make('div', 'flow-graph-legend'); legend.id = `flow-graph-legend-${Math.random().toString(36).slice(2, 8)}`;
-  const requestAgain = button('Request stack', () => { if (requestKey) highlightRequest(requestKey); canvas.focus({preventScroll: true}); }, 'Light the stack of the chosen request again', 'flow-graph-tool flow-graph-request-again');
+  const requestAgain = button('Request stack', () => { if (requestKey) lightRequest(requestKey); canvas.focus({preventScroll: true}); }, 'Light the stack of the chosen request again', 'flow-graph-tool flow-graph-request-again');
   requestAgain.hidden = true;
   const keyToggle = button('Key', () => setKey(!status.hasAttribute('data-key-open')), 'Show the key', 'flow-graph-tool flow-graph-key-toggle');
   keyToggle.setAttribute('aria-expanded', 'false'); keyToggle.setAttribute('aria-controls', legend.id);
@@ -491,15 +491,21 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   let collapse = true, expanded = new Set(), selected = -1, selectedRow = -1, highlight = null, highlightLabel = '', matches = [], matchSet = new Set(), matchIndex = -1, requestKey = null, shownRequest = '', visible = false;
   // The workspace's timeline mark: a Wasm function (and row) a sample points
   // to, apart from the selection. The selection last reported to onSelect.
-  let mark = null, markTarget = null, reported = '', pendingKey = null, keyIndex = null, labelSides = null;
-  // True while the graph changes its selection for the host rather than the
-  // researcher: a key `select` queued before layout, the stack of the request
-  // `show` names, a refresh keeping the selection or a new session clearing
-  // it. onSelect then says `requested`, so the host does not count a pick.
-  let hostDriven = false;
-  const forHost = run => { const was = hostDriven; hostDriven = true; try { return run(); } finally { hostDriven = was; } };
+  let mark = null, markTarget = null, reported = '', keyIndex = null, labelSides = null;
+  // Who is changing the selection while a call runs, as onSelect reports it:
+  // null is the researcher ('pick'); 'host' a public setter or show() acting
+  // for the host; 'replay' the graph putting back what it had after a
+  // refresh or a new layout; 'silent' a setter whose return value answers.
+  let cause = null;
+  const as = (next, run) => { const was = cause; cause = next; try { return run(); } finally { cause = was; } };
+  // What to select once the next layout lands, asked for while there was
+  // none or it was being replaced, each with the cause that asked: a `key`
+  // the host asked for, the lit `request`, the `card` (and row) the graph
+  // had. The first of them that is in the new graph wins, in that order.
+  let intent = null;
+  const expect = (kind, wanted) => { intent = {...intent, [kind]: wanted}; };
   // A layout the view was hidden during is redone when it shows again.
-  let layoutStale = false, layingOut = false, highlightFromRequest = false, detailsOpen = false, minimapOn = true, pendingSelect = null, pendingRequest = false;
+  let layoutStale = false, layingOut = false, highlightFromRequest = false, detailsOpen = false, minimapOn = true;
   // Cards visited by following calls, for Backspace.
   const history = [];
   let hover = {node: -1, row: -1, edge: -1}, edgeBounds = null, edgeFlat = [];
@@ -571,19 +577,17 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       const doc = await response.json();
       if (mine !== generation) return;
       const next = flowGraphModel(doc);
-      // A refresh keeps the selection, the expanded chains and the view
-      // wherever the same functions are still in the graph.
-      const keepSelected = selected >= 0 && display ? flowGraphNodeKey(model.nodes[display.nodes[selected].members[0]]) : null;
+      // A refresh keeps the lit request or the selection, the expanded chains
+      // and the view wherever the same functions are still in the graph.
+      if (highlightFromRequest && !intent?.request) expect('request', {reveal: false, cause: 'replay'});
+      else if (selected >= 0 && display && !intent?.card) expect('card', {key: cardKey(selected), row: selectedRow, cause: 'replay'});
       const keepExpanded = model ? [...expanded].map(id => flowGraphNodeKey(model.nodes[Number(id)])) : [];
-      const keepRow = selectedRow, keepHighlight = highlightFromRequest;
       const first = !model;
       model = next; selected = -1; selectedRow = -1; highlight = null; highlightLabel = '';
       const byKey = new Map(next.nodes.map((node, index) => [flowGraphNodeKey(node), index]));
       expanded = new Set(keepExpanded.map(key => byKey.get(key)).filter(index => index !== undefined).map(String));
-      pendingSelect = keepSelected && byKey.has(keepSelected) && !keepHighlight ? {original: byKey.get(keepSelected), row: keepRow} : null;
-      pendingRequest = keepHighlight;
       setBanner(null);
-      await rebuild(first);
+      await rebuild({fresh: first, cause: 'replay'});
     } catch (problem) {
       if (mine !== generation || problem?.name === 'AbortError') return;
       error = problem?.message ?? 'The flow graph could not be loaded.';
@@ -594,18 +598,19 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     }
   }
 
-  async function rebuild(fresh = false) {
+  /** Lays out the display for the current model, folding and options; a
+   * selection change it makes is reported with `why` unless an intent it
+   * applies has its own cause. */
+  async function rebuild({fresh = false, cause: why = 'pick'} = {}) {
     if (!model) return;
-    const keep = pendingSelect ? pendingSelect.original : selected >= 0 ? display?.nodes[selected]?.members?.[0] : null;
-    const keepRow = pendingSelect ? pendingSelect.row : -1, reselect = Boolean(pendingSelect), rehighlight = pendingRequest;
-    pendingSelect = null; pendingRequest = false;
+    const keep = selected >= 0 ? display?.nodes[selected]?.members?.[0] : null;
     // The drawn display, cards and layout change together, only when the new
     // layout is ready, so a card is never drawn at another card's position.
     const next = flowGraphDisplay(model, expanded, collapse);
     if (!next.nodes.length) {
       display = next; cards = []; layout = null; layoutStale = false; keyIndex = null; markTarget = null;
       selected = -1; selectedRow = -1; highlight = null; highlightFromRequest = false; selectionText.textContent = ''; requestAgain.hidden = true;
-      notify();
+      notify(why);
       const records = model.doc.stacks?.records ?? {}, walked = Object.values(model.doc.stacks?.not_walked ?? {}).reduce((sum, value) => sum + value, 0);
       const stacks = FLOW_GRAPH_STACK_RECORDS.reduce((sum, type) => sum + (records[type] ?? 0), 0);
       setState('empty', 'No recorded stacks in this session', stacks > walked
@@ -630,22 +635,37 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       edgeBounds = null; edgeFlat = []; miniKey = ''; hover = {node: -1, row: -1, edge: -1};
       findMark();
       selected = keep === null || keep === undefined ? -1 : display.displayOf[keep] ?? -1;
-      selectedRow = selected >= 0 && keepRow >= 0 && keepRow < cards[selected].rows.length ? keepRow : -1;
+      selectedRow = -1;
       if (highlight && highlight.source) applyHighlight(highlight.source, highlightLabel, false);
       renderSummary(); applyFilter(); renderInspector(); renderSelection();
       setState('ready');
-      if (fresh) { needsStart = cssW <= 1; start(); } else if (selected >= 0 && !reselect) ensureVisible(selected); else requestDraw();
-      forHost(() => {
-        if (reselect && selected >= 0) select(selected, {reveal: false, row: selectedRow});
-        if (requestKey && (fresh || rehighlight)) highlightRequest(requestKey, {reveal: fresh});
-        if (pendingKey) { const wanted = pendingKey; pendingKey = null; selectKey(wanted.key, {reveal: wanted.reveal}); }
-      });
-      notify();
+      const wanted = intent;
+      intent = null;
+      if (fresh) { needsStart = cssW <= 1; start(); } else if (selected >= 0 && !wanted) ensureVisible(selected); else requestDraw();
+      if (!applyIntent(wanted)) notify(why);
     } catch (problem) {
       layingOut = false;
       if (problem?.name === 'AbortError') { layoutStale = true; return; }
       setState('error', 'Could not lay out the flow graph', problem?.message ?? 'Layout failed.', true);
     }
+  }
+
+  /** Applies `wanted`, the intent a layout found: the first kind that is in
+   * this graph, reported with its own cause. Says whether one applied. */
+  function applyIntent(wanted) {
+    if (wanted?.key && indexOfKey(wanted.key.key) >= 0) {
+      as(wanted.key.cause, () => selectKey(wanted.key.key, wanted.key.reveal));
+      return true;
+    }
+    if (wanted?.request && requestKey) {
+      as(wanted.request.cause, () => lightRequest(requestKey, {reveal: wanted.request.reveal}));
+      return true;
+    }
+    const index = wanted?.card ? indexOfKey(wanted.card.key) : -1;
+    if (index < 0) return false;
+    const row = wanted.card.row < cards[index].rows.length ? wanted.card.row : -1;
+    as(wanted.card.cause, () => selectCard(index, {reveal: false, row}));
+    return true;
   }
 
   function renderSummary() {
@@ -1210,7 +1230,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     if (highlight) parts.push(`${highlight.paths} distinct ${highlight.paths === 1 ? 'stack' : 'stacks'}`);
     selectionText.textContent = parts.filter(Boolean).join(' · ');
   }
-  function select(index, {reveal = true, focusPaths = true, row = -1} = {}) {
+  function selectCard(index, {reveal = true, focusPaths = true, row = -1} = {}) {
     if (!display || index < 0 || index >= display.nodes.length) return;
     selected = index; selectedRow = row;
     const node = display.nodes[index];
@@ -1256,14 +1276,19 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     }
     return [...seen.values()].sort((a, b) => b.count - a.count).slice(0, 8);
   }
-  /** Tells the host when the selected card, row or lit request changed. */
-  function notify() {
-    const info = selected >= 0 ? selectionInfo(selected, selectedRow) : null;
-    const signature = info ? JSON.stringify([info.key, info.row?.index ?? -1, info.request]) : '';
+  /** The key a host knows a card by: its first member's, for a chain. */
+  const cardKey = index => flowGraphNodeKey(model.nodes[display.nodes[index].members[0]]);
+  /** The selection as onSelect describes it, or null. */
+  const currentInfo = () => (selected >= 0 ? selectionInfo(selected, selectedRow) : null);
+  /** Tells the host when the selected card, row or lit request changed,
+   * with `how` as its cause; 'silent' records it without telling. */
+  function notify(how = cause ?? 'pick') {
+    const request = highlightFromRequest && requestKey ? [requestKey.process, requestKey.request] : null;
+    const signature = selected >= 0 ? JSON.stringify([cardKey(selected), selectedRow, request]) : '';
     if (signature === reported) return;
     reported = signature;
-    if (typeof onSelect !== 'function') return;
-    try { onSelect(info, {requested: hostDriven}); } catch (problem) { console.error(problem); }
+    if (how === 'silent' || typeof onSelect !== 'function') return;
+    try { onSelect(currentInfo(), {cause: how}); } catch (problem) { console.error(problem); }
   }
   /** Display index by the key of every model node a card holds. */
   function indexOfKey(key) {
@@ -1274,15 +1299,17 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     }
     return keyIndex.get(String(key)) ?? -1;
   }
-  function selectKey(key, {reveal = true} = {}) {
-    if (key === null || key === undefined) return false;
-    // Before the graph is drawn the key waits for it.
-    if (!layout || layingOut) { pendingKey = {key: String(key), reveal}; return false; }
+  /** Selects the card that holds `key`; returns its info, or null. Before
+   * the graph is drawn the key waits for it, and is applied then for the
+   * host even when the call was silent, since it could not answer. */
+  function selectKey(key, reveal) {
+    if (key === null || key === undefined) return null;
+    if (!layout || layingOut) { expect('key', {key: String(key), reveal, cause: 'host'}); return null; }
     const index = indexOfKey(key);
-    if (index < 0) return false;
-    select(index, {reveal: false});
+    if (index < 0) return null;
+    selectCard(index, {reveal: false});
     if (reveal) centerOn(index);
-    return true;
+    return currentInfo();
   }
   /** The card (and row) a timeline sample's {artifact_id, function_index,
    * offset} names: a Wasm function of that module and index, and its row
@@ -1299,6 +1326,26 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       else if (mark.offset !== null) row = cards[index].rows.findIndex(item => (item.members ?? []).some(edge => (model.doc.edges[edge]?.sites ?? []).some(site => site.module_offset !== undefined && Number(site.module_offset) === mark.offset)));
       markTarget = {index, row};
     }
+  }
+  /** The request show() names, lit for the host once the graph is drawn;
+   * none clears a stack it lit. */
+  function showRequest(request) {
+    if (!request) {
+      if (intent?.request) expect('request', null);
+      if (highlightFromRequest) clearSelection();
+    } else if (layout && !layingOut) lightRequest(request);
+    else expect('request', {reveal: true, cause: 'host'});
+  }
+  /** highlightRequest(request): the stack lit for the host, and the info of
+   * the card that made the request; null when it has no stack (the
+   * selection clears) or the graph is not drawn yet (it is lit then). */
+  function hostLightRequest(request, reveal) {
+    if (!layout || layingOut) {
+      requestKey = request;
+      if (request) expect('request', {reveal, cause: 'host'});
+      return null;
+    }
+    return lightRequest(request, {reveal}) ? currentInfo() : null;
   }
   function setMark(next) {
     mark = next && typeof next === 'object' && next.artifact_id !== undefined && next.artifact_id !== null && Number.isFinite(Number(next.function_index))
@@ -1318,7 +1365,9 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     }
     selected = index; rebuild();
   }
-  function highlightRequest(key, {reveal = true} = {}) {
+  /** Lights the stack of a renderer request {process, request} and selects
+   * the row that made it; says whether the request has a stack here. */
+  function lightRequest(key, {reveal = true} = {}) {
     requestKey = key;
     if (!model || !display || !key) return false;
     const paths = requestPaths(key);
@@ -1337,7 +1386,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     let target = null;
     cards.forEach((card, index) => { if (target || !highlight.nodes.has(index)) return; const row = card.rows.findIndex(item => item.sink?.members.some(member => sinks.has(member))); if (row >= 0) target = {index, row}; });
     if (!target) { const own = [...sinks].map(node => display.displayOf[node]).find(index => index >= 0); if (own !== undefined) target = {index: own, row: -1}; }
-    if (target) select(target.index, {focusPaths: false, row: target.row, reveal: false});
+    if (target) selectCard(target.index, {focusPaths: false, row: target.row, reveal: false});
     // The whole stack in view when it fits legibly, else its top.
     if (reveal && !showCards([...highlight.nodes]) && target) centerOn(target.index);
     const caller = target ? display.nodes[target.index] : null, sink = target && target.row >= 0 ? cards[target.index].rows[target.row] : null;
@@ -1361,7 +1410,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     if (!edge) { if (cards[index]?.rows[row]?.sink) setDetails(true); return; }
     if (edge.to === index) return;
     remember();
-    select(edge.to);
+    selectCard(edge.to);
   }
   function remember() {
     if (selected < 0) return;
@@ -1373,7 +1422,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     if (!entry) { flash('Nothing to go back to'); return; }
     const index = display.nodes.findIndex(node => flowGraphNodeKey(model.nodes[node.members[0]]) === entry.key);
     if (index < 0) { back(); return; }
-    view = {...entry.view}; select(index, {reveal: false, row: entry.row});
+    view = {...entry.view}; selectCard(index, {reveal: false, row: entry.row});
   }
   /** Goes to the caller that reached this card most often. */
   function toCaller(index) {
@@ -1381,7 +1430,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     for (const edge of display.edges) if (edge.to === index && edge.from !== index && (!best || edge.count > best.count)) best = edge;
     if (!best) { flash('No recorded caller'); return; }
     remember();
-    select(best.from, {row: cards[best.from].rows.findIndex(row => row.edge === display.edges.indexOf(best))});
+    selectCard(best.from, {row: cards[best.from].rows.findIndex(row => row.edge === display.edges.indexOf(best))});
   }
   /** J and K step through the selected card's calls. */
   function stepRow(direction) {
@@ -1390,7 +1439,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     if (!count) return;
     const next = selectedRow < 0 ? (direction > 0 ? 0 : count - 1) : Math.max(0, Math.min(count - 1, selectedRow + direction));
     if (next === selectedRow) return;
-    select(selected, {reveal: false, focusPaths: false, row: next});
+    selectCard(selected, {reveal: false, focusPaths: false, row: next});
   }
   function copy(text, what) {
     if (!text) return;
@@ -1423,7 +1472,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     matchIndex = (matchIndex + direction + matches.length) % matches.length;
     renderMatches();
     // A match is shown at reading size, and the other matches stay undimmed.
-    select(matches[matchIndex], {reveal: false}); centerOn(matches[matchIndex]);
+    selectCard(matches[matchIndex], {reveal: false}); centerOn(matches[matchIndex]);
   }
   let filterTimer = 0;
   filter.addEventListener('input', () => { clearTimeout(filterTimer); filterTimer = setTimeout(applyFilter, 120); });
@@ -1493,7 +1542,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       items.sort((a, b) => b.edge.count - a.edge.count).slice(0, 64).forEach(({edge}) => {
         const other = incoming ? edge.from : edge.to, item = make('li');
         const link = make('button', 'flow-inspector-link', flowGraphNodeName(display.nodes[other])); link.type = 'button';
-        link.addEventListener('click', () => { select(other); canvas.focus({preventScroll: true}); });
+        link.addEventListener('click', () => { selectCard(other); canvas.focus({preventScroll: true}); });
         const sites = flowGraphEdgeSites(model, edge);
         const meta = [edge.kind === 'task' ? REQUEST_STACK_TASKS[edge.task] ?? edge.task : edge.kind, ...edge.crosses.map(cross => ({frame: 'frame boundary', language: 'JS ↔ Wasm', dynamic: 'into eval'})[cross]),
           ...(sites.length ? [`at ${sites.slice(0, 4).join(', ')}${sites.length > 4 ? '…' : ''}`] : []), `×${edge.count.toLocaleString()}`];
@@ -1624,7 +1673,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   const hasCaller = index => display.edges.some(edge => edge.to === index && edge.from !== index);
   function openMenu(index, px, py, row = -1) {
     if (!display?.nodes[index]) return;
-    if (selected !== index || selectedRow !== row) select(index, {reveal: false, row, focusPaths: selected !== index});
+    if (selected !== index || selectedRow !== row) selectCard(index, {reveal: false, row, focusPaths: selected !== index});
     hideTooltip();
     const node = display.nodes[index], foldable = node.kind === 'chain' || display.foldKey.get(node.members[0]), item = row >= 0 ? cards[index].rows[row] : null;
     const entries = [
@@ -1721,8 +1770,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     pointer.down = false;
     if (pointer.moved || !layout) return;
     const [px, py] = local(event), hit = hitTest(px, py);
-    if (hit.node >= 0) { select(hit.node, {reveal: false, row: hit.row}); return; }
-    if (hit.edge >= 0) { const edge = display.edges[hit.edge]; select(edge.from, {reveal: false, row: cards[edge.from].rows.findIndex(row => row.edge === hit.edge)}); return; }
+    if (hit.node >= 0) { selectCard(hit.node, {reveal: false, row: hit.row}); return; }
+    if (hit.edge >= 0) { const edge = display.edges[hit.edge]; selectCard(edge.from, {reveal: false, row: cards[edge.from].rows.findIndex(row => row.edge === hit.edge)}); return; }
     clearSelection();
   });
   canvas.addEventListener('dblclick', event => {
@@ -1744,7 +1793,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   }, {passive: false});
   function move(dx, dy) {
     if (!display?.nodes.length) return;
-    if (selected < 0) { let first = 0; display.nodes.forEach((node, index) => { if (layout.y[index] < layout.y[first] || (layout.y[index] === layout.y[first] && layout.x[index] < layout.x[first])) first = index; }); return select(first); }
+    if (selected < 0) { let first = 0; display.nodes.forEach((node, index) => { if (layout.y[index] < layout.y[first] || (layout.y[index] === layout.y[first] && layout.x[index] < layout.x[first])) first = index; }); return selectCard(first); }
     const from = nodeBox(selected), cx = from.x + from.w / 2, cy = from.y + from.h / 2;
     let best = -1, bestScore = Infinity;
     display.nodes.forEach((node, index) => {
@@ -1755,7 +1804,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       const score = along + across * 2.5;
       if (score < bestScore) { bestScore = score; best = index; }
     });
-    if (best >= 0) select(best);
+    if (best >= 0) selectCard(best);
   }
   canvas.addEventListener('keydown', event => {
     if (!layout) return;
@@ -1799,9 +1848,16 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       readTokens();
       const changed = String(next ?? '') !== String(session ?? ''), first = session === null;
       session = next ?? null;
-      // A key asked for before the first session waits for it; one asked for
-      // in another session does not carry over.
-      if (changed) { model = null; display = null; cards = null; layout = null; selected = -1; selectedRow = -1; highlight = null; keyIndex = null; markTarget = null; if (!first) pendingKey = null; generation += 1; runner.cancel(); forHost(notify); }
+      if (changed) {
+        model = null; display = null; cards = null; layout = null; selected = -1; selectedRow = -1; highlight = null; highlightFromRequest = false; keyIndex = null; markTarget = null;
+        // A key asked for before the first session waits for it; what was
+        // asked for in another session does not carry over, and this
+        // session's request is lit afresh.
+        if (!first) intent = null;
+        shownRequest = '';
+        generation += 1; runner.cancel();
+        as('host', notify);
+      }
       // Evidence polls re-render Flow; only a newly chosen request moves
       // the highlight, so a card the researcher picked stays lit.
       const requestText = request ? `${request.process}:${request.request}` : '';
@@ -1811,9 +1867,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       resize();
       if (!model || (status_ === 'empty' && !layingOut)) load(Boolean(model));
       // Polls call show() often; a layout already running is left to finish.
-      else if (!layingOut && (layoutStale || !layout)) rebuild(!layout);
-      else if (newRequest && request) forHost(() => highlightRequest(request));
-      else if (newRequest && highlightFromRequest) forHost(clearSelection);
+      else if (!layingOut && (layoutStale || !layout)) rebuild({fresh: !layout, cause: 'replay'});
+      if (newRequest) as('host', () => showRequest(request));
       requestDraw();
     },
     hide() {
@@ -1821,17 +1876,22 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       controller?.abort(); runner.cancel(); hideTooltip(); closeMenu(false);
       if (status_ === 'loading' && !layout) { requested = null; status_ = 'idle'; }
     },
-    highlightRequest,
     focus() { canvas.focus({preventScroll: true}); },
+    // The setters act for the host: a change they make is never a pick. By
+    // default they are silent, and their return value is the answer.
     /** Selects (and by default centres) the card that holds `key`, a
-     * flowGraphNodeKey(); says whether it is in the graph. */
-    select: (key, options) => selectKey(key, options),
-    /** The selection as onSelect last described it, or null. */
-    selection: () => selected >= 0 ? selectionInfo(selected, selectedRow) : null,
-    /** Re-measures the stage after the host resized it. */
-    resize: () => resize(),
+     * flowGraphNodeKey(); returns its info, or null when it is not in the
+     * graph or the graph is not drawn yet. */
+    select: (key, {reveal = true, silent = true} = {}) => as(silent ? 'silent' : 'host', () => selectKey(key, reveal)),
+    /** Lights the stack of a renderer request {process, request}; returns
+     * the info of the card that made it, or null. */
+    highlightRequest: (request, {reveal = true, silent = true} = {}) => as(silent ? 'silent' : 'host', () => hostLightRequest(request, reveal)),
     /** Marks the Wasm card (and row) a timeline sample points to, apart from
      * the selection; null clears it. Says whether a card took the mark. */
-    setMark
+    setMark: next => as('silent', () => setMark(next)),
+    /** The selection as onSelect last described it, or null. */
+    selection: currentInfo,
+    /** Re-measures the stage after the host resized it. */
+    resize: () => resize()
   };
 }

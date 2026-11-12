@@ -98,29 +98,21 @@ function createFlowWorkspace(options) {
   const engine = options.blockGraphEngine ?? (typeof blockGraphEngine === 'function' ? blockGraphEngine : () => 'layered');
   const makeTimeline = options.createFlowTimeline ?? (typeof createFlowTimeline === 'function' ? createFlowTimeline : null);
   const call = (name, ...args) => (typeof options[name] === 'function' ? options[name](...args) : undefined);
-  // A graph that reports its own selection while the workspace drives it
-  // (select, setMark, highlightRequest) must not rewrite the selection that
-  // caused the call; `drivingGraph` marks those calls.
-  let drivingGraph = false, echo, intended = null;
-  const graphCall = (name, ...args) => {
-    if (!graph || typeof graph[name] !== 'function') return undefined;
-    const was = drivingGraph; drivingGraph = true;
-    try { return graph[name](...args); } finally { drivingGraph = was; }
-  };
+  // The graph's setters act for the host and never report back as a pick;
+  // called silently, they answer with the selection they made. `intended`
+  // is a key the graph could not select yet: its later `host` report is
+  // that pick.
+  let intended = null;
+  const graphCall = (name, ...args) => (graph && typeof graph[name] === 'function' ? graph[name](...args) : undefined);
   // A pick the researcher makes through the workspace (a Related entry, a
   // lineage step that lights its request) drives the graph, and the card the
-  // graph selects in answer is that pick: it is applied once, after the call,
-  // so the echo during the call still cannot loop. A select queued before
-  // layout comes back `requested`; `intended` marks it as this pick.
+  // graph selects in answer is that pick.
   function graphIntent(name, ...args) {
-    echo = undefined;
-    const result = graphCall(name, ...args);
-    let picked = echo;
-    echo = undefined;
-    if (picked === undefined && result && typeof graph?.selection === 'function') picked = graph.selection() ?? null;
-    if (picked !== undefined) { intended = null; graphPicked(picked); }
-    else if (name === 'select' && result === false) intended = String(args[0]);
-    return result;
+    if (!graph || typeof graph[name] !== 'function') return;
+    const info = graph[name](...args);
+    if (name === 'select' && !info) { intended = String(args[0]); return; }
+    intended = null;
+    graphPicked(info ?? graph.selection?.() ?? null);
   }
   const doc = root.ownerDocument ?? document;
   const $ = selector => root.querySelector(selector);
@@ -408,14 +400,14 @@ function createFlowWorkspace(options) {
   }
 
   // Graph pane: selection API used with feature detection.
-  function graphPicked(info, {followed = false, requested = false} = {}) {
+  function graphPicked(info, {followed = false, cause = 'pick'} = {}) {
     graphInfo = info ?? null;
-    if (drivingGraph) { echo = info ?? null; renderRelated(); renderTabs(); return; }
-    // A key the workspace queued with select() before the graph was laid out
-    // comes back `requested` once drawn: the workspace asked, nobody picked,
-    // unless it was a researcher's pick made while the graph laid out.
-    if (requested && intended !== null && info?.key === intended) { intended = null; requested = false; }
-    if (restoring || requested) { renderRelated(); renderTabs(); return; }
+    // What the graph selects for the host (cause host or replay) is not a
+    // pick, unless it is the key a researcher's pick asked for before the
+    // graph was laid out.
+    let pick = cause === 'pick';
+    if (!pick && intended !== null && info?.key === intended) { intended = null; pick = true; }
+    if (restoring || !pick) { renderRelated(); renderTabs(); return; }
     intended = null;
     // A card replaces a picked sample, so the timeline lets go of it too.
     if (info && selection.sample) { timeline?.clear(); graphCall('setMark', null); }
@@ -550,7 +542,7 @@ function createFlowWorkspace(options) {
       else if (target.call) timeline?.select(target.call.key, {silent: true});
       else timeline?.clear();
       if (target.fn?.function_index !== null && target.fn?.function_index !== undefined && target.fn.artifact_id) loadCfg(target.fn, {offset: target.site?.offset ?? null});
-      if (target.graphKey) graphCall('select', target.graphKey, {reveal: true});
+      if (target.graphKey) graphCall('select', target.graphKey, {reveal: true, silent: false});
       graphCall('setMark', target.sample && target.fn?.artifact_id ? {artifact_id: target.fn.artifact_id, function_index: target.fn.function_index, offset: target.site?.offset ?? null} : null);
       reveal(entry.pane, {focus: true, record: false});
     } finally { restoring = false; }
@@ -582,7 +574,7 @@ function createFlowWorkspace(options) {
   /** A crumb or Related entry jumps to its item in its pane. */
   function jump(crumb) {
     if (crumb.kind === 'site' || (crumb.kind === 'fn' && crumb.pane === 'cfg')) { if (selection.fn) loadCfg(selection.fn, {offset: selection.site?.offset ?? null}); }
-    if (crumb.kind === 'fn' && crumb.pane === 'graph' && selection.fn?.key) graphCall('select', selection.fn.key, {reveal: true});
+    if (crumb.kind === 'fn' && crumb.pane === 'graph' && selection.fn?.key) graphCall('select', selection.fn.key, {reveal: true, silent: false});
     if (crumb.kind === 'call' && selection.call) timeline?.select(selection.call.key, {silent: true});
     if (crumb.kind === 'sample' && selection.sample) timeline?.select(selection.sample.key, {silent: true});
     if (crumb.pane === 'timeline') timelineOpen = true;
@@ -1083,7 +1075,7 @@ function createFlowWorkspace(options) {
     /** The lineage rows renderBacktrace just drew, for the Related rail. */
     setLineage(models) { lineageModels = Array.isArray(models) ? models.slice(0, 256) : []; if (!related?.hidden) renderRelated(); },
     lineageSelected: lineagePicked,
-    graphSelected: (info, how) => graphPicked(info, {requested: how?.requested === true}),
+    graphSelected: (info, how) => graphPicked(info, {cause: how?.cause ?? 'pick'}),
     graphFollowed: info => graphPicked(info, {followed: true}),
     reveal, follow, back, forward, togglePane, setMode, toggleFocus,
     selection: () => ({...selection}),

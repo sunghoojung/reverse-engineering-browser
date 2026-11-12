@@ -1245,25 +1245,32 @@ final class OriginTraceRenderedUITests: XCTestCase {
         try await ui.click("#source-debugger-toggle")
         try await ui.waitUntil("Boolean(document.querySelector('#debugger-sidebar [data-debugger-native=\"availability\"]'))", "the debugger sidebar did not read its state")
       }
-      // The pausing words have a native meaning only in the debugger sidebar:
-      // the statement of the availability get_native_debugger reports, read
-      // here and compared, and sections registered as native pausing ones.
-      // Those are left out of the text; their pausing controls stay disabled
-      // while the backend reports the debugger unsupported.
+      // The pausing words have a native meaning only inside the debugger
+      // sidebar: the statement of the availability get_native_debugger
+      // reports, read here and compared, and sections registered as native
+      // pausing ones. Only those two markers inside #debugger-sidebar are left
+      // out of the text; a marker anywhere else is a failure. While the
+      // backend reports the debugger unsupported, every control in a native
+      // pausing section is disabled, whatever its label.
       let read = try await ui.json("""
         (async () => {
-          const root = document.querySelector('#screen-\(screen)'), statement = root.querySelector('[data-debugger-native="availability"]');
-          const native = [...root.querySelectorAll('[data-debugger-native]')];
+          const root = document.querySelector('#screen-\(screen)');
+          const exempt = '#debugger-sidebar [data-debugger-native="availability"], #debugger-sidebar [data-debugger-native="pausing"]';
+          const statement = root.querySelector('#debugger-sidebar [data-debugger-native="availability"]');
+          const allowed = new Set(document.querySelectorAll(exempt));
+          const stray = [...document.querySelectorAll('[data-debugger-native]')].filter(node => !allowed.has(node)).map(node => node.outerHTML.slice(0, 80));
+          const native = [...root.querySelectorAll(exempt)];
           native.forEach(node => { node.hidden = true; });
           const text = root.innerText;
           native.forEach(node => { node.hidden = false; });
           const reported = statement ? (await (await fetch('/api/native-debugger', {cache: 'no-store'})).json()).availability : null;
-          const enabled = [...root.querySelectorAll('[data-debugger-native="pausing"] button')]
-            .filter(button => !button.disabled && /pause|resume|step|breakpoint/i.test(button.innerText)).map(button => button.innerText);
-          return {text, statement: statement?.dataset.availability ?? null, reported, enabled,
+          const enabled = [...root.querySelectorAll('#debugger-sidebar .debugger-section[data-debugger-native="pausing"] .debugger-section-body :is(button, input, select, textarea, a[href], [tabindex])')]
+            .filter(control => !control.disabled && control.getAttribute('aria-disabled') !== 'true').map(control => control.innerText || control.tagName);
+          return {text, stray, statement: statement?.dataset.availability ?? null, reported, enabled,
             controls: statement ? statement.querySelectorAll('button, input, select, textarea, a, summary, [tabindex]').length : 0};
         })()
         """)
+      XCTAssertEqual(read["stray"] as? [String], [], "\(screen): native debugger markers appear only inside the sidebar, with a known value")
       let text = read["text"] as? String ?? ""
       for phrase in removedFeaturePhrases {
         XCTAssertFalse(text.contains(phrase), "\(screen) still offers removed CDP feature text: \(phrase)")
@@ -1308,8 +1315,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
           size: Number(document.querySelector('#debugger-observations .debugger-list-row').getAttribute('aria-setsize')),
           view: Math.ceil(document.querySelector('#debugger-observations').clientHeight / 44),
           threads: [...document.querySelectorAll('#debugger-threads .debugger-list-group')].map(node => node.innerText.replace(/\\s+/g, ' ')),
-          pausing: document.querySelector('[data-debugger-native="availability"]')?.dataset.availability ?? null,
-          buttons: [...document.querySelectorAll('#debugger-sidebar button')].filter(button => !button.closest('[data-debugger-native="pausing"]'))
+          pausing: document.querySelector('#debugger-sidebar [data-debugger-native="availability"]')?.dataset.availability ?? null,
+          buttons: [...document.querySelectorAll('#debugger-sidebar button')].filter(button => !button.closest('#debugger-sidebar [data-debugger-native="pausing"]'))
             .map(button => button.innerText).filter(text => /pause|resume|step|breakpoint/i.test(text)),
           details: document.querySelector('#source-sidebar').hidden})
         """)

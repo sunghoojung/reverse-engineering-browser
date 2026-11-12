@@ -105,24 +105,53 @@ assert.deepEqual(context.removedReads, [], 'shipped UI must not read removed deb
 const document = window.document;
 // "Request call stack" is the native initiator stack (protocol/native-network-v3.md).
 const removedFeature = /breakpoint|paused frame|(?<!request )call stack|step over|step into|websocket (?:message|inspector|connection)|websockets ·|cookie import|import cookies|element screenshot|screenshot markup|marker (?:execution|run|fuzz)|run marker|local override|runtime hook|hook pivot|live script|page scripts|find in memory|memory origin/i;
-// The pausing vocabulary has a native meaning only in the debugger sidebar:
-// the statement of the availability get_native_debugger reports
-// (data-debugger-native="availability"), and sections registered with
-// native: 'pausing' (data-debugger-native="pausing"), which present that
-// debugger. Everywhere else the words imply a removed CDP view.
-const nativeAvailability = '[data-debugger-native="availability"]';
-const nativeDebugger = '[data-debugger-native]';
+// The pausing vocabulary has a native meaning only inside the debugger
+// sidebar (#debugger-sidebar): the statement of the availability
+// get_native_debugger reports (data-debugger-native="availability"), and
+// sections registered with native: 'pausing' (data-debugger-native="pausing"),
+// which present that debugger. A marker anywhere else, or with another value,
+// exempts nothing and fails on its own; elsewhere the words imply a removed
+// CDP view.
+const nativeAvailability = '#debugger-sidebar [data-debugger-native="availability"]';
+const nativeMarkers = new Set(['availability', 'pausing']);
+const nativeExempt = node => {
+  const marker = node.closest?.('[data-debugger-native]');
+  return Boolean(marker && nativeMarkers.has(marker.dataset.debuggerNative) && marker.parentElement?.closest('#debugger-sidebar'));
+};
+const nativeMarkerProblems = () => [...window.document.querySelectorAll('[data-debugger-native]')].filter(node => !nativeExempt(node))
+  .map(node => `${node.tagName.toLowerCase()}[data-debugger-native="${node.dataset.debuggerNative}"] ${node.textContent.slice(0, 60)}`);
 const reachable = node => {
   let text = node.textContent;
-  for (const native of node.querySelectorAll?.(nativeDebugger) ?? []) text = text.replace(native.textContent, '');
+  for (const native of node.querySelectorAll?.('[data-debugger-native]') ?? []) if (nativeExempt(native)) text = text.replace(native.textContent, '');
   return [text, node.getAttribute('aria-label'), node.getAttribute('title')].filter(Boolean).join(' ');
 };
+// Only the sidebar's registry writes the marker.
+for (const [file, source] of [...sources, ['index.html', html]]) {
+  if (file !== 'debugger_sidebar.js') assert(!/data-debugger-native|debuggerNative/.test(source), `${file} must not mark text as native debugger text`);
+}
+{
+  // Self-test: a marker outside the sidebar, or with another value, exempts nothing.
+  const outside = window.document.createElement('button');
+  outside.dataset.debuggerNative = 'pausing';
+  outside.textContent = 'Breakpoints';
+  window.document.getElementById('screen-traffic').append(outside);
+  const inside = window.document.createElement('span');
+  inside.dataset.debuggerNative = 'cdp';
+  inside.textContent = 'Step over';
+  window.document.getElementById('debugger-sidebar').append(inside);
+  assert(!nativeExempt(outside) && removedFeature.test(reachable(outside)), 'self-test: a marker outside the sidebar exempts nothing');
+  assert(!nativeExempt(inside) && removedFeature.test(reachable(inside)), 'self-test: an unknown marker value exempts nothing');
+  assert.equal(nativeMarkerProblems().length, 2, 'self-test: stray markers are reported');
+  outside.remove();
+  inside.remove();
+  assert.deepEqual(nativeMarkerProblems(), []);
+}
 for (const id of ['screen-traffic', 'screen-sources', 'screen-vm', 'investigation-navigation']) {
   const screen = document.getElementById(id);
   assert(screen, `missing ${id}`);
   // Hidden descendants count: removed controls must be gone, not hidden.
   for (const control of screen.querySelectorAll('button, summary, [role="tab"], [role="button"], label, h1, h2, h3, h4, section, details, a')) {
-    if (control.closest(nativeDebugger)) continue;
+    if (nativeExempt(control)) continue;
     assert(!removedFeature.test(reachable(control)), `${id} exposes a removed CDP control: ${reachable(control).slice(0, 160)}`);
   }
 }
@@ -362,18 +391,21 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   assert.match(statement.textContent, /^Unsupported\. No Brave build serves the pausing debugger \(browser_debugger_unsupported\)/);
   assert.equal(statement.querySelectorAll('button, input, select, textarea, a, summary, [tabindex]').length, 0, 'the pausing state is text');
   assert.equal(document.querySelectorAll(nativeAvailability).length, 1, 'the availability statement appears once');
-  // Outside native sections the words never appear; inside them a pausing
-  // control exists only disabled while the backend reports it unsupported.
+  // Outside native sections the words never appear. While the backend
+  // reports the debugger unsupported, every control in a native pausing
+  // section's body is disabled, whatever its label says.
   const checkVocabulary = () => {
     for (const control of sidebar.querySelectorAll('button, summary, [role="option"], label, h1, h2, h3, h4, section, details, a')) {
-      if (control.closest(nativeDebugger)) continue;
+      if (nativeExempt(control)) continue;
       assert(!removedFeature.test(reachable(control)), `the debugger sidebar implies a CDP control: ${reachable(control).slice(0, 160)}`);
     }
-    for (const button of sidebar.querySelectorAll('button')) {
-      const label = `${button.textContent} ${button.getAttribute('aria-label') ?? ''}`;
-      if (!/\b(?:pause|resume|step|breakpoint)/i.test(label)) continue;
-      assert(button.closest('[data-debugger-native="pausing"]'), `no pausing control outside a native section: ${label}`);
-      assert(button.disabled, `a pausing control stays disabled while the debugger is unsupported: ${label}`);
+    assert.deepEqual(nativeMarkerProblems(), [], 'native debugger markers appear only inside the sidebar, with a known value');
+    if (sidebar.querySelector(nativeAvailability)?.dataset.availability === 'available') return;
+    for (const section of sidebar.querySelectorAll('.debugger-section[data-debugger-native="pausing"]')) {
+      for (const control of section.querySelectorAll('.debugger-section-body :is(button, input, select, textarea, a[href], [tabindex])')) {
+        assert(control.disabled === true || control.getAttribute('aria-disabled') === 'true',
+          `every control of ${section.dataset.debuggerSection} stays disabled while the debugger is unsupported: ${control.tagName} ${control.textContent.slice(0, 60)}`);
+      }
     }
   };
   checkVocabulary();
@@ -451,11 +483,19 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   // The registry: later sections join in order; malformed ones are refused.
   assert.throws(() => runInContext(`RebDebuggerSidebar.addSection({id: 'Bad id', title: 'x', order: 1, render() {}})`, context), /lowercase/);
   assert.throws(() => runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'x', order: 1, native: 'cdp', render() {}})`, context), /native must be pausing/);
-  // A native section may name what it presents, and its controls stay disabled while unsupported.
+  // A native section may name what it presents. While unsupported, an enabled
+  // control in it fails whatever it is called; disabled, the section passes.
+  runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Breakpoints', order: 35, native: 'pausing', render(body) {
+    body.textContent = 'from the registry';
+    const go = document.createElement('button'); go.textContent = 'Go'; body.append(go);
+  }})`, context);
+  assert.throws(checkVocabulary, /every control of later stays disabled/, 'self-test: an enabled control in a pausing section fails');
   const remove = runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Breakpoints', order: 35, native: 'pausing', render(body) {
     body.textContent = 'from the registry';
     const step = document.createElement('button'); step.textContent = 'Step over'; step.disabled = true; body.append(step);
   }})`, context);
+  assert.match(sidebar.querySelector(nativeAvailability).textContent, /The controls in the Breakpoints section stay disabled\./,
+    'the Pausing statement names the native sections registered');
   const ids = sectionIds();
   assert(ids.indexOf('observations') < ids.indexOf('later') && ids.indexOf('later') < ids.indexOf('pausing'), `sections join by order: ${ids}`);
   const later = sidebar.querySelector('[data-debugger-section="later"]');
@@ -464,6 +504,7 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   checkVocabulary();
   remove();
   assert.equal(sidebar.querySelector('[data-debugger-section="later"]'), null, 'a removed section leaves');
+  assert.doesNotMatch(sidebar.querySelector(nativeAvailability).textContent, /Breakpoints/, 'a removed native section is no longer named');
   // Closing stops every read and releases rows and the tree scope.
   toggle.click();
   await settle();

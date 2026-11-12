@@ -286,6 +286,18 @@ const eventsOf = (id, records) => Array.from({length: records}, (_, sequence) =>
   assert.equal(t.document.activeElement?.dataset?.requestId, 'request-5', 'With focus on nothing, the row takes focus');
 }
 {
+  // A service_worker_end_lost gap has no request ID, so the row's store read
+  // lacks it; the selected copy keeps End lost from the index row.
+  const t = indexFixture({windowCount: 1});
+  t.setIndexRows([{...t.row(5, 2), end_lost: true}]);
+  t.api.renderRequests(); await quiet();
+  t.api.selectTrafficRow('request-5');
+  await quiet();
+  t.pending[0].gate.resolve(t.answer({events: eventsOf('5', 2), query: {limited: false, budget_exhausted: false, next_after: '9'}}));
+  await quiet();
+  assert.equal(t.state.trafficLoaded.get('request-5').endLost, true, 'The store copy keeps the index row\'s End lost');
+}
+{
   // A store read finishing after the researcher moved to the filter box leaves focus there.
   const t = indexFixture({windowCount: 1});
   t.setIndexRows([t.row(5, 2)]);

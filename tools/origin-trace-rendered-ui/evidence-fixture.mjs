@@ -33,6 +33,8 @@ export const RESPONSE_BODY_HOST = 'api.response.test';
 export const MEMORY_CACHE_HOST = 'cdn.memory.test';
 export const MEMORY_CACHE_TARGET = '/sprite.png?v=3';
 export const SERVICE_WORKER_FAILED_HOST = 'api.worker.test';
+// A service worker's end the renderer could not join to its start: End lost.
+export const SERVICE_WORKER_LOST_HOST = 'api.lost.test';
 const FIXTURE_TAB_ID = 1;
 export const RESPONSE_BODY_MARKER = '<img src=x onerror="window.__rebInjected=9">';
 export const HEADER_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=7">';
@@ -547,7 +549,12 @@ function rendererAnsweredRequests(template, events) {
   const start = row('request_initiated', hex(`GET ${SERVICE_WORKER_FAILED_HOST}`), {request_id: '5001', scheme_class: 2, loader_kind: 16});
   const startTarget = row('request_target', requestTargetPayload('/api?id=7'), {request_id: '5001', parent_event_id: start.sequence_number});
   const failed = row('request_failed', hex('failed'), {request_id: '5001', scheme_class: 2, error_code: -2, flags: 4});
-  return [reused, target, start, startTarget, failed];
+  const lostStart = row('request_initiated', hex(`GET ${SERVICE_WORKER_LOST_HOST}`), {request_id: '5002', scheme_class: 2, loader_kind: 16});
+  const lostTarget = row('request_target', requestTargetPayload('/lost?id=9'), {request_id: '5002', parent_event_id: lostStart.sequence_number});
+  // The gap has no request ID of its own, so the store read of the row lacks it.
+  const lost = row('gap', hex('service_worker_end_lost'), {request_id: '0', frame_id: '0',
+    initiator_process_id: processId, initiator_request_id: 5002});
+  return [reused, target, start, startTarget, failed, lostStart, lostTarget, lost];
 }
 
 // Like the browser, each gap takes its renderer's own sequence slot, so the

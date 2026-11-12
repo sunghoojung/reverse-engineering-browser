@@ -60,8 +60,12 @@ renderer stream and a request its service worker ended without a response.
 At both sizes the first reads `(memory cache)` with its status and a General
 note that no request was made (screenshot `traffic-memory-cache-*`), and the
 second reads Failed and `(service worker)`, never Pending (screenshot
-`traffic-service-worker-failed-*`). The narrow layout drops Size and Status,
-so it reads the row's accessible label and the Size tooltip.
+`traffic-service-worker-failed-*`). A third request, whose end a
+`service_worker_end_lost` gap names, reads End lost in the table, General and
+the selected strip, though the gap has no request ID and so is not in the
+row's store read (screenshot `traffic-service-worker-lost-*`). The narrow
+layout drops Size and Status, so it reads the row's accessible label and the
+Size tooltip.
 
 `test2SourcesRetainedArtifact` finds tree rows by their `data-artifact-id`,
 since file rows show plain names and the ID only in the meta column. It checks

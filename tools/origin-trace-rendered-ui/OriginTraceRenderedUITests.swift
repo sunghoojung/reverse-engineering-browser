@@ -350,6 +350,7 @@ struct Expectations: Decodable {
   let memoryCacheHost: String
   let memoryCacheTarget: String
   let serviceWorkerFailedHost: String
+  let serviceWorkerLostHost: String
   let invocationSiteStore: String
   let workerStackHost: String
   let workerStackPostingProcess: Int
@@ -1516,6 +1517,24 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertTrue(failed.contains("Failed") && failed.contains("(service worker)") && !failed.contains("Pending"),
         "\(size.name): the service worker's end is Failed, never Pending: \(failed)")
       try await ui.screenshot("traffic-service-worker-failed-\(size.name)")
+
+      // The lost-end gap names its row without a request ID, so the row's
+      // store read lacks it; the inspector keeps what the index row says.
+      try await ui.click("#screen-traffic .request-row", containing: expected.serviceWorkerLostHost)
+      try await ui.waitUntil("document.querySelector('#exchange-inspector').innerText.includes('\(expected.serviceWorkerLostHost)')",
+        "the lost-end row did not open")
+      let lost = try await ui.json(selected)
+      let lostLabel = lost["label"] as? String ?? ""
+      XCTAssertTrue(lostLabel.contains("End lost") && !lostLabel.contains("Pending") && !lostLabel.contains("No loader"),
+        "\(size.name): the table reads End lost: \(lostLabel)")
+      let lostGeneral = lost["general"] as? String ?? ""
+      XCTAssertTrue(lostGeneral.contains("End lost") && lostGeneral.contains("its outcome was not recorded"),
+        "\(size.name): the inspector agrees with the table: \(lostGeneral)")
+      XCTAssertFalse(lostGeneral.contains("Pending") || lostGeneral.contains("No loader"),
+        "\(size.name): the inspector does not read Pending: \(lostGeneral)")
+      let strip = try await ui.value("document.querySelector('#selected-status').textContent") as? String ?? ""
+      XCTAssertEqual(strip, "end lost", "\(size.name): the selected strip agrees")
+      try await ui.screenshot("traffic-service-worker-lost-\(size.name)")
     }
   }
 

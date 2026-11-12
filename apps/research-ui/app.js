@@ -3396,7 +3396,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           return;
         }
         elements.selectedMethod.textContent = request.method;
-        elements.selectedStatus.textContent = request.status;
+        elements.selectedStatus.textContent = request.endLost ? 'end lost' : request.status;
         const numericStatus = Number(request.status);
         const failed = Boolean(request.failed) || Number.isFinite(numericStatus) && numericStatus >= 400;
         elements.selectedStatus.classList.toggle('status-error', failed);
@@ -3535,6 +3535,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           // Tab sets and links have no request ID, so the store read lacks them; the index row has them.
           Object.assign(request, {tabIds: indexed.tabIds, tabLink: indexed.tabLink, tabLinkLabel: indexed.tabLinkLabel,
             extensionId: indexed.extensionId, recordsPartial: partial});
+          // So does a service_worker_end_lost gap, which names its row by initiator fields.
+          if (indexed.endLost && !request.endLost) {
+            request.endLost = true;
+            if (request.rank < 5 && !request.failed && !request.interrupted) request.status = 'incomplete';
+          }
           retainTrafficRequest(request);
           rebuildTrafficRequests();
           if (select) {

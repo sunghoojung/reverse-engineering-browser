@@ -689,11 +689,12 @@ function renderTrafficDetails(container, request, notice = '', targetView = null
   if (!request) return;
   const fullTarget = request.urlTruncated && targetView?.status === 'ready' && targetView.complete;
   const values = [trafficRequestUrl(request, targetView),
-    request.documentUrl ?? 'Not captured', request.method, request.failed ? 'Failed' : request.status === 'pending'
+    request.documentUrl ?? 'Not captured', request.method, request.failed ? 'Failed' : request.endLost ? 'End lost'
+      : request.status === 'pending'
       ? (Number.isInteger(request.provisionalStatus) ? `Pending · provisional HTTP ${request.provisionalStatus}` : 'Pending')
       : request.status, trafficOriginLabel(request), request.id,
     trafficTabText(request),
-    `${request.raceNetwork ? 'A service worker answered this request and also raced it to the network: the status is what the page received from the service worker, and the browser records are the network attempt, whose status and timing may differ. ' : ''}${request.memoryCache ? `${request.staticData
+    `${request.endLost ? 'A service worker ended this request without a response, but the renderer had already reused the slot that held its start, so its outcome was not recorded. ' : ''}${request.raceNetwork ? 'A service worker answered this request and also raced it to the network: the status is what the page received from the service worker, and the browser records are the network attempt, whose status and timing may differ. ' : ''}${request.memoryCache ? `${request.staticData
       ? 'Blink decoded this data: URL or MHTML archive resource in the renderer and made no request, so no headers, request body or response body exist for it.'
       : 'Blink answered this load from a resource it already held (the memory cache) and made no request, so no headers, request body or response body exist for it.'}${
         request.hostOnly ? ' Its URL path and query are recorded only in content capture sessions.' : ''}`

@@ -19,6 +19,7 @@ use crate::{
     request_stack::{self, Frame, Identity, Record, Segment},
     store_scan::{self, Stopped, Stores},
 };
+use hex::FromHex;
 use regex::bytes::Regex;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -400,7 +401,7 @@ struct Decoded {
 /// script IDs compiled it (an eval of one string, an inline script twice).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Code {
-    Sha(String),
+    Sha([u8; 32]),
     Script(u32),
 }
 
@@ -468,7 +469,7 @@ struct Context {
 
 struct Builder<'a> {
     scan: &'a Scan,
-    resolved: &'a HashMap<String, Resolved>,
+    resolved: &'a HashMap<[u8; 32], Resolved>,
     contexts: Vec<Context>,
     context_index: HashMap<(u32, u64), usize>,
     nodes: Vec<Node>,
@@ -498,8 +499,8 @@ fn combinator(frame: &Frame) -> &'static str {
     }
 }
 
-impl Builder<'_> {
-    fn identity(&self, process: u32, script: u32) -> Option<&Identity> {
+impl<'a> Builder<'a> {
+    fn identity(&self, process: u32, script: u32) -> Option<&'a Identity> {
         self.scan.identities.get(&process)?.get(&script)
     }
 
@@ -523,8 +524,8 @@ impl Builder<'_> {
     /// The node for one frame, or None past the node budget. Combinator frames
     /// are labels on the await edge, never nodes.
     fn function(&mut self, process: u32, frame: &Frame) -> Option<usize> {
-        let identity = self.identity(process, frame.script_id).cloned();
-        let realm = identity.as_ref().map_or(0, |identity| identity.realm);
+        let identity = self.identity(process, frame.script_id);
+        let realm = identity.map_or(0, |identity| identity.realm);
         let wasm = frame.kind == 2;
         let top_level = !wasm && frame.flags & 2 != 0;
         let function = if wasm {
@@ -534,10 +535,9 @@ impl Builder<'_> {
         } else {
             frame.detail
         };
-        let sha = identity
-            .as_ref()
-            .and_then(|identity| identity.sha256.clone());
-        let code = sha.clone().map_or(Code::Script(frame.script_id), Code::Sha);
+        let code = identity
+            .and_then(|identity| identity.sha256)
+            .map_or(Code::Script(frame.script_id), Code::Sha);
         let key = NodeKey::Function {
             process,
             realm,
@@ -568,7 +568,7 @@ impl Builder<'_> {
             "status": "unresolved",
         });
         let sources = self.resolved;
-        let source = request_stack::find_source(identity.as_ref(), |_, sha| sources.get(sha));
+        let source = request_stack::find_source(identity, |_, sha| sources.get(sha));
         let reason = match source {
             Ok((_, resolved)) => resolved.reason,
             Err(reason) => Some(reason),
@@ -1008,11 +1008,11 @@ type Main = (u32, u32, u8, Vec<Frame>, Vec<Segment>);
 
 fn decode_main(
     walk: &Walk,
-    stacks: &HashMap<String, Value>,
+    stacks: &HashMap<[u8; 32], Value>,
     read: &dyn Fn(&Value, usize) -> Option<Vec<u8>>,
 ) -> std::result::Result<Main, &'static str> {
     let content = stacks
-        .get(&hex::encode(walk.digest))
+        .get(&walk.digest)
         .and_then(|artifact| read(artifact, request_stack::MAX_ARTIFACT));
     let decoded = content.as_deref().and_then(|content| match &walk.shape {
         Shape::Record(record) => {
@@ -1054,7 +1054,7 @@ fn decode_main(
 fn decode(
     walk: &Walk,
     main: std::result::Result<Main, &'static str>,
-    stacks: &HashMap<String, Value>,
+    stacks: &HashMap<[u8; 32], Value>,
     read: &dyn Fn(&Value, usize) -> Option<Vec<u8>>,
     segments_seen: &mut HashMap<[u8; 32], Option<Vec<Frame>>>,
     missing: &mut BTreeMap<&'static str, u64>,
@@ -1087,7 +1087,7 @@ fn decode(
                 .entry(segment.digest)
                 .or_insert_with(|| {
                     stacks
-                        .get(&hex::encode(segment.digest))
+                        .get(&segment.digest)
                         .and_then(|artifact| read(artifact, request_stack::MAX_ARTIFACT))
                         .and_then(|content| {
                             request_stack::decode_segment_artifact(&content, segment.recorded)
@@ -1123,13 +1123,13 @@ struct SourceCuts {
 /// Positions and names for every offset any frame names in one retained
 /// script or module, reading its bytes once.
 fn resolve_sources(
-    wanted: &BTreeMap<String, (bool, BTreeSet<u32>)>,
-    sources: &HashMap<String, Value>,
+    wanted: &BTreeMap<[u8; 32], (bool, BTreeSet<u32>)>,
+    sources: &HashMap<[u8; 32], Value>,
     read: &dyn Fn(&Value, usize) -> Option<Vec<u8>>,
     deadline: Instant,
     budget: &mut usize,
     cuts: &mut SourceCuts,
-) -> HashMap<String, Resolved> {
+) -> HashMap<[u8; 32], Resolved> {
     let mut out = HashMap::new();
     for (sha, (wasm, offsets)) in wanted {
         let Some(artifact) = sources.get(sha) else {
@@ -1144,13 +1144,13 @@ fn resolve_sources(
         if Instant::now() >= deadline {
             resolved.reason = Some("source_deadline");
             cuts.deadline += 1;
-            out.insert(sha.clone(), resolved);
+            out.insert(*sha, resolved);
             continue;
         }
         if size > *budget {
             resolved.reason = Some("source_budget");
             cuts.budget += 1;
-            out.insert(sha.clone(), resolved);
+            out.insert(*sha, resolved);
             continue;
         }
         match read(artifact, request_stack::MAX_SOURCE) {
@@ -1179,7 +1179,7 @@ fn resolve_sources(
                 }
             }
         }
-        out.insert(sha.clone(), resolved);
+        out.insert(*sha, resolved);
     }
     out
 }
@@ -1255,7 +1255,7 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
         wanted.extend(
             table
                 .values()
-                .filter_map(|identity| identity.sha256.clone()),
+                .filter_map(|identity| identity.sha256.map(hex::encode)),
         );
     }
     let select = |wanted: &HashSet<String>| -> Result<Vec<Value>> {
@@ -1265,12 +1265,17 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
                 && a["sha256"].as_str().is_some_and(|sha| wanted.contains(sha))
         })
     };
-    let mut stacks: HashMap<String, Value> = HashMap::new();
-    let mut sources: HashMap<String, Value> = HashMap::new();
+    let mut stacks = HashMap::new();
+    let mut sources = HashMap::new();
     let place = |artifact: Value,
-                 stacks: &mut HashMap<String, Value>,
-                 sources: &mut HashMap<String, Value>| {
-        let sha = artifact["sha256"].as_str().unwrap_or_default().to_owned();
+                 stacks: &mut HashMap<[u8; 32], Value>,
+                 sources: &mut HashMap<[u8; 32], Value>| {
+        let Some(sha) = artifact["sha256"]
+            .as_str()
+            .and_then(|sha| <[u8; 32]>::from_hex(sha).ok())
+        else {
+            return;
+        };
         // Later manifest records are newer and win, as stack resolution reads them.
         if artifact["kind"] == "stack" {
             stacks.insert(sha, artifact);
@@ -1294,8 +1299,8 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
         .flatten()
         .flat_map(|(_, _, _, _, segments)| segments.iter())
         .filter(|segment| segment.kind != 9 && segment.state == 1)
+        .filter(|segment| !stacks.contains_key(&segment.digest))
         .map(|segment| hex::encode(segment.digest))
-        .filter(|sha| !stacks.contains_key(sha))
         .collect();
     if !segment_digests.is_empty() {
         for artifact in select(&segment_digests)? {
@@ -1311,7 +1316,7 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
         .map(|(walk, main)| decode(walk, main, &stacks, &read, &mut segments_seen, &mut missing))
         .collect();
     // Every offset each retained script is asked for, gathered before any read.
-    let mut offsets: BTreeMap<String, (bool, BTreeSet<u32>)> = BTreeMap::new();
+    let mut offsets: BTreeMap<[u8; 32], (bool, BTreeSet<u32>)> = BTreeMap::new();
     for (walk, decoded) in scan.walks.iter().zip(&decoded) {
         let frames = decoded.sync.iter().chain(&decoded.asyncs).chain(
             decoded
@@ -1325,7 +1330,7 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
                 .identities
                 .get(&walk.process)
                 .and_then(|t| t.get(&frame.script_id))
-                .and_then(|i| i.sha256.clone())
+                .and_then(|i| i.sha256)
             else {
                 continue;
             };

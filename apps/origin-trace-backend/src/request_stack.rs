@@ -337,7 +337,7 @@ pub struct Identity {
     /// The execution context ID of the script's realm: one per document,
     /// so a stack that changes realm crossed a frame boundary.
     pub(crate) realm: u64,
-    pub(crate) sha256: Option<String>,
+    pub(crate) sha256: Option<[u8; 32]>,
 }
 
 impl Identity {
@@ -358,10 +358,10 @@ impl Identity {
 /// script's identity and digest, or the first reason there is none.
 pub(crate) fn find_source<'a, T>(
     identity: Option<&'a Identity>,
-    find: impl FnOnce(&'a Identity, &str) -> Option<T>,
+    find: impl FnOnce(&'a Identity, &[u8; 32]) -> Option<T>,
 ) -> std::result::Result<(&'a Identity, T), &'static str> {
     let identity = identity.ok_or("script_identity_missing")?;
-    let sha = identity.sha256.as_deref().ok_or("source_unavailable")?;
+    let sha = identity.sha256.as_ref().ok_or("source_unavailable")?;
     let found = find(identity, sha).ok_or(if identity.wasm || identity.retained {
         "source_artifact_missing"
     } else {
@@ -406,7 +406,7 @@ pub fn decode_identity(payload: &[u8]) -> Option<(u32, Identity)> {
                 start_line: u32_at(payload, 12),
                 start_column: u32_at(payload, 16),
                 realm: u64_at(payload, 24),
-                sha256: matches!(retention, 0x00 | 0x02 | 0x10).then(|| hex::encode(digest)),
+                sha256: matches!(retention, 0x00 | 0x02 | 0x10).then(|| digest.try_into().unwrap()),
             },
         )
     })
@@ -582,8 +582,9 @@ fn load_source(
 ) -> std::result::Result<Source, &'static str> {
     let (identity, artifact) = find_source(identity, |identity, sha| {
         let kind = if identity.wasm { "wasm" } else { "javascript" };
+        let sha = hex::encode(sha);
         newest(artifacts, session, |a| {
-            a["kind"] == kind && a["sha256"] == sha
+            a["kind"] == kind && a["sha256"] == sha.as_str()
         })
     })?;
     let bytes = read(artifact, MAX_SOURCE).map_err(|_| "source_artifact_unreadable")?;
@@ -941,7 +942,7 @@ impl InitiatorFrames {
             .iter()
             .filter_map(|row| {
                 let identity = hex::decode(row["initiator_frame"]["identity"].as_str()?).ok()?;
-                decode_identity(&identity)?.1.sha256
+                decode_identity(&identity)?.1.sha256.map(hex::encode)
             })
             .collect();
         let mut deferred = false;
@@ -1119,7 +1120,7 @@ fn resolve_stored(
     };
     let mut wanted: BTreeSet<String> = identities
         .values()
-        .filter_map(|identity| identity.sha256.clone())
+        .filter_map(|identity| identity.sha256.map(hex::encode))
         .collect();
     let digest = hex::encode(record.digest);
     wanted.insert(digest.clone());

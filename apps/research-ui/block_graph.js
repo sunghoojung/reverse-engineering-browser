@@ -497,7 +497,10 @@ function createBlockGraphView(root, options = {}) {
     view.y = layout.y[block] + layout.h[block] / 2 - cssH / view.z / 2;
     requestDraw();
   }
-  function select(block, row = -1, reveal = false) {
+  /** Selects a block (and a row of it) and keeps it in view. A pick tells
+   * onSelect, or onReveal when `reveal`; a `silent` selection is the host's
+   * own and tells neither. */
+  function select(block, row = -1, {reveal = false, silent = false} = {}) {
     if (!layout || block < 0 || block >= graph.count) return;
     selectedBlock = block; selectedRow = row;
     const flags = graph.flags[block];
@@ -509,6 +512,7 @@ function createBlockGraphView(root, options = {}) {
     const x = layout.x[block], y = layout.y[block], w = layout.w[block], h = layout.h[block];
     if (!visible(x, y, w, h) || x < view.x || y < view.y || x + w > view.x + cssW / view.z || y + h > view.y + cssH / view.z) centerOn(block);
     requestDraw();
+    if (silent) return;
     if (reveal) options.onReveal?.(graph.offsets[block], block, graph);
     else options.onSelect?.(graph.offsets[block], block, graph);
   }
@@ -532,7 +536,7 @@ function createBlockGraphView(root, options = {}) {
     if (block < 0) { selectedBlock = -1; selectedRow = -1; requestDraw(); return; }
     const gy = view.y + (event.clientY - rect.top) / view.z - layout.y[block] - m.headerH - m.padY;
     const row = gy >= 0 && graph.rowCount[block] ? Math.min(graph.rowCount[block] - 1, Math.floor(gy / m.rowH)) : -1;
-    select(block, row >= 0 ? graph.firstRow[block] + row : -1, true);
+    select(block, row >= 0 ? graph.firstRow[block] + row : -1, {reveal: true});
   });
   canvas.addEventListener('wheel', event => {
     if (!layout) return;
@@ -562,7 +566,7 @@ function createBlockGraphView(root, options = {}) {
     else if (key === '+' || key === '=') zoomAt(1.25); else if (key === '-' || key === '_') zoomAt(0.8); else if (key === '0') fit();
     else if (key === 'Home') { select(0); centerOn(0); }
     else if (key === ']' || key === '[') { const order = [...Array(graph.count).keys()].sort((a, b) => graph.offsets[a] - graph.offsets[b]), index = order.indexOf(selectedBlock), next = order[key === ']' ? index + 1 : Math.max(0, index - 1)] ?? order.at(-1); if (next !== undefined) select(next); }
-    else if (key === 'Enter' && selectedBlock >= 0) select(selectedBlock, selectedRow, true);
+    else if (key === 'Enter' && selectedBlock >= 0) select(selectedBlock, selectedRow, {reveal: true});
     else handled = false;
     if (handled) event.preventDefault();
   });
@@ -593,7 +597,10 @@ function createBlockGraphView(root, options = {}) {
       canvas.width = 0; canvas.height = 0; minimap.width = 300; minimap.height = 220;
       setState('empty', '');
     },
-    measurements: () => ({...m}), setResult, setState, select, focus: () => canvas.focus(), hasGraph: () => Boolean(layout), tools, setTitle(text) { title.textContent = text; stats.textContent = ''; }
+    measurements: () => ({...m}), setResult, setState,
+    /** The host's selection: it never reports back through onSelect. */
+    select: (block, row = -1) => select(block, row, {silent: true}),
+    focus: () => canvas.focus(), hasGraph: () => Boolean(layout), tools, setTitle(text) { title.textContent = text; stats.textContent = ''; }
   };
 }
 

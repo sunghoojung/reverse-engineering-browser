@@ -169,7 +169,7 @@ function createFlowWorkspace(options) {
   };
 
   // CFG pane: the Sources block graph view and its layout worker.
-  const cfg = {fn: null, mark: null, key: null, loaded: false, result: null, generation: 0, abort: null, view: null, runner: null, marking: false, error: null, names: new Map()};
+  const cfg = {fn: null, mark: null, key: null, loaded: false, result: null, generation: 0, abort: null, view: null, runner: null, error: null, names: new Map()};
   function ensureCfgView() {
     if (cfg.view || !makeView || !cfgHost) return cfg.view;
     cfg.view = makeView(cfgHost, {
@@ -200,7 +200,7 @@ function createFlowWorkspace(options) {
     return first;
   }
   function cfgPicked(offset, block, graphDoc) {
-    if (cfg.marking || restoring) return;
+    if (restoring) return;
     const start = graphDoc?.offsets?.[block] ?? offset;
     const keepSample = selection.sample && selection.site && flowBlockAt(graphDoc, selection.site.offset) === block;
     setSelection({site: {offset: keepSample ? selection.site.offset : start, kind: keepSample ? selection.site.kind : 'block', label: keepSample ? selection.site.label : `loc_${Number(start).toString(16)}`},
@@ -282,8 +282,7 @@ function createFlowWorkspace(options) {
     if (!cfg.loaded || !cfg.result || cfg.mark === null || !cfg.view) return;
     const block = flowBlockAt(cfg.result.graph, cfg.mark);
     if (block < 0) return;
-    cfg.marking = true;
-    try { cfg.view.select(block, flowRowAt(cfg.result.graph, cfg.result.starts, block, cfg.mark)); } finally { cfg.marking = false; }
+    cfg.view.select(block, flowRowAt(cfg.result.graph, cfg.result.starts, block, cfg.mark));
   }
   function releaseCfg() {
     cfg.generation += 1; cfg.abort?.abort(); cfg.abort = null; cfg.runner?.cancel?.();

@@ -39,7 +39,7 @@ else
 $(error REB_RUST_TEST_RUNNER must be cargo or nextest, not $(REB_RUST_TEST_RUNNER))
 endif
 
-check: native-wasm-golden-check native-js-golden-check network-request-wire-check request-index-check request-stack-wire-check debugger-observation-wire-check network-scope-wire-check tab-link-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
+check: native-wasm-golden-check native-js-golden-check network-request-wire-check request-index-check request-stack-wire-check debugger-observation-wire-check network-scope-wire-check tab-link-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-tab-registry-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
 	$(RUST_SUITE) apps/origin-trace-backend/Cargo.toml
 	$(if $(RUST_DOCTESTS),$(RUST_DOCTESTS) apps/origin-trace-backend/Cargo.toml)
 	$(RUST_SUITE) apps/deobfuscator-worker/Cargo.toml
@@ -167,6 +167,11 @@ native-artifact-capture-check: $(ARTIFACT_RECEIVER_BINARY) $(BROKER_BINARY) orig
 native-network-capture-check:
 	CXX="$(CXX)" ./tools/check-native-network-capture.sh
 
+# The tab registry, factory scope and owner hook against pinned content API stand-ins.
+.PHONY: native-tab-registry-check
+native-tab-registry-check:
+	CXX="$(CXX)" ./tools/check-native-tab-registry.sh
+
 # C++ request_body/request_target verdicts against the Python validator and the
 # shipped Traffic decoders and row model.
 .PHONY: network-request-wire-check
@@ -229,6 +234,7 @@ sanitize:
 		EXTRA_LDFLAGS="-fsanitize=$(SANITIZERS)" \
 		all native-request-identity-check wire-decoder-check magic-decoder-check native-probe-compile native-proxy-policy-check native-vm-recorder-check owned-vm-helper-check native-tests
 	REB_PROBE_TEST_SANITIZERS="$(SANITIZERS)" CXX="$(CXX)" ./tools/check-native-network-capture.sh
+	REB_PROBE_TEST_SANITIZERS="$(SANITIZERS)" CXX="$(CXX)" ./tools/check-native-tab-registry.sh
 	REB_PROBE_TEST_SANITIZERS="$(SANITIZERS)" CXX="$(CXX)" python3 tools/check-native-artifact-capture.py --receiver $(SANITIZE_BUILD_DIR)/reb-artifact-receiver --broker $(SANITIZE_BUILD_DIR)/reb-event-broker
 
 format:
@@ -337,6 +343,7 @@ javascript-check: capture-completeness-check
 	node tools/check-native-console-document-start.mjs
 	node tools/check-source-format-ui.mjs
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only
+	node tools/check-rendered-ui-probes.mjs
 	node tools/check-evidence-names.mjs
 	node tools/check-origin-trace-launcher.mjs --cleanup-only
 	node tools/check-origin-trace-package.mjs --contract-only

@@ -20,6 +20,21 @@ struct NativeFetchOwner final {
   std::uint64_t context_id = 0;
 };
 
+// A worklet's fetch owner (Chromium patch 0042): the document that created
+// it, from its parent context's LocalFrameToken halves. A shared storage
+// worklet's parent token is a fresh one, so it names no owner here and its
+// fetches stay kOtherContext; a default owner means "not a worklet owner".
+[[nodiscard]] constexpr NativeFetchOwner NativeWorkletFetchOwner(
+    const bool shared_storage,
+    const bool parent_is_frame,
+    const std::uint64_t parent_high,
+    const std::uint64_t parent_low) noexcept {
+  return shared_storage || !parent_is_frame
+             ? NativeFetchOwner{}
+             : NativeFetchOwner{NativeLoaderKind::kWorklet,
+                                NativeContextFold(parent_high, parent_low)};
+}
+
 // Names the owner for request_initiated records made on this thread while it
 // lives. Blink's loaders set it around ResourceRequestSender::SendAsync. A
 // default owner leaves the thread untouched.

@@ -66,9 +66,14 @@ checks:
   page that is not ordinary (an SVG image's own document), which no tab owns,
   are the separate `non_ordinary_page_reuse` exclusion.
 - `network_tab_unresolved` (error): requests without a tab. Read one with
-  `get_events` and the `process_id` and `request_id` from `request_tabs`.
+  `get_events` and the `process_id` and `request_id` from `request_tabs`; its
+  `reason` says which owner failed (`document_frame`, `worker`, `no_frame`,
+  `browser_factory`, `no_loader_kind`, or `no_start` when the start record is
+  missing). A shared storage worklet's requests (`no_document`) are the
+  warning `network_tab_no_document` instead: the capture does not link them.
   Extension traffic recorded by opt-in counts as `extension_rows`, not as
-  unresolved.
+  unresolved. Service workers no page used and browser prefetches with no page
+  are counted in `no_tab_traffic_excluded`, not recorded.
 
 ## 3. Find a session's Wasm modules
 

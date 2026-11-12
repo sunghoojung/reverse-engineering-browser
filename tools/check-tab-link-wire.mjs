@@ -93,6 +93,30 @@ const orphan = Object.assign(golden('browser loader kind 6'), {process_id: 2, re
   browser_context_id_high: '3', browser_context_id_low: '4'});
 rows = tabs.attachRequestTabs(model.requestsFromEvents([orphan], 'live'), [orphan]);
 assert(rows.length === 1 && tabs.isUnresolved(rows[0]) && rows[0].tabIds.length === 0);
+assert.equal(rows[0].tabReason, 'browser_factory');
+// Each row without an owner names why, by the summary's rule.
+const reasonOf = events => tabs.attachRequestTabs(model.requestsFromEvents(events, 'live'), events)[0].tabReason;
+assert.equal(reasonOf([record({loader_kind: 20, request_id: '40', sequence_number: '40'})]), 'no_document');
+assert.equal(reasonOf([record({loader_kind: 18, request_id: '41', sequence_number: '41'})]), 'worker');
+assert.equal(reasonOf([record({loader_kind: 16, request_id: '42', sequence_number: '42', frame_id: '77'})]), 'document_frame');
+assert.equal(reasonOf([record({loader_kind: 21, request_id: '43', sequence_number: '43', frame_id: '0'})]), 'no_frame');
+const completionOnly = Object.assign(golden('renderer loader kind 16'), {type: 'request_completed', loader_kind: undefined,
+  process_id: 31, request_id: '44', sequence_number: '44', payload: hex('completed'), payload_size: 9});
+delete completionOnly.loader_kind;
+assert.equal(reasonOf([completionOnly]), 'no_start');
+// A memory-cache reuse is its row's renderer start.
+const reusePayload = Buffer.alloc(128);
+reusePayload.writeUInt16LE(1, 0);
+reusePayload.writeUInt16LE(128, 2);
+reusePayload[4] = 1;
+reusePayload[6] = 6;
+reusePayload.write('m.test', 8, 'ascii');
+const reuse = fields => Object.assign(record(fields), {type: 'memory_cache_reuse', payload: reusePayload.toString('hex'),
+  payload_size: 128, status_code: 200});
+assert.equal(reasonOf([reuse({loader_kind: 22, request_id: '46', sequence_number: '46', frame_id: '78'})]),
+  'document_frame');
+assert.equal(reasonOf([reuse({loader_kind: 19, request_id: '47', sequence_number: '47', frame_id: '79'})]), 'worker');
+assert.equal(reasonOf([record({loader_kind: 16, request_id: '45', sequence_number: '45', tab_id: 4})]), null);
 assert.equal(tabs.unresolvedNotice(1), '1 request without a tab (capture error)');
 assert.equal(tabs.unresolvedNotice(0), '');
 
@@ -104,6 +128,22 @@ const updateLink = golden('browser record link to two tabs');
 rows = tabs.attachRequestTabs(model.requestsFromEvents([update], 'live'), [update, updateSet, updateLink]);
 assert.deepEqual(rows[0].tabIds, ['4', '9']);
 assert(!tabs.isUnresolved(rows[0]) && rows[0].tabLinkLabel === 'Service worker · 2 tabs');
+
+// A version's install-time fetch links to the tab whose register() installed it.
+const installStart = record({loader_kind: 19, request_id: '18', sequence_number: '33'});
+const registrant = golden('registrant link');
+Object.assign(registrant, {initiator_process_id: 31, initiator_request_id: 18});
+rows = tabs.attachRequestTabs(model.requestsFromEvents([installStart], 'live'),
+  [installStart, withTabs(golden('one-part set'), [4, 9]), registrant]);
+assert.deepEqual(rows[0].tabIds, ['4', '9']);
+assert(!tabs.isUnresolved(rows[0]) && rows[0].tabLinkLabel === 'Service worker · installed from 2 tabs');
+assert.equal(tabs.linkLabel({kind: 5, count: 1}), 'Service worker · installed from 1 tab');
+
+// A worklet's record names its creating document and carries that tab like one.
+const worklet = record({loader_kind: 22, request_id: '19', sequence_number: '34', frame_id: '77', tab_id: 4});
+assert(model.isBrokerEvent(worklet));
+rows = tabs.attachRequestTabs(model.requestsFromEvents([worklet], 'live'), [worklet]);
+assert(!tabs.isUnresolved(rows[0]) && rows[0].tabIds[0] === '4');
 
 // Extension traffic recorded by opt-in sits under its extension, never under no tab.
 const extensionScript = Object.assign(golden('browser loader kind 6'), {process_id: 7, request_id: '900',
@@ -131,5 +171,6 @@ const domain = row => String(row.path).split('/')[0];
 assert.equal(tabs.tabPageLabel(rows, domain), 'example.test');
 
 console.log(`PASS tab link wire: ${cases.length} C++ golden records agree with Python and the UI readers; ` +
-  'worker rows appear in every linked tab once, incomplete sets say so, browser records and extension traffic link, ' +
+  'worker rows appear in every linked tab once, incomplete sets say so, browser records, registrants, worklets and ' +
+  'extension traffic link, ' +
   'unlinked rows are errors and tabs are named by their page');

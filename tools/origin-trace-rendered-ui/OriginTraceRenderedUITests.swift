@@ -354,6 +354,7 @@ struct Expectations: Decodable {
   let invocationSiteStore: String
   let workerStackHost: String
   let workerStackPostingProcess: Int
+  let registrantHost: String
 
   static func load() throws -> Expectations {
     let text = try Harness.required(ProcessInfo.processInfo.environment, "REB_RENDERED_UI_EXPECT")
@@ -1321,6 +1322,37 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertEqual(icon["clipped"] as? Bool, false, "\(size.name): the two-letter kind icon is not clipped")
       try await assertLayout(ui, "#screen-sources", "\(size.name) sources bytecode")
       try await ui.screenshot("sources-bytecode-\(size.name)")
+    }
+  }
+
+  // protocol/native-network-v3.md: a service worker's install-time fetch sits in
+  // the tab that registered it, marked as such, and requests no page caused are
+  // named in the footer instead of listed.
+  @MainActor
+  func test28ServiceWorkerRegistrantAndNoPageCounts() async throws {
+    let expected = try Expectations.load()
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      _ = try await ui.value("""
+        (() => { const filter = document.querySelector('#request-filter'); filter.value = '\(expected.registrantHost)';
+          filter.dispatchEvent(new Event('input', {bubbles: true})); })()
+        """)
+      try await ui.reveal("#screen-traffic .request-row", containing: expected.registrantHost)
+      let state = try await ui.json("""
+        (() => { const row = [...document.querySelectorAll('#screen-traffic .request-row')]
+            .find(node => node.innerText.includes('\(expected.registrantHost)'));
+          return {marker: row?.querySelector('.request-tab-link')?.textContent ?? '',
+            footer: document.querySelector('#request-window-status').textContent,
+            unresolvedHidden: document.querySelector('#request-unresolved').hidden}; })()
+        """)
+      XCTAssertTrue((state["marker"] as? String ?? "").contains("Service worker · installed from 1 tab"),
+                    "\(size.name): the registrant link is marked on its row: \(state)")
+      XCTAssertTrue((state["footer"] as? String ?? "").contains("2 service worker requests no page caused not recorded"),
+                    "\(size.name): the footer names the counted no-page requests: \(state)")
+      XCTAssertEqual(state["unresolvedHidden"] as? Bool, true, "\(size.name): the linked row is no capture error")
+      try await assertLayout(ui, "#screen-traffic", "\(size.name) service worker registrant")
+      try await ui.screenshot("traffic-registrant-\(size.name)")
     }
   }
 

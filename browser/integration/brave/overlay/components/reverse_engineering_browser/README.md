@@ -138,20 +138,37 @@ See [Native network v3](../../../../../../protocol/native-network-v3.md).
 Each request names the tab that caused it. Brave patch
 `0017-link-requests-to-tab-owners` records a factory's tab when it is created;
 Brave patch `0020-scope-native-proxy-factories` moves that decision to
-`browser/native_factory_scope.h`, which counts DevTools, extension-worker and
-WebUI factories instead of recording them, and records extension workers under
-their extension id with `--reb-capture-extension-traffic`. Frameless script
-factories read the owner content scopes around their creation through the
-`factory_owner_hook` component (Chromium patch
-`0036-name-frameless-script-fetch-owners`): a nested worker's ancestor
-document, a service worker's `register()` caller or the clients of the version
-it updates.
+`browser/native_factory_scope.h`, which counts DevTools, extension-worker,
+WebUI and browser prefetch factories instead of recording them, decides once
+per request (Brave patch `0022`, after the capture state) whether a service
+worker no page used is counted, sharing that answer with the drain for a
+renderer-issued request and for a script a starting worker imports through its
+new-scripts bundle (the drain decides a memory-cache reuse alone), and records
+extension workers under their extension id with
+`--reb-capture-extension-traffic`. Frameless factories read the owner content
+scopes around their creation through the `factory_owner_hook` component:
+a nested worker's ancestor document (Chromium patch
+`0036-name-frameless-script-fetch-owners`), a service-worker job's cause and
+the version it updates or a starting worker's version, also around the
+bundles DevTools Fetch interception replaces (`0045`), an early-hints
+navigation's main frame (`0043`) and a browser-initiated prefetch's page
+(`0044`). A job also notes the version it starts, so that version's fetches
+link to its registrant tabs, and a starting worker names its token with its
+factories. Brave patch `0021` attaches only an observing proxy, a handler that
+changes nothing, to the early-hints factory and only while capture runs, so
+Shields and extensions never act on those preloads. Capture still gives them a
+`reb-` DevTools ID and a teed body in content sessions, a hop through the UI
+thread, and `ERR_UNSAFE_REDIRECT` for an unsafe redirect stock Chromium leaves
+stalled; none is visible to the page or the server beyond timing (see
+[early hints are observed only](../../../../../../protocol/native-network-v3.md#early-hints-are-observed-only)). Chromium patch `0042`
+names a worklet's creating document through `renderer/native_fetch_owner.h`.
 Chromium patch `0027-record-renderer-fetch-owners` scopes the fetch's own
 document or worker (`renderer/native_fetch_owner.h`) around `SendAsync`, so
 `request_initiated` carries a loader kind and that owner. `browser/native_tab_registry.h`
 feeds `NativeTabResolver` from the dedicated, shared and service worker
 services; the drain links worker requests to `tab_set` records with one
-`request_tab_link` each. See
+`request_tab_link` each and counts the records of service workers no page
+used. See
 [request owners and tabs](../../../../../../protocol/native-network-v3.md#request-owners-and-tabs).
 
 Content sessions also record header blocks

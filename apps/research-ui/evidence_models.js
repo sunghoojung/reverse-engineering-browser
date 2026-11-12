@@ -54,7 +54,7 @@
         Number.isInteger(event.loader_kind) && (event.type === 'request_started'
           ? event.loader_kind >= 1 && event.loader_kind <= 10
           : ['request_initiated', 'memory_cache_reuse'].includes(event.type) && event.loader_kind >= 16 &&
-            event.loader_kind <= 21);
+            event.loader_kind <= 22);
       const uint64Fields = [
         'session_id', 'sequence_number', 'monotonic_time_ns', 'navigation_id',
         'frame_id', 'artifact_id', 'parent_event_id', 'request_id'
@@ -956,7 +956,7 @@
             event.flags !== 0 || event.payload_size !== 128 || typeof event.payload !== 'string' ||
             !/^[0-9a-f]{256}$/i.test(event.payload) || !(event.status_code >= 0) || event.error_code !== 0 ||
             event.resource_type !== 0 || event.initiator_request_id !== 0 || event.initiator_process_id !== 0 ||
-            !(event.process_id > 0) || !(event.scheme_class > 0) || !(event.loader_kind >= 16 && event.loader_kind <= 21) ||
+            !(event.process_id > 0) || !(event.scheme_class > 0) || !(event.loader_kind >= 16 && event.loader_kind <= 22) ||
             ['navigation_id', 'artifact_id', 'parent_event_id', 'encoded_data_length'].some(key => event[key] !== '0') ||
             ['browser_context_id_high', 'browser_context_id_low'].some(key => (event[key] ?? '0') !== '0') ||
             String(event.decoded_body_length).startsWith('-') ||

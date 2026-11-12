@@ -20,6 +20,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_capture_scope.h"
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_host.h"
+#include "brave/components/reverse_engineering_browser/browser/native_tab_resolver.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_dispatch_sites.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_invocation_sites.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
@@ -237,6 +238,7 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
                                    std::memory_order_relaxed);
   webui_renderers_excluded_ = 0;
   browser_requests_excluded_.clear();
+  NativeTabResolver::Get().ResetSharedDecisions();
   next_browser_sequence_.store(1, std::memory_order_relaxed);
   downstream_.store(downstream, std::memory_order_release);
   session_id_.store(session_id, std::memory_order_release);
@@ -346,6 +348,28 @@ void NativeProbeSession::EmitExclusion(const std::uint32_t excluded_process_id,
       static_cast<std::uint32_t>(base::GetCurrentProcId()),
       static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw()), excluded_process_id,
       exclusion_class, count));
+}
+
+void NativeProbeSession::EmitNamedGap(const NativeProbeCategory category,
+                                      const std::string_view reason) noexcept {
+  if (!IsActive()) {
+    return;
+  }
+  NativeProbeEvent gap;
+  gap.header.category = category;
+  gap.header.type = NativeProbeType::kGap;
+  gap.header.session_id = session_id();
+  gap.header.sequence_number = NextBrowserSequence();
+  gap.header.monotonic_time_ns =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  gap.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  gap.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  const std::size_t size = std::min(reason.size(), gap.inline_payload.size());
+  for (std::size_t index = 0; index < size; ++index) {
+    gap.inline_payload[index] = static_cast<std::byte>(static_cast<unsigned char>(reason[index]));
+  }
+  gap.header.payload_size = static_cast<std::uint32_t>(size);
+  Emit(gap);
 }
 
 std::uint64_t NativeProbeSession::NextBrowserSequence() noexcept {

@@ -25,6 +25,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "brave/components/reverse_engineering_browser/browser/native_tab_of.h"
 #include "brave/components/reverse_engineering_browser/browser/native_tab_resolver.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
 #include "content/public/browser/render_frame_host.h"
@@ -729,6 +730,7 @@ void NativeProbeHost::Configure(const std::uint64_t session_id,
                          : 0;
   reported_exclusions_ = {};
   extension_requests_excluded_ = 0;
+  no_page_requests_excluded_ = 0;
 
   queue_region_ = base::UnsafeSharedMemoryRegion::Create(sizeof(NativeProbeQueue));
   if (!queue_region_.IsValid()) {
@@ -763,6 +765,9 @@ void NativeProbeHost::Disable() {
   disabling_ = true;
   Drain();
   disabling_ = false;
+  // Answers evicted since this renderer's last worker record, while the
+  // session that StopSession is ending can still record them.
+  ReportUnsharedDecisions();
   wasm_epoch_lifetime_.reset();
   if (wasm_capture_epoch_ != std::numeric_limits<std::uint64_t>::max())
     ++wasm_capture_epoch_;
@@ -840,14 +845,31 @@ bool NativeProbeHost::IsExcludedRequestRecord(const NativeProbeEvent& event) con
 // protocol/native-network-v3.md: the record, its tab set the first time this
 // session names it, then the link.
 void NativeProbeHost::EmitWorkerRequest(NativeProbeEvent& event) {
-  const NativeTabResolution resolution =
-      NativeTabResolver::Get().Resolve(static_cast<NativeLoaderKind>(event.header.loader_kind),
-                                       event.header.frame_id, event.header.session_id);
+  const auto kind = static_cast<NativeLoaderKind>(event.header.loader_kind);
+  // A service worker's http(s) request starts reach the URL loader proxy,
+  // whose browser half takes the same class 68 answer as this record. Every
+  // other record is decided here alone: a memory-cache reuse or a local scheme
+  // never reaches the proxy, and a WebSocket uses neither the proxy nor the
+  // SendAsync path the renderer records.
+  const NativeTabResolver::RendererRequest request{
+      renderer_process_id_, static_cast<std::uint32_t>(event.header.request_id)};
+  const auto scheme = static_cast<NativeSchemeClass>(event.header.scheme_class);
+  const bool shared = event.header.type == NativeProbeType::kRequestInitiated &&
+                      kind == NativeLoaderKind::kServiceWorker &&
+                      (scheme == NativeSchemeClass::kHttp || scheme == NativeSchemeClass::kHttps);
+  const NativeTabResolution resolution = NativeTabResolver::Get().Resolve(
+      kind, event.header.frame_id, event.header.session_id, shared ? &request : nullptr);
   const bool extension = resolution.status == NativeTabResolution::Status::kExtension;
   if (extension && !(session_->capture_extension_traffic() && resolution.extension)) {
     excluded_requests_[excluded_next_++ % excluded_requests_.size()] = event.header.request_id;
     session_->EmitExclusion(renderer_os_pid_, kNativeExtensionWorkerExclusion,
                             ++extension_requests_excluded_);
+    return;
+  }
+  if (resolution.status == NativeTabResolution::Status::kNoPage) {
+    excluded_requests_[excluded_next_++ % excluded_requests_.size()] = event.header.request_id;
+    session_->EmitExclusion(renderer_os_pid_, kNativeServiceWorkerNoPageExclusion,
+                            ++no_page_requests_excluded_);
     return;
   }
   if (!extension && resolution.status != NativeTabResolution::Status::kLinked) {
@@ -873,6 +895,20 @@ void NativeProbeHost::EmitWorkerRequest(NativeProbeEvent& event) {
   EmitNativeTabLink(
       resolution, event.header, false, identity, [this] { return session_->NextBrowserSequence(); },
       [this](const NativeProbeEvent& record) { session_->Emit(record); });
+}
+
+// Shared class 68 answers the resolver evicted before their other half asked,
+// whichever side inserted the newer answer.
+void NativeProbeHost::ReportUnsharedDecisions() {
+  // Taken only when the session can record the gaps, so a drain after it
+  // ended leaves the count to be cleared when the next session starts.
+  if (!session_->IsActive()) {
+    return;
+  }
+  for (std::uint64_t evicted = NativeTabResolver::Get().TakeEvictedSharedDecisions(); evicted;
+       --evicted) {
+    session_->EmitNamedGap(NativeProbeCategory::kNetwork, kNativeSharedDecisionEvictedGap);
+  }
 }
 
 void NativeProbeHost::Drain() {
@@ -901,6 +937,7 @@ void NativeProbeHost::Drain() {
       drained_event = true;
       if (IsWorkerRequestStart(event)) {
         EmitWorkerRequest(event);
+        ReportUnsharedDecisions();
         continue;
       }
       if (IsExcludedRequestRecord(event)) {

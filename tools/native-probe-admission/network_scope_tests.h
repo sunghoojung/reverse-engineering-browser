@@ -177,7 +177,7 @@ void RendererAnsweredRequests() {
 void RendererFetchOwners() {
   NativeProbeQueue queue;
   ConfigureScope(queue, false, false, 63);
-  reb::EventRecord parser, worker, restored;
+  reb::EventRecord parser, worker, worklet, restored;
   {
     const reb::NativeFetchOwnerScope document({reb::NativeLoaderKind::kDocument, 0x1234});
     static_cast<void>(sink.RecordRequestInitiated(20, "GET", "https", "example.test"));
@@ -187,11 +187,28 @@ void RendererFetchOwners() {
       static_cast<void>(sink.RecordRequestInitiated(21, "GET", "https", "example.test"));
       worker = Core(One(queue));
     }
+    {
+      // A worklet's fetch names the document that created it.
+      const reb::NativeFetchOwnerScope module({reb::NativeLoaderKind::kWorklet, 0x1234});
+      static_cast<void>(sink.RecordRequestInitiated(24, "GET", "https", "example.test"));
+      worklet = Core(One(queue));
+    }
     static_cast<void>(sink.RecordRequestInitiated(22, "GET", "https", "example.test"));
     restored = Core(One(queue));
   }
   assert(parser.header.frame_id == 0x1234 && parser.header.loader_kind == 16);
   assert(worker.header.frame_id == 0x77 && worker.header.loader_kind == 17);
+  assert(worklet.header.frame_id == 0x1234 && worklet.header.loader_kind == 22 &&
+         reb::IsValidEvent(worklet));
+  // Patch 0042's branch: a worklet with a creating frame names it; a shared
+  // storage worklet and a worklet without a frame parent name no owner.
+  constexpr auto named = reb::NativeWorkletFetchOwner(false, true, 0x21, 0x42);
+  static_assert(named.kind == reb::NativeLoaderKind::kWorklet &&
+                named.context_id == reb::NativeContextFold(0x21, 0x42));
+  static_assert(reb::NativeWorkletFetchOwner(true, true, 0x21, 0x42).kind ==
+                    reb::NativeLoaderKind::kNotRecorded &&
+                reb::NativeWorkletFetchOwner(false, false, 0x21, 0x42).kind ==
+                    reb::NativeLoaderKind::kNotRecorded);
   assert(restored.header.frame_id == 0x1234 && restored.header.loader_kind == 16);
   // Without an owner the running script's frame is kept and labelled as such.
   static_cast<void>(sink.RecordRequestInitiated(23, "GET", "https", "example.test"));
@@ -206,8 +223,8 @@ void RendererFetchOwners() {
   mislabelled.header.loader_kind = 3;
   assert(!reb::IsValidEvent(mislabelled));
   transport.Disable();
-  std::cout << "PASS request_initiated names its fetch owner's document or worker, falls back "
-               "to the script frame, and validates its loader kind\n";
+  std::cout << "PASS request_initiated names its fetch owner's document, worker or worklet "
+               "document, falls back to the script frame, and validates its loader kind\n";
 }
 
 std::string_view NetworkGapReason(const NativeProbeEvent& event) {

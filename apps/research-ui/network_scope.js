@@ -7,10 +7,12 @@
   const WEBUI_RENDERER_CLASS = 64;
   // Requests a WebUI renderer sent through the browser proxy.
   const WEBUI_REQUEST_CLASS = 67;
-  // Traffic no tab caused (#425): extension workers and DevTools loads.
-  const NO_TAB_CLASSES = Object.freeze({65: 'extension', 66: 'devtools'});
+  // Traffic no tab caused (#425): extension workers, DevTools loads, service
+  // workers no page used and browser prefetches with no page.
+  const NO_TAB_CLASSES = Object.freeze({65: 'extension', 66: 'devtools', 68: 'serviceWorker', 69: 'prefetch'});
+  // Counted only browser-wide, so their producer is always 0.
+  const BROWSER_WIDE_CLASSES = Object.freeze([WEBUI_RENDERER_CLASS, 66, WEBUI_REQUEST_CLASS, 69]);
   // Memory-cache reuses a renderer did not record, always with that renderer.
-  // Classes 68 and 69 belong to another part of the contract.
   const MEMORY_CACHE_CLASS = 70;
   // Those in a page that is not ordinary (an SVG image's own document, a popup), which no tab owns.
   const NON_ORDINARY_PAGE_CLASS = 71;
@@ -35,7 +37,7 @@
         count === 0n || !(exclusionClass in INTERNAL_SCHEME_CLASSES || exclusionClass === WEBUI_RENDERER_CLASS ||
           exclusionClass === WEBUI_REQUEST_CLASS || exclusionClass in NO_TAB_CLASSES ||
           exclusionClass === MEMORY_CACHE_CLASS || exclusionClass === NON_ORDINARY_PAGE_CLASS) ||
-        ([WEBUI_RENDERER_CLASS, 66, WEBUI_REQUEST_CLASS].includes(exclusionClass) && event.initiator_process_id !== 0) ||
+        (BROWSER_WIDE_CLASSES.includes(exclusionClass) && event.initiator_process_id !== 0) ||
         ([MEMORY_CACHE_CLASS, NON_ORDINARY_PAGE_CLASS].includes(exclusionClass) && event.initiator_process_id === 0)) return null;
     return {exclusionClass, count, producer: `${event.session_id}:${event.initiator_process_id}`};
   }
@@ -49,7 +51,8 @@
       const key = `${value.producer}:${value.exclusionClass}`;
       if (!newest.has(key) || newest.get(key).count < value.count) newest.set(key, value);
     }
-    const totals = {requests: 0n, renderers: 0n, byScheme: new Map(), extension: 0n, devtools: 0n, memoryCache: 0n, nonOrdinaryPage: 0n};
+    const totals = {requests: 0n, renderers: 0n, byScheme: new Map(), extension: 0n, devtools: 0n,
+      serviceWorker: 0n, prefetch: 0n, memoryCache: 0n, nonOrdinaryPage: 0n};
     for (const {exclusionClass, count} of newest.values()) {
       if (exclusionClass === WEBUI_RENDERER_CLASS) {
         totals.renderers += count;
@@ -87,6 +90,13 @@
     }
     if (totals?.devtools > 0n) {
       parts.push(`${totals.devtools} DevTools ${totals.devtools === 1n ? 'load' : 'loads'} not recorded`);
+    }
+    if (totals?.serviceWorker > 0n) {
+      parts.push(`${totals.serviceWorker} service worker ${totals.serviceWorker === 1n ? 'request' : 'requests'} ` +
+        'no page caused not recorded');
+    }
+    if (totals?.prefetch > 0n) {
+      parts.push(`${totals.prefetch} browser ${totals.prefetch === 1n ? 'prefetch' : 'prefetches'} with no page not recorded`);
     }
     if (totals?.memoryCache > 0n) {
       parts.push(`${totals.memoryCache} memory-cache ${totals.memoryCache === 1n ? 'reuse' : 'reuses'} not recorded`);

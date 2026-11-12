@@ -1,0 +1,26 @@
+diff --git a/third_party/blink/renderer/core/loader/base_fetch_context.cc b/third_party/blink/renderer/core/loader/base_fetch_context.cc
+index 351fcda..7bf5376 100644
+--- a/third_party/blink/renderer/core/loader/base_fetch_context.cc
++++ b/third_party/blink/renderer/core/loader/base_fetch_context.cc
+@@ -47,6 +47,21 @@ reb::NativeFetchOwner BaseFetchContext::GetNativeFetchOwner() const {
+     return {};
+   }
+   const ExecutionContextToken token = context->GetExecutionContextToken();
++  // A worklet's fetches belong to the document that created it
++  // (protocol/native-network-v3.md).
++  if (context->IsWorkletGlobalScope()) {
++    const std::optional<ExecutionContextToken> parent =
++        context->GetParentExecutionContextToken();
++    const base::UnguessableToken* const frame =
++        parent && parent->Is<LocalFrameToken>() ? &parent->value() : nullptr;
++    if (const reb::NativeFetchOwner owner = reb::NativeWorkletFetchOwner(
++            token.Is<SharedStorageWorkletToken>(), frame != nullptr,
++            frame ? frame->GetHighForSerialization() : 0,
++            frame ? frame->GetLowForSerialization() : 0);
++        owner.kind != reb::NativeLoaderKind::kNotRecorded) {
++      return owner;
++    }
++  }
+   const base::UnguessableToken& value = token.value();
+   reb::NativeLoaderKind kind = reb::NativeLoaderKind::kOtherContext;
+   if (token.Is<LocalFrameToken>()) {

@@ -591,16 +591,20 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `sequence_gaps` | Sequence numbers missing inside the scanned events. |
 | `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. A Wasm reason ending in `filtered` is a sample-policy exclusion: that execution was not sampled and did not take a slot. |
 | `browser_internal_excluded` | Capture counted `chrome:`, `devtools:` and other browser-internal requests, requests WebUI renderers sent (`webui_request`), or WebUI renderers, instead of recording them; `count` is the requests. Not a gap. |
-| `no_tab_traffic_excluded` | Capture counted extension-worker requests and DevTools loads instead of recording them; `count` is the requests. Not a gap. `REB_CAPTURE_EXTENSION_TRAFFIC=1` records the extension requests instead. |
+| `no_tab_traffic_excluded` | Capture counted extension-worker requests, DevTools loads, requests of service workers no page used in this browser, and browser-initiated prefetches with no page, instead of recording them; `count` is the requests. Not a gap. `REB_CAPTURE_EXTENSION_TRAFFIC=1` records the extension requests instead. |
 | `memory_cache_reuse_not_recorded` | Renderers counted memory-cache reuses past their 4,096 records per capture configuration instead of recording them; `count` is the reuses. Not a gap. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are the separate `non_ordinary_page_reuse` exclusion. |
-| `network_tab_unresolved` | Severity `error`: `count` request rows have no tab. A capture bug; `request_tabs.unresolved_requests` names up to 16 by `process_id` and `request_id`. |
+| `network_tab_unresolved` | Severity `error`: `count` request rows have no tab, and the message counts them by reason. A capture bug; `request_tabs.unresolved_requests` names up to 16 by `process_id` and `request_id`, each with its `reason`. |
+| `network_tab_no_document` | Severity `warning`: `count` request rows come from a context with no parent document (a shared storage worklet), which the capture does not link; their reason is `no_document`. |
 | `bounded_scope` | Only the newest 64 MiB of events were summarized. |
 
 `exclusions` lists those counts by class and unit; see
 [native network v3](native-network-v3.md#browser-internal-exclusion).
 `request_tabs` counts request rows, the ones under an extension
-(`extension_rows`) and the ones without an owner; see
-[request owners and tabs](native-network-v3.md#request-owners-and-tabs).
+(`extension_rows`) and the ones without an owner, by reason
+(`unresolved_reasons`: `document_frame`, `worker`, `no_document`, `no_frame`,
+`browser_factory`, `no_loader_kind` or `no_start`); see
+[request owners and tabs](native-network-v3.md#request-owners-and-tabs) and
+[unresolved requests](native-network-v3.md#unresolved-requests).
 The summary scans the same newest 64 MiB as the polling window and the newest
 64 MiB of the manifest. It contains counts, identifiers and origin or
 `wasm://wasm/<hex>` labels only: no payloads, URL paths or queries, source or

@@ -15,13 +15,17 @@ const view = load(['apps/research-ui/request_stack.js', 'apps/research-ui/traffi
   trafficInitiatorFrame, trafficStatusCell`);
 
 const model = requestsFromEvents(golden.events, 'live');
+// Tabs and the unresolved reason come from tab sets and links, as Traffic attaches them.
+const {RebRequestTabs} = load(['apps/research-ui/request_tabs.js'], 'RebRequestTabs');
+RebRequestTabs.attachRequestTabs(model, golden.events);
 assert.equal(golden.rows.length, model.length, 'one index row per Traffic row');
 assert(model.length >= 10, 'the fixture covers every row shape');
 golden.rows.forEach((row, index) => {
   const expected = model[index], shown = view.trafficIndexRequest(row, 'live');
   for (const field of ['id', 'path', 'method', 'status', 'time', 'type', 'targetKind', 'hostOnly', 'failed', 'interrupted',
     'tabId', 'operation', 'targetMalformed', 'transferSize', 'resourceSize', 'fromCache', 'fromServiceWorker', 'memoryCache',
-    'staticData', 'raceNetwork', 'endLost', 'mimeType', 'protocol', 'responseTimestamp', 'errorCode', 'loaderObserved', 'initiator', 'mainFrame']) {
+    'staticData', 'raceNetwork', 'endLost', 'mimeType', 'protocol', 'responseTimestamp', 'errorCode', 'loaderObserved', 'initiator', 'mainFrame',
+    'tabReason']) {
     assert.deepEqual(shown[field], expected[field], `${expected.id} ${field}`);
   }
   for (const field of ['target', 'host', 'urlTruncated', 'targetLength']) {

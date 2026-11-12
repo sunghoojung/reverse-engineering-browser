@@ -814,6 +814,219 @@ void NativeProbeHostWorkerTabLinks() {
             version.owner_fold == reb::NativeToken128{0x81, 0x82}.fold() &&
             version.kind == reb::NativeTabLinkKind::kServiceWorkerLastClients,
         "A version's script fetch links to its clients and names the worker that ran");
+
+  // A worklet names its creating document; a context with no document stays unresolved.
+  const reb::NativeToken128 document{0x55, 0x56};
+  resolver.NoteFrame(1, document, 13);
+  start(reb::NativeLoaderKind::kWorklet, document.fold(), 60);
+  Check(events.size() == 1 && events[0].header.tab_id == 13 && valid(events[0]),
+        "A worklet's record takes its creating document's tab");
+  start(reb::NativeLoaderKind::kOtherContext, reb::NativeToken128{0x57, 0x58}.fold(), 61);
+  Check(events.size() == 1 && events[0].header.tab_id == 0 && valid(events[0]),
+        "A context with no parent document is recorded without a tab");
+
+  // Enumeration can report a nested worker before its parent.
+  const reb::NativeToken128 early_child{0x31, 0x32}, late_parent{0x33, 0x34};
+  resolver.DedicatedWorkerCreated(early_child, {}, 0, late_parent);
+  resolver.DedicatedWorkerCreated(late_parent, {}, 12, {});
+  start(reb::NativeLoaderKind::kDedicatedWorker, early_child.fold(), 62);
+  Check(events.size() == 3 && events[2].header.tab_id == 12 &&
+            link(events[2]) == std::pair{1U, 1U} && std::ranges::all_of(events, valid),
+        "A nested worker seen before its parent links through the parent when it fetches");
+  // One depth rule: a worker resolves when its chain from the document holds
+  // at most kCreatorDepth workers, whatever order the workers were seen in and
+  // whichever worker fetched first.
+  constexpr std::uint64_t kDepth = reb::NativeTabResolver::kCreatorDepth;
+  const auto chained = [](std::uint64_t family, std::uint64_t index) {
+    return reb::NativeToken128{family + index, index + 1};
+  };
+  const auto tab_of = [&](std::uint64_t family, std::uint64_t index, std::uint64_t request) {
+    start(reb::NativeLoaderKind::kDedicatedWorker, chained(family, index).fold(), request);
+    return events.empty() ? 0U : events[0].header.tab_id;
+  };
+  // Children seen before their parents, as enumeration can report them.
+  for (std::uint64_t index = kDepth; index > 0; --index) {
+    resolver.DedicatedWorkerCreated(chained(0x4000, index), {}, 0, chained(0x4000, index - 1));
+  }
+  resolver.DedicatedWorkerCreated(chained(0x4000, 0), {}, 15, {});
+  Check(tab_of(0x4000, kDepth, 63) == 0,
+        "Seen child first, a chain one past the depth stays unresolved");
+  Check(tab_of(0x4000, kDepth - 1, 64) == 15, "Seen child first, a chain of the depth resolves");
+  // Parents seen first, so each worker inherits at creation.
+  resolver.DedicatedWorkerCreated(chained(0x5000, 0), {}, 16, {});
+  for (std::uint64_t index = 1; index <= kDepth; ++index) {
+    resolver.DedicatedWorkerCreated(chained(0x5000, index), {}, 0, chained(0x5000, index - 1));
+  }
+  Check(tab_of(0x5000, kDepth, 71) == 0,
+        "Seen parent first, a chain one past the depth stays unresolved");
+  Check(tab_of(0x5000, kDepth - 1, 72) == 16, "Seen parent first, a chain of the depth resolves");
+  // A worker halfway down fetches first and caches the tab with its depth.
+  for (std::uint64_t index = kDepth; index > 0; --index) {
+    resolver.DedicatedWorkerCreated(chained(0x6000, index), {}, 0, chained(0x6000, index - 1));
+  }
+  resolver.DedicatedWorkerCreated(chained(0x6000, 0), {}, 17, {});
+  Check(tab_of(0x6000, kDepth / 2, 73) == 17, "A worker halfway down resolves");
+  Check(tab_of(0x6000, kDepth, 74) == 0 && tab_of(0x6000, kDepth - 1, 75) == 17,
+        "A tab cached halfway down keeps the same boundary below it");
+
+  // A version installed by a page's register() links its fetches to that page.
+  resolver.ServiceWorkerJobStarted(10, true, 33, -1);
+  resolver.ServiceWorkerStarted(10, {0xd1, 0xd2}, {}, "https://install.test/");
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0xd1, 0xd2}.fold(), 65);
+  Check(events.size() == 3 && events[0].header.tab_id == 33 &&
+            link(events[2]) == std::pair{5U, 1U} && std::ranges::all_of(events, valid),
+        "An installing service worker's fetch links to the tab that registered it");
+
+  // A service worker no page ever used: counted, and its later records dropped.
+  resolver.ServiceWorkerStarted(9, {0xc1, 0xc2}, {}, "https://push.test/");
+  const auto before = session.exclusions.size();
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0xc1, 0xc2}.fold(), 66);
+  Check(events.empty() && session.exclusions.size() == before + 1 &&
+            session.exclusions.back().process == 123 &&
+            session.exclusions.back().exclusion_class == 68 && session.exclusions.back().count == 1,
+        "A push-time fetch of a service worker no page used is counted, not recorded");
+  NativeProbeEvent pageless_done = completion;
+  pageless_done.header.sequence_number = ++sequence;
+  pageless_done.header.request_id = 66;
+  Check(queue->TryPush(pageless_done), "Renderer ring admits the completion");
+  events.clear();
+  host.EventsAvailable();
+  Check(events.empty(), "Later records of a pageless worker's request are dropped with it");
+  // A new configuration on the same renderer counts its own requests from one.
+  host.Configure(kSession, kMask, 200, false, false);
+  mapping = client.region.Map();
+  queue = static_cast<reb::NativeProbeQueue*>(mapping.memory());
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0xc1, 0xc2}.fold(), 70);
+  Check(events.empty() && session.exclusions.back().exclusion_class == 68 &&
+            session.exclusions.back().count == 1,
+        "A second configuration counts class 68 from one, not on top of the first");
+  resolver.ServiceWorkerControlleeAdded(9, "page", std::vector<std::uint32_t>{14});
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0xc1, 0xc2}.fold(), 67);
+  Check(events.size() == 3 && events[0].header.tab_id == 14 && link(events[2]) == std::pair{3U, 1U},
+        "Once a page uses the version its requests link to that page");
+  // One class 68 answer per renderer-issued request, whichever half asks first.
+  reb::NativeFactoryScope worker_scope;
+  worker_scope.owner.service_worker_without_caller = true;
+  const auto proxy = [&](std::int64_t version_id, std::uint32_t request) {
+    worker_scope.owner.service_worker_version = version_id;
+    return reb::NativeProxyRequestExclusion(
+        worker_scope, static_cast<int>(reb::NativeUrlLoaderFactoryKind::kServiceWorkerSubResource),
+        "https", {1, request});
+  };
+  const reb::NativeToken128 shared_worker_token{0xf1, 0xf2};
+  resolver.ServiceWorkerStarted(12, shared_worker_token, {}, "https://shared.test/");
+  // A: the proxy leaves the browser half out, then a page arrives before the drain.
+  const auto left_out = proxy(12, 81);
+  Check(left_out.exclusion_class == 68 && !left_out.counted_here,
+        "The proxy leaves a pageless worker's request out for the drain to count");
+  resolver.ServiceWorkerControlleeAdded(12, "late", std::vector<std::uint32_t>{19});
+  auto counted_now = session.exclusions.size();
+  start(reb::NativeLoaderKind::kServiceWorker, shared_worker_token.fold(), 81);
+  Check(
+      events.empty() && session.exclusions.size() == counted_now + 1 &&
+          session.exclusions.back().exclusion_class == 68,
+      "The renderer record takes the proxy's answer though a page arrived since, and counts once");
+  start(reb::NativeLoaderKind::kServiceWorker, shared_worker_token.fold(), 82);
+  Check(events.size() == 3 && events[0].header.tab_id == 19 && proxy(12, 82).exclusion_class == 0,
+        "After the page arrived both halves of a new request are kept");
+  // Brave patch 0022 decides each request once. Were the proxy to ask twice,
+  // the second ask would take its own answer and the drain would decide the
+  // renderer record anew, so a page arriving in between parts the halves.
+  resolver.ServiceWorkerStarted(23, {0xfb, 0xfc}, {}, "https://once.test/");
+  const auto once = proxy(23, 89);
+  resolver.ServiceWorkerControlleeAdded(23, "between", std::vector<std::uint32_t>{24});
+  const auto again = proxy(23, 89);
+  Check(once.exclusion_class == 68 && again.exclusion_class == 68 &&
+            !resolver.SharedServiceWorkerNoPage({1, 89}, 23),
+        "A repeated ask consumes the answer the drain needed, which 0022's one call avoids");
+  // B: the drain asks first for a worker it does not know; the proxy keeps its half too.
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0xf3, 0xf4}.fold(), 83);
+  Check(events.size() == 1 && events[0].header.tab_id == 0 && proxy(13, 83).exclusion_class == 0,
+        "A record of an unknown worker is kept, so its pageless browser half is kept as well");
+  // The drain asks first for a pageless worker: the proxy follows though a page arrived since.
+  const reb::NativeToken128 drained_first{0xf5, 0xf6};
+  resolver.ServiceWorkerStarted(14, drained_first, {}, "https://drained.test/");
+  counted_now = session.exclusions.size();
+  start(reb::NativeLoaderKind::kServiceWorker, drained_first.fold(), 84);
+  resolver.ServiceWorkerControlleeAdded(14, "late", std::vector<std::uint32_t>{20});
+  const auto followed = proxy(14, 84);
+  Check(events.empty() && session.exclusions.size() == counted_now + 1 &&
+            followed.exclusion_class == 68 && !followed.counted_here,
+        "The proxy takes the drain's answer and does not count the request again");
+  // An answer evicted before its other half asked is a named network gap.
+  constexpr std::size_t kAnswers = reb::NativeTabResolver::kSharedDecisionCapacity;
+  for (std::uint32_t index = 0; index < kAnswers; ++index) {
+    static_cast<void>(resolver.SharedServiceWorkerNoPage({9, index}, 12));
+  }
+  static_cast<void>(resolver.TakeEvictedSharedDecisions());
+  static_cast<void>(resolver.SharedServiceWorkerNoPage({9, 1'000'000}, 15));
+  for (std::uint32_t index = 0; index < kAnswers; ++index) {
+    static_cast<void>(resolver.SharedServiceWorkerNoPage({10, index}, 12));
+  }
+  const auto gaps = session.named_gaps.size();
+  start(reb::NativeLoaderKind::kServiceWorker, shared_worker_token.fold(), 85);
+  Check(session.named_gaps.size() == gaps + 1 &&
+            session.named_gaps.back().first == reb::NativeProbeCategory::kNetwork &&
+            session.named_gaps.back().second == reb::kNativeSharedDecisionEvictedGap,
+        "Only the evicted answer its other half could have decided otherwise is a named gap");
+  // A memory-cache reuse never reaches the proxy, so the drain decides it alone.
+  const reb::NativeToken128 reused_worker{0xf7, 0xf8};
+  resolver.ServiceWorkerStarted(16, reused_worker, {}, "https://reused.test/");
+  counted_now = session.exclusions.size();
+  start(reb::NativeLoaderKind::kServiceWorker, reused_worker.fold(), 86,
+        NativeProbeType::kMemoryCacheReuse);
+  resolver.ServiceWorkerControlleeAdded(16, "late", std::vector<std::uint32_t>{21});
+  Check(events.empty() && session.exclusions.size() == counted_now + 1 &&
+            session.exclusions.back().exclusion_class == 68 && proxy(16, 86).exclusion_class == 0,
+        "A pageless worker's memory-cache reuse is counted and leaves no shared answer behind");
+  // The count is taken only while the session can record it.
+  static_cast<void>(resolver.SharedServiceWorkerNoPage({11, 1'000'000}, 17));
+  for (std::uint32_t index = 0; index < kAnswers; ++index) {
+    static_cast<void>(resolver.SharedServiceWorkerNoPage({12, index}, 12));
+  }
+  const auto gaps_before_inactive = session.named_gaps.size();
+  session.active = false;
+  start(reb::NativeLoaderKind::kServiceWorker, shared_worker_token.fold(), 87);
+  session.active = true;
+  Check(session.named_gaps.size() == gaps_before_inactive,
+        "A drain the session cannot record takes no eviction count");
+  start(reb::NativeLoaderKind::kServiceWorker, shared_worker_token.fold(), 88);
+  Check(session.named_gaps.size() == gaps_before_inactive + 1 &&
+            session.named_gaps.back().second == reb::kNativeSharedDecisionEvictedGap,
+        "The count waits for the next drain the session records");
+  // A new session starts from no answers and no count.
+  static_cast<void>(resolver.SharedServiceWorkerNoPage({13, 1}, 20));
+  for (std::uint32_t index = 0; index < kAnswers; ++index) {
+    static_cast<void>(resolver.SharedServiceWorkerNoPage({14, index}, 12));
+  }
+  resolver.ServiceWorkerStarted(19, {0xf9, 0xfa}, {}, "https://reset.test/");
+  Check(resolver.SharedServiceWorkerNoPage({13, 2}, 19), "A pageless answer is stored");
+  resolver.ServiceWorkerControlleeAdded(19, "after", std::vector<std::uint32_t>{22});
+  resolver.ResetSharedDecisions();
+  Check(resolver.TakeEvictedSharedDecisions() == 0 &&
+            !resolver.SharedServiceWorkerNoPage({13, 2}, 19),
+        "Session start drops the last session's answers and eviction count");
+
+  // A client whose navigation never committed names no tab but is a page.
+  resolver.ServiceWorkerControlleeAdded(11, "uncommitted", std::vector<std::uint32_t>{});
+  resolver.ServiceWorkerStarted(11, {0xe1, 0xe2}, {}, "https://uncommitted.test/");
+  const auto counted_before_uncommitted = session.exclusions.size();
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0xe1, 0xe2}.fold(), 68);
+  Check(events.size() == 1 && events[0].header.tab_id == 0 &&
+            session.exclusions.size() == counted_before_uncommitted,
+        "A version whose only client never committed stays unresolved, never counted");
+
+  // Answers evicted after the last worker record are reported as the host stops.
+  static_cast<void>(resolver.SharedServiceWorkerNoPage({15, 1}, 21));
+  for (std::uint32_t index = 0; index < kAnswers; ++index) {
+    static_cast<void>(resolver.SharedServiceWorkerNoPage({16, index}, 12));
+  }
+  const auto gaps_before_stop = session.named_gaps.size();
+  host.Disable();
+  Check(session.named_gaps.size() == gaps_before_stop + 1 &&
+            session.named_gaps.back().second == reb::kNativeSharedDecisionEvictedGap,
+        "Disabling the host reports the evictions since its last worker record");
+
   for (std::uint64_t index = 0; index <= reb::NativeTabResolver::kFrameCapacity; ++index) {
     resolver.NoteFrame(4, {0xf000 + index, index + 1}, 41);
   }
@@ -825,6 +1038,11 @@ void NativeProbeHostWorkerTabLinks() {
       "The frame registry is bounded and evicts its oldest entry");
   session.active = false;
   session.emitted = {};
-  std::cout << "PASS production NativeProbeHost links worker requests to tab sets and keeps "
-               "tombstoned frame tabs\n";
+  std::cout
+      << "PASS production NativeProbeHost links worker requests to tab sets, registrants and "
+         "worklet documents under one creator depth, takes one class 68 answer per request with "
+         "its browser half, decides a memory-cache reuse alone, reports evictions only while the "
+         "session "
+         "records and as the host stops, clears them per session, and keeps tombstoned frame "
+         "tabs\n";
 }

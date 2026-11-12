@@ -511,6 +511,9 @@ class NativeProbeSession {
   bool capture_browser_internal() const { return browser_internal; }
   bool capture_extension_traffic() const { return extension_traffic; }
   void NoteWebUiRendererExcluded() { ++webui_excluded; }
+  void EmitNamedGap(NativeProbeCategory category, std::string_view reason) {
+    named_gaps.emplace_back(category, std::string(reason));
+  }
   void EmitExclusion(std::uint32_t process, std::uint8_t exclusion_class, std::uint64_t count) {
     exclusions.push_back({process, exclusion_class, count});
   }
@@ -537,6 +540,7 @@ class NativeProbeSession {
     std::uint64_t count;
   };
   std::vector<Exclusion> exclusions;
+  std::vector<std::pair<NativeProbeCategory, std::string>> named_gaps;
   NativeWasmSampleBudgetPolicy wasm_budget{};
   std::function<void(const NativeProbeEvent&)> emitted;
 

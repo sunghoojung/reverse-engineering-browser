@@ -2,7 +2,8 @@
  * request_extension_link records (protocol/native-network-v3.md "Request owners
  * and tabs"). A row without an owner is a capture error that stays listed. */
 (function (global) {
-  const LINK_KINDS = Object.freeze({1: 'Dedicated worker', 2: 'Shared worker', 3: 'Service worker', 4: 'Service worker'});
+  const LINK_KINDS = Object.freeze({1: 'Dedicated worker', 2: 'Shared worker', 3: 'Service worker', 4: 'Service worker',
+    5: 'Service worker'});
   const OWNER_KINDS = new Set([17, 18, 19]);
   const BROWSER_FETCHED_KINDS = new Set([4, 6]);
   const PART_TABS = 26;
@@ -66,7 +67,7 @@
     if (!row) return null;
     const view = new DataView(bytes.buffer);
     const setId = view.getBigUint64(8, true), count = view.getUint32(16, true);
-    if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 24 || !(bytes[4] >= 1 && bytes[4] <= 4) ||
+    if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 24 || !(bytes[4] >= 1 && bytes[4] <= 5) ||
         bytes[5] || bytes[6] || bytes[7] || view.getUint32(20, true) || setId === 0n || count === 0 ||
         (count === 1) !== (event.tab_id !== 0)) return null;
     return {kind: bytes[4], setId: setId.toString(), count, row};
@@ -107,10 +108,30 @@
     const name = LINK_KINDS[link.kind];
     if (link.kind === 1) return name;
     if (link.kind === 4) return `${name} · last ${link.count === 1 ? 'client' : `${link.count} clients`}`;
+    // The tabs whose register(), update() or navigation installed the version.
+    if (link.kind === 5) return `${name} · installed from ${link.count === 1 ? '1 tab' : `${link.count} tabs`}`;
     return `${name} · ${link.count} ${link.count === 1 ? 'tab' : 'tabs'}`;
   }
 
-  // Adds tabIds, tabLink, tabLinkLabel and extensionId to each row; evidence is not changed.
+  // Why a row without an owner has none, from its renderer and browser start
+  // records: the same rule as unresolved_reason in request_tabs.rs. A
+  // memory-cache reuse names its owner as request_initiated does.
+  function unresolvedReason(row) {
+    const events = row.events ?? [];
+    const renderer = events.find(event => ['request_initiated', 'memory_cache_reuse'].includes(event.type));
+    if (renderer) {
+      const kind = renderer.loader_kind ?? 0;
+      if (kind === 0) return 'no_loader_kind';
+      if (OWNER_KINDS.has(kind)) return 'worker';
+      if (kind === 20) return 'no_document';
+      return (renderer.frame_id ?? '0') === '0' ? 'no_frame' : 'document_frame';
+    }
+    const starts = events.filter(event => event.type === 'request_started');
+    if (!starts.length) return 'no_start';
+    return starts.some(event => event.loader_kind) ? 'browser_factory' : 'no_loader_kind';
+  }
+
+  // Adds tabIds, tabLink, tabLinkLabel, extensionId and tabReason to each row; evidence is not changed.
   function attachRequestTabs(rows, events) {
     const sets = tabSetsFrom(events);
     const links = new Map(), extensions = new Map();
@@ -128,6 +149,7 @@
       row.tabLink = link && {kind: link.kind, count: link.count, complete: Boolean(link.set?.complete)};
       row.tabLinkLabel = link ? linkLabel(link) : '';
       row.extensionId = extensions.get(row.id) ?? null;
+      row.tabReason = row.tabIds.length || row.extensionId ? null : unresolvedReason(row);
     }
     return rows;
   }
@@ -167,7 +189,7 @@
   }
 
   const api = Object.freeze({decodeTabSet, decodeTabLink, decodeExtensionLink, tabSetsFrom, attachRequestTabs, rowTabs,
-    scopeLabel, isUnresolved, tabPageLabel, unresolvedNotice, linkLabel});
+    scopeLabel, isUnresolved, tabPageLabel, unresolvedNotice, linkLabel, unresolvedReason});
   global.RebRequestTabs = api;
   if (typeof module === 'object' && module?.exports) module.exports = api;
 })(globalThis);

@@ -1,0 +1,68 @@
+diff --git a/browser/net/brave_proxying_url_loader_factory.cc b/browser/net/brave_proxying_url_loader_factory.cc
+index 6e602ad..c3add0d 100644
+--- a/browser/net/brave_proxying_url_loader_factory.cc
++++ b/browser/net/brave_proxying_url_loader_factory.cc
+@@ -202,14 +202,24 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+       request_id_(request_id),
+       network_service_request_id_(network_service_request_id),
+       render_frame_token_(render_frame_token),
++      // Capture state first, so a profile outside capture costs the sink
++      // checks alone. A renderer-issued service-worker request takes the
++      // class 68 answer its renderer record shares.
++      native_exclusion_(
++          (reb::NativeNetworkCaptureSink::Get().IsEnabled() ||
++           reb::NativeArtifactCaptureSink::Get().IsEnabled()) &&
++                  reb::NativeNetworkCaptureSink::Get().IsOwnedContext(browser_context)
++              ? reb::NativeProxyRequestExclusion(
++                    factory.native_scope_,
++                    static_cast<int>(factory.url_loader_factory_type_),
++                    request.url.scheme(),
++                    {factory.render_process_id_,
++                     static_cast<uint32_t>(network_service_request_id)})
++              : reb::NativeRequestExclusion{}),
+       native_capture_lifecycle_(
+           (reb::NativeNetworkCaptureSink::Get().IsEnabled() ||
+            reb::NativeArtifactCaptureSink::Get().IsEnabled()) &&
+-                  reb::NativeProxyRequestExclusion(
+-                      factory.native_scope_,
+-                      static_cast<int>(factory.url_loader_factory_type_),
+-                      request.url.scheme())
+-                          .exclusion_class == 0 &&
++                  native_exclusion_.exclusion_class == 0 &&
+                   reb::NativeNetworkCaptureSink::Get().IsOwnedContext(browser_context)
+               ? reb::NativeNetworkCaptureSink::Get().generation()
+               : 0),
+@@ -236,16 +246,10 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+     reb::NativeNetworkCaptureSink::Get().AssignNetworkHeadersId(request_id_,
+                                                                 request_);
+     reb::NativeNetworkCaptureSink::Get().TeeRequestBody(request_id_, request_);
+-  } else if (const reb::NativeRequestExclusion exclusion =
+-                 reb::NativeProxyRequestExclusion(
+-                     factory.native_scope_,
+-                     static_cast<int>(factory.url_loader_factory_type_),
+-                     request.url.scheme());
+-             exclusion.counted_here &&
+-             reb::NativeNetworkCaptureSink::Get().IsEnabled() &&
+-             reb::NativeNetworkCaptureSink::Get().IsOwnedContext(browser_context)) {
++  } else if (native_exclusion_.counted_here &&
++             reb::NativeNetworkCaptureSink::Get().IsEnabled()) {
+     reb::NativeProbeSession::Get().NoteBrowserRequestExcluded(
+-        exclusion.exclusion_class);
++        native_exclusion_.exclusion_class);
+   }
+   // If there is a client error, clean up the request.
+   target_client_.set_disconnect_handler(base::BindOnce(
+diff --git a/browser/net/brave_proxying_url_loader_factory.h b/browser/net/brave_proxying_url_loader_factory.h
+index 8513b9d..974a296 100644
+--- a/browser/net/brave_proxying_url_loader_factory.h
++++ b/browser/net/brave_proxying_url_loader_factory.h
+@@ -153,6 +153,9 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
+     uint64_t browser_context_id_high_ = 0;
+     uint64_t browser_context_id_low_ = 0;
+     bool native_capture_identity_initialized_ = false;
++    // What capture leaves out of this request, decided once while capture
++    // runs for the profile; protocol/native-network-v3.md.
++    const reb::NativeRequestExclusion native_exclusion_;
+     reb::NativeNetworkLifecycle native_capture_lifecycle_;
+     const uint32_t options_;
+ 

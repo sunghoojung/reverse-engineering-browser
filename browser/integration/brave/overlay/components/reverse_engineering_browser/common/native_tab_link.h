@@ -43,6 +43,7 @@ enum class NativeLoaderKind : std::uint8_t {
   kServiceWorker = 19,
   kOtherContext = 20,
   kScriptContext = 21,
+  kWorklet = 22,
 };
 
 enum class NativeTabLinkKind : std::uint8_t {
@@ -50,10 +51,16 @@ enum class NativeTabLinkKind : std::uint8_t {
   kSharedWorkerClients = 2,
   kServiceWorkerClients = 3,
   kServiceWorkerLastClients = 4,
+  kServiceWorkerRegistrant = 5,
 };
 
 inline constexpr std::uint8_t kNativeExtensionWorkerExclusion = 65;
 inline constexpr std::uint8_t kNativeDevToolsLoadExclusion = 66;
+inline constexpr std::uint8_t kNativeServiceWorkerNoPageExclusion = 68;
+inline constexpr std::uint8_t kNativeBrowserPrefetchExclusion = 69;
+// A class 68 answer evicted before its other half asked; that half then
+// decided alone (protocol/native-network-v3.md).
+inline constexpr char kNativeSharedDecisionEvictedGap[] = "service_worker_page_decision_unshared";
 inline constexpr std::uint16_t kNativeTabSetPayloadVersion = 1;
 inline constexpr std::uint32_t kNativeTabSetPayloadSize = 128;
 inline constexpr std::size_t kNativeTabSetPartTabs = 26;
@@ -95,6 +102,9 @@ enum class NativeBodyFileAccess : std::uint8_t {
 // extension, and whose access a file body is read under.
 struct NativeBrowserRequestOwner final {
   std::int64_t service_worker_version = -1;
+  // A service-worker job or worker start that named no caller frame: with no
+  // tab for its version, no page caused the request (class 68).
+  bool service_worker_without_caller = false;
   std::optional<NativeExtensionId> extension{};
   NativeBodyFileAccess body_files = NativeBodyFileAccess::kRefused;
   int body_file_process_id = 0;

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
+#include "brave/components/reverse_engineering_browser/browser/native_factory_scope.h"
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_host.h"
 #include "brave/components/reverse_engineering_browser/browser/native_tab_resolver.h"

@@ -145,12 +145,11 @@ EVENT_TYPES = {
 SCHEME_CLASSES = {*range(0, 9), 15, *range(16, 21)}
 SCHEME_CLASS_TYPES = {"request_initiated", "request_started", "request_completed", "request_failed",
                       "memory_cache_reuse"}
-# 68 and 69 belong to another part of the contract; 70 and 71 are memory-cache
-# reuses past the budget and in pages that are not ordinary.
+# 70 and 71 are memory-cache reuses past the budget and in pages that are not ordinary.
 EXCLUSION_CLASSES = {*range(16, 21), *range(64, 72)}
 # Loader kinds, shared with include/reb/tab_link.hpp.
-LOADER_KINDS = {"request_started": range(1, 11), "request_initiated": range(16, 22),
-                "memory_cache_reuse": range(16, 22)}
+LOADER_KINDS = {"request_started": range(1, 11), "request_initiated": range(16, 23),
+                "memory_cache_reuse": range(16, 23)}
 UINT64_MAX = (1 << 64) - 1
 INT64_MIN = -(1 << 63)
 INT64_MAX = (1 << 63) - 1
@@ -881,7 +880,7 @@ def valid_capture_exclusion(event: dict, payload: bytes) -> bool:
             and all(event[key] == "0" for key in zero) and event["process_id"] != 0
             and event["tab_id"] == 0 and event["status_code"] == 0 and event["error_code"] == 0
             and event["resource_type"] == 0 and event["initiator_request_id"] == 0
-            and (payload[4] not in (64, 66, 67) or event["initiator_process_id"] == 0)
+            and (payload[4] not in (64, 66, 67, 69) or event["initiator_process_id"] == 0)
             and (payload[4] not in (70, 71) or event["initiator_process_id"] != 0))
 
 
@@ -902,7 +901,7 @@ def valid_memory_cache_reuse(event: dict, payload: bytes) -> bool:
             and not event["decoded_body_length"].startswith("-") and event["status_code"] >= 0
             and event["error_code"] == 0 and event["resource_type"] == 0
             and event["initiator_request_id"] == 0 and event["initiator_process_id"] == 0
-            and event.get("scheme_class", 0) != 0 and event.get("loader_kind", 0) in range(16, 22))
+            and event.get("scheme_class", 0) != 0 and event.get("loader_kind", 0) in LOADER_KINDS["memory_cache_reuse"])
 
 
 def quiet_tab_envelope(event: dict, request_fields: bool = False) -> bool:
@@ -950,7 +949,7 @@ def valid_request_tab_link(event: dict, payload: bytes) -> bool:
     if len(payload) != 24 or not names_linked_record(event):
         return False
     count = int.from_bytes(payload[16:20], "little")
-    return (payload[:4] == bytes((1, 0, 24, 0)) and 1 <= payload[4] <= 4 and not any(payload[5:8])
+    return (payload[:4] == bytes((1, 0, 24, 0)) and 1 <= payload[4] <= 5 and not any(payload[5:8])
             and any(payload[8:16]) and count > 0 and not any(payload[20:24])
             and (count == 1) == (event["tab_id"] != 0))
 

@@ -369,7 +369,8 @@ fn exclusion_class(code: u8) -> Option<(&'static str, &'static str)> {
         65 => ("extension_worker", "requests"),
         66 => ("devtools_load", "requests"),
         67 => ("webui_request", "requests"),
-        // 68 and 69 belong to another part of the contract.
+        68 => ("service_worker_no_page", "requests"),
+        69 => ("browser_prefetch", "requests"),
         70 => ("memory_cache_reuse", "reuses"),
         71 => ("non_ordinary_page_reuse", "reuses"),
         _ => return None,
@@ -383,7 +384,9 @@ fn check(code: &str, severity: &str, message: impl Into<String>) -> Value {
 /// Plain-language meaning of a producer gap reason, from its shape. The reason
 /// itself stays in the check, so an unfamiliar one is never hidden.
 fn gap_meaning(reason: &str) -> &'static str {
-    if reason.contains("filtered") {
+    if reason == "service_worker_page_decision_unshared" {
+        "A service-worker request's class 68 answer was evicted before its other half asked, so that half decided alone: the request may have one half recorded without the other, as a row without a tab, or one half left out. The count is the evicted answers (protocol/native-network-v3.md)."
+    } else if reason.contains("filtered") {
         "A sample policy excluded these observations before a sample slot was taken. Retained observations are unchanged."
     } else if reason.contains("limit_or_invalid") || reason.contains("module_invalid") {
         "The record was malformed or outside a structural bound, so it was refused before a sample slot was taken."
@@ -537,31 +540,54 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         item["count"] = json!(gap.count.to_string());
         checks.push(item);
     }
-    let unresolved = request_tabs.unresolved();
+    // A context with no parent document (a shared storage worklet) is not
+    // linked by design, so it is a warning; every other reason is a capture bug.
+    let mut reasons = request_tabs.unresolved_reasons();
+    let no_document = reasons.remove("no_document").unwrap_or(0);
+    let unresolved: u64 = reasons.values().sum();
     if unresolved > 0 {
+        let reasons = reasons
+            .iter()
+            .map(|(reason, count)| format!("{reason} {count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let mut item = check(
             "network_tab_unresolved",
             "error",
             format!(
-                "{unresolved} requests have no tab. This is a capture bug, not a property of the page; request_tabs lists them by process and request id for get_events."
+                "{unresolved} requests have no tab ({reasons}). This is a capture bug, not a property of the page; request_tabs lists them by process and request id, with their reason, for get_events."
             ),
         );
         item["count"] = json!(unresolved.to_string());
         checks.insert(0, item);
     }
+    if no_document > 0 {
+        let mut item = check(
+            "network_tab_no_document",
+            "warning",
+            format!(
+                "{no_document} requests come from a context with no parent document, a shared storage worklet, which the renderer cannot name a tab for. The capture does not link them; request_tabs lists them with reason no_document."
+            ),
+        );
+        item["count"] = json!(no_document.to_string());
+        checks.push(item);
+    }
     let excluded = exclusions.totals();
-    let no_tab: u64 = [65, 66]
+    let no_tab: u64 = [65, 66, 68, 69]
         .iter()
         .filter_map(|class| excluded.get(class))
         .fold(0, |sum, count| sum.saturating_add(*count));
     if no_tab > 0 {
+        let count = |class: u8| excluded.get(&class).copied().unwrap_or(0);
         let mut item = check(
             "no_tab_traffic_excluded",
             "info",
             format!(
-                "{no_tab} requests no tab caused were not recorded (extension workers {}, DevTools loads {}). These are named exclusions, not gaps.",
-                excluded.get(&65).copied().unwrap_or(0),
-                excluded.get(&66).copied().unwrap_or(0)
+                "{no_tab} requests no tab caused were not recorded (extension workers {}, DevTools loads {}, service workers no page used {}, browser prefetches with no page {}). These are named exclusions, not gaps.",
+                count(65),
+                count(66),
+                count(68),
+                count(69)
             ),
         );
         item["count"] = json!(no_tab.to_string());
@@ -740,6 +766,47 @@ mod tests {
         assert!(gap_meaning("native_wasm_dispatch_budget_incomplete").contains("budget"));
     }
 
+    #[test]
+    fn unshared_service_worker_decisions_have_their_own_meaning() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("events.jsonl");
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let lines = [1, 2].map(|sequence| {
+            event(
+                sequence,
+                "network",
+                "gap",
+                0,
+                "service_worker_page_decision_unshared",
+            )
+            .to_string()
+        });
+        std::fs::write(&store, lines.join("\n") + "\n").unwrap();
+        let state = CaptureState {
+            instance_id: "1:2",
+            capture_mode: "live",
+            broker_connected: true,
+            capture_stopped: false,
+            artifact_receiver_configured: false,
+            artifact_receiver_connected: false,
+        };
+        let summary = build(&store, &artifacts, &state).unwrap();
+        let gap = summary["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == "named_gap")
+            .unwrap();
+        assert_eq!(gap["reason"], "service_worker_page_decision_unshared");
+        assert_eq!(gap["count"], "2");
+        let message = gap["message"].as_str().unwrap();
+        assert!(
+            message.contains("evicted") && !message.contains("refused or dropped"),
+            "{message}"
+        );
+    }
+
     fn exclusion(sequence: u64, producer: u32, class: u8, count: u64) -> Value {
         let mut payload = vec![1, 0, 16, 0, class, 0, 0, 0];
         payload.extend(count.to_le_bytes());
@@ -771,6 +838,9 @@ mod tests {
             exclusion(12, 41, 70, 4),
             exclusion(13, 41, 70, 9),
             exclusion(14, 41, 71, 2),
+            exclusion(15, 41, 68, 2),
+            exclusion(16, 0, 68, 1),
+            exclusion(17, 0, 69, 4),
         ]
         .map(|event| event.to_string())
         .to_vec();
@@ -780,6 +850,14 @@ mod tests {
         orphan["browser_context_id_high"] = json!("3");
         orphan["browser_context_id_low"] = json!("4");
         lines.push(orphan.to_string());
+        // A shared storage worklet's fetch: unresolved by design, a warning.
+        let mut worklet = event(1, "network", "request_initiated", 0, "GET example.test");
+        worklet["process_id"] = json!(31);
+        worklet["request_id"] = json!("5");
+        worklet["frame_id"] = json!("9");
+        worklet["loader_kind"] = json!(20);
+        worklet["tab_id"] = json!(0);
+        lines.push(worklet.to_string());
         let mut dirty = exclusion(7, 42, 16, 9);
         let mut bytes = hex::decode(dirty["payload"].as_str().unwrap()).unwrap();
         bytes[5] = 1;
@@ -804,6 +882,8 @@ mod tests {
                 {"class": "extension_worker", "unit": "requests", "count": "2"},
                 {"class": "devtools_load", "unit": "requests", "count": "1"},
                 {"class": "webui_request", "unit": "requests", "count": "3"},
+                {"class": "service_worker_no_page", "unit": "requests", "count": "3"},
+                {"class": "browser_prefetch", "unit": "requests", "count": "4"},
                 {"class": "memory_cache_reuse", "unit": "reuses", "count": "9"},
                 {"class": "non_ordinary_page_reuse", "unit": "reuses", "count": "2"},
             ])
@@ -822,13 +902,41 @@ mod tests {
         assert_eq!(checks[0]["severity"], "error");
         assert_eq!(
             summary["request_tabs"]["unresolved_requests"],
-            json!([{"process_id": 7, "request_id": "77"}])
+            json!([
+                {"process_id": 31, "request_id": "5", "reason": "no_document"},
+                {"process_id": 7, "request_id": "77", "reason": "no_loader_kind"}
+            ])
+        );
+        assert!(
+            checks[0]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("1 requests have no tab (no_loader_kind 1).")
+        );
+        assert_eq!(checks[0]["count"], "1");
+        let no_document = checks
+            .iter()
+            .find(|check| check["code"] == "network_tab_no_document")
+            .unwrap();
+        assert_eq!(
+            (
+                no_document["severity"].as_str(),
+                no_document["count"].as_str()
+            ),
+            (Some("warning"), Some("1"))
+        );
+        assert_eq!(
+            summary["request_tabs"]["unresolved_reasons"],
+            json!({"no_document": "1", "no_loader_kind": "1"})
         );
         let no_tab = checks
             .iter()
             .find(|check| check["code"] == "no_tab_traffic_excluded")
             .unwrap();
-        assert_eq!(no_tab["count"], "3");
+        assert_eq!(no_tab["count"], "10");
+        assert!(no_tab["message"].as_str().unwrap().contains(
+            "(extension workers 2, DevTools loads 1, service workers no page used 3, browser prefetches with no page 4)"
+        ));
         assert_eq!(summary["events"]["sequence_gaps"], "0");
         let checks = summary["checks"].as_array().unwrap();
         assert!(checks.iter().all(|check| check["code"] != "named_gap"));

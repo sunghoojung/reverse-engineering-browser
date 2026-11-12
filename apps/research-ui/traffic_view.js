@@ -437,7 +437,7 @@ function trafficIndexRequest(row, origin) {
   return {id: row.id, path: row.path, method: row.method, status: row.status, time: row.time, type: row.type, origin,
     targetKind: row.target_kind, hostOnly: row.target_kind === 'host', failed: row.failed, interrupted: row.interrupted,
     tabId: row.tab_id, tabIds: row.tab_ids, extensionId: row.extension_id ?? null, operation: row.operation,
-    tabLink: row.tab_link ?? null, initiatorFrame: row.initiator_frame ?? null, tabLinkLabel: row.tab_link ? globalThis.RebRequestTabs?.linkLabel(row.tab_link) ?? '' : '', target: row.target, host: row.host, urlTruncated: row.url_truncated,
+    tabLink: row.tab_link ?? null, tabReason: row.tab_reason ?? null, initiatorFrame: row.initiator_frame ?? null, tabLinkLabel: row.tab_link ? globalThis.RebRequestTabs?.linkLabel(row.tab_link) ?? '' : '', target: row.target, host: row.host, urlTruncated: row.url_truncated,
     targetLength: row.target_length, targetMalformed: row.target_malformed,
     firstTimestamp: BigInt(row.first_time_ns), lastTimestamp: BigInt(row.last_time_ns),
     transferSize: row.transfer_size, resourceSize: row.resource_size, fromCache: row.from_cache,
@@ -551,7 +551,7 @@ function renderTrafficRows(container, requests, options) {
         return node;
       };
       const url = `${request.path}${request.urlTruncated ? '…' : ''}`;
-      const name = cell('name', 'request-name', undefined, `${url}\n${trafficOriginLabel(request)} · ${request.method} · network · ${request.operation ?? 'network'} · request ${request.id}${request.tabLinkLabel ? ` · ${request.tabLinkLabel}` : ''}${request.hostOnly ? ' · URL path and query not captured' : request.urlTruncated ? ` · path and query truncated from ${request.targetLength} bytes` : ''}`);
+      const name = cell('name', 'request-name', undefined, `${url}\n${trafficOriginLabel(request)} · ${request.method} · network · ${request.operation ?? 'network'} · request ${request.id}${request.tabLinkLabel ? ` · ${request.tabLinkLabel}` : ''}${request.tabReason ? ` · no tab: ${request.tabReason}` : ''}${request.hostOnly ? ' · URL path and query not captured' : request.urlTruncated ? ` · path and query truncated from ${request.targetLength} bytes` : ''}`);
       // A researcher name leads the cell; the captured path and host stay visible.
       if (researcherName) name.append(trafficNode('span', 'researcher-name', researcherName));
       const host = trafficNode('span', 'request-host', target.host);

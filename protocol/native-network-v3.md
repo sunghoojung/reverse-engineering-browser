@@ -34,12 +34,15 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | Brave patch 0018 | `capture-native-network-headers` | Headers and cookies |
 | Brave patch 0019 | `tee-native-request-bodies` | Request body reads |
 | Brave patch 0020 | `scope-native-proxy-factories` | Request scope and tabs |
+| Brave patch 0021, 0022 | `observe-early-hints-preloads-only`, `decide-native-exclusion-once` | Request scope and tabs |
 | `request_body` flag bit 6, state 12 | `read`, `not_captured_read_incomplete` | Request body reads |
 | Chromium patch 0025 | `forward-native-network-headers` | Headers and cookies |
 | Chromium patch 0026, 0027 | `finish-renderer-answered-requests`, `record-renderer-fetch-owners` | Request scope and tabs |
 | Chromium patch 0028 | `record-script-cookie-access` | Headers and cookies |
 | Chromium patch 0029 | `record-request-initiator-stacks` | Request initiator stacks |
 | Chromium patch 0035, 0036 | `expose-process-lock-scheme`, `name-frameless-script-fetch-owners` | Request scope and tabs |
+| Chromium patch 0042, 0043 | `name-worklet-fetch-owners`, `record-early-hints-preloads` | Request scope and tabs |
+| Chromium patch 0044, 0045 | `name-browser-prefetch-owners`, `name-service-worker-job-causes` | Request scope and tabs |
 | V8 patch 0015 | `capture-native-request-stacks` | Request initiator stacks |
 | Chromium patch 0034 | `record-navigation-and-async-initiators` | Navigation and async task callers |
 | V8 patch 0017 | `bound-native-async-task-stacks` | Navigation and async task callers |
@@ -48,7 +51,8 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | Chromium patch 0048 | `record-promise-registration-stacks` | Navigation and async task callers |
 | V8 patch 0021 | `record-native-promise-registrations` | Navigation and async task callers |
 | Event type 52 | `memory_cache_reuse` | Request scope and tabs |
-| Exclusion class 70 | `memory_cache_reuse` (68 and 69 belong to another part) | Request scope and tabs |
+| Exclusion class 68, 69 | `service_worker_no_page`, `browser_prefetch` | Request scope and tabs |
+| Exclusion class 70 | `memory_cache_reuse` | Request scope and tabs |
 | Exclusion class 71 | `non_ordinary_page_reuse` | Request scope and tabs |
 | Probe queue version 4 | the memory-cache counters | Request scope and tabs |
 | Chromium patch 0038 | `record-synchronous-requests-on-calling-thread` | Request scope and tabs |
@@ -335,7 +339,7 @@ with a `request_tab_link`, as a worker request start is.
 
 Category `network`, renderer, the renderer sequence space. `frame_id` and
 `loader_kind` name the fetch's owner exactly as on `request_initiated`
-([loader kind](#loader-kind) 16 to 21), `scheme_class` the URL's class
+([loader kind](#loader-kind) 16 to 22), `scheme_class` the URL's class
 (nonzero), `request_id` the fresh renderer request ID, `status_code` the
 reused response's HTTP status (0 when it has none: at the pin
 `CreateResourceForStaticData` sets none for an MHTML archive resource),
@@ -412,7 +416,7 @@ new `WebContents`.
 
 Byte 141 of the envelope, formerly reserved, is the request's loader kind. It
 is nonzero only on network `request_started` (browser, 1 to 10) and
-`request_initiated` and `memory_cache_reuse` (renderer, 16 to 21). JSON carries
+`request_initiated` and `memory_cache_reuse` (renderer, 16 to 22). JSON carries
 it as `loader_kind`, written only when nonzero.
 
 | Value | Kind | Meaning |
@@ -431,11 +435,17 @@ it as `loader_kind`, written only when nonzero.
 | 17 | `dedicated_worker` | Renderer: `frame_id` is the fold of the `DedicatedWorkerToken` |
 | 18 | `shared_worker` | `frame_id` is the fold of the `SharedWorkerToken` |
 | 19 | `service_worker` | `frame_id` is the fold of the `ServiceWorkerToken` |
-| 20 | `other_context` | A worklet or shadow realm; not linked |
+| 20 | `other_context` | A context with no parent document, which at the pin is only a shared storage worklet; `frame_id` is the fold of its own token, and the row stays unresolved |
 | 21 | `script_context` | No fetch context reached the loader; `frame_id` is the running script's frame, as before #425 |
+| 22 | `worklet` | A paint, layout, animation or audio worklet; `frame_id` is the fold of the `LocalFrameToken` of the document that created it, and the record resolves like a document's |
 
 A fold is `rotl(high, 17) ^ low` of the 128-bit token, the same function as
-frame ids.
+frame ids. A shadow realm fetches through its initiator's `ResourceFetcher`
+(`ShadowRealmGlobalScope::Fetcher`), so its requests name that document or
+worker. A worklet's `WorkletGlobalScope::GetParentExecutionContextToken` is the
+creating document's `LocalFrameToken` for every worklet but a shared storage
+worklet, whose parent token is a fresh one, so it is told apart by its own
+`SharedStorageWorkletToken`.
 
 #### Where the owner comes from
 
@@ -444,25 +454,87 @@ frame ids.
 | Browser record from a frame's factory (document, navigation, a download's frame, a document-created worker's main script, a speculation-rules prefetch's referring frame) | The tab of the factory's frame, resolved when `WillCreateURLLoaderFactory` creates the factory | Brave patch `0017-link-requests-to-tab-owners`. A beacon, keepalive fetch or removed iframe keeps the tab its factory recorded. Redirects stay in the same loader |
 | Renderer `request_initiated` | The fetch's `FetchContext`, never the running script | Chromium patch `0027-record-renderer-fetch-owners`: `ResourceLoader` and `BackgroundURLLoader` scope the owner around `ResourceRequestSender::SendAsync`. Parser, preload scanner, CSS and image loads therefore name their document |
 | Renderer document record drained late | The browser's frame registry, keyed by process and full frame token, filled at factory creation and from live frames, with tombstones that outlive the frame | `browser/native_tab_resolver.h` |
-| Dedicated and nested workers | The creator document's tab, resolved at `DedicatedWorkerService::Observer::OnWorkerCreated` through the creator chain | `request_tab_link` kind 1 |
+| Dedicated and nested workers | The creator document's tab, resolved at `DedicatedWorkerService::Observer::OnWorkerCreated` through the creator chain, or when a request is linked if the parent was not known yet | `request_tab_link` kind 1 |
 | Shared workers | Every client tab at request start (`SharedWorkerService::Observer::OnClientAdded` / `OnClientRemoved`) | kind 2 |
-| Service workers | The controlled client tabs (`ServiceWorkerContextObserver::OnControlleeAdded`, `OnControlleeNavigationCommitted` for window clients, `OnControlleeRemoved`); with none, the registration's last client tabs | kinds 3 and 4 |
+| Service workers | The version's controlled client tabs (`ServiceWorkerContextObserver::OnControlleeAdded`, `OnControlleeNavigationCommitted` for window clients, `OnControlleeRemoved`); with none, its last client tabs; with none, its registrant tabs; with none, the registration's last client tabs | kinds 3, 4, 5 and 4 |
+| Worklet renderer `request_initiated` | The document that created the worklet | Chromium patch `0042-name-worklet-fetch-owners`: `BaseFetchContext::GetNativeFetchOwner` names `GetParentExecutionContextToken()` with loader kind 22 |
 | Page request a service worker answers | The page's document (renderer record) plus the renderer completion above | |
 | Browser record from a worker factory | Joined to its renderer record (same row) through `initiator_process_id` and `initiator_request_id` | |
 | Nested dedicated worker main script | Its factory has no creator frame; `WorkerScriptFetcher::CreateScriptLoader` scopes the ancestor frame, the document at the root of the creator chain, around the factory's creation | Chromium patch `0036-name-frameless-script-fetch-owners` |
-| Service-worker main script and update check | `ServiceWorkerRegisterJob` scopes its `requesting_frame_id_` (the `register()` caller) and the registration's active version around both factory creations. The caller's tab is the factory's tab; without one, each request links to that version's client tabs, which hold the tab whose navigation hinted the update | Patch 0036; `request_tab_link` kinds 3 and 4 naming the browser record |
+| Service-worker main script and update check | `ServiceWorkerRegisterJob` keeps its cause: the `register()` caller (`requesting_frame_id_`), else the frame scoped while the job was created, which is the page calling `registration.update()` (`ServiceWorkerContainerHostForClient::Update`) or the page a payment app is installed for (`PaymentAppInstaller`). It scopes that cause and the registration's active version around both factory creations. The cause's tab is the factory's tab; without one, the request links to the active version's tabs | Patches 0036 and `0045-name-service-worker-job-causes`; `request_tab_link` kinds 3 to 5 naming the browser record |
+| A service-worker version's registrant | The cause's tab when the job starts the version, else the active version's tabs at that moment. `ServiceWorkerRegisterJob::StartWorkerForUpdate` notes the version and the cause; the version's install-time fetches and imported scripts link to it while it has no client. A job with a caller that starts no version notes that caller for the registration's active and waiting versions: `ContinueWithRegistrationWithSameRegistrationOptions` resolves a `register()` of the current script against an active version, and `OnUpdateCheckFinished` ends an update whose script is identical. So a page that is no controllee and calls `register()` again before messaging the installed worker is that worker's registrant | Patch 0045; kind 5 |
+| Scripts a starting service worker imports | `EmbeddedWorkerInstance::Start`, and `ServiceWorkerDevToolsAgentHost::UpdateLoaderFactories` when DevTools replaces them, scope its version and `ServiceWorkerToken` around both factory bundles: the browser record links to that version's tabs, and the resolver knows the worker before its first fetch can be drained. The renderer's start, with patch 0038 for `importScripts`, is the worker's own request | Patch 0045; kinds 3 to 5 |
+| Early-hints preload | The navigating main frame's tab, recorded without changing the preload | Chromium patch `0043-record-early-hints-preloads`: `NavigationRequest::CreateNavigationEarlyHintsManagerParams` creates the factory through `ContentClientParams`, with no frame because the document has not committed, and scopes `FrameTreeNode::current_frame_host()`. Brave patch `0021-observe-early-hints-preloads-only` keeps the preloads as stock: see [below](#early-hints-are-observed-only) |
+| Browser-initiated prefetch | The referring `WebContents`' primary main frame | Chromium patch `0044-name-browser-prefetch-owners`: `CreatePrefetchURLLoaderFactory` scopes it; a prefetch with no live `WebContents` is traffic no tab caused (class 69) |
 
 In a capture launch the proxy observes the owned profile's frames and worker
 services from its first factory, before any session starts, and fixes each
 factory's exclusion class when it is created, so owners and excluded factories
-that predate the session still resolve.
+that predate the session still resolve. No worker client can predate that
+factory: the owned profile is named in `PreProfileInit`, and
+`NavigationURLLoaderImpl::Start` creates a navigation's factory before its
+interceptors add a service-worker controllee and before the document commits,
+which a dedicated or shared worker client needs. Observing seeds the resolver
+from Chromium's registries: `EnumerateDedicatedWorkers` and
+`EnumerateSharedWorkers` report the workers alive then, and
+`GetRunningServiceWorkerInfos` the running service-worker versions. The
+enumeration follows token order, so a nested dedicated worker can arrive before
+its parent; each dedicated worker keeps its creator's token, and a request
+walks that chain, at most 64 workers, to the root document's tab when it is
+linked. A dedicated worker is linked when its chain from the document holds
+at most 64 workers; a tab a worker inherits at creation or caches when a
+request is linked keeps its depth, so the rule does not depend on the order
+workers are seen in or on which one fetches first. A starting service worker
+names its token with its factories (patch 0045), so a fetch it makes during
+its first script evaluation, before `OnVersionStartedRunning`, still finds it.
+A worker entry outlives the worker as a tombstone until the capacity below
+evicts it, so records drained or started late still resolve.
+
+#### Early hints are observed only
+
+Stock Brave and Chromium create the early-hints factory without
+`ContentClientParams`, so no embedder proxy sees those preloads. Patch 0043
+lets them reach `ContentBrowserClient::WillCreateURLLoaderFactory` only so
+native capture can record them, and Brave patch 0021 keeps that observational:
+`BraveContentBrowserClient::WillCreateURLLoaderFactory` returns for
+`kEarlyHints` before both Brave Shields and `ChromeContentBrowserClient`, so
+neither Shields nor an extension's `webRequest` or `declarativeNetRequest` acts
+on them. While native capture runs for the owned profile it first attaches
+Brave's proxy with a request handler that answers every hook with `net::OK`, so
+no header, referrer, block or redirect decision changes. Capture itself still
+adds four things, none visible to the page or the server beyond timing:
+
+- In content sessions the proxy gives a preload without one a `reb-` DevTools
+  request ID (Brave patch 0018), so the network service also sends SSL info
+  with the response and transfer-size updates. `NavigationEarlyHintsManager`'s
+  `PreloadURLLoaderClient` reads only the response head's cache flags and
+  records transfer sizes to UMA.
+- In content sessions the response body is teed for artifact capture, as for
+  any request; the manager still drains its own copy.
+- Each preload's messages take an extra hop through the proxy on the UI thread.
+- A redirect `content::IsSafeRedirectTarget` refuses, to a scheme other than
+  http(s), ends the preload with `ERR_UNSAFE_REDIRECT`. Stock Chromium leaves
+  that preload stalled until the manager goes at commit, because
+  `PreloadURLLoaderClient::OnReceiveRedirect` follows nothing. An http(s)
+  redirect passes unchanged and the manager ignores it as before.
+
+Without capture nothing is attached, and the factory is built exactly as
+without these patches.
 
 The scoped owner is read by the proxy while `WillCreateURLLoaderFactory` runs
 and only for a factory without a frame. A navigation's update hint
 (`ServiceWorkerClient::HintToUpdateServiceWorker`) reaches
 `ServiceWorkerVersion::ScheduleUpdate`, a coalescing one-second timer that
-keeps no client, so the hinting tab itself is not carried; it is a controllee
-of the active version and so in the linked set.
+keeps no client. The hinting navigation's client is a controllee of the active
+version (`SetControllerRegistration` comes before `AddServiceWorkerToUpdate`),
+so its tab is among the active version's current or last clients that the
+update check links to. A client whose navigation never committed has no frame
+id, so Chromium names no tab for it; its version still counts as having had a
+client, so its requests are reported unresolved, never counted as traffic no
+tab caused. `registration.update()` from a dedicated worker needs the
+`ServiceWorkerInDedicatedWorker` runtime feature, which is not stable at the
+pin, and `self.registration.update()` from the service worker names no caller:
+both link to the active version's tabs.
 
 `NativeWorkerAuthority` is not used: it holds one selected document's workers
 for source transfer under a lease, while tab links need every worker of the
@@ -525,6 +597,7 @@ size 24:
 | 2 | `shared_worker_clients` | Every client tab when the request started |
 | 3 | `service_worker_clients` | The controlled client tabs |
 | 4 | `service_worker_last_clients` | No current client; the registration's last client tabs, which may be closed |
+| 5 | `service_worker_registrant` | No current or last client of the version; the tabs of the `register()`, `update()` or update hint that installed it, which may be closed |
 
 #### `request_extension_link` (type 50)
 
@@ -551,6 +624,8 @@ Excluded at capture by default and counted like browser-internal exclusions:
 | ---: | --- | --- | --- |
 | 65 | `extension_worker` | requests | The drain, per renderer, for a renderer record whose owner is an extension worker; the proxy, browser-wide, for a worker main script or service-worker script it fetches for a `chrome-extension` context. The proxy also leaves out the renderer-issued requests of such a context, which the drain counts |
 | 66 | `devtools_load` | requests | The proxy, browser-wide, for the DevTools factory |
+| 68 | `service_worker_no_page` | requests | A service worker's requests when its job named no caller and neither its version nor its registration has had a client, last client or registrant in this browser: a browser-initiated registration or update (DevTools, `chrome://serviceworker-internals`), or a push, sync or other functional event for a registration no page used in this browser run. The proxy, browser-wide, for a script it fetches; the drain, per renderer, for the worker's renderer record, a memory-cache reuse included. The proxy also leaves out such a worker's renderer-issued requests and the scripts it imports, which the drain counts |
+| 69 | `browser_prefetch` | requests | The proxy, browser-wide, for a browser-initiated prefetch with no live referring `WebContents` (`PrefetchRequest::CreateBrowserInitiatedWithoutWebContents`, or one whose contents closed first) |
 
 `REB_CAPTURE_EXTENSION_TRAFFIC=1` makes the live launcher pass
 `--reb-capture-extension-traffic`; class 65 is then recorded instead of
@@ -567,6 +642,58 @@ keeps for excluded extension requests so that the reuse's `request_target`
 child is dropped too, as a request's later records are. An excluded ID that
 has left those 64 has its later records recorded without their start.
 
+A version only ever gains a page: a client, a last client and a registrant
+stay recorded. A renderer-issued request of such a worker has two halves, the
+browser record and the renderer record, and they take one decision: the proxy
+and the drain each ask `NativeTabResolver::SharedServiceWorkerNoPage` with the
+renderer's child id and request id. A script a starting worker imports is such
+a request too. Its bundle for new scripts, which `EmbeddedWorkerInstance::Start`
+creates inside patch 0045's scope, serves only
+`ServiceWorkerScriptLoaderFactory`, and that hands the renderer's request id on
+(`ServiceWorkerNewScriptLoader` starts its `ThrottlingURLLoader` with it), so the
+proxy asks with that id for each request of that bundle. A memory-cache reuse
+never reaches the proxy, so the drain decides it alone. The first to ask decides from the
+version's state, keeping a request of a version it does not know, and stores
+the answer; the second takes it. Both halves are therefore kept, or both left
+out and counted once, by the drain, whichever asks first and whether or not a
+page arrived in between. The resolver keeps the 4,096 newest answers. An answer
+evicted before its other half asked, where that half could have decided
+otherwise alone (a no-page answer, or a keep for an unknown version), is one
+named network gap `service_worker_page_decision_unshared`. The second half then
+decides alone, from the version's state at that moment, so the halves can
+part three ways: the proxy left the browser half out and the renderer record
+is kept and recorded alone; the drain kept the renderer record and the browser
+half is left out; or one half was left out, counted by the drain if it was the
+renderer record, and the other kept, which for a browser half is a row with no
+tab, reported unresolved with reason `browser_factory`. The summary names the
+gap with that meaning. An answer whose other half never asks, such as a
+request the renderer cancelled before sending it or an import
+`ServiceWorkerScriptLoaderFactory` answers from storage, is evicted and may be
+counted the same way. The count is taken only by a drain the session can
+record, at a worker record or when `StopSession` disables the host, and
+`StartSession` clears the answers and the count, so neither crosses into
+another session. A version the resolver evicted counts as new if it runs again.
+
+Classes 65 and 68 count each request they leave out once: the drain counts a
+request that has a renderer record, the proxy a script the browser fetches
+with none, such as a worker's main script. An imported script of a starting
+worker is two records that never join, the browser's fetch on the new-scripts
+bundle and the renderer's start. Chromium patch
+`0038-record-synchronous-requests-on-calling-thread` records an `importScripts`
+start on the worker's thread, inside its fetch owner scope (see
+[synchronous requests](#synchronous-requests)), so it carries loader kind 19
+and the worker's token, as a module worker's static imports, which load
+asynchronously, always did. Both records link to the version's tabs, or both
+are left out and the drain counts the import once, with the worker's other
+requests. The only other creator of these bundles at the pin is
+`ServiceWorkerDevToolsAgentHost::UpdateLoaderFactories`, which replaces both
+of a running worker's bundles through `EmbeddedWorkerInstance::UpdateLoaderFactories`
+when a DevTools client enables Fetch interception for it. Patch 0045 scopes the
+same owner there, the version and its `start_worker_token()`, so the replaced
+bundles name, link and count their requests as the originals did. A memory-cache reuse of a worker no
+page used is counted as class 68 by the drain, like its requests. Classes 68
+and 69 have no opt-in: no tab caused them and they name no extension.
+
 Content-script requests use their page's document factory and stay with that
 tab. Extension pages (background page, popup, options) are their own
 `WebContents` and are named by their page like any tab.
@@ -575,18 +702,29 @@ tab. Extension pages (background page, popup, options) are their own
 
 A row (records joined as in Traffic) is unresolved when none of its records
 has a nonzero `tab_id` and no `request_tab_link` or `request_extension_link`
-names it. `get_session_summary`
-reports `request_tabs` (rows, unresolved rows and up to 16 of them by process
-and request id) and the error check `network_tab_unresolved`. Traffic shows the
-count in its footer; the button lists those rows. They are never hidden.
+names it. `get_session_summary` reports `request_tabs` (rows, unresolved rows
+by reason, and up to 16 of them by process and request id with their reason).
+Rows of reason `no_document` raise the warning `network_tab_no_document`: the
+renderer names no creating document for a shared storage worklet, so the
+capture does not link it. Every other reason is the error
+`network_tab_unresolved`, whose message counts the rows by reason. The request
+index gives each such row its `tab_reason`, and Traffic names it in the row's
+tooltip. Traffic shows the count in its footer; the button lists those rows.
+They are never hidden.
 
-Not linked yet, so unresolved: a service-worker script fetch with neither a
-`register()` caller nor an active version with a client tab this browser saw
-(a browser-initiated registration, or an update while no client was ever
-controlled), a browser-initiated prefetch, worklet requests, and a worker whose
-creator or clients were gone before capture started. Early-hints preloads never reach the
-proxy at the pin (`NavigationRequest` creates their factory without
-`ContentClientParams`), so they are not recorded at all.
+The reason comes from the row's records: the renderer `request_initiated` when
+the row has one, else the newest nonzero loader kind of a browser
+`request_started`. The first that applies:
+
+| Reason | Row |
+| --- | --- |
+| `no_loader_kind` | The renderer record, or every browser `request_started`, has no loader kind (an earlier producer) |
+| `worker` | A renderer record of loader kind 17 to 19 that no link names: the worker was never seen or was evicted, its creator chain is longer than 64 workers, or it had no tab and was not counted as traffic no tab caused |
+| `no_document` | A renderer record of loader kind 20 |
+| `no_frame` | A renderer record with frame 0 |
+| `document_frame` | A renderer record of loader kind 16, 21 or 22 whose frame the browser held no tab for: never seen, evicted, or sharing its fold with another frame of the process |
+| `browser_factory` | Only browser records: a factory with no frame, scoped owner or version tab, or a scoped owner whose frame was gone |
+| `no_start` | No renderer `request_initiated` and no browser `request_started`: the start was dropped by a full queue (the queue reports the drop), is older than the scanned records, or belonged to an excluded request whose later records outlived the drain's 64-request exclusion ring |
 
 ### Hot path and bounds
 
@@ -619,10 +757,16 @@ proxy at the pin (`NavigationRequest` creates their factory without
 - Tabs, inactive: the loaders' owner scope and the proxy's factory hook add at
   most one atomic load and allocate nothing. Active: one virtual
   call and a thread-local write per load, one registry insert per factory, and
-  for worker requests one link record, plus one `tab_set` per new set. The
-  resolver keeps at most 16,384 frames and 4,096 workers, versions and clients
-  per worker, evicting the oldest; an evicted owner leaves its later records
-  unresolved, which the summary reports.
+  for worker requests one link record, plus one `tab_set` per new set. A
+  request through a factory a service-worker job or worker start scoped adds
+  one version lookup and, renderer-issued, one shared answer of at most 4,096;
+  linking a dedicated worker walks at most 64 creators.
+- The proxy reads the capture state before anything else and decides each
+  request's exclusion once (Brave patch 0022), so a request outside capture
+  costs the sinks' checks and no resolver lookup.
+  The resolver keeps at most 16,384 frames and 4,096 workers, versions and
+  clients per worker, evicting the oldest; an evicted owner leaves its later
+  records unresolved, which the summary reports.
 - The proxy fixes a factory's scope once, when Chromium creates it: a
   command-line read and, for a frameless factory, the scoped owner. Each
   request then costs one classification of its scheme. Admission reads the
@@ -633,16 +777,19 @@ proxy at the pin (`NavigationRequest` creates their factory without
 - The broker validates both the scheme class and type 36 in `IsValidEvent`,
   and the loader kind and types 37, 38, 50 and 52.
 - `get_session_summary` lists `exclusions` by class and adds the info checks
-  `browser_internal_excluded` and `no_tab_traffic_excluded`, `request_tabs`
-  (with `extension_rows`), and the error check `network_tab_unresolved`. Class
-  70 is its own info check, `memory_cache_reuse_not_recorded`; class 71 is listed
-  in `exclusions` only, since no tab lost a row. The backend keeps
-  types 36 to 38, 50 and 52 in its network window.
+  `browser_internal_excluded` and `no_tab_traffic_excluded` (classes 65, 66,
+  68 and 69), `request_tabs` (with `extension_rows` and `unresolved_reasons`),
+  and the error check `network_tab_unresolved`. Class 70 is its own info check,
+  `memory_cache_reuse_not_recorded`; class 71 is listed in `exclusions` only,
+  since no tab lost a row. The backend keeps types 36 to 38, 50 and 52 in its
+  network window.
 - Traffic has no Unattributed group. A row is in every tab its records or link
-  name, with a marker such as "Service worker · 2 tabs"; All tabs counts it
-  once. Each chip is named by the tab's newest main-frame navigation; extension
+  name, with a marker such as "Service worker · 2 tabs" or, for kind 5,
+  "Service worker · installed from 1 tab"; All tabs counts it once. Each chip is named by the tab's newest main-frame navigation; extension
   traffic gets one chip per extension id. The footer counts rows without an
   owner as a capture error and its button lists them.
+- Traffic's footer also names the counted service-worker and browser prefetch
+  requests no tab caused.
 - Traffic shows "N browser-internal requests not recorded" in its footer, names
   hostless rows by scheme (`data:`), and joins renderer targets and completions
   to their row. A reversible "Hide browser-internal" filter in Traffic and
@@ -695,19 +842,30 @@ lost-end rows and reads the lost end's status cell. `test29RendererAnsweredRows`
 `make rendered-ui-check` opens a memory-cache row and a service-worker
 failure in the packaged app. `make native-network-capture-check`
 checks the browser `request_started` scheme class and loader kind, and the
-factory scope: which proxy loads are counted where, and the links a frameless
-service-worker script carries.
+factory scope: which proxy loads are counted where, the links a frameless
+service-worker script carries, its registrant link, and the class 68 and 69
+decisions.
 
 `tests/tab_link_test.cpp` checks loader kinds, tab sets and links for parity
 and malformed records; `make tab-link-wire-check` compares them with the Python
 validator and `request_tabs.js`, then drives Traffic rows through multi-tab,
-incomplete-set, browser-record, extension, unlinked and page-name cases. `make
-native-artifact-capture-check` drives the real `NativeProbeHost` drain and
-`NativeTabResolver` through tombstoned frames, nested dedicated workers, shared
-worker clients, a service worker with 30 clients, last clients, counted and
-opted-in extension workers, renderers locked to an internal scheme, a worker's
-memory-cache reuse and the class 70 and 71 reports. `make
-native-probe-admission-check` covers the renderer fetch owner.
+incomplete-set, browser-record, registrant, extension, unlinked and page-name
+cases. `make native-artifact-capture-check` drives the real `NativeProbeHost`
+drain and `NativeTabResolver` through tombstoned frames, nested dedicated
+workers enumerated before their parent, a 64-deep creator chain, shared worker
+clients, a service worker with 30 clients, last clients, registrants, versions
+with no page, worklet records, counted and opted-in extension workers,
+renderers locked to an internal scheme, a worker's memory-cache reuse and the
+class 70 and 71 reports. `make native-probe-admission-check` covers the
+renderer fetch owner and patch 0042's worklet owner. The drain test also takes
+one class 68 answer in both orders, with a page arriving in between, and counts
+an evicted answer as a named gap. `make native-tab-registry-check` drives the
+production `NativeTabRegistry`, `NativeFactoryScopeOf` and factory owner hook
+against pinned content API stand-ins: scoped owners and their flags, class 69,
+job notes with the caller's frame alive and gone, starting workers named before
+their first fetch, and the worker service observers. The backend's
+`request_tabs` tests derive each
+unresolved reason.
 
 ### Acceptance
 
@@ -724,14 +882,20 @@ Still required before declaring this browser-ready:
    request content) and status.
 4. Repeat with `REB_CAPTURE_BROWSER_INTERNAL=1` and confirm the internal rows
    return with classes 16 to 20 and no exclusion is reported.
-5. With Brave patches `0017-link-requests-to-tab-owners` and
-   `0020-scope-native-proxy-factories` and Chromium patches
-   `0027-record-renderer-fetch-owners` and
-   `0036-name-frameless-script-fetch-owners`, run the #425 fixture site:
-   `get_session_summary` reports no `network_tab_unresolved` beyond the
-   unlinked cases listed under [Unresolved requests](#unresolved-requests), and
-   each request lands on its tab, including a nested worker's main script and
-   a service worker's registration and update-check fetches.
+5. With Brave patches `0017-link-requests-to-tab-owners`,
+   `0020-scope-native-proxy-factories`, `0021` and `0022` and Chromium patches
+   `0027-record-renderer-fetch-owners`,
+   `0036-name-frameless-script-fetch-owners` and `0042` to `0045`, run the
+   #425 fixture site, with Chromium patch 0038 too: `get_session_summary`
+   reports no `network_tab_unresolved`, and each request lands on its tab,
+   including a nested worker's main script, a service worker's registration,
+   both records of its imported scripts and its install-time `cache.addAll`
+   fetches, an update
+   check from an uncontrolled page's `registration.update()`, a paint
+   worklet's module, an early-hints preload and a speculation-rules prefetch.
+   An early-hints preload Shields would block is still loaded, as in stock
+   Brave. A push event for a registration no page used in that browser run
+   counts its fetches as `service_worker_no_page`.
 6. The new tab page's own https requests count as `webui_request`, and a
    `chrome-untrusted:` frame and an open DevTools window add `webui_renderer`
    processes and no scripts to Sources (Chromium patch

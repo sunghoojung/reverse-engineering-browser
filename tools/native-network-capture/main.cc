@@ -1025,9 +1025,12 @@ void FactoryOwners() {
   assert(decide(Factory::kNavigation, "", "", true).exclusion == 0);
   assert(decide(Factory::kDocumentSubResource, "https", "a.test", false).exclusion == 0);
 
-  const auto exclusion = [](const reb::NativeFactoryScope& scope, Factory kind,
-                            std::string_view scheme) {
-    const auto value = reb::NativeProxyRequestExclusion(scope, static_cast<int>(kind), scheme);
+  // Each call is a new request's only decision, as the proxy makes it.
+  std::uint32_t next_request = 1;
+  const auto exclusion = [&next_request](const reb::NativeFactoryScope& scope, Factory kind,
+                                         std::string_view scheme) {
+    const auto value = reb::NativeProxyRequestExclusion(scope, static_cast<int>(kind), scheme,
+                                                        {1, next_request++});
     return std::pair{value.exclusion_class, value.counted_here};
   };
   const reb::NativeFactoryScope plain;
@@ -1100,6 +1103,65 @@ void FactoryOwners() {
   reb::NativeExtensionId bad;
   assert(!reb::ParseNativeExtensionId(std::string(32, 'q'), bad) &&
          !reb::ParseNativeExtensionId(std::string(31, 'a'), bad));
+  // A version a page's register() installed links to that page as its registrant.
+  resolver.ServiceWorkerJobStarted(73, true, 6, -1);
+  script(305, {.service_worker_version = 73});
+  assert(events.size() == 3 && events[0].header.tab_id == 6 &&
+         events[1].header.type == reb::NativeProbeType::kTabSet &&
+         std::to_integer<int>(events[2].inline_payload[4]) == 5 &&
+         std::all_of(events.begin(), events.end(), valid));
+  // An update with no caller takes the updated version's clients as its registrant.
+  resolver.ServiceWorkerJobStarted(74, false, 0, 70);
+  script(306, {.service_worker_version = 74});
+  assert(events.size() == 3 && events[0].header.tab_id == 0 &&
+         std::to_integer<int>(events[2].inline_payload[4]) == 5 &&
+         std::to_integer<int>(events[2].inline_payload[16]) == 2 &&
+         std::all_of(events.begin(), events.end(), valid));
+  // A renderer-issued service-worker record is linked through its renderer record.
+  events.clear();
+  sink.RecordRequestStarted(307, 4, 123, 0, 0, 11, 12, request,
+                            reb::NativeLoaderKind::kServiceWorkerSubresource,
+                            {.service_worker_version = 70, .service_worker_without_caller = true});
+  std::erase_if(events, [](const auto& event) {
+    return event.header.type == reb::NativeProbeType::kRequestBody;
+  });
+  assert(events.size() == 1 && events[0].header.tab_id == 0);
+
+  // Class 68: decided per request, from the version's page state.
+  reb::NativeFactoryScope pageless;
+  pageless.owner.service_worker_without_caller = true;
+  pageless.owner.service_worker_version = 75;
+  assert(exclusion(pageless, Factory::kServiceWorkerScript, "https") ==
+         std::pair(std::uint8_t{68}, true));
+  assert(exclusion(pageless, Factory::kServiceWorkerSubResource, "https") ==
+         std::pair(std::uint8_t{68}, false));
+  pageless.owner.service_worker_version = -1;
+  assert(exclusion(pageless, Factory::kServiceWorkerScript, "https").first == 68);
+  // A client that never committed still names a page; so does a caller or a client tab.
+  pageless.owner.service_worker_version = 75;
+  resolver.ServiceWorkerControlleeAdded(75, "uncommitted", std::vector<std::uint32_t>{});
+  assert(exclusion(pageless, Factory::kServiceWorkerScript, "https").first == 0);
+  pageless.owner.service_worker_version = 70;
+  assert(exclusion(pageless, Factory::kServiceWorkerScript, "https").first == 0);
+  pageless.owner.service_worker_version = 76;
+  resolver.ServiceWorkerJobStarted(76, true, 0, -1);
+  assert(exclusion(pageless, Factory::kServiceWorkerScript, "https").first == 0);
+  pageless.owner.service_worker_version = 77;
+  pageless.tab_id = 3;
+  assert(exclusion(pageless, Factory::kServiceWorkerScript, "https").first == 0);
+  pageless.tab_id = 0;
+  pageless.owner.service_worker_without_caller = false;
+  assert(exclusion(pageless, Factory::kServiceWorkerScript, "https").first == 0);
+  // A registration whose earlier version had clients is not pageless.
+  resolver.ServiceWorkerStarted(78, {0xb1, 0xb2}, {}, "https://scope.test/");
+  resolver.ServiceWorkerControlleeAdded(78, "d", std::vector<std::uint32_t>{4});
+  resolver.ServiceWorkerControlleeRemoved(78, "d");
+  resolver.ServiceWorkerScope(79, "https://scope.test/");
+  assert(!resolver.ServiceWorkerHasNoPage(79) && resolver.ServiceWorkerHasNoPage(80));
+  // Class 69: a prefetch with no page is counted where the proxy sees it.
+  reb::NativeFactoryScope prefetch;
+  prefetch.exclusion = 69;
+  assert(exclusion(prefetch, Factory::kPrefetch, "https") == std::pair(std::uint8_t{69}, true));
   sink.SetEmitter(nullptr, 0, 0, 0);
   events.clear();
   using Files = reb::NativeBodyFileAccess;
@@ -1117,7 +1179,8 @@ void FactoryOwners() {
          reb::DecideNativeBodyFileAccess(-1) == Files::kRefused);
   std::cout
       << "PASS native factory scope: DevTools, extension, WebUI and internal-scheme loads are "
-         "counted where they are not recorded; frameless scripts link to clients or extensions\n";
+         "counted where they are not recorded; frameless scripts link to clients, registrants or "
+         "extensions; pageless service workers and prefetches are counted\n";
 }
 
 int main() {

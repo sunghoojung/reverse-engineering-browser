@@ -1,10 +1,11 @@
 //! Whether each request row has a tab (protocol/native-network-v3.md "Request
 //! owners and tabs"). Rows join records the way Traffic does; a row is linked
 //! when any record has a tab or a request_tab_link or request_extension_link
-//! names it. An unlinked row is a capture error. Identifiers only.
+//! names it. An unlinked row is a capture error, reported with a reason taken
+//! from its own records. Identifiers only.
 use crate::event_window;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 const TRACKED_ROWS: usize = 262_144;
 const SAMPLES: usize = 16;
@@ -21,6 +22,41 @@ struct State {
     order: usize,
     process_id: u64,
     request_id: u64,
+    /// The renderer request_initiated's loader kind and whether it had a frame.
+    renderer: Option<(u64, bool)>,
+    /// Set by a browser request_started: its newest nonzero loader kind, else 0.
+    browser: Option<u64>,
+}
+
+/// Why a row has no tab (protocol/native-network-v3.md "Unresolved requests"),
+/// from its renderer start's loader kind and frame and its browser start's
+/// loader kind. The request index names its rows with the same rule.
+pub(crate) fn unresolved_reason(
+    renderer: Option<(u64, bool)>,
+    browser: Option<u64>,
+) -> &'static str {
+    match (renderer, browser) {
+        (Some((0, _)), _) => "no_loader_kind",
+        (Some((17..=19, _)), _) => "worker",
+        (Some((20, _)), _) => "no_document",
+        (Some((_, false)), _) => "no_frame",
+        (Some(_), _) => "document_frame",
+        (None, None) => "no_start",
+        (None, Some(0)) => "no_loader_kind",
+        (None, Some(_)) => "browser_factory",
+    }
+}
+
+fn reason(state: &State) -> &'static str {
+    unresolved_reason(state.renderer, state.browser)
+}
+
+/// One lifecycle record's part in its row.
+struct Record {
+    process_id: u64,
+    request_id: u64,
+    renderer: Option<(u64, bool)>,
+    browser: Option<u64>,
 }
 
 #[derive(Default)]
@@ -54,7 +90,7 @@ fn link_payload(event: &Value, extension: bool) -> bool {
                     && bytes[..4] == [1, 0, 40, 0]
                     && matches!(bytes[4], 4 | 6 | 17..=19)
             } else {
-                bytes.len() == 24 && bytes[..4] == [1, 0, 24, 0] && (1..=4).contains(&bytes[4])
+                bytes.len() == 24 && bytes[..4] == [1, 0, 24, 0] && (1..=5).contains(&bytes[4])
             }
         })
 }
@@ -89,7 +125,7 @@ impl RequestTabs {
                 )
             };
             if !matches!(row, Row::Renderer(_, _, 0) | Row::Browser(_, _, _, _, 0)) {
-                self.note(row, true, extension, 0, 0);
+                self.note(row, true, extension, None);
             }
             return;
         }
@@ -118,36 +154,48 @@ impl RequestTabs {
         if matches!(row, Row::Renderer(_, _, 0) | Row::Browser(_, _, _, _, 0)) {
             return;
         }
-        self.note(
-            row,
-            number("tab_id") != 0,
-            false,
-            number("process_id"),
-            number("request_id"),
-        );
+        let loader_kind = number("loader_kind");
+        let record = Record {
+            process_id: number("process_id"),
+            request_id: number("request_id"),
+            // A memory-cache reuse names its owner as request_initiated does.
+            renderer: matches!(kind, "request_initiated" | "memory_cache_reuse")
+                .then(|| (loader_kind, number("frame_id") != 0)),
+            browser: (kind == "request_started").then_some(loader_kind),
+        };
+        self.note(row, number("tab_id") != 0, false, Some(record));
     }
 
-    fn note(&mut self, row: Row, linked: bool, extension: bool, process_id: u64, request_id: u64) {
-        let order = self.rows.len();
-        if let Some(state) = self.rows.get_mut(&row) {
-            state.linked |= linked;
-            state.extension |= extension;
-            if state.process_id == 0 {
-                (state.process_id, state.request_id) = (process_id, request_id);
-            }
-        } else if self.rows.len() >= TRACKED_ROWS {
+    fn note(&mut self, row: Row, linked: bool, extension: bool, record: Option<Record>) {
+        if !self.rows.contains_key(&row) && self.rows.len() >= TRACKED_ROWS {
             self.untracked += 1;
-        } else {
-            self.rows.insert(
-                row,
-                State {
-                    linked,
-                    extension,
-                    order,
-                    process_id,
-                    request_id,
-                },
-            );
+            return;
+        }
+        let order = self.rows.len();
+        let state = self.rows.entry(row).or_insert(State {
+            linked: false,
+            extension: false,
+            order,
+            process_id: 0,
+            request_id: 0,
+            renderer: None,
+            browser: None,
+        });
+        state.linked |= linked;
+        state.extension |= extension;
+        let Some(record) = record else {
+            return;
+        };
+        if state.process_id == 0 {
+            (state.process_id, state.request_id) = (record.process_id, record.request_id);
+        }
+        state.renderer = state.renderer.or(record.renderer);
+        if let Some(kind) = record.browser {
+            state.browser = Some(if kind == 0 {
+                state.browser.unwrap_or(0)
+            } else {
+                kind
+            });
         }
     }
 
@@ -156,8 +204,13 @@ impl RequestTabs {
         self.rows.values().filter(|state| state.process_id != 0)
     }
 
-    pub(crate) fn unresolved(&self) -> u64 {
-        self.rows().filter(|state| !state.linked).count() as u64
+    /// Unresolved rows by reason.
+    pub(crate) fn unresolved_reasons(&self) -> BTreeMap<&'static str, u64> {
+        let mut reasons = BTreeMap::new();
+        for state in self.rows().filter(|state| !state.linked) {
+            *reasons.entry(reason(state)).or_default() += 1;
+        }
+        reasons
     }
 
     pub(crate) fn document(&self) -> Value {
@@ -170,9 +223,13 @@ impl RequestTabs {
             "rows": self.rows().count().to_string(),
             "extension_rows": self.rows().filter(|state| state.extension).count().to_string(),
             "unresolved": unresolved.len().to_string(),
+            "unresolved_reasons": self.unresolved_reasons().into_iter()
+                .map(|(reason, count)| (reason.to_owned(), json!(count.to_string())))
+                .collect::<serde_json::Map<_, _>>(),
             "unresolved_requests": unresolved.iter().take(SAMPLES).map(|state| json!({
                 "process_id": state.process_id,
                 "request_id": state.request_id.to_string(),
+                "reason": reason(state),
             })).collect::<Vec<_>>(),
             "unresolved_omitted": unresolved.len().saturating_sub(SAMPLES).to_string(),
             "untracked_records": self.untracked.to_string(),
@@ -236,7 +293,7 @@ mod tests {
             902,
             0,
             json!({
-            "browser_context_id_high": "3", "browser_context_id_low": "4"}),
+            "browser_context_id_high": "3", "browser_context_id_low": "4", "loader_kind": 6}),
         ));
         tabs.record(&record(
             "request_completed",
@@ -259,7 +316,13 @@ mod tests {
         link["payload"] = json!(format!("0100280006000000{}", "61".repeat(32)));
         tabs.record(&record("request_extension_link", 2, 905, 0, link));
         // A malformed link names nothing.
-        tabs.record(&record("request_initiated", 31, 6, 0, json!({})));
+        tabs.record(&record(
+            "request_initiated",
+            31,
+            6,
+            0,
+            json!({"loader_kind": 17}),
+        ));
         tabs.record(&record(
             "request_tab_link",
             2,
@@ -286,14 +349,100 @@ mod tests {
         let mut old = record("request_started", 2, 903, 0, json!({}));
         old["protocol_version"] = json!(2);
         tabs.record(&old);
-        assert_eq!(tabs.unresolved(), 3);
+        // A registrant link (kind 5) names its row like the others.
+        tabs.record(&record(
+            "request_initiated",
+            31,
+            10,
+            0,
+            json!({"loader_kind": 19}),
+        ));
+        tabs.record(&record(
+            "request_tab_link",
+            2,
+            0,
+            0,
+            json!({
+            "initiator_process_id": 31, "initiator_request_id": 10,
+            "payload": "010018000500000003000000000000000100000000000000"}),
+        ));
         let document = tabs.document();
-        assert_eq!(document["rows"], "9");
+        assert_eq!(document["unresolved"], "3");
+        assert_eq!(document["rows"], "10");
         assert_eq!(document["extension_rows"], "1");
         assert_eq!(
             document["unresolved_requests"],
-            json!([{"process_id": 2, "request_id": "902"}, {"process_id": 31, "request_id": "6"},
-                {"process_id": 31, "request_id": "9"}])
+            json!([
+                {"process_id": 2, "request_id": "902", "reason": "browser_factory"},
+                {"process_id": 31, "request_id": "6", "reason": "worker"},
+                {"process_id": 31, "request_id": "9", "reason": "no_loader_kind"}
+            ])
+        );
+        assert_eq!(
+            document["unresolved_reasons"],
+            json!({"browser_factory": "1", "no_loader_kind": "1", "worker": "1"})
+        );
+    }
+
+    #[test]
+    fn unresolved_rows_name_why_from_their_own_records() {
+        let mut tabs = RequestTabs::default();
+        let renderer =
+            |request: u64, fields: Value| record("request_initiated", 31, request, 0, fields);
+        tabs.record(&renderer(1, json!({"loader_kind": 16, "frame_id": "77"})));
+        tabs.record(&renderer(2, json!({"loader_kind": 22, "frame_id": "78"})));
+        tabs.record(&renderer(3, json!({"loader_kind": 20, "frame_id": "79"})));
+        tabs.record(&renderer(4, json!({"loader_kind": 21, "frame_id": "0"})));
+        tabs.record(&renderer(5, json!({"loader_kind": 18, "frame_id": "80"})));
+        tabs.record(&renderer(6, json!({"frame_id": "81"})));
+        // The renderer record decides, even when a browser record with a loader kind joins it.
+        tabs.record(&record(
+            "request_started",
+            2,
+            900,
+            0,
+            json!({
+            "initiator_process_id": 31, "initiator_request_id": 5,
+            "browser_context_id_high": "3", "browser_context_id_low": "4", "loader_kind": 7}),
+        ));
+        // Only a completion: the start was dropped, outside the scan or past the exclusion ring.
+        tabs.record(&record("request_completed", 31, 8, 0, json!({})));
+        // A memory-cache reuse names its owner as a start does.
+        tabs.record(&record(
+            "memory_cache_reuse",
+            31,
+            9,
+            0,
+            json!({"loader_kind": 16, "frame_id": "83"}),
+        ));
+        // A worklet record whose frame the browser knew is no error.
+        tabs.record(&renderer(
+            7,
+            json!({"loader_kind": 22, "frame_id": "82", "tab_id": 4}),
+        ));
+        let reasons = tabs
+            .rows
+            .values()
+            .filter(|state| !state.linked)
+            .map(|state| (state.request_id, reason(state)))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            reasons,
+            BTreeMap::from([
+                (1, "document_frame"),
+                (2, "document_frame"),
+                (3, "no_document"),
+                (4, "no_frame"),
+                (5, "worker"),
+                (6, "no_loader_kind"),
+                (8, "no_start"),
+                (9, "document_frame"),
+            ])
+        );
+        assert_eq!(
+            tabs.document()["unresolved_reasons"],
+            json!({"document_frame": "3", "no_document": "1", "no_frame": "1",
+                   "no_loader_kind": "1", "no_start": "1", "worker": "1"})
         );
     }
 }

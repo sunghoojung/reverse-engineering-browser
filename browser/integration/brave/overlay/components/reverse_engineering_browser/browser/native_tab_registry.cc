@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "base/unguessable_token.h"
+#include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_tab_of.h"
 #include "brave/components/reverse_engineering_browser/browser/native_tab_resolver.h"
 #include "brave/components/reverse_engineering_browser/common/native_factory_owner_hook.h"
@@ -38,6 +39,23 @@ std::string_view ExtensionOf(const url::Origin& origin) {
 
 NativeToken128 TokenOf(const base::UnguessableToken& token) {
   return {token.GetHighForSerialization(), token.GetLowForSerialization()};
+}
+
+// A job's caller is read when the job starts the version, while its frame is
+// most likely alive; the version keeps the tab after the frame is gone.
+void NoteServiceWorkerVersion(content::BrowserContext* context,
+                              const std::int64_t version_id,
+                              const NativeFactoryOwner& cause) {
+  if (!NativeNetworkCaptureSink::Get().IsOwnedContext(context)) {
+    return;
+  }
+  const bool caller = cause.frame_process_id >= 0;
+  const std::uint32_t tab =
+      caller ? NativeTabRegistry::Get().NoteFrame(
+                   content::RenderFrameHost::FromID(cause.frame_process_id, cause.frame_routing_id))
+             : 0;
+  NativeTabResolver::Get().ServiceWorkerJobStarted(version_id, caller, tab,
+                                                   cause.service_worker_version_id);
 }
 
 std::uint64_t ClientKey(const content::GlobalRenderFrameHostId& id) {
@@ -151,7 +169,9 @@ NativeTabRegistry& NativeTabRegistry::Get() {
 NativeTabRegistry::NativeTabRegistry()
     : dedicated_(std::make_unique<DedicatedWorkers>()),
       shared_(std::make_unique<SharedWorkers>()),
-      service_(std::make_unique<ServiceWorkers>()) {}
+      service_(std::make_unique<ServiceWorkers>()) {
+  SetNativeServiceWorkerVersionObserver(&NoteServiceWorkerVersion);
+}
 
 NativeTabRegistry::~NativeTabRegistry() = default;
 
@@ -166,14 +186,30 @@ std::uint32_t NativeTabRegistry::NoteFrame(content::RenderFrameHost* frame) {
 
 NativeFactoryOwnerTab NativeTabRegistry::NoteFactory(content::RenderFrameHost* frame) {
   if (frame) {
-    return {NoteFrame(frame), -1};
+    return {.tab = NoteFrame(frame)};
   }
   const NativeFactoryOwner owner = CurrentNativeFactoryOwner();
-  const std::uint32_t tab = owner.frame_process_id >= 0
-                                ? NoteFrame(content::RenderFrameHost::FromID(
-                                      owner.frame_process_id, owner.frame_routing_id))
-                                : 0;
-  return {tab, tab ? -1 : owner.service_worker_version_id};
+  const bool caller = owner.frame_process_id >= 0;
+  const std::uint32_t tab = caller ? NoteFrame(content::RenderFrameHost::FromID(
+                                         owner.frame_process_id, owner.frame_routing_id))
+                                   : 0;
+  return {.tab = tab,
+          .service_worker_version = tab ? -1 : owner.service_worker_version_id,
+          .service_worker_without_caller =
+              !caller && owner.cause == NativeFactoryOwnerCause::kServiceWorker,
+          .prefetch_without_page = owner.cause == NativeFactoryOwnerCause::kPrefetchWithoutPage};
+}
+
+bool NativeTabRegistry::NoteStartingServiceWorker(const url::Origin& origin) {
+  const NativeFactoryOwner owner = CurrentNativeFactoryOwner();
+  const NativeToken128 token{owner.service_worker_token_high, owner.service_worker_token_low};
+  if (owner.cause != NativeFactoryOwnerCause::kServiceWorker || !token.valid() ||
+      owner.service_worker_version_id < 0) {
+    return false;
+  }
+  NativeTabResolver::Get().ServiceWorkerStarted(owner.service_worker_version_id, token,
+                                                ExtensionOf(origin), {});
+  return true;
 }
 
 void NativeTabRegistry::ObserveContext(content::BrowserContext* context) {

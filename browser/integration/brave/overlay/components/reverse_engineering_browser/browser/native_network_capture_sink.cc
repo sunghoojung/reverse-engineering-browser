@@ -828,8 +828,10 @@ void NativeNetworkCaptureSink::RecordRequestStarted(
     event.header.flags |= static_cast<std::uint16_t>(NativeProbeFlag::kFromServiceWorker);
   }
   SetPayload(event, request.method, " ", request.url.host());
+  // A renderer-issued record is linked through its renderer record instead.
   const NativeTabResolution clients =
-      owner.service_worker_version >= 0 && !owner.extension
+      loader_kind == NativeLoaderKind::kServiceWorkerScript && owner.service_worker_version >= 0 &&
+              !owner.extension
           ? NativeTabResolver::Get().ResolveVersion(owner.service_worker_version,
                                                     event.header.session_id)
           : NativeTabResolution{};

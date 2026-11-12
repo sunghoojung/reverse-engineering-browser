@@ -260,6 +260,7 @@ def self_test():
         else:
             raise AssertionError("Invalid builtins must fail closed")
     check_claim(claim_work_directory, WORK_MARKER, ("running", "failed"), "passed")
+    check_gn_cache()
     print("PASS standalone adapter preserves every production C++ hunk and excludes only embedder GN wiring")
 
 
@@ -300,6 +301,60 @@ def claim_work_directory(work):
     write_json(marker, {"status": "running"})
 
 
+# GN is built from the exact revision V8's DEPS pins, so one built binary
+# serves every later run with the same V8 pin and compiler. The record names
+# both and the binary's digest; anything else is rebuilt, never trusted.
+GN_CACHE_RECORD = "gn-binary.json"
+
+
+def cached_gn(cache_dir, gn_revision, compiler):
+    """Return the cached GN for this revision and compiler, or None."""
+    binary = cache_dir / gn_revision / "gn"
+    record = binary.parent / GN_CACHE_RECORD
+    if binary.is_symlink() or record.is_symlink() or not binary.is_file() or not record.is_file():
+        return None
+    try:
+        expected = json.loads(record.read_text())
+    except ValueError:
+        return None
+    if not isinstance(expected, dict):
+        return None
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    if expected != {"gn_revision": gn_revision, "compiler": compiler, "sha256": digest}:
+        return None
+    return binary
+
+
+def store_gn(cache_dir, gn_revision, compiler, built):
+    """Keep a built GN for later runs and return its digest."""
+    binary = cache_dir / gn_revision / "gn"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(built, binary)
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    write_json(binary.parent / GN_CACHE_RECORD,
+               {"gn_revision": gn_revision, "compiler": compiler, "sha256": digest})
+    return digest
+
+
+def check_gn_cache():
+    """A cached GN is reused only for its own revision, compiler and bytes."""
+    with tempfile.TemporaryDirectory() as directory:
+        cache = Path(directory) / "cache"
+        built = Path(directory) / "built-gn"
+        built.write_bytes(b"gn binary")
+        revision, other = "a" * 40, "b" * 40
+        assert cached_gn(cache, revision, "clang 23") is None
+        digest = store_gn(cache, revision, "clang 23", built)
+        assert digest == hashlib.sha256(b"gn binary").hexdigest()
+        assert cached_gn(cache, revision, "clang 23") == cache / revision / "gn"
+        assert cached_gn(cache, other, "clang 23") is None
+        assert cached_gn(cache, revision, "clang 24") is None
+        (cache / revision / "gn").write_bytes(b"altered")
+        assert cached_gn(cache, revision, "clang 23") is None
+        (cache / revision / GN_CACHE_RECORD).write_text("not json")
+        assert cached_gn(cache, revision, "clang 23") is None
+
+
 def check_claim(claim, marker, incomplete, complete):
     """A rerun replaces only this tool's own unfinished directory."""
     with tempfile.TemporaryDirectory() as directory:
@@ -336,9 +391,15 @@ def main():
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--work-dir", type=Path)
     parser.add_argument("--receipt", type=Path)
-    parser.add_argument("--jobs", type=int, default=2, choices=(1, 2))
+    # A V8 compile job peaks near 2 GiB, so CI passes the runner's core count
+    # (4 cores and 16 GiB on the hosted Linux runner) and the default stays low.
+    parser.add_argument("--jobs", type=int, default=2, help="Parallel compile and fetch jobs (1 to 64)")
     parser.add_argument("--ccache-dir", type=Path, help="Optional isolated compiler-object cache")
+    parser.add_argument("--gn-cache-dir", type=Path,
+                        help="Optional cache of the GN binary built for V8's pinned GN revision")
     args = parser.parse_args()
+    if not 1 <= args.jobs <= 64:
+        parser.error("--jobs must be between 1 and 64")
     if args.self_test:
         self_test()
         return
@@ -475,12 +536,25 @@ def main():
         }]) + "\ntarget_os = ['linux']\n")
         run(["python3", str(depot / "gclient.py"), "sync", "--nohooks", "--noprehooks", "--shallow",
              "--ignore-dep-type=gcs", "--ignore-dep-type=cipd",
-             "-j", "2", "--revision", "v8@" + v8_pin])
-        gn_source = work / "gn-source"
-        # GN's version generator needs its initial-commit tag/history.
-        checkout("https://gn.googlesource.com/gn", gn_pin, gn_source, full=True)
-        run(["python3", "build/gen.py", "--out-path=out"], gn_source)
-        run(["ninja", "-C", "out", "-j", str(args.jobs), "gn"], gn_source)
+             "-j", str(args.jobs), "--revision", "v8@" + v8_pin])
+        receipt["jobs"] = args.jobs
+        gn_cache = None if args.gn_cache_dir is None else args.gn_cache_dir.resolve()
+        gn_binary = None if gn_cache is None else cached_gn(gn_cache, gn_pin, receipt["compiler"])
+        if gn_binary is not None:
+            receipt["gn_binary"] = {"reused": True,
+                                    "sha256": hashlib.sha256(gn_binary.read_bytes()).hexdigest()}
+        else:
+            gn_source = work / "gn-source"
+            # GN's version generator needs its initial-commit tag/history.
+            checkout("https://gn.googlesource.com/gn", gn_pin, gn_source, full=True)
+            run(["python3", "build/gen.py", "--out-path=out"], gn_source)
+            run(["ninja", "-C", "out", "-j", str(args.jobs), "gn"], gn_source)
+            gn_binary = gn_source / "out/gn"
+            digest = hashlib.sha256(gn_binary.read_bytes()).hexdigest()
+            if gn_cache is not None:
+                digest = store_gn(gn_cache, gn_pin, receipt["compiler"], gn_binary)
+            receipt["gn_binary"] = {"reused": False, "sha256": digest}
+        receipt["gn_binary"]["version"] = run([str(gn_binary), "--version"], capture=True).strip()
         receipt["gn_revision"] = gn_pin
         for patch in sorted((ROOT / "browser/integration/brave/patches/v8").glob("*.patch")):
             source, build, omitted = split_patch(patch.read_text())
@@ -530,7 +604,7 @@ def main():
         run(["node", str(fixture / "check-native-hook-loader.mjs"), str(public_inputs)], ROOT)
         receipt["public_fixture_inputs"] = json.loads((public_inputs / "input-receipt.json").read_text())
         save_receipt()
-        run([str(gn_source / "out/gn"), "gen", "out/native-runtime", "--fail-on-unused-args", "--args=" + gn_args], v8)
+        run([str(gn_binary), "gen", "out/native-runtime", "--fail-on-unused-args", "--args=" + gn_args], v8)
         run(["ninja", "-C", "out/native-runtime", "-j", str(args.jobs), "d8", "cctest"], v8)
         binary = v8 / "out/native-runtime/cctest"
         listed = run([str(binary), "--list"], v8, True)

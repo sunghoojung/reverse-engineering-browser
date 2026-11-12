@@ -54,21 +54,46 @@ jobs:
           path: ${{ runner.temp }}/reb-native-ccache
           key: native-v8-ubuntu26-clang23-${{ hashFiles('browser/config/v8.rev', 'tools/native-llvm23-release.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: native-v8-ubuntu26-clang23-${{ hashFiles('browser/config/v8.rev', 'tools/native-llvm23-release.json') }}-
+      # GN comes from the revision V8's DEPS pins, so the V8 pin and the
+      # compiler name the binary exactly. The script checks the cached digest
+      # and rebuilds on any mismatch.
+      - name: Restore the GN binary built for the pinned V8
+        id: gn-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/reb-native-gn
+          key: native-v8-gn-ubuntu26-clang23-${{ hashFiles('browser/config/v8.rev', 'tools/native-llvm23-release.json') }}
       - name: Validate standalone adaptation
         run: python3 tools/check-native-v8-runtime.py --self-test
+      # One compile job per core: the hosted runner has 4 cores and 16 GiB,
+      # and a V8 compile job peaks near 2 GiB.
       - name: Compile pinned native runtime and execute real C++ tests
         run: >-
           python3 tools/check-native-v8-runtime.py
           --work-dir "$RUNNER_TEMP/reb-native-v8"
           --receipt build/native-v8-runtime.json
-          --jobs 2
+          --jobs "$(nproc)"
           --ccache-dir "$RUNNER_TEMP/reb-native-ccache"
+          --gn-cache-dir "$RUNNER_TEMP/reb-native-gn"
       - name: Preserve successful compiler objects even after a later failure
         if: always() && steps.compiler-cache.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/reb-native-ccache
           key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+      - name: Find a newly built GN binary
+        id: gn-built
+        if: always() && steps.gn-cache.outcome == 'success' && steps.gn-cache.outputs.cache-hit != 'true'
+        run: |
+          if compgen -G "$RUNNER_TEMP/reb-native-gn/*/gn" >/dev/null; then
+            echo "built=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Preserve the GN binary for later runs
+        if: always() && steps.gn-built.outputs.built == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/reb-native-gn
+          key: ${{ steps.gn-cache.outputs.cache-primary-key }}
       - name: Preserve build and test receipt
         if: always()
         uses: actions/upload-artifact@v7

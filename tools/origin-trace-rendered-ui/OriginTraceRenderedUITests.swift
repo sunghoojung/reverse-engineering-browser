@@ -1248,10 +1248,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
       // The pausing words have a native meaning only inside the debugger
       // sidebar: the statement of the availability get_native_debugger
       // reports, read here and compared, and sections registered as native
-      // pausing ones. Only those two markers inside #debugger-sidebar are left
-      // out of the text; a marker anywhere else is a failure. While the
-      // backend reports the debugger unsupported, every control in a native
-      // pausing section is disabled, whatever its label.
+      // pausing ones. Inside those two markers only the paused-state words are
+      // left out of the text; every other removed phrase still fails there, and
+      // a marker anywhere else is a failure. While the backend reports the
+      // debugger unsupported or the sidebar's last read is not ready, every
+      // control in a native pausing section is a really disabled form control.
       let read = try await ui.json("""
         (async () => {
           const root = document.querySelector('#screen-\(screen)');
@@ -1261,12 +1262,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
           const stray = [...document.querySelectorAll('[data-debugger-native]')].filter(node => !allowed.has(node)).map(node => node.outerHTML.slice(0, 80));
           const native = [...root.querySelectorAll(exempt)];
           native.forEach(node => { node.hidden = true; });
-          const text = root.innerText;
+          const text = `${root.innerText} ${nativeText}`;
           native.forEach(node => { node.hidden = false; });
           const reported = statement ? (await (await fetch('/api/native-debugger', {cache: 'no-store'})).json()).availability : null;
-          const enabled = [...root.querySelectorAll('#debugger-sidebar .debugger-section[data-debugger-native="pausing"] .debugger-section-body :is(button, input, select, textarea, a[href], [tabindex])')]
-            .filter(control => !control.disabled && control.getAttribute('aria-disabled') !== 'true').map(control => control.innerText || control.tagName);
-          return {text, stray, statement: statement?.dataset.availability ?? null, reported, enabled,
+          const controls = 'button, input, select, textarea, a[href], summary, [tabindex], [role="button"], [role="option"], [role="checkbox"], [role="tab"], [contenteditable]:not([contenteditable="false"])';
+          const disabled = control => ['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(control.tagName) && control.matches(':disabled');
+          const enabled = [...root.querySelectorAll('#debugger-sidebar .debugger-section[data-debugger-native="pausing"] > .debugger-section-body')]
+            .flatMap(body => [...body.querySelectorAll(controls)]).filter(control => !disabled(control)).map(control => control.innerText || control.tagName);
+          const ready = document.querySelector('#debugger-sidebar')?.dataset.state === 'ready';
+          return {text, stray, statement: statement?.dataset.availability ?? null, reported, enabled, ready,
             controls: statement ? statement.querySelectorAll('button, input, select, textarea, a, summary, [tabindex]').length : 0};
         })()
         """)
@@ -1277,9 +1281,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
       }
       if screen == "sources" {
         XCTAssertEqual(read["statement"] as? String, read["reported"] as? String, "the pausing state is the reported availability: \(read)")
+          const pausedFree = text => text.replace(/breakpoint|paused frame|call stack|step over|step into|resume/gi, ' ');
+          const nativeText = native.map(node => pausedFree(node.innerText)).join(' ');
         XCTAssertEqual(read["controls"] as? Int, 0, "the pausing state offers no control")
-        if read["reported"] as? String == "unsupported" {
-          XCTAssertEqual(read["enabled"] as? [String], [], "no pausing control is enabled while the debugger is unsupported")
+        if read["reported"] as? String != "available" || read["ready"] as? Bool != true {
+          XCTAssertEqual(read["enabled"] as? [String], [], "no pausing control is enabled while the debugger is unsupported or unread")
         }
         // Docked, the sidebar narrows the editor and Debugger may move into More.
         try await ui.click("#debugger-sidebar .debugger-sidebar-close")

@@ -109,9 +109,10 @@ const removedFeature = /breakpoint|paused frame|(?<!request )call stack|step ove
 // sidebar (#debugger-sidebar): the statement of the availability
 // get_native_debugger reports (data-debugger-native="availability"), and
 // sections registered with native: 'pausing' (data-debugger-native="pausing"),
-// which present that debugger. A marker anywhere else, or with another value,
-// exempts nothing and fails on its own; elsewhere the words imply a removed
-// CDP view.
+// which present that debugger. Within them only the paused-state words are
+// exempt; every other removed feature (cookie import, find in memory,
+// websockets and the rest) still fails there. A marker anywhere else, or with
+// another value, exempts nothing and fails on its own.
 const nativeAvailability = '#debugger-sidebar [data-debugger-native="availability"]';
 const nativeMarkers = new Set(['availability', 'pausing']);
 const nativeExempt = node => {
@@ -120,11 +121,21 @@ const nativeExempt = node => {
 };
 const nativeMarkerProblems = () => [...window.document.querySelectorAll('[data-debugger-native]')].filter(node => !nativeExempt(node))
   .map(node => `${node.tagName.toLowerCase()}[data-debugger-native="${node.dataset.debuggerNative}"] ${node.textContent.slice(0, 60)}`);
+const pausedWords = /breakpoint|paused frame|(?<!request )call stack|step over|step into/gi;
+const pausedFree = text => text.replace(pausedWords, ' ');
 const reachable = node => {
-  let text = node.textContent;
-  for (const native of node.querySelectorAll?.('[data-debugger-native]') ?? []) if (nativeExempt(native)) text = text.replace(native.textContent, '');
-  return [text, node.getAttribute('aria-label'), node.getAttribute('title')].filter(Boolean).join(' ');
+  const own = nativeExempt(node);
+  let text = own ? pausedFree(node.textContent) : node.textContent;
+  if (!own) for (const native of node.querySelectorAll?.('[data-debugger-native]') ?? []) if (nativeExempt(native)) text = text.replace(native.textContent, pausedFree(native.textContent));
+  const labels = [node.getAttribute('aria-label'), node.getAttribute('title')].filter(Boolean).map(value => own ? pausedFree(value) : value);
+  return [text, ...labels].join(' ');
 };
+// Every element in a native pausing section a researcher could activate must
+// be a form control that is really disabled; aria-disabled leaves its handler
+// running, and a summary, a role or an editable region cannot be disabled.
+const pausingControls = 'button, input, select, textarea, a[href], summary, [tabindex], [role="button"], [role="option"], [role="checkbox"], [role="tab"], [contenteditable]:not([contenteditable="false"])';
+const reallyDisabled = control => ['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(control.tagName) &&
+  (control.disabled === true || Boolean(control.closest('fieldset[disabled]')));
 // Only the sidebar's registry writes the marker.
 for (const [file, source] of [...sources, ['index.html', html]]) {
   if (file !== 'debugger_sidebar.js') assert(!/data-debugger-native|debuggerNative/.test(source), `${file} must not mark text as native debugger text`);
@@ -151,7 +162,6 @@ for (const id of ['screen-traffic', 'screen-sources', 'screen-vm', 'investigatio
   assert(screen, `missing ${id}`);
   // Hidden descendants count: removed controls must be gone, not hidden.
   for (const control of screen.querySelectorAll('button, summary, [role="tab"], [role="button"], label, h1, h2, h3, h4, section, details, a')) {
-    if (nativeExempt(control)) continue;
     assert(!removedFeature.test(reachable(control)), `${id} exposes a removed CDP control: ${reachable(control).slice(0, 160)}`);
   }
 }
@@ -391,20 +401,22 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   assert.match(statement.textContent, /^Unsupported\. No Brave build serves the pausing debugger \(browser_debugger_unsupported\)/);
   assert.equal(statement.querySelectorAll('button, input, select, textarea, a, summary, [tabindex]').length, 0, 'the pausing state is text');
   assert.equal(document.querySelectorAll(nativeAvailability).length, 1, 'the availability statement appears once');
-  // Outside native sections the words never appear. While the backend
-  // reports the debugger unsupported, every control in a native pausing
-  // section's body is disabled, whatever its label says.
+  // Outside native sections the paused-state words never appear, and inside
+  // them only those words. While the backend reports the debugger anything but
+  // available, or the sidebar's last read is not ready, every control in a
+  // native pausing section's body is a really disabled form control.
   const checkVocabulary = () => {
     for (const control of sidebar.querySelectorAll('button, summary, [role="option"], label, h1, h2, h3, h4, section, details, a')) {
-      if (nativeExempt(control)) continue;
       assert(!removedFeature.test(reachable(control)), `the debugger sidebar implies a CDP control: ${reachable(control).slice(0, 160)}`);
     }
     assert.deepEqual(nativeMarkerProblems(), [], 'native debugger markers appear only inside the sidebar, with a known value');
-    if (sidebar.querySelector(nativeAvailability)?.dataset.availability === 'available') return;
+    if (sidebar.querySelector(nativeAvailability)?.dataset.availability === 'available' && sidebar.dataset.state === 'ready') return;
     for (const section of sidebar.querySelectorAll('.debugger-section[data-debugger-native="pausing"]')) {
-      for (const control of section.querySelectorAll('.debugger-section-body :is(button, input, select, textarea, a[href], [tabindex])')) {
-        assert(control.disabled === true || control.getAttribute('aria-disabled') === 'true',
-          `every control of ${section.dataset.debuggerSection} stays disabled while the debugger is unsupported: ${control.tagName} ${control.textContent.slice(0, 60)}`);
+      for (const body of section.querySelectorAll(':scope > .debugger-section-body')) {
+        for (const control of body.querySelectorAll(pausingControls)) {
+          assert(reallyDisabled(control),
+            `every control of ${section.dataset.debuggerSection} stays disabled while the debugger is unsupported: ${control.tagName} ${control.textContent.slice(0, 60)}`);
+        }
       }
     }
   };
@@ -485,19 +497,37 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   assert.throws(() => runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'x', order: 1, native: 'cdp', render() {}})`, context), /native must be pausing/);
   // A native section may name what it presents. While unsupported, an enabled
   // control in it fails whatever it is called; disabled, the section passes.
-  runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Breakpoints', order: 35, native: 'pausing', render(body) {
+  runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Breakpoints', order: 55, native: 'pausing', render(body) {
     body.textContent = 'from the registry';
     const go = document.createElement('button'); go.textContent = 'Go'; body.append(go);
   }})`, context);
   assert.throws(checkVocabulary, /every control of later stays disabled/, 'self-test: an enabled control in a pausing section fails');
-  const remove = runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Breakpoints', order: 35, native: 'pausing', render(body) {
+  // Self-tests: no control escapes by aria-disabled, a role, a nested summary
+  // or an editable region, and only paused-state words are exempt.
+  for (const [label, make, failure] of [
+    ['an aria-disabled button', "const b = document.createElement('button'); b.textContent = 'Go'; b.setAttribute('aria-disabled', 'true'); b.addEventListener('click', () => {}); body.append(b);", /stays disabled/],
+    ['a div with role button', "const d = document.createElement('div'); d.setAttribute('role', 'button'); d.textContent = 'Go'; body.append(d);", /stays disabled/],
+    ['a nested summary', "const d = document.createElement('details'); const m = document.createElement('summary'); m.textContent = 'More'; d.append(m); body.append(d);", /stays disabled/],
+    ['an editable region', "const d = document.createElement('div'); d.setAttribute('contenteditable', 'true'); body.append(d);", /stays disabled/],
+    ['a tab', "const d = document.createElement('div'); d.setAttribute('role', 'tab'); body.append(d);", /stays disabled/],
+    ['another removed feature', "const b = document.createElement('button'); b.textContent = 'Import cookies'; b.disabled = true; body.append(b);", /implies a CDP control/]]) {
+    runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Breakpoints', order: 55, native: 'pausing', render(body) {
+      body.textContent = 'from the registry'; ${make}
+    }})`, context);
+    assert.throws(checkVocabulary, failure, `self-test: ${label} in a pausing section fails`);
+  }
+  const remove = runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Breakpoints', order: 55, native: 'pausing', render(body) {
     body.textContent = 'from the registry';
     const step = document.createElement('button'); step.textContent = 'Step over'; step.disabled = true; body.append(step);
   }})`, context);
   assert.match(sidebar.querySelector(nativeAvailability).textContent, /The controls in the Breakpoints section stay disabled\./,
     'the Pausing statement names the native sections registered');
   const ids = sectionIds();
-  assert(ids.indexOf('observations') < ids.indexOf('later') && ids.indexOf('later') < ids.indexOf('pausing'), `sections join by order: ${ids}`);
+  assert(ids.indexOf('pausing') < ids.indexOf('later'), `sections join by order: ${ids}`);
+  // The built-in sections cannot be replaced, so the statement stays.
+  for (const id of ['threads', 'watch-rules', 'observations', 'pausing']) {
+    assert.throws(() => runInContext(`RebDebuggerSidebar.addSection({id: '${id}', title: 'x', order: 1, render() {}})`, context), /built-in section/);
+  }
   const later = sidebar.querySelector('[data-debugger-section="later"]');
   assert.match(later.textContent, /from the registry/);
   assert.equal(later.dataset.debuggerNative, 'pausing', 'a native section is marked for the guards');

@@ -153,5 +153,5 @@ same-process iframe whose handler calls an eval'd helper and a Wasm export
 whose JavaScript import fetches, and checks the realms, crossings, call sites,
 weights, paths, cache, missing bytes and malformed records, and each answer
 against the `FlowGraph` schema. `tests/http.rs` checks the route's statuses.
-`node tools/check-flow-graph-ui.mjs` checks the UI model, folding, layout and
-panel.
+The packaged app's rendered UI test opens the Flow workspace and checks its
+layout.

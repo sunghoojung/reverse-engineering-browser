@@ -2288,8 +2288,7 @@ theme, Dawn and the light app palette in the light one.
 - **Contrast:** every ink, and the name, badge and muted text, clears 4.5:1 on
   the card, on its tinted header, on its pill and on a selected or marked row
   in both themes. A hue that would not, such as Moon's pine or Dawn's gold,
-  never sets text. `tools/check-flow-graph-ui.mjs` resolves the tokens through
-  `app.css` and checks every pair.
+  never sets text.
 - **Line style:** every v1 edge is observed, so it is solid; only an omitted
   run of frames is dotted. Colour is never the only carrier: a crossing, a task
   kind and a request are written on their rows too.

@@ -27,8 +27,16 @@ namespace reb {
 inline constexpr std::uint16_t kNativeResponseBodyPayloadVersion = 1;
 inline constexpr std::size_t kNativeResponseBodyCodingSlots = 4;
 inline constexpr std::uint64_t kNativeResponseBodyCaptureBytes = kNativeArtifactMaxContentBytes;
-// Live snapshots of one open body; the capture-end flush may add one more.
-inline constexpr std::uint16_t kNativeResponseBodyPartialLimit = 16;
+// Partial snapshots of an open body ("Partial bodies" in native-network-v3.md).
+// Each copies every byte kept so far, so they are spaced by the body's age and
+// paid from a byte allowance rather than counted: the first after a second,
+// each later one at least a 32nd of the body's age after the one before.
+inline constexpr std::uint64_t kNativeResponseBodySnapshotFirstNs = 1'000'000'000;
+inline constexpr std::uint64_t kNativeResponseBodySnapshotAgeDivisor = 32;
+// One body's snapshots copy at most an eighth of the session budget, and all of a
+// session's snapshots at most a quarter, so whole bodies keep three quarters.
+inline constexpr std::uint64_t kNativeResponseBodySnapshotBodyDivisor = 8;
+inline constexpr std::uint64_t kNativeResponseBodySnapshotSessionDivisor = 4;
 // Unique response bytes per session (--reb-response-body-budget-bytes).
 inline constexpr std::uint64_t kNativeResponseBodyDefaultBudgetBytes = 512ULL * 1024ULL * 1024ULL;
 inline constexpr std::uint64_t kNativeResponseBodyMinBudgetBytes = 1ULL * 1024ULL * 1024ULL;

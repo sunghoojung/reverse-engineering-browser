@@ -1287,6 +1287,7 @@ void Corpus(reb::ArtifactReceiver& receiver, const std::filesystem::path& output
   RequestBodies(receiver, output);
   ResponseBodies(receiver, output);
   StreamPastExpiry();
+  ResponseBodySchedule(receiver);
   record_corpus = false;
   std::cout << "PASS actual sinks/receiver ACK: exact, missing ACK/creator, generated/runtime, "
                "BrowserContext request reuse, out-of-order body and ACK; uint64 roots > 2^53\n";

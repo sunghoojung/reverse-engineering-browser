@@ -146,7 +146,8 @@ it.
   budget. Those bytes include uploaded files, blobs and stream bodies, which the
   browser reads for that purpose. See [Native network v2](protocol/native-network-v2.md). The same
   sessions retain response bodies, at most 16 MiB each and 512 MiB of unique
-  bytes unless `REB_RESPONSE_BODY_BUDGET_MIB` sets another budget; images,
+  bytes unless `REB_RESPONSE_BODY_BUDGET_MIB` sets another budget, including
+  partial copies of bodies still arriving, which use at most a quarter of it; images,
   audio, video and fonts that page elements load need
   `REB_CAPTURE_RESPONSE_MEDIA=1`. See [Native network v3](protocol/native-network-v3.md).
   The backend's request index keeps a private derived copy of those paths

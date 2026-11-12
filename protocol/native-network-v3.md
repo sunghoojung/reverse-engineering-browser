@@ -952,12 +952,64 @@ to `browser/native_response_body_capture.cc`:
   10 s and flagged.
 - Bytes stream to the receiver as they arrive
   ([artifact channel v2](../docs/architecture/artifact-transfer-channel.md#streamed-artifacts-version-2)).
-  A body without a declared length that is still open after a second is
-  published as `partial` by a receiver checkpoint of what arrived when it has
-  grown by half since the last one, at most 15 times, so snapshots stay within
-  three times the body. Open bodies at capture end or expiry end their stream
-  as one last `partial` record, or `not_captured_artifact_unavailable` when no
-  byte has arrived. The record of the ended body supersedes every snapshot.
+  A body still arriving is published as `partial` on the schedule in
+  [partial bodies](#partial-bodies), whether or not it declared a length. Open
+  bodies at capture end or expiry end their stream as one last `partial`
+  record, or `not_captured_artifact_unavailable` when no byte has arrived. The
+  record of the ended body supersedes every snapshot.
+
+### Partial bodies
+
+Server-sent events, long polling and slow downloads stay open for minutes or
+the whole session, so a body is readable while it arrives. A snapshot is a
+receiver checkpoint: the receiver copies every byte it holds of the stream
+into a new artifact, which a `partial` record names. A snapshot costs a copy of
+the whole kept prefix, so the schedule bounds copies by bytes and time instead
+of by a count. Snapshot n+1 of an open body is taken when a chunk arrives and
+all of these hold:
+
+1. The body grew since snapshot n.
+2. At least the larger of 1 s and a 32nd of the body's age has passed since
+   snapshot n (since the body opened, for the first). A body open for an hour
+   is snapshotted at most about 180 times, a day about 300, so the 16-bit
+   partial index is never reached.
+3. The copy fits the body's allowance, an eighth of the session's response body
+   budget (64 MiB of the default 512 MiB). A quarter of it may be spent at
+   once; of the rest, the share spendable so far is the larger of the share of
+   the session left when the body opened that has passed, and the share of the
+   16 MiB limit the body has filled. So a body spends its allowance evenly over
+   the session, or faster when it fills toward the limit.
+4. All snapshots of the session together stay within a quarter of the budget
+   (128 MiB by default), so whole bodies always keep three quarters, and the
+   copy fits what is left of the budget. Snapshots are charged to the budget;
+   a receiver refusal refunds them.
+
+A body whose kept prefix reaches the 16 MiB limit is sealed: those bytes can no
+longer change, so its stream ends there and a `partial` record names that
+artifact at once, without a copy. Later bytes are counted, and every later
+record of the body, including its end, names the sealed artifact.
+
+The bounds come from real streams. Wikimedia's public `recentchange` event
+stream ran at about 60 KB/s (42 events a second) and its `page-create` stream at
+about 3.6 KB/s (two 1.3 KB events a second); a chat completion streams 1 to
+20 KB/s for under a minute, and a notification channel sends a heartbeat of a
+few bytes every 15 to 30 s. In a one-hour session with the default budget:
+
+| Stream | Snapshots | Copied | How old the newest snapshot can be |
+| --- | ---: | ---: | --- |
+| 60 KB/s | about 33, then sealed after 4.7 min | about 63 MiB | 90 s, until the seal |
+| 3.6 KB/s | about 95 | about 63 MiB | 1 min in the first 5 min, 15 min later |
+| 10 KB/s for 60 s | about 50 | under 13 MiB | 2 s |
+| a heartbeat every 15 s | about 95 | a few KiB | 2 min |
+
+These come from replaying those rates through the schedule in 250 ms steps.
+
+A larger budget (`REB_RESPONSE_BODY_BUDGET_MIB`) keeps a medium stream
+fresher, because its allowance grows with it; the 1 MiB minimum budget leaves
+a body 128 KiB of snapshots, so a stream past that is read when it ends.
+`make native-artifact-capture-check` drives a two-hour stream past the old
+limit of 15 snapshots and checks the spacing, the allowance, the session share
+and its refund, a declared length, and the seal.
 
 ### `response_body` (type 33)
 
@@ -1053,7 +1105,8 @@ launcher passes for content sessions.
   with `--reb-response-body-budget-bytes` (`REB_RESPONSE_BODY_BUDGET_MIB`).
   A body is charged when it ends, once its digest is known: identical bytes
   are stored once by SHA-256 and charge nothing (the repeat stream is aborted),
-  each snapshot is charged, and a receiver refusal refunds them. The launcher grows a content session's receiver store
+  each snapshot is charged within its [shares](#partial-bodies), and a receiver
+  refusal refunds them. The launcher grows a content session's receiver store
   by both budgets.
 - Every refusal is a named state. The session summary counts states 2 and 9 to
   12 under `request_content_not_retained`, category `response_body`.
@@ -1093,7 +1146,8 @@ brotli and service-worker JSON, a fetched PNG, a chunked stream partial then
 captured, an aborted prefix, 304, a redirect, a cancelled body, a skipped font,
 digest dedupe, budget exhaustion, receiver refusal refund, 50 parallel bodies,
 the full pool, 16 MiB truncation, a missing completion, coding order, the
-capture-end partial, media opt-in, metadata-only sessions and tee refusal.
+capture-end partial, media opt-in, metadata-only sessions and tee refusal, and
+the [partial body schedule](#partial-bodies).
 `make native-network-capture-check` covers the redirect and unavailable records.
 `tests/network_request_test.cpp` checks layout parity and every valid and
 malformed record. `tools/check-traffic-response-ui.mjs` and

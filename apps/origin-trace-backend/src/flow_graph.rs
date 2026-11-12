@@ -15,7 +15,7 @@
 //! never bridged.
 use crate::{
     error::{Error, Result},
-    evidence, request_index,
+    evidence, request_cookies, request_index,
     request_stack::{self, Frame, Identity, Record, Segment},
     store_scan::{self, Stopped, Stores},
 };
@@ -317,19 +317,17 @@ impl Scan {
                 }
             }
             "script_cookie" => {
-                // Only writes walk the stack; a read keeps one frame.
-                let api = match bytes.get(4) {
-                    Some(1) => "document.cookie set",
-                    Some(3) => "cookieStore.set",
-                    Some(6) => "cookieStore.delete",
-                    _ => return true,
+                let Some(script) = request_cookies::decode_script(event) else {
+                    return false;
                 };
-                if bytes.len() != 128 || bytes[5] & 0x06 != 0x06 {
+                // Only a write walks the stack (flags bits 1 and 2); a read
+                // keeps one frame.
+                if !matches!(script.api, 1 | 3 | 6) || script.flags & 0x06 != 0x06 {
                     return true;
                 }
-                let digest: [u8; 32] = bytes[40..72].try_into().unwrap();
-                let innermost = Frame::read(&bytes[24..40]);
-                if let Some(walk) = self.walk(event, digest, Shape::Alone, innermost) {
+                let api = request_cookies::APIS[usize::from(script.api)];
+                let innermost = Frame::read(&script.frame);
+                if let Some(walk) = self.walk(event, script.stack, Shape::Alone, innermost) {
                     *walk.sinks.entry(Sink::Cookie(api)).or_default() += 1;
                 }
             }
@@ -1967,12 +1965,13 @@ mod tests {
     fn malformed_and_unwalked_records_are_counted() {
         let mut f = iframe_wasm_fixture();
         f.event("request_initiator_stack", 41, 80, 7, &[0; 128]);
+        f.event("script_cookie", 41, 0, 7, &[0; 128]);
         let mut no_script = vec![2, 0, 128, 0, 2, 0, 0, 0];
         no_script.resize(128, 0);
         f.event("request_initiator_stack", 41, 81, 7, &no_script);
         f.events.push(json!({"session_id": "9", "type": "async_task_stack", "payload_encoding": "hex", "payload": "zz"}));
         let g = graph(&f);
-        assert_eq!(g["coverage"]["malformed_records"], 2);
+        assert_eq!(g["coverage"]["malformed_records"], 3);
         assert_eq!(g["stacks"]["not_walked"]["no_script"], 1);
         assert_eq!(g["stacks"]["distinct"], 3);
     }

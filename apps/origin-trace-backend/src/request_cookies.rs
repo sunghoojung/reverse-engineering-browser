@@ -80,7 +80,7 @@ const EFFECTIVE: [&str; 6] = [
     "Lax-allowing-unsafe",
     "Undefined",
 ];
-const APIS: [&str; 7] = [
+pub(crate) const APIS: [&str; 7] = [
     "",
     "document.cookie set",
     "document.cookie get",
@@ -416,21 +416,21 @@ pub fn build(
     })
 }
 
-struct Script {
-    api: u8,
-    flags: u8,
+pub(crate) struct Script {
+    pub(crate) api: u8,
+    pub(crate) flags: u8,
     count: u32,
     name_length: u32,
     value_length: u32,
     string_length: u32,
-    frame: [u8; 16],
-    stack: [u8; 32],
+    pub(crate) frame: [u8; 16],
+    pub(crate) stack: [u8; 32],
     value: [u8; 32],
     prefix: [u8; NAME_PREFIX],
 }
 
 /// The C++ core's rules for the renderer's script_cookie record.
-fn decode_script(event: &Value) -> Option<Script> {
+pub(crate) fn decode_script(event: &Value) -> Option<Script> {
     if event["type"] != "script_cookie"
         || event["protocol_version"] != 3
         || event["category"] != "network"

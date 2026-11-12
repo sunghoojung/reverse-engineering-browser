@@ -31,10 +31,12 @@ session of these types ([native network v3](native-network-v3.md#request-initiat
 | 35 `script_identity` | Script ID to realm, eval flag, start position and source digest |
 | `request_initiated` | The `METHOD host` label of a request stack's sink |
 
-Lines are selected by a byte prefilter before they are parsed. Stack, script
-and module artifacts are found by SHA-256 in one artifact-manifest pass, plus
-one more for task segments that name scheduling stacks no record here
-describes.
+Lines are selected by a byte prefilter before they are parsed. A selected line
+that is not JSON, and a record of the session that its decoder refuses, count
+in `coverage.malformed_records`; a `script_cookie` record is checked by the
+rules `get_cookie_provenance` applies. Stack, script and module artifacts are
+found by SHA-256 in one artifact-manifest pass, plus one more for task
+segments that name scheduling stacks no record here describes.
 
 ## Folding
 

@@ -144,7 +144,11 @@ it.
   mode sets, at most 16 MiB per body and 256 MiB of unique body and full-URL
   bytes per session unless `REB_REQUEST_CONTENT_BUDGET_MIB` sets another
   budget. Those bytes include uploaded files, blobs and stream bodies, which the
-  browser reads for that purpose. See [Native network v2](protocol/native-network-v2.md). The same
+  browser reads for that purpose. See [Native network v2](protocol/native-network-v2.md).
+  A load Blink answers from its memory cache makes no request and is recorded
+  like one, its host and status always and its path and query only in content
+  capture, at most 4,096 per renderer configuration with the rest counted
+  ([Native network v3](protocol/native-network-v3.md#memory-cache-reuse)). The same
   sessions retain response bodies, at most 16 MiB each and 512 MiB of unique
   bytes unless `REB_RESPONSE_BODY_BUDGET_MIB` sets another budget; images,
   audio, video and fonts that page elements load need

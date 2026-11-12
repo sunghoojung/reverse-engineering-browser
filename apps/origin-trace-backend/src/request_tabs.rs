@@ -39,6 +39,7 @@ fn lifecycle(kind: &str) -> bool {
             | "response_completed"
             | "request_completed"
             | "request_failed"
+            | "memory_cache_reuse"
     )
 }
 
@@ -95,7 +96,7 @@ impl RequestTabs {
         if !lifecycle(kind) {
             return;
         }
-        let row = if kind == "request_initiated" {
+        let row = if kind == "request_initiated" || kind == "memory_cache_reuse" {
             Row::Renderer(session, number("process_id"), number("request_id"))
         } else if number("initiator_process_id") != 0 {
             Row::Renderer(
@@ -267,17 +268,32 @@ mod tests {
             json!({
             "initiator_process_id": 31, "initiator_request_id": 6, "payload": "00"}),
         ));
+        // A memory-cache reuse is its own row: one on its frame's tab, one in a
+        // worker its link names, one with neither.
+        tabs.record(&record("memory_cache_reuse", 31, 7, 4, json!({})));
+        tabs.record(&record("memory_cache_reuse", 31, 8, 0, json!({})));
+        tabs.record(&record(
+            "request_tab_link",
+            2,
+            0,
+            0,
+            json!({
+            "initiator_process_id": 31, "initiator_request_id": 8,
+            "payload": "010018000100000003000000000000000100000000000000"}),
+        ));
+        tabs.record(&record("memory_cache_reuse", 31, 9, 0, json!({})));
         // Pre-v3 evidence has no tab field to judge.
         let mut old = record("request_started", 2, 903, 0, json!({}));
         old["protocol_version"] = json!(2);
         tabs.record(&old);
-        assert_eq!(tabs.unresolved(), 2);
+        assert_eq!(tabs.unresolved(), 3);
         let document = tabs.document();
-        assert_eq!(document["rows"], "6");
+        assert_eq!(document["rows"], "9");
         assert_eq!(document["extension_rows"], "1");
         assert_eq!(
             document["unresolved_requests"],
-            json!([{"process_id": 2, "request_id": "902"}, {"process_id": 31, "request_id": "6"}])
+            json!([{"process_id": 2, "request_id": "902"}, {"process_id": 31, "request_id": "6"},
+                {"process_id": 31, "request_id": "9"}])
         );
     }
 }

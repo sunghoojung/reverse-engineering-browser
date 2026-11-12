@@ -347,6 +347,9 @@ struct Expectations: Decodable {
   let cookieValueMarker: String
   let invocationArtifactId: String
   let minifiedArtifactId: String
+  let memoryCacheHost: String
+  let memoryCacheTarget: String
+  let serviceWorkerFailedHost: String
   let invocationSiteStore: String
   let workerStackHost: String
   let workerStackPostingProcess: Int
@@ -1469,6 +1472,49 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) response preview")
       try await ui.screenshot("traffic-preview-\(size.name)")
       try await ui.click("#inspector-tab-general")
+    }
+  }
+
+  // protocol/native-network-v3.md "Requests answered in the renderer": a
+  // memory-cache reuse is a complete row labelled (memory cache), and a request
+  // its service worker ended without a response is Failed, never Pending.
+  @MainActor
+  func test28RendererAnsweredRows() async throws {
+    let expected = try Expectations.load()
+    // The narrow layout drops Size and Status, so the row's label and the Size
+    // tooltip carry what the cells show.
+    let selected = """
+      (() => {
+        const row = document.querySelector('#screen-traffic .request-row[aria-selected="true"]');
+        return {label: row?.getAttribute('aria-label') ?? '', size: row?.querySelector('[data-column="size"]')?.title ?? '',
+          general: document.querySelector('#exchange-inspector').innerText};
+      })()
+      """
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      try await ui.click("#screen-traffic .request-row", containing: expected.memoryCacheHost)
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      let reused = try await ui.json(selected)
+      let label = reused["label"] as? String ?? ""
+      XCTAssertTrue(label.contains("(memory cache)") && label.contains(", 200,"),
+        "\(size.name): a reuse is a complete (memory cache) row with its status: \(label)")
+      XCTAssertTrue((reused["size"] as? String ?? "").contains("Served from the memory cache"),
+        "\(size.name): the Size tooltip says no request was made")
+      let general = reused["general"] as? String ?? ""
+      XCTAssertTrue(general.contains("https://\(expected.memoryCacheHost)\(expected.memoryCacheTarget)"),
+        "\(size.name): General shows the reused URL: \(general)")
+      XCTAssertTrue(general.contains("(the memory cache) and made no request"), "\(size.name): General says no request was made")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) memory-cache row")
+      try await ui.screenshot("traffic-memory-cache-\(size.name)")
+
+      try await ui.click("#screen-traffic .request-row", containing: expected.serviceWorkerFailedHost)
+      try await ui.waitUntil("document.querySelector('#exchange-inspector').innerText.includes('\(expected.serviceWorkerFailedHost)')",
+        "the service-worker row did not open")
+      let failed = (try await ui.json(selected))["label"] as? String ?? ""
+      XCTAssertTrue(failed.contains("Failed") && failed.contains("(service worker)") && !failed.contains("Pending"),
+        "\(size.name): the service worker's end is Failed, never Pending: \(failed)")
+      try await ui.screenshot("traffic-service-worker-failed-\(size.name)")
     }
   }
 

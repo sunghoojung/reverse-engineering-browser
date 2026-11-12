@@ -187,14 +187,15 @@ configuration, so the renderer's target follows the same gate as the
 browser's. Only a start the configuration admitted is finished, and only into
 that configuration.
 
-`data:` URLs that `fetch`, XHR and other raw loads request are decoded by
-Blink's `ResourceLoader` without a URL loader. That loader records them: a
+`data:` URLs that `fetch`, XHR and other raw loads request, and deferred
+`data:` loads, are decoded by Blink's `ResourceLoader` without a URL loader.
+That loader records them: a
 `request_initiated` with a fresh renderer request ID, the method, an empty host
 and class 5, then the completion above once the URL is decoded (status 200, or
 the decoding error). A `data:` load cancelled before decoding fails with
-`ERR_ABORTED`. A `data:` image, style sheet, script or font never reaches that
-loader: `ResourceFetcher` decodes it itself and reports it as a
-[memory-cache load](#memory-cache-reuse).
+`ERR_ABORTED`. A `data:` image, style sheet, script or font loaded at once
+never reaches that loader: `ResourceFetcher` decodes it itself and reports it
+as a [memory-cache load](#memory-cache-reuse).
 
 #### Synchronous requests
 
@@ -247,11 +248,15 @@ newest http(s) starts it recorded: 1,024 slots indexed by the request ID's low
 class. The end then emits, from the loader's thread, the same records as
 above: a `request_target` child in content sessions and the completion, with
 the start's frame, flags `from_service_worker` and status 0. A slot that holds
-another start of the same configuration (1,024 later http(s) starts reused it)
-loses that end: the renderer emits a `gap` of category `network` and payload
-`service_worker_end_lost`, the start's row stays without completion, and the
-summary names the gap. A slot of an earlier configuration means the start was
-not recorded in this one, so nothing is emitted.
+another start of the same configuration (1,024 later http(s) starts reused
+it), or that a writer is filling, loses that end: the renderer emits a `gap` of
+category `network` and payload `service_worker_end_lost`, the start's row stays
+without completion, and the summary names the gap. A writer that finds its
+slot busy, which takes two starts 1,024 request IDs apart at the same moment,
+skips it, so that end is reported lost too. A slot of an earlier configuration
+means the start was not recorded in this one, so nothing is emitted; a start
+of this configuration that has since reused the slot of a request started
+before it makes that request's end read as lost.
 
 #### Memory-cache reuse
 
@@ -264,7 +269,11 @@ image, style sheet, script or font that `ResourceFetcher` decoded itself
 call after its detached and observer check as one `memory_cache_reuse`
 (type 52) record, with a fresh renderer request ID, so it is a Traffic row of
 its own. In content sessions it has a `request_target` child, as above, with
-`parent_event_id` its sequence.
+`parent_event_id` its sequence. The record names no method: Blink adds only
+GET resources to the memory cache (`ShouldResourceBeAddedToMemoryCache`), and
+preloads and static data are GET too, so consumers show GET. A reuse a worker
+owns is linked to its tabs by the drain with a `request_tab_link`, as a worker
+request start is.
 
 ##### `memory_cache_reuse` (type 52)
 
@@ -580,7 +589,19 @@ and the shipped readers, then drives the Traffic model through `data:`,
 service-worker, opted-in internal and pre-v3 rows.
 `make native-probe-admission-check` drives the real renderer sink and
 transport through exclusion counting, opt-in, renderer completion, stale and
-refused starts and the inactive path. `make native-network-capture-check`
+refused starts and the inactive path; service-worker ends with and without
+request content, ERR_ABORTED, a non-http ID, an evicted slot, an earlier
+configuration and the inactive path, and four writers racing ends on one slot
+with no torn start; and memory-cache reuses with their owner, host, status,
+size, target, static data, a 200-byte host, counted internal URLs, the
+4,096 budget and its class 68 count, a new configuration and the inactive
+path. `tests/network_scope_test.cpp` also checks type 52 and class 68 for
+parity and malformed records, and `make network-scope-wire-check` drives the
+Traffic model through memory-cache rows and a service-worker failure.
+`make request-index-check` holds the index to the model on `data:`,
+memory-cache and service-worker-failure rows. `test28RendererAnsweredRows` in
+`make rendered-ui-check` opens a memory-cache row and a service-worker
+failure in the packaged app. `make native-network-capture-check`
 checks the browser `request_started` scheme class and loader kind, and the
 factory scope: which proxy loads are counted where, and the links a frameless
 service-worker script carries.
@@ -592,7 +613,8 @@ incomplete-set, browser-record, extension, unlinked and page-name cases. `make
 native-artifact-capture-check` drives the real `NativeProbeHost` drain and
 `NativeTabResolver` through tombstoned frames, nested dedicated workers, shared
 worker clients, a service worker with 30 clients, last clients, counted and
-opted-in extension workers, and renderers locked to an internal scheme. `make
+opted-in extension workers, renderers locked to an internal scheme, a worker's
+memory-cache reuse and the class 68 report. `make
 native-probe-admission-check` covers the renderer fetch owner.
 
 ### Acceptance

@@ -26933,7 +26933,6 @@
             "required": [
               "source",
               "request_content",
-              "content_limits",
               "canvas_images",
               "request_stacks",
               "document_start",
@@ -26964,7 +26963,7 @@
                   "response_body_budget_mib",
                   "response_media"
                 ],
-                "description": "Version 1 of the limits a content session runs with, named as the LiveSessionStart options: set by the app's start panel, the start options or the launcher's REB_REQUEST_CONTENT_BUDGET_MIB, REB_RESPONSE_BODY_BUDGET_MIB and REB_CAPTURE_RESPONSE_MEDIA. Null when request_content is false or the backend is not live. A backend from before this object omits it; read that as not reported.",
+                "description": "Version 1 of the limits a content session runs with, named as the LiveSessionStart options: set by the app's start panel, the start options or the launcher's REB_REQUEST_CONTENT_BUDGET_MIB, REB_RESPONSE_BODY_BUDGET_MIB and REB_CAPTURE_RESPONSE_MEDIA. Null when request_content is false or the backend is not live. Not required: a backend from before this object omits it, which a reader treats as not reported; every backend that knows it reports it.",
                 "properties": {
                   "version": {
                     "const": 1
@@ -26988,8 +26987,11 @@
                     "description": "MiB of unique response bodies this session keeps. Null when the launcher did not name it."
                   },
                   "response_media": {
-                    "type": "boolean",
-                    "description": "Element images, audio, video and fonts are kept too, against the response body budget."
+                    "type": [
+                      "boolean",
+                      "null"
+                    ],
+                    "description": "Element images, audio, video and fonts are kept too, against the response body budget. Null when the launcher did not name the choice."
                   }
                 }
               },

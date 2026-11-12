@@ -1544,8 +1544,8 @@ fi
 if [[ "$REB_CAPTURE_REQUEST_CONTENT" == 1 ]]; then
   labels+=(--session-request-content
     --session-request-content-budget-mib "${{REB_REQUEST_CONTENT_BUDGET_MIB:-256}}"
-    --session-response-body-budget-mib "${{REB_RESPONSE_BODY_BUDGET_MIB:-512}}")
-  [[ "${{REB_CAPTURE_RESPONSE_MEDIA-0}}" == 1 ]] && labels+=(--session-response-media)
+    --session-response-body-budget-mib "${{REB_RESPONSE_BODY_BUDGET_MIB:-512}}"
+    --session-response-media "${{REB_CAPTURE_RESPONSE_MEDIA:-0}}")
 fi
 [[ "$REB_CONSOLE_DOCUMENT_START" == 1 ]] && labels+=(--session-document-start)
 [[ "${{REB_NATIVE_REQUEST_STACKS-0}}" == 1 ]] && labels+=(--session-request-stacks)

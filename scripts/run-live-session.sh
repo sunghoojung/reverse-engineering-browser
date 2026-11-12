@@ -802,10 +802,8 @@ if [[ "${capture_request_content}" == 1 ]]; then
   # The limits this content session runs with; a metadata session has none.
   ui_arguments+=(--session-request-content
     --session-request-content-budget-mib "${request_content_budget_mib}"
-    --session-response-body-budget-mib "${response_body_budget_mib}")
-  if [[ "${capture_response_media}" == 1 ]]; then
-    ui_arguments+=(--session-response-media)
-  fi
+    --session-response-body-budget-mib "${response_body_budget_mib}"
+    --session-response-media "${capture_response_media}")
 fi
 if [[ "${capture_canvas_images}" == 1 ]]; then
   ui_arguments+=(--session-canvas-images)

@@ -106,10 +106,11 @@ printf '%s\\n' "${'${ui_arguments[@]-}'}"`], {encoding:'utf8'});
     return result.stdout.trimEnd().split('\n').filter(Boolean);
   };
   assert.deepEqual(run('capture_request_content=1; request_content_budget_mib=256; response_body_budget_mib=512; capture_response_media=0'),
-    ['--session-request-content', '--session-request-content-budget-mib', '256', '--session-response-body-budget-mib', '512']);
+    ['--session-request-content', '--session-request-content-budget-mib', '256', '--session-response-body-budget-mib', '512',
+      '--session-response-media', '0']);
   assert.deepEqual(run('capture_request_content=1; request_content_budget_mib=4096; response_body_budget_mib=16384; capture_response_media=1'),
     ['--session-request-content', '--session-request-content-budget-mib', '4096', '--session-response-body-budget-mib', '16384',
-      '--session-response-media']);
+      '--session-response-media', '1']);
   assert.deepEqual(run('capture_request_content=0; request_content_budget_mib=4096; response_body_budget_mib=16384; capture_response_media=0'), [],
     'a metadata session names no limit');
   // The workspace address carries the same limits, so Traffic can name a budget.

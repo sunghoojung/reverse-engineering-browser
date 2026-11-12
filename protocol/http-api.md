@@ -386,11 +386,11 @@ with `request_content` it is `{"version": 1, "request_content_budget_mib",
 with, named as the start options are, whichever of the app's start panel, the
 start options or the launcher environment set them. Otherwise it is null. The
 launcher passes them as `--session-request-content-budget-mib`,
-`--session-response-body-budget-mib` and `--session-response-media`, which the
-backend accepts only with `--session-request-content` and within the
-launcher's bounds; a budget no launcher named is null, never a guessed
-default. A backend from before the addition omits `content_limits`; a reader
-treats that as not reported.
+`--session-response-body-budget-mib` and `--session-response-media` (`0` or
+`1`), which the backend accepts only with `--session-request-content` and
+within the launcher's bounds; a value no launcher named is null, never a
+guessed default. The schema does not require `content_limits`: a backend from
+before the addition omits it, and a reader treats that as not reported.
 
 CDP was removed. Version 1 keeps its debugger fields with fixed retirement
 values so existing clients still parse it: `debugger_state` is `unavailable`,

@@ -1489,9 +1489,12 @@ NativeProbeEvent StartCountingGaps(NativeProbeQueue& queue,
                "through every table's queued index; the others ignore it\n";
 }
 
-// The transport's thread refuses while the worker walks, with no ordering
-// between them: every refused stack is sent again at its next walk, whether
-// its refusal was applied alone or covered by an overflow.
+// Refusals against a full mailbox and refusals racing drains, on a separate
+// transport thread. Filler refusals repeat a creator the worker already
+// owns, so the owner ring routes them to the worker alone and its queued
+// index ignores every repeat. Each phase ends by walking every refused
+// stack again: a refusal applied, or covered by an overflow, sends it again;
+// one lost leaves its digest known and the walk sends nothing.
 [[gnu::noinline]] void NativeRefusalConcurrency() {
   using reb::NativeStackThread;
   NativeProbeQueue queue;
@@ -1499,59 +1502,118 @@ NativeProbeEvent StartCountingGaps(NativeProbeQueue& queue,
   scenario = {};
   scenario.depth = 2;
   scenario.scripts = 1;
-  // Above the mailbox; with the walks below, under the request budget even
-  // when an overflow leaves every refusal's budget charged.
-  constexpr std::uint32_t kRefused = 300;
-  static_assert(kRefused > reb::kNativeStackRefusalMailbox);
-  std::vector<std::uint64_t> sequences(kRefused);
+  // Few enough stacks that the 256-digest table never evicts one, so only a
+  // refusal can make a walk send its stack again.
+  constexpr std::uint32_t kReal = 48;
+  constexpr std::uint32_t kBursts = 6;
+  constexpr std::uint32_t kPerBurst = kReal / kBursts;
+  constexpr std::uint32_t kFiller = reb::kNativeStackRefusalMailbox + 4;
   TestThread worker;
-  worker.Run([&] {
-    NativeRequestStackWalk::AttachThread(WorkerScope(NativeStackThread::kDedicatedWorker, 0xE000));
+  const reb::NativeStackScope scope = WorkerScope(NativeStackThread::kDedicatedWorker, 0xE000);
+  std::vector<std::uint64_t> real(kReal);
+  std::uint64_t filler = 0;
+  const auto queue_stacks = [&](const std::uint32_t seed) {
     const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, 0xE000});
-    for (std::uint32_t i = 0; i < kRefused; ++i) {
+    for (std::uint32_t i = 0; i < kReal; ++i) {
+      scenario.seed = seed + i;
+      const auto stack = Start(queue, static_cast<std::int32_t>(9000 + i)).second;
+      assert((StackPayload(stack).flags & reb::kNativeRequestStackArtifactQueued) != 0);
+      real[i] = stack.header.sequence_number;
+      Drain(queue);
+    }
+  };
+  worker.Run([&] {
+    NativeRequestStackWalk::AttachThread(scope);
+    const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, 0xE000});
+    scenario.seed = 49000;
+    filler = Start(queue, 8990).second.header.sequence_number;
+    Drain(queue);
+    queue_stacks(50000);
+  });
+
+  // Phase 1: each burst, sent while the worker waits, is more than the
+  // mailbox holds, and its real refusals come last. Storing them would need a
+  // free slot; the mailbox records an overflow instead, which the worker
+  // counts and turns into forgetting every digest.
+  for (std::uint32_t burst = 0; burst < kBursts; ++burst) {
+    std::thread transport_thread([&] {
+      for (std::uint32_t i = 0; i < kFiller; ++i) {
+        transport.NativeStackArtifactRefused(filler);
+      }
+      for (std::uint32_t i = 0; i < kPerBurst; ++i) {
+        transport.NativeStackArtifactRefused(real[burst * kPerBurst + i]);
+      }
+    });
+    transport_thread.join();
+    worker.Run([&] {
+      NativeRequestStackWalk::AttributeAsyncTask(1, 1);
+      assert(GapReason(Pop(queue)) == "request_stack_refusals_overflowed" && Drain(queue) == 0);
+    });
+  }
+  worker.Run([&] {
+    const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, 0xE000});
+    for (std::uint32_t i = 0; i < kReal; ++i) {
       scenario.seed = 50000 + i;
-      sequences[i] =
-          Start(queue, static_cast<std::int32_t>(9000 + i)).second.header.sequence_number;
+      const auto again = Start(queue, static_cast<std::int32_t>(9100 + i)).second;
+      assert((StackPayload(again).flags & reb::kNativeRequestStackArtifactQueued) != 0);
+      real[i] = again.header.sequence_number;
       Drain(queue);
     }
   });
+
+  // Phase 2: the transport thread refuses while the worker drains as fast as
+  // it can, so slots are freed and refilled concurrently. The entries are
+  // plain memory: a slot reused before it was copied is a data race that
+  // REB_PROBE_TEST_SANITIZERS=thread reports, and a lost refusal leaves its
+  // stack unsent below.
   std::atomic<bool> refused_all{false};
+  std::map<std::string, int> gaps;
   std::thread transport_thread([&] {
-    for (const auto sequence : sequences) {
-      transport.NativeStackArtifactRefused(sequence);
+    for (std::uint32_t round = 0; round < 40; ++round) {
+      for (std::uint32_t i = 0; i < 64; ++i) {
+        transport.NativeStackArtifactRefused(filler);
+      }
+      for (std::uint32_t i = round; i < kReal; i += 40) {
+        transport.NativeStackArtifactRefused(real[i]);
+      }
     }
     refused_all.store(true, std::memory_order_release);
   });
-  std::map<std::string, int> gaps;
   worker.Run([&] {
-    const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, 0xE000});
-    // Other stacks meanwhile, each walk draining what has arrived.
-    for (std::uint32_t i = 0; !refused_all.load(std::memory_order_acquire) || i < 4; ++i) {
-      scenario.seed = 60000 + i % 64;
-      StartCountingGaps(queue, 9700, gaps);
-      Drain(queue);
+    while (!refused_all.load(std::memory_order_acquire)) {
+      NativeRequestStackWalk::AttributeAsyncTask(1, 1);
+    }
+    NativeRequestStackWalk::AttributeAsyncTask(1, 1);
+    NativeProbeEvent event;
+    while (queue.TryPop(event)) {
+      ++gaps[GapReason(event)];
     }
   });
   transport_thread.join();
   worker.Run([&] {
+    NativeRequestStackWalk::AttributeAsyncTask(1, 1);
+    NativeProbeEvent event;
+    while (queue.TryPop(event)) {
+      ++gaps[GapReason(event)];
+    }
     const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, 0xE000});
-    for (std::uint32_t i = 0; i < kRefused; ++i) {
+    for (std::uint32_t i = 0; i < kReal; ++i) {
       scenario.seed = 50000 + i;
-      const auto again = StackPayload(StartCountingGaps(queue, 9800, gaps));
-      assert((again.flags & reb::kNativeRequestStackArtifactQueued) != 0);
+      assert((StackPayload(Start(queue, static_cast<std::int32_t>(9200 + i)).second).flags &
+              reb::kNativeRequestStackArtifactQueued) != 0);
       Drain(queue);
     }
     NativeRequestStackWalk::DetachThread();
   });
-  // Only these gaps can appear, and an overflow is always counted.
   for (const auto& [reason, count] : gaps) {
     assert(reason == "request_stack_refusals_overflowed" && count >= 1);
   }
   scenario = {};
   transport.Disable();
   Drain(queue);
-  std::cout << "PASS refusal concurrency: " << kRefused
-            << " refusals raced with walks; each refused stack was sent again, "
-            << (gaps.empty() ? 0 : gaps.begin()->second) << " counted overflows\n";
+  std::cout << "PASS refusal concurrency: " << kBursts
+            << " over-full bursts each counted as an overflow and every refused stack sent "
+               "again; refusals racing drains lost none ("
+            << (gaps.empty() ? 0 : gaps.begin()->second) << " counted overflows)\n";
 }
 }  // namespace

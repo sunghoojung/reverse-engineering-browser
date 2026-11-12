@@ -98,15 +98,17 @@ struct NativeRequestStackTables final {
   // Refusal mailbox: a single-producer, single-consumer ring that never
   // overwrites. The producer is the transport's sequence, under the registry
   // lock. It loads refused_tail with acquire and writes only to a free slot:
-  // the entry relaxed, then refused_head with release. With every slot in use
-  // it sets refused_overflow with release instead. The consumer is this
-  // thread, at the start of each walk (DrainRefusals). It loads refused_head
-  // with acquire, copies the entries below it, publishes refused_tail with
-  // release, so the producer reuses a slot only after it was read, and then
-  // exchanges refused_overflow. An overflow forgets every digest and counts a
+  // the entry, then refused_head with release. With every slot in use it sets
+  // refused_overflow with release instead. The consumer is this thread, at
+  // the start of each walk (DrainRefusals). It loads refused_head with
+  // acquire, copies the entries below it, publishes refused_tail with release,
+  // so the producer reuses a slot only after it was read, and then exchanges
+  // refused_overflow. An overflow forgets every digest and counts a
   // request_stack_refusals_overflowed gap. So each routed refusal is applied
-  // or covered by a later drain on this thread; none is lost unseen.
-  std::array<std::atomic<std::uint64_t>, kNativeStackRefusalMailbox> refused{};
+  // or covered by a later drain on this thread; none is lost unseen. The
+  // entries are plain memory ordered only by refused_head and refused_tail:
+  // any access outside that order is a data race ThreadSanitizer reports.
+  std::array<std::uint64_t, kNativeStackRefusalMailbox> refused{};
   std::atomic<std::uint64_t> refused_head{0};
   std::atomic<std::uint64_t> refused_tail{0};
   std::atomic<bool> refused_overflow{false};
@@ -428,8 +430,7 @@ bool DrainRefusals(NativeRequestStackTables& state, const std::uint64_t generati
       static_cast<std::size_t>(std::min<std::uint64_t>(head - tail, kNativeStackRefusalMailbox));
   std::array<std::uint64_t, kNativeStackRefusalMailbox> creators;
   for (std::size_t i = 0; i < count; ++i) {
-    creators[i] = state.refused[(tail + i) & (kNativeStackRefusalMailbox - 1)].load(
-        std::memory_order_relaxed);
+    creators[i] = state.refused[(tail + i) & (kNativeStackRefusalMailbox - 1)];
   }
   state.refused_tail.store(head, std::memory_order_release);
   // After the tail: a refusal the producer could not store is seen here or by
@@ -1626,8 +1627,7 @@ void NativeRequestStackWalk::StackArtifactRefused(const std::uint64_t creator_se
     if (head - state->refused_tail.load(std::memory_order_acquire) >= kNativeStackRefusalMailbox) {
       state->refused_overflow.store(true, std::memory_order_release);
     } else {
-      state->refused[head & (kNativeStackRefusalMailbox - 1)].store(creator_sequence,
-                                                                    std::memory_order_relaxed);
+      state->refused[head & (kNativeStackRefusalMailbox - 1)] = creator_sequence;
       state->refused_head.store(head + 1, std::memory_order_release);
     }
     if (table != 0) {

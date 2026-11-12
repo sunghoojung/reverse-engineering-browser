@@ -1336,9 +1336,11 @@ applied or covered, and a cover is counted; none is lost unseen. The order:
    it.
 3. Each table's mailbox is a 256-entry single-producer, single-consumer ring
    that never overwrites: the producer reads the consumer's published tail with
-   acquire and stores an entry only into a free slot (entry relaxed, head with
-   release). With every slot in use it sets the table's overflow flag with
-   release instead.
+   acquire and stores an entry only into a free slot (the entry as plain
+   memory, then the head with release). With every slot in use it sets the
+   table's overflow flag with release instead. Because the entries are plain
+   memory ordered only by the head and tail, a slot reused before the consumer
+   copied it is a data race ThreadSanitizer reports.
 4. The owning thread drains at the start of its next walk: head with acquire,
    the entries below it copied, the tail published with release (only then
    can the producer reuse those slots), then the overflow flag exchanged.
@@ -1529,8 +1531,10 @@ thread a dedicated worker's own tables, scope, frame IDs and identities; that
 naming allocates nothing and a thread's first active walk makes its tables;
 refusals routed from the transport's thread; a counted mailbox overflow; a
 refusal whose owner slot 8,192 newer artifacts reused, which still reaches its
-owner; refusals racing walks on two threads, after which every refused stack
-is sent again (also clean under `REB_PROBE_TEST_SANITIZERS=thread`); the
+owner; over-full bursts from the transport's thread, each counted as an
+overflow, after which every refused stack is sent again; refusals racing
+drains on two threads, which lose none and are clean under
+`REB_PROBE_TEST_SANITIZERS=thread`; the
 32-worker limit, its state 6 records and its gap once per configuration; a
 thread with no tables and detach.
 `make request-stack-wire-check` compares the C++ verdicts with the Python

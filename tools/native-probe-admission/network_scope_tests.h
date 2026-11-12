@@ -2,6 +2,7 @@
 // protocol/native-network-v3.md, through the real sink, transport and ring.
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -284,7 +285,10 @@ void ServiceWorkerRequestEnds() {
 
   // The kSentBody boundary: one completion whichever side ends the request.
   // A response the worker sent carries from_service_worker, so the loader's
-  // client finishes the row and the loader does not.
+  // client finishes the row and the loader does not. The decision helper gets
+  // literal inputs here, so this tests the sink's handling of each side, not
+  // the loader's own status_ changes, which patch 0039 makes and only a
+  // browser build compiles.
   auto answered = sink.RecordRequestInitiated(5005, "GET", "https", "example.test");
   One(metadata);
   answered.NoteResponse(200, true, false);
@@ -317,12 +321,15 @@ void ServiceWorkerRequestEnds() {
 
 // The start table is a Boehm-style sequence lock, correct only if a reader
 // never accepts a slot that writers half filled. Every field here is a
-// function of the request ID, so any accepted mix shows. Accepting every read
-// (a broken lock) fails this within a few thousand reads.
+// function of the request ID, so any accepted mix shows. Writers run until the
+// reader has accepted kAccepted copies, so the count does not depend on how
+// the threads are scheduled; accepting every read (a broken lock) fails within
+// a few thousand of them.
 void ServiceWorkerStartSequenceLock() {
   static reb::NativeServiceWorkerStarts starts;
-  constexpr int kWriters = 4;
-  constexpr std::uint32_t kStarts = 250000;
+  constexpr std::uint32_t kWriters = 4;
+  constexpr std::uint64_t kAccepted = 100000;
+  constexpr auto kDeadline = std::chrono::seconds(120);
   constexpr std::uint32_t kSlot = 7;
   const auto start_of = [](const std::uint32_t id) {
     reb::NativeRendererRequest start;
@@ -336,23 +343,24 @@ void ServiceWorkerStartSequenceLock() {
         (id & 1024U) != 0 ? reb::NativeSchemeClass::kHttps : reb::NativeSchemeClass::kHttp;
     return start;
   };
-  std::atomic<int> running{kWriters};
+  std::atomic<bool> stop{false};
   std::vector<std::thread> writers;
-  for (int writer = 0; writer < kWriters; ++writer) {
+  for (std::uint32_t writer = 0; writer < kWriters; ++writer) {
     writers.emplace_back([&, writer] {
-      for (std::uint32_t index = 0; index < kStarts; ++index) {
-        starts.Keep(
-            start_of(kSlot + 1024U * (static_cast<std::uint32_t>(writer) * kStarts + index)));
+      // IDs stay in slot kSlot and wrap after 2^20 writes; every field is still
+      // a function of the ID.
+      for (std::uint32_t index = 0; !stop.load(std::memory_order_relaxed); ++index) {
+        starts.Keep(start_of(kSlot + 1024U * (writer + kWriters * index)));
         // A short pause between writes lets the reader in between them too.
         for (int spin = 0; spin < 32; ++spin) {
-          static_cast<void>(running.load(std::memory_order_relaxed));
+          static_cast<void>(stop.load(std::memory_order_relaxed));
         }
       }
-      running.fetch_sub(1, std::memory_order_acq_rel);
     });
   }
+  const auto deadline = std::chrono::steady_clock::now() + kDeadline;
   std::uint64_t accepted = 0, busy = 0, torn = 0;
-  while (running.load(std::memory_order_acquire) != 0) {
+  while (accepted < kAccepted && std::chrono::steady_clock::now() < deadline) {
     reb::NativeRendererRequest read;
     if (!starts.Read(kSlot, read)) {
       ++busy;
@@ -369,11 +377,16 @@ void ServiceWorkerStartSequenceLock() {
             read.frame_id != expected.frame_id || read.thread_id != expected.thread_id ||
             read.scheme_class != expected.scheme_class;
   }
+  stop.store(true, std::memory_order_relaxed);
   for (auto& writer : writers) {
     writer.join();
   }
+  if (accepted < kAccepted) {
+    std::cerr << "FAIL service-worker start slots: the reader accepted " << accepted << " of "
+              << kAccepted << " reads in " << kDeadline.count() << " s\n";
+  }
+  assert(accepted >= kAccepted);
   assert(torn == 0);
-  assert(accepted > 1000);
   std::cout << "PASS service-worker start slots: " << accepted << " reads racing " << kWriters
             << " writers accepted no torn slot (" << busy << " found it busy)\n";
 }

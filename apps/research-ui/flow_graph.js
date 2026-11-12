@@ -46,19 +46,29 @@ const FLOW_GRAPH_SINKS = new Set(['request', 'navigation', 'cookie_write']);
 const FLOW_GRAPH_CARD = Object.freeze({head: 32, location: 22, gap: 2, row: 19, foot: 9, pad: 12, radius: 8, minW: 184, maxW: 440, rows: 8});
 const FLOW_GRAPH_MEASURE = Object.freeze({row: 6.93, head: 7.53, badge: 6.32, pill: 7});
 
-/** Validates a `flow-graph-v1` document into a model, or throws. Edges that
- * name a node outside the document are dropped and counted, never drawn. */
+/** Validates a `flow-graph-v1` document into a model, or throws. `valid`
+ * lists the edges that name two nodes of the document; the others are
+ * dropped and counted, never drawn. `pathsOf` lists each node's paths and
+ * `requestPaths` each renderer request's, by "process:request". */
 function flowGraphModel(doc) {
   if (doc?.schema !== 'flow-graph-v1' || !Array.isArray(doc.nodes) || !Array.isArray(doc.edges) || !Array.isArray(doc.contexts) || !Array.isArray(doc.paths))
     throw Error('The flow graph provider returned an invalid document.');
   const nodes = doc.nodes, count = nodes.length;
-  const valid = index => Number.isInteger(index) && index >= 0 && index < count;
-  let dropped = 0;
-  const edges = [];
-  doc.edges.forEach((edge, index) => { if (valid(edge?.from) && valid(edge?.to)) edges.push({...edge, index}); else dropped += 1; });
+  const inRange = index => Number.isInteger(index) && index >= 0 && index < count;
+  const valid = [];
+  doc.edges.forEach((edge, index) => { if (inRange(edge?.from) && inRange(edge?.to)) valid.push(index); });
   const contexts = doc.contexts.map((context, index) => ({...context, index, label: flowGraphContextLabel(context, index)}));
   nodes.forEach(node => { if (!contexts[node.context]) node.context = 0; });
-  return {doc, nodes, edges, contexts, paths: doc.paths, dropped};
+  const pathsOf = Array.from({length: count}, () => []), requestPaths = new Map();
+  doc.paths.forEach((path, index) => {
+    for (const node of path.nodes ?? []) if (pathsOf[node] && pathsOf[node].at(-1) !== index) pathsOf[node].push(index);
+    for (const request of path.requests ?? []) {
+      const key = `${path.process_id}:${request}`;
+      if (!requestPaths.has(key)) requestPaths.set(key, []);
+      requestPaths.get(key).push(path);
+    }
+  });
+  return {doc, nodes, edges: doc.edges, valid, contexts, paths: doc.paths, dropped: doc.edges.length - valid.length, pathsOf, requestPaths};
 }
 
 function flowGraphContextLabel(context, index) {
@@ -82,13 +92,20 @@ function flowGraphNodeName(node) {
   return node.name ?? (node.status === 'resolved' ? '(anonymous)' : `(script ${node.script_id})`);
 }
 
+/** The file a script node names: `VM<id>` for eval code, as DevTools
+ * does, else its URL, or that URL's file name when `short`. */
+function flowGraphNodeFile(node, short = false) {
+  if (node.kind === 'eval') return `VM${node.script_id}`;
+  return short ? requestStackFile(node.url) : node.url ?? '';
+}
+
 function flowGraphNodeDetail(node) {
   if (!node) return '';
   if (node.kind === 'chain') return `${node.members.length} functions · Space expands`;
   if (FLOW_GRAPH_SINKS.has(node.kind)) return `${node.hits.toLocaleString()} ${node.hits === 1 ? 'time' : 'times'}`;
   if (node.status !== 'resolved') return FLOW_GRAPH_REASONS[node.reason] ?? node.reason ?? 'unresolved';
   if (node.kind === 'wasm') return `func ${node.function_index} · ${requestStackFile(node.url)}`;
-  const file = node.kind === 'eval' ? `VM${node.script_id}` : requestStackFile(node.url);
+  const file = flowGraphNodeFile(node, true);
   return node.line ? `${file}:${node.line}:${node.column}` : file;
 }
 
@@ -98,7 +115,7 @@ function flowGraphNodeLocation(node) {
   if (FLOW_GRAPH_SINKS.has(node.kind)) return node.name ?? '';
   if (node.status !== 'resolved') return '';
   if (node.kind === 'wasm') return `${node.url ?? ''} func ${node.function_index}`.trim();
-  const file = node.kind === 'eval' ? `VM${node.script_id}` : node.url ?? '';
+  const file = flowGraphNodeFile(node);
   return node.line ? `${file}:${node.line}:${node.column}` : file;
 }
 
@@ -115,9 +132,14 @@ function flowGraphNodeKey(node) {
  * request, navigation or cookie write is a row of each function that made it,
  * the way a disassembly lists a call to an import, unless nothing calls it. */
 function flowGraphDisplay(model, expanded = new Set(), collapse = true) {
-  const {nodes, edges} = model, count = nodes.length;
+  const {nodes, edges, valid} = model, count = nodes.length;
   const ins = Array.from({length: count}, () => []), outs = Array.from({length: count}, () => []), recursive = new Uint8Array(count);
-  for (const edge of edges) { if (edge.from === edge.to) { recursive[edge.from] = 1; continue; } outs[edge.from].push(edge); ins[edge.to].push(edge); }
+  for (const index of valid) {
+    const edge = edges[index];
+    if (edge.from === edge.to) { recursive[edge.from] = 1; continue; }
+    outs[edge.from].push(edge);
+    ins[edge.to].push(edge);
+  }
   const quiet = edge => edge.kind === 'call' && !edge.crosses?.length;
   const passes = new Uint8Array(count);
   if (collapse) for (let v = 0; v < count; v += 1) {
@@ -157,14 +179,15 @@ function flowGraphDisplay(model, expanded = new Set(), collapse = true) {
   // Groups are contiguous runs, so a member reached before its head still maps.
   for (const members of groups) for (const member of members) displayOf[member] = displayOf[members[0]];
   const merged = new Map(), list = [];
-  for (const edge of edges) {
-    const from = displayOf[edge.from], to = displayOf[edge.to];
+  for (const index of valid) {
+    const edge = edges[index], from = displayOf[edge.from], to = displayOf[edge.to];
     if (from === to && edge.from !== edge.to) continue;
     const key = `${from}:${to}:${edge.kind}:${edge.task ?? ''}`;
     let item = merged.get(key);
     if (!item) { item = {from, to, kind: edge.kind, task: edge.task, via: edge.via, label: edge.label, omitted: edge.omitted, crosses: new Set(), count: 0, members: []}; merged.set(key, item); list.push(item); }
     edge.crosses?.forEach(cross => item.crosses.add(cross));
-    item.count += edge.count ?? 0; item.members.push(edge.index);
+    item.count += edge.count ?? 0;
+    item.members.push(index);
   }
   list.forEach(item => { item.crosses = [...item.crosses]; });
   const called = new Uint8Array(display.length);
@@ -179,7 +202,15 @@ function flowGraphDisplay(model, expanded = new Set(), collapse = true) {
     if (keep[item.from]) drawn.push({...item, from: remap[item.from], to: remap[item.to]});
   }
   for (let v = 0; v < count; v += 1) displayOf[v] = remap[displayOf[v]];
-  return {nodes: display.filter((node, index) => keep[index]), edges: drawn, sinkRows, displayOf, groups: groups.length, foldKey};
+  // Each card's drawn edges in and out, and the drawn edge each document edge is in.
+  const shown = display.filter((node, index) => keep[index]);
+  const inbound = shown.map(() => []), outbound = shown.map(() => []), edgeOf = new Int32Array(edges.length).fill(-1);
+  drawn.forEach((edge, index) => {
+    outbound[edge.from].push(index);
+    inbound[edge.to].push(index);
+    for (const member of edge.members) edgeOf[member] = index;
+  });
+  return {nodes: shown, edges: drawn, sinkRows, displayOf, groups: groups.length, foldKey, ins: inbound, outs: outbound, edgeOf};
 }
 
 /** What colours an edge: a crossing (frame, JavaScript and Wasm, into eval)
@@ -221,31 +252,50 @@ function flowGraphDistinctStacks(model, display) {
   return counts;
 }
 
+/* Rows read in source order: by kind, then line and column (or module
+ * offset), then the order the edges were drawn in. */
+const FLOW_GRAPH_ROW_RANK = Object.freeze({call: 0, await: 1, task: 2, omitted: 3, request: 4, navigation: 4, cookie_write: 4});
+const FLOW_GRAPH_SINK_NOUNS = Object.freeze({request: ['request', 'requests'], navigation: ['navigation', 'navigations'], cookie_write: ['cookie write', 'cookie writes']});
+
+/** The row a call gives its card: `edge` is a drawn edge with its display
+ * `index`, or a sink row with index -1. */
+function flowGraphCardRow(model, display, edge, index) {
+  const sites = flowGraphEdgeSites(model, edge);
+  const first = edge.members.map(member => model.doc.edges[member]?.sites?.[0]).find(Boolean);
+  const order = [FLOW_GRAPH_ROW_RANK[edge.kind] ?? 5, first ? first.line ?? 0 : 1e15, first ? first.column ?? first.module_offset ?? 0 : 0, index < 0 ? 1e9 : index];
+  return {
+    site: sites[0] ? `${sites[0]}${sites.length > 1 ? `+${sites.length - 1}` : ''}` : '',
+    op: FLOW_GRAPH_OPS[edge.kind === 'task' ? edge.task : edge.kind] ?? edge.task ?? edge.kind,
+    target: flowGraphNodeName(edge.sink ?? display.nodes[edge.to]),
+    note: edge.sink ? '' : flowGraphEdgeNote(model, display, edge),
+    count: edge.count > 1 ? `×${edge.count.toLocaleString()}` : '',
+    edge: index,
+    sink: edge.sink ?? null,
+    members: edge.members,
+    family: edge.sink ? 'sink' : flowGraphEdgeFamily(edge),
+    order
+  };
+}
+const flowGraphRowOrder = (a, b) => a.order[0] - b.order[0] || a.order[1] - b.order[1] || a.order[2] - b.order[2] || a.order[3] - b.order[3];
+
+/** A chain card's rows: its folded members, numbered. */
+const flowGraphChainRows = (model, node) => node.members.map((member, i) => ({site: String(i + 1), op: '', target: flowGraphNodeName(model.nodes[member]), note: flowGraphNodeDetail(model.nodes[member]), count: '', edge: -1}));
+
 /** What each card says: its name, a badge with the distinct stacks through
  * it, its kind tag and location, then one row per call it made (site,
  * mnemonic, callee and a note), the way a disassembly block lists its
  * instructions. Sizes follow from the text. */
 function flowGraphCards(model, display, measure = FLOW_GRAPH_MEASURE) {
-  const C = FLOW_GRAPH_CARD, outs = display.nodes.map(() => []);
-  display.edges.forEach((edge, index) => outs[edge.from].push(index));
-  const stacks = flowGraphDistinctStacks(model, display);
-  const rank = {call: 0, await: 1, task: 2, omitted: 3, request: 4, navigation: 4, cookie_write: 4};
+  const C = FLOW_GRAPH_CARD, stacks = flowGraphDistinctStacks(model, display);
   return display.nodes.map((node, v) => {
     const chain = node.kind === 'chain', sink = FLOW_GRAPH_SINKS.has(node.kind);
-    let rows = [];
-    if (chain) rows = node.members.map((member, i) => ({site: String(i + 1), op: '', target: flowGraphNodeName(model.nodes[member]), note: flowGraphNodeDetail(model.nodes[member]), count: '', edge: -1}));
-    else rows = [...outs[v].map(index => ({edge: display.edges[index], index})), ...(display.sinkRows?.[v] ?? []).map(edge => ({edge, index: -1}))].map(({edge, index}) => {
-      const sites = flowGraphEdgeSites(model, edge), first = edge.members.map(member => model.doc.edges[member]?.sites?.[0]).find(Boolean);
-      // Rows read in source order: by kind, then line and column (or module offset).
-      const order = [rank[edge.kind] ?? 5, first ? first.line ?? 0 : 1e15, first ? first.column ?? first.module_offset ?? 0 : 0];
-      return {site: sites[0] ? `${sites[0]}${sites.length > 1 ? `+${sites.length - 1}` : ''}` : '', op: FLOW_GRAPH_OPS[edge.kind === 'task' ? edge.task : edge.kind] ?? edge.task ?? edge.kind,
-        target: edge.sink ? flowGraphNodeName(edge.sink) : flowGraphNodeName(display.nodes[edge.to]), note: edge.sink ? '' : flowGraphEdgeNote(model, display, edge),
-        count: edge.count > 1 ? `×${edge.count.toLocaleString()}` : '', edge: index, sink: edge.sink ?? null, members: edge.members, family: edge.sink ? 'sink' : flowGraphEdgeFamily(edge), order: order.concat(index < 0 ? 1e9 : index)};
-    }).sort((a, b) => a.order[0] - b.order[0] || a.order[1] - b.order[1] || a.order[2] - b.order[2] || a.order[3] - b.order[3]);
+    let rows = chain ? flowGraphChainRows(model, node) : [
+      ...display.outs[v].map(index => flowGraphCardRow(model, display, display.edges[index], index)),
+      ...display.sinkRows[v].map(edge => flowGraphCardRow(model, display, edge, -1))
+    ].sort(flowGraphRowOrder);
     let more = 0;
     if (rows.length > C.rows) { more = rows.length - (C.rows - 1); rows = rows.slice(0, C.rows - 1); }
-    const nouns = {request: ['request', 'requests'], navigation: ['navigation', 'navigations'], cookie_write: ['cookie write', 'cookie writes']};
-    const location = sink ? `${node.hits.toLocaleString()} ${nouns[node.kind][node.hits === 1 ? 0 : 1]}` : chain ? `${node.members.length} pass-through frames, folded` : flowGraphNodeDetail(node);
+    const location = sink ? `${node.hits.toLocaleString()} ${FLOW_GRAPH_SINK_NOUNS[node.kind][node.hits === 1 ? 0 : 1]}` : chain ? `${node.members.length} pass-through frames, folded` : flowGraphNodeDetail(node);
     const title = flowGraphNodeName(node), tag = FLOW_GRAPH_KIND_TAGS[node.kind] ?? node.kind, badge = stacks[v].toLocaleString();
     const siteW = rows.reduce((max, row) => Math.max(max, row.site.length), 0), opW = rows.reduce((max, row) => Math.max(max, row.op.length), 0);
     const pillW = Math.ceil((measure.pillWidth ? measure.pillWidth(tag) : tag.length * measure.pill) + 12), badgeW = Math.ceil(badge.length * measure.badge + 10);
@@ -270,10 +320,18 @@ function flowGraphLayoutInput(display, cards = null) {
   return input;
 }
 
-/** Paths (one per distinct stack) through any of the given original nodes. */
+/** Paths (one per distinct stack) through any of the given original nodes, in document order. */
 function flowGraphPathsThrough(model, members) {
-  const wanted = new Set(members);
-  return model.paths.filter(path => path.nodes.some(node => wanted.has(node)));
+  const indexes = new Set();
+  for (const member of members) for (const index of model.pathsOf[member] ?? []) indexes.add(index);
+  return [...indexes].sort((a, b) => a - b).map(index => model.paths[index]);
+}
+
+/** How many drawn edges cross a frame, JavaScript and Wasm, or into eval. */
+function flowGraphCrossings(display) {
+  const counts = {frame: 0, language: 0, dynamic: 0};
+  for (const edge of display?.edges ?? []) for (const cross of edge.crosses) if (cross in counts) counts[cross] += 1;
+  return counts;
 }
 
 /** Why a realm kept the layered layout (a graphLayoutClient reason, or
@@ -298,10 +356,12 @@ function flowGraphLayoutReason(reason) {
 function flowGraphHighlight(model, display, paths) {
   const nodes = new Set(), edges = new Set(), originalEdges = new Set();
   for (const path of paths) {
-    path.nodes.forEach(node => { const at = display.displayOf[node]; if (at >= 0) nodes.add(at); });
-    path.edges.forEach(edge => originalEdges.add(edge));
+    for (const node of path.nodes) { const at = display.displayOf[node]; if (at >= 0) nodes.add(at); }
+    for (const edge of path.edges) {
+      originalEdges.add(edge);
+      if (display.edgeOf[edge] >= 0) edges.add(display.edgeOf[edge]);
+    }
   }
-  display.edges.forEach((edge, index) => { if (edge.members.some(member => originalEdges.has(member))) edges.add(index); });
   return {nodes, edges, originalEdges, paths: paths.length, occurrences: paths.reduce((sum, path) => sum + (path.occurrences ?? 0), 0)};
 }
 
@@ -361,11 +421,19 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   find.append(button('\u25b2', () => stepMatch(-1), 'Previous match'), matchLabel, button('\u25bc', () => stepMatch(1), 'Next match'));
   // Folded or every frame: one radio group, one tab stop, arrows switch.
   const segment = make('div', 'flow-graph-segment'); segment.setAttribute('role', 'radiogroup'); segment.setAttribute('aria-label', 'Pass-through frames');
+  const renderCollapse = value => {
+    for (const [item, on] of [[folded, value], [every, !value]]) {
+      item.setAttribute('aria-checked', String(on));
+      item.setAttribute('aria-pressed', String(on));
+      item.tabIndex = on ? 0 : -1;
+    }
+  };
   const setCollapse = (value, focus = false) => {
-    for (const [item, on] of [[folded, value], [every, !value]]) { item.setAttribute('aria-checked', String(on)); item.setAttribute('aria-pressed', String(on)); item.tabIndex = on ? 0 : -1; }
+    renderCollapse(value);
     if (focus) (value ? folded : every).focus();
     if (collapse === value) return;
-    collapse = value; rebuild();
+    collapse = value;
+    rebuild();
   };
   const folded = button('Folded', () => setCollapse(true), 'Fold pass-through frames into chains', 'flow-graph-segment-item');
   const every = button('Every frame', () => setCollapse(false), 'Draw every frame', 'flow-graph-segment-item');
@@ -373,7 +441,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   for (const item of [folded, every]) item.setAttribute('role', 'radio');
   segment.addEventListener('keydown', event => { if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) { event.preventDefault(); setCollapse(!collapse, true); } });
   segment.append(folded, every);
-  for (const [item, on] of [[folded, true], [every, false]]) { item.setAttribute('aria-checked', String(on)); item.setAttribute('aria-pressed', String(on)); item.tabIndex = on ? 0 : -1; }
+  renderCollapse(true);
   const zoomBar = make('div', 'flow-graph-zoom-bar');
   const zoomLabel = make('span', 'flow-graph-zoom', '100%');
   zoomBar.append(button('−', () => zoomAt(0.8), 'Zoom out'), zoomLabel, button('+', () => zoomAt(1.25), 'Zoom in'), button('Fit', fit, 'Fit graph to view'));
@@ -514,19 +582,20 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   const metrics = flowGraphLayout.METRICS, ROUTE = flowGraphLayout.ROUTE;
 
   const requestDraw = () => { if (visible && !frame) frame = requestAnimationFrame(() => { frame = 0; draw(); }); };
+  /** The heading gives way to the tools by their measured width. */
+  const syncToolsWidth = () => host.style.setProperty('--flow-tools-w', `${Math.ceil(tools.offsetWidth || 0)}px`);
   function resize() {
     if (!visible) return;
     ({cssW, cssH, dpr} = graphFitCanvas(canvas, stage));
     miniKey = '';
-    // The heading gives way to the tools by their measured width.
-    host.style?.setProperty?.('--flow-tools-w', `${Math.ceil(tools.offsetWidth || 0)}px`);
+    syncToolsWidth();
     if (needsStart && layout && cssW > 1) { needsStart = false; start(); return; }
     requestDraw();
   }
   if (typeof ResizeObserver === 'function') {
     new ResizeObserver(resize).observe(stage);
     // Find opening widens the tools; the heading gives way at once.
-    new ResizeObserver(() => host.style?.setProperty?.('--flow-tools-w', `${Math.ceil(tools.offsetWidth || 0)}px`)).observe(tools);
+    new ResizeObserver(syncToolsWidth).observe(tools);
   }
   window.addEventListener('resize', resize);
 
@@ -679,9 +748,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     stats.textContent = parts.join(' · ');
     evidence.textContent = doc.complete ? 'observed' : 'observed · partial';
     evidence.dataset.partial = String(!doc.complete);
-    const crossing = display ? display.edges.filter(edge => edge.crosses.length) : [];
-    const frames = crossing.filter(edge => edge.crosses.includes('frame')).length, languages = crossing.filter(edge => edge.crosses.includes('language')).length, dynamic = crossing.filter(edge => edge.crosses.includes('dynamic')).length;
-    const crossings = [[frames, 'frame'], [languages, 'JS ↔ Wasm'], [dynamic, 'into eval']].filter(([count]) => count).map(([count, label]) => `${count} ${label}`);
+    const {frame, language, dynamic} = flowGraphCrossings(display);
+    const crossings = [[frame, 'frame'], [language, 'JS ↔ Wasm'], [dynamic, 'into eval']].filter(([count]) => count).map(([count, label]) => `${count} ${label}`);
     summary.textContent = `${(doc.stacks?.occurrences ?? 0).toLocaleString()} stack records · ${crossings.length ? `crossings: ${crossings.join(', ')}` : 'no crossings'}`;
     const notes = [];
     if (doc.coverage?.stopped === 'deadline') notes.push('The scan stopped at its deadline.');
@@ -1218,7 +1286,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     highlightLabel = label;
     if (reveal) requestDraw();
   }
-  const requestPaths = key => key && model ? model.paths.filter(path => String(path.process_id) === String(key.process) && path.requests?.includes(String(key.request))) : [];
+  const requestPaths = key => (key && model ? model.requestPaths.get(`${key.process}:${key.request}`) ?? [] : []);
   function renderSelection() {
     // A chosen request whose stack another selection replaced can be lit again.
     requestAgain.hidden = !(requestKey && !highlightFromRequest && requestPaths(requestKey).length);
@@ -1262,18 +1330,19 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       process_id: context?.process_id ?? null, execution_context_id: context?.execution_context_id ?? null, url: node.url ?? null, artifact_id: node.artifact_id ?? null,
       function_index: node.function_index ?? null, row: item ? {index: rowIndex, site: item.site, op: item.op, target: item.target} : null,
       request: highlightFromRequest && requestKey ? {process: requestKey.process, request: requestKey.request} : null,
-      callers: neighbours(index, 'to', 'from'), callees: neighbours(index, 'from', 'to')};
+      callers: cardNeighbours(index, true), callees: cardNeighbours(index, false)};
   }
-  /** Up to eight cards on drawn edges into or out of a card, most stacks first. */
-  function neighbours(index, side, other) {
+  /** Up to eight cards on drawn edges into (`incoming`) or out of a card,
+   * most stacks first. */
+  function cardNeighbours(index, incoming) {
     const seen = new Map();
-    for (const edge of display?.edges ?? []) {
-      if (edge[side] !== index || edge[other] === index) continue;
-      const peer = display.nodes[edge[other]];
-      if (!peer) continue;
-      const key = flowGraphNodeKey(peer.kind === 'chain' ? model.nodes[peer.members[0]] : peer);
-      const entry = seen.get(key) ?? {key, name: flowGraphNodeName(peer), kind: peer.kind, note: edge.kind, count: 0};
-      entry.count += edge.count ?? 1; seen.set(key, entry);
+    for (const e of (incoming ? display.ins : display.outs)[index]) {
+      const edge = display.edges[e], other = incoming ? edge.from : edge.to;
+      if (other === index) continue;
+      const key = cardKey(other);
+      const entry = seen.get(key) ?? {key, name: flowGraphNodeName(display.nodes[other]), kind: display.nodes[other].kind, note: edge.kind, count: 0};
+      entry.count += edge.count ?? 1;
+      seen.set(key, entry);
     }
     return [...seen.values()].sort((a, b) => b.count - a.count).slice(0, 8);
   }
@@ -1427,11 +1496,12 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   }
   /** Goes to the caller that reached this card most often. */
   function toCaller(index) {
-    let best = null;
-    for (const edge of display.edges) if (edge.to === index && edge.from !== index && (!best || edge.count > best.count)) best = edge;
-    if (!best) { flash('No recorded caller'); return; }
+    let best = -1;
+    for (const e of display.ins[index]) if (display.edges[e].from !== index && (best < 0 || display.edges[e].count > display.edges[best].count)) best = e;
+    if (best < 0) { flash('No recorded caller'); return; }
     remember();
-    selectCard(best.from, {row: cards[best.from].rows.findIndex(row => row.edge === display.edges.indexOf(best))});
+    const caller = display.edges[best].from;
+    selectCard(caller, {row: cards[caller].rows.findIndex(row => row.edge === best)});
   }
   /** J and K step through the selected card's calls. */
   function stepRow(direction) {
@@ -1534,13 +1604,13 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       fold.addEventListener('click', () => { toggleChain(selected); canvas.focus({preventScroll: true}); }); actions.append(fold);
     }
     if (actions.children.length) inspector.append(actions);
-    const neighbours = (incoming) => display.edges.map((edge, index) => ({edge, index})).filter(({edge}) => (incoming ? edge.to : edge.from) === selected && edge.from !== edge.to);
+    const linked = incoming => (incoming ? display.ins : display.outs)[selected].map(index => display.edges[index]).filter(edge => edge.from !== edge.to);
     for (const [label, incoming] of [['Called by', true], ['Calls', false]]) {
-      const items = neighbours(incoming);
+      const items = linked(incoming);
       if (!items.length) continue;
       inspector.append(make('h4', 'flow-inspector-heading', `${label} · ${items.length}`));
       const list = make('ul', 'flow-inspector-list');
-      items.sort((a, b) => b.edge.count - a.edge.count).slice(0, 64).forEach(({edge}) => {
+      items.sort((a, b) => b.count - a.count).slice(0, 64).forEach(edge => {
         const other = incoming ? edge.from : edge.to, item = make('li');
         const link = make('button', 'flow-inspector-link', flowGraphNodeName(display.nodes[other])); link.type = 'button';
         link.addEventListener('click', () => { selectCard(other); canvas.focus({preventScroll: true}); });
@@ -1584,11 +1654,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       list.append(item);
     });
     inspector.append(list);
-    const crossing = display ? display.edges.filter(edge => edge.crosses.length) : [];
-    if (crossing.length) {
-      const frames = crossing.filter(edge => edge.crosses.includes('frame')).length, languages = crossing.filter(edge => edge.crosses.includes('language')).length, dynamic = crossing.filter(edge => edge.crosses.includes('dynamic')).length;
-      inspector.append(make('p', 'flow-inspector-note', `Crossings: ${frames} frame, ${languages} JS ↔ Wasm, ${dynamic} into eval.`));
-    }
+    const {frame, language, dynamic} = flowGraphCrossings(display);
+    if (frame || language || dynamic) inspector.append(make('p', 'flow-inspector-note', `Crossings: ${frame} frame, ${language} JS ↔ Wasm, ${dynamic} into eval.`));
     const decoded = doc.stacks?.decoded ?? 0, distinct = doc.stacks?.distinct ?? 0;
     inspector.append(make('p', 'flow-inspector-note', `${(doc.stacks?.occurrences ?? 0).toLocaleString()} stack records, ${distinct.toLocaleString()} distinct, ${decoded.toLocaleString()} with retained frames.`));
     const unresolved = Object.entries(doc.stacks?.unresolved ?? {});
@@ -1668,27 +1735,30 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   function callSite(index, row) {
     const node = display.nodes[index], item = cards[index]?.rows[row], site = item?.site?.replace(/\+\d+$/, '');
     if (!site) return '';
-    const file = node.kind === 'eval' ? `VM${node.script_id}` : node.url ?? '';
+    const file = flowGraphNodeFile(node);
     return site.startsWith('+0x') ? `${file} ${site}`.trim() : `${file}:${site}`;
   }
-  const hasCaller = index => display.edges.some(edge => edge.to === index && edge.from !== index);
+  const hasCaller = index => display.ins[index].some(e => display.edges[e].from !== index);
   function openMenu(index, px, py, row = -1) {
     if (!display?.nodes[index]) return;
     if (selected !== index || selectedRow !== row) selectCard(index, {reveal: false, row, focusPaths: selected !== index});
     hideTooltip();
     const node = display.nodes[index], foldable = node.kind === 'chain' || display.foldKey.get(node.members[0]), item = row >= 0 ? cards[index].rows[row] : null;
-    const entries = [
-      ...(item ? [...(item.edge >= 0 ? [['Follow call', '↩', true, () => follow(index, row)]] : []), ['Copy call site', 'S', Boolean(callSite(index, row)), () => copy(callSite(index, row), 'Call site')], null] : []),
-      ['Open in Sources', item ? 'O' : '↩', canOpen(node), () => open(node)],
-      ...(foldable ? [[node.kind === 'chain' ? 'Expand chain' : 'Fold chain', 'Space', true, () => toggleChain(index)]] : []),
-      null,
+    // Each entry is [label, shortcut, enabled, action]; null is a rule.
+    const entries = [];
+    if (item) {
+      if (item.edge >= 0) entries.push(['Follow call', '↩', true, () => follow(index, row)]);
+      entries.push(['Copy call site', 'S', Boolean(callSite(index, row)), () => copy(callSite(index, row), 'Call site')], null);
+    }
+    entries.push(['Open in Sources', item ? 'O' : '↩', canOpen(node), () => open(node)]);
+    if (foldable) entries.push([node.kind === 'chain' ? 'Expand chain' : 'Fold chain', 'Space', true, () => toggleChain(index)]);
+    entries.push(null,
       ['Go to caller', 'U', hasCaller(index), () => toCaller(index)],
       ['Center on card', 'F', true, () => centerOn(index)],
       ['Show details', 'I', true, () => setDetails(true)],
       null,
       ['Copy name', 'C', true, () => copy(flowGraphNodeName(node), 'Name')],
-      ['Copy location', 'L', Boolean(flowGraphNodeLocation(node)), () => copy(flowGraphNodeLocation(node), 'Location')],
-    ];
+      ['Copy location', 'L', Boolean(flowGraphNodeLocation(node)), () => copy(flowGraphNodeLocation(node), 'Location')]);
     menu.replaceChildren(); menuItems = [];
     for (const entry of entries) {
       if (!entry) { const rule = make('div', 'flow-graph-menu-rule'); rule.setAttribute('role', 'separator'); menu.append(rule); continue; }
@@ -1792,9 +1862,17 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     if (event.ctrlKey || event.metaKey) { const [px, py] = local(event); zoomAt(Math.exp(-event.deltaY * 0.01), px, py); }
     else { view.x += event.deltaX / view.z; view.y += event.deltaY / view.z; requestDraw(); }
   }, {passive: false});
+  /** The card at the top left, which the first arrow key selects. */
+  function topLeftCard() {
+    let first = 0;
+    for (let index = 1; index < display.nodes.length; index += 1) {
+      if (layout.y[index] < layout.y[first] || (layout.y[index] === layout.y[first] && layout.x[index] < layout.x[first])) first = index;
+    }
+    return first;
+  }
   function move(dx, dy) {
     if (!display?.nodes.length) return;
-    if (selected < 0) { let first = 0; display.nodes.forEach((node, index) => { if (layout.y[index] < layout.y[first] || (layout.y[index] === layout.y[first] && layout.x[index] < layout.x[first])) first = index; }); return selectCard(first); }
+    if (selected < 0) return selectCard(topLeftCard());
     const from = nodeBox(selected), cx = from.x + from.w / 2, cy = from.y + from.h / 2;
     let best = -1, bestScore = Infinity;
     display.nodes.forEach((node, index) => {

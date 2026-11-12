@@ -980,8 +980,11 @@ impl InitiatorFrames {
     }
 }
 
-fn payload(event: &Value) -> Option<Vec<u8>> {
-    hex::decode(event["payload"].as_str()?).ok()
+/// A stored record's payload bytes; stored payloads are hex.
+pub(crate) fn payload(event: &Value) -> Option<Vec<u8>> {
+    (event["payload_encoding"] == "hex")
+        .then(|| hex::decode(event["payload"].as_str()?).ok())
+        .flatten()
 }
 
 /// Bytes 80-127 of a `navigation_initiator_stack`: its kind and target frame.

@@ -15,7 +15,7 @@
 //! never bridged.
 use crate::{
     error::{Error, Result},
-    evidence, request_cookies, request_index,
+    event_window, evidence, request_cookies, request_index,
     request_stack::{self, Frame, Identity, Record, Segment},
     store_scan::{self, Stopped, Stores},
 };
@@ -141,17 +141,9 @@ struct Scan {
     request_refs_dropped: u64,
 }
 
-fn unsigned(value: &Value) -> u64 {
-    match value {
-        Value::String(text) => text.parse().unwrap_or(0),
-        other => other.as_u64().unwrap_or(0),
-    }
-}
-
-fn payload(event: &Value) -> Option<Vec<u8>> {
-    (event["payload_encoding"] == "hex")
-        .then(|| hex::decode(event["payload"].as_str()?).ok())
-        .flatten()
+/// An identifier field of a record, 0 unless it is a canonical unsigned integer.
+fn number(event: &Value, key: &str) -> u64 {
+    event_window::unsigned(&event[key]).unwrap_or(0)
 }
 
 impl Scan {
@@ -162,7 +154,7 @@ impl Scan {
         shape: Shape,
         innermost: Frame,
     ) -> Option<&mut Walk> {
-        let process = unsigned(&event["process_id"]) as u32;
+        let process = number(event, "process_id") as u32;
         let index = match self.by_digest.get(&(process, digest)) {
             Some(index) => *index,
             None if self.walks.len() < MAX_STACKS => {
@@ -193,9 +185,9 @@ impl Scan {
         walk.occurrences += 1;
         *walk
             .frame_votes
-            .entry(unsigned(&event["frame_id"]))
+            .entry(number(event, "frame_id"))
             .or_default() += 1;
-        let tab = unsigned(&event["tab_id"]);
+        let tab = number(event, "tab_id");
         if tab != 0 && walk.tabs.len() < 64 {
             walk.tabs.insert(tab);
         }
@@ -209,11 +201,11 @@ impl Scan {
         else {
             return false;
         };
-        let Some(bytes) = payload(event) else {
+        let Some(bytes) = request_stack::payload(event) else {
             return false;
         };
         *self.records.entry(kind).or_default() += 1;
-        let process = unsigned(&event["process_id"]) as u32;
+        let process = number(event, "process_id") as u32;
         match *kind {
             "script_identity" => {
                 let Some((script, identity)) = request_stack::decode_identity(&bytes) else {
@@ -255,7 +247,7 @@ impl Scan {
                     }
                 };
                 self.labels
-                    .insert((process, unsigned(&event["request_id"])), id);
+                    .insert((process, number(event, "request_id")), id);
             }
             "request_initiator_stack" => {
                 let Some(record) = request_stack::decode_record(&bytes) else {
@@ -272,12 +264,12 @@ impl Scan {
                 }
                 let label = self
                     .labels
-                    .get(&(process, unsigned(&event["request_id"])))
+                    .get(&(process, number(event, "request_id")))
                     .map(|id| self.label_text[*id as usize].clone())
                     .unwrap_or_else(|| "request".to_owned());
                 let (digest, innermost, unretained) =
                     (record.digest, record.innermost, record.state != 1);
-                let request = unsigned(&event["request_id"]);
+                let request = number(event, "request_id");
                 let room = self.request_refs < MAX_REQUEST_REFS;
                 let mut kept = false;
                 if let Some(walk) = self.walk(event, digest, Shape::Record(record), innermost) {
@@ -1218,7 +1210,6 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
     let deadline = started + SCAN_DEADLINE;
     let prefilter = Regex::new(&format!(r#""type":"(?:{})""#, TYPES.join("|")))
         .map_err(|_| Error::new(500, "Flow graph filter failed"))?;
-    let session_text = session.to_string();
     let reader = store_scan::Reader {
         cancel,
         deadline,
@@ -1232,12 +1223,8 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
         Some(&prefilter),
         &mut |_, line| {
             let event = serde_json::from_slice::<Value>(line).ok()?;
-            let same = match &event["session_id"] {
-                Value::String(text) => *text == session_text,
-                other => other.as_u64() == Some(session),
-            };
             // A record the decoders refuse is counted as malformed.
-            (!same || scan.record(&event)).then_some(true)
+            (!store_scan::same_session(&event, session) || scan.record(&event)).then_some(true)
         },
     )?;
     scan.malformed = scanned.malformed;

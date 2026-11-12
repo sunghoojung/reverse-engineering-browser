@@ -55,7 +55,7 @@ ends. [`probes.js`](probes.js) scrolls an unmounted row into view before a click
 finds it. The Response test also checks that pretty print uses the Oxc layout
 and that a clicked token reports its raw range.
 
-`test28RendererAnsweredRows` opens a `memory_cache_reuse` row from its own
+`test29RendererAnsweredRows` opens a `memory_cache_reuse` row from its own
 renderer stream and a request its service worker ended without a response.
 At both sizes the first reads `(memory cache)` with its status and a General
 note that no request was made (screenshot `traffic-memory-cache-*`), and the

@@ -1479,7 +1479,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // memory-cache reuse is a complete row labelled (memory cache), and a request
   // its service worker ended without a response is Failed, never Pending.
   @MainActor
-  func test28RendererAnsweredRows() async throws {
+  func test29RendererAnsweredRows() async throws {
     let expected = try Expectations.load()
     // The narrow layout drops Size and Status, so the row's label and the Size
     // tooltip carry what the cells show.

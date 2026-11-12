@@ -132,6 +132,8 @@ const sourceTreeView = createSourceTree({
   helpers: {isSource: isSourceArtifact, identity: sourceIdentity, reference: sourceReference, name: sourceDisplayName, isCurrent: sourceIsCurrent},
   catalog: () => state.artifacts, collection: () => state.sourceCollection, selectedId: () => state.selectedArtifactId,
   catalogLimit: () => state.artifactCatalogLimit, consoleDocuments: () => state.consoleDocuments,
+  // An observed frame selected in the debugger sidebar's Threads (debugger_sidebar.js).
+  scope: () => globalThis.RebDebuggerSidebar?.sourceScope() ?? null,
   hideInternal: () => state.hideBrowserInternal, internalToggle: internal => sourceInternalToggle(internal),
   kindLabel: source => sourceKindLabel(source.kind),
   researcherName(source) {
@@ -8583,7 +8585,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         requestAnimationFrame(() => elements.quickOpenInput.focus());
       }
 
-      function renderSourceSidebar() { const open = Boolean(state.sourceSidebarOpen); elements.sourceSidebar.hidden = !open; document.querySelector('#screen-sources').dataset.sidebarOpen = String(open); elements.sourceSidebarToggle.setAttribute('aria-expanded', String(open)); }
+      // Details and the debugger sidebar share one column, so opening one closes the other.
+      function renderSourceSidebar() {
+        const open = Boolean(state.sourceSidebarOpen);
+        if (open) globalThis.RebDebuggerSidebar?.close();
+        elements.sourceSidebar.hidden = !open;
+        document.querySelector('#screen-sources').dataset.sidebarOpen = String(open || Boolean(globalThis.RebDebuggerSidebar?.isOpen()));
+        elements.sourceSidebarToggle.setAttribute('aria-expanded', String(open));
+      }
 
       async function refreshArtifacts() {
         if (state.artifactRefreshing || location.protocol === 'file:') return;

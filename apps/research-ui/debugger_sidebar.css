@@ -1,0 +1,93 @@
+/* Sources debugger sidebar (debugger_sidebar.js). It shares the Details
+   column and its docking and overlay rules (.sources-debugger in app.css).
+   Row heights match DEBUGGER_SIDEBAR in the script. */
+#screen-sources .sources-debugger.debugger-sidebar { grid-template-rows: auto auto minmax(0, 1fr); }
+/* Docked, it takes the Details column; below 1112 px it overlays the editor
+   like Details, where a grid area would push it off the screen. */
+@media (min-width: 1112px) {
+  #screen-sources .sources-debugger.debugger-sidebar { grid-column: 3; grid-row: 1; }
+}
+.debugger-sidebar-head { display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 0 6px 0 12px; border-bottom: 1px solid var(--line-soft); }
+.debugger-sidebar-title { flex: none; margin: 0; color: var(--text); font: 600 12px var(--sans); }
+.debugger-sidebar-mode { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-size: 11px; }
+.debugger-sidebar-close { flex: none; width: 24px; height: 24px; display: grid; place-items: center; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--muted); font-size: 14px; line-height: 1; }
+.debugger-sidebar-close:hover { background: var(--panel-3); color: var(--text); }
+.debugger-sidebar-status { margin: 0; padding: 6px 12px; border-bottom: 1px solid var(--line-soft); color: var(--muted); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
+.debugger-sidebar-status:is([data-kind="disconnected"], [data-kind="malformed"]) { color: var(--amber); }
+.debugger-sidebar-sections { min-height: 0; overflow: auto; overscroll-behavior: contain; }
+#screen-sources .debugger-section > summary { gap: 8px; }
+.debugger-section-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.debugger-section-count { flex: none; max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 400 11px var(--sans); font-variant-numeric: tabular-nums; }
+.debugger-section[data-stale="true"] .debugger-section-count::after { content: " · last read"; }
+.debugger-section[data-stale="true"] .debugger-section-body { opacity: .72; }
+#screen-sources .debugger-section-body.debug-pane-body { display: grid; gap: 6px; padding: 0 0 10px; }
+.debugger-note { margin: 0; padding: 0 12px 0 24px; color: var(--muted); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
+.debugger-note[data-kind="warning"] { color: var(--amber); }
+.debugger-note[data-kind="gap"] { color: var(--amber); }
+.debugger-note-error { color: var(--red); }
+.debugger-link { all: unset; cursor: pointer; color: var(--accent); overflow-wrap: anywhere; }
+.debugger-link:hover { text-decoration: underline; }
+.debugger-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+.debugger-off { color: var(--faint); }
+
+/* Lists mount only the rows in view; rows are absolutely positioned. */
+.debugger-list { position: relative; max-height: 240px; overflow: auto; overscroll-behavior: contain; border-block: 1px solid var(--line-soft); background: var(--panel); }
+.debugger-observations .debugger-list { height: clamp(132px, 36vh, 360px); max-height: none; }
+.debugger-list-space { position: relative; width: 100%; }
+.debugger-list-row, .debugger-list-group { position: absolute; left: 0; right: 0; box-sizing: border-box; }
+.debugger-list-group { display: flex; align-items: center; gap: 6px; padding: 0 12px 0 24px; color: var(--muted); font-size: 11px; }
+.debugger-list-group-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.debugger-list-count { flex: none; min-width: 18px; padding: 0 5px; border-radius: 8px; background: var(--panel-3); color: var(--text); font: 600 10px/15px var(--sans); text-align: center; font-variant-numeric: tabular-nums; }
+.debugger-list-row { display: grid; grid-template-rows: 18px 16px; align-content: center; row-gap: 1px; padding: 0 12px 0 22px; cursor: default; border-left: 2px solid transparent; }
+.debugger-list-row:hover { background: var(--panel-2); }
+.debugger-list-row[aria-selected="true"] { background: color-mix(in srgb, var(--accent) 16%, transparent); border-left-color: var(--accent); }
+.debugger-list:focus-visible .debugger-list-row[data-active="true"] { box-shadow: inset 0 0 0 1px var(--accent); }
+.debugger-row-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.debugger-chip { flex: none; max-width: 132px; padding: 0 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid var(--line-soft); border-radius: 4px; color: var(--muted); font: 10px/14px var(--sans); }
+.debugger-list-row[data-kind="exception_observation"] .debugger-chip, .debugger-list-row[data-kind="csp_violation"] .debugger-chip { border-color: color-mix(in srgb, var(--amber) 50%, transparent); color: var(--amber); }
+.debugger-row-main { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font: 12px var(--mono); }
+.debugger-row-main[data-missing="true"] { color: var(--faint); font-family: var(--sans); font-size: 11px; }
+.debugger-row-state { flex: none; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 11px var(--sans); font-variant-numeric: tabular-nums; }
+.debugger-row-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 11px/16px var(--mono); font-variant-numeric: tabular-nums; }
+
+/* Observations: kind filter, notes, list, older page and record details. */
+.debugger-observations { display: grid; gap: 6px; min-width: 0; }
+.debugger-kinds { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 12px 0 24px; }
+.debugger-kind { flex: none; height: 22px; padding: 0 8px; border: 1px solid var(--line-soft); border-radius: 11px; background: transparent; color: var(--muted); font: 11px var(--sans); }
+.debugger-kind:hover { color: var(--text); }
+.debugger-kind[aria-pressed="true"] { border-color: var(--line); background: var(--panel-3); color: var(--text); }
+.debugger-observation-notes, .debugger-thread-notes, .debugger-watch-state { display: grid; gap: 4px; min-width: 0; }
+.debugger-older { justify-self: start; margin-left: 24px; }
+.debugger-detail { display: grid; gap: 6px; margin: 0 12px 0 24px; padding: 8px; border: 1px solid var(--line-soft); border-radius: var(--control-radius); background: var(--panel); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
+.debugger-detail .debugger-note { padding: 0; }
+.debugger-detail-head { display: flex; align-items: flex-start; gap: 8px; }
+.debugger-detail-head strong { flex: 1 1 auto; min-width: 0; color: var(--text); font: 12px/18px var(--mono); }
+.debugger-detail-close { flex: none; width: 22px; height: 22px; display: grid; place-items: center; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--muted); font-size: 13px; line-height: 1; }
+.debugger-detail-close:hover { background: var(--panel-3); color: var(--text); }
+.debugger-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.debugger-detail-actions .secondary-button { max-width: 100%; min-height: 26px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.debugger-fields, .debugger-rules { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 10px; margin: 0; }
+.debugger-rules { padding: 0 12px 0 24px; font-size: 11px; line-height: 16px; }
+.debugger-fields dt, .debugger-rules dt { grid-column: 1; color: var(--faint); }
+.debugger-fields dd, .debugger-rules dd { grid-column: 2; margin: 0; min-width: 0; color: var(--text); font-family: var(--mono); overflow-wrap: anywhere; }
+.debugger-rules dd.debugger-off { color: var(--faint); }
+.debugger-stack { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; font: 11px/16px var(--mono); }
+.debugger-stack-frame { min-width: 0; color: var(--muted); overflow-wrap: anywhere; }
+
+/* Watch rules form: the Console's live document only. */
+.debugger-watch-form { display: grid; gap: 8px; padding: 0 12px 0 24px; }
+.debugger-field { display: grid; gap: 3px; min-width: 0; color: var(--muted); font-size: 11px; }
+.debugger-field-label { color: var(--text); font-weight: 500; }
+.debugger-field-hint { color: var(--faint); }
+.debugger-input, .debugger-select { min-width: 0; padding: 3px 8px; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--panel-2); color: var(--text); font: 12px/18px var(--mono); }
+.debugger-input { resize: vertical; }
+.debugger-select { height: 26px; padding-top: 0; padding-bottom: 0; font-family: var(--sans); }
+.debugger-watch-switches { display: flex; flex-wrap: wrap; align-items: end; gap: 6px 14px; }
+.debugger-check { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; color: var(--text); font-size: 11px; }
+.debugger-watch-form .debugger-note { padding: 0; }
+.debugger-watch-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.debugger-watch-actions .secondary-button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Pausing: one state from the reported availability, never a control. */
+.debugger-pausing-state strong { color: var(--text); }
+.debugger-section[data-debugger-section="pausing"] .debugger-fields { padding: 0 12px 0 24px; font-size: 11px; line-height: 16px; }

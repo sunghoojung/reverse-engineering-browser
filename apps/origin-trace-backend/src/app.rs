@@ -38,7 +38,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 67] = [
+const UI_ASSETS: [&str; 69] = [
     "index.html",
     "block_graph.css",
     "block_graph.js",
@@ -106,6 +106,8 @@ const UI_ASSETS: [&str; 67] = [
     "native_console_completion.js",
     "xrefs_view.js",
     "xrefs_view.css",
+    "debugger_sidebar.js",
+    "debugger_sidebar.css",
 ];
 /// Flags a blocking read (cross-references or an artifact map) as abandoned
 /// when its request future is dropped.

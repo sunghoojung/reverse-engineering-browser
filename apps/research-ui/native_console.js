@@ -927,5 +927,18 @@
     if (event.key.toLowerCase() === 'j' && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey) { event.preventDefault(); setOpen(root.hidden); }
   });
   new MutationObserver(() => { if (!root.hidden) initialize(); }).observe(root, {attributes: true, attributeFilter: ['hidden']});
+  // The debugger sidebar arms watch rules only through this connection: the
+  // live capture document selected and confirmed here, through the same
+  // queue, never retried (debugger_sidebar.js).
+  globalThis.RebNativeConsole = Object.freeze({
+    liveDocument() {
+      if (!session || disconnected || documentSource !== 'live_capture' || !selectedDocument()) return null;
+      return {session_id: session, target_id: controls.target.value, label: controls.target.selectedOptions[0]?.textContent ?? ''};
+    },
+    watch(rules) {
+      if (!this.liveDocument()) return Promise.resolve({status: 'error', text: 'No live Console connection to a selected document'});
+      return runtime(rules ? {operation: 'watch', rules} : {operation: 'unwatch'});
+    }
+  });
   renderControls();
 })();

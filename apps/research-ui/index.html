@@ -14,6 +14,7 @@
     <link rel="stylesheet" href="flow_workspace.css">
     <link rel="stylesheet" href="agent_panel.css">
     <link rel="stylesheet" href="session_panel.css">
+    <link rel="stylesheet" href="debugger_sidebar.css">
   </head>
   <body>
     <div class="app">
@@ -281,6 +282,7 @@
                 <span id="source-location" class="source-location">Select a captured artifact</span>
                 <button id="source-quick-open" class="source-tool" type="button">Open file</button>
                 <input id="source-search" class="source-search" type="search" maxlength="512" placeholder="Find" aria-label="Find in source" aria-keyshortcuts="Meta+F Control+F" aria-describedby="source-search-status" title="Find retained text; Enter for next, Shift+Enter for previous (single-line literal, first 1000 matches)" />
+                <button id="source-debugger-toggle" class="source-tool" type="button" aria-controls="debugger-sidebar" aria-expanded="false" aria-pressed="false" title="Threads, watch rules and native observations; never pauses">Debugger</button>
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
                 <button id="source-graph" class="source-tool" type="button" aria-label="Show basic-block graph" aria-pressed="false" hidden>Graph</button>
                 <button id="source-map" class="source-tool" type="button" aria-label="Show artifact map" aria-pressed="false" hidden>Map</button>
@@ -343,6 +345,7 @@
 
               </div>
             </aside>
+            <aside id="debugger-sidebar" class="sources-debugger debugger-sidebar" aria-label="Debugger" hidden></aside>
           </section>
 
           <section id="screen-vm" class="screen" aria-label="Virtual machine investigation" hidden>
@@ -964,5 +967,6 @@
     <script src="session_panel.js"></script>
     <script src="vm_program_workspace.js"></script>
     <script src="xrefs_view.js"></script>
+    <script src="debugger_sidebar.js"></script>
   </body>
 </html>

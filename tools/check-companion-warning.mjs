@@ -44,7 +44,9 @@ try {
     for(const name of ['events.jsonl','traces.jsonl','signals.jsonl'])await writeFile(join(stores,name),'');
   }
   const child=spawn('xcodebuild',['test','-project',join(root,'tools/companion-warning-ui/CompanionWarningUITests.xcodeproj'),
-    '-scheme','CompanionWarningUITests','-destination','platform=macOS',
+    // One architecture: this Mac's. A Debug build otherwise compiles x86_64 too.
+    '-scheme','CompanionWarningUITests','-destination',`platform=macOS,arch=${execFileSync('uname',['-m'],{encoding:'utf8'}).trim()}`,
+    'ONLY_ACTIVE_ARCH=YES',
     '-derivedDataPath',join(temporary,'derived'),'-resultBundlePath',result,'-parallel-testing-enabled','NO'],
   {cwd:temporary,detached:true,env:{...process.env,TEST_RUNNER_REB_COMPANION_WARNING_APP:app,
     TEST_RUNNER_REB_COMPANION_WARNING_ROOT:temporary,TEST_RUNNER_REB_COMPANION_WARNING_BRAVE:executable}});

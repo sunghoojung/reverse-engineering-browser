@@ -243,7 +243,9 @@ async function runClientProjectSmoke(app, directory) {
   const stores=join(directory,'client-project'),output=join(directory,'client-project-panels');
   await mkdir(stores);await mkdir(output);
   const child=spawn('xcodebuild',['test','-project',join(root,'tools/client-project-ui/ClientProjectUITests.xcodeproj'),
-    '-scheme','ClientProjectUITests','-destination','platform=macOS',
+    // One architecture: this Mac's. A Debug build otherwise compiles x86_64 too.
+    '-scheme','ClientProjectUITests','-destination',`platform=macOS,arch=${execFileSync('uname',['-m'],{encoding:'utf8'}).trim()}`,
+    'ONLY_ACTIVE_ARCH=YES',
     '-derivedDataPath',join(directory,'client-project-derived'),
     '-resultBundlePath',join(directory,'client-project-ui.xcresult'),
     '-parallel-testing-enabled','NO'],{cwd:directory,env:{...process.env,

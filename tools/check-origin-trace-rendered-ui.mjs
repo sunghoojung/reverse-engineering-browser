@@ -197,7 +197,9 @@ fetch("/getcaptcha");
   const missingBrave = join(temporary, 'no-brave', 'Brave Browser Development.app', 'Contents', 'MacOS', 'Brave Browser Development');
   const derived = join(root, 'build/rendered-ui-derived');
   log += await run('xcodebuild', ['build-for-testing', '-project', join(harness, 'OriginTraceRenderedUITests.xcodeproj'),
-    '-scheme', 'OriginTraceRenderedUITests', '-destination', destination, '-derivedDataPath', derived],
+    // Only the destination's architecture; a Debug build otherwise compiles x86_64 too.
+    '-scheme', 'OriginTraceRenderedUITests', '-destination', destination, '-derivedDataPath', derived,
+    'ONLY_ACTIVE_ARCH=YES'],
   {timeout: 600000, label: 'XCTest bundle build'});
   const products = join(derived, 'Build/Products');
   const generated = (await readdir(products)).find(name => name.endsWith('.xctestrun') && !name.startsWith('hosted'));

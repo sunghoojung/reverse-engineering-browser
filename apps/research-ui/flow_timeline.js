@@ -357,14 +357,22 @@ function flowGapMarkText(gap) {
   return `${gap.weight.toLocaleString('en-US')} ${gap.weight === 1n ? 'record' : 'records'} dropped by a full queue`;
 }
 
+/** One page of the filtered event read, parsed, within the page byte budget. */
+async function flowTimelinePage(url, signal) {
+  const response = await fetch(url, {cache: 'no-store', signal});
+  if (!response.ok) throw await responseError(response, `The event store returned ${response.status}.`);
+  const buffer = await response.arrayBuffer();
+  if (buffer.byteLength > FLOW_TIMELINE_LIMITS.maxPageBytes) throw Error('An event page was larger than the page budget.');
+  return JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(buffer));
+}
+
 /**
- * The timeline view. `fetchJSON(url, signal)` returns a parsed page;
- * `onSelect(selection | null)` and `onFollow(selection)` report the chosen
+ * The timeline view. `onSelect(selection | null)` and `onFollow(selection)` report the chosen
  * sample, call or request to the workspace, `onPartial(partial)` follows
  * every read, and `describeRequest(process, request)` names a renderer
  * request when the app lists it.
  */
-function createFlowTimeline({root, fetchJSON, onSelect, onFollow, onPartial, describeRequest}) {
+function createFlowTimeline({root, onSelect, onFollow, onPartial, describeRequest}) {
   const limits = FLOW_TIMELINE_LIMITS;
   const make = (tag, className = '', text = '') => { const element = document.createElement(tag); if (className) element.className = className; if (text) element.textContent = text; return element; };
   root.classList.add('flow-timeline');
@@ -431,7 +439,7 @@ function createFlowTimeline({root, fetchJSON, onSelect, onFollow, onPartial, des
       const budget = more ? limits.pagesPerRead : Math.max(limits.pagesPerRead, pagesHeld);
       while (pages < budget && collected.length < limits.maxRecords) {
         const parameters = new URLSearchParams({session_id: session, category: FLOW_TIMELINE_CATEGORY, type: FLOW_TIMELINE_TYPES.join(','), after, limit: String(limits.pageSize)});
-        const body = await fetchJSON(`/api/events?${parameters}`, abort.signal);
+        const body = await flowTimelinePage(`/api/events?${parameters}`, abort.signal);
         if (owner !== generation) return;
         if (!body || !Array.isArray(body.events) || !body.query || typeof body.query !== 'object') throw new TypeError('The event store returned a malformed page.');
         collected.push(...body.events.slice(0, limits.maxRecords - collected.length));

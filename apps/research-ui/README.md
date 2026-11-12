@@ -2068,9 +2068,13 @@ pane, tab or layout never changes the selection.
   module's name section. Empty, it says how to fill it. **Sources** opens the
   module in Sources at the function's first byte (its body's start), revealed
   the way the entropy map reveals a byte once the module's bytes are held; a
-  byte the hex view does not hold says so in the status bar. A session change
-  cancels a read or layout in flight and forgets the decoded graph and names,
-  so nothing from another session is drawn.
+  byte the hex view does not hold says so in the status bar. The function's
+  blocks are read only while the CFG pane is shown. A card picked in the graph
+  waits 150 ms first, so moving across cards reads only the card it stops on;
+  a function already loading is not read twice, and the last four functions
+  read or failed stay, so returning to one needs no read. A session change
+  cancels a read or layout in flight and forgets the decoded graphs and
+  names, so nothing from another session is drawn.
 - **Lineage** (rose): the selected request's recorded predecessors from
   `/api/origin-trace`, what Steps used to show, with the event under
   **Details**. Each link shows how sure it is by line style (solid observed,

@@ -156,14 +156,20 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     flashTimer = setTimeout(() => { status.textContent = ''; status.hidden = true; }, 4000);
   };
 
-  // CFG pane: the Sources block graph view and its layout worker.
-  const cfg = {fn: null, mark: null, key: null, loaded: false, result: null, generation: 0, abort: null, view: null, runner: null, error: null, names: new Map()};
-  function ensureCfgView() {
+  // CFG pane: one Wasm function's basic blocks, read and drawn as Sources
+  // does. Each function's read is idle (not in `reads`), loading, ready or
+  // failed. A read starts only while the pane is shown, the read of a
+  // function already loading is reused, and the last few results are kept,
+  // so returning to a function needs no read. A pick from the graph waits a
+  // moment first, so moving across cards reads only the card it stops on.
+  const cfg = {fn: null, mark: null, reads: new Map(), shown: null, active: false, abort: null, timer: 0, view: null, runner: null, names: new Map()};
+  const cfgKey = fn => `${fn.artifact_id}:${fn.function_index}`;
+  function cfgView() {
     if (cfg.view) return cfg.view;
     cfg.view = createBlockGraphView(cfgHost, {
       onSelect: (offset, block, graphDoc) => cfgPicked(offset, block, graphDoc),
       onReveal: (offset, block, graphDoc) => cfgPicked(offset, block, graphDoc),
-      retry: () => loadCfg(cfg.fn, {offset: cfg.mark, force: true}),
+      retry: () => { cfg.reads.delete(cfgKey(cfg.fn)); ensureCfg(); },
       titleOf: graphDoc => cfg.fn?.name || `func ${graphDoc.functionIndex}`,
       statsPrefix: graphDoc => (cfg.fn?.name ? `func ${graphDoc.functionIndex}` : '')
     });
@@ -175,12 +181,18 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     open.title = 'Open the module in Sources at this function';
     open.addEventListener('click', () => { if (cfg.fn) openSource({artifact_id: cfg.fn.artifact_id, offset: cfgFirstByte()}); });
     cfg.view.tools.append(open, focusButton('cfg'));
+    renderCfgChrome();
     return cfg.view;
+  }
+  /** The shown function's laid-out graph while the view draws it, else null. */
+  function cfgDrawn() {
+    const key = cfg.fn ? cfgKey(cfg.fn) : null;
+    return key && cfg.shown === `${key}:ready` ? cfg.reads.get(key).result : null;
   }
   /** The function's first byte: its body's start in the module, which the
    * graph document names, else its lowest block start; null before a read. */
   function cfgFirstByte() {
-    const graph = cfg.result?.flowKey === cfg.key ? cfg.result.graph : null;
+    const graph = cfgDrawn()?.graph;
     if (!graph) return null;
     if (Number.isSafeInteger(graph.byteOffset)) return graph.byteOffset;
     let first = null;
@@ -201,80 +213,105 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   function functionNames(artifactId) {
     if (!nameReads.has(artifactId)) {
       if (nameReads.size >= 8) nameReads.delete(nameReads.keys().next().value);
-      nameReads.set(artifactId, (async () => {
-        try {
-          const response = await fetch(`/api/wasm/functions?artifact_id=${encodeURIComponent(artifactId)}`, {cache: 'no-store'});
-          if (!response.ok) return new Map();
-          const index = await response.json();
-          if (index?.schema !== 'wasm-function-index-v1' || !Array.isArray(index.names)) return new Map();
-          return new Map(index.names.filter(entry => Array.isArray(entry) && Number.isSafeInteger(entry[0]) && typeof entry[1] === 'string').map(([at, name]) => [at, name.slice(0, 128)]));
-        } catch { return new Map(); }
-      })());
+      nameReads.set(artifactId, readWasmFunctionIndex(artifactId).then(index => index.names, () => new Map()));
     }
     return nameReads.get(artifactId);
   }
+  /** Names a Wasm function once its module's names are read; a read from an
+   * earlier session names nothing. Resolves when the name is applied. */
+  function nameCfgFunction(fn) {
+    if (fn.name) return Promise.resolve();
+    const names = functionNames(fn.artifact_id);
+    return names.then(found => { if (nameReads.get(fn.artifact_id) === names) nameFunction(fn, found.get(fn.function_index)?.slice(0, 128)); });
+  }
   function nameFunction(fn, name) {
-    if (!name || fn.name) return;
-    cfg.names.set(`${fn.artifact_id}:${fn.function_index}`, name);
-    const named = {...fn, name, label: name};
-    if (cfg.fn?.key === fn.key) cfg.fn = named;
+    if (!name || cfg.names.get(cfgKey(fn)) === name) return;
+    cfg.names.set(cfgKey(fn), name);
+    if (cfg.fn?.key === fn.key) { cfg.fn = {...cfg.fn, name, label: name}; renderCfgChrome(); }
     // A name changes no selection key, so the trail is redrawn here.
-    if (selection.fn?.key === fn.key) { selection = {...selection, fn: named}; renderTrail(); renderTabs(); }
+    if (selection.fn?.key === fn.key) { selection = {...selection, fn: {...selection.fn, name, label: name}}; renderTrail(); renderTabs(); }
   }
-  /** Opens one function's CFG; `offset` marks the block that holds it. */
-  async function loadCfg(fn, {offset = null, force = false} = {}) {
-    if (!fn || !fn.artifact_id || fn.artifact_id === '0' || !Number.isSafeInteger(fn.function_index)) return;
-    const key = `${fn.artifact_id}:${fn.function_index}`;
+  /** Shows a function in the CFG pane, marking the block that holds
+   * `offset`. In the split the pane opens beside the graph when `open`,
+   * unless the researcher hid it; `wait` delays the read for a graph pick. */
+  function showCfg(fn, offset = null, {open = false, wait = false} = {}) {
+    const opened = open && !cfgUserHidden && !split.cfg;
+    if (opened) { split.cfg = true; savePrefs(); }
+    // Only the shown function's read runs: another one in flight stops.
+    if (!cfg.fn || cfgKey(cfg.fn) !== cfgKey(fn)) cancelCfgRead();
     cfg.fn = fn; cfg.mark = Number.isFinite(offset) ? offset : null;
-    renderCfgChrome();
-    if (!force && cfg.key === key && cfg.loaded) { applyCfgMark(); renderCfgSamples(); return; }
-    cfg.key = key; cfg.loaded = false; cfg.error = null;
-    if (!visible) return;
-    const view = ensureCfgView();
-    const owner = ++cfg.generation;
-    cfg.abort?.abort(); cfg.abort = new AbortController();
-    view.activate();
-    view.setTitle(fn.name || `func ${fn.function_index}`);
-    view.setState('loading', 'Decoding basic blocks…');
-    renderCfgChrome();
-    try {
-      const names = fn.name ? null : functionNames(fn.artifact_id);
-      let result = !force && cfg.result?.flowKey === key ? cfg.result : null;
-      if (!result) {
-        const response = await fetch(`/api/wasm/graph?artifact_id=${encodeURIComponent(fn.artifact_id)}&function=${fn.function_index}`, {cache: 'no-store', signal: cfg.abort.signal});
-        if (!response.ok) { let text = `The block graph read returned ${response.status}.`; try { text = (await response.json()).error || text; } catch { /* keep the status text */ } throw Error(text); }
-        const buffer = await response.arrayBuffer();
-        if (owner !== cfg.generation) return;
-        view.setState('loading', 'Laying out the graph…');
-        result = await cfg.runner.run({type: 'wasm', buffer, metrics: view.measurements(), engine: blockGraphEngine()}, [buffer]);
-        if (owner !== cfg.generation) return;
-        result.graph.functionIndex = fn.function_index;
-        result.flowKey = key;
-      }
-      if (names) nameFunction(fn, (await names).get(fn.function_index));
-      if (owner !== cfg.generation) return;
-      cfg.result = result; cfg.loaded = true;
-      view.setResult(result);
-      applyCfgMark();
-    } catch (error) {
-      if (owner !== cfg.generation || error?.name === 'AbortError') return;
-      cfg.error = error instanceof TypeError ? 'The evidence service is unreachable. Check that the session is still running.' : error.message;
-      view.setState('error', cfg.error, true);
-    }
+    nameCfgFunction(fn);
+    clearTimeout(cfg.timer);
+    cfg.timer = wait && !cfgDrawn() ? setTimeout(() => { cfg.timer = 0; ensureCfg(); }, 150) : 0;
     renderCfgChrome(); renderCfgSamples(); renderTabs();
+    if (cfgDrawn()) markCfg();
+    if (opened) applyLayout(); else ensureCfg();
   }
-  function applyCfgMark() {
-    if (!cfg.loaded || !cfg.result || cfg.mark === null || !cfg.view) return;
-    const block = flowBlockAt(cfg.result.graph, cfg.mark);
-    if (block < 0) return;
-    cfg.view.select(block, flowRowAt(cfg.result.graph, cfg.result.starts, block, cfg.mark));
+  /** Draws the shown function while the pane is shown: a kept result, the
+   * read in flight or its failure, else a new read. */
+  function ensureCfg() {
+    if (!cfg.fn || !visible || !paneVisible('cfg')) return;
+    const key = cfgKey(cfg.fn), view = cfgView();
+    if (!cfg.active) { view.activate(); cfg.active = true; }
+    if (!cfg.reads.has(key) && !cfg.timer) readCfg(key, cfg.fn);
+    // A pick still waiting reads as loading.
+    const read = cfg.reads.get(key) ?? {status: 'loading'};
+    if (cfg.shown === `${key}:${read.status}`) return;
+    cfg.shown = `${key}:${read.status}`;
+    if (read.status === 'ready') {
+      cfg.reads.delete(key); cfg.reads.set(key, read);
+      view.setResult(read.result);
+      markCfg();
+      return;
+    }
+    view.setTitle(cfg.fn.name || `func ${cfg.fn.function_index}`);
+    if (read.status === 'error') view.setState('error', read.error, true);
+    else view.setState('loading', 'Decoding basic blocks…');
   }
+  async function readCfg(key, fn) {
+    const read = {status: 'loading'}, abort = new AbortController();
+    cfg.reads.set(key, read); cfg.abort = abort;
+    try {
+      const [result] = await Promise.all([loadWasmFunctionGraph({artifactId: fn.artifact_id, functionIndex: fn.function_index, view: cfg.view, runner: cfg.runner, signal: abort.signal}), nameCfgFunction(fn)]);
+      Object.assign(read, {status: 'ready', result});
+    } catch (error) {
+      Object.assign(read, error?.name === 'AbortError' ? {status: 'aborted'} : {status: 'error', error: graphReadMessage(error)});
+    } finally {
+      if (cfg.abort === abort) cfg.abort = null;
+    }
+    // A read cancelled, or forgotten with its session, changes nothing.
+    if (cfg.reads.get(key) !== read) return;
+    if (read.status === 'aborted') { cfg.reads.delete(key); return; }
+    // Keep the last four results and failures, the most recent last.
+    const settled = [...cfg.reads.keys()].filter(item => cfg.reads.get(item).status !== 'loading');
+    for (const old of settled.slice(0, -4)) cfg.reads.delete(old);
+    ensureCfg();
+  }
+  /** Stops the read in flight and a pick still waiting; neither is kept. */
+  function cancelCfgRead() {
+    clearTimeout(cfg.timer); cfg.timer = 0;
+    cfg.abort?.abort(); cfg.abort = null; cfg.runner?.cancel();
+  }
+  /** Marks the block (and row) that holds the shown mark, silently. */
+  function markCfg() {
+    const result = cfgDrawn();
+    if (!result || cfg.mark === null) return;
+    const block = flowBlockAt(result.graph, cfg.mark);
+    if (block >= 0) cfg.view.select(block, flowRowAt(result.graph, result.starts, block, cfg.mark));
+  }
+  /** Leaves the view: the canvas and drawing resources go, the kept results
+   * stay, so returning needs no read. */
   function releaseCfg() {
-    cfg.generation += 1; cfg.abort?.abort(); cfg.abort = null; cfg.runner?.cancel();
-    // The decoded result stays for one function so returning needs no read;
-    // the canvas and drawing resources go.
-    if (cfg.view) cfg.view.release();
-    cfg.loaded = false;
+    cancelCfgRead();
+    cfg.view?.release();
+    cfg.active = false; cfg.shown = null;
+  }
+  /** A new session: nothing read in the old one is drawn or reused. */
+  function forgetCfg() {
+    releaseCfg();
+    cfg.reads.clear(); cfg.names.clear(); nameReads.clear();
+    cfg.fn = null; cfg.mark = null;
+    renderCfgChrome();
   }
   function renderCfgChrome() {
     const hasFn = Boolean(cfg.fn);
@@ -317,13 +354,6 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   // Timeline pane.
   const timeline = createFlowTimeline({
     root: timelineRoot,
-    fetchJSON: async (url, signal) => {
-      const response = await fetch(url, {cache: 'no-store', signal});
-      if (!response.ok) { let text = `The event store returned ${response.status}.`; try { text = (await response.json()).error || text; } catch { /* keep the status text */ } throw Error(text); }
-      const buffer = await response.arrayBuffer();
-      if (buffer.byteLength > FLOW_TIMELINE_LIMITS.maxPageBytes) throw Error('An event page was larger than the page budget.');
-      return JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(buffer));
-    },
     describeRequest: findRendererRequest,
     onSelect: info => timelinePicked(info),
     onFollow: info => { timelinePicked(info); follow(); },
@@ -352,7 +382,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
       setSelection({...noCrumbs, call: callCrumb, fn, site: {offset: sample.offset, kind: sample.kind, label: `${flowHexOffset(sample.offset)} ${sample.kind}`}, sample: {key: info.key, label: `sample ${sample.ordinal}`},
         graphKey: sameCard ? selection.graphKey : null});
       graph.setMark({artifact_id: sample.artifact_id, function_index: sample.function_index, offset: sample.offset});
-      openCfg(fn, sample.offset, {auto: true});
+      showCfg(fn, sample.offset, {open: true});
     } else if (info.type === 'call') {
       setSelection({...noCrumbs, call: callCrumb});
       graph.setMark(null);
@@ -387,14 +417,6 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     if (name) cfg.names.set(`${artifactId}:${functionIndex}`, name);
     return {key: `wasm:${artifactId}:${functionIndex}`, artifact_id: String(artifactId), function_index: functionIndex, name, label: name || `func ${functionIndex}`};
   }
-  /** Shows the CFG for a function: in the split it appears beside the graph
-   * unless the researcher hid it; `auto` never moves away from another tab. */
-  function openCfg(fn, offset = null, {auto = false} = {}) {
-    if (!fn) return;
-    if (!cfgUserHidden && !split.cfg && auto) { split.cfg = true; savePrefs(); }
-    loadCfg(fn, {offset});
-    applyLayout();
-  }
 
   // Graph pane.
   /** What the graph selects, shown in the Related rail and the pane head. */
@@ -421,7 +443,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
       const fn = fnFor(info.artifact_id, info.function_index);
       const site = /^\+0x[0-9a-f]+$/i.test(info.row?.site ?? '') ? {offset: Number.parseInt(info.row.site.slice(3), 16), kind: info.row.op ?? 'site', label: `${info.row.site} ${info.row.op ?? ''}`.trim()} : null;
       setSelection({...noCrumbs, graphKey: info.key ?? null, fn, site});
-      openCfg(fn, site?.offset ?? null, {auto: true});
+      showCfg(fn, site?.offset ?? null, {open: true, wait: !followed});
       if (followed) reveal('cfg', {focus: true});
     } else {
       setSelection({...noCrumbs, graphKey: info.key ?? null, fn: info.key ? {key: info.key, artifact_id: null, function_index: null, name: info.name ?? null, label: info.name || info.kind || 'card'} : null});
@@ -539,7 +561,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
       if (target.sample) timeline.select(target.sample.key);
       else if (target.call) timeline.select(target.call.key);
       else timeline.clear();
-      if (target.fn?.function_index !== null && target.fn?.function_index !== undefined && target.fn.artifact_id) loadCfg(target.fn, {offset: target.site?.offset ?? null});
+      if (target.fn?.function_index !== null && target.fn?.function_index !== undefined && target.fn.artifact_id) showCfg(target.fn, target.site?.offset ?? null);
       if (target.graphKey) graphShown(graphAnswer(graph.select(target.graphKey)));
       graph.setMark(target.sample && target.fn?.artifact_id ? {artifact_id: target.fn.artifact_id, function_index: target.fn.function_index, offset: target.site?.offset ?? null} : null);
       reveal(entry.pane, {focus: true, record: false});
@@ -570,7 +592,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   }
   /** A crumb or Related entry jumps to its item in its pane. */
   function jump(crumb) {
-    if (crumb.kind === 'site' || (crumb.kind === 'fn' && crumb.pane === 'cfg')) { if (selection.fn) loadCfg(selection.fn, {offset: selection.site?.offset ?? null}); }
+    if (crumb.kind === 'site' || (crumb.kind === 'fn' && crumb.pane === 'cfg')) { if (selection.fn) showCfg(selection.fn, selection.site?.offset ?? null); }
     if (crumb.kind === 'fn' && crumb.pane === 'graph' && selection.fn?.key) graphShown(graphAnswer(graph.select(selection.fn.key)));
     if (crumb.kind === 'call' && selection.call) timeline.select(selection.call.key);
     if (crumb.kind === 'sample' && selection.sample) timeline.select(selection.sample.key);
@@ -581,7 +603,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   /** Enter: follow the selection into the pane that explains it. */
   function follow() {
     if (selection.sample || (selection.fn?.artifact_id && Number.isSafeInteger(selection.fn.function_index))) {
-      if (selection.fn) openCfg(selection.fn, selection.site?.offset ?? null);
+      if (selection.fn) showCfg(selection.fn, selection.site?.offset ?? null);
       reveal('cfg', {focus: true});
       return 'cfg';
     }
@@ -660,6 +682,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     if (effectiveMode === 'focus') renderRelated();
     // The canvases resize with their panes; the graph also observes its own.
     graph.resize();
+    ensureCfg();
   }
   function applySizes() {
     const width = body.clientWidth || 0, height = body.clientHeight || 0;
@@ -708,7 +731,6 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     }
     active = name;
     applyLayout();
-    if (name === 'cfg' && cfg.fn && !cfg.loaded) loadCfg(cfg.fn, {offset: cfg.mark});
     if (focus) focusPaneContent(name);
     if (record && before !== name && !changing) pushHistory(name);
     return true;
@@ -749,7 +771,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     if (mode !== 'split' || layout === 'compact') { flash('Pane toggles change the split; press Z to return to it.'); return; }
     if (layout === 'laptop' && name === 'cfg' && split.cfg && currentSideTab() !== 'cfg') { sideTab = 'cfg'; applyLayout(); return; }
     split[name] = !split[name];
-    if (name === 'cfg') { cfgUserHidden = !split.cfg; if (split.cfg && layout === 'laptop') sideTab = 'cfg'; if (split.cfg && cfg.fn && !cfg.loaded) loadCfg(cfg.fn, {offset: cfg.mark}); }
+    if (name === 'cfg') { cfgUserHidden = !split.cfg; if (split.cfg && layout === 'laptop') sideTab = 'cfg'; }
     if (name === 'lineage' && split.lineage && layout === 'laptop') sideTab = 'lineage';
     if (name === 'timeline' && split.timeline && layout === 'laptop') timelineOpen = false;
     if (!split[name] && active === name) active = 'graph';
@@ -798,7 +820,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
   });
   for (const [name, tab] of Object.entries(sideTabs)) {
     tab.addEventListener('click', () => {
-      if (name === 'cfg') { sideTab = 'cfg'; active = 'cfg'; applyLayout(); if (cfg.fn && !cfg.loaded) loadCfg(cfg.fn, {offset: cfg.mark}); return; }
+      if (name === 'cfg') { sideTab = 'cfg'; active = 'cfg'; applyLayout(); return; }
       sideTab = 'lineage'; setLineageTab(name);
     });
   }
@@ -887,7 +909,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
       const sites = timeline.samplesFor(cfg.fn.artifact_id, cfg.fn.function_index);
       if (sites.length) section(`CFG · ${cfg.fn.label}`, 'cfg', sites.slice(0, FLOW_WORKSPACE_LIMITS.related).map(site => entry(`${flowHexOffset(site.offset)} ${site.kind}`, `×${site.samples.length}`, () => {
         setSelection({site: {offset: site.offset, kind: site.kind, label: `${flowHexOffset(site.offset)} ${site.kind}`}});
-        loadCfg(cfg.fn, {offset: site.offset}); reveal('cfg', {focus: true});
+        showCfg(cfg.fn, site.offset); reveal('cfg', {focus: true});
       })), {label: 'Open', key: '2', aria: 'Open CFG', run: () => reveal('cfg', {focus: true})});
     }
     // The graph card: its row, and its callers and callees when the graph says.
@@ -1035,15 +1057,10 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
       if (String(nextSession ?? '') !== String(session ?? '')) {
         session = nextSession ? String(nextSession) : null;
         loadPrefs(session);
-        // The old session's CFG read, layout, decoded result and names must
-        // never land in or be reused by this one.
-        cfg.generation += 1; cfg.abort?.abort(); cfg.abort = null; cfg.runner?.cancel();
+        forgetCfg();
         // The app's request in this session is a pick of its own.
-        history = []; cursor = -1; requestRevision = null; graphInfo = null; cfg.fn = null; cfg.key = null; cfg.result = null; cfg.mark = null; cfg.loaded = false; cfg.error = null;
-        cfg.names.clear(); nameReads.clear();
-        if (cfg.view) cfg.view.release();
+        history = []; cursor = -1; requestRevision = null; graphInfo = null;
         selection = {request: null, call: null, fn: null, site: null, sample: null, step: null, graphKey: null};
-        renderCfgChrome();
       }
       const crumb = requestCrumb(request);
       // A revision the app made while the workspace changed something is
@@ -1067,7 +1084,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
       requestMeta.textContent = parts.join(' · '); requestMeta.hidden = !parts.length;
       graph.show({session, request: request?.renderer ?? null, stacks});
       timeline.sync(session);
-      if (!wasVisible) { applyLayout(); if (cfg.fn && !cfg.loaded) loadCfg(cfg.fn, {offset: cfg.mark}); }
+      if (!wasVisible) applyLayout();
       else renderTabs();
     },
     /** The lineage rows renderBacktrace just drew, for the Related rail. */

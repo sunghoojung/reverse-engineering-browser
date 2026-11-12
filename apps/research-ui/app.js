@@ -3639,6 +3639,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           candidates.find(event => integerText(event, 'request_id') !== '0') ?? null;
       }
 
+      /** The renderer request {process, request} a captured row's
+       * request_initiated record names, which Flow's stacks are keyed by. */
+      function rendererRequestOf(request) {
+        const initiated = request?.events?.find(event => event.type === 'request_initiated');
+        const id = investigationId(initiated?.request_id);
+        return id && id !== '0' ? {process: initiated.process_id, request: id} : null;
+      }
+
       function requestSignalProfileSelection() {
         const candidates = state.requests.filter(candidate => candidate.id === state.selectedRequestId);
         const request = candidates.length === 1 ? candidates[0] : null;
@@ -4393,10 +4401,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         item.append(row); return item;
       }
 
-      /** The session the Flow graph folds: the selected request's, else the first captured one. */
-      function flowGraphSession() {
-        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId) ?? null;
-        const root = requestTraceRoot(request) ?? state.requests.map(candidate => requestTraceRoot(candidate)).find(Boolean);
+      // A declaration, since the workspace asks for the request while it is built.
+      function flowSelectedRequest() {
+        return state.requests.find(candidate => candidate.id === state.selectedRequestId) ?? null;
+      }
+      /** The session Flow shows: the selected request's, else the first captured one's. */
+      function flowSession() {
+        let root = requestTraceRoot(flowSelectedRequest());
+        for (const candidate of state.requests) {
+          if (root) break;
+          root = requestTraceRoot(candidate);
+        }
         const session = investigationId(root?.session_id);
         return session && session !== '0' ? session : null;
       }
@@ -4405,17 +4420,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       function flowGraphStackCount() {
         return state.requests.reduce((count, request) => count + (request.initiator === 'script' ? 1 : 0), 0);
       }
-      /** The renderer request a Flow graph path names, from the row's request_initiated record. */
-      function flowGraphRequestKey() {
-        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId) ?? null;
-        const initiated = request?.events?.find(event => event.type === 'request_initiated');
-        const id = investigationId(initiated?.request_id);
-        return initiated && id && id !== '0' ? {process: initiated.process_id, request: id} : null;
-      }
       /** Shows the Flow workspace's panes for the selected request, or hides them. */
       function renderFlowWorkspace() {
         const showing = !document.querySelector('#screen-backtrace').hidden;
-        flowWorkspace.sync({visible: showing, session: flowGraphSession(), request: showing ? flowWorkspaceRequest() : null, revision: state.requestRevision, stacks: flowGraphStackCount()});
+        flowWorkspace.sync({visible: showing, session: flowSession(), request: showing ? flowWorkspaceRequest() : null, revision: state.requestRevision, stacks: flowGraphStackCount()});
       }
       /** Traffic's Trace origin and Evidence's Show in Flow: Flow with the
        * request selected and its Lineage showing. */
@@ -4424,34 +4432,37 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         flowWorkspace.reveal('lineage', {record: false});
         return true;
       }
+      /** How Flow names a captured request: its method and target without the
+       * scheme, cut to 48 characters. */
+      function flowRequestLabel(request) {
+        const target = String(request.path ?? '').replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
+        return `${request.method ?? ''} ${target.length > 48 ? `${target.slice(0, 47)}…` : target}`.trim();
+      }
       /** The selected request as the workspace names it: its trail crumb and request card. */
       function flowWorkspaceRequest() {
-        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId) ?? null;
+        const request = flowSelectedRequest();
         if (!request) return null;
-        const renderer = flowGraphRequestKey();
-        const path = String(request.path ?? '').replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, '') || String(request.path ?? '');
-        return {id: request.id, method: request.method, path: request.path, status: request.status ?? null, renderer,
-          label: `${request.method ?? ''} ${path.length > 48 ? `${path.slice(0, 47)}…` : path}${renderer ? ` #${renderer.request}` : ''}`.trim()};
+        const renderer = rendererRequestOf(request);
+        return {id: request.id, status: request.status ?? null, renderer, label: `${flowRequestLabel(request)}${renderer ? ` #${renderer.request}` : ''}`};
       }
       function flowWorkspaceSelectRequest(id) {
         if (state.selectedRequestId === id || !state.requests.some(candidate => candidate.id === id)) return;
         selectRequest(id);
         refreshOriginTrace();
       }
-      // Renderer request ID to the captured request row that names it, rebuilt
-      // only when the request list changes.
-      let flowRendererIndex = {requests: null, map: new Map()};
+      // The captured row each renderer request names, built once per request list.
+      const flowRendererIndexes = new WeakMap();
       function flowWorkspaceRendererRequest(process, request) {
-        if (flowRendererIndex.requests !== state.requests) {
-          const map = new Map();
+        let index = flowRendererIndexes.get(state.requests);
+        if (!index) {
+          index = new Map();
           for (const candidate of state.requests) {
-            const initiated = candidate.events?.find(event => event.type === 'request_initiated');
-            const id = investigationId(initiated?.request_id);
-            if (initiated && id && id !== '0') map.set(`${initiated.process_id}:${id}`, {id: candidate.id, label: `${candidate.method} ${String(candidate.path ?? '').replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')}`});
+            const renderer = rendererRequestOf(candidate);
+            if (renderer) index.set(`${renderer.process}:${renderer.request}`, {id: candidate.id, label: flowRequestLabel(candidate)});
           }
-          flowRendererIndex = {requests: state.requests, map};
+          flowRendererIndexes.set(state.requests, index);
         }
-        return flowRendererIndex.map.get(`${process}:${request}`) ?? null;
+        return index.get(`${process}:${request}`) ?? null;
       }
       /** Opens a Wasm module in Sources from the CFG pane, at the function's first byte. */
       function flowWorkspaceOpenSource({artifact_id: artifactId, offset = null}) {
@@ -4478,7 +4489,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           for (const candidate of choices) repeats.set(labelOf(candidate), (repeats.get(labelOf(candidate)) ?? 0) + 1);
           const options = choices.map(candidate => {
             const option = document.createElement('option'); option.value = candidate.id;
-            const label = labelOf(candidate), renderer = candidate.events?.find(event => event.type === 'request_initiated')?.request_id;
+            const label = labelOf(candidate), renderer = rendererRequestOf(candidate)?.request;
             option.textContent = repeats.get(label) > 1 && renderer ? `${label} · #${renderer}` : label;
             option.selected = candidate.id === state.selectedRequestId;
             return option;

@@ -620,6 +620,10 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   assert.deepEqual(context.__watchCalls.map(text => JSON.parse(text)), [{requests: [{method: 'POST', url_contains: '/api/x'}, {url_contains: '/collect'}],
     events: ['click', 'submit'], timers: true, csp: false, exceptions: 'uncaught', dom: []}]);
   assert.match(form.querySelector('.debugger-watch-result').textContent, /Armed on document 22/);
+  // Where a rule is armed, what it cannot observe is said (protocol/native-debugger-observation-v1.md).
+  for (const limit of [/only this document's main thread/, /not its workers, other frames or same-process iframes/, /navigation clears the rules/i, /cannot be armed ahead of a page load/]) {
+    assert.match(form.querySelector('.debugger-watch-limits').textContent, limit);
+  }
   form.querySelector('input[type="text"]').value = 'x'.repeat(28);
   form.dispatchEvent(new window.Event('submit', {cancelable: true}));
   await settle();

@@ -984,5 +984,18 @@ await check('showObservation chooses the record Traffic names', async () => {
   ui.close();
 });
 
+// What a watch rule cannot see is said where rules are armed and where they stand armed.
+await check('watch rules state what they cannot observe', async () => {
+  const store = createStore(1);
+  store.watch = {state: 'armed', armed: {session_id: '5', target_id: '22', rules: {requests: [{url_contains: '/api/x'}]}}};
+  const ui = mount({store, globals: {RebNativeConsole: {liveDocument: () => ({session_id: '5', target_id: '22', label: 'top #22'}), watch: async () => ({status: 'ok'})}}});
+  ui.open();
+  await until(() => ui.sidebar.querySelector('.debugger-watch-limits'), 'the arming form');
+  const limits = ui.text('.debugger-watch-limits');
+  for (const said of [/only this document's main thread/, /workers, other frames or same-process iframes/, /navigation clears the rules/i, /cannot be armed ahead of a page load/]) assert.match(limits, said);
+  assert.match(ui.text('.debugger-watch-state'), /Only its main thread is observed/);
+  ui.close();
+});
+
 console.log(`PASS debugger sidebar: ${results.length} cases with real timers (offline DOM model; no rendered layout claimed)`);
 for (const name of results) console.log(`  ${name}`);

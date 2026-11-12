@@ -973,6 +973,10 @@ function debuggerWatchSection() {
     const switches = debuggerNode('div', 'debugger-watch-switches');
     switches.append(timers.label, csp.label, field('Exceptions', exceptions));
     const dom = debuggerNode('p', 'debugger-note');
+    // What a rule cannot see, said where it is armed: a wait for it would time
+    // out with nothing missing (protocol/native-debugger-observation-v1.md).
+    const limits = debuggerNode('p', 'debugger-note debugger-watch-limits',
+      'Observes only this document\'s main thread: not its workers, other frames or same-process iframes. Its navigation clears the rules, and they cannot be armed ahead of a page load, so what a page does while it loads is not observed.');
     const arm = debuggerNode('button', 'secondary-button debugger-arm');
     arm.type = 'submit';
     const actions = debuggerNode('div', 'debugger-watch-actions');
@@ -1061,7 +1065,7 @@ function debuggerWatchSection() {
       if (watch.state === 'busy') nodes.push(debuggerNote('A Console action holds the session, so the armed set is read again shortly.', 'warning'));
       else if (!armed) nodes.push(debuggerNote('No rules armed. Nothing is observed until a set is armed on one live document.'));
       else {
-        nodes.push(debuggerNote(`Armed on Console document ${armed.target_id} (Console session ${armed.session_id}). Navigation, a new capture, Clear rules or a Console Stop disarms them.`));
+        nodes.push(debuggerNote(`Armed on Console document ${armed.target_id} (Console session ${armed.session_id}). Only its main thread is observed. Navigation, a new capture, Clear rules or a Console Stop disarms them.`));
         const thread = view.thread;
         if (thread?.kind === 'document' && thread.target_id !== armed.target_id) nodes.push(debuggerNote(`The selected document ${thread.target_id} has no rules; they are armed on document ${armed.target_id}.`, 'warning'));
         const list = debuggerNode('dl', 'debugger-rules');

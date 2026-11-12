@@ -51,6 +51,30 @@ function pauseDocument(answer) {
   return answer && typeof answer === 'object' ? answer : null;
 }
 
+/* Nothing in these sections may be operated unless the last read is good and
+ * a browser serves the debugger. The sidebar's contract is stricter than
+ * "looks inert": every control is a form control with `disabled` set, so one
+ * gate decides it for all of them. */
+function pauseLive(view) {
+  return view?.status === 'ready' && pauseDocument(view?.document)?.availability === 'available';
+}
+
+// Before the first read, or in a window with no backend, every section says
+// why it has nothing rather than looking like an empty debugger.
+const DEBUGGER_PAUSE_UNREAD = Object.freeze({
+  loading: 'Reading the debugger state.',
+  disconnected: 'The backend is not answering, so the pausing debugger cannot be read.',
+  malformed: 'The last answer could not be read, so nothing here is shown.',
+  unavailable: 'This window has no backend, so the pausing debugger cannot be read.'
+});
+
+function pauseUnread(view) {
+  const answer = pauseDocument(view?.document);
+  if (answer) return null;
+  return pauseNode('p', 'debugger-pause-unread',
+    DEBUGGER_PAUSE_UNREAD[view?.status] ?? 'The debugger state has not been read yet.');
+}
+
 /* The one place that decides whether an action can be sent. Without an
  * authorized document, or without the pause and lease the action needs,
  * nothing is sent and the control is disabled instead. */
@@ -169,7 +193,8 @@ function createDebuggerPause(hooks = {}) {
     const answer = pauseDocument(view?.document);
     pauseSync(state, answer);
     body.replaceChildren();
-    if (!answer) return;
+    const unread = pauseUnread(view);
+    if (unread) { body.append(unread); return; }
     if (answer.availability !== 'available') {
       body.append(pauseNode('p', 'debugger-pause-unsupported',
         DEBUGGER_PAUSE_UNSUPPORTED[answer.reason] ?? 'The pausing debugger is unsupported.'));
@@ -197,16 +222,17 @@ function createDebuggerPause(hooks = {}) {
       : 'running'));
 
     const controls = pauseNode('div', 'debugger-pause-controls');
+    const frozen = !pauseLive(view) || state.busy;
     const paused = Boolean(answer.paused);
     for (const [text, action] of [['Resume', 'resume'], ['Step over', 'step_over'], ['Step into', 'step_into'],
       ['Step out', 'step_out'], ['Release lease', 'release_lease']]) {
       const command = pauseCommand(answer, action);
       controls.append(pauseButton(text, 'debugger-pause-control',
-        () => { void send(command); }, !paused || !command || state.busy));
+        () => { void send(command); }, frozen || !paused || !command));
     }
     const pauseNow = pauseCommand(answer, 'pause', {confirm_pause: true});
     controls.append(pauseButton('Pause', 'debugger-pause-control',
-      () => { void send(pauseNow); }, paused || !pauseNow || state.busy));
+      () => { void send(pauseNow); }, frozen || paused || !pauseNow));
     body.append(controls);
     notice(body);
   }
@@ -215,6 +241,9 @@ function createDebuggerPause(hooks = {}) {
     const answer = pauseDocument(view?.document);
     pauseSync(state, answer);
     body.replaceChildren();
+    const unread = pauseUnread(view);
+    if (unread) { body.append(unread); return; }
+    const frozen = !pauseLive(view) || state.busy;
     const breakpoints = Array.isArray(answer?.breakpoints) ? answer.breakpoints : [];
     if (!breakpoints.length) {
       body.append(pauseNode('p', 'debugger-pause-empty', 'No breakpoint is set on this document.'));
@@ -230,7 +259,7 @@ function createDebuggerPause(hooks = {}) {
       row.append(pauseNode('span', 'debugger-pause-state', state_text.join(' · ')));
       const command = pauseCommand(answer, 'remove_breakpoint', {breakpoint_id: breakpoint.breakpoint_id});
       row.append(pauseButton('Remove', 'debugger-pause-remove',
-        () => { void send(command); }, !command || state.busy));
+        () => { void send(command); }, frozen || !command));
       list.append(row);
     }
     body.append(list);
@@ -241,6 +270,9 @@ function createDebuggerPause(hooks = {}) {
     const answer = pauseDocument(view?.document);
     pauseSync(state, answer);
     body.replaceChildren();
+    const unread = pauseUnread(view);
+    if (unread) { body.append(unread); return; }
+    const frozen = !pauseLive(view) || state.busy;
     const pause = answer?.paused ? answer.pause : null;
     if (!pause) {
       body.append(pauseNode('p', 'debugger-pause-empty', 'The page is not paused, so there is no call stack.'));
@@ -259,7 +291,7 @@ function createDebuggerPause(hooks = {}) {
     body.append(list);
     if (shown.length < frames.length) {
       body.append(pauseButton(`Show all ${frames.length} frames`, 'debugger-pause-more',
-        () => { state.allFrames = true; repaint(); }));
+        () => { state.allFrames = true; repaint(); }, frozen));
     }
     const counts = [`${pause.frames_recorded} recorded`];
     if (pause.async_frames) counts.push(`${pause.async_frames} async`);
@@ -272,6 +304,9 @@ function createDebuggerPause(hooks = {}) {
     const answer = pauseDocument(view?.document);
     pauseSync(state, answer);
     body.replaceChildren();
+    const unread = pauseUnread(view);
+    if (unread) { body.append(unread); return; }
+    const frozen = !pauseLive(view) || state.busy;
     const frame = answer?.paused ? answer.pause?.frames?.[0] : null;
     if (!frame) {
       body.append(pauseNode('p', 'debugger-pause-empty', 'The page is not paused, so there are no scopes.'));
@@ -286,7 +321,7 @@ function createDebuggerPause(hooks = {}) {
           if (page) state.expanded.delete(scope.object_id);
           else void expand(answer, scope.object_id, 0);
           repaint();
-        }, state.busy));
+        }, frozen));
       if (page) {
         const list = pauseNode('ul', 'debugger-pause-list');
         for (const item of page.items) {
@@ -299,7 +334,7 @@ function createDebuggerPause(hooks = {}) {
         block.append(list);
         if (page.next !== null) {
           block.append(pauseButton(`Show more of ${page.total}`, 'debugger-pause-more',
-            () => { void expand(answer, scope.object_id, Number(page.next)); }, state.busy));
+            () => { void expand(answer, scope.object_id, Number(page.next)); }, frozen));
         }
       }
       body.append(block);
@@ -311,10 +346,14 @@ function createDebuggerPause(hooks = {}) {
     const answer = pauseDocument(view?.document);
     pauseSync(state, answer);
     body.replaceChildren();
+    const unread = pauseUnread(view);
+    if (unread) { body.append(unread); return; }
+    const frozen = !pauseLive(view) || state.busy;
     const field = pauseNode('input', 'debugger-pause-watch-input');
     field.type = 'text';
     field.placeholder = 'Expression on the innermost paused frame';
     field.maxLength = DEBUGGER_PAUSE.expressionBytes;
+    field.disabled = frozen;
     const add = pauseButton('Watch', 'debugger-pause-watch-add', () => {
       const expression = String(field.value ?? '').trim();
       if (!expression || state.watches.length >= DEBUGGER_PAUSE.watchLimit ||
@@ -323,7 +362,7 @@ function createDebuggerPause(hooks = {}) {
       field.value = '';
       void runWatch(answer, state.watches.length - 1);
       repaint();
-    }, state.busy);
+    }, frozen);
     const form = pauseNode('div', 'debugger-pause-watch-form');
     form.append(field, add);
     body.append(form);
@@ -342,12 +381,13 @@ function createDebuggerPause(hooks = {}) {
           : answer?.paused ? 'not read yet' : 'the page is running'));
       row.append(pauseButton('Read', 'debugger-pause-read',
         () => { void runWatch(answer, index); },
-        !answer?.paused || !pauseCommand(answer, 'evaluate_on_frame', {call_frame_index: 0, expression}) || state.busy));
+        frozen || !answer?.paused ||
+        !pauseCommand(answer, 'evaluate_on_frame', {call_frame_index: 0, expression})));
       row.append(pauseButton('Remove', 'debugger-pause-remove', () => {
         state.watches.splice(index, 1);
         state.watchResults.delete(expression);
         repaint();
-      }, state.busy));
+      }, frozen));
       list.append(row);
     });
     body.append(list);
@@ -365,7 +405,9 @@ function createDebuggerPause(hooks = {}) {
       painted.set(id, {body, view});
       render(body, view);
     };
-    return {id, title, order, render: paint,
+    // `native: 'pausing'` is what lets these sections use the paused-state
+    // words at all, and what the sidebar's own Pausing statement names.
+    return {id, title, order, native: 'pausing', render: paint,
       release: () => { painted.delete(id); }, ...extra};
   }
 

@@ -497,7 +497,7 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   assert.throws(() => runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'x', order: 1, native: 'cdp', render() {}})`, context), /native must be pausing/);
   // A native section may name what it presents. While unsupported, an enabled
   // control in it fails whatever it is called; disabled, the section passes.
-  runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Breakpoints', order: 55, native: 'pausing', render(body) {
+  runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Paused frames', order: 55, native: 'pausing', render(body) {
     body.textContent = 'from the registry';
     const go = document.createElement('button'); go.textContent = 'Go'; body.append(go);
   }})`, context);
@@ -511,16 +511,17 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
     ['an editable region', "const d = document.createElement('div'); d.setAttribute('contenteditable', 'true'); body.append(d);", /stays disabled/],
     ['a tab', "const d = document.createElement('div'); d.setAttribute('role', 'tab'); body.append(d);", /stays disabled/],
     ['another removed feature', "const b = document.createElement('button'); b.textContent = 'Import cookies'; b.disabled = true; body.append(b);", /implies a CDP control/]]) {
-    runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Breakpoints', order: 55, native: 'pausing', render(body) {
+    runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Paused frames', order: 55, native: 'pausing', render(body) {
       body.textContent = 'from the registry'; ${make}
     }})`, context);
     assert.throws(checkVocabulary, failure, `self-test: ${label} in a pausing section fails`);
   }
-  const remove = runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Breakpoints', order: 55, native: 'pausing', render(body) {
+  const remove = runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Paused frames', order: 55, native: 'pausing', render(body) {
     body.textContent = 'from the registry';
     const step = document.createElement('button'); step.textContent = 'Step over'; step.disabled = true; body.append(step);
   }})`, context);
-  assert.match(sidebar.querySelector(nativeAvailability).textContent, /The controls in the Breakpoints section stay disabled\./,
+  assert.match(sidebar.querySelector(nativeAvailability).textContent,
+    /The controls in .*Paused frames.* sections? stay disabled\./,
     'the Pausing statement names the native sections registered');
   const ids = sectionIds();
   assert(ids.indexOf('pausing') < ids.indexOf('later'), `sections join by order: ${ids}`);
@@ -534,7 +535,8 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   checkVocabulary();
   remove();
   assert.equal(sidebar.querySelector('[data-debugger-section="later"]'), null, 'a removed section leaves');
-  assert.doesNotMatch(sidebar.querySelector(nativeAvailability).textContent, /Breakpoints/, 'a removed native section is no longer named');
+  assert.doesNotMatch(sidebar.querySelector(nativeAvailability).textContent, /Paused frames/,
+    'a removed native section is no longer named');
   // Closing stops every read and releases rows and the tree scope.
   toggle.click();
   await settle();

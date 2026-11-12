@@ -59,13 +59,13 @@ function paused(overrides = {}) {
   for (const [reason, text] of [['browser_debugger_unsupported', 'No browser serves'],
     ['peer_unavailable', 'did not answer']]) {
     const body = create('div', 'body');
-    sectionOf(panel, 'pause').render(body, {document: {contract_version: 1, availability: 'unsupported',
+    sectionOf(panel, 'pause').render(body, {status: 'ready', document: {contract_version: 1, availability: 'unsupported',
       reason, active_indication: null, document: null, paused: false, pause: null, breakpoints: []}});
     assert(body.textContent.includes(text), reason);
     assert(!body.textContent.includes('Debugger active'), reason);
   }
   const stack = create('div', 'stack');
-  sectionOf(panel, 'call-stack').render(stack, {document: {availability: 'unsupported', paused: false, pause: null}});
+  sectionOf(panel, 'call-stack').render(stack, {status: 'ready', document: {availability: 'unsupported', paused: false, pause: null}});
   assert(stack.textContent.includes('not paused'));
 }
 
@@ -79,7 +79,7 @@ function paused(overrides = {}) {
       paused: false, resumed: true, lease: null, pause: null, breakpoint: null, value: null, properties: null})};
   });
   const body = create('div', 'body');
-  const view = {document: paused()};
+  const view = {status: 'ready', document: paused()};
   sectionOf(panel, 'pause').render(body, view);
   assert(body.textContent.includes('Debugger active (detectable)'));
   assert(body.textContent.includes('target 22, the top frame'));
@@ -105,7 +105,7 @@ function paused(overrides = {}) {
   const {panel, create} = load(async () => { throw new Error('no request is sent while running'); });
   const body = create('div', 'body');
   const running = paused({paused: false, pause: null, lease: {lease_id: '4', state: 'released', expires_in_ms: 0}});
-  sectionOf(panel, 'pause').render(body, {document: running});
+  sectionOf(panel, 'pause').render(body, {status: 'ready', document: running});
   assert(body.textContent.includes('released; the page is running'));
   for (const label of ['Resume', 'Step over', 'Step into', 'Step out', 'Release lease']) {
     assert(buttonNamed(body, label).disabled, label);
@@ -113,7 +113,7 @@ function paused(overrides = {}) {
   assert(!buttonNamed(body, 'Pause').disabled);
   const expired = paused({paused: false, pause: null, lease: {lease_id: '4', state: 'expired', expires_in_ms: 0}});
   const second = create('div', 'second');
-  sectionOf(panel, 'pause').render(second, {document: expired});
+  sectionOf(panel, 'pause').render(second, {status: 'ready', document: expired});
   assert(second.textContent.includes('expired; the browser resumed the page'));
 }
 
@@ -126,7 +126,7 @@ function paused(overrides = {}) {
   deep.pause.frames_recorded = 1024;
   deep.pause.async_frames = 32;
   deep.pause.frames_truncated = true;
-  sectionOf(panel, 'call-stack').render(body, {document: deep});
+  sectionOf(panel, 'call-stack').render(body, {status: 'ready', document: deep});
   const frames = body.all.slice(1).filter(node => node.className === 'debugger-pause-frame');
   assert.equal(frames.length, 2);
   assert.equal(buttonNamed(body, 'Show all'), undefined, 'a short stack needs no control');
@@ -142,10 +142,10 @@ function paused(overrides = {}) {
   long.pause.frames_recorded = 200;
   const wide = create('div', 'wide');
   const section = sectionOf(panel, 'call-stack');
-  section.render(wide, {document: long});
+  section.render(wide, {status: 'ready', document: long});
   assert.equal(wide.all.slice(1).filter(node => node.className === 'debugger-pause-frame').length, 64);
   buttonNamed(wide, 'Show all 200 frames').listeners.click[0]();
-  section.render(wide, {document: long});
+  section.render(wide, {status: 'ready', document: long});
   assert.equal(wide.all.slice(1).filter(node => node.className === 'debugger-pause-frame').length, 200);
 }
 
@@ -165,7 +165,7 @@ function paused(overrides = {}) {
     return {ok: true, status: 200, json: async () => ({action: body.action, status: 'ok', paused: true,
       resumed: false, lease: null, pause: null, breakpoint: null, value: null, properties: pages[sent.length - 1]})};
   });
-  const view = {document: paused()};
+  const view = {status: 'ready', document: paused()};
   const body = create('div', 'body');
   const scope = sectionOf(panel, 'scope');
   scope.render(body, view);
@@ -188,7 +188,7 @@ function paused(overrides = {}) {
   // A new lease is a new pause: nothing read under the old one survives.
   const next = paused();
   next.lease = {lease_id: '5', state: 'active', expires_in_ms: 60000};
-  scope.render(body, {document: next});
+  scope.render(body, {status: 'ready', document: next});
   assert(!body.textContent.includes('onerror'), 'values do not cross a pause');
 }
 
@@ -207,7 +207,7 @@ function paused(overrides = {}) {
       status: replies[sent.length - 1].threw ? 'evaluation_error' : 'ok', paused: true, resumed: false,
       lease: null, pause: null, breakpoint: null, value: replies[sent.length - 1], properties: null})};
   });
-  const view = {document: paused()};
+  const view = {status: 'ready', document: paused()};
   const body = create('div', 'body');
   const watch = sectionOf(panel, 'watch');
   watch.render(body, view);
@@ -226,7 +226,7 @@ function paused(overrides = {}) {
   assert.equal(panel.state.watches.length, 2);
 
   const running = paused({paused: false, pause: null, lease: {lease_id: '4', state: 'released', expires_in_ms: 0}});
-  watch.render(body, {document: running});
+  watch.render(body, {status: 'ready', document: running});
   assert(body.textContent.includes('the page is running'));
   for (const button of buttons(body).filter(node => node.textContent === 'Read')) {
     assert(button.disabled, 'a watch cannot be read while the page runs');
@@ -238,7 +238,7 @@ function paused(overrides = {}) {
   const {panel, create} = load(async () => ({ok: false, status: 503,
     json: async () => ({error: 'No Brave build serves the native debugger.', code: 'dependency_unavailable'})}));
   const body = create('div', 'body');
-  const view = {document: paused()};
+  const view = {status: 'ready', document: paused()};
   const section = sectionOf(panel, 'pause');
   section.render(body, view);
   buttonNamed(body, 'Resume').listeners.click[0]();
@@ -254,7 +254,7 @@ function paused(overrides = {}) {
     json: async () => ({action: JSON.parse(options.body).action, status: 'stale_lease', paused: true,
       resumed: false, lease: null, pause: null, breakpoint: null, value: null, properties: null})}));
   const body = create('div', 'body');
-  const view = {document: paused()};
+  const view = {status: 'ready', document: paused()};
   const section = sectionOf(panel, 'pause');
   section.render(body, view);
   buttonNamed(body, 'Step over').listeners.click[0]();
@@ -282,7 +282,7 @@ function paused(overrides = {}) {
       condition_set: false, logpoint: false}
   ];
   const body = create('div', 'body');
-  sectionOf(panel, 'breakpoints').render(body, {document: answer});
+  sectionOf(panel, 'breakpoints').render(body, {status: 'ready', document: answer});
   assert(body.textContent.includes('Logpoint · script 11 line 7:4'));
   assert(body.textContent.includes('never pauses'));
   assert(body.textContent.includes('Conditional · script 11 line 9:2'));
@@ -296,7 +296,7 @@ function paused(overrides = {}) {
   assert.deepEqual(sent[0], {action: 'remove_breakpoint', target_id: '22',
     breakpoint_id: '1'});
   const empty = create('div', 'empty');
-  sectionOf(panel, 'breakpoints').render(empty, {document: paused({breakpoints: []})});
+  sectionOf(panel, 'breakpoints').render(empty, {status: 'ready', document: paused({breakpoints: []})});
   assert(empty.textContent.includes('No breakpoint is set'));
 }
 
@@ -304,7 +304,7 @@ function paused(overrides = {}) {
 {
   const {panel, create} = load(async () => { throw new Error('no request is sent'); });
   const body = create('div', 'body');
-  sectionOf(panel, 'pause').render(body, {document: paused({document: null, active_indication: null,
+  sectionOf(panel, 'pause').render(body, {status: 'ready', document: paused({document: null, active_indication: null,
     paused: false, pause: null, last_clear: 'navigated', lease: null})});
   assert(body.textContent.includes('Debugger attached to no document'));
   assert(body.textContent.includes('cleared: navigated'));
@@ -316,7 +316,7 @@ function paused(overrides = {}) {
 {
   const {panel, create} = load(async () => { throw new Error('unused'); });
   const body = create('div', 'body');
-  sectionOf(panel, 'pause').render(body, {document: paused({
+  sectionOf(panel, 'pause').render(body, {status: 'ready', document: paused({
     active_indication: 'Debugger active (detectable)',
     document: {target_id: '23', frame: 'child'}})});
   assert(body.textContent.includes('Debugger active (detectable)'));
@@ -333,6 +333,61 @@ function paused(overrides = {}) {
   assert.deepEqual(added.map(section => section.id), ['pause', 'breakpoints', 'call-stack', 'scope', 'watch']);
   assert.deepEqual(added.map(section => section.order), [50, 51, 52, 53, 54]);
   assert.equal(context.RebDebuggerPause.register({}), null, 'no registry, no sections');
+}
+
+// The sidebar's contract for a later section: every one of these is a
+// pausing section, and the real registry refuses anything else.
+{
+  const added = [];
+  const registry = {addSection(section) { added.push(section); return () => {}; }};
+  const {context} = load(async () => { throw new Error('unused'); });
+  context.RebDebuggerPause.register(registry);
+  for (const section of added) {
+    assert.equal(section.native, 'pausing', section.id);
+    assert(section.order >= 50, section.id);
+    assert(typeof section.render === 'function' && typeof section.release === 'function', section.id);
+  }
+  assert(!added.some(section => section.id === 'pausing'), 'pausing is the sidebar\'s own id');
+}
+
+// Nothing is operable unless the last read is good and a browser serves the
+// debugger: every control is a form control with disabled set, which is what
+// the sidebar's guard checks. No control is a link, a summary or anything
+// else that cannot be disabled.
+{
+  const {panel, create} = load(async () => { throw new Error('nothing is sent while frozen'); });
+  const frozen = [
+    ['loading', null],
+    ['disconnected', null],
+    ['malformed', null],
+    ['unavailable', null],
+    ['ready', {...paused(), availability: 'unsupported', reason: 'browser_debugger_unsupported'}],
+    ['loading', paused()],
+    ['disconnected', paused()]
+  ];
+  for (const [status, document_] of frozen) {
+    for (const id of ['pause', 'breakpoints', 'call-stack', 'scope', 'watch']) {
+      const body = create('div', `${id}-${status}`);
+      sectionOf(panel, id).render(body, {status, document: document_});
+      const operable = body.all.slice(1).filter(node => ['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(node.tagName));
+      for (const node of operable) assert(node.disabled === true, `${id} ${status} ${node.textContent}`);
+      const unreachable = body.all.slice(1).filter(node => ['A', 'SUMMARY', 'DETAILS'].includes(node.tagName) ||
+        node.getAttribute?.('tabindex') !== null && node.getAttribute?.('tabindex') !== undefined ||
+        node.getAttribute?.('role') !== null && node.getAttribute?.('role') !== undefined ||
+        node.getAttribute?.('contenteditable') !== null && node.getAttribute?.('contenteditable') !== undefined);
+      assert.equal(unreachable.length, 0, `${id} ${status} draws only controls that can be disabled`);
+      if (!document_) {
+        assert(body.textContent.length > 0, `${id} ${status} says why it has nothing`);
+        assert(!body.textContent.includes('No breakpoint is set'), `${id} ${status} claims nothing about a document it has not read`);
+      }
+    }
+  }
+  // The Watch expression field is a control too.
+  const watch = create('div', 'watch-frozen');
+  sectionOf(panel, 'watch').render(watch, {status: 'ready',
+    document: {...paused(), availability: 'unsupported', reason: 'peer_unavailable'}});
+  const field = watch.all.slice(1).find(node => node.tagName === 'INPUT');
+  assert(field && field.disabled === true, 'the watch expression field is disabled');
 }
 
 // The shipped asset lists name the module, and app.js loads nothing of its own.

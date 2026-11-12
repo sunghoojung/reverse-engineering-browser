@@ -141,6 +141,15 @@ in a native pausing section that is not a really disabled form control while
 the debugger is unsupported, and compares that statement with
 `/api/native-debugger`.
 
+`test32PausingSections` opens the same sidebar with the pausing debugger's own
+five sections registered (`pause`, `breakpoints`, `call-stack`, `scope`,
+`watch`, marked `data-debugger-native="pausing"`). The backend reports the
+pausing debugger unsupported, so at both window sizes the Pausing statement
+must say so and name all five sections, every control those sections draw must
+be a form control with `disabled` set, and nothing that cannot be disabled, a
+link, a `summary`, a `role`, a `tabindex` or an editable region, may appear.
+It photographs them in both themes.
+
 `test27StartPanelStartRetryAndKeyboard` takes the start panel through a whole
 decision at both window sizes. The driver names a `REB_BRAVE_BINARY` that does
 not exist, so Start fails at once and no browser launches on any machine. The

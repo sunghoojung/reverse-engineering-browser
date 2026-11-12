@@ -3427,6 +3427,18 @@ final class OriginTraceRenderedUITests: XCTestCase {
       }
       try await assertInert(ui, "\(size.name) pausing sections")
       try await assertLayout(ui, "#debugger-sidebar", "\(size.name) pausing sections")
+      // The phase 1 sections fill the pane, so the photograph is of what this
+      // test is about: the five pausing sections, scrolled to.
+      _ = try await ui.value("""
+        (() => { document.querySelector('#debugger-sidebar [data-debugger-section="pause"]')
+          ?.scrollIntoView({block: 'start'}); return true; })()
+        """)
+      try await ui.waitUntil("""
+        (() => { const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections');
+          const first = document.querySelector('#debugger-sidebar [data-debugger-section="pause"]');
+          if (!pane || !first) return false;
+          return first.getBoundingClientRect().top < pane.getBoundingClientRect().bottom; })()
+        """, "\(size.name): the pausing sections did not come into view")
       try await ui.screenshot("debugger-pausing-sections-\(size.name)")
       try await lightScreenshot(ui, "debugger-pausing-sections", size.name)
     }

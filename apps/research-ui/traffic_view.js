@@ -306,6 +306,11 @@ function trafficStatusCell(request) {
     return {text: 'End lost', className: 'status-neutral status-unobserved',
       title: 'A service worker ended this request without a response, but the renderer had already reused the slot that held its start, so its outcome was not recorded.'};
   }
+  if (request.status === 'finished') {
+    return {text: 'Finished', className: 'status-neutral', title: request.staticData
+      ? 'No HTTP status: archive resource. Blink decoded this MHTML archive resource itself and the load finished; an archive resource carries no HTTP status.'
+      : 'No HTTP status: Blink reused a resource whose response carried none, and the load finished.'};
+  }
   if (request.status === 'pending' && request.loaderObserved === false) {
     return {text: 'No loader', className: 'status-neutral status-unobserved',
       title: 'Browser loader not observed: only the renderer recorded this request, so its status, size and completion are unknown.'};
@@ -690,6 +695,7 @@ function renderTrafficDetails(container, request, notice = '', targetView = null
   const fullTarget = request.urlTruncated && targetView?.status === 'ready' && targetView.complete;
   const values = [trafficRequestUrl(request, targetView),
     request.documentUrl ?? 'Not captured', request.method, request.failed ? 'Failed' : request.endLost ? 'End lost'
+      : request.status === 'finished' ? `Finished · no HTTP status${request.staticData ? ' (archive resource)' : ''}`
       : request.status === 'pending'
       ? (Number.isInteger(request.provisionalStatus) ? `Pending · provisional HTTP ${request.provisionalStatus}` : 'Pending')
       : request.status, trafficOriginLabel(request), request.id,

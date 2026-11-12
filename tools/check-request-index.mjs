@@ -43,6 +43,11 @@ assert(lost && lost.status === 'incomplete' && view.trafficStatusCell(lost).text
 const raced = shownRows.find(row => row.raceNetwork);
 assert(raced && raced.status === 'failed' && raced.fromServiceWorker && view.trafficStatusCell(raced).text === 'Failed');
 assert.equal(shownRows.filter(row => row.endLost || row.raceNetwork).length, 2);
+// An MHTML archive reuse has no HTTP status, yet it finished: never No loader.
+const archive = shownRows.find(row => row.memoryCache && row.status === 'finished');
+const archiveCell = archive && view.trafficStatusCell(archive);
+assert(archiveCell && archiveCell.text === 'Finished' && archiveCell.title.startsWith('No HTTP status: archive resource') &&
+  archive.time !== 'pending', 'an archive reuse reads Finished with no HTTP status');
 for (const [sort, orders] of Object.entries(golden.orders)) {
   for (const [direction, sign] of [['asc', 1], ['desc', -1]]) {
     assert.deepEqual(orders[direction], view.trafficSortedRequests(model, sort, sign).map(request => request.id), `${sort} ${direction}`);

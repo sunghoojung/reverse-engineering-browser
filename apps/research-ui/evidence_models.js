@@ -1708,6 +1708,8 @@
           row.status = answer.failed ? 'failed' : code > 0 ? code : 'pending';
           row.errorCode = answer.errorCode;
         }
+        // A reuse is a finished load; an MHTML archive resource has no HTTP status.
+        for (const row of rows) if (row.memoryCache && row.status === 'pending') row.status = 'finished';
         // A service worker's end the renderer could not join to its start
         // names the row by process and request ID, as a request_tab_link does.
         const byId = new Map(rows.map(row => [row.id, row]));

@@ -1256,6 +1256,9 @@ fn view(row: &Row) -> View {
         json!("incomplete")
     } else if code > 0 {
         json!(code)
+    } else if row.memory_cache {
+        // A reuse is a finished load; an MHTML archive resource has no HTTP status.
+        json!("finished")
     } else {
         json!("pending")
     };
@@ -2814,6 +2817,14 @@ mod tests {
             b"service_worker_end_lost",
             json!({"initiator_process_id": 51, "initiator_request_id": 36, "frame_id": "0"}),
         );
+        // An MHTML archive resource Blink decoded itself: finished, no HTTP status.
+        store.push(
+            51,
+            37,
+            "memory_cache_reuse",
+            &reuse(1, true, b"archive.example.test"),
+            merge(class(2), json!({"decoded_body_length": "64"})),
+        );
     }
     fn write(path: &Path, store: &Store) {
         fs::write(path, store.bytes()).unwrap();
@@ -2930,6 +2941,19 @@ mod tests {
                 "renderer",
                 false,
                 true
+            ]),
+            json!([
+                "archive.example.test",
+                "host",
+                "finished",
+                "img",
+                true,
+                true,
+                false,
+                false,
+                "renderer",
+                false,
+                false
             ]),
         ];
         assert_eq!(rows.iter().map(summary).collect::<Vec<_>>(), expected);

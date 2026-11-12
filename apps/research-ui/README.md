@@ -1292,7 +1292,9 @@ Protocol is available from the header menu.
   Pending has no response yet, and No loader means only the renderer recorded
   the request. End lost means the request's service worker ended it but the
   renderer had reused the slot holding its start, so its outcome is unknown
-  (a `service_worker_end_lost` gap). Once `response_started` arrives the row
+  (a `service_worker_end_lost` gap). Finished is a memory-cache reuse whose
+  resource carried no HTTP status, such as an MHTML archive resource; it
+  completed. Once `response_started` arrives the row
   shows that HTTP code, and until a terminal record follows, Time reads a dash
   and the tooltip says so. A service worker race route shows what the page
   received, which the worker or the network may have answered (the records do

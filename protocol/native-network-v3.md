@@ -326,7 +326,9 @@ Category `network`, renderer, the renderer sequence space. `frame_id` and
 `loader_kind` name the fetch's owner exactly as on `request_initiated`
 ([loader kind](#loader-kind) 16 to 21), `scheme_class` the URL's class
 (nonzero), `request_id` the fresh renderer request ID, `status_code` the
-reused response's HTTP status (0 when it has none), `decoded_body_length` its
+reused response's HTTP status (0 when it has none: at the pin
+`CreateResourceForStaticData` sets none for an MHTML archive resource),
+`decoded_body_length` its
 decoded body length as DevTools reports it (0 or more). Tab, navigation,
 artifact, parent, BrowserContext, encoded length, error, resource type, flags
 and initiator fields are zero; the drain sets `tab_id` as for any renderer
@@ -628,8 +630,10 @@ proxy at the pin (`NavigationRequest` creates their factory without
   evidence recorded before scheme classes, renderer-only rows whose host is one
   bare label. It shows the hidden count and never changes stored evidence.
 - A `memory_cache_reuse` row is complete: the request index gives it
-  `memory_cache` true, its status, its decoded size and a type from its
-  resource type, and Traffic labels it "(memory cache)" in Size, with a General
+  `memory_cache` true, its status (status `finished` when the record has
+  none, which Traffic shows as "Finished" with "No HTTP status: archive
+  resource" for static data, never Pending or No loader), its decoded size and
+  a type from its resource type, and Traffic labels it "(memory cache)" in Size, with a General
   note that no request was made (from the memory cache, or decoded from a
   `data:` URL or MHTML archive for static data). The footer shows
   "N memory-cache reuses not recorded" for class 70.

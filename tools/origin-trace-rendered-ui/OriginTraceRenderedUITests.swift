@@ -1284,7 +1284,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
           const text = `${root.innerText} ${nativeText}`;
           native.forEach(node => { node.hidden = false; });
           const reported = statement ? (await (await fetch('/api/native-debugger', {cache: 'no-store'})).json()).availability : null;
-          const controls = 'button, input, select, textarea, a[href], summary, [tabindex], [role]:not([role="presentation"]):not([role="none"]), [contenteditable]:not([contenteditable="false"])';
+          const controls = 'button, input, select, textarea, a[href], details, summary, [tabindex], [role]:not([role="presentation"]):not([role="none"]), [contenteditable]:not([contenteditable="false"])';
           const disabled = control => ['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(control.tagName) && control.matches(':disabled');
           const enabled = [...root.querySelectorAll('#debugger-sidebar .debugger-section[data-debugger-native="pausing"] > .debugger-section-body')]
             .flatMap(body => [...body.querySelectorAll(controls)]).filter(control => !disabled(control)).map(control => control.innerText || control.tagName);

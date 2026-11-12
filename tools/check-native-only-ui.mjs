@@ -132,9 +132,10 @@ const reachable = node => {
 };
 // Every element in a native pausing section a researcher could activate must
 // be a form control that is really disabled; aria-disabled leaves its handler
-// running, and a summary, a link, an editable region or any element given a
-// role (other than presentation or none) cannot be disabled.
-const pausingControls = 'button, input, select, textarea, a[href], summary, [tabindex], [role]:not([role="presentation"]):not([role="none"]), [contenteditable]:not([contenteditable="false"])';
+// running, and a details element (the browser draws its own toggle when it
+// has no summary), a summary, a link, an editable region or any element given
+// a role (other than presentation or none) cannot be disabled.
+const pausingControls = 'button, input, select, textarea, a[href], details, summary, [tabindex], [role]:not([role="presentation"]):not([role="none"]), [contenteditable]:not([contenteditable="false"])';
 const reallyDisabled = control => ['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(control.tagName) &&
   (control.disabled === true || Boolean(control.closest('fieldset[disabled]')));
 // Only the sidebar's registry writes the marker.
@@ -511,6 +512,7 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
     ['an aria-disabled button', "const b = document.createElement('button'); b.textContent = 'Go'; b.setAttribute('aria-disabled', 'true'); b.addEventListener('click', () => {}); body.append(b);", /stays disabled/],
     ['a div with role button', "const d = document.createElement('div'); d.setAttribute('role', 'button'); d.textContent = 'Go'; body.append(d);", /stays disabled/],
     ['a nested summary', "const d = document.createElement('details'); const m = document.createElement('summary'); m.textContent = 'More'; d.append(m); body.append(d);", /stays disabled/],
+    ['a details element with no summary', "const d = document.createElement('details'); d.textContent = 'More'; body.append(d);", /stays disabled/],
     ['an editable region', "const d = document.createElement('div'); d.setAttribute('contenteditable', 'true'); body.append(d);", /stays disabled/],
     ['a tab', "const d = document.createElement('div'); d.setAttribute('role', 'tab'); body.append(d);", /stays disabled/],
     ...['link', 'menuitem', 'switch', 'radio', 'treeitem'].map(role => [`a div with role ${role}`,

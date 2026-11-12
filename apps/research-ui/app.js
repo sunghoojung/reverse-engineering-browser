@@ -1401,6 +1401,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (loaded && !trafficIndexActive()) for (const id of loaded.keys()) if (id !== state.selectedRequestId) loaded.delete(id);
         if (!loaded?.size) {
           state.requests = state.nativeRequests;
+          markTrafficEndLostRows();
           return;
         }
         // Rows read on selection stay selectable and replace a window copy with fewer records.
@@ -1411,6 +1412,23 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const windowIds = new Set(state.nativeRequests.map(request => request.id));
         for (const [id, request] of loaded) if (!windowIds.has(id)) merged.push(request);
         state.requests = merged;
+        markTrafficEndLostRows();
+      }
+
+      // A service_worker_end_lost gap names its row by initiator fields, not
+      // request ID, so neither the network window nor a row's store read holds
+      // it; the index row does (protocol/native-network-v3.md). In place, since
+      // each poll builds fresh rows and the rebuild marks them again.
+      function markTrafficEndLost(request) {
+        if (request.endLost) return;
+        request.endLost = true;
+        if (request.rank < 5 && !request.failed && !request.interrupted) request.status = 'incomplete';
+      }
+
+      function markTrafficEndLostRows() {
+        const rows = state.trafficIndex?.answer?.()?.rows ?? [];
+        const lost = new Set(rows.filter(row => row.endLost).map(row => row.id));
+        if (lost.size) for (const request of state.requests) if (lost.has(request.id)) markTrafficEndLost(request);
       }
 
       function renderShellStatus() {
@@ -3512,6 +3530,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const indexed = state.trafficIndex?.row(id) ?? null;
         const retained = state.requests.find(request => request.id === id);
         if (retained && (!indexed || trafficRecordCount(retained) >= indexed.indexRow.records)) {
+          if (indexed?.endLost) markTrafficEndLost(retained);
           selectRequest(id);
           focusRequestRow(id);
         } else if (indexed) loadTrafficRequest(indexed, true);
@@ -3535,11 +3554,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           // Tab sets and links have no request ID, so the store read lacks them; the index row has them.
           Object.assign(request, {tabIds: indexed.tabIds, tabLink: indexed.tabLink, tabLinkLabel: indexed.tabLinkLabel,
             extensionId: indexed.extensionId, recordsPartial: partial});
-          // So does a service_worker_end_lost gap, which names its row by initiator fields.
-          if (indexed.endLost && !request.endLost) {
-            request.endLost = true;
-            if (request.rank < 5 && !request.failed && !request.interrupted) request.status = 'incomplete';
-          }
+          if (indexed.endLost) markTrafficEndLost(request);
           retainTrafficRequest(request);
           rebuildTrafficRequests();
           if (select) {

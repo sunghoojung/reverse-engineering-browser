@@ -139,8 +139,10 @@ Each request names the tab that caused it. Brave patch
 `0017-link-requests-to-tab-owners` records a factory's tab when it is created;
 Brave patch `0020-scope-native-proxy-factories` moves that decision to
 `browser/native_factory_scope.h`, which counts DevTools, extension-worker,
-WebUI and browser prefetch factories instead of recording them, decides per
-request whether a service worker no page used is counted, and records
+WebUI and browser prefetch factories instead of recording them, decides once
+per request (Brave patch `0022`, after the capture state) whether a service
+worker no page used is counted, sharing that answer with the drain for a
+renderer-issued request, and records
 extension workers under their extension id with
 `--reb-capture-extension-traffic`. Frameless factories read the owner content
 scopes around their creation through the `factory_owner_hook` component:
@@ -149,8 +151,11 @@ a nested worker's ancestor document (Chromium patch
 the version it updates or a starting worker's version (`0045`), an early-hints
 navigation's main frame (`0043`) and a browser-initiated prefetch's page
 (`0044`). A job also notes the version it starts, so that version's fetches
-link to its registrant tabs. Chromium patch `0042` names a worklet's creating
-document.
+link to its registrant tabs, and a starting worker names its token with its
+factories. Brave patch `0021` attaches only an observing proxy, a handler that
+changes nothing, to the early-hints factory and only while capture runs, so
+Shields and extensions never act on those preloads. Chromium patch `0042`
+names a worklet's creating document through `renderer/native_fetch_owner.h`.
 Chromium patch `0027-record-renderer-fetch-owners` scopes the fetch's own
 document or worker (`renderer/native_fetch_owner.h`) around `SendAsync`, so
 `request_initiated` carries a loader kind and that owner. `browser/native_tab_registry.h`

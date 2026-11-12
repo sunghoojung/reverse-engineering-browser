@@ -264,7 +264,12 @@ lists, to the overlay. Chromium patch `0058` gives the factories Chromium
 builds without a DevTools observer (shared-worker subresources, worker and
 service-worker main scripts, early-hints and browser prefetches) an agentless
 one in those sessions only, so their sent headers and cookies are reported
-too; downloads are left out on purpose. Chromium patch `0028` records
+too. Not built, on purpose: downloads (they share the browser-process factory
+with all browser traffic), service-worker scripts fetched through an
+extension's or DevTools' header client, and value digests for
+`document.cookie` reads (names only); the
+[contract](../../../protocol/native-network-v3.md#network-service-binding-at-the-pinned-chromium)
+gives each reason, and such a request says why on its Headers tab. Chromium patch `0028` records
 `document.cookie` and Cookie Store API calls in the renderer for the same
 sessions, naming each cookie a read returns.
 Renderer events use a bounded shared-memory queue with Mojo lifecycle control

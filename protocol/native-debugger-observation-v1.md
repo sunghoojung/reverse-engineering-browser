@@ -22,6 +22,16 @@ nothing. `get_native_debugger` reports the rules the renderer confirmed, the
 Console documents, recorded workers and observed frames (`threads`), and the
 newest 32 records decoded.
 
+Three limits follow from arming through a live document, and each one makes a
+wait time out with nothing missing from the store, so every place that arms a
+rule or waits on one states them:
+
+- Only the armed document's main thread matches. Workers, other frames and
+  same-process iframes never record, and one document is armed at a time.
+- Navigation of that document clears the rules.
+- Rules cannot be armed ahead of a page load. What a new page does before its
+  rules are armed is not observed.
+
 | Rule | Bound |
 | --- | --- |
 | `requests`: `url_contains` (1-256 bytes) and optional `method` | 8 |
@@ -45,6 +55,22 @@ observation records among the newest 2,048 records that are observations or
 gaps of any kind, within the newest 64 MiB of the store, at most 64.
 `observation_budget_gaps` lists the newest `debugger_observation_budget` gaps
 (above) in that scan, at most 16.
+
+`get_events` and `wait_for_events` put `debugger_observation` beside the hex
+payload of every record of types 40 to 45, so an agent "breaks" by waiting on
+a cursor filtered by `type`. It is the object `get_native_debugger` lists,
+from the same decoder, with `status: decoded`, plus `site` and `stack_read`,
+or `{status: invalid}` with no field for a record the core refuses. `site` is
+the record's own frame resolved as `get_request_stack` resolves it below:
+script URL, one-based line, UTF-16 column and function name when the source is
+retained, else a reason with the raw `script_id` and `position`. A filtered or
+cursor read resolves up to 32 distinct sites per page; the unfiltered polling
+window, a site past those 32 or a read whose identities or manifest failed
+keeps the raw frame with `resolution: {status: deferred}` and the reason
+`polling_window`, `site_limit` or `site_read_failed`. `stack_read` names the
+`get_request_stack` arguments for the record's whole stack. These fields hold
+identities, kinds, positions and names only, so the MCP content levels that
+omit captured content leave them whole.
 
 `get_request_stack` with `process_id` and `observation_sequence` reads one
 record of types 40 to 45 and resolves its stack like a request's. It adds

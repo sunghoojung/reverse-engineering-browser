@@ -547,6 +547,65 @@ asking, while the researcher watches every call. A complete loop:
 4. `session_action {"body": {"action": "end", "confirm": true}}`. The
    connection returns to the session it was opened on.
 
+## 25. Break on a request, a click handler or a CSP violation, without pausing
+
+Needs `--allow-effects`, a live capture of the authorized page and a Console
+connection to the document to watch (recipe 18). Nothing pauses: the page
+keeps running, and the agent "breaks" by waiting on a cursor filtered to one
+observation type ([native debugger observation v1](../../protocol/native-debugger-observation-v1.md)).
+Start the session with `request_stacks` to get stacks; without it they read
+`no_script`. Load the page first, then arm:
+
+```text
+native_console_action {"body": {"action": "runtime", "session_id": "<session_id>",
+  "target_id": "<id>", "command": {"operation": "watch", "rules": {
+  "requests": [{"url_contains": "/api/x", "method": "POST"}],
+  "events": ["click"], "csp": true}}}}
+wait_for_events {"timeout_ms": 1}
+```
+
+Then act (a click with recipe 17, or an `evaluate`), and wait with the
+cursor from the second call:
+
+```text
+wait_for_events {"type": "request_watch_match", "after": "<query.next_after>", "timeout_ms": 30000}
+```
+
+Good: each record has `debugger_observation` with `status: decoded`, the
+same fields `get_native_debugger` lists, `site` and `stack_read`:
+
+- `request_watch_match`: `detail.rule` is the request rule's index in the
+  armed set, `request_id` is the request, and `site` is null. Read the stack
+  that started it with `get_request_stack` and the arguments in `stack_read`
+  (drop `operation`): `frames`, innermost first, with `resolution.url`,
+  `line`, `column` and `function_name`.
+- `listener_dispatch`: `detail.event_type`,
+  `detail.target`, and `site.resolution` is the listener's file, line and
+  column. A click listener usually runs with no script on the stack, so
+  `stack.state` is `no_script` and `site` is the position to open.
+- `csp_violation`: `detail.directive`, `detail.disposition` and
+  `detail.blocked_host`, never a path or query.
+
+A `site` that did not resolve keeps its raw `script_id` and `position` with
+a reason; it is never guessed. `resolution.status: deferred` means this read
+did not try: the unfiltered polling window, more than 32 distinct sites on one
+page (`site_limit`), or a failed identity or manifest read. Read it with
+`stack_read`. `status: invalid` is a record the core refuses, with no fields.
+
+A timeout does not mean nothing happened. Rules match only the main thread of
+the document they were armed on, never a worker, another frame or a
+same-process iframe, and one document is armed at a time. A navigation clears
+them, and they cannot be armed ahead of a page load, so what a new page does
+before you arm it again is not recorded. `get_native_debugger` `watch` says
+what the renderer has armed now (`--permission ask` and up). A renderer
+stops after 1,024 records per capture configuration and leaves one
+`debugger_observation_budget` gap; `get_session_summary` lists it. Disarm with
+`{"operation": "unwatch"}`; `stop` disarms too.
+
+These fields carry identities, kinds, positions and names only, so they are
+the same at Read only as at Full access. The payload hex is what the content
+levels omit.
+
 ## Response shapes at a glance
 
 | Tool | Look at |
@@ -554,7 +613,7 @@ asking, while the researcher watches every call. A complete loop:
 | `get_session_summary` | `checks`, `events.by_type`, `events.frames`, `artifacts.items` |
 | `get_events` | `events`, `named_gaps`, `query` |
 | `get_artifacts` | `artifacts`, `query` |
-| `wait_for_events` | `wait.timed_out`, `events`, `query.next_after` |
+| `wait_for_events` | `wait.timed_out`, `events`, `query.next_after`; `debugger_observation` on types 40 to 45 |
 | `inspect_wasm` | `coverage`, then the requested section rows |
 | `start_live_session` | `session_id`, `url_opened`, `capture_observed`, `options` |
 | `session_action` `list_inputs` | `elements` with `role`, `name`, `visible`, `x`, `y` |

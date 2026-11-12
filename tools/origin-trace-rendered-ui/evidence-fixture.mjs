@@ -45,6 +45,7 @@ export const REGISTRANT_HOST = 'sw.install.test';
 export const BODY_CASE_PROCESS = 4949;
 export const REUSED_HOST = 'cdn.reused.test';
 export const REUSED_MARKER = '<img src=x onerror="window.__rebInjected=10">';
+export const REUSED_TARGET = '/sprite.json?v=1';
 export const WORKER_ANSWER_HOST = 'feed.worker.test';
 export const PARTIAL_HOST = 'events.partial.test';
 export const HEX_BODY_HOST = 'blob.hex.test';
@@ -631,8 +632,9 @@ async function bodyCaseRequests(template, firstSequence, firstTime, artifactsRoo
   reuse[5] = 4;
   reuse[6] = REUSED_HOST.length;
   reuse.write(REUSED_HOST, 8, 'ascii');
-  rendered('62', 'memory_cache_reuse', reuse.toString('hex'), {scheme_class: 2, loader_kind: 16, status_code: 200,
+  const reused = rendered('62', 'memory_cache_reuse', reuse.toString('hex'), {scheme_class: 2, loader_kind: 16, status_code: 200,
     decoded_body_length: String(sprite.length), initiator_process_id: renderer, initiator_request_id: 61});
+  rendered('62', 'request_target', requestTargetPayload(REUSED_TARGET), {parent_event_id: reused.sequence_number});
   // The page's request its service worker answered, and the worker's own fetch
   // of the same URL while the page's request was open.
   const page = rendered('63', 'request_initiated', hex(`GET ${WORKER_ANSWER_HOST}`), {scheme_class: 2, loader_kind: 16});

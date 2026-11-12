@@ -1857,8 +1857,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
     for size in windowSizes {
       let ui = try await prepare(size)
       try await show(ui, "traffic")
-      try await ui.click(row(62))
+      // Rows mount as they scroll, so each is revealed by its path first.
+      try await ui.click("#screen-traffic .request-row", containing: "\(expected.reusedHost)/sprite.json")
       try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      let selectedReuse = try await ui.value("document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"]')?.dataset.requestId ?? ''") as? String ?? ""
+      XCTAssertTrue(selectedReuse.hasSuffix(":R\(expected.bodyCaseProcess):62"), "\(size.name): the reuse row is selected: \(selectedReuse)")
       try await ui.click("#inspector-tab-response")
       try await ui.waitUntil("document.querySelector('#response-inspector .traffic-response-code') !== null",
         "\(size.name): the reused request's bytes did not load")
@@ -1881,11 +1884,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.screenshot("traffic-response-memory-cache-\(size.name)")
       // The link selects the request whose response Blink reused.
       try await ui.click("#response-inspector .traffic-response-open")
-      try await ui.waitUntil("document.querySelector(\(String(reflecting: row(61))))?.getAttribute('aria-selected') === 'true'",
+      try await ui.waitUntil("(document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"]')?.dataset.requestId ?? '').endsWith(':R\(expected.bodyCaseProcess):61')",
         "\(size.name): the reuse did not open its source request")
 
       // A service worker's answer: no body for the page's request, and the
       // worker's own request for the same URL while it was open.
+      _ = try await ui.reveal("#screen-traffic .request-row", containing: expected.workerAnswerHost)
       try await ui.click(row(63))
       try await ui.click("#inspector-tab-response")
       try await ui.waitUntil("\(panel).includes('requested this URL while this request was open')",

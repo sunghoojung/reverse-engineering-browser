@@ -36,8 +36,18 @@ inline constexpr std::uint32_t kNativePromiseStackArtifactBudget = 1024;
 // Browser refusals a thread can fall behind on before it forgets every
 // digest and stops calling any of its segments captured.
 inline constexpr std::size_t kNativeStackRefusalMailbox = 256;
-// Stack artifacts whose owning thread a refusal can still be routed to.
+// Stack artifacts whose owning thread a refusal is routed to directly; an
+// older one's refusal goes to every attached thread.
 inline constexpr std::size_t kNativeStackOwnerRing = 8192;
+// The artifacts a thread queued in this configuration whose refusal can
+// still arrive. A power of two above the sum of the three artifact budgets,
+// which bounds how many can be outstanding, so an entry is never displaced.
+inline constexpr std::size_t kNativeStackQueuedIndex = 4096;
+// Worker threads per renderer process with stack tables (about 650 KiB each
+// with Blink's frame buffer and a promise registration ring). The document
+// main thread is not counted. A worker past the limit walks nothing; its
+// request stacks read not_walked_thread_limit.
+inline constexpr std::uint32_t kNativeStackThreadLimit = 32;
 
 enum class NativeRequestStackWalkResult : std::uint8_t {
   kWalked,
@@ -88,19 +98,27 @@ using NativeRequestStackProvider = NativeRequestStackWalkResult (*)(NativeReques
 class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
  public:
   // Installed once per renderer by Blink, only when V8 runs with
-  // --reb-request-stacks, after the main thread's AttachThread.
-  static void SetProvider(NativeRequestStackProvider provider) noexcept;
-  // Allocates the calling thread's frame buffer and tables, once, before any
-  // walk on it: Blink calls it for the document main thread when it installs
-  // the provider, and for each dedicated, shared and service worker when its
-  // global scope starts. `embedder_frames` is Blink's own buffer for V8's
-  // frames, released with the tables. A second call on a thread does nothing.
-  static void AttachThread(const NativeStackScope& scope,
-                           void* embedder_frames,
-                           void (*release)(void*)) noexcept;
-  // Frees the calling worker thread's tables at its shutdown; refusals for its
-  // artifacts are dropped from then on. The main thread is never detached.
+  // --reb-request-stacks. `allocate_frames` makes Blink's buffer for V8's
+  // frames when a thread's tables are made, and `release_frames` frees it
+  // with them; both may be null.
+  static void SetProvider(NativeRequestStackProvider provider,
+                          void* (*allocate_frames)() = nullptr,
+                          void (*release_frames)(void*) = nullptr) noexcept;
+  // Names the calling thread's isolate: two thread-local stores, nothing
+  // allocated and no lock taken. Blink calls it, with or without
+  // --reb-request-stacks, for the document main thread at V8 initialization
+  // and for each dedicated, shared and service worker when its global scope
+  // starts. The thread's tables and Blink's frame buffer are allocated by its
+  // first walk while capture is active, never here. A second call keeps the
+  // first scope.
+  static void AttachThread(const NativeStackScope& scope) noexcept;
+  // Frees the calling worker thread's tables, if any, at its shutdown and
+  // forgets its scope; refusals for its artifacts are dropped from then on.
+  // The main thread is never detached.
   static void DetachThread() noexcept;
+  // The calling thread's scope, or zero when it was never attached (a
+  // worklet, or a thread Blink does not run script on).
+  [[nodiscard]] static NativeStackScope CurrentScope() noexcept;
   // --reb-promise-stacks: threads attached after this keep a registration ring.
   static void EnablePromiseRegistrations() noexcept;
   // Called by the loader with RecordRequestInitiated's admitted sequence.
@@ -190,7 +208,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
   [[nodiscard]] bool ScriptNeeded(std::uint32_t script_id) const noexcept;
   // The browser refused the stack artifact this record created: the owning
   // thread forgets its digest at its next walk, so an identical later stack is
-  // sent again. Called on the transport's sequence only (one producer).
+  // sent again. Called on the transport's sequence only (one producer). The
+  // ordering that keeps every refusal applied or covered is in the .cc.
   static void StackArtifactRefused(std::uint64_t creator_sequence) noexcept;
   // Whether this walk's record was admitted. A walk with none keeps nothing, so
   // Blink skips the UTF-8 conversion of the scripts it would otherwise describe.
@@ -215,6 +234,16 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
                          const std::array<std::uint8_t, 48>& tail = {}) noexcept;
   // The checks RecordRequestInitiated makes before admitting a network record.
   [[nodiscard]] static bool NetworkActive(const NativeProbeSink& sink) noexcept;
+  // The calling thread's tables with its routed refusals applied, made on
+  // its first walk while capture is active when `make`; null without. Emits
+  // the gaps that counts: a mailbox overflow, and once per configuration a
+  // worker past kNativeStackThreadLimit, which also sets `*limited`.
+  [[nodiscard]] static NativeRequestStackTables* Tables(std::uint64_t generation,
+                                                        bool make,
+                                                        bool* limited = nullptr) noexcept;
+  static void EmitGap(std::string_view reason,
+                      std::uint64_t frame_id,
+                      std::uint64_t generation) noexcept;
   void Emit(const NativeRequestStackPayload& payload) noexcept;
   void EmitMalformed() noexcept;
   void AsyncTaskFramesReady(std::uint32_t recorded, bool bounded) noexcept;

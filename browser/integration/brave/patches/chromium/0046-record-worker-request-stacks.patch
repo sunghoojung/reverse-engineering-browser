@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index fa4a188..5d6c5d0 100644
+index fa4a188..a3df0bc 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 @@ -43,7 +43,6 @@
@@ -66,17 +66,29 @@ index fa4a188..5d6c5d0 100644
                                 : reb::kNativeRequestStackSyncLimit;
    capture.async_capacity = task ? 0 : reb::kNativeRequestStackAsyncLimit;
    capture.innermost_only = task;
-@@ -2231,7 +2228,7 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -2228,11 +2225,17 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+     isolate->SetJsInvocationCallbacks(js_invocation);
+     reb::NativeProbeSink::Get().SetNativeJsInvocationContextProvider(
+         CurrentJsInvocation);
++    // Names the main thread's isolate for request stacks and script_cookie
++    // records, with or without --reb-request-stacks; allocates nothing.
++    reb::request_stack_blink::AttachMainThread();
      // Installed only with --reb-request-stacks, so a request start without
-     // it costs the sink one atomic load.
+-    // it costs the sink one atomic load.
++    // it costs the sink one atomic load. A thread's tables and V8 frame
++    // buffer are made by its first walk while capture is active.
      if (v8::IsNativeStackCaptureEnabled()) {
 -      NativeStackFrames();
-+      reb::request_stack_blink::AttachMainThread();
-       reb::NativeRequestStackWalk::SetProvider(WalkNativeRequestStack);
+-      reb::NativeRequestStackWalk::SetProvider(WalkNativeRequestStack);
++      reb::NativeRequestStackWalk::SetProvider(
++          WalkNativeRequestStack,
++          &reb::request_stack_blink::AllocateV8StackFrames,
++          &reb::request_stack_blink::ReleaseV8StackFrames);
      }
    }
+   // Every isolate, including workers. The worker br_table gap is recorded
 diff --git a/third_party/blink/renderer/core/workers/worker_thread.cc b/third_party/blink/renderer/core/workers/worker_thread.cc
-index b6981ea..787af93 100644
+index b6981ea..459bdd7 100644
 --- a/third_party/blink/renderer/core/workers/worker_thread.cc
 +++ b/third_party/blink/renderer/core/workers/worker_thread.cc
 @@ -25,6 +25,7 @@
@@ -87,17 +99,18 @@ index b6981ea..787af93 100644
  #include "brave/components/reverse_engineering_browser/renderer/native_worker_observation_blink.h"
  
  #include <atomic>
-@@ -681,6 +682,9 @@ void WorkerThread::InitializeOnWorkerThread(
+@@ -681,6 +682,10 @@ void WorkerThread::InitializeOnWorkerThread(
      // initialization/evaluation.
      reb::worker_observation::ObserveScope(
          GlobalScope(), {reb::NativeWorkerOperation::kGlobalScopeStarted});
-+    // Request stack tables for this worker's isolate; see
++    // Names this worker's isolate for request stacks and script_cookie
++    // records: thread-local stores only, nothing allocated under lock_; see
 +    // protocol/native-network-v3.md.
 +    reb::request_stack_blink::AttachWorkerThread(GlobalScope());
  
      worker_inspector_controller_ = WorkerInspectorController::Create(
          this, url_for_debugger, inspector_task_runner_,
-@@ -851,6 +855,7 @@ void WorkerThread::PerformShutdownOnWorkerThread() {
+@@ -851,6 +856,7 @@ void WorkerThread::PerformShutdownOnWorkerThread() {
  
    GlobalScope()->Dispose();
    global_scope_ = nullptr;

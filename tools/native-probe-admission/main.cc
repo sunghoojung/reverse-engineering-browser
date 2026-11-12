@@ -2270,6 +2270,9 @@ int main() {
   Run<&NativeWorkerRequestStacks>();
   Run<&NativeMessageOrigins>();
   Run<&NativePromiseRegistrations>();
+  Run<&NativeStackThreadLimit>();
+  Run<&NativeRefusalRouting>();
+  Run<&NativeRefusalConcurrency>();
   Run<&NativeDebuggerObservations>();
   Run<&DispatchSampleAdmission>();
   Run<&DispatchEmitFailureReleasesBudget>();

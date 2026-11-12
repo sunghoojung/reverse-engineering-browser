@@ -67,6 +67,9 @@ enum class NativeRequestStackState : std::uint8_t {
   kUnsupportedThread = 3,
   kNotRetainedArtifactUnavailable = 4,
   kNotRetainedBudget = 5,
+  // Version 3: a worker thread found the renderer's stack tables all in use
+  // (kNativeStackThreadLimit), so nothing was walked. The scope is carried.
+  kNotWalkedThreadLimit = 6,
 };
 inline constexpr std::uint8_t kNativeRequestStackArtifactQueued = 1U << 0U;
 inline constexpr std::uint8_t kNativeRequestStackFramesOmitted = 1U << 1U;
@@ -383,6 +386,9 @@ inline void SetNativeStackScope(std::array<std::uint8_t, N>& tail,
   }
   const auto state = static_cast<NativeRequestStackState>(v.state);
   // Version 3: a thread with no worker or document isolate has no scope.
+  if (state == NativeRequestStackState::kNotWalkedThreadLimit && !scoped) {
+    return false;
+  }
   if (scoped && (!IsZeroAfterNativeStackScope(v.reserved1) ||
                  (state == NativeRequestStackState::kUnsupportedThread
                       ? NativeStackScopeOf(v.reserved1) != NativeStackScope{}
@@ -390,7 +396,8 @@ inline void SetNativeStackScope(std::array<std::uint8_t, N>& tail,
     return false;
   }
   if (state == NativeRequestStackState::kNoScript ||
-      state == NativeRequestStackState::kUnsupportedThread) {
+      state == NativeRequestStackState::kUnsupportedThread ||
+      state == NativeRequestStackState::kNotWalkedThreadLimit) {
     const std::uint8_t allowed = tasks ? 0 : kNativeRequestStackTaskCallersNotCaptured;
     return (v.flags & ~allowed) == 0 && v.task_segments == 0 && v.total_depth == 0 &&
            v.recorded == 0 && v.omitted == 0 && v.async_frames == 0 && v.async_segments == 0 &&

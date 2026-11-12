@@ -46,23 +46,29 @@ inline std::uint64_t FrameId(const blink::Frame* frame) {
 
 // Blink's buffer for V8's frames, one per attached thread, freed with its tables.
 using V8StackFrames = std::array<v8::NativeStackFrame, kNativeRequestStackFrameCapacity>;
+inline void* AllocateV8StackFrames() {
+  return new V8StackFrames();
+}
 inline void ReleaseV8StackFrames(void* frames) {
   delete static_cast<V8StackFrames*>(frames);
 }
 
-// The document main thread, before the provider is installed.
+// V8 initialization on the document main thread, with or without
+// --reb-request-stacks: names its isolate and allocates nothing.
 inline void AttachMainThread() {
   NativeStackScope scope;
   scope.thread = static_cast<std::uint8_t>(NativeStackThread::kDocument);
-  NativeRequestStackWalk::AttachThread(scope, new V8StackFrames(), &ReleaseV8StackFrames);
+  NativeRequestStackWalk::AttachThread(scope);
 }
 
-// WorkerThread::InitializeOnWorkerThread, once the global scope exists:
-// dedicated, shared and service workers get tables keyed by the worker's
-// context ID, the frame_id of its own requests. Worklets get none, so their
-// requests read unsupported_thread.
+// WorkerThread::InitializeOnWorkerThread, once the global scope exists, with
+// or without --reb-request-stacks: dedicated, shared and service workers are
+// named by the worker's context ID, the frame_id of its own requests and
+// cookie records. Two thread-local stores under WorkerThread::lock_; the
+// tables come later, from the first active walk. Worklets get no scope, so
+// their requests read unsupported_thread.
 inline void AttachWorkerThread(blink::ExecutionContext* scope) {
-  if (!NativeRequestStackWalk::Enabled() || !scope) {
+  if (!scope) {
     return;
   }
   NativeStackThread thread;
@@ -86,7 +92,7 @@ inline void AttachWorkerThread(blink::ExecutionContext* scope) {
   if (key.isolate_key == 0) {
     return;
   }
-  NativeRequestStackWalk::AttachThread(key, new V8StackFrames(), &ReleaseV8StackFrames);
+  NativeRequestStackWalk::AttachThread(key);
 }
 
 inline std::uint32_t CurrentTaskAttribution(v8::Isolate* isolate) {

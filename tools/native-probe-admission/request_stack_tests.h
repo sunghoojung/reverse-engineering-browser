@@ -5,6 +5,8 @@
 
 #include <condition_variable>
 #include <functional>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -107,8 +109,8 @@ reb::NativeRequestStackWalkResult FixtureTaskWalk(NativeRequestStackWalk& walk) 
 
 reb::NativeRequestStackWalkResult FixtureWalk(NativeRequestStackWalk& walk) {
   ++scenario.walks;
-  // Blink walks only on a thread whose tables it attached.
-  if (walk.scope().thread == 0) {
+  // Blink walks only on a thread whose tables and frame buffer exist.
+  if (walk.scope().thread == 0 || !walk.embedder_frames()) {
     return reb::NativeRequestStackWalkResult::kUnsupportedThread;
   }
   if (scenario.result != reb::NativeRequestStackWalkResult::kWalked) {
@@ -164,6 +166,25 @@ NativeScriptIdentityPayload IdentityPayload(const NativeProbeEvent& event) {
   return value;
 }
 
+// Stands in for Blink's V8 frame buffer: counted and static, so the
+// allocation checks see only the sink's own.
+std::atomic<int> fixture_frames_made{0};
+std::atomic<int> fixture_frames_freed{0};
+int fixture_frames = 0;
+void* AllocateFixtureFrames() {
+  ++fixture_frames_made;
+  return &fixture_frames;
+}
+void ReleaseFixtureFrames(void* frames) {
+  assert(frames == &fixture_frames);
+  ++fixture_frames_freed;
+}
+
+std::string GapReason(const NativeProbeEvent& event) {
+  assert(event.header.type == reb::NativeProbeType::kGap);
+  return {reinterpret_cast<const char*>(event.inline_payload.data()), event.header.payload_size};
+}
+
 // One request start: the request_initiated record, then its stack child.
 std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
                                                     const std::int32_t request) {
@@ -204,18 +225,27 @@ std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
     assert(NativeRequestStackWalk::TakeFormNavigation(9) == 0);
     assert(allocations.load() == before && scenario.walks == 0 && Drain(queue) == 1);
   }
-  // Blink attaches the main thread's tables, then installs the provider.
+  // Blink names the main thread's isolate, then installs the provider with
+  // its frame buffer allocator. Neither allocates: the tables and buffer
+  // wait for the first walk while capture is active.
   reb::NativeStackScope document;
   document.thread = static_cast<std::uint8_t>(reb::NativeStackThread::kDocument);
-  NativeRequestStackWalk::AttachThread(document, nullptr, nullptr);
-  NativeRequestStackWalk::SetProvider(&FixtureWalk);
+  {
+    const auto before = allocations.load();
+    NativeRequestStackWalk::AttachThread(document);
+    NativeRequestStackWalk::SetProvider(&FixtureWalk, &AllocateFixtureFrames,
+                                        &ReleaseFixtureFrames);
+    assert(allocations.load() == before && fixture_frames_made == 0 &&
+           NativeRequestStackWalk::CurrentScope() == document);
+  }
   transport.Disable();
   {
     // Inactive session: RecordRequestInitiated admits nothing, so no walk.
     const auto before = allocations.load();
     NativeRequestStackWalk::Record(
         2, sink.RecordRequestInitiated(2, "GET", "https", "a.example.test").initiated_sequence);
-    assert(allocations.load() == before && scenario.walks == 0 && Drain(queue) == 0);
+    assert(allocations.load() == before && scenario.walks == 0 && Drain(queue) == 0 &&
+           fixture_frames_made == 0);
   }
 
   Configure(queue);
@@ -224,6 +254,8 @@ std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
   // and one identity per script with its retained source.
   scenario.depth = 150;
   auto [parent, stack] = Start(queue, 3);
+  // The first active walk made the main thread's tables and Blink's buffer.
+  assert(fixture_frames_made == 1);
   auto payload = StackPayload(stack);
   assert(payload.protocol_version == reb::kNativeRequestStackScopePayloadVersion &&
          reb::NativeStackScopeOf(payload.reserved1).thread == 1 && payload.state == 1 &&
@@ -819,16 +851,9 @@ reb::NativeStackScope WorkerScope(const reb::NativeStackThread thread, const std
   return scope;
 }
 
-std::atomic<int> worker_releases{0};
-int worker_frames = 0;
-void ReleaseWorkerFrames(void* frames) {
-  assert(frames == &worker_frames);
-  ++worker_releases;
-}
-
-// Dedicated workers: their own tables, scope and frame IDs; script IDs
-// described again for their isolate; refusals routed from the transport's
-// thread; a thread with no tables; detach.
+// Dedicated workers: their own tables, made by the first active walk, scope
+// and frame IDs; script IDs described again for their isolate; refusals
+// routed from the transport's thread; mailbox overflow; detach.
 [[gnu::noinline]] void NativeWorkerRequestStacks() {
   using reb::NativeAsyncTaskKind;
   NativeProbeQueue queue;
@@ -844,13 +869,19 @@ void ReleaseWorkerFrames(void* frames) {
   Drain(queue);
   TestThread thread;
   std::uint64_t worker_stack = 0;
+  const int frames_made = fixture_frames_made;
+  const int frames_freed = fixture_frames_freed;
   thread.Run([&] {
-    NativeRequestStackWalk::AttachThread(worker, &worker_frames, &ReleaseWorkerFrames);
-    // A second attach keeps the first tables and releases its buffer.
-    NativeRequestStackWalk::AttachThread(worker, &worker_frames, &ReleaseWorkerFrames);
-    assert(worker_releases == 1);
+    // Attaching, under WorkerThread::lock_ in Blink, is two thread-local
+    // stores: nothing is allocated, and a second attach keeps the first scope.
+    const auto before = allocations.load();
+    NativeRequestStackWalk::AttachThread(worker);
+    NativeRequestStackWalk::AttachThread(WorkerScope(reb::NativeStackThread::kSharedWorker, 0x1));
+    assert(allocations.load() == before && fixture_frames_made == frames_made &&
+           NativeRequestStackWalk::CurrentScope() == worker);
     const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, 0x7777});
     const auto [parent, stack] = Start(queue, 7001);
+    assert(fixture_frames_made == frames_made + 1);
     assert(parent.header.frame_id == 0x7777 && stack.header.frame_id == 0x7777);
     const auto payload = StackPayload(stack);
     assert(payload.state == 1 && reb::NativeStackScopeOf(payload.reserved1) == worker &&
@@ -888,8 +919,9 @@ void ReleaseWorkerFrames(void* frames) {
          0);
   Drain(queue);
 
-  // More than 256 routed refusals before the worker walks again: it cannot
-  // tell which it missed, so it forgets every digest and sends again.
+  // More than 256 routed refusals before the worker walks again: the mailbox
+  // keeps 256 and records the overflow, so the worker forgets every digest,
+  // sends again and counts a request_stack_refusals_overflowed gap.
   std::uint64_t kept = 0;
   std::vector<std::uint64_t> refused;
   thread.Run([&] {
@@ -908,6 +940,11 @@ void ReleaseWorkerFrames(void* frames) {
   }
   thread.Run([&] {
     const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, 0x7777});
+    // Any call that reads the tables drains them first.
+    NativeRequestStackWalk::AttributeAsyncTask(1, 1);
+    const auto overflow = Pop(queue);
+    assert(GapReason(overflow) == "request_stack_refusals_overflowed" &&
+           overflow.header.frame_id == 0x7777 && Drain(queue) == 0);
     scenario.seed = 600;
     assert((StackPayload(Start(queue, 7006).second).flags &
             reb::kNativeRequestStackArtifactQueued) != 0);
@@ -918,7 +955,8 @@ void ReleaseWorkerFrames(void* frames) {
   // Detach frees the tables and Blink's buffer; the thread then has no scope.
   thread.Run([&] {
     NativeRequestStackWalk::DetachThread();
-    assert(worker_releases == 2);
+    assert(fixture_frames_freed == frames_freed + 1 &&
+           NativeRequestStackWalk::CurrentScope() == reb::NativeStackScope{});
     const auto none = StackPayload(Start(queue, 7007).second);
     assert(none.state == 3 && reb::NativeStackScopeOf(none.reserved1) == reb::NativeStackScope{});
     assert(NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout) == 0);
@@ -928,8 +966,9 @@ void ReleaseWorkerFrames(void* frames) {
   transport.NativeStackArtifactRefused(worker_stack);
   scenario = {};
   transport.Disable();
-  std::cout << "PASS worker request stacks: per-thread tables, scope, frame IDs, identities, "
-               "routed refusals, mailbox overflow, unattached and detached threads\n";
+  std::cout << "PASS worker request stacks: attach allocates nothing, tables made by the first "
+               "active walk, scope, frame IDs, identities, routed refusals, counted mailbox "
+               "overflow, unattached and detached threads\n";
 }
 
 // MessagePort, BroadcastChannel and worker messages carry the posting stack
@@ -987,7 +1026,7 @@ void ReleaseWorkerFrames(void* frames) {
   TestThread thread;
   const auto worker = WorkerScope(reb::NativeStackThread::kDedicatedWorker, 0x8888);
   thread.Run([&] {
-    NativeRequestStackWalk::AttachThread(worker, nullptr, nullptr);
+    NativeRequestStackWalk::AttachThread(worker);
     // Received on a worker: copies of the carried segments, same digests.
     const auto copied =
         NativeRequestStackWalk::ReceiveMessageOrigin(NativeAsyncTaskKind::kMessagePort, bytes);
@@ -1084,12 +1123,12 @@ void ReleaseWorkerFrames(void* frames) {
     NativeRequestStackWalk::PromiseReactionFinished(5);
   }
   NativeRequestStackWalk::EnablePromiseRegistrations();
-  // The main thread attached before the flag: it keeps no ring.
+  // The main thread's tables were made before the flag: they keep no ring.
   assert(!NativeRequestStackWalk::PromiseRegistrationActive());
   TestThread thread;
   thread.Run([&] {
     NativeRequestStackWalk::AttachThread(
-        WorkerScope(reb::NativeStackThread::kServiceWorker, 0x9999), nullptr, nullptr);
+        WorkerScope(reb::NativeStackThread::kServiceWorker, 0x9999));
     assert(NativeRequestStackWalk::PromiseRegistrationActive());
     // A timer whose callback registers a .then.
     scenario.task_seed = 9600;
@@ -1169,17 +1208,245 @@ void ReleaseWorkerFrames(void* frames) {
     scenario.attribution = 0;
     NativeRequestStackWalk::DetachThread();
   });
-  // Capture off: registrations are inactive even where a ring exists.
+  // Capture off: registrations are inactive, and an attached worker that
+  // only schedules tasks and registers reactions never makes its tables.
   transport.Disable();
   thread.Run([&] {
-    NativeRequestStackWalk::AttachThread(WorkerScope(reb::NativeStackThread::kSharedWorker, 0x9998),
-                                         nullptr, nullptr);
+    const auto before = allocations.load();
+    const int made = fixture_frames_made;
+    NativeRequestStackWalk::AttachThread(
+        WorkerScope(reb::NativeStackThread::kSharedWorker, 0x9998));
     assert(!NativeRequestStackWalk::PromiseRegistrationActive());
+    NativeRequestStackWalk::RecordPromiseRegistration(5, NativePromiseRegistration::kThen);
+    assert(NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout) == 0 &&
+           allocations.load() == before && fixture_frames_made == made);
     NativeRequestStackWalk::DetachThread();
   });
   scenario = {};
   std::cout << "PASS promise registrations: flag off, per-thread ring, registration stack in the "
                "microtask segment, hop for tasks scheduled in a reaction, dedupe, 32-frame "
                "bound, unknown reaction, budget, capture off\n";
+}
+
+// A request start inside a worker: its stack record, with any gaps that came
+// first counted in `gaps` by reason.
+NativeProbeEvent StartCountingGaps(NativeProbeQueue& queue,
+                                   const std::int32_t request,
+                                   std::map<std::string, int>& gaps) {
+  const auto initiated =
+      sink.RecordRequestInitiated(request, "GET", "https", "api.example.test").initiated_sequence;
+  assert(initiated != 0);
+  NativeRequestStackWalk::Record(request, initiated);
+  assert(Pop(queue).header.sequence_number == initiated);
+  for (;;) {
+    const auto event = Pop(queue);
+    if (event.header.type == reb::NativeProbeType::kGap) {
+      ++gaps[GapReason(event)];
+      continue;
+    }
+    assert(event.header.parent_event_id == initiated);
+    return event;
+  }
+}
+
+// More workers than kNativeStackThreadLimit: the extra one walks nothing,
+// says so on every request and once per configuration as a gap, until a
+// worker's tables are freed. The main thread is not counted.
+[[gnu::noinline]] void NativeStackThreadLimit() {
+  using reb::NativeStackThread;
+  NativeProbeQueue queue;
+  Configure(queue, 74);
+  scenario = {};
+  scenario.depth = 2;
+  scenario.scripts = 1;
+  scenario.seed = 1100;
+  std::vector<std::unique_ptr<TestThread>> workers;
+  for (std::uint32_t i = 0; i < reb::kNativeStackThreadLimit; ++i) {
+    workers.push_back(std::make_unique<TestThread>());
+    workers.back()->Run([&, i] {
+      NativeRequestStackWalk::AttachThread(
+          WorkerScope(NativeStackThread::kDedicatedWorker, 0xA000 + i));
+      const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, 0xA000 + i});
+      assert(StackPayload(Start(queue, static_cast<std::int32_t>(7300 + i)).second).state == 1);
+      Drain(queue);
+    });
+  }
+  // An attached worker that never walks holds no place.
+  TestThread idle;
+  idle.Run([&] {
+    NativeRequestStackWalk::AttachThread(WorkerScope(NativeStackThread::kSharedWorker, 0xB000));
+  });
+  const auto extra_scope = WorkerScope(NativeStackThread::kServiceWorker, 0xB001);
+  TestThread extra;
+  const int made = fixture_frames_made;
+  extra.Run([&] {
+    NativeRequestStackWalk::AttachThread(extra_scope);
+    std::map<std::string, int> gaps;
+    const auto limited = StartCountingGaps(queue, 7400, gaps);
+    auto payload = StackPayload(limited);
+    assert(payload.state ==
+               static_cast<std::uint8_t>(reb::NativeRequestStackState::kNotWalkedThreadLimit) &&
+           reb::NativeStackScopeOf(payload.reserved1) == extra_scope &&
+           limited.header.frame_id == 0xB001 && gaps["request_stack_thread_limit"] == 1 &&
+           gaps.size() == 1);
+    // Every request says so; the gap counts the thread once per configuration.
+    gaps.clear();
+    payload = StackPayload(StartCountingGaps(queue, 7401, gaps));
+    assert(payload.state == 6 && gaps.empty());
+    // Nothing it schedules or receives is walked or remembered.
+    assert(NativeRequestStackWalk::RecordAsyncTask(reb::NativeAsyncTaskKind::kSetTimeout) == 0 &&
+           NativeRequestStackWalk::ReceiveMessageOrigin(reb::NativeAsyncTaskKind::kMessagePort,
+                                                        {}) == 0 &&
+           Drain(queue) == 0 && fixture_frames_made == made);
+  });
+  // A new configuration counts the thread again.
+  Configure(queue, 75);
+  extra.Run([&] {
+    std::map<std::string, int> gaps;
+    assert(StackPayload(StartCountingGaps(queue, 7402, gaps)).state == 6 &&
+           gaps["request_stack_thread_limit"] == 1);
+  });
+  // One worker shuts down: its place goes to the next thread that walks.
+  workers.back()->Run([] { NativeRequestStackWalk::DetachThread(); });
+  extra.Run([&] {
+    const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kServiceWorker, 0xB001});
+    assert(StackPayload(Start(queue, 7403).second).state == 1 && fixture_frames_made == made + 1);
+    Drain(queue);
+    NativeRequestStackWalk::DetachThread();
+  });
+  for (auto& worker : workers) {
+    worker->Run([] { NativeRequestStackWalk::DetachThread(); });
+  }
+  idle.Run([] { NativeRequestStackWalk::DetachThread(); });
+  scenario = {};
+  transport.Disable();
+  Drain(queue);
+  std::cout << "PASS stack thread limit: 32 worker tables per renderer, the next worker reads "
+               "not_walked_thread_limit with its scope, one gap per configuration, nothing "
+               "scheduled or allocated, its place taken after a worker detaches\n";
+}
+
+// A refusal for an artifact whose owner slot 8,192 newer artifacts reused
+// still reaches the thread that queued it: it goes to every attached table,
+// and only the owner's queued index knows the creator.
+[[gnu::noinline]] void NativeRefusalRouting() {
+  using reb::NativeStackThread;
+  NativeProbeQueue queue;
+  Configure(queue, 76);
+  scenario = {};
+  scenario.depth = 2;
+  scenario.scripts = 1;
+  constexpr std::uint32_t kThreads = 9;
+  static_assert(kThreads * reb::kNativeRequestStackArtifactBudget > reb::kNativeStackOwnerRing);
+  std::vector<std::unique_ptr<TestThread>> workers;
+  std::uint64_t first = 0;
+  for (std::uint32_t t = 0; t < kThreads; ++t) {
+    workers.push_back(std::make_unique<TestThread>());
+    workers.back()->Run([&, t] {
+      const std::uint64_t key = 0xD000 + t;
+      NativeRequestStackWalk::AttachThread(WorkerScope(NativeStackThread::kDedicatedWorker, key));
+      const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, key});
+      for (std::uint32_t i = 0; i < reb::kNativeRequestStackArtifactBudget; ++i) {
+        scenario.seed = 30000 + 2000 * t + i;
+        const auto stack = Start(queue, static_cast<std::int32_t>(8000 + i)).second;
+        assert((StackPayload(stack).flags & reb::kNativeRequestStackArtifactQueued) != 0);
+        if (t == 0 && i == 0) {
+          first = stack.header.sequence_number;
+        }
+        Drain(queue);
+      }
+    });
+  }
+  // The first artifact's owner slot now names a later one.
+  transport.NativeStackArtifactRefused(first);
+  workers.front()->Run([&] {
+    const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, 0xD000});
+    scenario.seed = 30000;
+    const auto again = StackPayload(Start(queue, 8999).second);
+    assert((again.flags & reb::kNativeRequestStackArtifactQueued) != 0);
+    Drain(queue);
+  });
+  // The other tables ignored it: their first stacks are still known.
+  workers[1]->Run([&] {
+    const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, 0xD001});
+    scenario.seed = 32000;
+    assert((StackPayload(Start(queue, 8998).second).flags &
+            reb::kNativeRequestStackArtifactQueued) == 0);
+    Drain(queue);
+  });
+  for (auto& worker : workers) {
+    worker->Run([] { NativeRequestStackWalk::DetachThread(); });
+  }
+  scenario = {};
+  transport.Disable();
+  Drain(queue);
+  std::cout << "PASS refusal routing: a refusal whose owner slot was reused reaches its owner "
+               "through every table's queued index; the others ignore it\n";
+}
+
+// The transport's thread refuses while the worker walks, with no ordering
+// between them: every refused stack is sent again at its next walk, whether
+// its refusal was applied alone or covered by an overflow.
+[[gnu::noinline]] void NativeRefusalConcurrency() {
+  using reb::NativeStackThread;
+  NativeProbeQueue queue;
+  Configure(queue, 77);
+  scenario = {};
+  scenario.depth = 2;
+  scenario.scripts = 1;
+  // Above the mailbox; with the walks below, under the request budget even
+  // when an overflow leaves every refusal's budget charged.
+  constexpr std::uint32_t kRefused = 300;
+  static_assert(kRefused > reb::kNativeStackRefusalMailbox);
+  std::vector<std::uint64_t> sequences(kRefused);
+  TestThread worker;
+  worker.Run([&] {
+    NativeRequestStackWalk::AttachThread(WorkerScope(NativeStackThread::kDedicatedWorker, 0xE000));
+    const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, 0xE000});
+    for (std::uint32_t i = 0; i < kRefused; ++i) {
+      scenario.seed = 50000 + i;
+      sequences[i] =
+          Start(queue, static_cast<std::int32_t>(9000 + i)).second.header.sequence_number;
+      Drain(queue);
+    }
+  });
+  std::atomic<bool> refused_all{false};
+  std::thread transport_thread([&] {
+    for (const auto sequence : sequences) {
+      transport.NativeStackArtifactRefused(sequence);
+    }
+    refused_all.store(true, std::memory_order_release);
+  });
+  std::map<std::string, int> gaps;
+  worker.Run([&] {
+    const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, 0xE000});
+    // Other stacks meanwhile, each walk draining what has arrived.
+    for (std::uint32_t i = 0; !refused_all.load(std::memory_order_acquire) || i < 4; ++i) {
+      scenario.seed = 60000 + i % 64;
+      StartCountingGaps(queue, 9700, gaps);
+      Drain(queue);
+    }
+  });
+  transport_thread.join();
+  worker.Run([&] {
+    const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, 0xE000});
+    for (std::uint32_t i = 0; i < kRefused; ++i) {
+      scenario.seed = 50000 + i;
+      const auto again = StackPayload(StartCountingGaps(queue, 9800, gaps));
+      assert((again.flags & reb::kNativeRequestStackArtifactQueued) != 0);
+      Drain(queue);
+    }
+    NativeRequestStackWalk::DetachThread();
+  });
+  // Only these gaps can appear, and an overflow is always counted.
+  for (const auto& [reason, count] : gaps) {
+    assert(reason == "request_stack_refusals_overflowed" && count >= 1);
+  }
+  scenario = {};
+  transport.Disable();
+  Drain(queue);
+  std::cout << "PASS refusal concurrency: " << kRefused
+            << " refusals raced with walks; each refused stack was sent again, "
+            << (gaps.empty() ? 0 : gaps.begin()->second) << " counted overflows\n";
 }
 }  // namespace

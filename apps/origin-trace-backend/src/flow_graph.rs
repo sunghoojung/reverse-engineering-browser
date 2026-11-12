@@ -386,7 +386,8 @@ struct Decoded {
     sync: Vec<Frame>,
     omitted: u32,
     asyncs: Vec<Frame>,
-    segments: Vec<(Segment, Option<Vec<Frame>>)>,
+    /// Many stacks share one scheduling stack, so its frames are shared.
+    segments: Vec<(Segment, Option<Arc<[Frame]>>)>,
     /// Record flags bit 2, bit 3 and bit 4.
     asyncs_truncated: bool,
     chain_cut: bool,
@@ -1056,7 +1057,7 @@ fn decode(
     main: std::result::Result<Main, &'static str>,
     stacks: &HashMap<[u8; 32], Value>,
     read: &dyn Fn(&Value, usize) -> Option<Vec<u8>>,
-    segments_seen: &mut HashMap<[u8; 32], Option<Vec<Frame>>>,
+    segments_seen: &mut HashMap<[u8; 32], Option<Arc<[Frame]>>>,
     missing: &mut BTreeMap<&'static str, u64>,
 ) -> Decoded {
     let (recorded, omitted, flags, mut frames, segments) = match main {
@@ -1092,6 +1093,7 @@ fn decode(
                         .and_then(|content| {
                             request_stack::decode_segment_artifact(&content, segment.recorded)
                         })
+                        .map(Arc::from)
                 })
                 .clone();
             if frames.is_none() {
@@ -1322,7 +1324,7 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
             decoded
                 .segments
                 .iter()
-                .filter_map(|(_, frames)| frames.as_ref())
+                .filter_map(|(_, frames)| frames.as_deref())
                 .flatten(),
         );
         for frame in frames.filter(|frame| frame.script_id != 0) {

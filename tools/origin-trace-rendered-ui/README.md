@@ -111,7 +111,7 @@ backend and the app share one temporary saved set through
 `--js-invocation-site-store` and `REB_JS_INVOCATION_SITE_STORE`.
 
 `test31DebuggerSidebar` opens the Sources debugger sidebar on the fixture's
-observation records: a renderer of its own (process 4343) with records in six
+observation records: a renderer of its own (process 4747) with records in six
 frames, three workers, a watched request and two malformed records, and a
 retained compiled script (artifact 360) whose listener, timer and
 throw sites the records name. One listener's event type is markup and must

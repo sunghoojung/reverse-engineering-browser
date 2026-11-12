@@ -107,14 +107,20 @@ scan stopped at its deadline or any budget or table cut something (every
 and `edges` index each other by position. The full shape is the `FlowGraph`
 schema in [openapi.json](openapi.json).
 
-`not_shown` lists what stacks cannot contain: worklet stacks, and those of a
-worker past the renderer's 32 stack tables; `ServiceWorker.postMessage`,
-`Client.postMessage` and `window.postMessage` to or from another process,
-which carry no task origin; out-of-process frames (another renderer, whose
-stacks appear as their own realm with no edge to the page); and calls that
-never reached a recorded request, navigation, task or cookie write. Worker
-stacks, and `MessagePort`, `BroadcastChannel` and worker message task edges,
-are shown.
+`not_shown` lists what the stack records read cannot contain, by the versions
+present, as `get_request_stack` does per record. Records with the stack scope
+(request stack version 3, `async_task_stack` version 2): worklet stacks, and
+those of a worker past the renderer's 32 stack tables;
+`ServiceWorker.postMessage`, `Client.postMessage` and `window.postMessage` to
+or from another process, which carry no task origin; calls that never reached
+a recorded request, navigation, task or cookie write; and frames of another
+renderer process, whose stacks are their own realms, joined to this page's
+only by the `MessagePort`, `BroadcastChannel` and worker message task edges a
+carried segment draws. Records from earlier builds: worker and worklet stacks
+(walked on the document main thread only), `MessagePort` and worker messages,
+calls that never reached a recorded request, navigation, task or cookie
+write, and out-of-process frames (only their own stacks appear). A store holding both lists the earlier records'
+worker and message gaps as theirs.
 
 ## Bounds
 

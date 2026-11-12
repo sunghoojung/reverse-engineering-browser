@@ -155,6 +155,11 @@ struct Scan {
     not_walked: BTreeMap<&'static str, u64>,
     request_refs: usize,
     request_refs_dropped: u64,
+    /// Stack records from builds before the stack scope (request stack
+    /// versions 1 and 2, `async_task_stack` version 1), and from builds with
+    /// it: what the graph cannot show depends on which it read.
+    unscoped_records: bool,
+    scoped_records: bool,
 }
 
 /// An identifier field of a record, 0 unless it is a canonical unsigned integer.
@@ -289,6 +294,7 @@ impl Scan {
         let Some(record) = request_stack::decode_record(bytes) else {
             return false;
         };
+        self.note_version(bytes[0] == 3);
         if matches!(record.state, 2 | 3 | 6) {
             let reason = match record.state {
                 2 => "no_script",
@@ -340,10 +346,19 @@ impl Scan {
         true
     }
 
+    fn note_version(&mut self, scoped: bool) {
+        if scoped {
+            self.scoped_records = true;
+        } else {
+            self.unscoped_records = true;
+        }
+    }
+
     fn scheduling_stack(&mut self, event: &Value, bytes: &[u8]) -> bool {
         let Some((task, recorded, digest, innermost, isolate)) = decode_scheduling(bytes) else {
             return false;
         };
+        self.note_version(bytes[0] == 2);
         let bounded = bytes[5] & 1 != 0;
         let shape = Shape::Scheduling(recorded);
         if let Some(walk) = self.walk(event, isolate, digest, shape, innermost) {
@@ -1591,6 +1606,48 @@ fn source_offsets(scan: &Scan, decoded: &[Decoded]) -> BTreeMap<[u8; 32], (bool,
     offsets
 }
 
+/// What the read records cannot contain. Records from before the stack scope
+/// walked the document main thread only and carried no message callers;
+/// later ones walk workers and carry messages across threads and processes.
+fn not_shown(scan: &Scan) -> Vec<&'static str> {
+    const UNSCOPED: [&str; 3] = [
+        "worker and worklet stacks (stacks are walked on the document main thread only)",
+        "MessagePort and worker messages",
+        "cross-process frames (an out-of-process iframe is another renderer; only its own stacks \
+         appear)",
+    ];
+    const SCOPED: [&str; 3] = [
+        "worklet stacks (worklets have no stack tables), and stacks of a worker past the \
+         renderer's 32 stack tables",
+        "ServiceWorker.postMessage and Client.postMessage, and window.postMessage to or from \
+         another process",
+        "frames of another renderer process: its stacks are their own realms, joined to this \
+         page's only by MessagePort, BroadcastChannel and worker message task edges",
+    ];
+    const MIXED: [&str; 3] = [
+        "in records from builds before request stack version 3: worker stacks, and MessagePort \
+         and worker messages",
+        "worklet stacks (worklets have no stack tables), and stacks of a worker past the \
+         renderer's 32 stack tables",
+        "ServiceWorker.postMessage and Client.postMessage, and window.postMessage to or from \
+         another process",
+    ];
+    let mut out: Vec<&'static str> = match (scan.unscoped_records, scan.scoped_records) {
+        (true, false) => UNSCOPED.to_vec(),
+        (true, true) => MIXED
+            .iter()
+            .copied()
+            .chain(std::iter::once(SCOPED[2]))
+            .collect(),
+        _ => SCOPED.to_vec(),
+    };
+    out.insert(
+        out.len() - 1,
+        "calls that never reached a recorded request, navigation, task or cookie write",
+    );
+    out
+}
+
 /// The graph, and whether it may be cached: an answer the deadline cut is not.
 fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result<(Value, bool)> {
     let started = Instant::now();
@@ -1687,14 +1744,7 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
             "source_bytes": MAX_SOURCE_BYTES,
             "scan_deadline_ms": SCAN_DEADLINE.as_millis() as u64,
         },
-        "not_shown": [
-            "worklet stacks (worklets have no stack tables), and stacks of a worker past the \
-             renderer's 32 stack tables",
-            "ServiceWorker.postMessage and Client.postMessage, and window.postMessage to or from \
-             another process",
-            "calls that never reached a recorded request, navigation, task or cookie write",
-            "cross-process frames (an out-of-process iframe is another renderer; only its own stacks appear)",
-        ],
+        "not_shown": not_shown(&scan),
         "contexts": contexts,
         "nodes": nodes,
         "edges": edges,
@@ -2360,6 +2410,12 @@ mod tests {
             !task(&a1, &go42),
             "no edge between processes that never interacted"
         );
+        // Only records from before the stack scope: what they could not hold.
+        assert_eq!(
+            g["not_shown"][0],
+            "worker and worklet stacks (stacks are walked on the document main thread only)"
+        );
+        assert_eq!(g["not_shown"][1], "MessagePort and worker messages");
     }
 
     #[test]
@@ -2422,6 +2478,14 @@ mod tests {
             (Some("task"), Some("message_port"))
         );
         assert_eq!(g["stacks"]["not_walked"]["not_walked_thread_limit"], 1);
+        // Scoped records walk workers and carry messages across processes.
+        let not_shown = g["not_shown"].to_string();
+        assert!(
+            not_shown.contains("worklet stacks (worklets have no stack tables)")
+                && not_shown.contains("joined to this page's only by MessagePort")
+                && !not_shown.contains("MessagePort and worker messages"),
+            "{not_shown}"
+        );
     }
 
     #[test]

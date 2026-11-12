@@ -208,7 +208,7 @@ void NativeScriptCookieSink::RecordDocumentCookieGet(const std::string_view cook
     return;
   }
   const std::uint64_t this_read = ++reads_->reads;
-  // Names first, so a table that fills during this read still counts them.
+  // Names first, so this read's record carries the names none could count.
   std::size_t names = 0;
   std::uint32_t unrecorded = 0;
   ForEachCookieName(cookie_string, [&](const std::string_view name) {

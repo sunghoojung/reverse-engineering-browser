@@ -1223,7 +1223,7 @@ index b14d5b515f190d529e6a3dbe258346ef4327c59a..ef1027c9398899af7fe2298e1fc77b48
      return SerializedCodeSanityCheckResult::kInvalidHeader;
    }
 diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
-index 8749b774f891ebc5969933dde548d2e8434c1440..2e1b7f10345bbadfad1faa9adf3b68ce310fe703 100644
+index 8749b774f891ebc5969933dde548d2e8434c1440..e59870ef66d424a27cc3f00e7e039d6e71f6a28b 100644
 --- a/test/cctest/test-api.cc
 +++ b/test/cctest/test-api.cc
 @@ -27,15 +27,19 @@
@@ -1270,7 +1270,7 @@ index 8749b774f891ebc5969933dde548d2e8434c1440..2e1b7f10345bbadfad1faa9adf3b68ce
  #include "src/utils/utils.h"
  #include "test/cctest/heap/heap-tester.h"
  #include "test/cctest/heap/heap-utils.h"
-@@ -32669,3 +32676,731 @@ TEST(IsolateFree) {
+@@ -32669,3 +32676,736 @@ TEST(IsolateFree) {
    v8::Isolate::Free(isolate1);
    v8::Isolate::Free(isolate2);
  }
@@ -1761,15 +1761,15 @@ index 8749b774f891ebc5969933dde548d2e8434c1440..2e1b7f10345bbadfad1faa9adf3b68ce
 +  CHECK_EQ(1, RebBytecodeOf("rebFlush").traces);
 +  CHECK_EQ(1u, capture.embedder().observations.size());
 +
-+  auto flush_bytecode = [&]() {
-+    i::SharedFunctionInfo::EnsureOldForTesting(function->shared());
++  auto flush_bytecode = [&](i::IndirectHandle<i::JSFunction> target) {
++    i::SharedFunctionInfo::EnsureOldForTesting(target->shared());
 +    i::DisableConservativeStackScanningScopeForTesting no_stack_scanning(
 +        CcTest::heap());
 +    i::heap::InvokeMajorGC(CcTest::heap());
-+    CHECK(!function->shared()->is_compiled());
++    CHECK(!target->shared()->is_compiled());
 +  };
 +  // Regeneration in the same configuration keeps the site armed.
-+  flush_bytecode();
++  flush_bytecode(function);
 +  CompileRun("rebFlush([0, 1])");
 +  CHECK(function->shared()->is_compiled());
 +  CHECK_EQ(1, RebBytecodeOf("rebFlush").traces);
@@ -1793,13 +1793,18 @@ index 8749b774f891ebc5969933dde548d2e8434c1440..2e1b7f10345bbadfad1faa9adf3b68ce
 +  capture.Arm(3, {});
 +  CompileRun("rebFlush([1])");
 +  CHECK_EQ(4u, capture.embedder().observations.size());
-+  flush_bytecode();
++  flush_bytecode(function);
 +  CompileRun("rebFlush([1])");
 +  const RebBytecode regenerated = RebBytecodeOf("rebFlush");
 +  CHECK_EQ(0, regenerated.traces);
 +  {
++    // V8 15.7 numbers this function's feedback slots differently when it
++    // regenerates flushed bytecode than on the first compile, so the
++    // reference is a never-armed copy flushed and regenerated the same way.
 +    LocalContext plain;
 +    CompileRun(source.c_str());
++    flush_bytecode(RebFunction("rebFlush"));
++    CompileRun("rebFlush([1])");
 +    CheckSameRebBytecode(RebBytecodeOf("rebFlush"), regenerated);
 +  }
 +  CHECK_EQ(4u, capture.embedder().observations.size());

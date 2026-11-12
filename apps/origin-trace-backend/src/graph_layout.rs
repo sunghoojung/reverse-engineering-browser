@@ -94,7 +94,7 @@ impl Serialize for Coord {
 
 /// One graph's result, in request order. The worker writes `LaidOut` or
 /// `Failed`; the server assigns the others.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum Outcome {
     LaidOut {
@@ -290,17 +290,7 @@ async fn in_worker(jobs: &[&Graph], deadline: Duration, fault: Option<&str>) -> 
             },
             Stop::Abandon(reason) => Outcome::Failed { reason },
         };
-        while outcomes.len() < jobs.len() {
-            outcomes.push(match &missing {
-                Outcome::Timeout { reason } => Outcome::Timeout {
-                    reason: reason.clone(),
-                },
-                Outcome::Failed { reason } => Outcome::Failed {
-                    reason: reason.clone(),
-                },
-                _ => unreachable!("only timeout and failed fill missing results"),
-            });
-        }
+        outcomes.resize(jobs.len(), missing);
     }
     outcomes
 }

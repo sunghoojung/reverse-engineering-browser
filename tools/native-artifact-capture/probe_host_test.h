@@ -969,6 +969,33 @@ void NativeProbeHostWorkerTabLinks() {
   Check(events.empty() && session.exclusions.size() == counted_now + 1 &&
             session.exclusions.back().exclusion_class == 68 && proxy(16, 86).exclusion_class == 0,
         "A pageless worker's memory-cache reuse is counted and leaves no shared answer behind");
+  // The count is taken only while the session can record it.
+  static_cast<void>(resolver.SharedServiceWorkerNoPage({11, 1'000'000}, 17));
+  for (std::uint32_t index = 0; index < kAnswers; ++index) {
+    static_cast<void>(resolver.SharedServiceWorkerNoPage({12, index}, 12));
+  }
+  const auto gaps_before_inactive = session.named_gaps.size();
+  session.active = false;
+  start(reb::NativeLoaderKind::kServiceWorker, shared_worker_token.fold(), 87);
+  session.active = true;
+  Check(session.named_gaps.size() == gaps_before_inactive,
+        "A drain the session cannot record takes no eviction count");
+  start(reb::NativeLoaderKind::kServiceWorker, shared_worker_token.fold(), 88);
+  Check(session.named_gaps.size() == gaps_before_inactive + 1 &&
+            session.named_gaps.back().second == reb::kNativeSharedDecisionEvictedGap,
+        "The count waits for the next drain the session records");
+  // A new session starts from no answers and no count.
+  static_cast<void>(resolver.SharedServiceWorkerNoPage({13, 1}, 20));
+  for (std::uint32_t index = 0; index < kAnswers; ++index) {
+    static_cast<void>(resolver.SharedServiceWorkerNoPage({14, index}, 12));
+  }
+  resolver.ServiceWorkerStarted(19, {0xf9, 0xfa}, {}, "https://reset.test/");
+  Check(resolver.SharedServiceWorkerNoPage({13, 2}, 19), "A pageless answer is stored");
+  resolver.ServiceWorkerControlleeAdded(19, "after", std::vector<std::uint32_t>{22});
+  resolver.ResetSharedDecisions();
+  Check(resolver.TakeEvictedSharedDecisions() == 0 &&
+            !resolver.SharedServiceWorkerNoPage({13, 2}, 19),
+        "Session start drops the last session's answers and eviction count");
 
   // A client whose navigation never committed names no tab but is a page.
   resolver.ServiceWorkerControlleeAdded(11, "uncommitted", std::vector<std::uint32_t>{});
@@ -978,6 +1005,17 @@ void NativeProbeHostWorkerTabLinks() {
   Check(events.size() == 1 && events[0].header.tab_id == 0 &&
             session.exclusions.size() == counted_before_uncommitted,
         "A version whose only client never committed stays unresolved, never counted");
+
+  // Answers evicted after the last worker record are reported as the host stops.
+  static_cast<void>(resolver.SharedServiceWorkerNoPage({15, 1}, 21));
+  for (std::uint32_t index = 0; index < kAnswers; ++index) {
+    static_cast<void>(resolver.SharedServiceWorkerNoPage({16, index}, 12));
+  }
+  const auto gaps_before_stop = session.named_gaps.size();
+  host.Disable();
+  Check(session.named_gaps.size() == gaps_before_stop + 1 &&
+            session.named_gaps.back().second == reb::kNativeSharedDecisionEvictedGap,
+        "Disabling the host reports the evictions since its last worker record");
 
   for (std::uint64_t index = 0; index <= reb::NativeTabResolver::kFrameCapacity; ++index) {
     resolver.NoteFrame(4, {0xf000 + index, index + 1}, 41);
@@ -993,5 +1031,8 @@ void NativeProbeHostWorkerTabLinks() {
   std::cout
       << "PASS production NativeProbeHost links worker requests to tab sets, registrants and "
          "worklet documents under one creator depth, takes one class 68 answer per request with "
-         "its browser half, decides a memory-cache reuse alone, and keeps tombstoned frame tabs\n";
+         "its browser half, decides a memory-cache reuse alone, reports evictions only while the "
+         "session "
+         "records and as the host stops, clears them per session, and keeps tombstoned frame "
+         "tabs\n";
 }

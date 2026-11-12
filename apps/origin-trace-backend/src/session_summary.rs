@@ -384,7 +384,9 @@ fn check(code: &str, severity: &str, message: impl Into<String>) -> Value {
 /// Plain-language meaning of a producer gap reason, from its shape. The reason
 /// itself stays in the check, so an unfamiliar one is never hidden.
 fn gap_meaning(reason: &str) -> &'static str {
-    if reason.contains("filtered") {
+    if reason == "service_worker_page_decision_unshared" {
+        "A service-worker request's class 68 answer was evicted before its other half asked, so that half decided alone: the request may have one half recorded without the other, as a row without a tab, or one half left out. The count is the evicted answers (protocol/native-network-v3.md)."
+    } else if reason.contains("filtered") {
         "A sample policy excluded these observations before a sample slot was taken. Retained observations are unchanged."
     } else if reason.contains("limit_or_invalid") || reason.contains("module_invalid") {
         "The record was malformed or outside a structural bound, so it was refused before a sample slot was taken."
@@ -762,6 +764,47 @@ mod tests {
             assert!(!meaning.contains("dropped"), "{reason}: {meaning}");
         }
         assert!(gap_meaning("native_wasm_dispatch_budget_incomplete").contains("budget"));
+    }
+
+    #[test]
+    fn unshared_service_worker_decisions_have_their_own_meaning() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("events.jsonl");
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let lines = [1, 2].map(|sequence| {
+            event(
+                sequence,
+                "network",
+                "gap",
+                0,
+                "service_worker_page_decision_unshared",
+            )
+            .to_string()
+        });
+        std::fs::write(&store, lines.join("\n") + "\n").unwrap();
+        let state = CaptureState {
+            instance_id: "1:2",
+            capture_mode: "live",
+            broker_connected: true,
+            capture_stopped: false,
+            artifact_receiver_configured: false,
+            artifact_receiver_connected: false,
+        };
+        let summary = build(&store, &artifacts, &state).unwrap();
+        let gap = summary["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == "named_gap")
+            .unwrap();
+        assert_eq!(gap["reason"], "service_worker_page_decision_unshared");
+        assert_eq!(gap["count"], "2");
+        let message = gap["message"].as_str().unwrap();
+        assert!(
+            message.contains("evicted") && !message.contains("refused or dropped"),
+            "{message}"
+        );
     }
 
     fn exclusion(sequence: u64, producer: u32, class: u8, count: u64) -> Value {

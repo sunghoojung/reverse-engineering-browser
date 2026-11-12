@@ -401,6 +401,12 @@ std::uint64_t NativeTabResolver::TakeEvictedSharedDecisions() {
   return std::exchange(shared_evicted_, std::uint64_t{0});
 }
 
+void NativeTabResolver::ResetSharedDecisions() {
+  shared_decisions_.clear();
+  shared_order_.clear();
+  shared_evicted_ = 0;
+}
+
 NativeTabResolution NativeTabResolver::Resolve(const NativeLoaderKind owner_kind,
                                                const std::uint64_t owner_fold,
                                                const std::uint64_t session_id,

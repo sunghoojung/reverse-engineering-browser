@@ -20,6 +20,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_capture_scope.h"
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_host.h"
+#include "brave/components/reverse_engineering_browser/browser/native_tab_resolver.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_dispatch_sites.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_invocation_sites.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
@@ -237,6 +238,7 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
                                    std::memory_order_relaxed);
   webui_renderers_excluded_ = 0;
   browser_requests_excluded_.clear();
+  NativeTabResolver::Get().ResetSharedDecisions();
   next_browser_sequence_.store(1, std::memory_order_relaxed);
   downstream_.store(downstream, std::memory_order_release);
   session_id_.store(session_id, std::memory_order_release);

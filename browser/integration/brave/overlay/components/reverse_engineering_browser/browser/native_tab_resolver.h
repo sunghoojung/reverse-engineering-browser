@@ -142,6 +142,9 @@ class NativeTabResolver final {
   // answered otherwise: a no-page answer, or a keep for an unknown version.
   // Counted since the last call.
   [[nodiscard]] std::uint64_t TakeEvictedSharedDecisions();
+  // Session start: no answer or eviction count of an earlier session carries
+  // over, since every request of a session asks within it.
+  void ResetSharedDecisions();
 
   // A linked set the session has not received is marked sent here; the
   // caller emits it before the link. A renderer record of a service worker

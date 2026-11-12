@@ -764,6 +764,9 @@ void NativeProbeHost::Disable() {
   disabling_ = true;
   Drain();
   disabling_ = false;
+  // Answers evicted since this renderer's last worker record, while the
+  // session that StopSession is ending can still record them.
+  ReportUnsharedDecisions();
   wasm_epoch_lifetime_.reset();
   if (wasm_capture_epoch_ != std::numeric_limits<std::uint64_t>::max())
     ++wasm_capture_epoch_;
@@ -893,6 +896,11 @@ void NativeProbeHost::EmitWorkerRequest(NativeProbeEvent& event) {
 // Shared class 68 answers the resolver evicted before their other half asked,
 // whichever side inserted the newer answer.
 void NativeProbeHost::ReportUnsharedDecisions() {
+  // Taken only when the session can record the gaps, so a drain after it
+  // ended leaves the count to be cleared when the next session starts.
+  if (!session_->IsActive()) {
+    return;
+  }
   for (std::uint64_t evicted = NativeTabResolver::Get().TakeEvictedSharedDecisions(); evicted;
        --evicted) {
     session_->EmitNamedGap(NativeProbeCategory::kNetwork, kNativeSharedDecisionEvictedGap);

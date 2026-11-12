@@ -644,13 +644,20 @@ out and counted once, by the drain, whichever asks first and whether or not a
 page arrived in between. The resolver keeps the 4,096 newest answers. An answer
 evicted before its other half asked, where that half could have decided
 otherwise alone (a no-page answer, or a keep for an unknown version), is one
-named network gap `service_worker_page_decision_unshared`, reported at the next
-drain. In one direction the browser half was left out and the renderer record
-may then be recorded alone; in the other the renderer record was kept and the
-browser half may be left out. An answer whose other half never asks, such as a
+named network gap `service_worker_page_decision_unshared`. The second half then
+decides alone, from the version's state at that moment, so the halves can
+part three ways: the proxy left the browser half out and the renderer record
+is kept and recorded alone; the drain kept the renderer record and the browser
+half is left out; or one half was left out, counted by the drain if it was the
+renderer record, and the other kept, which for a browser half is a row with no
+tab, reported unresolved with reason `browser_factory`. The summary names the
+gap with that meaning. An answer whose other half never asks, such as a
 request the renderer cancelled before sending it or an import
 `ServiceWorkerScriptLoaderFactory` answers from storage, is evicted and may be
-counted the same way. A version the resolver evicted counts as new if it runs again.
+counted the same way. The count is taken only by a drain the session can
+record, at a worker record or when `StopSession` disables the host, and
+`StartSession` clears the answers and the count, so neither crosses into
+another session. A version the resolver evicted counts as new if it runs again.
 
 Classes 65 and 68 count each request they leave out once: the drain counts a
 request that has a renderer record, the proxy a script the browser fetches

@@ -2046,8 +2046,9 @@ continues the spine. A wider layer becomes side-by-side boxes and wraps into a
 grid past six. Arms with no way out stack on the spine. Edges leaving a box
 share a bottom port, and every back edge to a loop shares one rail.
 
-Memory: one function is decoded on demand, layout runs in a worker that is
-terminated when a job finishes or is replaced, and laid-out graphs stay in a
+Memory: one function is decoded on demand, layout runs in one worker per view
+that stays between jobs and is terminated when a job is replaced or the view
+closes, and laid-out graphs stay in a
 16 MiB least-recently-used cache that is cleared when the view closes, the
 artifact changes or the screen leaves. The canvas is one bounded backing store
 that does not grow with graph size, and only visible cards and edges are drawn.
@@ -2471,8 +2472,9 @@ The panel returns, besides `show`, `hide`, `highlightRequest` and `focus`:
 
 ### Layout
 
-Layout runs in `flow_graph_layout.js` as a Web Worker, or on the main thread
-when a shell cannot start one, on card sizes measured from their text.
+Layout runs in `flow_graph_layout.js` as a Web Worker, through the block
+graph's runner, or on the main thread when a shell cannot start one, with the
+same engine report either way, on card sizes measured from their text.
 
 **Layered layout:**
 - Bands are ordered callers first over the calls between realms: realms that

@@ -597,25 +597,51 @@ function createBlockGraphView(root, options = {}) {
 /** Triskel lays out when this shell's backend serves the layout route. */
 const blockGraphEngine = () => /^https?:$/.test(globalThis.location?.protocol ?? '') ? 'triskel' : 'layered';
 
-/** Sends one job to a dedicated layout worker. A new job terminates the old. */
-function createBlockGraphRunner() {
-  let worker = null, serial = 0, reject = null;
-  const cancel = () => { serial += 1; worker?.terminate(); worker = null; reject?.(new DOMException('Cancelled', 'AbortError')); reject = null; };
+/**
+ * Runs layout jobs one at a time in a worker that answers {id, ok, result}
+ * or {id, ok: false, error}. A new job cancels the one running; the worker
+ * stays between jobs and is terminated only to cancel one. `script` is the
+ * worker; `local`, when given, runs a job on this thread where no worker
+ * starts. The flow graph uses it with its own worker and fallback.
+ */
+function createBlockGraphRunner({script = 'block_graph_layout.js', local = null} = {}) {
+  let worker = null, serial = 0, job = null;
+  function finish(id, ok, value) {
+    if (job?.id !== id) return;
+    const {resolve, reject} = job;
+    job = null;
+    if (ok) resolve(value); else reject(value);
+  }
+  const runLocal = (id, message) => local(message).then(result => finish(id, true, result), error => finish(id, false, error));
+  function start() {
+    try { worker = new Worker(script); } catch { worker = null; return false; }
+    worker.onmessage = event => finish(event.data.id, event.data.ok, event.data.ok ? event.data.result : Error(event.data.error));
+    worker.onerror = event => {
+      event.preventDefault?.();
+      worker?.terminate();
+      worker = null;
+      // A worker that cannot run leaves its job to this thread when it can.
+      if (job && local) runLocal(job.id, job.message);
+      else if (job) finish(job.id, false, Error(event.message || 'Layout failed.'));
+    };
+    return true;
+  }
+  function cancel() {
+    worker?.terminate();
+    worker = null;
+    const cancelled = job;
+    job = null;
+    cancelled?.reject(new DOMException('Cancelled', 'AbortError'));
+  }
   return {
-    run(message, transfer) {
-      cancel();
-      if (typeof Worker === 'undefined') return Promise.reject(Error('The layout worker is unavailable in this browser context.'));
+    run(message, transfer = []) {
+      if (job) cancel();
       const id = ++serial;
-      return new Promise((resolve, fail) => {
-        reject = fail;
-        try { worker = new Worker('block_graph_layout.js'); } catch { reject = null; fail(Error('The layout worker could not start.')); return; }
-        worker.onmessage = event => {
-          if (event.data.id !== id) return;
-          worker?.terminate(); worker = null; reject = null;
-          if (event.data.ok) resolve(event.data.result); else fail(Error(event.data.error));
-        };
-        worker.onerror = event => { if (id === serial) { worker?.terminate(); worker = null; reject = null; fail(Error(event.message || 'Layout failed.')); } };
-        worker.postMessage({...message, id}, transfer ?? []);
+      return new Promise((resolve, reject) => {
+        job = {id, message: local ? message : null, resolve, reject};
+        if (worker || start()) worker.postMessage({...message, id}, transfer);
+        else if (local) runLocal(id, message);
+        else finish(id, false, Error('The layout worker could not start.'));
       });
     },
     cancel

@@ -687,8 +687,8 @@ if (typeof importScripts === 'function') {
   importScripts('graph_layout_client.js');
   self.onmessage = async event => {
     try {
-      const layout = await flowGraphLayout.runAsync(event.data);
-      self.postMessage({id: event.data.id, ok: true, layout}, flowGraphLayout.transfer(layout));
+      const result = await flowGraphLayout.runAsync(event.data);
+      self.postMessage({id: event.data.id, ok: true, result}, flowGraphLayout.transfer(result));
     } catch (error) {
       self.postMessage({id: event.data.id, ok: false, error: error?.message ?? 'Layout failed.'});
     }

@@ -305,37 +305,6 @@ function flowGraphHighlight(model, display, paths) {
   return {nodes, edges, originalEdges, paths: paths.length, occurrences: paths.reduce((sum, path) => sum + (path.occurrences ?? 0), 0)};
 }
 
-function createFlowGraphRunner() {
-  let worker = null, serial = 0, reject = null;
-  const cancel = () => { serial += 1; worker?.terminate(); worker = null; reject?.(new DOMException('Cancelled', 'AbortError')); reject = null; };
-  return {
-    cancel,
-    layout(graph, metrics, engine = 'layered') {
-      cancel();
-      const id = serial;
-      return new Promise((resolve, fail) => {
-        reject = fail;
-        const local = async () => {
-          // A shell that cannot start workers still lays out, on this thread.
-          try {
-            const layout = await flowGraphLayout.runAsync({graph, metrics, engine});
-            if (id !== serial) return;
-            reject = null; resolve(layout);
-          } catch (error) { if (id === serial) { reject = null; fail(error); } }
-        };
-        try { worker = new Worker('flow_graph_layout.js'); } catch { worker = null; local(); return; }
-        worker.onmessage = event => {
-          if (event.data.id !== id) return;
-          worker?.terminate(); worker = null; reject = null;
-          if (event.data.ok) resolve(event.data.layout); else fail(Error(event.data.error));
-        };
-        worker.onerror = event => { if (id === serial) { worker?.terminate(); worker = null; local(); event.preventDefault?.(); } };
-        worker.postMessage({id, graph, metrics, engine});
-      });
-    }
-  };
-}
-
 /** Parses a colour token (#rgb, #rrggbb, rgb() or rgba()) into a canvas
  * colour at `alpha`, for shadows, which take no global alpha of their own. */
 function flowGraphAlpha(color, alpha) {
@@ -516,7 +485,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   if (typeof MutationObserver === 'function') new MutationObserver(() => { readTokens(); requestDraw(); }).observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
   globalThis.matchMedia?.('(prefers-color-scheme: dark)')?.addEventListener?.('change', () => { readTokens(); requestDraw(); });
 
-  const runner = createFlowGraphRunner();
+  // A shell that cannot start a worker lays out on this thread, with the same engine report.
+  const runner = createBlockGraphRunner({script: 'flow_graph_layout.js', local: message => flowGraphLayout.runAsync(message)});
   let session = null, requested = null, status_ = 'idle', error = '', model = null, display = null, cards = null, layout = null, generation = 0, controller = null;
   let collapse = true, expanded = new Set(), selected = -1, selectedRow = -1, highlight = null, highlightLabel = '', matches = [], matchSet = new Set(), matchIndex = -1, requestKey = null, shownRequest = '', visible = false;
   // The workspace's timeline mark: a Wasm function (and row) a sample points
@@ -653,7 +623,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     const nextCards = flowGraphCards(model, next, measure);
     try {
       // Triskel runs in the backend; a shell without the route lays out here.
-      const result = await runner.layout(flowGraphLayoutInput(next, nextCards), metrics, available() ? 'triskel' : 'layered');
+      const result = await runner.run({graph: flowGraphLayoutInput(next, nextCards), metrics, engine: available() ? 'triskel' : 'layered'});
       layingOut = false;
       if (mine !== generation) return;
       display = next; cards = nextCards; layout = result; layoutStale = false; keyIndex = null; labelSides = null;

@@ -1643,7 +1643,10 @@ With `--reb-promise-stacks`, V8 reports each user `.then`, `.catch`,
 promise with the 26-bit async task ID DevTools' async stacks use, and reports
 the reaction's start and end (`OnPromiseBefore` and `OnPromiseAfter`). The
 debugger is never activated and the inspector's delegate is unchanged; both
-see the same IDs. While capture is inactive the delegate's `active` check
+see the same IDs. The builtins reach these points through the isolate's
+`HasAsyncEventDelegate` promise-hook bit, which covers either listener;
+`Promise#then`'s CodeStubAssembler check reads that bit instead of the
+inspector's delegate pointer. While capture is inactive the delegate's `active` check
 fails before V8 scans a frame or assigns an ID.
 
 Each registration in an active capture walks the innermost 32 frames, hashes

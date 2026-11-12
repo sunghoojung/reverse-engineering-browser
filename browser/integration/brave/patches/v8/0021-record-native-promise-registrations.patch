@@ -41,6 +41,24 @@ index 9f29470..bea8f38 100644
  }  // namespace v8
  
  #endif  // INCLUDE_V8_NATIVE_STACK_H_
+diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
+index faad5a4..e149294 100644
+--- a/src/codegen/code-stub-assembler.cc
++++ b/src/codegen/code-stub-assembler.cc
+@@ -19299,9 +19299,10 @@ TNode<BoolT> CodeStubAssembler::IsDebugActive() {
+ }
+ 
+ TNode<BoolT> CodeStubAssembler::HasAsyncEventDelegate() {
+-  const TNode<RawPtrT> async_event_delegate = Load<RawPtrT>(ExternalConstant(
+-      ExternalReference::async_event_delegate_address(isolate())));
+-  return WordNotEqual(async_event_delegate, IntPtrConstant(0));
++  // The bit the isolate sets for the inspector's delegate or the REB promise
++  // callbacks (include/v8-native-stack.h), so Promise#then reports to both.
++  return IsSetWord32<Isolate::PromiseHookFields::HasAsyncEventDelegate>(
++      PromiseHookFlags());
+ }
+ 
+ TNode<Uint32T> CodeStubAssembler::PromiseHookFlags() {
 diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
 index a296e08..e2abc5f 100644
 --- a/src/execution/isolate.cc

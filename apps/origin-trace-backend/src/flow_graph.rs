@@ -17,7 +17,7 @@ use crate::{
     error::{Error, Result},
     event_window, evidence, request_cookies, request_index,
     request_stack::{self, Frame, Identity, Record, Segment},
-    store_scan::{self, Stopped, Stores},
+    store_scan::{self, Scanned, Stopped, Stores},
 };
 use hex::FromHex;
 use regex::bytes::Regex;
@@ -25,6 +25,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -136,9 +137,6 @@ struct Scan {
     stacks_over_budget: u64,
     records: BTreeMap<&'static str, u64>,
     not_walked: BTreeMap<&'static str, u64>,
-    malformed: u64,
-    stopped: &'static str,
-    scanned_bytes: u64,
     request_refs: usize,
     request_refs_dropped: u64,
 }
@@ -1338,30 +1336,28 @@ pub fn run(
     {
         return Ok(value.clone());
     }
-    let value = Arc::new(build(stores, session, end, cancel)?);
+    let (graph, cacheable) = build(stores, session, end, cancel)?;
+    let value = Arc::new(graph);
     // A scan cut by its deadline is answered but not kept: the next request
     // reads again instead of repeating the partial graph.
-    let deadline_cut =
-        value["coverage"]["stopped"] != "end" || value["truncated"]["source_deadline"] != 0;
-    *cache.0.lock().unwrap() = (!deadline_cut).then(|| (key, value.clone()));
+    *cache.0.lock().unwrap() = cacheable.then(|| (key, value.clone()));
     Ok(value)
 }
 
-fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result<Value> {
-    let started = Instant::now();
-    let deadline = started + SCAN_DEADLINE;
+/// Every record of the session the flow graph reads, in one forward pass.
+fn scan_events(
+    path: &Path,
+    session: u64,
+    end: u64,
+    reader: &store_scan::Reader,
+) -> Result<(Scan, Scanned)> {
     let filter = |pattern: &str| {
         Regex::new(pattern).map_err(|_| Error::new(500, "Flow graph filter failed"))
     };
     let prefilter = filter(&format!(r#""type":"(?:{})""#, TYPES.join("|")))?;
     let needle = filter(&store_scan::field_pattern("session_id", session))?;
-    let reader = store_scan::Reader {
-        cancel,
-        deadline,
-        cancelled: CANCELLED,
-    };
     let mut scan = Scan::default();
-    let scanned = reader.lines(&stores.events, 0, end, Some(&prefilter), &mut |_, line| {
+    let scanned = reader.lines(path, 0, end, Some(&prefilter), &mut |_, line| {
         if !may_be_session(line, &needle, session) {
             return Some(true);
         }
@@ -1369,16 +1365,63 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
         // A record the decoders refuse is counted as malformed.
         (!store_scan::same_session(&event, session) || scan.record(&event)).then_some(true)
     })?;
-    scan.malformed = scanned.malformed;
-    scan.scanned_bytes = scanned.position;
-    scan.stopped = if scanned.stopped == Stopped::Deadline {
-        "deadline"
-    } else {
-        "end"
-    };
+    Ok((scan, scanned))
+}
 
-    // One manifest pass for the stack and source artifacts every walk names.
-    let session_id = session.to_string();
+/// The session's stack, script and module artifacts the walks name, by
+/// SHA-256.
+struct Artifacts<'a> {
+    root: &'a Path,
+    session: String,
+    stacks: HashMap<[u8; 32], Value>,
+    sources: HashMap<[u8; 32], Value>,
+}
+
+impl<'a> Artifacts<'a> {
+    fn new(root: &'a Path, session: u64) -> Self {
+        Self {
+            root,
+            session: session.to_string(),
+            stacks: HashMap::new(),
+            sources: HashMap::new(),
+        }
+    }
+
+    /// One manifest pass for the artifacts whose hex SHA-256 is wanted.
+    fn select(&mut self, wanted: &HashSet<String>) -> Result<()> {
+        let selected = evidence::select_artifacts(self.root, |a| {
+            a["session_id"].as_str() == Some(self.session.as_str())
+                && matches!(a["kind"].as_str(), Some("stack" | "javascript" | "wasm"))
+                && a["sha256"].as_str().is_some_and(|sha| wanted.contains(sha))
+        })?;
+        for artifact in selected {
+            let Some(sha) = artifact["sha256"]
+                .as_str()
+                .and_then(|sha| <[u8; 32]>::from_hex(sha).ok())
+            else {
+                continue;
+            };
+            // Later manifest records are newer and win, as stack resolution reads them.
+            if artifact["kind"] == "stack" {
+                self.stacks.insert(sha, artifact);
+            } else {
+                self.sources.insert(sha, artifact);
+            }
+        }
+        Ok(())
+    }
+
+    fn read(&self, artifact: &Value, limit: usize) -> Option<Vec<u8>> {
+        evidence::content(self.root, artifact, limit).ok()
+    }
+}
+
+/// Every walk decoded, with its task segments' scheduling stacks, and the
+/// count of walks and segments left unresolved by why.
+fn decode_walks(
+    scan: &Scan,
+    artifacts: &mut Artifacts,
+) -> Result<(Vec<Decoded>, BTreeMap<&'static str, u64>)> {
     let mut wanted: HashSet<String> = scan
         .walks
         .iter()
@@ -1391,40 +1434,12 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
                 .filter_map(|identity| identity.sha256.map(hex::encode)),
         );
     }
-    let select = |wanted: &HashSet<String>| -> Result<Vec<Value>> {
-        evidence::select_artifacts(&stores.artifacts, |a| {
-            a["session_id"].as_str() == Some(session_id.as_str())
-                && matches!(a["kind"].as_str(), Some("stack" | "javascript" | "wasm"))
-                && a["sha256"].as_str().is_some_and(|sha| wanted.contains(sha))
-        })
-    };
-    let mut stacks = HashMap::new();
-    let mut sources = HashMap::new();
-    let place = |artifact: Value,
-                 stacks: &mut HashMap<[u8; 32], Value>,
-                 sources: &mut HashMap<[u8; 32], Value>| {
-        let Some(sha) = artifact["sha256"]
-            .as_str()
-            .and_then(|sha| <[u8; 32]>::from_hex(sha).ok())
-        else {
-            return;
-        };
-        // Later manifest records are newer and win, as stack resolution reads them.
-        if artifact["kind"] == "stack" {
-            stacks.insert(sha, artifact);
-        } else {
-            sources.insert(sha, artifact);
-        }
-    };
-    for artifact in select(&wanted)? {
-        place(artifact, &mut stacks, &mut sources);
-    }
-    let root = stores.artifacts.clone();
-    let read = move |artifact: &Value, limit: usize| evidence::content(&root, artifact, limit).ok();
+    artifacts.select(&wanted)?;
+    let read = |artifact: &Value, limit: usize| artifacts.read(artifact, limit);
     let mains: Vec<_> = scan
         .walks
         .iter()
-        .map(|walk| decode_main(walk, &stacks, &read))
+        .map(|walk| decode_main(walk, &artifacts.stacks, &read))
         .collect();
     // Task segments can name scheduling stacks that no record here describes.
     let segment_digests: HashSet<String> = mains
@@ -1432,25 +1447,37 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
         .flatten()
         .flat_map(|(_, _, _, _, segments)| segments.iter())
         .filter(|segment| segment.kind != 9 && segment.state == 1)
-        .filter(|segment| !stacks.contains_key(&segment.digest))
+        .filter(|segment| !artifacts.stacks.contains_key(&segment.digest))
         .map(|segment| hex::encode(segment.digest))
         .collect();
     if !segment_digests.is_empty() {
-        for artifact in select(&segment_digests)? {
-            place(artifact, &mut stacks, &mut sources);
-        }
+        artifacts.select(&segment_digests)?;
     }
+    let read = |artifact: &Value, limit: usize| artifacts.read(artifact, limit);
     let mut missing = BTreeMap::new();
     let mut segments_seen = HashMap::new();
-    let decoded: Vec<Decoded> = scan
+    let decoded = scan
         .walks
         .iter()
         .zip(mains)
-        .map(|(walk, main)| decode(walk, main, &stacks, &read, &mut segments_seen, &mut missing))
+        .map(|(walk, main)| {
+            decode(
+                walk,
+                main,
+                &artifacts.stacks,
+                &read,
+                &mut segments_seen,
+                &mut missing,
+            )
+        })
         .collect();
-    // Every offset each retained script is asked for, gathered before any read.
+    Ok((decoded, missing))
+}
+
+/// Every offset each retained script is asked for, gathered before any read.
+fn source_offsets(scan: &Scan, decoded: &[Decoded]) -> BTreeMap<[u8; 32], (bool, BTreeSet<u32>)> {
     let mut offsets: BTreeMap<[u8; 32], (bool, BTreeSet<u32>)> = BTreeMap::new();
-    for (walk, decoded) in scan.walks.iter().zip(&decoded) {
+    for (walk, decoded) in scan.walks.iter().zip(decoded) {
         let frames = decoded.sync.iter().chain(&decoded.asyncs).chain(
             decoded
                 .segments
@@ -1478,11 +1505,26 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
             }
         }
     }
+    offsets
+}
+
+/// The graph, and whether it may be cached: an answer the deadline cut is not.
+fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result<(Value, bool)> {
+    let started = Instant::now();
+    let deadline = started + SCAN_DEADLINE;
+    let reader = store_scan::Reader {
+        cancel,
+        deadline,
+        cancelled: CANCELLED,
+    };
+    let (scan, scanned) = scan_events(&stores.events, session, end, &reader)?;
+    let mut artifacts = Artifacts::new(&stores.artifacts, session);
+    let (decoded, missing) = decode_walks(&scan, &mut artifacts)?;
     let (mut source_budget, mut source_cuts) = (MAX_SOURCE_BYTES, SourceCuts::default());
     let resolved = resolve_sources(
-        &offsets,
-        &sources,
-        &read,
+        &source_offsets(&scan, &decoded),
+        &artifacts.sources,
+        &|artifact, limit| artifacts.read(artifact, limit),
         deadline,
         &mut source_budget,
         &mut source_cuts,
@@ -1496,6 +1538,19 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
         builder.add(walk, decoded);
     }
 
+    let deadline_cut = scanned.stopped == Stopped::Deadline;
+    // Complete means nothing was cut: no deadline, no budget and no table
+    // that forgot entries.
+    let complete = !deadline_cut
+        && scan.stacks_over_budget == 0
+        && builder.nodes_cut == 0
+        && builder.edges_cut == 0
+        && builder.paths_cut == 0
+        && scan.identities_dropped == 0
+        && !scan.labels_dropped
+        && scan.request_refs_dropped == 0
+        && source_cuts.budget == 0
+        && source_cuts.deadline == 0;
     let contexts: Vec<Value> = builder
         .contexts
         .iter()
@@ -1509,34 +1564,21 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
         .map(|(id, node)| node.json(id))
         .collect();
     let edges: Vec<Value> = builder.edges.into_iter().map(Edge::json).collect();
-    let occurrences: u64 = scan.walks.iter().map(|walk| walk.occurrences).sum();
-    // Complete means nothing was cut: no deadline, no budget and no table
-    // that forgot entries.
-    let complete = scan.stopped == "end"
-        && scan.stacks_over_budget == 0
-        && builder.nodes_cut == 0
-        && builder.edges_cut == 0
-        && builder.paths_cut == 0
-        && scan.identities_dropped == 0
-        && !scan.labels_dropped
-        && scan.request_refs_dropped == 0
-        && source_cuts.budget == 0
-        && source_cuts.deadline == 0;
-    Ok(json!({
+    let graph = json!({
         "schema": SCHEMA,
         "session_id": session.to_string(),
         "evidence": "observed",
         "complete": complete,
         "coverage": {
-            "stopped": scan.stopped,
-            "scanned_bytes": scan.scanned_bytes.to_string(),
+            "stopped": if deadline_cut { "deadline" } else { "end" },
+            "scanned_bytes": scanned.position.to_string(),
             "store_end": end.to_string(),
-            "malformed_records": scan.malformed,
+            "malformed_records": scanned.malformed,
             "elapsed_ms": started.elapsed().as_millis() as u64,
         },
         "stacks": {
             "records": scan.records,
-            "occurrences": occurrences,
+            "occurrences": scan.walks.iter().map(|walk| walk.occurrences).sum::<u64>(),
             "distinct": scan.walks.len(),
             "decoded": decoded.iter().filter(|d| d.retained).count(),
             "not_walked": scan.not_walked,
@@ -1572,7 +1614,8 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
         "nodes": nodes,
         "edges": edges,
         "paths": builder.paths,
-    }))
+    });
+    Ok((graph, !deadline_cut && source_cuts.deadline == 0))
 }
 
 #[cfg(test)]
@@ -1580,7 +1623,7 @@ mod tests {
     use super::*;
     use crate::request_stack::tests::{frame, identity_bytes, segment, stack_artifact};
     use sha2::{Digest, Sha256};
-    use std::{io::Write, path::Path};
+    use std::io::Write;
 
     fn request_record(
         digest: &[u8],
@@ -1692,11 +1735,14 @@ mod tests {
         }
     }
 
-    fn graph(fixture: &Fixture) -> Value {
-        let stores = fixture.stores();
-        let value = run(&stores, 9, &Cache::default(), &AtomicBool::new(false)).unwrap();
+    fn answer(stores: &Stores, session: u64, cache: &Cache) -> Arc<Value> {
+        let value = run(stores, session, cache, &AtomicBool::new(false)).unwrap();
         assert_contract(&value);
-        (*value).clone()
+        value
+    }
+
+    fn graph(fixture: &Fixture) -> Value {
+        (*answer(&fixture.stores(), 9, &Cache::default())).clone()
     }
 
     fn node<'a>(graph: &'a Value, name: &str) -> &'a Value {
@@ -1969,17 +2015,17 @@ mod tests {
         }
         let stores = f.stores();
         let cache = Cache::default();
-        let first = run(&stores, 9, &cache, &AtomicBool::new(false)).unwrap();
+        let first = answer(&stores, 9, &cache);
         assert_eq!(first["stacks"]["distinct"], 3);
         assert_eq!(first["stacks"]["occurrences"], 304);
         assert_eq!(edge(&first, "boot", "onMessage")["count"], 302);
-        let second = run(&stores, 9, &cache, &AtomicBool::new(false)).unwrap();
+        let second = answer(&stores, 9, &cache);
         assert!(
             Arc::ptr_eq(&first, &second),
             "an unchanged store answers from the cache"
         );
         // Another session in the same store is not this one.
-        let other = run(&stores, 8, &cache, &AtomicBool::new(false)).unwrap();
+        let other = answer(&stores, 8, &cache);
         assert_eq!(other["nodes"], json!([]));
     }
 

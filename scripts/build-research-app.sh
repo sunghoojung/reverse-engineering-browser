@@ -7,6 +7,24 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
+# The native smoke checks run by default. REB_APP_SMOKE_CHECKS=0 builds the
+# same bundle without them; CI's rendered-UI job uses it because the
+# macos-package job of the same run executes every one on the same source.
+# The agent CLI stand-in is always built: the rendered UI runs it as Claude.
+smoke_checks="${REB_APP_SMOKE_CHECKS:-1}"
+case "${smoke_checks}" in
+  0 | 1) ;;
+  *)
+    echo "REB_APP_SMOKE_CHECKS must be 0 or 1, not ${smoke_checks}" >&2
+    exit 2
+    ;;
+esac
+smoke() {
+  if [[ "${smoke_checks}" == 1 ]]; then
+    "$@"
+  fi
+}
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 final_app_path="${repo_root}/build/Origin Trace.app"
 # Assemble and sign a private copy, then replace the bundle in one rename. A
@@ -159,48 +177,52 @@ render_icon 512 icon_512x512.png
 render_icon 1024 icon_512x512@2x.png
 xcrun iconutil -c icns "${iconset_path}" -o "${resources_path}/OriginTrace.icns"
 
-xcrun swiftc -parse-as-library \
+if [[ "${smoke_checks}" == 0 ]]; then
+  echo "Skipping the native smoke checks (REB_APP_SMOKE_CHECKS=0)."
+fi
+
+smoke xcrun swiftc -parse-as-library \
   "${workspace_lease_source}" "${repo_root}/apps/research-ui/macos/NativeWorkspaceLeaseChecks.swift" \
   -o "${repo_root}/build/check-native-workspace-lease"
-"${repo_root}/build/check-native-workspace-lease"
-REB_WORKSPACE_LEASE_TEST_HELPER="${repo_root}/build/check-native-workspace-lease" \
+smoke "${repo_root}/build/check-native-workspace-lease"
+smoke env REB_WORKSPACE_LEASE_TEST_HELPER="${repo_root}/build/check-native-workspace-lease" \
   cargo test --locked --manifest-path "${repo_root}/apps/origin-trace-backend/Cargo.toml" \
   workspace_native_lock_interoperability -- --ignored
 
-xcrun swiftc -parse-as-library \
+smoke xcrun swiftc -parse-as-library \
   "${trace_document_source}" "${repo_root}/tools/check-origin-trace-gaps.swift" \
   -o "${repo_root}/build/check-origin-trace-gaps"
-"${repo_root}/build/check-origin-trace-gaps" \
+smoke "${repo_root}/build/check-origin-trace-gaps" \
   "${repo_root}/apps/origin-trace-backend/assets/origin-trace-gap-cases.json" \
   "${repo_root}/apps/origin-trace-backend/assets/origin-trace-invocation-cases.json"
 
-xcrun swiftc -parse-as-library \
+smoke xcrun swiftc -parse-as-library \
   "${live_session_source}" "${repo_root}/tools/check-live-session-failure.swift" \
   -o "${repo_root}/build/check-live-session-failure"
-"${repo_root}/build/check-live-session-failure"
+smoke "${repo_root}/build/check-live-session-failure"
 
 xcrun swiftc -parse-as-library \
   "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${repo_root}/tools/check-agent-core.swift" \
   "${repo_root}/tools/check-agent-subscriptions.swift" "${repo_root}/tools/agent-cli-stand-in.swift" \
   -o "${repo_root}/build/check-agent-core"
-"${repo_root}/build/check-agent-core" "${repo_root}/apps/origin-trace-backend/target/release/reb-api"
+smoke "${repo_root}/build/check-agent-core" "${repo_root}/apps/origin-trace-backend/target/release/reb-api"
 
-node "${repo_root}/tools/check-captured-client-project.mjs"
-xcrun swiftc -parse-as-library -framework Cocoa -framework WebKit \
+smoke node "${repo_root}/tools/check-captured-client-project.mjs"
+smoke xcrun swiftc -parse-as-library -framework Cocoa -framework WebKit \
   "${client_project_export_source}" "${repo_root}/tools/check-client-project-export.swift" \
   -o "${repo_root}/build/check-client-project-export"
-"${repo_root}/build/check-client-project-export" \
+smoke "${repo_root}/build/check-client-project-export" \
   "${repo_root}/build/client-project-qa/authored-example.zip"
 
-xcrun swiftc -parse-as-library \
+smoke xcrun swiftc -parse-as-library \
   "${stored_event_window_source}" "${repo_root}/tools/check-stored-event-window.swift" \
   -o "${repo_root}/build/check-stored-event-window"
-"${repo_root}/build/check-stored-event-window"
+smoke "${repo_root}/build/check-stored-event-window"
 
-xcrun swiftc -parse-as-library \
+smoke xcrun swiftc -parse-as-library \
   "${stored_evidence_backend_source}" "${repo_root}/tools/check-stored-evidence-backend.swift" \
   -o "${repo_root}/build/check-stored-evidence-backend"
-"${repo_root}/build/check-stored-evidence-backend" "${macos_path}/OriginTraceBackend"
+smoke "${repo_root}/build/check-stored-evidence-backend" "${macos_path}/OriginTraceBackend"
 
 xcrun swiftc \
   -parse-as-library \

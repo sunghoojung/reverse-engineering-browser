@@ -1629,28 +1629,54 @@ message beside Chromium's `sender_stack_trace_id`: `BlinkCloneableMessage`
 moves it across threads, and the `CloneableMessage` mojom field
 `reb_task_origin` carries it to other renderers, directly for a `MessagePort`
 and through the browser's `ShallowClone` for a `BroadcastChannel`. It is never
-stored. Little endian:
+stored as such. Little endian:
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | version, `1` |
+| 0 | 2 | version, `2` |
 | 2 | 1 | segments n, 1 to 32 |
-| 3 | 1 | flags: bit 0 the sender's chain continued past these, or was cut there |
-| 4 | 4 | sender's OS process ID, nonzero |
-| 8 | 8 | sender's table, a process-unique nonzero number per attached thread |
-| 16 | 8 | posting segment's serial in that table; zero exactly when it is `no_script` |
-| 24 | 48 x n | version 3 task segments, nearest first: the posting segment (kind 10 to 12), then the sender's chain |
+| 3 | 1 | flags: bit 0 the sender's chain was cut after these (a caller not recorded or no longer remembered); bit 1 it went on past these 32; never both |
+| 4 | 4 | reserved, zero |
+| 8 | 48 x n | version 3 task segments, nearest first: the posting segment (kind 10 to 12), then the sender's chain |
 
-At most 1,560 bytes per message, built from at most 32 ring reads when the
-message is posted. The receiving renderer treats the bytes as untrusted: an
-origin that does not validate, names another kind, or is absent while capture
-is active cuts the handler's chain (bit 3); the message itself is never
-affected. Received on the thread that posted it, while that segment is still
-remembered, the handler's task continues the same chain. Received anywhere
-else, the carried segments are copied into the receiving thread's ring
-(at most 32 writes), the last one cut when bit 0 is set, so a request in the
-handler lists the posting stack and the sender's callers. Each copied segment's
-frames resolve in the scope of its own artifact.
+What crosses is the minimum the receiving thread needs to write the chain into
+its own stack artifacts: per segment its kind, state, frame-limit flag,
+registration, frame count and the SHA-256 digest that names its stack
+artifact, which the sender stored. The origin names no process, thread, table
+or serial: version 1 carried the sender's OS process ID, a table number and
+the posting segment's serial so that a receiver on the posting thread could
+link the posting segment in place; every receiver now stores copies instead,
+which give the same chain. A no-script last segment, and bit 1 only with 32
+segments, are checked; a sender never carries `origin_rejected`.
+
+At most 1,544 bytes per message, built from at most 32 ring reads when the
+message is posted. The receiving renderer treats the bytes as untrusted and
+the message itself is never affected:
+
+- Absent while capture is active: the sender carried nothing (capture off
+  there, a worklet, or a worker past the thread limit), so the caller is
+  unknown and the handler's chain is cut (bit 3).
+- Present but not valid, or naming another kind than the API that received
+  it: rejected. Nothing of it is kept; the handler's chain ends at a segment
+  of the receiving kind with state 8 `origin_rejected`, and each rejection
+  counts one `message_task_origin_rejected` gap.
+- Longer than 1,544 bytes: the Mojo traits of both `CloneableMessage`
+  variants (`blink::CloneableMessage`, which the browser reads when it relays
+  a `BroadcastChannel` post, and the renderer's `BlinkCloneableMessage`) and
+  `ShallowClone` replace it, without reading it, with one zero byte
+  (`kRebTaskOriginOversize`), which never validates, so the receiver rejects
+  and counts it as above. `kRebTaskOriginMaxBytes` in
+  `third_party/blink/public/common/messaging/cloneable_message.h` is
+  static-asserted equal to the contract's bound.
+- Valid: the carried segments are copied into the receiving thread's ring (at
+  most 32 writes), farthest first, the last one marked cut or truncated as
+  bit 0 or 1 says, so a request in the handler lists the posting stack and
+  the sender's callers, with bit 3 or bit 4 as the sender's chain had. Each
+  copied segment's frames resolve in the scope of its own artifact. A sender
+  that has since shut down changes nothing: the copies are already complete.
+
+What it exposes, to whom, and where it is stored is in
+[SAFETY.md](../SAFETY.md#default-capture).
 
 #### Promise registrations
 

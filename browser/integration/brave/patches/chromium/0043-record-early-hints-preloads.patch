@@ -1,5 +1,5 @@
 diff --git a/content/browser/renderer_host/navigation_request.cc b/content/browser/renderer_host/navigation_request.cc
-index eb951c7..f659f19 100644
+index eb951c7..c4fc7a3 100644
 --- a/content/browser/renderer_host/navigation_request.cc
 +++ b/content/browser/renderer_host/navigation_request.cc
 @@ -47,6 +47,7 @@
@@ -10,13 +10,14 @@ index eb951c7..f659f19 100644
  #include "build/build_config.h"
  #include "build/buildflag.h"
  #include "components/viz/host/host_frame_sink_manager.h"
-@@ -5607,11 +5608,23 @@ NavigationRequest::CreateNavigationEarlyHintsManagerParams(
+@@ -5607,11 +5608,24 @@ NavigationRequest::CreateNavigationEarlyHintsManagerParams(
  
    // TODO(crbug.com/40188470): Support DevTools instrumentation and extension's
    // WebRequest API.
-+  // The embedder sees the preloads like other loads. The document has not
-+  // committed, so no frame is passed; the navigating main frame is scoped as
-+  // their owner (protocol/native-network-v3.md).
++  // The embedder's factory hook sees the preloads only so native capture can
++  // record them; the embedder must leave them as they are
++  // (protocol/native-network-v3.md). The document has not committed, so no
++  // frame is passed; the navigating main frame is scoped as their owner.
 +  RenderFrameHostImpl* const native_owner_frame =
 +      frame_tree_node_->current_frame_host();
 +  const reb::ScopedNativeFactoryOwner native_owner(

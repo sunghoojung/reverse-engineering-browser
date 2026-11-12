@@ -68,6 +68,13 @@ const DEBUGGER_PAUSE_UNREAD = Object.freeze({
   unavailable: 'This window has no backend, so the pausing debugger cannot be read.'
 });
 
+function pauseUnsupported(view) {
+  const answer = pauseDocument(view?.document);
+  if (!answer || answer.availability === 'available') return null;
+  return pauseNode('p', 'debugger-pause-unsupported',
+    DEBUGGER_PAUSE_UNSUPPORTED[answer.reason] ?? 'The pausing debugger is unsupported.');
+}
+
 function pauseUnread(view) {
   const answer = pauseDocument(view?.document);
   if (answer) return null;
@@ -241,7 +248,7 @@ function createDebuggerPause(hooks = {}) {
     const answer = pauseDocument(view?.document);
     pauseSync(state, answer);
     body.replaceChildren();
-    const unread = pauseUnread(view);
+    const unread = pauseUnread(view) ?? pauseUnsupported(view);
     if (unread) { body.append(unread); return; }
     const frozen = !pauseLive(view) || state.busy;
     const breakpoints = Array.isArray(answer?.breakpoints) ? answer.breakpoints : [];
@@ -270,7 +277,7 @@ function createDebuggerPause(hooks = {}) {
     const answer = pauseDocument(view?.document);
     pauseSync(state, answer);
     body.replaceChildren();
-    const unread = pauseUnread(view);
+    const unread = pauseUnread(view) ?? pauseUnsupported(view);
     if (unread) { body.append(unread); return; }
     const frozen = !pauseLive(view) || state.busy;
     const pause = answer?.paused ? answer.pause : null;
@@ -304,7 +311,7 @@ function createDebuggerPause(hooks = {}) {
     const answer = pauseDocument(view?.document);
     pauseSync(state, answer);
     body.replaceChildren();
-    const unread = pauseUnread(view);
+    const unread = pauseUnread(view) ?? pauseUnsupported(view);
     if (unread) { body.append(unread); return; }
     const frozen = !pauseLive(view) || state.busy;
     const frame = answer?.paused ? answer.pause?.frames?.[0] : null;
@@ -346,7 +353,7 @@ function createDebuggerPause(hooks = {}) {
     const answer = pauseDocument(view?.document);
     pauseSync(state, answer);
     body.replaceChildren();
-    const unread = pauseUnread(view);
+    const unread = pauseUnread(view) ?? pauseUnsupported(view);
     if (unread) { body.append(unread); return; }
     const frozen = !pauseLive(view) || state.busy;
     const field = pauseNode('input', 'debugger-pause-watch-input');

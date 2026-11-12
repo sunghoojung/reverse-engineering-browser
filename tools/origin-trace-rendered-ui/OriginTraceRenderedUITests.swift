@@ -3385,8 +3385,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
           """) as? Bool
         if closed == true { try await ui.click("#debugger-sidebar [data-debugger-section=\"\(id)\"] summary") }
       }
-      try await ui.waitUntil("document.querySelectorAll('#debugger-sidebar [data-debugger-native=\"pausing\"] button, #debugger-sidebar [data-debugger-native=\"pausing\"] input').length > 0",
-        "\(size.name): the pausing sections drew no controls")
+      try await ui.waitUntil("document.querySelectorAll('#debugger-sidebar .debugger-section[data-debugger-native=\"pausing\"] > .debugger-section-body').length === 5",
+        "\(size.name): the five pausing sections did not render")
       let state = try await ui.json("""
         (() => {
           const sidebar = document.querySelector('#debugger-sidebar');
@@ -3401,6 +3401,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
           return {sections, pausing, controls: controls.length,
             enabled: controls.filter(control => !control.disabled).map(control => control.innerText || control.placeholder || control.type),
             reachable: reachable.length,
+            said: bodies.filter(body => body.innerText.includes('No browser serves the pausing debugger')).length,
             statement: document.querySelector('[data-debugger-native="availability"]').innerText.replace(/\\s+/g, ' '),
             availability: document.querySelector('[data-debugger-native="availability"]').dataset.availability};
         })()
@@ -3411,12 +3412,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
         "\(size.name): the five pausing sections are registered and marked: \(state)")
       XCTAssertEqual(Array((state["sections"] as? [String] ?? []).prefix(4)), ["threads", "watch-rules", "observations", "pausing"],
         "\(size.name): they follow the phase 1 sections: \(state)")
-      // Unsupported draws what it can honestly draw: the Watch form, which
-      // is the shape of the interface, and no step or breakpoint control at
-      // all. Whatever is drawn is disabled.
-      XCTAssertGreaterThan(state["controls"] as? Int ?? 0, 0, "\(size.name): the sections draw their controls: \(state)")
+      // While no browser serves the debugger each section says so and draws
+      // no control at all: there is no document to operate on, so there is
+      // nothing to disable either.
+      XCTAssertEqual(state["said"] as? Int, 5, "\(size.name): every section says why it has nothing: \(state)")
+      XCTAssertEqual(state["controls"] as? Int, 0, "\(size.name): no control is drawn: \(state)")
       XCTAssertEqual(state["enabled"] as? [String], [],
-        "\(size.name): every control is disabled while the debugger is unsupported: \(state)")
+        "\(size.name): nothing operable while the debugger is unsupported: \(state)")
       XCTAssertEqual(state["reachable"] as? Int, 0,
         "\(size.name): nothing that cannot be disabled is drawn: \(state)")
       let statement = state["statement"] as? String ?? ""

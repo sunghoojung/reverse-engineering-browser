@@ -64,8 +64,19 @@ function paused(overrides = {}) {
     assert(body.textContent.includes(text), reason);
     assert(!body.textContent.includes('Debugger active'), reason);
   }
+  // Every section says the same honest thing while no browser serves the
+  // debugger: there is no authorized document to say anything else about.
+  for (const id of ['breakpoints', 'call-stack', 'scope', 'watch']) {
+    const body = create('div', id);
+    sectionOf(panel, id).render(body, {status: 'ready',
+      document: {availability: 'unsupported', reason: 'browser_debugger_unsupported', paused: false, pause: null}});
+    assert(body.textContent.includes('No browser serves'), id);
+    assert(!body.textContent.includes('No breakpoint is set'), id);
+    assert(!body.textContent.includes('not paused'), id);
+  }
   const stack = create('div', 'stack');
-  sectionOf(panel, 'call-stack').render(stack, {status: 'ready', document: {availability: 'unsupported', paused: false, pause: null}});
+  sectionOf(panel, 'call-stack').render(stack, {status: 'ready',
+    document: {availability: 'available', document: null, paused: false, pause: null}});
   assert(stack.textContent.includes('not paused'));
 }
 
@@ -382,12 +393,20 @@ function paused(overrides = {}) {
       }
     }
   }
-  // The Watch expression field is a control too.
+  // The Watch expression field is a control too: while the debugger is there
+  // but the read is not ready, the form is drawn and every part of it is
+  // disabled.
   const watch = create('div', 'watch-frozen');
-  sectionOf(panel, 'watch').render(watch, {status: 'ready',
-    document: {...paused(), availability: 'unsupported', reason: 'peer_unavailable'}});
+  sectionOf(panel, 'watch').render(watch, {status: 'loading', document: paused()});
   const field = watch.all.slice(1).find(node => node.tagName === 'INPUT');
   assert(field && field.disabled === true, 'the watch expression field is disabled');
+  // Unsupported draws no form at all: there is no document to evaluate on.
+  const gone = create('div', 'watch-unsupported');
+  sectionOf(panel, 'watch').render(gone, {status: 'ready',
+    document: {...paused(), availability: 'unsupported', reason: 'peer_unavailable'}});
+  assert.equal(gone.all.slice(1).filter(node => ['INPUT', 'BUTTON'].includes(node.tagName)).length, 0,
+    'no watch form while the debugger is unsupported');
+  assert(gone.textContent.includes('did not answer'));
 }
 
 // The shipped asset lists name the module, and app.js loads nothing of its own.

@@ -17,18 +17,24 @@ namespace reb {
 // tests/request_stack_test.cpp keeps the two in step.
 inline constexpr std::uint16_t kRequestStackPayloadVersion = 1;
 inline constexpr std::uint16_t kRequestStackTaskPayloadVersion = 2;
+inline constexpr std::uint16_t kRequestStackScopePayloadVersion = 3;
+inline constexpr std::uint16_t kScriptIdentityScopeVersion = 2;
+inline constexpr std::uint16_t kAsyncTaskStackScopeVersion = 2;
 inline constexpr std::uint32_t kRequestStackSyncLimit = 1024;
 inline constexpr std::uint32_t kRequestStackAsyncLimit = 32;
 inline constexpr std::uint32_t kTaskSegmentLimit = 32;
 inline constexpr std::uint32_t kAsyncTaskFrameLimit = 256;
+inline constexpr std::uint32_t kPromiseRegistrationFrameLimit = 32;
 inline constexpr std::uint32_t kStackArtifactMagic = 0x4b534252U;
 inline constexpr std::uint16_t kStackArtifactVersion = 1;
 inline constexpr std::uint16_t kStackArtifactTaskVersion = 2;
+inline constexpr std::uint16_t kStackArtifactScopeVersion = 3;
 inline constexpr std::size_t kStackArtifactHeaderSize = 32;
+inline constexpr std::size_t kStackArtifactScopeHeaderSize = 48;
 inline constexpr std::size_t kStackFrameSize = 16;
 inline constexpr std::size_t kTaskSegmentSize = 48;
 inline constexpr std::size_t kStackArtifactMaxBytes =
-    kStackArtifactHeaderSize +
+    kStackArtifactScopeHeaderSize +
     kStackFrameSize * (kRequestStackSyncLimit + kRequestStackAsyncLimit) +
     kTaskSegmentSize * kTaskSegmentLimit;
 inline constexpr std::uint64_t kScriptIdentityMaxSourceBytes = 16ULL * 1024ULL * 1024ULL;
@@ -57,8 +63,34 @@ inline constexpr std::uint8_t kRequestStackTaskCallersNotCaptured = 1U << 3U;
 inline constexpr std::uint8_t kRequestStackTaskChainCut = 1U << 3U;
 inline constexpr std::uint8_t kRequestStackTaskChainTruncated = 1U << 4U;
 inline constexpr std::uint8_t kTaskKindMicrotask = 9;
+// Version 3 segments and version 2 async_task_stack records: kinds 10 to 12.
+inline constexpr std::uint8_t kTaskKindMessagePort = 10;
+inline constexpr std::uint8_t kTaskKindWorkerMessage = 12;
+inline constexpr std::uint8_t kTaskKindLimit = 12;
 inline constexpr std::uint8_t kTaskSegmentNotRecorded = 6;
+// Version 3: scheduled while no script ran; the chain ends here.
+inline constexpr std::uint8_t kTaskSegmentNoScript = 7;
 inline constexpr std::uint8_t kTaskSegmentBounded = 1U << 0U;
+// Promise registrations, version 3 kind 9: then, catch, finally, await.
+inline constexpr std::uint8_t kPromiseRegistrationLimit = 4;
+
+// The isolate a stack's script IDs belong to: 1 document main thread, 2
+// dedicated, 3 shared, 4 service worker. The key is zero for 1, else the
+// worker's context ID.
+enum class StackThread : std::uint8_t {
+  kDocument = 1,
+  kDedicatedWorker = 2,
+  kSharedWorker = 3,
+  kServiceWorker = 4,
+};
+struct StackScope final {
+  std::uint8_t thread = 0;
+  std::array<std::uint8_t, 7> reserved{};
+  std::uint64_t isolate_key = 0;
+  friend bool operator==(const StackScope&, const StackScope&) = default;
+};
+static_assert(sizeof(StackScope) == 16);
+static_assert(std::has_unique_object_representations_v<StackScope>);
 
 enum class ScriptIdentityKind : std::uint8_t { kJavaScript = 1, kWasm = 2 };
 inline constexpr std::uint8_t kScriptIdentityEval = 1U << 0U;
@@ -153,11 +185,23 @@ static_assert(offsetof(StackArtifactHeader, total_depth) == 12);
 static_assert(offsetof(StackArtifactHeader, async_frames) == 24);
 static_assert(offsetof(StackArtifactHeader, task_segments) == 28);
 
+// Bytes 32-47 of a version 3 stack artifact header.
+struct StackArtifactScope final {
+  std::uint32_t process_id = 0;
+  std::uint8_t thread = 0;
+  std::array<std::uint8_t, 3> reserved{};
+  std::uint64_t isolate_key = 0;
+};
+static_assert(sizeof(StackArtifactScope) ==
+              kStackArtifactScopeHeaderSize - kStackArtifactHeaderSize);
+static_assert(std::has_unique_object_representations_v<StackArtifactScope>);
+
 struct TaskSegment final {
   std::uint8_t kind = 0;
   std::uint8_t state = 0;
   std::uint8_t flags = 0;
-  std::uint8_t reserved0 = 0;
+  // Version 3, kind 9 with a recorded stack: the promise registration. Else zero.
+  std::uint8_t registration = 0;
   std::uint32_t recorded = 0;
   std::array<std::uint8_t, 8> reserved1{};
   std::array<std::uint8_t, 32> digest{};
@@ -171,7 +215,9 @@ struct AsyncTaskStackPayload final {
   std::uint16_t payload_size = 128;
   std::uint8_t kind = 0;
   std::uint8_t flags = 0;
-  std::uint16_t reserved0 = 0;
+  // Version 2, kind 9: the promise registration. Else zero.
+  std::uint8_t registration = 0;
+  std::uint8_t reserved0 = 0;
   std::uint32_t recorded = 0;
   std::uint32_t wasm_frames = 0;
   std::uint32_t scripts = 0;
@@ -246,15 +292,50 @@ template <typename T>
   return false;
 }
 
+[[nodiscard]] inline bool IsValidStackScope(const StackScope& scope) noexcept {
+  if (!request_stack_detail::AllZero(scope.reserved)) {
+    return false;
+  }
+  if (scope.thread == static_cast<std::uint8_t>(StackThread::kDocument)) {
+    return scope.isolate_key == 0;
+  }
+  return scope.thread >= static_cast<std::uint8_t>(StackThread::kDedicatedWorker) &&
+         scope.thread <= static_cast<std::uint8_t>(StackThread::kServiceWorker) &&
+         scope.isolate_key != 0;
+}
+
+// The scope at the head of a record tail, and whether the rest is zero.
+template <std::size_t N>
+[[nodiscard]] inline StackScope StackScopeOf(const std::array<std::uint8_t, N>& tail) noexcept {
+  static_assert(N >= sizeof(StackScope));
+  std::array<std::uint8_t, sizeof(StackScope)> head{};
+  std::copy_n(tail.begin(), head.size(), head.begin());
+  return std::bit_cast<StackScope>(head);
+}
+template <std::size_t N>
+[[nodiscard]] inline bool IsZeroAfterStackScope(const std::array<std::uint8_t, N>& tail) noexcept {
+  return request_stack_detail::AllZero(
+      std::span<const std::uint8_t>(tail).subspan(sizeof(StackScope)));
+}
+
 [[nodiscard]] inline bool IsValidRequestStackPayload(const RequestStackPayload& v) noexcept {
   using request_stack_detail::AllZero;
-  const bool tasks = v.protocol_version == kRequestStackTaskPayloadVersion;
+  const bool scoped = v.protocol_version == kRequestStackScopePayloadVersion;
+  const bool tasks = scoped || v.protocol_version == kRequestStackTaskPayloadVersion;
   const std::uint8_t known_flags = tasks ? 0x1FU : 0x0FU;
   if ((v.protocol_version != kRequestStackPayloadVersion && !tasks) || v.payload_size != 128 ||
-      (!tasks && v.task_segments != 0) || !AllZero(v.reserved1) || (v.flags & ~known_flags) != 0) {
+      (!tasks && v.task_segments != 0) || (!scoped && !AllZero(v.reserved1)) ||
+      (v.flags & ~known_flags) != 0) {
     return false;
   }
   const auto state = static_cast<RequestStackState>(v.state);
+  // Version 3: a thread with no worker or document isolate has no scope.
+  if (scoped && (!IsZeroAfterStackScope(v.reserved1) ||
+                 (state == RequestStackState::kUnsupportedThread
+                      ? StackScopeOf(v.reserved1) != StackScope{}
+                      : !IsValidStackScope(StackScopeOf(v.reserved1))))) {
+    return false;
+  }
   if (state == RequestStackState::kNoScript || state == RequestStackState::kUnsupportedThread) {
     const std::uint8_t allowed = tasks ? 0 : kRequestStackTaskCallersNotCaptured;
     return (v.flags & ~allowed) == 0 && v.task_segments == 0 && v.total_depth == 0 &&
@@ -285,27 +366,54 @@ template <typename T>
          IsValidStackFrame(v.innermost, false);
 }
 
-[[nodiscard]] inline bool IsValidTaskSegment(const TaskSegment& s) noexcept {
+// artifact_version: the stack artifact's version, 2 or 3.
+[[nodiscard]] inline bool IsValidTaskSegment(
+    const TaskSegment& s,
+    const std::uint16_t artifact_version = kStackArtifactTaskVersion) noexcept {
   using request_stack_detail::AllZero;
-  if (s.reserved0 != 0 || !AllZero(s.reserved1) || (s.flags & ~kTaskSegmentBounded) != 0) {
+  const bool scoped = artifact_version == kStackArtifactScopeVersion;
+  if (!AllZero(s.reserved1) || (s.flags & ~kTaskSegmentBounded) != 0) {
     return false;
   }
+  const bool walked = s.state == 1 || s.state == 4 || s.state == 5;
+  const auto frames = [&](const std::uint32_t limit) {
+    return walked && s.recorded >= 1 && s.recorded <= limit &&
+           ((s.flags & kTaskSegmentBounded) == 0 || s.recorded == limit) && !AllZero(s.digest);
+  };
+  const bool empty = s.flags == 0 && s.recorded == 0 && AllZero(s.digest);
   if (s.kind == kTaskKindMicrotask) {
-    return s.state == kTaskSegmentNotRecorded && s.flags == 0 && s.recorded == 0 &&
-           AllZero(s.digest);
+    if (s.state == kTaskSegmentNotRecorded) {
+      return s.registration == 0 && empty;
+    }
+    return scoped && s.registration >= 1 && s.registration <= kPromiseRegistrationLimit &&
+           frames(kPromiseRegistrationFrameLimit);
   }
-  return s.kind >= 1 && s.kind <= 8 && (s.state == 1 || s.state == 4 || s.state == 5) &&
-         s.recorded >= 1 && s.recorded <= kAsyncTaskFrameLimit &&
-         ((s.flags & kTaskSegmentBounded) == 0 || s.recorded == kAsyncTaskFrameLimit) &&
-         !AllZero(s.digest);
+  if (s.registration != 0 || s.kind < 1 || s.kind > (scoped ? kTaskKindLimit : 8)) {
+    return false;
+  }
+  if (s.state == kTaskSegmentNoScript) {
+    return scoped && empty;
+  }
+  return frames(kAsyncTaskFrameLimit);
 }
 
 [[nodiscard]] inline bool IsValidAsyncTaskStackPayload(const AsyncTaskStackPayload& v) noexcept {
   using request_stack_detail::AllZero;
-  return v.protocol_version == 1 && v.payload_size == 128 && v.kind >= 1 && v.kind <= 8 &&
-         (v.flags & ~kTaskSegmentBounded) == 0 && v.reserved0 == 0 && AllZero(v.reserved1) &&
-         AllZero(v.reserved2) && v.recorded >= 1 && v.recorded <= kAsyncTaskFrameLimit &&
-         ((v.flags & kTaskSegmentBounded) == 0 || v.recorded == kAsyncTaskFrameLimit) &&
+  const bool scoped = v.protocol_version == kAsyncTaskStackScopeVersion;
+  if ((v.protocol_version != 1 && !scoped) || v.payload_size != 128 ||
+      (v.flags & ~kTaskSegmentBounded) != 0 || v.reserved0 != 0 || !AllZero(v.reserved1) ||
+      (scoped ? !IsValidStackScope(StackScopeOf(v.reserved2)) || !IsZeroAfterStackScope(v.reserved2)
+              : !AllZero(v.reserved2))) {
+    return false;
+  }
+  const bool microtask = v.kind == kTaskKindMicrotask;
+  if (microtask ? !scoped || v.registration < 1 || v.registration > kPromiseRegistrationLimit
+                : v.registration != 0 || v.kind < 1 || v.kind > (scoped ? kTaskKindLimit : 8)) {
+    return false;
+  }
+  const std::uint32_t limit = microtask ? kPromiseRegistrationFrameLimit : kAsyncTaskFrameLimit;
+  return v.recorded >= 1 && v.recorded <= limit &&
+         ((v.flags & kTaskSegmentBounded) == 0 || v.recorded == limit) &&
          v.wasm_frames <= v.recorded && v.scripts <= v.recorded && !AllZero(v.digest) &&
          IsValidStackFrame(v.innermost, false);
 }
@@ -335,10 +443,13 @@ template <typename T>
   constexpr std::uint8_t kRetention = kScriptIdentitySourceQueued | kScriptIdentitySourceTooLarge |
                                       kScriptIdentitySourceUnavailable | kScriptIdentityNotRetained;
   const std::uint8_t retention = v.flags & kRetention;
-  if (v.protocol_version != kRequestStackPayloadVersion || v.payload_size != 128 ||
-      v.reserved0 != 0 || v.reserved1 != 0 || !AllZero(v.reserved2) || v.script_id == 0 ||
-      v.execution_context_id == 0 || (v.flags & ~(kRetention | kScriptIdentityEval)) != 0 ||
-      std::popcount(retention) > 1) {
+  const bool scoped = v.protocol_version == kScriptIdentityScopeVersion;
+  if ((v.protocol_version != kRequestStackPayloadVersion && !scoped) || v.payload_size != 128 ||
+      v.reserved0 != 0 || v.reserved1 != 0 ||
+      (scoped ? !IsValidStackScope(StackScopeOf(v.reserved2)) || !IsZeroAfterStackScope(v.reserved2)
+              : !AllZero(v.reserved2)) ||
+      v.script_id == 0 || v.execution_context_id == 0 ||
+      (v.flags & ~(kRetention | kScriptIdentityEval)) != 0 || std::popcount(retention) > 1) {
     return false;
   }
   if (v.kind == static_cast<std::uint8_t>(ScriptIdentityKind::kWasm) &&
@@ -435,13 +546,15 @@ template <typename T>
              request_stack_detail::Decode<NavigationLinkPayload>(event.inline_payload));
 }
 
-// Validates one stack artifact; returns its frames and version 2 task chain.
+// Validates one stack artifact; returns its frames, version 2 and 3 task
+// chain and, for version 3, its scope.
 [[nodiscard]] inline bool DecodeStackArtifact(std::span<const std::byte> content,
                                               StackArtifactHeader& header,
                                               std::span<StackFrame> out,
                                               std::size_t& frame_count,
                                               std::span<TaskSegment> segments = {},
-                                              std::size_t* segment_count = nullptr) noexcept {
+                                              std::size_t* segment_count = nullptr,
+                                              StackArtifactScope* scope = nullptr) noexcept {
   frame_count = 0;
   if (segment_count) {
     *segment_count = 0;
@@ -450,13 +563,15 @@ template <typename T>
     return false;
   }
   header = request_stack_detail::Decode<StackArtifactHeader>(content);
-  const bool tasks = header.version == kStackArtifactTaskVersion;
+  const bool scoped = header.version == kStackArtifactScopeVersion;
+  const bool tasks = scoped || header.version == kStackArtifactTaskVersion;
+  const std::size_t header_size = scoped ? kStackArtifactScopeHeaderSize : kStackArtifactHeaderSize;
   const std::size_t frames = std::size_t{header.recorded} + header.async_frames;
   const std::uint16_t known =
       kRequestStackFramesOmitted | kRequestStackAsyncTruncated |
       (tasks ? kRequestStackTaskChainCut | kRequestStackTaskChainTruncated : 0);
   if (header.magic != kStackArtifactMagic || (header.version != kStackArtifactVersion && !tasks) ||
-      header.header_size != kStackArtifactHeaderSize || header.frame_size != kStackFrameSize ||
+      header.header_size != header_size || header.frame_size != kStackFrameSize ||
       header.reserved != 0 || (!tasks && header.task_segments != 0) ||
       (header.flags & ~known) != 0 || header.recorded == 0 ||
       header.recorded > kRequestStackSyncLimit ||
@@ -471,24 +586,43 @@ template <typename T>
              : header.async_segments > header.async_frames) ||
       ((header.flags & kRequestStackAsyncTruncated) != 0 &&
        header.async_frames != kRequestStackAsyncLimit) ||
-      content.size() != kStackArtifactHeaderSize + kStackFrameSize * frames +
-                            kTaskSegmentSize * header.task_segments ||
+      content.size() !=
+          header_size + kStackFrameSize * frames + kTaskSegmentSize * header.task_segments ||
       out.size() < frames ||
       (header.task_segments != 0 && segments.size() < header.task_segments)) {
     return false;
   }
+  if (scoped) {
+    const auto value = request_stack_detail::Decode<StackArtifactScope>(
+        content.subspan(kStackArtifactHeaderSize, sizeof(StackArtifactScope)));
+    StackScope as_scope;
+    as_scope.thread = value.thread;
+    as_scope.isolate_key = value.isolate_key;
+    if (value.process_id == 0 || !request_stack_detail::AllZero(value.reserved) ||
+        !IsValidStackScope(as_scope)) {
+      return false;
+    }
+    if (scope) {
+      *scope = value;
+    }
+  }
   for (std::size_t i = 0; i < frames; ++i) {
     out[i] = request_stack_detail::Decode<StackFrame>(
-        content.subspan(kStackArtifactHeaderSize + i * kStackFrameSize, kStackFrameSize));
+        content.subspan(header_size + i * kStackFrameSize, kStackFrameSize));
     if (!IsValidStackFrame(out[i], i >= header.recorded)) {
       return false;
     }
   }
-  const std::size_t chain = kStackArtifactHeaderSize + kStackFrameSize * frames;
+  const std::size_t chain = header_size + kStackFrameSize * frames;
   for (std::size_t i = 0; i < header.task_segments; ++i) {
     segments[i] = request_stack_detail::Decode<TaskSegment>(
         content.subspan(chain + i * kTaskSegmentSize, kTaskSegmentSize));
-    if (!IsValidTaskSegment(segments[i])) {
+    // A segment scheduled with no script ends the chain: nothing follows it
+    // and the chain is neither cut nor truncated there.
+    if (!IsValidTaskSegment(segments[i], header.version) ||
+        (segments[i].state == kTaskSegmentNoScript &&
+         (i + 1 != header.task_segments ||
+          (header.flags & (kRequestStackTaskChainCut | kRequestStackTaskChainTruncated)) != 0))) {
       return false;
     }
   }

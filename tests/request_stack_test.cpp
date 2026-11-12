@@ -70,7 +70,20 @@ static_assert(offsetof(reb::NativeAsyncTaskStackPayload, innermost) ==
 static_assert(offsetof(reb::NativeNavigationStackTail, target_frame_id) ==
               offsetof(reb::NavigationStackTail, target_frame_id));
 static_assert(reb::kNativeTaskSegmentLimit == reb::kTaskSegmentLimit &&
-              reb::kNativeAsyncTaskFrameLimit == reb::kAsyncTaskFrameLimit);
+              reb::kNativeAsyncTaskFrameLimit == reb::kAsyncTaskFrameLimit &&
+              reb::kNativePromiseRegistrationFrameLimit == reb::kPromiseRegistrationFrameLimit);
+static_assert(sizeof(reb::NativeStackScope) == sizeof(reb::StackScope) &&
+              offsetof(reb::NativeStackScope, isolate_key) ==
+                  offsetof(reb::StackScope, isolate_key));
+static_assert(sizeof(reb::NativeStackArtifactScope) == sizeof(reb::StackArtifactScope) &&
+              offsetof(reb::NativeStackArtifactScope, isolate_key) ==
+                  offsetof(reb::StackArtifactScope, isolate_key));
+static_assert(reb::kNativeStackArtifactScopeHeaderSize == reb::kStackArtifactScopeHeaderSize &&
+              reb::kNativeAsyncTaskKindLimit == reb::kTaskKindLimit);
+static_assert(offsetof(reb::NativeTaskSegment, registration) ==
+                  offsetof(reb::TaskSegment, registration) &&
+              offsetof(reb::NativeAsyncTaskStackPayload, registration) ==
+                  offsetof(reb::AsyncTaskStackPayload, registration));
 
 reb::NativeStackFrame JsFrame(const std::uint32_t script, const std::uint32_t position) {
   reb::NativeStackFrame frame;
@@ -177,7 +190,11 @@ void CheckStackRecords() {
   });
   invalid("unknown flag", [](auto& v) { v.flags |= 0x10; });
   invalid("dirty reserved", [](auto& v) { v.reserved1[3] = 1; });
-  invalid("version", [](auto& v) { v.protocol_version = 3; });
+  invalid("version", [](auto& v) { v.protocol_version = 4; });
+  invalid("version 3 without a scope", [](auto& v) {
+    v.protocol_version = reb::kNativeRequestStackScopePayloadVersion;
+    v.flags = 0;
+  });
   invalid("task segments in version 1", [](auto& v) {
     v.task_segments = 1;
     v.async_segments = 3;
@@ -217,6 +234,41 @@ void CheckStackRecords() {
   v2.flags = 0;
   v2.task_segments = 1;
   Check(!valid(v2), "a version 2 parser record has no task segments");
+
+  // Version 3 names the isolate its script IDs belong to.
+  const auto scoped = [&](const reb::NativeStackThread thread, const std::uint64_t key) {
+    auto v = tasks(2);
+    v.protocol_version = reb::kNativeRequestStackScopePayloadVersion;
+    reb::NativeStackScope scope;
+    scope.thread = static_cast<std::uint8_t>(thread);
+    scope.isolate_key = key;
+    reb::SetNativeStackScope(v.reserved1, scope);
+    return v;
+  };
+  Check(valid(scoped(reb::NativeStackThread::kDocument, 0)), "a document stack, version 3");
+  Check(valid(scoped(reb::NativeStackThread::kDedicatedWorker, 0x77)),
+        "a dedicated worker stack names its worker");
+  Check(valid(scoped(reb::NativeStackThread::kServiceWorker, 0x78)), "a service worker stack");
+  Check(!valid(scoped(reb::NativeStackThread::kSharedWorker, 0)), "a worker scope needs its key");
+  Check(!valid(scoped(reb::NativeStackThread::kDocument, 9)), "the main thread has no key");
+  Check(!valid(scoped(static_cast<reb::NativeStackThread>(5), 9)), "unknown thread kind");
+  auto v3 = scoped(reb::NativeStackThread::kDocument, 0);
+  v3.reserved1[2] = 1;
+  Check(!valid(v3), "dirty scope reserved bytes");
+  v3 = scoped(reb::NativeStackThread::kDocument, 0);
+  v3.reserved1[16] = 1;
+  Check(!valid(v3), "dirty bytes after the scope");
+  v3 = {};
+  v3.protocol_version = reb::kNativeRequestStackScopePayloadVersion;
+  v3.state = static_cast<std::uint8_t>(reb::NativeRequestStackState::kUnsupportedThread);
+  Check(valid(v3), "a worklet or pool thread has no scope");
+  reb::NativeStackScope worker;
+  worker.thread = static_cast<std::uint8_t>(reb::NativeStackThread::kDedicatedWorker);
+  worker.isolate_key = 0x77;
+  reb::SetNativeStackScope(v3.reserved1, worker);
+  Check(!valid(v3), "unsupported_thread names no isolate");
+  v3.state = static_cast<std::uint8_t>(reb::NativeRequestStackState::kNoScript);
+  Check(valid(v3), "a worker request with no script on its stack");
 
   auto event = Event(reb::EventType::kRequestInitiatorStack, reb::EventCategory::kNetwork,
                      reb::EncodeNativeRequestStackRecord(Captured(40, 1)));
@@ -325,6 +377,62 @@ void CheckNavigationAndTaskRecords() {
   Check(reb::EventTypeName(reb::EventType::kAsyncTaskStack) == "async_task_stack",
         "async task stack name");
 
+  // Version 2: the scope, message kinds and promise registrations.
+  reb::NativeStackScope worker;
+  worker.thread = static_cast<std::uint8_t>(reb::NativeStackThread::kSharedWorker);
+  worker.isolate_key = 0x91;
+  auto scoped_task = task;
+  scoped_task.protocol_version = reb::kNativeAsyncTaskStackScopeVersion;
+  reb::SetNativeStackScope(scoped_task.reserved2, worker);
+  const auto scoped_variant = [&](const std::string& name,
+                                  const std::function<void(reb::NativeAsyncTaskStackPayload&)>& f,
+                                  const bool expected) {
+    auto copy = scoped_task;
+    f(copy);
+    Check(reb::IsValidNativeAsyncTaskStackPayload(copy) == expected, "overlay verdict for " + name);
+    check(
+        name,
+        RendererRecord(reb::EventType::kAsyncTaskStack, reb::EncodeNativeRequestStackRecord(copy)),
+        expected);
+  };
+  scoped_variant("async task stack version 2", [](auto&) {}, true);
+  scoped_variant("MessagePort.postMessage stack", [](auto& v) { v.kind = 10; }, true);
+  scoped_variant("BroadcastChannel.postMessage stack", [](auto& v) { v.kind = 11; }, true);
+  scoped_variant("worker postMessage stack", [](auto& v) { v.kind = 12; }, true);
+  scoped_variant("async task kind 13", [](auto& v) { v.kind = 13; }, false);
+  const auto then = [](reb::NativeAsyncTaskStackPayload& v) {
+    v.kind = 9;
+    v.registration = static_cast<std::uint8_t>(reb::NativePromiseRegistration::kThen);
+    v.recorded = 32;
+  };
+  scoped_variant("promise then registration stack", then, true);
+  scoped_variant(
+      "promise registration without its call",
+      [&](auto& v) {
+        then(v);
+        v.registration = 0;
+      },
+      false);
+  scoped_variant(
+      "promise registration kind 5",
+      [&](auto& v) {
+        then(v);
+        v.registration = 5;
+      },
+      false);
+  scoped_variant(
+      "promise registration above 32 frames",
+      [&](auto& v) {
+        then(v);
+        v.recorded = 33;
+        v.flags = 0;
+      },
+      false);
+  scoped_variant("registration on a timer", [](auto& v) { v.registration = 1; }, false);
+  scoped_variant("async task version 2 without a scope", [](auto& v) { v.reserved2 = {}; }, false);
+  scoped_variant("async task dirty after the scope", [](auto& v) { v.reserved2[20] = 1; }, false);
+  task_variant("version 1 message kind", [](auto& v) { v.kind = 10; });
+
   reb::NativeNavigationLinkPayload link;
   link.renderer_process_id = 41;
   link.renderer_sequence = 9;
@@ -403,6 +511,17 @@ void CheckScriptIdentities() {
   invalid("no context", [](auto& v) { v.execution_context_id = 0; });
   invalid("no script", [](auto& v) { v.script_id = 0; });
   invalid("zero digest", [](auto& v) { v.sha256.fill(0); });
+  invalid("version 2 without a scope",
+          [](auto& v) { v.protocol_version = reb::kNativeScriptIdentityScopeVersion; });
+  auto worker = base;
+  worker.protocol_version = reb::kNativeScriptIdentityScopeVersion;
+  reb::NativeStackScope scope;
+  scope.thread = static_cast<std::uint8_t>(reb::NativeStackThread::kDedicatedWorker);
+  scope.isolate_key = 0x55;
+  reb::SetNativeStackScope(worker.reserved2, scope);
+  Check(valid(worker), "a worker script identity names its isolate");
+  worker.reserved2[30] = 1;
+  Check(!valid(worker), "a worker script identity with dirty reserved bytes");
 
   auto event = Event(reb::EventType::kScriptIdentity, reb::EventCategory::kNetwork,
                      reb::EncodeNativeRequestStackRecord(base));
@@ -460,6 +579,145 @@ std::vector<std::byte> TaskArtifact() {
     bytes.insert(bytes.end(), raw, raw + sizeof(segment));
   }
   return bytes;
+}
+
+reb::NativeTaskSegment Segment(const reb::NativeAsyncTaskKind kind,
+                               const reb::NativeTaskSegmentState state,
+                               const std::uint32_t recorded,
+                               const std::uint8_t fill) {
+  reb::NativeTaskSegment segment;
+  segment.kind = static_cast<std::uint8_t>(kind);
+  segment.state = static_cast<std::uint8_t>(state);
+  segment.recorded = recorded;
+  if (recorded != 0) {
+    segment.digest.fill(fill);
+  }
+  return segment;
+}
+
+// A version 3 artifact: the scope header, frames, then the given segments.
+std::vector<std::byte> ScopedArtifact(
+    const std::vector<reb::NativeTaskSegment>& chain,
+    const std::uint16_t flags = 0,
+    const reb::NativeStackThread thread = reb::NativeStackThread::kDedicatedWorker) {
+  const auto v1 = StackArtifact(4, 0);
+  reb::NativeStackArtifactHeader header;
+  std::memcpy(&header, v1.data(), sizeof(header));
+  header.version = reb::kNativeStackArtifactScopeVersion;
+  header.header_size = reb::kNativeStackArtifactScopeHeaderSize;
+  header.task_segments = static_cast<std::uint16_t>(chain.size());
+  header.async_segments = static_cast<std::uint16_t>(chain.size());
+  header.flags = flags;
+  reb::NativeStackArtifactScope scope;
+  scope.process_id = 41;
+  scope.thread = static_cast<std::uint8_t>(thread);
+  scope.isolate_key = thread == reb::NativeStackThread::kDocument ? 0 : 0x77;
+  std::vector<std::byte> bytes(sizeof(header) + sizeof(scope));
+  std::memcpy(bytes.data(), &header, sizeof(header));
+  std::memcpy(bytes.data() + sizeof(header), &scope, sizeof(scope));
+  bytes.insert(bytes.end(), v1.begin() + sizeof(header), v1.end());
+  for (const auto& segment : chain) {
+    const auto* raw = reinterpret_cast<const std::byte*>(&segment);
+    bytes.insert(bytes.end(), raw, raw + sizeof(segment));
+  }
+  return bytes;
+}
+
+void CheckScopedArtifactsAndOrigins() {
+  using Kind = reb::NativeAsyncTaskKind;
+  using State = reb::NativeTaskSegmentState;
+  std::array<reb::StackFrame, reb::kRequestStackSyncLimit + reb::kRequestStackAsyncLimit> frames{};
+  reb::StackArtifactHeader header;
+  std::size_t count = 0;
+  std::array<reb::TaskSegment, reb::kTaskSegmentLimit> chain{};
+  std::size_t segments = 0;
+  reb::StackArtifactScope scope;
+  auto then = Segment(Kind::kMicrotask, State::kCaptured, 5, 0x21);
+  then.registration = static_cast<std::uint8_t>(reb::NativePromiseRegistration::kThen);
+  const auto port = Segment(Kind::kMessagePort, State::kCaptured, 3, 0x22);
+  const auto parser = Segment(Kind::kEvent, State::kNoScript, 0, 0);
+  for (const auto& segment : {then, port, parser}) {
+    Check(reb::IsValidNativeTaskSegment(segment, reb::kNativeStackArtifactScopeVersion),
+          "overlay accepts a version 3 segment");
+    Check(!reb::IsValidNativeTaskSegment(segment), "version 2 has no such segment");
+  }
+  const auto good = ScopedArtifact({then, port, parser});
+  Check(reb::DecodeStackArtifact(good, header, frames, count, chain, &segments, &scope) &&
+            count == 4 && segments == 3 && scope.process_id == 41 && scope.thread == 2 &&
+            scope.isolate_key == 0x77 && chain[0].registration == 1 && chain[1].kind == 10 &&
+            chain[2].state == reb::kTaskSegmentNoScript,
+        "a version 3 artifact decodes its scope, registration, message and no-script segments");
+  Check(!reb::DecodeStackArtifact(ScopedArtifact({parser, port}), header, frames, count, chain,
+                                  &segments),
+        "a no-script segment ends the chain");
+  Check(!reb::DecodeStackArtifact(
+            ScopedArtifact({port, parser}, reb::kNativeRequestStackTaskChainCut), header, frames,
+            count, chain, &segments),
+        "a chain that ends with no script is not cut");
+  auto unregistered = then;
+  unregistered.registration = 0;
+  Check(!reb::DecodeStackArtifact(ScopedArtifact({unregistered}), header, frames, count, chain,
+                                  &segments),
+        "a recorded microtask names its registration");
+  auto long_then = then;
+  long_then.recorded = 33;
+  Check(!reb::DecodeStackArtifact(ScopedArtifact({long_then}), header, frames, count, chain,
+                                  &segments),
+        "a registration keeps at most 32 frames");
+  auto no_process = good;
+  std::fill_n(no_process.begin() + 32, 4, std::byte{0});
+  Check(!reb::DecodeStackArtifact(no_process, header, frames, count, chain, &segments),
+        "a version 3 artifact names its renderer process");
+  auto short_header = good;
+  short_header[6] = std::byte{32};
+  Check(!reb::DecodeStackArtifact(short_header, header, frames, count, chain, &segments),
+        "a version 3 artifact has a 48-byte header");
+  Check(reb::DecodeStackArtifact(ScopedArtifact({}, 0, reb::NativeStackThread::kDocument), header,
+                                 frames, count, chain, &segments, &scope) &&
+            scope.thread == 1 && scope.isolate_key == 0,
+        "a document artifact has no isolate key");
+
+  // Message origins: the posting segment first, at most 32, validated whole.
+  const auto origin = [](const std::vector<reb::NativeTaskSegment>& carried,
+                         const std::uint64_t serial, const std::uint8_t flags = 0) {
+    reb::NativeTaskOriginHeader head;
+    head.count = static_cast<std::uint8_t>(carried.size());
+    head.flags = flags;
+    head.process_id = 41;
+    head.table = 3;
+    head.serial = serial;
+    std::vector<std::uint8_t> bytes(sizeof(head));
+    std::memcpy(bytes.data(), &head, sizeof(head));
+    for (const auto& segment : carried) {
+      const auto* raw = reinterpret_cast<const std::uint8_t*>(&segment);
+      bytes.insert(bytes.end(), raw, raw + sizeof(segment));
+    }
+    return bytes;
+  };
+  reb::NativeTaskOriginHeader head;
+  std::array<reb::NativeTaskSegment, reb::kNativeTaskSegmentLimit> carried{};
+  const auto timeout = Segment(Kind::kSetTimeout, State::kCaptured, 4, 0x23);
+  Check(reb::DecodeNativeTaskOrigin(origin({port, then, timeout}, 9), head, carried) &&
+            head.count == 3 && carried[2].kind == 1,
+        "a message origin carries the posting segment and the sender's chain");
+  Check(reb::DecodeNativeTaskOrigin(
+            origin({Segment(Kind::kWorkerMessage, State::kNoScript, 0, 0)}, 0), head, carried),
+        "a message posted with no script running");
+  Check(!reb::DecodeNativeTaskOrigin(origin({port}, 0), head, carried),
+        "a recorded posting segment names its serial");
+  Check(!reb::DecodeNativeTaskOrigin(origin({timeout}, 9), head, carried),
+        "the first carried segment is a message kind");
+  Check(!reb::DecodeNativeTaskOrigin(origin({}, 9), head, carried), "an empty origin");
+  Check(!reb::DecodeNativeTaskOrigin(origin({port}, 9, 2), head, carried), "unknown origin flag");
+  std::vector<reb::NativeTaskSegment> many(33, port);
+  auto too_many = origin(many, 9);
+  Check(!reb::DecodeNativeTaskOrigin(too_many, head, carried), "33 carried segments");
+  auto truncated = origin({port, timeout}, 9);
+  truncated.pop_back();
+  Check(!reb::DecodeNativeTaskOrigin(truncated, head, carried), "a short origin");
+  auto foreign = origin({port}, 9);
+  foreign[4] = foreign[5] = foreign[6] = foreign[7] = 0;
+  Check(!reb::DecodeNativeTaskOrigin(foreign, head, carried), "an origin names its process");
 }
 
 void CheckStackArtifacts() {
@@ -580,6 +838,7 @@ int main(int argc, char** argv) {
   CheckNavigationAndTaskRecords();
   CheckScriptIdentities();
   CheckStackArtifacts();
+  CheckScopedArtifactsAndOrigins();
   if (argc == 2 && std::string_view(argv[1]) == "--golden") {
     std::string json;
     std::cout << '[';

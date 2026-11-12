@@ -532,7 +532,9 @@ proxy at the pin (`NavigationRequest` creates their factory without
   not emitted; the drop counter already reports the start.
 - Synchronous requests: the same start work as an asynchronous request, moved
   to the calling thread; the pool thread copies one value.
-- Service-worker ends, inactive: the loader's hooks are one atomic load. Active:
+- Service-worker ends, inactive: the loader's hook takes a view of the URL's
+  path, reads its port and returns after one atomic load; nothing is
+  allocated. Active:
   each recorded http(s) start writes one 48-byte slot of a fixed 48 KiB table
   (a sequence lock; a writer that finds the slot busy skips it, which the end
   then reports as lost), and each end reads one slot and emits at most two

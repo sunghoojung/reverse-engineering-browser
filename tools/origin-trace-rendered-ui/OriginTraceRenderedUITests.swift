@@ -1505,6 +1505,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertTrue(general.contains("https://\(expected.memoryCacheHost)\(expected.memoryCacheTarget)"),
         "\(size.name): General shows the reused URL: \(general)")
       XCTAssertTrue(general.contains("(the memory cache) and made no request"), "\(size.name): General says no request was made")
+      XCTAssertFalse(general.contains("Headers tab shows retained headers"), "\(size.name): no request record is promised")
       try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) memory-cache row")
       try await ui.screenshot("traffic-memory-cache-\(size.name)")
 

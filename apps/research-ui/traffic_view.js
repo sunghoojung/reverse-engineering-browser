@@ -688,12 +688,13 @@ function renderTrafficDetails(container, request, notice = '', targetView = null
       ? (Number.isInteger(request.provisionalStatus) ? `Pending · provisional HTTP ${request.provisionalStatus}` : 'Pending')
       : request.status, trafficOriginLabel(request), request.id,
     trafficTabText(request),
-    `${request.memoryCache ? request.staticData
-      ? 'Blink decoded this data: URL in the renderer and made no request, so no browser records, headers or response body exist for it. '
-      : 'Blink answered this load from a resource it already held (the memory cache) and made no request, so no browser records, headers or response body exist for it. '
-      : ''}${request.hostOnly
+    `${request.memoryCache ? `${request.staticData
+      ? 'Blink decoded this data: URL in the renderer and made no request, so no headers, request body or response body exist for it.'
+      : 'Blink answered this load from a resource it already held (the memory cache) and made no request, so no headers, request body or response body exist for it.'}${
+        request.hostOnly ? ' Its URL path and query are recorded only in content capture sessions.' : ''}`
+      : `${request.hostOnly
       ? 'Native capture recorded method, host, status and lifecycle timing. URL path, query, headers and body bytes are recorded only in content capture sessions.'
-      : 'Native capture recorded method, URL path and query, status and lifecycle timing; the Headers tab shows retained headers.'} The request body is on the Payload tab. Response bodies are on the Response tab.${request.targetMalformed ? ' The URL target record is malformed and was not interpreted.' : ''}${request.urlTruncated && !fullTarget ? ' Request URL truncated.' : ''}${request.documentUrlTruncated ? ' Document URL truncated.' : ''}${request.methodTruncated ? ' Method truncated.' : ''}`];
+      : 'Native capture recorded method, URL path and query, status and lifecycle timing; the Headers tab shows retained headers.'} The request body is on the Payload tab. Response bodies are on the Response tab.`}${request.targetMalformed ? ' The URL target record is malformed and was not interpreted.' : ''}${request.urlTruncated && !fullTarget ? ' Request URL truncated.' : ''}${request.documentUrlTruncated ? ' Document URL truncated.' : ''}${request.methodTruncated ? ' Method truncated.' : ''}`];
   // Captured values stay mono; coverage notes read as prose; Source is provenance.
   const kinds = ['value', request.documentUrl ? 'value' : 'prose', 'value', /^\d+$/.test(String(values[3])) ? 'value' : 'prose',
     'provenance', 'value', trafficTabs(request).length ? 'value' : 'prose', 'prose'];

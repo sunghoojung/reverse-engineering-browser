@@ -4364,14 +4364,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const item = document.createElement('li'); item.className = `trace-step${model.gap ? ' gap' : ''}`;
         const row = document.createElement('button'); row.type = 'button'; row.className = 'trace-row';
         row.dataset.traceKey = model.key;
-        // Line style says how sure the link is; colour says what it is (flow_workspace.css).
-        row.dataset.relation = model.step?.relation ?? 'gap';
-        row.dataset.confidence = model.step?.confidence ?? 'gap';
         row.setAttribute('aria-pressed', String(state.selectedTraceRow === model.key));
         row.tabIndex = state.selectedTraceRow === model.key ? 0 : -1;
         const copy = document.createElement('span'); copy.className = 'trace-row-copy';
         copy.append(textElement('span', 'step-title', model.title), textElement('span', 'step-kind', model.kind));
+        // Line style says how sure the link is; colour says what it is (flow_workspace.css).
         const line = document.createElement('span'); line.className = 'trace-line'; line.setAttribute('aria-hidden', 'true');
+        Object.assign(line.dataset, flowLinkKind(model));
         row.append(line, textElement('span', 'step-index', model.index), copy,
           textElement('span', `trace-link-type ${model.style}`, model.confidence));
         row.addEventListener('click', () => {

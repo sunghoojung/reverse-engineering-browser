@@ -83,17 +83,16 @@ function flowWorkspaceKey(event) {
   return code === 'KeyZ' || key === 'z' || key === 'Z' || /^Digit[1-4]$/.test(code) || /^[1-4]$/.test(key);
 }
 
-/** Line style and colour of a lineage link, from the step's confidence and relation. */
+/* A lineage link's colour says what it is, from the step's relation; its
+ * line style says how sure it is, from the confidence, which reads as shared
+ * identifiers when unknown, as traceLinkClass does. */
+const FLOW_LINK_KINDS = {parent_event: 'call', trace_target: 'request', request_initiator: 'request', request_lifecycle: 'request',
+  temporal_adjacency: 'cross', issued_during_invocation: 'tracked', invocation_settlement: 'tracked', invocation_value_flow: 'data', artifact_request: 'plain'};
+const FLOW_LINK_LINES = {observed: 'observed', correlated: 'correlated', time_adjacent: 'adjacent'};
+/** The `data-kind` and `data-line` of a lineage link's sample; a gap is a cut. */
 function flowLinkKind(model) {
   if (!model?.step) return {line: 'cut', kind: 'plain'};
-  const relation = model.step.relation;
-  const kind = relation === 'parent_event' ? 'call'
-    : relation === 'temporal_adjacency' ? 'cross'
-      : relation === 'issued_during_invocation' || relation === 'invocation_settlement' ? 'tracked'
-        : relation === 'invocation_value_flow' ? 'data'
-          : relation === 'artifact_request' ? 'plain' : 'request';
-  const line = model.step.confidence === 'observed' ? 'observed' : model.step.confidence === 'time_adjacent' ? 'adjacent' : 'correlated';
-  return {line, kind};
+  return {line: FLOW_LINK_LINES[model.step.confidence] ?? 'correlated', kind: FLOW_LINK_KINDS[model.step.relation] ?? 'plain'};
 }
 
 /**
@@ -580,7 +579,7 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     crumbs.forEach((crumb, index) => {
       const last = index === crumbs.length - 1;
       const item = button(`flow-crumb flow-crumb-${crumb.kind}`, crumb.label, `${crumb.label}: show it in ${FLOW_PANE_NAMES[crumb.pane]}`);
-      item.dataset.kind = crumb.kind; item.title = `${crumb.label} · ${FLOW_PANE_NAMES[crumb.pane]}`;
+      item.title = `${crumb.label} · ${FLOW_PANE_NAMES[crumb.pane]}`;
       if (last) item.setAttribute('aria-current', 'true');
       item.addEventListener('click', () => jump(crumb));
       nodes.push(item);
@@ -883,10 +882,10 @@ function createFlowWorkspace({root, openFrame, graphAvailable, storage = null, g
     const steps = lineageModels.filter(model => model.step).slice(0, FLOW_WORKSPACE_LIMITS.related);
     if (lineageModels.length) {
       const entries = steps.map(model => {
-        const {line, kind} = flowLinkKind(model);
         // A link here is picked as its Lineage row is.
         const item = entry(model.title, model.confidence, () => { if (selectTraceRow(model)) lineagePicked(model); reveal('lineage', {focus: true}); }, 'flow-related-link');
-        const sample = make('span', 'flow-link-line'); sample.dataset.line = line; sample.dataset.kind = kind; sample.setAttribute('aria-hidden', 'true');
+        const sample = make('span', 'flow-link-line'); sample.setAttribute('aria-hidden', 'true');
+        Object.assign(sample.dataset, flowLinkKind(model));
         item.prepend(sample);
         return item;
       });

@@ -194,17 +194,17 @@
 #screen-backtrace .trace-row { grid-template-columns: 24px 18px minmax(0, 1fr) auto; gap: 8px; padding: 8px 12px; }
 #screen-backtrace .trace-row .step-index { color: var(--faint); font: 11px var(--mono); }
 #screen-backtrace .trace-row .step-title { font: 12px var(--mono); }
-/* Each link: line style says how sure, colour says what it is. */
-.trace-line, .flow-link-line { --link: var(--faint); display: block; width: 22px; height: 3px; border-radius: 2px; background: var(--link); }
-.trace-row[data-relation="parent_event"] .trace-line, .flow-link-line[data-kind="call"] { --link: var(--fw-foam); }
-.trace-row:is([data-relation="trace_target"], [data-relation="request_initiator"], [data-relation="request_lifecycle"]) .trace-line, .flow-link-line[data-kind="request"] { --link: var(--fw-rose); }
-.trace-row[data-relation="temporal_adjacency"] .trace-line, .flow-link-line[data-kind="cross"] { --link: var(--fw-love); }
-.trace-row:is([data-relation="issued_during_invocation"], [data-relation="invocation_settlement"]) .trace-line, .flow-link-line[data-kind="tracked"] { --link: var(--fw-pine); }
-.trace-row[data-relation="invocation_value_flow"] .trace-line, .flow-link-line[data-kind="data"] { --link: var(--fw-rose); }
-.trace-row[data-confidence="correlated"] .trace-line, .flow-link-line[data-line="correlated"] { background: repeating-linear-gradient(90deg, var(--link) 0 6px, transparent 6px 10px); }
-.trace-row[data-confidence="time_adjacent"] .trace-line, .flow-link-line[data-line="adjacent"] { background: repeating-linear-gradient(90deg, var(--link) 0 2px, transparent 2px 6px); }
+/* Each link: line style says how sure, colour says what it is. Lineage rows
+ * and the Related rail set both from flowLinkKind (flow_workspace.js). */
+:is(.trace-line, .flow-link-line) { --link: var(--faint); display: block; width: 22px; height: 3px; border-radius: 2px; background: var(--link); }
+:is(.trace-line, .flow-link-line)[data-kind="call"] { --link: var(--fw-foam); }
+:is(.trace-line, .flow-link-line):is([data-kind="request"], [data-kind="data"]) { --link: var(--fw-rose); }
+:is(.trace-line, .flow-link-line)[data-kind="cross"] { --link: var(--fw-love); }
+:is(.trace-line, .flow-link-line)[data-kind="tracked"] { --link: var(--fw-pine); }
+:is(.trace-line, .flow-link-line)[data-line="correlated"] { background: repeating-linear-gradient(90deg, var(--link) 0 6px, transparent 6px 10px); }
+:is(.trace-line, .flow-link-line)[data-line="adjacent"] { background: repeating-linear-gradient(90deg, var(--link) 0 2px, transparent 2px 6px); }
 /* A gap is a cut: the chain stops and nothing is guessed. */
-.trace-row[data-confidence="gap"] .trace-line, .flow-link-line[data-line="cut"] { width: 14px; height: 12px; margin-left: 4px; border-radius: 0; background: linear-gradient(var(--faint), var(--faint)) center top / 14px 2px no-repeat, linear-gradient(var(--faint), var(--faint)) center / 2px 12px no-repeat; }
+:is(.trace-line, .flow-link-line)[data-line="cut"] { width: 14px; height: 12px; margin-left: 4px; border-radius: 0; background: linear-gradient(var(--faint), var(--faint)) center top / 14px 2px no-repeat, linear-gradient(var(--faint), var(--faint)) center / 2px 12px no-repeat; }
 .flow-lineage-selected { flex: none; max-height: 40%; overflow: auto; margin: 0 12px 10px; padding: 10px 0 0; border-top: 1px solid var(--line-soft); }
 .flow-lineage-selected h3 { margin: 0 0 4px; color: var(--muted); font: 600 11px var(--sans); letter-spacing: .04em; text-transform: uppercase; }
 .flow-lineage-selected-site { color: var(--fw-iris-text); font-family: var(--mono); letter-spacing: 0; text-transform: none; }

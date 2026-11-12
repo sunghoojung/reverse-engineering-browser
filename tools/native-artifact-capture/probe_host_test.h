@@ -657,7 +657,7 @@ void NativeProbeHostWorkerTabLinks() {
     record.header.scheme_class = 2;
     if (type == NativeProbeType::kMemoryCacheReuse) {
       record.header.payload_size = reb::kNativeMemoryCacheReusePayloadSize;
-      record.inline_payload = reb::EncodeNativeMemoryCacheReusePayload(3, false, "a.test");
+      record.inline_payload = reb::EncodeNativeMemoryCacheReusePayload(3, false, "a.test", false);
     } else {
       record.header.payload_size = 3;
       record.inline_payload[0] = std::byte{'G'};

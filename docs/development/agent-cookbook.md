@@ -65,6 +65,12 @@ checks:
   rows for the capture; later reuses were counted, not recorded. Reuses in a
   page that is not ordinary (an SVG image's own document), which no tab owns,
   are the separate `non_ordinary_page_reuse` exclusion.
+- `response_bodies_not_observed`: some responses never reached the browser
+  proxy (served by a service worker, reused from the memory cache, answered in
+  the renderer), so no body is retained under their own request.
+  `response_bodies.cases` counts every request's body case; each
+  `get_requests` row names its own as `response_body.case`, and a reuse's
+  `memory_cache_source` names the request whose retained body Blink reused.
 - `network_tab_unresolved` (error): requests without a tab. Read one with
   `get_events` and the `process_id` and `request_id` from `request_tabs`; its
   `reason` says which owner failed (`document_frame`, `worker`, `no_frame`,

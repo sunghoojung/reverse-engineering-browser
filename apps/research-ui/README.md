@@ -1544,20 +1544,27 @@ or **Clear range** removes it. The footer reads `N / M requests · X transferred
 · Y resources` for the matching requests of the whole session.
 
 When a content session's budget runs out, the browser lists each later body or
-URL and names it as not kept. The footer then adds a line naming each budget
-that refused something in the loaded rows, for example `Response body budget
-(512 MiB) used, 511.8 MiB kept: 2 response bodies not kept · Raise it in New
-Live Session… for the next session.` The budget comes from the
-live session's address (`app_state.js`); the bytes kept are the unique bytes of
-that budget's artifacts, read from `get_session_summary` once a refusal shows
-and again at most every 30 s, and a failed read keeps the last figure. The
-Payload tab and the Request URL row name the request content budget the same
-way, and the Response tab names **Response body budget** and **Capture media and
-fonts**; each remedy applies to the next session. A session the address does
-not describe (a stored or older one) names the budget without its size. In
-the short stacked layout (at most 1,100 by 650 px) the line steps aside while a
-request is open, as the timing strip does, so the ledger keeps its rows; that
-request's tabs still name its budget.
+URL and names it as not kept. The footer then adds a line naming each used
+budget, for example `Response body budget (512 MiB) used, 511.8 MiB kept: 2,400
+response bodies not kept · Raise it in New Live Session… for the next session.`
+
+- The counts are the whole session's, from `get_session_summary`'s budget
+  checks, like the `N / M requests` beside them. In a content session Traffic
+  reads the summary at most every 30 s while it shows, so a budget met outside
+  the loaded rows still shows. Until that read answers, the loaded rows give
+  `at least N`, as does a summary whose scan stopped at its 64 MiB bound. A
+  failed read keeps the last figure.
+- The size is the session context's `capture_options.content_limits`
+  (`get_session_context`), read once after the first valid poll; a session that
+  is not live, or keeps no content, names the budget without a size. The bytes
+  kept are the unique bytes of that budget's artifacts, from the summary.
+- The Payload tab and the Request URL row name the request content budget the
+  same way, and the Response tab names **Response body budget** and **Capture
+  media and fonts**; each remedy applies to the next session.
+- In the short stacked layout (at most 1,100 by 650 px) with a request open, the
+  line becomes a one-line **Budgets used** button (or the one budget's name)
+  beside the footer's own, so the ledger keeps its rows. Return or Space opens
+  the whole sentence above the footer, and Escape closes it.
 
 The filter box matches the method, URL or host and status as literal,
 case-insensitive text. `-text` excludes rows that contain it. `domain:` (with

@@ -5,20 +5,6 @@
         new URLSearchParams(location.search).get('canvas_images') === '1';
       const requestContentCaptureEnabled = typeof location !== 'undefined' &&
         new URLSearchParams(location.search).get('request_content') === '1';
-      // A content session's limits, as its launcher wrote them into the
-      // workspace address beside request_content. A value outside the
-      // launcher's bounds is unknown, never a guessed default.
-      const sessionContentLimits = (() => {
-        if (!requestContentCaptureEnabled) return null;
-        const query = new URLSearchParams(location.search);
-        const budget = (name, max) => {
-          const text = query.get(name) ?? '';
-          return /^[1-9][0-9]{0,4}$/.test(text) && Number(text) <= max ? Number(text) : null;
-        };
-        return Object.freeze({request_content_budget_mib: budget('request_content_budget_mib', 4096),
-          response_body_budget_mib: budget('response_body_budget_mib', 16384),
-          response_media: query.get('response_media') === '1'});
-      })();
       const sampleRequests = [];
       const sampleEvidence = [];
       const sampleArtifacts = [];
@@ -92,7 +78,10 @@
         canvasRenderCaptures: [],
         canvasImageCaptureEnabled,
         requestContentCaptureEnabled,
-        sessionContentLimits,
+        // capture_options.content_limits from the session context (app.js);
+        // null until that read answers, and for a session without content.
+        sessionContentLimits: null,
+        sessionContentLimitsRead: null,
         nativeRequests: [],
         requests: standalonePreview ? [...sampleRequests] : [],
         artifacts: standalonePreview ? [...sampleArtifacts] : [],

@@ -113,18 +113,6 @@ printf '%s\\n' "${'${ui_arguments[@]-}'}"`], {encoding:'utf8'});
       '--session-response-media', '1']);
   assert.deepEqual(run('capture_request_content=0; request_content_budget_mib=4096; response_body_budget_mib=16384; capture_response_media=0'), [],
     'a metadata session names no limit');
-  // The workspace address carries the same limits, so Traffic can name a budget.
-  const address = section('live_ui_query="native=1', '\n# The backend writes this after the console socket');
-  const url = variables => {
-    const result = spawnSync(shell, ['-c', `set -eu; ui_endpoint=http://127.0.0.1:9; capture_canvas_images=1; ${variables}; ${address}
-printf '%s' "$live_ui_url"`], {encoding:'utf8'});
-    assert.equal(result.status, 0, result.stderr);
-    return result.stdout;
-  };
-  assert.equal(url('capture_request_content=1; request_content_budget_mib=1024; response_body_budget_mib=512; capture_response_media=1'),
-    'http://127.0.0.1:9/?native=1&canvas_images=1&request_content=1&request_content_budget_mib=1024&response_body_budget_mib=512&response_media=1');
-  assert.equal(url('capture_request_content=0; request_content_budget_mib=1024; response_body_budget_mib=512; capture_response_media=0'),
-    'http://127.0.0.1:9/?native=1&canvas_images=1&request_content=0', 'a metadata workspace names no limit');
   // The launcher refuses a value the backend label would refuse, before anything starts.
   for (const [options, message] of [
     [{REB_REQUEST_CONTENT_BUDGET_MIB:'4097'}, /REB_REQUEST_CONTENT_BUDGET_MIB must be an integer from 1 to 4096/],
@@ -139,7 +127,7 @@ printf '%s' "$live_ui_url"`], {encoding:'utf8'});
     assert.equal(result.status, 2, result.stderr);
     assert.match(result.stderr, message);
   }
-  console.log('PASS content session limits: the launcher refuses out-of-bounds budgets and labels a content session\'s limits for the session context and the workspace address, a metadata session none');
+  console.log('PASS content session limits: the launcher refuses out-of-bounds budgets and labels a content session\'s limits for the session context, a metadata session none');
 }
 
 const adapterDirectory = await mkdtemp(join(tmpdir(), 'reb-native-adapter-'));

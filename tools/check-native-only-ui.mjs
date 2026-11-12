@@ -337,6 +337,10 @@ assert.doesNotMatch(contentLabel.getAttribute('title'), /Budgets:/, 'an address 
 runInContext(`state.sessionContentLimits = {request_content_budget_mib: 1024, response_body_budget_mib: 2048, response_media: true}`, context);
 shell('live', true, true);
 assert.match(contentLabel.getAttribute('title'), /kept locally\. Budgets: 1,024 MiB of request content and 2,048 MiB of response bodies; media and fonts kept\. Each Traffic row/);
+runInContext(`state.sessionContentLimits = {request_content_budget_mib: 64, response_body_budget_mib: 128, response_media: null}`, context);
+shell('live', true, true);
+assert.match(contentLabel.getAttribute('title'), /Budgets: 64 MiB of request content and 128 MiB of response bodies\. Each Traffic row/,
+  'an unreported media choice is not guessed');
 shell('live', false, true);
 assert.doesNotMatch(contentLabel.getAttribute('title'), /Budgets:/, 'a session without request content names no budget');
 runInContext('state.sessionContentLimits = null', context);

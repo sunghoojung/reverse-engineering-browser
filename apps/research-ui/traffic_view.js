@@ -58,10 +58,11 @@ function trafficByteCount(value) {
   return `${count.toLocaleString('en-US')} ${count === 1n ? 'byte' : 'bytes'}`;
 }
 
-// A budget a refusal met: its size when this live session's address names it
-// (app_state.js), and the start panel control that sets it for the next session.
+// A budget a refusal met: its size when the session context names it
+// (state.sessionContentLimits, app.js), and the start panel control that sets
+// it for the next session.
 function trafficBudgetUsed(name, key, control) {
-  const budget = typeof sessionContentLimits === 'undefined' ? null : sessionContentLimits?.[key] ?? null;
+  const budget = typeof state === 'undefined' ? null : state?.sessionContentLimits?.[key] ?? null;
   return `this session had used its ${budget ? `${budget.toLocaleString('en-US')} MiB ` : ''}${name}. `
     + `Raise ${control} in New Live Session… for the next session.`;
 }

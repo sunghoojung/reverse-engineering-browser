@@ -125,9 +125,8 @@ try {
   const endpoint = await waitForFile(endpointFile, backend);
   assert.match(endpoint, /^http:\/\/127\.0\.0\.1:\d+$/, 'The packaged backend must bind loopback only');
   // The packaged app's default content mode retains request content, so the
-  // titlebar carries its session label in every screenshot. The launcher also
-  // writes the session's limits, which Traffic names when a budget is used.
-  const uiURL = `${endpoint}/?native=1&canvas_images=0&request_content=1&request_content_budget_mib=64&response_body_budget_mib=128&response_media=0`;
+  // titlebar carries its session label in every screenshot.
+  const uiURL = `${endpoint}/?native=1&canvas_images=0&request_content=1`;
 
   // A local stand-in for the provider, so the agent's whole loop runs through
   // the packaged app with no key and no network. The real tool server answers.

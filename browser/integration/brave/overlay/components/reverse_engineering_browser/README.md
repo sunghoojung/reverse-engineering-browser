@@ -263,7 +263,13 @@ as a `stack` artifact and each new script's source once. The same walk records
 script navigations (event 46) and async task scheduling stacks (event 48) with
 their task chain; `renderer/native_request_stack_blink.h` holds the Blink-side
 hooks and `common/native_navigation_initiator_hook.h` carries a navigation's
-renderer stack to the browser link (event 47). See the
+renderer stack to the browser link (event 47). Every table belongs to one
+thread: the document main thread and each dedicated, shared and service worker
+attach their own, so walks take no lock; only attach, detach and the
+transport's routing of a browser refusal to its owning thread take the registry
+lock. `common/native_request_stack.h` also defines the task origin a posted
+message carries, and the sink records promise registrations under
+`--reb-promise-stacks`. See the
 [contract](../../../../../../protocol/native-network-v3.md).
 
 Renderer code never writes files or sockets directly.

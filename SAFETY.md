@@ -73,9 +73,13 @@ it.
   arms.
 - Request call stacks (`REB_NATIVE_REQUEST_STACKS`, on by default in the
   packaged app when Network and Artifact are captured) record script IDs and
-  positions of the stack that started each document request or script
-  navigation, and of the stack that scheduled each async task it came from,
-  never names or values. Content capture sessions also retain the source of
+  positions of the stack that started each document or worker request or
+  script navigation, and of the stack that scheduled each async task it came
+  from, including the stack that posted a message to a port, a broadcast
+  channel or a worker, never names or values. A posted message carries those
+  identities to the renderer that handles it. `REB_NATIVE_PROMISE_STACKS=1`,
+  off by default everywhere, also records the stack of each promise
+  registration. Content capture sessions also retain the source of
   each script a stack names as an artifact; metadata-only sessions do not.
   Agent-started sessions record them only when the start names
   `request_stacks`.

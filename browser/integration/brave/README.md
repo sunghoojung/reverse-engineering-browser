@@ -464,6 +464,16 @@ records script navigations and async task callers through
 `renderer/native_request_stack_blink.h`: the async task probes, task
 attribution at top-level callbacks, `BeginNavigation`, form scheduling and the
 browser navigation link; V8 `0017` bounds scheduling-time walks to 256 frames.
+Chromium `0046` walks on dedicated, shared and service worker threads too:
+`WorkerThread` attaches each worker's tables when its global scope starts and
+frees them at shutdown, and the walker uses that thread's frame buffer.
+Chromium `0047` carries a task origin beside `sender_stack_trace_id` in
+`CloneableMessage` (mojom, both struct variants and their traits, and
+`ShallowClone` for the browser's `BroadcastChannel` relay) and links
+`MessagePort`, `BroadcastChannel` and dedicated worker message handlers to it.
+`REB_NATIVE_PROMISE_STACKS=1` adds `--reb-promise-stacks`: V8 `0021` reports
+promise registrations to a REB delegate beside the inspector's, and Chromium
+`0048` installs it on every isolate.
 See [Native network v3](../../../protocol/native-network-v3.md).
 
 ## Debugger observations

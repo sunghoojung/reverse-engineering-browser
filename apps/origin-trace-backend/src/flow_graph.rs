@@ -1504,46 +1504,9 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request_stack::tests::{frame, identity_bytes, segment, stack_artifact};
     use sha2::{Digest, Sha256};
     use std::{io::Write, path::Path};
-
-    fn frame(kind: u8, flags: u8, script: u32, position: u32, detail: u32) -> Vec<u8> {
-        let mut bytes = vec![kind, flags, 0, 0];
-        for value in [script, position, detail] {
-            bytes.extend(value.to_le_bytes());
-        }
-        bytes
-    }
-
-    /// A version 2 stack artifact: frames innermost first, then segments.
-    fn stack_artifact(version: u16, frames: &[Vec<u8>], segments: &[Vec<u8>]) -> Vec<u8> {
-        let recorded = frames.len() as u32;
-        let mut a = 0x4b53_4252u32.to_le_bytes().to_vec();
-        a.extend(version.to_le_bytes());
-        a.extend([32, 0, 16, 0, 0, 0]);
-        for value in [recorded, recorded, 0] {
-            a.extend(value.to_le_bytes());
-        }
-        a.extend(0u16.to_le_bytes());
-        a.extend((segments.len() as u16).to_le_bytes());
-        a.extend((segments.len() as u16).to_le_bytes());
-        a.extend(0u16.to_le_bytes());
-        for f in frames {
-            a.extend(f);
-        }
-        for s in segments {
-            a.extend(s);
-        }
-        a
-    }
-
-    fn segment(kind: u8, recorded: u32, digest: &[u8]) -> Vec<u8> {
-        let mut s = vec![kind, 1, 0, 0];
-        s.extend(recorded.to_le_bytes());
-        s.extend([0; 8]);
-        s.extend(digest);
-        s
-    }
 
     fn request_record(
         digest: &[u8],
@@ -1575,18 +1538,6 @@ mod tests {
         p.resize(32, 0);
         p.extend(digest);
         p.extend(innermost);
-        p.resize(128, 0);
-        p
-    }
-
-    fn identity(kind: u8, flags: u8, script: u32, realm: u64, bytes: &[u8]) -> Vec<u8> {
-        let mut p = vec![1, 0, 128, 0, kind, flags, 0, 0];
-        for value in [script, 0, 0, 0] {
-            p.extend(value.to_le_bytes());
-        }
-        p.extend(realm.to_le_bytes());
-        p.extend((bytes.len() as u64).to_le_bytes());
-        p.extend(Sha256::digest(bytes));
         p.resize(128, 0);
         p
     }
@@ -1718,7 +1669,7 @@ mod tests {
             frame(1, 0, 10, at(top, "frames[0]"), at(top, "() {")),
             frame(1, 2, 10, at(top, "boot();"), 0),
         ];
-        let scheduling_artifact = stack_artifact(1, &scheduling, &[]);
+        let scheduling_artifact = stack_artifact(1, &scheduling, &[], &[]);
         let scheduling_sha = f.artifact("stack", "reb-stack:x", &scheduling_artifact);
         let scheduling_digest = hex::decode(&scheduling_sha).unwrap();
         // The request stack in the iframe realm, innermost first:
@@ -1734,7 +1685,8 @@ mod tests {
                 at(inner, "() {\n  helper"),
             ),
         ];
-        let request_artifact = stack_artifact(2, &request, &[segment(5, 2, &scheduling_digest)]);
+        let request_artifact =
+            stack_artifact(2, &request, &[], &[segment(5, 1, 2, &scheduling_digest)]);
         let request_sha = f.artifact("stack", "reb-stack:y", &request_artifact);
         let request_digest = hex::decode(&request_sha).unwrap();
         // A second, cookie-free request through the eval'd helper.
@@ -1748,7 +1700,7 @@ mod tests {
                 at(inner, "() {\n  helper"),
             ),
         ];
-        let helper_artifact = stack_artifact(2, &helper, &[]);
+        let helper_artifact = stack_artifact(2, &helper, &[], &[]);
         let helper_sha = f.artifact("stack", "reb-stack:z", &helper_artifact);
         let helper_digest = hex::decode(&helper_sha).unwrap();
         for (script, realm, kind, flags, bytes) in [
@@ -1762,7 +1714,7 @@ mod tests {
                 41,
                 0,
                 7,
-                &identity(kind, flags, script, realm, &bytes),
+                &identity_bytes(kind, flags, script, (0, 0), realm, &bytes),
             );
         }
         f.event(
@@ -1972,28 +1924,6 @@ mod tests {
         assert_eq!(g["stacks"]["distinct"], 3);
     }
 
-    /// A version 2 artifact with an await chain after the synchronous frames.
-    fn stack_with_asyncs(sync: &[Vec<u8>], asyncs: &[Vec<u8>], segments: &[Vec<u8>]) -> Vec<u8> {
-        let recorded = sync.len() as u32;
-        let mut a = 0x4b53_4252u32.to_le_bytes().to_vec();
-        a.extend([2, 0, 32, 0, 16, 0, 0, 0]);
-        for value in [recorded, recorded, 0] {
-            a.extend(value.to_le_bytes());
-        }
-        for value in [
-            asyncs.len(),
-            asyncs.len() + segments.len(),
-            segments.len(),
-            0,
-        ] {
-            a.extend((value as u16).to_le_bytes());
-        }
-        for part in sync.iter().chain(asyncs).chain(segments) {
-            a.extend(part);
-        }
-        a
-    }
-
     fn async_record(
         digest: &[u8],
         innermost: &[u8],
@@ -2019,18 +1949,19 @@ mod tests {
             41,
             0,
             7,
-            &identity(1, 2, 50, 99, text.as_bytes()),
+            &identity_bytes(1, 2, 50, (0, 0), 99, text.as_bytes()),
         );
         let b = frame(1, 0, 50, at("fetch"), start("b"));
         let x = frame(1, 0, 50, at("setTimeout"), start("x"));
-        let scheduler = stack_artifact(1, std::slice::from_ref(&x), &[]);
+        let scheduler = stack_artifact(1, std::slice::from_ref(&x), &[], &[]);
         let scheduler = hex::decode(f.artifact("stack", "reb-stack:x", &scheduler)).unwrap();
         // 1. `setTimeout(a)` ran `a`, which awaited `b`: the task enters `a`.
         let awaited = frame(3, 0, 50, at("await b"), start("a"));
-        let one = stack_with_asyncs(
+        let one = stack_artifact(
+            2,
             std::slice::from_ref(&b),
             std::slice::from_ref(&awaited),
-            &[segment(1, 1, &scheduler)],
+            &[segment(1, 1, 1, &scheduler)],
         );
         let one = hex::decode(f.artifact("stack", "reb-stack:1", &one)).unwrap();
         f.event(
@@ -2047,22 +1978,26 @@ mod tests {
             frame(1, 0, 50, at("  r();"), start("r")),
             255,
         ));
-        let deep =
-            hex::decode(f.artifact("stack", "reb-stack:deep", &stack_artifact(1, &deep, &[])))
-                .unwrap();
+        let deep = hex::decode(f.artifact(
+            "stack",
+            "reb-stack:deep",
+            &stack_artifact(1, &deep, &[], &[]),
+        ))
+        .unwrap();
         let g = frame(1, 0, 50, at("  r();\n}\n"), start("g"));
         let poster = hex::decode(f.artifact(
             "stack",
             "reb-stack:g",
-            &stack_artifact(1, std::slice::from_ref(&g), &[]),
+            &stack_artifact(1, std::slice::from_ref(&g), &[], &[]),
         ))
         .unwrap();
-        let mut bounded = segment(1, 256, &deep);
+        let mut bounded = segment(1, 1, 256, &deep);
         bounded[2] = 1;
         let two = stack_artifact(
             2,
             std::slice::from_ref(&b),
-            &[bounded, segment(5, 1, &poster)],
+            &[],
+            &[bounded, segment(5, 1, 1, &poster)],
         );
         let two = hex::decode(f.artifact("stack", "reb-stack:2", &two)).unwrap();
         f.event(
@@ -2073,12 +2008,12 @@ mod tests {
             &request_record(&two, &b, 1, 2, 0),
         );
         // 3. A microtask hop before the same timer: the shared edge keeps it.
-        let mut microtask = vec![9, 6, 0, 0];
-        microtask.resize(48, 0);
+        let microtask = segment(9, 6, 0, &[0; 32]);
         let three = stack_artifact(
             2,
             std::slice::from_ref(&b),
-            &[microtask, segment(1, 1, &scheduler)],
+            &[],
+            &[microtask, segment(1, 1, 1, &scheduler)],
         );
         let three = hex::decode(f.artifact("stack", "reb-stack:3", &three)).unwrap();
         f.event(

@@ -1253,17 +1253,77 @@ pub fn navigation_document(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
 
-    fn frame(kind: u8, script: u32, position: u32, detail: u32) -> Vec<u8> {
-        let mut bytes = vec![kind, 0, 0, 0];
+    /// One 16-byte frame of a stack artifact or record.
+    pub(crate) fn frame(kind: u8, flags: u8, script: u32, position: u32, detail: u32) -> Vec<u8> {
+        let mut bytes = vec![kind, flags, 0, 0];
         for value in [script, position, detail] {
             bytes.extend(value.to_le_bytes());
         }
         bytes
     }
+
+    /// A stack artifact: synchronous frames innermost first, then the await
+    /// chain and the task segments.
+    pub(crate) fn stack_artifact(
+        version: u16,
+        sync: &[Vec<u8>],
+        asyncs: &[Vec<u8>],
+        segments: &[Vec<u8>],
+    ) -> Vec<u8> {
+        let recorded = sync.len() as u32;
+        let mut a = 0x4b53_4252u32.to_le_bytes().to_vec();
+        a.extend(version.to_le_bytes());
+        a.extend([32, 0, 16, 0, 0, 0]);
+        for value in [recorded, recorded, 0] {
+            a.extend(value.to_le_bytes());
+        }
+        for value in [
+            asyncs.len(),
+            asyncs.len() + segments.len(),
+            segments.len(),
+            0,
+        ] {
+            a.extend((value as u16).to_le_bytes());
+        }
+        for part in sync.iter().chain(asyncs).chain(segments) {
+            a.extend(part);
+        }
+        a
+    }
+
+    /// One 48-byte task segment of a version 2 stack artifact.
+    pub(crate) fn segment(kind: u8, state: u8, recorded: u32, digest: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![kind, state, 0, 0];
+        bytes.extend(recorded.to_le_bytes());
+        bytes.extend([0; 8]);
+        bytes.extend(digest);
+        bytes
+    }
+
+    /// A `script_identity` payload whose digest is that of `text`.
+    pub(crate) fn identity_bytes(
+        kind: u8,
+        flags: u8,
+        script: u32,
+        (line, column): (u32, u32),
+        realm: u64,
+        text: &[u8],
+    ) -> Vec<u8> {
+        let mut p = vec![1, 0, 128, 0, kind, flags, 0, 0];
+        for value in [script, line, column, 0] {
+            p.extend(value.to_le_bytes());
+        }
+        p.extend(realm.to_le_bytes());
+        p.extend((text.len() as u64).to_le_bytes());
+        p.extend(Sha256::digest(text));
+        p.resize(128, 0);
+        p
+    }
+
     fn record_bytes(
         state: u8,
         total: u32,
@@ -1284,41 +1344,7 @@ mod tests {
         p.extend(0u32.to_le_bytes());
         p.extend(1u32.to_le_bytes());
         p.extend(digest);
-        p.extend(frame(1, 7, 30, 21));
-        p.resize(128, 0);
-        p
-    }
-    fn artifact_bytes(total: u32, frames: &[Vec<u8>], asyncs: u16) -> Vec<u8> {
-        let recorded = frames.len() as u32 - u32::from(asyncs);
-        let mut a = 0x4b53_4252u32.to_le_bytes().to_vec();
-        a.extend([1, 0, 32, 0, 16, 0]);
-        a.extend(if total > recorded { [2u8, 0] } else { [0, 0] });
-        for value in [total, recorded, total - recorded] {
-            a.extend(value.to_le_bytes());
-        }
-        a.extend(asyncs.to_le_bytes());
-        a.extend(asyncs.to_le_bytes());
-        a.extend(0u32.to_le_bytes());
-        for f in frames {
-            a.extend(f);
-        }
-        a
-    }
-    fn identity_bytes(
-        kind: u8,
-        flags: u8,
-        script: u32,
-        line: u32,
-        column: u32,
-        text: &[u8],
-    ) -> Vec<u8> {
-        let mut p = vec![1, 0, 128, 0, kind, flags, 0, 0];
-        for value in [script, line, column, 0] {
-            p.extend(value.to_le_bytes());
-        }
-        p.extend(99u64.to_le_bytes());
-        p.extend((text.len() as u64).to_le_bytes());
-        p.extend(Sha256::digest(text));
+        p.extend(frame(1, 0, 7, 30, 21));
         p.resize(128, 0);
         p
     }
@@ -1340,11 +1366,11 @@ mod tests {
         let at = source.find("fetch").unwrap() as u32;
         let start = source.find("() {").unwrap() as u32;
         let raw = |identity: Option<Vec<u8>>| {
-            json!({"session_id": "9", "process_id": 41, "frame": hex::encode(frame(1, 7, at, start)),
+            json!({"session_id": "9", "process_id": 41, "frame": hex::encode(frame(1, 0, 7, at, start)),
                 "identity": identity.map(hex::encode)})
         };
         let mut document = json!({"requests": [
-            {"initiator_frame": raw(Some(identity_bytes(1, 0x02, 7, 0, 0, source.as_bytes())))},
+            {"initiator_frame": raw(Some(identity_bytes(1, 0x02, 7, (0, 0), 99, source.as_bytes())))},
             {"initiator_frame": Value::Null},
         ]});
         let mut frames = InitiatorFrames::default();
@@ -1361,7 +1387,8 @@ mod tests {
         frames.resolve_with(&mut again, root.path(), |_| Vec::new());
         assert_eq!(again["requests"][0]["initiator_frame"], *resolved);
         let mut missing = json!({"requests": [{"initiator_frame": raw(None)}]});
-        missing["requests"][0]["initiator_frame"]["frame"] = json!(hex::encode(frame(1, 8, 1, 0)));
+        missing["requests"][0]["initiator_frame"]["frame"] =
+            json!(hex::encode(frame(1, 0, 8, 1, 0)));
         frames.resolve_with(&mut missing, root.path(), |_| Vec::new());
         assert_eq!(
             missing["requests"][0]["initiator_frame"]["reason"],
@@ -1466,19 +1493,21 @@ mod tests {
         let frames = vec![
             frame(
                 1,
+                0,
                 7,
                 inline.find("fetch").unwrap() as u32,
                 inline.find("() {").unwrap() as u32,
             ),
-            frame(1, 8, 0, 0),
+            frame(1, 0, 8, 0, 0),
             frame(
                 1,
+                0,
                 9,
                 wrapped.find("send").unwrap() as u32,
                 wrapped.find("() {").unwrap() as u32,
             ),
         ];
-        let stack = artifact_bytes(3, &frames, 0);
+        let stack = stack_artifact(1, &frames, &[], &[]);
         let mut record = record_bytes(1, 3, 3, 0, Sha256::digest(&stack).into());
         record[64..80].copy_from_slice(&frames[0]);
 
@@ -1491,19 +1520,19 @@ mod tests {
                 1,
                 0,
                 "script_identity",
-                identity_bytes(1, 0x10, 7, 4, 0, inline.as_bytes()),
+                identity_bytes(1, 0x10, 7, (4, 0), 99, inline.as_bytes()),
             ),
             (
                 2,
                 0,
                 "script_identity",
-                identity_bytes(1, 0x11, 8, 0, 0, evaled.as_bytes()),
+                identity_bytes(1, 0x11, 8, (0, 0), 99, evaled.as_bytes()),
             ),
             (
                 3,
                 0,
                 "script_identity",
-                identity_bytes(1, 0x02, 9, 0, 0, wrapped.as_bytes()),
+                identity_bytes(1, 0x02, 9, (0, 0), 99, wrapped.as_bytes()),
             ),
             (4, 5, "request_initiated", Vec::new()),
             (5, 5, "request_initiator_stack", record),
@@ -1588,7 +1617,7 @@ mod tests {
 
     #[test]
     fn an_identity_outside_the_scan_is_not_reported_as_missing() {
-        let identity = identity_bytes(1, 0x02, 7, 1, 1, b"x");
+        let identity = identity_bytes(1, 0x02, 7, (1, 1), 99, b"x");
         let root = store_with_newer_traffic(&[
             (42, 0, "script_identity", identity),
             (42, 5, "request_initiated", Vec::new()),
@@ -1651,34 +1680,35 @@ mod tests {
         wasm.push(custom.len() as u8);
         wasm.extend(custom);
         let frames = vec![
-            frame(1, 7, fetch_at, send_at),
-            frame(2, 30, 0x2a1, 3),
-            frame(1, 8, 0, 0),
-            frame(1, 7, call_at, run_at),
-            frame(1, 40, 5, 0),
-            frame(3, 7, call_at, run_at),
+            frame(1, 0, 7, fetch_at, send_at),
+            frame(2, 0, 30, 0x2a1, 3),
+            frame(1, 0, 8, 0, 0),
+            frame(1, 0, 7, call_at, run_at),
+            frame(1, 0, 40, 5, 0),
+            frame(3, 0, 7, call_at, run_at),
             vec![4, 0, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0],
         ];
-        let stack = artifact_bytes(6, &frames, 2);
+        let stack = stack_artifact(1, &frames[..5], &frames[5..], &[]);
         let digest: [u8; 32] = Sha256::digest(&stack).into();
         let mut bytes = record_bytes(1, 5, 5, 2, digest);
         bytes[64..80].copy_from_slice(&frames[0]);
         bytes[24..28].copy_from_slice(&1u32.to_le_bytes());
         let record = decode_record(&bytes).expect("valid record");
+        let mut deeper = stack.clone();
+        deeper[12] = 6;
         assert!(
-            decode_artifact(&stack, &record).is_none(),
+            decode_artifact(&deeper, &record).is_none(),
             "depth must agree"
         );
-        let stack = artifact_bytes(5, &frames, 2);
-        let digest: [u8; 32] = Sha256::digest(&stack).into();
-        bytes[32..64].copy_from_slice(&digest);
-        let record = decode_record(&bytes).expect("valid record");
         let mut identities = HashMap::new();
         for (script, payload) in [
-            (7, identity_bytes(1, 0x02, 7, 10, 4, inline.as_bytes())),
-            (8, identity_bytes(1, 0x03, 8, 0, 0, evaled.as_bytes())),
-            (30, identity_bytes(2, 0, 30, 0, 0, &wasm)),
-            (40, identity_bytes(1, 0x11, 40, 0, 0, b"not retained")),
+            (
+                7,
+                identity_bytes(1, 0x02, 7, (10, 4), 99, inline.as_bytes()),
+            ),
+            (8, identity_bytes(1, 0x03, 8, (0, 0), 99, evaled.as_bytes())),
+            (30, identity_bytes(2, 0, 30, (0, 0), 99, &wasm)),
+            (40, identity_bytes(1, 0x11, 40, (0, 0), 99, b"not retained")),
         ] {
             let (id, identity) = decode_identity(&payload).expect("identity");
             assert_eq!(id, script);
@@ -1745,28 +1775,18 @@ mod tests {
         let source =
             "function schedule() {\n  setTimeout(send, 5);\n}\nfunction send() { fetch('/b'); }\n";
         let at = |text: &str| source.find(text).unwrap() as u32;
-        let schedule = frame(1, 7, at("setTimeout"), at("() {"));
-        let mut timer = 0x4b53_4252u32.to_le_bytes().to_vec();
-        timer.extend([1, 0, 32, 0, 16, 0, 0, 0]);
-        timer.extend([1u32, 1, 0].iter().flat_map(|v| v.to_le_bytes()));
-        timer.extend([0; 8]);
-        timer.extend(&schedule);
+        let schedule = frame(1, 0, 7, at("setTimeout"), at("() {"));
+        let timer = stack_artifact(1, std::slice::from_ref(&schedule), &[], &[]);
         let timer_digest: [u8; 32] = Sha256::digest(&timer).into();
-        let send = frame(1, 7, at("fetch"), at("() { fetch"));
-        let segment = |kind: u8, state: u8, recorded: u32, digest: [u8; 32]| {
-            let mut bytes = vec![kind, state, 0, 0];
-            bytes.extend(recorded.to_le_bytes());
-            bytes.extend([0; 8]);
-            bytes.extend(digest);
-            bytes
-        };
-        let mut stack = 0x4b53_4252u32.to_le_bytes().to_vec();
-        stack.extend([2, 0, 32, 0, 16, 0, 0x08, 0]);
-        stack.extend([1u32, 1, 0].iter().flat_map(|v| v.to_le_bytes()));
-        stack.extend([0, 0, 2, 0, 2, 0, 0, 0]);
-        stack.extend(&send);
-        stack.extend(segment(1, 1, 1, timer_digest));
-        stack.extend(segment(9, 6, 0, [0; 32]));
+        let send = frame(1, 0, 7, at("fetch"), at("() { fetch"));
+        let mut stack = stack_artifact(
+            2,
+            std::slice::from_ref(&send),
+            &[],
+            &[segment(1, 1, 1, &timer_digest), segment(9, 6, 0, &[0; 32])],
+        );
+        // The task chain was cut.
+        stack[10] = 0x08;
         let digest: [u8; 32] = Sha256::digest(&stack).into();
         let mut bytes = record_bytes(1, 1, 1, 0, digest);
         bytes[0] = 2;
@@ -1779,7 +1799,7 @@ mod tests {
         v1[0] = 1;
         assert!(decode_record(&v1).is_none(), "version 1 has no task chain");
         let (_, identity) =
-            decode_identity(&identity_bytes(1, 0x02, 7, 0, 0, source.as_bytes())).unwrap();
+            decode_identity(&identity_bytes(1, 0x02, 7, (0, 0), 99, source.as_bytes())).unwrap();
         let identities = HashMap::from([(7, identity)]);
         let artifacts = vec![
             artifact("1", "stack", &stack),

@@ -1,8 +1,8 @@
 diff --git a/include/v8-native-stack.h b/include/v8-native-stack.h
-index 9f29470..bea8f38 100644
+index 9f29470..6d7a127 100644
 --- a/include/v8-native-stack.h
 +++ b/include/v8-native-stack.h
-@@ -118,6 +118,38 @@ struct NativeThrow {
+@@ -118,6 +118,39 @@ struct NativeThrow {
  // pause-on-exceptions does; walks the stack once.
  V8_EXPORT NativeThrow DescribeNativeThrow(Isolate* isolate);
  
@@ -33,7 +33,8 @@ index 9f29470..bea8f38 100644
 +
 +V8_EXPORT bool IsNativePromiseStackCaptureEnabled();
 +
-+// Installs callbacks that outlive the isolate. Does nothing when the flag is
++// Installs callbacks that outlive the isolate; null removes them and restores
++// the isolate's promise hook state. Installing does nothing when the flag is
 +// off or a callback is missing. Isolate thread only.
 +V8_EXPORT void SetNativePromiseCallbacks(Isolate* isolate,
 +                                         const NativePromiseCallbacks* callbacks);
@@ -60,7 +61,7 @@ index faad5a4..e149294 100644
  
  TNode<Uint32T> CodeStubAssembler::PromiseHookFlags() {
 diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
-index a296e08..e2abc5f 100644
+index a296e08..4ed6100 100644
 --- a/src/execution/isolate.cc
 +++ b/src/execution/isolate.cc
 @@ -7415,7 +7415,8 @@ void Isolate::PromiseHookStateUpdated() {
@@ -170,7 +171,7 @@ index a296e08..e2abc5f 100644
      async_event_delegate_->AsyncEventOccurred(debug::kDebugStackTraceCaptured,
                                                stack_trace->id(), false);
    }
-@@ -8823,6 +8858,21 @@ bool CaptureNativeStack(Isolate* isolate, NativeStackCapture& capture,
+@@ -8823,6 +8858,29 @@ bool CaptureNativeStack(Isolate* isolate, NativeStackCapture& capture,
                          callbacks);
  }
  
@@ -180,13 +181,21 @@ index a296e08..e2abc5f 100644
 +
 +void SetNativePromiseCallbacks(Isolate* isolate,
 +                               const NativePromiseCallbacks* callbacks) {
-+  if (!isolate || !internal::v8_flags.reb_promise_stacks || !callbacks ||
-+      !callbacks->active || !callbacks->registered ||
-+      !callbacks->will_handle || !callbacks->did_handle) {
++  if (!isolate) {
 +    return;
 +  }
-+  reinterpret_cast<internal::Isolate*>(isolate)->set_reb_promise_callbacks(
-+      callbacks);
++  internal::Isolate* const i_isolate =
++      reinterpret_cast<internal::Isolate*>(isolate);
++  if (!callbacks) {
++    i_isolate->set_reb_promise_callbacks(nullptr);
++    return;
++  }
++  if (!internal::v8_flags.reb_promise_stacks || !callbacks->active ||
++      !callbacks->registered || !callbacks->will_handle ||
++      !callbacks->did_handle) {
++    return;
++  }
++  i_isolate->set_reb_promise_callbacks(callbacks);
 +}
 +
  void SetNativeThrowObserver(Isolate* isolate, NativeThrowObserver observer) {
@@ -240,7 +249,7 @@ index 3c5816f..076472a 100644
              "print stack trace when an illegal exception is thrown")
  DEFINE_BOOL(abort_on_uncaught_exception, false,
 diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
-index 207e899..6cd999d 100644
+index 207e899..0859e59 100644
 --- a/test/cctest/test-api.cc
 +++ b/test/cctest/test-api.cc
 @@ -59,6 +59,7 @@
@@ -251,7 +260,7 @@ index 207e899..6cd999d 100644
  #include "include/v8-primitive-object.h"
  #include "include/v8-regexp.h"
  #include "include/v8-util.h"
-@@ -33381,3 +33382,108 @@ TEST(RebNativeCompiledScriptDisabledRunsNothing) {
+@@ -33381,3 +33382,129 @@ TEST(RebNativeCompiledScriptDisabledRunsNothing) {
    CompileRun("eval('8 + 8');");
    CHECK(reb_compiled_scripts.empty());
  }
@@ -295,9 +304,12 @@ index 207e899..6cd999d 100644
 +  LocalContext env;
 +  v8::Isolate* isolate = env.isolate();
 +  v8::HandleScope scope(isolate);
++  i::Isolate* const i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  const bool hook_before = i_isolate->HasAsyncEventDelegate();
 +  RebPromiseLog log;
 +  reb_promise_log = &log;
 +  v8::SetNativePromiseCallbacks(isolate, &kRebPromiseCallbacks);
++  CHECK(i_isolate->HasAsyncEventDelegate());
 +  // One registration per user call, in call order; builtins that call then
 +  // internally (catch, finally) report as themselves.
 +  CompileRun(
@@ -342,6 +354,17 @@ index 207e899..6cd999d 100644
 +  CHECK_LT(0, log.active_checks);
 +  CHECK(log.registered.empty());
 +  CHECK(log.started.empty());
++
++  // Null removes the callbacks and restores the isolate: the promise-hook bit
++  // is as it was, and nothing is reported.
++  v8::SetNativePromiseCallbacks(isolate, nullptr);
++  CHECK_EQ(hook_before, i_isolate->HasAsyncEventDelegate());
++  log = {};
++  CompileRun("Promise.resolve(4).then(() => {}); (async () => { await 0; })();");
++  isolate->PerformMicrotaskCheckpoint();
++  CHECK_EQ(0, log.active_checks);
++  CHECK(log.registered.empty());
++  CHECK(log.started.empty());
 +  reb_promise_log = nullptr;
 +}
 +
@@ -352,11 +375,18 @@ index 207e899..6cd999d 100644
 +  RebPromiseLog log;
 +  reb_promise_log = &log;
 +  CHECK(!v8::IsNativePromiseStackCaptureEnabled());
-+  // Without --reb-promise-stacks the callbacks are not installed.
++  i::Isolate* const i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  const bool hook_before = i_isolate->HasAsyncEventDelegate();
++  // Without --reb-promise-stacks the callbacks are not installed, and the
++  // isolate's promise hook state is unchanged.
 +  v8::SetNativePromiseCallbacks(isolate, &kRebPromiseCallbacks);
++  CHECK_EQ(hook_before, i_isolate->HasAsyncEventDelegate());
 +  CompileRun("Promise.resolve(3).then(() => {});");
 +  isolate->PerformMicrotaskCheckpoint();
 +  CHECK_EQ(0, log.active_checks);
 +  CHECK(log.registered.empty());
++  // Removing what was never installed is harmless.
++  v8::SetNativePromiseCallbacks(isolate, nullptr);
++  CHECK_EQ(hook_before, i_isolate->HasAsyncEventDelegate());
 +  reb_promise_log = nullptr;
 +}

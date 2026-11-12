@@ -4158,13 +4158,15 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
 
     /// Differential invariant: on every owned input, tier and score with the
     /// opcode-claim gate equal those of the unchanged base recovery path,
-    /// which is the same pipeline with the gate off.
-    #[test]
-    fn classification_never_changes_tier_or_score_on_any_owned_input() {
+    /// which is the same pipeline with the gate off. Two analyses of each of
+    /// 90-odd inputs ran over a minute as one unoptimized test, the longest in
+    /// the suite, so the inputs are split by index into shards the test runner
+    /// runs at once. The shards together cover every input.
+    fn classification_never_changes_tier_or_score_in_shard(shard: usize) {
         let inputs = vm::review_inputs::differential_inputs();
         assert!(inputs.len() >= 90, "{} differential inputs", inputs.len());
         let mut differences = Vec::new();
-        for (name, bytes, kind) in &inputs {
+        for (name, bytes, kind) in inputs.iter().skip(shard).step_by(CLASSIFICATION_SHARDS) {
             let gated = tier_and_score(bytes, kind, true);
             let base = tier_and_score(bytes, kind, false);
             if gated != base {
@@ -4172,6 +4174,35 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             }
         }
         assert!(differences.is_empty(), "{}", differences.join("\n"));
+    }
+
+    const CLASSIFICATION_SHARDS: usize = 8;
+
+    macro_rules! classification_shards {
+        ($($name:ident = $shard:literal),+ $(,)?) => {
+            $(
+                #[test]
+                fn $name() {
+                    classification_never_changes_tier_or_score_in_shard($shard);
+                }
+            )+
+
+            #[test]
+            fn classification_shards_cover_every_input() {
+                assert_eq!(vec![$($shard),+], (0..CLASSIFICATION_SHARDS).collect::<Vec<usize>>());
+            }
+        };
+    }
+
+    classification_shards! {
+        classification_never_changes_tier_or_score_on_any_owned_input_0 = 0,
+        classification_never_changes_tier_or_score_on_any_owned_input_1 = 1,
+        classification_never_changes_tier_or_score_on_any_owned_input_2 = 2,
+        classification_never_changes_tier_or_score_on_any_owned_input_3 = 3,
+        classification_never_changes_tier_or_score_on_any_owned_input_4 = 4,
+        classification_never_changes_tier_or_score_on_any_owned_input_5 = 5,
+        classification_never_changes_tier_or_score_on_any_owned_input_6 = 6,
+        classification_never_changes_tier_or_score_on_any_owned_input_7 = 7,
     }
 
     fn first_site(classification: &Value, instruction: &str) -> Value {

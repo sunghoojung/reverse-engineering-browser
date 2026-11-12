@@ -1290,8 +1290,13 @@ Protocol is available from the header menu.
   sublabel only when the path was captured. The full URL is the tooltip.
 - **Status** colors 3xx, 4xx and 5xx apart. Failed names its net error,
   Pending has no response yet, and No loader means only the renderer recorded
-  the request. Once `response_started` arrives the row shows that HTTP code,
-  and until a terminal record follows, Time reads a dash and the tooltip says so.
+  the request. End lost means the request's service worker ended it but the
+  renderer had reused the slot holding its start, so its outcome is unknown
+  (a `service_worker_end_lost` gap). Once `response_started` arrives the row
+  shows that HTTP code, and until a terminal record follows, Time reads a dash
+  and the tooltip says so. A race network request the worker answered shows
+  the worker's outcome, and General says the browser records are the network
+  attempt's.
 - **Type** comes from the resource type, then the response MIME type when the
   resource type says only "other". Its tooltip has the MIME type.
 - **Initiator** names a script start's innermost frame as `file:line` when the
@@ -1303,7 +1308,8 @@ Protocol is available from the header menu.
   `decoded_body_length` (resource), or (disk cache) and (service worker) from
   the response or renderer completion flags, or (memory cache) for a
   `memory_cache_reuse` row, whose tooltip and General coverage say Blink reused
-  a resource it held, or decoded a `data:` URL, and made no request. A served
+  a resource it held, or decoded a `data:` URL or MHTML archive resource, and
+  made no request. A served
   row shows its resource size only when the column is wide enough for both.
   Units are decimal; the tooltip has exact bytes.
 - **Waterfall** draws each request from its first to its last record, lighter

@@ -592,7 +592,7 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. A Wasm reason ending in `filtered` is a sample-policy exclusion: that execution was not sampled and did not take a slot. |
 | `browser_internal_excluded` | Capture counted `chrome:`, `devtools:` and other browser-internal requests, requests WebUI renderers sent (`webui_request`), or WebUI renderers, instead of recording them; `count` is the requests. Not a gap. |
 | `no_tab_traffic_excluded` | Capture counted extension-worker requests and DevTools loads instead of recording them; `count` is the requests. Not a gap. `REB_CAPTURE_EXTENSION_TRAFFIC=1` records the extension requests instead. |
-| `memory_cache_reuse_not_recorded` | Renderers counted memory-cache reuses past their 4,096 records per capture configuration instead of recording them; `count` is the reuses. Not a gap. |
+| `memory_cache_reuse_not_recorded` | Renderers counted memory-cache reuses past their 4,096 records per capture configuration, or in a page that is not ordinary (an SVG image's own document or a page popup), instead of recording them; `count` is the reuses. Not a gap. |
 | `network_tab_unresolved` | Severity `error`: `count` request rows have no tab. A capture bug; `request_tabs.unresolved_requests` names up to 16 by `process_id` and `request_id`. |
 | `bounded_scope` | Only the newest 64 MiB of events were summarized. |
 

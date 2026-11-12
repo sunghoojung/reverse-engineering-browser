@@ -2808,12 +2808,6 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
-  // The start panel through a whole decision at both window sizes. The harness
-  // names a REB_BRAVE_BINARY that does not exist, so Start fails at once and
-  // nothing launches. The panel must fit, reach every control by keyboard with
-  // visible focus, offer no Keychain choice, start with the mode chosen by
-  // keyboard, come back as a failure with Retry focused and that same mode,
-  // fail afresh on Retry, and leave the offline workspace on Continue Offline.
   // A dedicated worker's request stack and its async callers resolve in their
   // own isolates (protocol/native-network-v3.md): a Promise.then registration
   // in the worker, a MessagePort post from another renderer, and a task
@@ -2844,6 +2838,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // The start panel through a whole decision at both window sizes. The harness
+  // names a REB_BRAVE_BINARY that does not exist, so Start fails at once and
+  // nothing launches. The panel must fit, reach every control by keyboard with
+  // visible focus, offer no Keychain choice, start with the mode chosen by
+  // keyboard, come back as a failure with Retry focused and that same mode,
+  // fail afresh on Retry, and leave the offline workspace on Continue Offline.
   @MainActor
   func test27StartPanelStartRetryAndKeyboard() async throws {
     let ui = try await prepare(windowSizes[0])

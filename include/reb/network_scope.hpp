@@ -39,7 +39,8 @@ enum class ExclusionClass : std::uint8_t {
   kExtensionWorker = 65,
   kDevToolsLoad = 66,
   kWebUiRequest = 67,
-  // 68 and 69 belong to another part of the contract.
+  kServiceWorkerNoPage = 68,
+  kBrowserPrefetch = 69,
   kMemoryCacheReuse = 70,
   kNonOrdinaryPageReuse = 71,
 };
@@ -113,7 +114,8 @@ struct CaptureExclusionPayload final {
          value.reserved == std::array<std::uint8_t, 3>{} && value.count != 0 &&
          ((value.exclusion_class != static_cast<std::uint8_t>(ExclusionClass::kWebUiRenderer) &&
            value.exclusion_class != static_cast<std::uint8_t>(ExclusionClass::kDevToolsLoad) &&
-           value.exclusion_class != static_cast<std::uint8_t>(ExclusionClass::kWebUiRequest)) ||
+           value.exclusion_class != static_cast<std::uint8_t>(ExclusionClass::kWebUiRequest) &&
+           value.exclusion_class != static_cast<std::uint8_t>(ExclusionClass::kBrowserPrefetch)) ||
           h.initiator_process_id == 0) &&
          // Only a renderer counts the reuses it did not record.
          ((value.exclusion_class != static_cast<std::uint8_t>(ExclusionClass::kMemoryCacheReuse) &&

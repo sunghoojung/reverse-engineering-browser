@@ -105,6 +105,22 @@ rows = tabs.attachRequestTabs(model.requestsFromEvents([update], 'live'), [updat
 assert.deepEqual(rows[0].tabIds, ['4', '9']);
 assert(!tabs.isUnresolved(rows[0]) && rows[0].tabLinkLabel === 'Service worker · 2 tabs');
 
+// A version's install-time fetch links to the tab whose register() installed it.
+const installStart = record({loader_kind: 19, request_id: '18', sequence_number: '33'});
+const registrant = golden('registrant link');
+Object.assign(registrant, {initiator_process_id: 31, initiator_request_id: 18});
+rows = tabs.attachRequestTabs(model.requestsFromEvents([installStart], 'live'),
+  [installStart, withTabs(golden('one-part set'), [4, 9]), registrant]);
+assert.deepEqual(rows[0].tabIds, ['4', '9']);
+assert(!tabs.isUnresolved(rows[0]) && rows[0].tabLinkLabel === 'Service worker · installed from 2 tabs');
+assert.equal(tabs.linkLabel({kind: 5, count: 1}), 'Service worker · installed from 1 tab');
+
+// A worklet's record names its creating document and carries that tab like one.
+const worklet = record({loader_kind: 22, request_id: '19', sequence_number: '34', frame_id: '77', tab_id: 4});
+assert(model.isBrokerEvent(worklet));
+rows = tabs.attachRequestTabs(model.requestsFromEvents([worklet], 'live'), [worklet]);
+assert(!tabs.isUnresolved(rows[0]) && rows[0].tabIds[0] === '4');
+
 // Extension traffic recorded by opt-in sits under its extension, never under no tab.
 const extensionScript = Object.assign(golden('browser loader kind 6'), {process_id: 7, request_id: '900',
   sequence_number: '32', browser_context_id_high: '11', browser_context_id_low: '12'});
@@ -131,5 +147,6 @@ const domain = row => String(row.path).split('/')[0];
 assert.equal(tabs.tabPageLabel(rows, domain), 'example.test');
 
 console.log(`PASS tab link wire: ${cases.length} C++ golden records agree with Python and the UI readers; ` +
-  'worker rows appear in every linked tab once, incomplete sets say so, browser records and extension traffic link, ' +
+  'worker rows appear in every linked tab once, incomplete sets say so, browser records, registrants, worklets and ' +
+  'extension traffic link, ' +
   'unlinked rows are errors and tabs are named by their page');

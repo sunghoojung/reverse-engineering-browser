@@ -28,6 +28,7 @@ enum class LoaderKind : std::uint8_t {
   kServiceWorker = 19,
   kOtherContext = 20,
   kScriptContext = 21,
+  kWorklet = 22,
 };
 
 enum class TabLinkKind : std::uint8_t {
@@ -35,6 +36,7 @@ enum class TabLinkKind : std::uint8_t {
   kSharedWorkerClients = 2,
   kServiceWorkerClients = 3,
   kServiceWorkerLastClients = 4,
+  kServiceWorkerRegistrant = 5,
 };
 
 inline constexpr std::uint16_t kTabSetPayloadVersion = 1;
@@ -52,7 +54,7 @@ inline constexpr std::size_t kExtensionIdSize = 32;
 }
 
 [[nodiscard]] constexpr bool IsRendererLoaderKind(const std::uint8_t value) noexcept {
-  return value >= 16 && value <= 21;
+  return value >= 16 && value <= 22;
 }
 
 [[nodiscard]] constexpr bool IsWorkerOwnerKind(const std::uint8_t value) noexcept {
@@ -178,7 +180,7 @@ struct RequestTabLinkPayload final {
   value.link_kind = static_cast<std::uint8_t>(At(bytes, 4, 1));
   value.set_id = At(bytes, 8, 8);
   value.tab_count = static_cast<std::uint32_t>(At(bytes, 16, 4));
-  return value.link_kind >= 1 && value.link_kind <= 4 && value.set_id != 0 && value.tab_count != 0;
+  return value.link_kind >= 1 && value.link_kind <= 5 && value.set_id != 0 && value.tab_count != 0;
 }
 
 // tab_id is the set's only tab, else 0.

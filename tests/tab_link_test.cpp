@@ -50,8 +50,12 @@ static_assert(reb::kTabSetPayloadSize == reb::kNativeTabSetPayloadSize);
 static_assert(reb::kRequestTabLinkPayloadSize == reb::kNativeRequestTabLinkPayloadSize);
 static_assert(static_cast<int>(reb::LoaderKind::kScriptContext) ==
               static_cast<int>(reb::NativeLoaderKind::kScriptContext));
+static_assert(static_cast<int>(reb::LoaderKind::kWorklet) ==
+              static_cast<int>(reb::NativeLoaderKind::kWorklet));
 static_assert(static_cast<int>(reb::TabLinkKind::kServiceWorkerLastClients) ==
               static_cast<int>(reb::NativeTabLinkKind::kServiceWorkerLastClients));
+static_assert(static_cast<int>(reb::TabLinkKind::kServiceWorkerRegistrant) ==
+              static_cast<int>(reb::NativeTabLinkKind::kServiceWorkerRegistrant));
 static_assert(reb::NativeBrowserLoaderKind(0) == reb::NativeLoaderKind::kNavigation &&
               reb::NativeBrowserLoaderKind(9) == reb::NativeLoaderKind::kEarlyHints &&
               reb::NativeBrowserLoaderKind(10) == reb::NativeLoaderKind::kNotRecorded);
@@ -134,14 +138,14 @@ void LoaderKinds() {
     Case("browser loader kind " + std::to_string(kind),
          Request(reb::EventType::kRequestStarted, kind), true);
   }
-  for (std::uint8_t kind = 16; kind <= 21; ++kind) {
+  for (std::uint8_t kind = 16; kind <= 22; ++kind) {
     Case("renderer loader kind " + std::to_string(kind),
          Request(reb::EventType::kRequestInitiated, kind), true);
   }
   Case("browser kind on a renderer start", Request(reb::EventType::kRequestInitiated, 3), false);
   Case("renderer kind on a browser start", Request(reb::EventType::kRequestStarted, 16), false);
   Case("loader kind 11", Request(reb::EventType::kRequestStarted, 11), false);
-  Case("loader kind 22", Request(reb::EventType::kRequestInitiated, 22), false);
+  Case("loader kind 23", Request(reb::EventType::kRequestInitiated, 23), false);
   Case("loader kind on a completion", Request(reb::EventType::kRequestCompleted, 3), false);
   std::string json;
   reb::WriteEventJson(Request(reb::EventType::kRequestStarted, 3), json);
@@ -218,6 +222,7 @@ void Links() {
   Case("link to two tabs", Link({4, 9}, reb::NativeTabLinkKind::kSharedWorkerClients), true);
   Case("dedicated worker link", Link({4}, reb::NativeTabLinkKind::kDedicatedWorker), true);
   Case("last clients link", Link({4}, reb::NativeTabLinkKind::kServiceWorkerLastClients), true);
+  Case("registrant link", Link({4, 9}, reb::NativeTabLinkKind::kServiceWorkerRegistrant), true);
   auto event = Link({4, 9});
   event.header.tab_id = 4;
   Case("several tabs with an envelope tab", event, false);
@@ -225,8 +230,8 @@ void Links() {
   event.header.tab_id = 0;
   Case("one tab without an envelope tab", event, false);
   event = Link({4});
-  event.inline_payload[4] = std::byte{5};
-  Case("link kind 5", event, false);
+  event.inline_payload[4] = std::byte{6};
+  Case("link kind 6", event, false);
   event = Link({4});
   event.inline_payload[4] = std::byte{0};
   Case("link kind 0", event, false);

@@ -1807,7 +1807,9 @@ Traffic is grouped by browser tab with an All tabs scope and a domain
 selector. Each chip is named by its tab's newest main-frame page. A worker
 request linked to several tabs (`request_tabs.js`, from `tab_set` and
 `request_tab_link`) appears in each with a marker such as "Service worker · 2
-tabs"; All tabs counts it once. Extension traffic recorded with
+tabs", or "Service worker · installed from 1 tab" for a version that has had
+no client yet; All tabs counts it once. The footer also names counted
+service-worker requests no page caused and browser prefetches with no page. Extension traffic recorded with
 `REB_CAPTURE_EXTENSION_TRAFFIC=1` (`request_extension_link`) has one
 "Extension <id>" chip per extension. The request index joins the same links, so
 chips, the tab filter and the footer count cover the whole session. There is no

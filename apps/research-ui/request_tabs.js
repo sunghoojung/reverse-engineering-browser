@@ -2,7 +2,8 @@
  * request_extension_link records (protocol/native-network-v3.md "Request owners
  * and tabs"). A row without an owner is a capture error that stays listed. */
 (function (global) {
-  const LINK_KINDS = Object.freeze({1: 'Dedicated worker', 2: 'Shared worker', 3: 'Service worker', 4: 'Service worker'});
+  const LINK_KINDS = Object.freeze({1: 'Dedicated worker', 2: 'Shared worker', 3: 'Service worker', 4: 'Service worker',
+    5: 'Service worker'});
   const OWNER_KINDS = new Set([17, 18, 19]);
   const BROWSER_FETCHED_KINDS = new Set([4, 6]);
   const PART_TABS = 26;
@@ -66,7 +67,7 @@
     if (!row) return null;
     const view = new DataView(bytes.buffer);
     const setId = view.getBigUint64(8, true), count = view.getUint32(16, true);
-    if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 24 || !(bytes[4] >= 1 && bytes[4] <= 4) ||
+    if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 24 || !(bytes[4] >= 1 && bytes[4] <= 5) ||
         bytes[5] || bytes[6] || bytes[7] || view.getUint32(20, true) || setId === 0n || count === 0 ||
         (count === 1) !== (event.tab_id !== 0)) return null;
     return {kind: bytes[4], setId: setId.toString(), count, row};
@@ -107,6 +108,8 @@
     const name = LINK_KINDS[link.kind];
     if (link.kind === 1) return name;
     if (link.kind === 4) return `${name} · last ${link.count === 1 ? 'client' : `${link.count} clients`}`;
+    // The tabs whose register(), update() or navigation installed the version.
+    if (link.kind === 5) return `${name} · installed from ${link.count === 1 ? '1 tab' : `${link.count} tabs`}`;
     return `${name} · ${link.count} ${link.count === 1 ? 'tab' : 'tabs'}`;
   }
 

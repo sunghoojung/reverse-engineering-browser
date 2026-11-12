@@ -226,7 +226,7 @@ asking without `layers` gets the v1 answer.
 
 | Phase | Scope | Can be built and checked here |
 | --- | --- | --- |
-| 0 | Request rows and cards name path, status and renderer ID, not only `METHOD host`. The value-flow body limit is stated three ways (256 KiB in the invocation protocol, 16 MiB in the invocation design, 1 MiB read by `origin_trace.rs`); settle on one. | yes |
+| 0 | Request rows and cards name path, status and renderer ID, not only `METHOD host`. The value-flow body limit is stated two ways (16 MiB retained, as the invocation protocol and design say, and 1 MiB read by `origin_trace.rs`); settle on one. | yes |
 | 1 | `flow-graph-v2` with the Requests and Tracked calls layers; request lineage replaces Steps' single chain; the side-by-side pane | yes, on synthetic stores from the existing C++ invocation encoders |
 | 2 | The VM layer: `br_table`, `call_indirect`, guest and host-link joins; dispatch rows on Wasm cards; the runtime overlay on Sources Graph | yes, on the native Wasm goldens `make native-wasm-golden-check` already exports |
 | 3 | Signals and Analysis layers; the fingerprint evidence graph drawn for the first time | yes |

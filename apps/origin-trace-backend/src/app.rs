@@ -524,16 +524,12 @@ impl App {
                 self.live_wasm.state()?
             }
             "/api/native-debugger" => {
-                if !q.0.is_empty() {
-                    return Err(Error::bad(
-                        "Native debugger state takes no query parameters",
-                    ));
-                }
+                let query = native_debugger_query(&q)?;
                 let console = self.native_console.state().await;
                 let watch = self.native_console.watch();
                 let store = self.options.store.clone();
                 tokio::task::spawn_blocking(move || {
-                    crate::native_debugger::state(&store, &console, watch)
+                    crate::native_debugger::state(&store, &console, watch, &query)
                 })
                 .await
                 .map_err(|_| Error::new(500, "Native debugger state read failed"))??
@@ -771,44 +767,38 @@ impl App {
                 .0
             }
             "/api/request-stack" => {
-                q.only(
-                    &[
-                        "session_id",
-                        "process_id",
-                        "request_id",
-                        "navigation_sequence",
-                    ],
-                    &[],
-                )?;
+                const NAMES: [&str; 3] =
+                    ["request_id", "navigation_sequence", "observation_sequence"];
+                q.only(&["session_id", "process_id"], &NAMES)?;
                 let session = match q.one("session_id")? {
                     Some(_) => Some(q.number("session_id", None, 64, true)?),
                     None => None,
                 };
                 let process = q.number("process_id", None, 32, true)?;
-                let navigation = match q.one("navigation_sequence")? {
-                    Some(_) => Some(q.number("navigation_sequence", None, 64, true)?),
-                    None => None,
+                let named: Vec<&str> = NAMES
+                    .into_iter()
+                    .filter(|name| q.0.contains_key(*name))
+                    .collect();
+                let [name] = named[..] else {
+                    return Err(Error::bad(
+                        "Specify exactly one of request_id, navigation_sequence and observation_sequence",
+                    ));
                 };
-                let request = match navigation {
-                    Some(_) if q.one("request_id")?.is_some() => {
-                        return Err(Error::bad(
-                            "Specify request_id or navigation_sequence, not both",
-                        ));
-                    }
-                    Some(_) => 0,
-                    None => q.number("request_id", None, 64, true)?,
-                };
+                let value = q.number(name, None, 64, true)?;
                 let (store, artifacts, requests) = (
                     self.options.store.clone(),
                     self.options.artifacts.clone(),
                     self.requests.clone(),
                 );
-                self.blocking(move || match navigation {
-                    Some(sequence) => crate::request_stack::navigation_document(
-                        &store, &artifacts, &requests, session, process, sequence,
+                self.blocking(move || match name {
+                    "navigation_sequence" => crate::request_stack::navigation_document(
+                        &store, &artifacts, &requests, session, process, value,
                     ),
-                    None => crate::request_stack::document(
-                        &store, &artifacts, &requests, session, process, request,
+                    "observation_sequence" => crate::request_stack::observation_document(
+                        &store, &artifacts, &requests, session, process, value,
+                    ),
+                    _ => crate::request_stack::document(
+                        &store, &artifacts, &requests, session, process, value,
                     ),
                 })
                 .await?
@@ -2176,6 +2166,54 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
         HeaderValue::from_static("nosniff"),
     );
     response
+}
+/// `get_native_debugger` filters: one observation type, one native frame
+/// named by all three identities, and a backward byte cursor.
+fn native_debugger_query(q: &Query) -> Result<crate::debugger_observation::Query> {
+    use crate::debugger_observation::{PAGE, Query as Observations, RECENT, TYPES, Thread};
+    q.only(
+        &[
+            "type",
+            "session_id",
+            "process_id",
+            "frame_id",
+            "before",
+            "limit",
+        ],
+        &[],
+    )?;
+    let kind = match q.one("type")? {
+        Some(kind) => Some(
+            *TYPES
+                .iter()
+                .find(|known| **known == kind)
+                .ok_or_else(|| Error::bad(format!("type must be one of {}", TYPES.join(", "))))?,
+        ),
+        None => None,
+    };
+    let thread = match ["session_id", "process_id", "frame_id"].map(|key| q.0.contains_key(key)) {
+        [false, false, false] => None,
+        [true, true, true] => Some(Thread {
+            session: q.number("session_id", None, 64, true)?,
+            process: q.number("process_id", None, 32, true)?,
+            frame: q.number("frame_id", None, 64, true)?,
+        }),
+        _ => {
+            return Err(Error::bad(
+                "A thread scope names session_id, process_id and frame_id together",
+            ));
+        }
+    };
+    let before = match q.one("before")? {
+        Some(_) => Some(q.number("before", None, 64, false)?),
+        None => None,
+    };
+    Ok(Observations {
+        kind,
+        thread,
+        before,
+        limit: q.limit(RECENT, PAGE)?,
+    })
 }
 pub(crate) struct Query(BTreeMap<String, Vec<String>>);
 impl Query {

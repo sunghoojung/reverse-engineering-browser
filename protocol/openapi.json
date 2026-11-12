@@ -1997,7 +1997,7 @@
       "get": {
         "operationId": "get_request_stack",
         "summary": "Read the JavaScript and Wasm call stack that started one renderer request or script navigation",
-        "description": "Newest request_initiator_stack record (34) inside the bytes the request index names for one renderer request (or the newest 64 MiB of events when it names none), named by the renderer's process_id and request_id as its request_initiated record carries them, or with navigation_sequence the navigation_initiator_stack record (46) a browser navigation_initiator_link (47) names, with every recorded frame innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact of any capture origin (network, stack_script, compiled_script or dynamic_javascript), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Await frames follow the synchronous ones. A version 2 record adds task_segments, nearest first: each async task (timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or observer) with the stack that scheduled it, resolved from its async_task_stack (48) artifact, and microtask hops linked through task attribution. A version 3 record adds scope, the isolate the stack was walked in (the document main thread or a dedicated, shared or service worker), message segments (MessagePort, BroadcastChannel and worker postMessage) whose frames resolve in the posting thread's or renderer's isolate, a microtask segment's promise registration (then, catch, finally or await) when promise stacks were recorded, a no_script segment that ends the chain where a task was scheduled with no script running, and an origin_rejected segment that ends it where a received message's task origin did not validate. task_chain_cut says an earlier caller was not recorded; async_callers_not_shown lists the callers this record version cannot show. status is not_recorded when the read covered the request's indexed bytes or the whole store and found no stack record, and outside_scan when it did not reach all of them; coverage says what was read. A frame keeps reason script_identity_outside_scan when its identity was not found and not every identity was read. See protocol/native-network-v3.md.",
+        "description": "Newest request_initiator_stack record (34) inside the bytes the request index names for one renderer request (or the newest 64 MiB of events when it names none), named by the renderer's process_id and request_id as its request_initiated record carries them, or with navigation_sequence the navigation_initiator_stack record (46) a browser navigation_initiator_link (47) names, or with observation_sequence one debugger observation record (40 to 45) of that renderer, with every recorded frame innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact of any capture origin (network, stack_script, compiled_script or dynamic_javascript), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Await frames follow the synchronous ones. A version 2 record adds task_segments, nearest first: each async task (timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or observer) with the stack that scheduled it, resolved from its async_task_stack (48) artifact, and microtask hops linked through task attribution. A version 3 record adds scope, the isolate the stack was walked in (the document main thread or a dedicated, shared or service worker), message segments (MessagePort, BroadcastChannel and worker postMessage) whose frames resolve in the posting thread's or renderer's isolate, a microtask segment's promise registration (then, catch, finally or await) when promise stacks were recorded, a no_script segment that ends the chain where a task was scheduled with no script running, and an origin_rejected segment that ends it where a received message's task origin did not validate. task_chain_cut says an earlier caller was not recorded; async_callers_not_shown lists the callers this record version cannot show. status is not_recorded when the read covered the request's indexed bytes or the whole store and found no stack record, and outside_scan when it did not reach all of them; coverage says what was read. A frame keeps reason script_identity_outside_scan when its identity was not found and not every identity was read. An observation adds observation: its type, decoded detail and its own frame (the listener, timer callback or throw site) resolved alone as site, or null when it names none; its stack is the one recorded when it fired, and the site can resolve when the stack holds no script. See protocol/native-network-v3.md and protocol/native-debugger-observation-v1.md.",
         "tags": [
           "events"
         ],
@@ -2018,7 +2018,7 @@
             "name": "request_id",
             "in": "query",
             "required": false,
-            "description": "Renderer request ID of the request_initiated record. Required unless navigation_sequence is given.",
+            "description": "Renderer request ID of the request_initiated record. Required unless navigation_sequence or observation_sequence is given.",
             "schema": {
               "$ref": "#/components/schemas/NonzeroUint64String"
             }
@@ -2027,7 +2027,7 @@
             "name": "navigation_sequence",
             "in": "query",
             "required": false,
-            "description": "Sequence of the renderer's navigation_initiator_stack, as a navigation_initiator_link payload names it with the renderer process_id. Excludes request_id.",
+            "description": "Sequence of the renderer's navigation_initiator_stack, as a navigation_initiator_link payload names it with the renderer process_id. Excludes request_id and observation_sequence.",
             "schema": {
               "$ref": "#/components/schemas/NonzeroUint64String"
             }
@@ -2037,6 +2037,15 @@
             "in": "query",
             "required": false,
             "description": "Restricts the lookup to one session.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "observation_sequence",
+            "in": "query",
+            "required": false,
+            "description": "Sequence of one debugger observation record (types 40 to 45) of the renderer process_id, as get_native_debugger observations carry it. Excludes request_id and navigation_sequence.",
             "schema": {
               "$ref": "#/components/schemas/NonzeroUint64String"
             }
@@ -5279,7 +5288,7 @@
       "get": {
         "operationId": "get_native_debugger",
         "summary": "Read Phase 1 threads, watch rules and observations, and the pausing debugger state",
-        "description": "Phase 1 is served: threads lists Console documents and recorded workers, watch is what the renderer confirmed armed through the Console watch command, and observations are the newest decoded records; wait on them with wait_for_events. availability unsupported with reason browser_debugger_unsupported means no Brave build serves the pausing debugger; that is not an empty breakpoint list, and no frames, scopes or values are invented. policy proposed_pending_approval means docs/product/native-debugger-v1.md has not been approved into SAFETY.md.",
+        "description": "Phase 1 is served: threads lists Console documents, recorded workers and the native frames observation records came from (observed), watch is what the renderer confirmed armed through the Console watch command, and observations are the newest decoded records; wait on them with wait_for_events. type, the thread scope (session_id, process_id and frame_id together, an observed frame) and before select and page the observations; observations_query echoes the read and its byte scope. observation_budget_gaps names renderers that refused later records after 1,024 in one capture configuration. availability unsupported with reason browser_debugger_unsupported means no Brave build serves the pausing debugger; that is not an empty breakpoint list, and no frames, scopes or values are invented. policy proposed_pending_approval means docs/product/native-debugger-v1.md has not been approved into SAFETY.md.",
         "tags": [
           "native-debugger"
         ],
@@ -5295,7 +5304,7 @@
             }
           },
           "400": {
-            "description": "Unexpected query.",
+            "description": "Unknown parameter, an unknown type, a partial thread scope or a malformed identity or cursor.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5350,7 +5359,73 @@
         },
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
-        }
+        },
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "Only observations of this type.",
+            "schema": {
+              "enum": [
+                "request_watch_match",
+                "listener_dispatch",
+                "timer_observation",
+                "csp_violation",
+                "exception_observation",
+                "dom_mutation"
+              ]
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "description": "Thread scope: with process_id and frame_id, only that native frame's observations, matched exactly.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "process_id",
+            "in": "query",
+            "required": false,
+            "description": "Thread scope: the renderer process.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            }
+          },
+          {
+            "name": "frame_id",
+            "in": "query",
+            "required": false,
+            "description": "Thread scope: the native frame, as threads.observed and observation records carry it.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "description": "Byte cursor: the newest matching records that end at or before it, from a previous observations_query.next_before.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Observations to return, clamped to 1..256. Noninteger, blank, or duplicate values return 400.",
+            "schema": {
+              "type": "integer",
+              "default": 32
+            }
+          }
+        ]
       }
     },
     "/api/native-debugger/actions": {
@@ -10413,6 +10488,40 @@
               },
               "target_frame_id": {
                 "$ref": "#/components/schemas/NonzeroUint64String"
+              }
+            }
+          },
+          "observation": {
+            "type": "object",
+            "description": "Debugger observations only.",
+            "required": [
+              "type",
+              "detail",
+              "site"
+            ],
+            "properties": {
+              "type": {
+                "enum": [
+                  "request_watch_match",
+                  "listener_dispatch",
+                  "timer_observation",
+                  "csp_violation",
+                  "exception_observation",
+                  "dom_mutation"
+                ]
+              },
+              "detail": {
+                "type": "object"
+              },
+              "site": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/RequestStackFrame"
+                  }
+                ]
               }
             }
           }
@@ -23433,7 +23542,9 @@
           "threads",
           "watch",
           "observations",
-          "observations_malformed"
+          "observations_malformed",
+          "observations_query",
+          "observation_budget_gaps"
         ],
         "properties": {
           "contract_version": {
@@ -23512,9 +23623,10 @@
             "required": [
               "console",
               "frames",
-              "workers"
+              "workers",
+              "observed"
             ],
-            "description": "Console documents (frames, including out-of-process frames) and the workers whose requests the renderer recorded. Not a pausable thread list.",
+            "description": "Console documents (frames, including out-of-process frames), the workers whose requests the renderer recorded, and the native frames that observation records came from. Console documents carry no native frame ID, so only observed frames scope observations exactly. Not a pausable thread list.",
             "properties": {
               "console": {
                 "type": "string",
@@ -23607,6 +23719,46 @@
                     }
                   }
                 }
+              },
+              "observed": {
+                "type": "array",
+                "maxItems": 64,
+                "description": "Native frames of the newest 2,048 observation records, newest first: the exact identity a thread scope filters by.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "session_id",
+                    "process_id",
+                    "frame_id",
+                    "last_sequence",
+                    "records"
+                  ],
+                  "properties": {
+                    "session_id": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    },
+                    "process_id": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "frame_id": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    },
+                    "last_sequence": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    },
+                    "records": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 2048
+                    }
+                  }
+                }
               }
             }
           },
@@ -23659,8 +23811,8 @@
           },
           "observations": {
             "type": "array",
-            "maxItems": 32,
-            "description": "The newest Phase 1 records, decoded; the same records get_events and wait_for_events return with hex payloads. Identities, kinds, positions and names only.",
+            "maxItems": 256,
+            "description": "The newest decoded Phase 1 records the query selects, newest first; the same records get_events and wait_for_events return with hex payloads. Identities, kinds, positions and names only.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -23991,8 +24143,135 @@
           "observations_malformed": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 32,
-            "description": "Newest records the core rules refuse; counted, never shown."
+            "description": "Records of the read that the core rules refuse, and damaged lines it met; counted, never shown."
+          },
+          "observations_query": {
+            "type": "object",
+            "required": [
+              "type",
+              "thread",
+              "scope",
+              "direction",
+              "limit",
+              "returned",
+              "store_end",
+              "next_after",
+              "next_before",
+              "limited",
+              "budget_exhausted"
+            ],
+            "description": "The observation read, paged like get_events: next_before continues to older records; scope store means the read covered the whole store.",
+            "properties": {
+              "type": {
+                "enum": [
+                  "request_watch_match",
+                  "listener_dispatch",
+                  "timer_observation",
+                  "csp_violation",
+                  "exception_observation",
+                  "dom_mutation",
+                  null
+                ]
+              },
+              "thread": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "session_id",
+                      "process_id",
+                      "frame_id"
+                    ],
+                    "properties": {
+                      "session_id": {
+                        "type": "string"
+                      },
+                      "process_id": {
+                        "type": "integer"
+                      },
+                      "frame_id": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                ]
+              },
+              "scope": {
+                "enum": [
+                  "store",
+                  "bounded_range"
+                ]
+              },
+              "direction": {
+                "const": "backward"
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 256
+              },
+              "returned": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 256
+              },
+              "store_end": {
+                "type": "string"
+              },
+              "next_after": {
+                "type": "string"
+              },
+              "next_before": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "limited": {
+                "type": "boolean"
+              },
+              "budget_exhausted": {
+                "type": "boolean"
+              }
+            }
+          },
+          "observation_budget_gaps": {
+            "type": "array",
+            "maxItems": 16,
+            "description": "debugger_observation_budget gap records in the newest observation scan, newest first: that renderer admitted 1,024 records in one capture configuration and refused the rest.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "session_id",
+                "process_id",
+                "frame_id",
+                "sequence_number"
+              ],
+              "properties": {
+                "session_id": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "process_id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "frame_id": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "sequence_number": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                }
+              }
+            }
           }
         }
       },

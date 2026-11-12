@@ -1181,15 +1181,21 @@ mod tests {
                 assert!(apart, "{label}: nodes {node} and {other} overlap");
             }
         }
-        let min_x = nodes
-            .iter()
-            .map(|corner| corner[0].0)
-            .fold(f64::INFINITY, f64::min);
-        let min_y = nodes
-            .iter()
-            .map(|corner| corner[1].0)
-            .fold(f64::INFINITY, f64::min);
-        assert!(min_x >= 0.0 && min_y >= 0.0, "{label}");
+        // The drawing, waypoints included, starts at 0, 0.
+        for axis in 0..2 {
+            let low =
+                nodes
+                    .iter()
+                    .map(|corner| corner[axis].0)
+                    .chain(edges.iter().flat_map(|points| {
+                        points.iter().skip(axis).step_by(2).map(|value| value.0)
+                    }))
+                    .fold(f64::INFINITY, f64::min);
+            assert!(
+                nodes.is_empty() || low == 0.0,
+                "{label}: axis {axis} starts at {low}"
+            );
+        }
         for (edge, (points, &[from, to])) in edges.iter().zip(&graph.edges).enumerate() {
             assert!(
                 points.len() >= 4 && points.len() % 2 == 0,

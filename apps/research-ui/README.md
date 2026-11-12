@@ -943,6 +943,32 @@ each request body's length, type and SHA-256. In Content mode,
 `REB_CAPTURE_REQUEST_CONTENT=0` or `REB_CAPTURE_CANVAS_IMAGES=0` turns either
 off.
 
+With Content chosen, the panel also shows the session's **Content limits**:
+
+| Control | Range and default | What it means |
+| --- | --- | --- |
+| **Request content budget** | 1 to 4,096 MiB, default 256 | How much of the request bodies and full URLs the session keeps, counting identical content once |
+| **Response body budget** | 1 to 16,384 MiB, default 512 | How much of the response bodies the session keeps, counting identical bodies once |
+| **Capture media and fonts** | Off by default | Also keep the images, audio, video and fonts that pages load; they count against the response body budget |
+
+Past a budget the browser still lists each later body or URL and names it as
+not kept, never silently. The budgets stay on this Mac with the session, and
+the launcher grows the session's artifact store by both, so a raised budget can
+use that much more disk. A value outside its range, or not a whole number, is
+named at its field with the rule, and nothing starts. The native side checks a
+Content start again ([`ContentLimits`](macos/LiveSessionCoordinator.swift)) with
+the rules the agent path applies to `request_content_budget_mib`,
+`response_body_budget_mib` and `response_media`, and passes the values to the
+launcher as `REB_REQUEST_CONTENT_BUDGET_MIB`, `REB_RESPONSE_BODY_BUDGET_MIB`
+and `REB_CAPTURE_RESPONSE_MEDIA`, replacing any inherited value. The panel
+first shows those variables when the launcher would accept them, else the
+defaults; the limits it starts with hold for later Content sessions in the same
+app run, including Retry and a Dock reopen, as the mode does. Until the panel
+starts a Content session, the automatic launch takes the variables as they are.
+**Metadata only** keeps no content, so the panel shows none of the limits and
+passes none to the launcher. The starting and failed panels name the limits
+the session runs with.
+
 The app saves no capture choice between launches. `REB_AUTOMATIC_CAPTURE_MODE=metadata`
 selects Metadata for the automatic launch and preselects it in the start panel.
 Any value other than `content` does the same, so a misspelled opt-out never

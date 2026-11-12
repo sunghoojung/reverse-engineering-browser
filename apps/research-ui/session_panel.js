@@ -16,10 +16,24 @@
   };
   const ARTIFACT_NOTE = 'Artifacts keep raw source URLs locally; only an explicitly exported redacted copy is altered.';
 
+  // A Content session's limits, in the order the panel lists them. Native
+  // sends each value with its bounds and default (ContentLimits in
+  // macos/LiveSessionCoordinator.swift); the keys are the agent options'.
+  const LIMITS = [
+    {key: 'request_content_budget_mib', id: 'session-panel-request-budget', name: 'Request content budget',
+      detail: 'How much of the request bodies and full URLs this session keeps, counting identical content once. Past it, later ones are listed but not kept.'},
+    {key: 'response_body_budget_mib', id: 'session-panel-response-budget', name: 'Response body budget',
+      detail: 'How much of the response bodies this session keeps, counting identical bodies once. Past it, later bodies are listed but not kept.'},
+  ];
+  const MEDIA = {key: 'response_media', id: 'session-panel-media', name: 'Capture media and fonts',
+    detail: 'Also keep the images, audio, video and fonts that pages load. They count against the response body budget.'};
+  const LIMITS_NOTE = 'Both budgets stay on this Mac with the session and can use that much disk. They apply to the session you start here.';
+
   // The page's own selection while the decision is open: the capture mode
-  // only. It starts from what native offers and is sent with Start; native
-  // validates it. Sessions started here always use the isolated profile.
-  const view = {state: null, mode: 'content', busy: false, confirmClear: false, notice: null};
+  // and, for Content, its limits as typed. It starts from what native offers
+  // and is sent with Start; native validates it again. Sessions started here
+  // always use the isolated profile.
+  const view = {state: null, mode: 'content', limits: null, invalid: null, busy: false, confirmClear: false, notice: null};
 
   function element(tag, className, text) {
     const node = document.createElement(tag);
@@ -57,6 +71,33 @@
   }
 
   function plural(count, word) { return `${count} ${word}${count === 1 ? '' : 's'}`; }
+  const mib = value => `${Number(value).toLocaleString('en-US')} MiB`;
+
+  // The typed text of each budget and the media choice, from native's values.
+  function limitsFrom(limits) {
+    const text = key => String(limits?.[key]?.value ?? limits?.[key]?.default ?? '');
+    return {[LIMITS[0].key]: text(LIMITS[0].key), [LIMITS[1].key]: text(LIMITS[1].key),
+      [MEDIA.key]: limits?.[MEDIA.key]?.value === true};
+  }
+
+  // The rule native applies, so a value it would refuse is named here before
+  // anything is sent: a whole number of MiB within the stated bounds.
+  function budgetProblem(limit) {
+    const bounds = view.state?.limits?.[limit.key];
+    const text = String(view.limits?.[limit.key] ?? '').trim();
+    const value = /^[0-9]+$/.test(text) ? Number(text) : NaN;
+    if (!bounds || (Number.isSafeInteger(value) && value >= bounds.min && value <= bounds.max)) return null;
+    return `${limit.name} must be a whole number from ${bounds.min} to ${bounds.max} MiB.`;
+  }
+
+  // A sentence naming the limits a session runs with, for the starting and
+  // failed states.
+  function limitsSentence(limits) {
+    if (!limits) return '';
+    const value = key => limits[key]?.value;
+    return `Request content budget ${mib(value(LIMITS[0].key))}, response body budget ${mib(value(LIMITS[1].key))}, `
+      + `media and fonts ${value(MEDIA.key) === true ? 'kept' : 'skipped'}.`;
+  }
 
   async function ask(op, body = {}) {
     const handler = bridge();
@@ -126,6 +167,91 @@
       group.append(option);
     }
     return group;
+  }
+
+  // A Content session's budgets and media choice, shown only when Content is
+  // chosen: a Metadata session keeps no content, so it is given none of them.
+  function limitsGroup() {
+    const group = element('fieldset', 'session-panel-limits');
+    group.append(element('legend', 'session-panel-label', 'Content limits'));
+    for (const limit of LIMITS) {
+      const bounds = view.state?.limits?.[limit.key] ?? {};
+      const row = element('div', 'session-panel-limit');
+      const label = element('label', 'session-panel-limit-name', limit.name);
+      label.setAttribute('for', limit.id);
+      const field = element('span', 'session-panel-limit-field');
+      const input = element('input', 'session-panel-limit-input');
+      input.type = 'text';
+      input.inputMode = 'numeric';
+      input.autocomplete = 'off';
+      input.spellcheck = false;
+      input.maxLength = 6;
+      input.id = limit.id;
+      input.dataset.focusKey = `limit:${limit.key}`;
+      input.value = view.limits?.[limit.key] ?? '';
+      const detailId = `${limit.id}-detail`;
+      const errorId = `${limit.id}-error`;
+      const problem = view.invalid === limit.key ? budgetProblem(limit) : null;
+      input.setAttribute('aria-describedby', problem ? `${errorId} ${detailId}` : detailId);
+      if (problem) input.setAttribute('aria-invalid', 'true');
+      input.addEventListener('input', () => {
+        view.limits[limit.key] = input.value;
+        // A fixed value takes its error away at once, without a redraw that
+        // would move the caret.
+        if (view.invalid === limit.key && !budgetProblem(limit)) {
+          view.invalid = null;
+          input.removeAttribute('aria-invalid');
+          input.setAttribute('aria-describedby', detailId);
+          row.querySelector('.session-panel-limit-error')?.remove();
+        }
+      });
+      // Return in a budget starts, as it does on Start Session.
+      input.addEventListener('keydown', event => {
+        if (event.key === 'Enter' && !event.isComposing) { event.preventDefault(); start(); }
+      });
+      field.append(input, element('span', 'session-panel-limit-unit', 'MiB'));
+      const detail = element('span', 'session-panel-limit-detail',
+        `${limit.detail} ${Number(bounds.min ?? 1).toLocaleString('en-US')} to ${mib(bounds.max ?? 0)}; default ${mib(bounds.default ?? 0)}.`);
+      detail.id = detailId;
+      row.append(label, field, detail);
+      if (problem) {
+        const error = element('span', 'session-panel-limit-error', problem);
+        error.id = errorId;
+        error.setAttribute('role', 'alert');
+        row.append(error);
+      }
+      group.append(row);
+    }
+    const media = element('label', 'session-panel-media');
+    const box = element('input');
+    box.type = 'checkbox';
+    box.id = MEDIA.id;
+    box.dataset.focusKey = `limit:${MEDIA.key}`;
+    box.checked = view.limits?.[MEDIA.key] === true;
+    box.addEventListener('change', () => { view.limits[MEDIA.key] = box.checked; });
+    const text = element('span', 'session-panel-mode-text');
+    text.append(element('span', 'session-panel-mode-name', MEDIA.name), element('span', 'session-panel-mode-detail', MEDIA.detail));
+    media.append(box, text);
+    group.append(media, element('p', 'session-panel-text session-panel-note', LIMITS_NOTE));
+    return group;
+  }
+
+  // Start sends the mode, and for Content the limits as whole numbers. A
+  // budget native would refuse is named at its field and nothing is sent.
+  function start() {
+    if (view.busy) return;
+    if (view.mode !== 'content') { choose('start', {mode: view.mode}); return; }
+    const wrong = LIMITS.find(limit => budgetProblem(limit));
+    if (wrong) {
+      view.invalid = wrong.key;
+      render();
+      root.querySelector(`#${wrong.id}`)?.focus();
+      return;
+    }
+    view.invalid = null;
+    choose('start', {mode: 'content',
+      [LIMITS[0].key]: Number(view.limits[LIMITS[0].key].trim()), [LIMITS[1].key]: Number(view.limits[LIMITS[1].key].trim()),
+      [MEDIA.key]: view.limits[MEDIA.key] === true});
   }
 
   // The saved invocation sites the capture about to start arms, read by
@@ -206,18 +332,18 @@
   function chooseContent(state) {
     const body = element('div', 'session-panel-body');
     body.append(element('p', 'session-panel-lede', 'Choose the evidence boundary for this session. You can start another session later from the Origin Trace menu.'),
-      modeGroup(), element('p', 'session-panel-text session-panel-note', ARTIFACT_NOTE), sitesSection(state.sites));
+      modeGroup(), ...(view.mode === 'content' && state.limits ? [limitsGroup()] : []),
+      element('p', 'session-panel-text session-panel-note', ARTIFACT_NOTE), sitesSection(state.sites));
     const offline = button('session-panel-button', 'Continue Offline', () => choose('offline'), 'offline');
     offline.id = 'session-panel-offline';
-    const start = button('session-panel-button session-panel-button-primary', 'Start Session',
-      () => choose('start', {mode: view.mode}), 'start');
-    start.id = 'session-panel-start';
-    return [header('start', 'Start a live research session'), body, actions(start, offline)];
+    const startButton = button('session-panel-button session-panel-button-primary', 'Start Session', start, 'start');
+    startButton.id = 'session-panel-start';
+    return [header('start', 'Start a live research session'), body, actions(startButton, offline)];
   }
 
   function startingContent(state) {
     const body = element('div', 'session-panel-body');
-    const status = element('p', 'session-panel-text', `Capture mode: ${modeTitle(state.mode)}. Origin Trace opens the live workspace when the broker, receiver and Brave Browser Development are ready, within a minute.`);
+    const status = element('p', 'session-panel-text', `Capture mode: ${modeTitle(state.mode)}. ${limitsSentence(state.limits)}${state.limits ? ' ' : ''}Origin Trace opens the live workspace when the broker, receiver and Brave Browser Development are ready, within a minute.`);
     status.setAttribute('role', 'status');
     body.append(status);
     return [header('busy', 'Starting a live session'), body];
@@ -229,7 +355,7 @@
     const message = element('p', 'session-panel-failure', String(failure.message ?? 'The live session stopped.'));
     message.id = 'session-panel-failure';
     body.append(message);
-    body.append(element('p', 'session-panel-text', `Retry starts a new session with the same capture mode: ${modeTitle(state.mode)}.`));
+    body.append(element('p', 'session-panel-text', `Retry starts a new session with the same capture mode: ${modeTitle(state.mode)}.${state.limits ? ` Same limits: ${limitsSentence(state.limits).replace(/^./, letter => letter.toLowerCase())}` : ''}`));
     if (failure.afterStartup) {
       body.append(element('p', 'session-panel-text', 'Continue Offline replaces this ended workspace, which can no longer load or save anything, with the offline workspace. Its evidence stays in its session folder.'));
     }
@@ -293,6 +419,8 @@
     const previous = view.state?.panel;
     if (state.panel === 'choose' && previous !== 'choose') {
       view.mode = state.mode === 'metadata' ? 'metadata' : 'content';
+      view.limits = limitsFrom(state.limits);
+      view.invalid = null;
       view.confirmClear = false;
     }
     if (!keepNotice && state.panel !== previous) view.notice = null;

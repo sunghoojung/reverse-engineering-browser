@@ -28,6 +28,101 @@ enum LiveCaptureMode: String {
   }
 }
 
+// How much a Content session keeps, set in the start panel. The bounds and
+// defaults are the launcher's (scripts/run-live-session.sh) and the agent
+// path's (apps/origin-trace-backend/src/session_launch.rs), and the panel's
+// start message is checked as that path checks its options. Each budget counts
+// unique bytes for the whole session; past it, the browser names each body or
+// target it did not keep. All three mean nothing without request content, so a
+// Metadata session carries none of them.
+struct ContentLimits: Equatable {
+  static let requestContentBudgetRange: ClosedRange<UInt32> = 1...4096
+  static let responseBodyBudgetRange: ClosedRange<UInt32> = 1...16384
+  static let defaults = ContentLimits(requestContentBudgetMiB: 256, responseBodyBudgetMiB: 512, responseMedia: false)
+  // The start message's keys, named as the agent options are.
+  static let keys = ["request_content_budget_mib", "response_body_budget_mib", "response_media"]
+
+  var requestContentBudgetMiB: UInt32
+  var responseBodyBudgetMiB: UInt32
+  var responseMedia: Bool
+
+  struct Refusal: Error, Equatable {
+    let message: String
+  }
+
+  static let requestContentBudgetRule = "Request content budget must be a whole number from 1 to 4096 MiB."
+  static let responseBodyBudgetRule = "Response body budget must be a whole number from 1 to 16384 MiB."
+
+  // What the start panel shows first when this run has not chosen yet: the
+  // app environment's launcher settings when the launcher would accept them,
+  // else the defaults. An unreadable value is left to the automatic launch,
+  // whose launcher names it; the panel never starts from it.
+  static func configured(_ environment: [String: String]) -> ContentLimits {
+    let budget = { (name: String, range: ClosedRange<UInt32>, fallback: UInt32) -> UInt32 in
+      guard let text = environment[name], let value = launcherInteger(text), range.contains(value) else { return fallback }
+      return value
+    }
+    return ContentLimits(
+      requestContentBudgetMiB: budget("REB_REQUEST_CONTENT_BUDGET_MIB", requestContentBudgetRange, defaults.requestContentBudgetMiB),
+      responseBodyBudgetMiB: budget("REB_RESPONSE_BODY_BUDGET_MIB", responseBodyBudgetRange, defaults.responseBodyBudgetMiB),
+      responseMedia: environment["REB_CAPTURE_RESPONSE_MEDIA"] == "1")
+  }
+
+  // The launcher's grammar: ASCII digits without a sign or a leading zero.
+  private static func launcherInteger(_ text: String) -> UInt32? {
+    let bytes = Array(text.utf8)
+    guard (1...5).contains(bytes.count), bytes[0] != UInt8(ascii: "0"),
+      bytes.allSatisfy({ (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0) })
+    else { return nil }
+    return UInt32(text)
+  }
+
+  // A start message from the page. A Content session names all three; each
+  // budget is a whole number in its range and media is true or false. JSON
+  // numbers and booleans both arrive as NSNumber, so a boolean is never read
+  // as a budget, nor a number as the media choice.
+  static func validated(_ body: [String: Any]) -> Result<ContentLimits, Refusal> {
+    guard keys.allSatisfy({ body[$0] != nil }) else {
+      return .failure(Refusal(message: "A Content session needs a request content budget, a response body budget and the media choice."))
+    }
+    let budget = { (key: String, range: ClosedRange<UInt32>) -> UInt32? in
+      guard let number = body[key] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+      let value = number.doubleValue
+      guard value.isFinite, value.rounded() == value, value >= Double(range.lowerBound),
+        value <= Double(range.upperBound)
+      else { return nil }
+      return UInt32(value)
+    }
+    guard let request = budget(keys[0], requestContentBudgetRange) else { return .failure(Refusal(message: requestContentBudgetRule)) }
+    guard let response = budget(keys[1], responseBodyBudgetRange) else { return .failure(Refusal(message: responseBodyBudgetRule)) }
+    guard let media = body[keys[2]] as? NSNumber, CFGetTypeID(media) == CFBooleanGetTypeID() else {
+      return .failure(Refusal(message: "Capture media and fonts must be on or off."))
+    }
+    return .success(ContentLimits(requestContentBudgetMiB: request, responseBodyBudgetMiB: response, responseMedia: media.boolValue))
+  }
+
+  // The launcher switches for these values.
+  var launcherEnvironment: [String: String] {
+    [
+      "REB_REQUEST_CONTENT_BUDGET_MIB": String(requestContentBudgetMiB),
+      "REB_RESPONSE_BODY_BUDGET_MIB": String(responseBodyBudgetMiB),
+      "REB_CAPTURE_RESPONSE_MEDIA": responseMedia ? "1" : "0",
+    ]
+  }
+
+  // What the page draws: each value with its bounds and default.
+  var panelState: [String: Any] {
+    let defaults = Self.defaults
+    return [
+      Self.keys[0]: ["value": requestContentBudgetMiB, "min": Self.requestContentBudgetRange.lowerBound,
+        "max": Self.requestContentBudgetRange.upperBound, "default": defaults.requestContentBudgetMiB],
+      Self.keys[1]: ["value": responseBodyBudgetMiB, "min": Self.responseBodyBudgetRange.lowerBound,
+        "max": Self.responseBodyBudgetRange.upperBound, "default": defaults.responseBodyBudgetMiB],
+      Self.keys[2]: ["value": responseMedia, "default": defaults.responseMedia],
+    ]
+  }
+}
+
 // The app's saved native JavaScript invocation sites, which every capture it
 // starts arms (protocol/native-js-invocation-v1.md#site-file). The site file
 // is exactly the browser's native-js-invocation-sites-v1 form with 1 to 8
@@ -254,6 +349,7 @@ final class LiveSessionCoordinator {
   func start(
     braveExecutableURL: URL,
     captureNetworkContent: Bool,
+    contentLimits: ContentLimits? = nil,
     useSystemKeychain: Bool,
     ready: @escaping (URL) -> Void,
     failed: @escaping (Failure) -> Void
@@ -265,6 +361,7 @@ final class LiveSessionCoordinator {
       let configuration = try makeConfiguration(
         braveExecutableURL: braveExecutableURL,
         captureNetworkContent: captureNetworkContent,
+        contentLimits: contentLimits,
         useSystemKeychain: useSystemKeychain
       )
       let child = Process()
@@ -366,6 +463,7 @@ final class LiveSessionCoordinator {
   private func makeConfiguration(
     braveExecutableURL: URL,
     captureNetworkContent: Bool,
+    contentLimits: ContentLimits?,
     useSystemKeychain: Bool
   ) throws -> Configuration {
     guard let resourcesURL = Bundle.main.resourceURL else {
@@ -464,7 +562,7 @@ final class LiveSessionCoordinator {
     }
     environment = Self.captureDefaults(
       environment: environment, captureNetworkContent: captureNetworkContent,
-      savedInvocationSites: invocationSitesURL)
+      savedInvocationSites: invocationSitesURL, contentLimits: contentLimits)
     // A mask without VM leaves the copy unused.
     if let copy = invocationSitesURL, environment["REB_NATIVE_JS_INVOCATION_SITES"] != copy.path {
       try? FileManager.default.removeItem(at: copy)
@@ -583,8 +681,14 @@ final class LiveSessionCoordinator {
   // (512). The launcher arms them only if this Brave defines invocation
   // capture, and otherwise starts without them and says so. Their settled-value
   // digests are sensitive capture: on in Content mode, off in Metadata mode.
+  //
+  // `contentLimits` are the start panel's budgets and media choice, or nil
+  // when this run's panel has not chosen any. They are the researcher's
+  // explicit choice, so they replace the environment's values, and they apply
+  // only to a session that retains request content: otherwise none is passed.
   static func captureDefaults(
-    environment: [String: String], captureNetworkContent: Bool, savedInvocationSites: URL? = nil
+    environment: [String: String], captureNetworkContent: Bool, savedInvocationSites: URL? = nil,
+    contentLimits: ContentLimits? = nil
   ) -> [String: String] {
     var environment = environment
     let mask = categoryMask(environment["REB_CAPTURE_CATEGORY_MASK"]) ?? 0
@@ -598,6 +702,9 @@ final class LiveSessionCoordinator {
     environment["REB_CAPTURE_REQUEST_CONTENT"] =
       environment["REB_CAPTURE_REQUEST_CONTENT"]
       ?? (captureNetworkContent && allows(1280) ? "1" : "0")
+    if let contentLimits, environment["REB_CAPTURE_REQUEST_CONTENT"] == "1" {
+      environment.merge(contentLimits.launcherEnvironment) { _, chosen in chosen }
+    }
     // The packaged app turns on every native switch that needs no per-target input
     // file. Guest-state and JavaScript dispatch-site capture stay off because they
     // need a researcher-supplied adapter or site file. An explicit "0" still opts

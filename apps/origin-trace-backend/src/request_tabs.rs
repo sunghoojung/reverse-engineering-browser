@@ -204,10 +204,6 @@ impl RequestTabs {
         self.rows.values().filter(|state| state.process_id != 0)
     }
 
-    pub(crate) fn unresolved(&self) -> u64 {
-        self.rows().filter(|state| !state.linked).count() as u64
-    }
-
     /// Unresolved rows by reason.
     pub(crate) fn unresolved_reasons(&self) -> BTreeMap<&'static str, u64> {
         let mut reasons = BTreeMap::new();
@@ -370,8 +366,8 @@ mod tests {
             "initiator_process_id": 31, "initiator_request_id": 10,
             "payload": "010018000500000003000000000000000100000000000000"}),
         ));
-        assert_eq!(tabs.unresolved(), 3);
         let document = tabs.document();
+        assert_eq!(document["unresolved"], "3");
         assert_eq!(document["rows"], "10");
         assert_eq!(document["extension_rows"], "1");
         assert_eq!(

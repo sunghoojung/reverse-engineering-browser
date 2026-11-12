@@ -26,7 +26,7 @@ const ARTIFACTS: usize = 32;
 const REFUSAL_REASONS: usize = 32;
 /// Browser requests followed for a final header block, as many as the
 /// request index holds; the rest are counted as untracked.
-const HEADER_REQUESTS: usize = 131_072;
+const HEADER_REQUESTS: usize = if cfg!(test) { 16 } else { 131_072 };
 
 /// Live state the backend knows outside the stores.
 pub struct CaptureState<'a> {
@@ -285,7 +285,7 @@ impl HeaderCoverage {
                 if facts.response || facts.hop >= 64 {
                     return;
                 }
-                if let Some(request) = self.request(key) {
+                if let Some(request) = self.request(key, true) {
                     if facts.source == 1 {
                         request.provisional |= 1 << facts.hop;
                     } else {
@@ -306,19 +306,23 @@ impl HeaderCoverage {
             ) if event["browser_context_id_high"].as_str().unwrap_or("0") != "0"
                 || event["browser_context_id_low"].as_str().unwrap_or("0") != "0" =>
             {
-                if let Some(request) = self.request(key) {
+                if let Some(request) = self.request(key, false) {
                     request.lifecycle.record(event);
                 }
             }
             _ => {}
         }
     }
-    fn request(&mut self, key: (u64, u64, u64)) -> Option<&mut RequestHeaderFacts> {
+    /// The request's facts. Only a header record past the bound is counted
+    /// as untracked: a request with no header record has no final block to
+    /// miss, as in a metadata-only session, whose lifecycle records are simply
+    /// not followed then.
+    fn request(&mut self, key: (u64, u64, u64), header: bool) -> Option<&mut RequestHeaderFacts> {
         if key.2 == 0 {
             return None;
         }
         if !self.requests.contains_key(&key) && self.requests.len() >= HEADER_REQUESTS {
-            self.untracked += 1;
+            self.untracked += u64::from(header);
             return None;
         }
         Some(self.requests.entry(key).or_default())
@@ -710,7 +714,7 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
             "final_headers_untracked",
             "info",
             format!(
-                "{} header and lifecycle records belong to requests past the {HEADER_REQUESTS} this summary follows, so whether those requests have final headers is not counted.",
+                "{} header records belong to requests past the {HEADER_REQUESTS} this summary follows, so whether those requests have final headers is not counted.",
                 header_coverage.untracked
             ),
         );
@@ -1217,6 +1221,56 @@ mod tests {
         }
         event["payload_truncated"] = json!(false);
         event
+    }
+
+    #[test]
+    fn untracked_final_blocks_are_counted_only_for_header_records() {
+        let summarize = |events: Vec<Value>| {
+            let root = tempfile::tempdir().unwrap();
+            let store = root.path().join("events.jsonl");
+            let artifacts = root.path().join("artifacts");
+            std::fs::create_dir_all(&artifacts).unwrap();
+            let lines: Vec<String> = events.iter().map(Value::to_string).collect();
+            std::fs::write(&store, lines.join("\n") + "\n").unwrap();
+            let state = CaptureState {
+                instance_id: "1:2",
+                capture_mode: "live",
+                broker_connected: true,
+                capture_stopped: false,
+                artifact_receiver_configured: false,
+                artifact_receiver_connected: false,
+            };
+            build(&store, &artifacts, &state).unwrap()["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|check| check["code"] == "final_headers_untracked")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        // A metadata-only session past the bound has no final block to miss.
+        let mut sequence = 0;
+        let mut metadata = Vec::new();
+        for request in 1..=HEADER_REQUESTS as u64 + 4 {
+            for kind in ["request_started", "response_started", "request_completed"] {
+                sequence += 1;
+                metadata.push(lifecycle(sequence, kind, request));
+            }
+        }
+        assert_eq!(summarize(metadata), Vec::<Value>::new());
+        // A content session's header records past it are counted.
+        let mut content = Vec::new();
+        let mut sequence = 0;
+        for request in 1..=HEADER_REQUESTS as u64 + 4 {
+            sequence += 1;
+            let start = sequence;
+            content.push(lifecycle(start, "request_started", request));
+            sequence += 1;
+            content.push(header(sequence, start, request, false, 1, 3, 0, 0));
+        }
+        let untracked = summarize(content);
+        assert_eq!(untracked.len(), 1);
+        assert_eq!(untracked[0]["count"], "4");
     }
 
     #[test]

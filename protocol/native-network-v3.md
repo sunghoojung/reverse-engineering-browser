@@ -1941,8 +1941,10 @@ and the Cookies tab lists each such hop with it.
 - the requests whose final hop ended without a `network` block, one
   `final_headers_missing` check per reason: `info` for `download`,
   `service_worker`, `from_cache` and `failed`, `warning` for `not_reported`.
-  It follows at most 131,072 browser requests; records of later ones are
-  counted as `final_headers_untracked`.
+  It follows at most 131,072 browser requests; header records of later ones
+  are counted as `final_headers_untracked`. A request with no header record
+  (any request of a metadata-only session) has no final block to miss and is
+  never counted there.
 
 The Traffic footer shows the same counts for the loaded rows, with reasons.
 

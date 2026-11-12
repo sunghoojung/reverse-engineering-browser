@@ -19,6 +19,7 @@ use crate::{
     request_stack::{self, Frame, Identity, Record, Segment},
     store_scan::{self, Scanned, Stopped, Stores},
 };
+use axum::body::Bytes;
 use hex::FromHex;
 use regex::bytes::Regex;
 use serde::Deserialize;
@@ -68,7 +69,7 @@ const TYPES: [&str; 6] = [
 
 /// The last answer and the store snapshot it describes.
 #[derive(Default)]
-pub struct Cache(Mutex<Option<(String, Arc<Value>)>>);
+pub struct Cache(Mutex<Option<(String, Bytes)>>);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Sink {
@@ -1321,27 +1322,24 @@ fn snapshot_key(stores: &Stores, session: u64, end: u64) -> String {
     format!("{session}:{end}:{manifest}")
 }
 
-/// The session's flow graph, answered from the cache while the stores have not
-/// changed.
-pub fn run(
-    stores: &Stores,
-    session: u64,
-    cache: &Cache,
-    cancel: &AtomicBool,
-) -> Result<Arc<Value>> {
+/// The session's flow graph as JSON, answered from the cache while the stores
+/// have not changed.
+pub fn run(stores: &Stores, session: u64, cache: &Cache, cancel: &AtomicBool) -> Result<Bytes> {
     let end = store_scan::complete_end(&stores.events)?;
     let key = snapshot_key(stores, session, end);
-    if let Some((cached, value)) = cache.0.lock().unwrap().as_ref()
+    if let Some((cached, bytes)) = cache.0.lock().unwrap().as_ref()
         && *cached == key
     {
-        return Ok(value.clone());
+        return Ok(bytes.clone());
     }
     let (graph, cacheable) = build(stores, session, end, cancel)?;
-    let value = Arc::new(graph);
+    let bytes = Bytes::from(
+        serde_json::to_vec(&graph).map_err(|_| Error::new(500, "Flow graph encoding failed"))?,
+    );
     // A scan cut by its deadline is answered but not kept: the next request
     // reads again instead of repeating the partial graph.
-    *cache.0.lock().unwrap() = cacheable.then(|| (key, value.clone()));
-    Ok(value)
+    *cache.0.lock().unwrap() = cacheable.then(|| (key, bytes.clone()));
+    Ok(bytes)
 }
 
 /// Every record of the session the flow graph reads, in one forward pass.
@@ -1735,14 +1733,15 @@ mod tests {
         }
     }
 
-    fn answer(stores: &Stores, session: u64, cache: &Cache) -> Arc<Value> {
-        let value = run(stores, session, cache, &AtomicBool::new(false)).unwrap();
+    fn answer(stores: &Stores, session: u64, cache: &Cache) -> (Bytes, Value) {
+        let bytes = run(stores, session, cache, &AtomicBool::new(false)).unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap();
         assert_contract(&value);
-        value
+        (bytes, value)
     }
 
     fn graph(fixture: &Fixture) -> Value {
-        (*answer(&fixture.stores(), 9, &Cache::default())).clone()
+        answer(&fixture.stores(), 9, &Cache::default()).1
     }
 
     fn node<'a>(graph: &'a Value, name: &str) -> &'a Value {
@@ -2015,17 +2014,18 @@ mod tests {
         }
         let stores = f.stores();
         let cache = Cache::default();
-        let first = answer(&stores, 9, &cache);
+        let (bytes, first) = answer(&stores, 9, &cache);
         assert_eq!(first["stacks"]["distinct"], 3);
         assert_eq!(first["stacks"]["occurrences"], 304);
         assert_eq!(edge(&first, "boot", "onMessage")["count"], 302);
-        let second = answer(&stores, 9, &cache);
-        assert!(
-            Arc::ptr_eq(&first, &second),
+        let (again, _) = answer(&stores, 9, &cache);
+        assert_eq!(
+            bytes.as_ptr(),
+            again.as_ptr(),
             "an unchanged store answers from the cache"
         );
         // Another session in the same store is not this one.
-        let other = answer(&stores, 8, &cache);
+        let (_, other) = answer(&stores, 8, &cache);
         assert_eq!(other["nodes"], json!([]));
     }
 

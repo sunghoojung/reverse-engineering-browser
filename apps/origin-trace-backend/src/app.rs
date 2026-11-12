@@ -1326,7 +1326,7 @@ impl App {
                 let graph = self
                     .blocking(move || crate::flow_graph::run(&stores, session, &cache, &cancel))
                     .await?;
-                (*graph).clone()
+                return Ok(bytes_response(graph, "application/json"));
             }
             "/api/xrefs" => {
                 let query = crate::xrefs::XrefQuery::parse(&q)?;
@@ -2266,8 +2266,8 @@ fn not_modified(etag: &str) -> Response {
         .insert("etag", HeaderValue::from_str(etag).unwrap());
     response
 }
-fn bytes_response(bytes: Vec<u8>, mime: &'static str) -> Response {
-    let mut response = Response::new(Body::from(bytes));
+fn bytes_response(bytes: impl Into<Body>, mime: &'static str) -> Response {
+    let mut response = Response::new(bytes.into());
     response
         .headers_mut()
         .insert("content-type", HeaderValue::from_static(mime));

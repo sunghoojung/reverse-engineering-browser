@@ -139,13 +139,16 @@ EVENT_TYPES = {
     "wasm_dispatch_overflow",
     "wasm_indirect_overflow",
     "script_compiled",
+    "memory_cache_reuse",
 }
 # protocol/native-network-v3.md, shared with include/reb/network_scope.hpp.
 SCHEME_CLASSES = {*range(0, 9), 15, *range(16, 21)}
-SCHEME_CLASS_TYPES = {"request_initiated", "request_started", "request_completed", "request_failed"}
-EXCLUSION_CLASSES = {*range(16, 21), 64, 65, 66, 67}
+SCHEME_CLASS_TYPES = {"request_initiated", "request_started", "request_completed", "request_failed",
+                      "memory_cache_reuse"}
+EXCLUSION_CLASSES = {*range(16, 21), 64, 65, 66, 67, 68}
 # Loader kinds, shared with include/reb/tab_link.hpp.
-LOADER_KINDS = {"request_started": range(1, 11), "request_initiated": range(16, 22)}
+LOADER_KINDS = {"request_started": range(1, 11), "request_initiated": range(16, 22),
+                "memory_cache_reuse": range(16, 22)}
 UINT64_MAX = (1 << 64) - 1
 INT64_MIN = -(1 << 63)
 INT64_MAX = (1 << 63) - 1
@@ -876,7 +879,28 @@ def valid_capture_exclusion(event: dict, payload: bytes) -> bool:
             and all(event[key] == "0" for key in zero) and event["process_id"] != 0
             and event["tab_id"] == 0 and event["status_code"] == 0 and event["error_code"] == 0
             and event["resource_type"] == 0 and event["initiator_request_id"] == 0
-            and (payload[4] not in (64, 66, 67) or event["initiator_process_id"] == 0))
+            and (payload[4] not in (64, 66, 67) or event["initiator_process_id"] == 0)
+            and (payload[4] != 68 or event["initiator_process_id"] != 0))
+
+
+# protocol/native-network-v3.md memory_cache_reuse, shared with include/reb/network_scope.hpp.
+def valid_memory_cache_reuse(event: dict, payload: bytes) -> bool:
+    if (event["protocol_version"] != 3 or event["category"] != "network" or event["flags"] != 0
+            or len(payload) != 128 or payload[:4] != bytes((1, 0, 128, 0))):
+        return False
+    resource_type, flags, length = payload[4], payload[5], payload[6]
+    zero = ("navigation_id", "artifact_id", "parent_event_id", "browser_context_id_high",
+            "browser_context_id_low", "encoded_data_length")
+    return (1 <= resource_type <= 15 and flags & ~3 == 0 and length <= 120 and payload[7] == 0
+            and (not flags & 2 or length == 120)
+            and all(0x21 <= byte <= 0x7E for byte in payload[8:8 + length])
+            and not any(payload[8 + length:])
+            and all(event[key] != "0" for key in ("session_id", "sequence_number"))
+            and all(event[key] == "0" for key in zero) and event["process_id"] != 0
+            and not event["decoded_body_length"].startswith("-") and event["status_code"] >= 0
+            and event["error_code"] == 0 and event["resource_type"] == 0
+            and event["initiator_request_id"] == 0 and event["initiator_process_id"] == 0
+            and event.get("scheme_class", 0) != 0 and event.get("loader_kind", 0) in range(16, 22))
 
 
 def quiet_tab_envelope(event: dict, request_fields: bool = False) -> bool:
@@ -1117,6 +1141,8 @@ def validate_event(event: object, line_number: int) -> None:
         raise ValueError(f"line {line_number}: scheme class is invalid")
     if event["type"] == "capture_exclusion" and not valid_capture_exclusion(event, payload):
         raise ValueError(f"line {line_number}: capture exclusion record is invalid")
+    if event["type"] == "memory_cache_reuse" and not valid_memory_cache_reuse(event, payload):
+        raise ValueError(f"line {line_number}: memory-cache reuse record is invalid")
     loader_kind = event.get("loader_kind", 0)
     if "loader_kind" in event and (not isinstance(loader_kind, int) or isinstance(loader_kind, bool)
                                    or event["category"] != "network"

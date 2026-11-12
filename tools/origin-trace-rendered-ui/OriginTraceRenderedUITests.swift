@@ -3586,8 +3586,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
         + #"Response body budget \(128 MiB\) used, \d+ KiB kept: 1 response body not kept · Raise them in New Live Session… for the next session\.$"#
       XCTAssertNotNil(notice.range(of: pattern, options: .regularExpression), "\(size.name): footer: \(notice)")
       try await assertLayout(traffic, "#screen-traffic .request-window", "\(size.name) budget footer")
+      try await assertFullyVisible(traffic, "#request-budget", "\(size.name) budget footer")
+      try await traffic.screenshot("traffic-budget-footer-\(size.name)")
       try await traffic.click("#screen-traffic .request-row", containing: expected.budgetHost)
       try await traffic.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "\(size.name): request detail did not open")
+      // The short stacked inspector gives the ledger the budget line's height;
+      // side by side, the line stays whole beside the open request.
+      let shown = try await traffic.value("getComputedStyle(document.querySelector('#request-budget')).display !== 'none'") as? Bool
+      XCTAssertEqual(shown, size.name == "normal", "\(size.name): the budget line beside an open request")
+      if size.name == "normal" { try await assertFullyVisible(traffic, "#request-budget", "\(size.name) budget footer with a request open") }
       try await traffic.click("#inspector-tab-payload")
       try await traffic.waitUntil("(document.querySelector('#payload-inspector')?.innerText ?? '').includes('Not captured')", "\(size.name): Payload did not say why")
       let payload = try await traffic.value("document.querySelector('#payload-inspector').innerText") as? String ?? ""

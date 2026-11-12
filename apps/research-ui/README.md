@@ -1551,7 +1551,10 @@ and again at most every 30 s, and a failed read keeps the last figure. The
 Payload tab and the Request URL row name the request content budget the same
 way, and the Response tab names **Response body budget** and **Capture media and
 fonts**; each remedy applies to the next session. A session the address does
-not describe (a stored or older one) names the budget without its size.
+not describe (a stored or older one) names the budget without its size. In
+the short stacked layout (at most 1,100 by 650 px) the line steps aside while a
+request is open, as the timing strip does, so the ledger keeps its rows; that
+request's tabs still name its budget.
 
 The filter box matches the method, URL or host and status as literal,
 case-insensitive text. `-text` excludes rows that contain it. `domain:` (with

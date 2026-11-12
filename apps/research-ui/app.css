@@ -2310,9 +2310,11 @@ var(--panel);
       .overview-range { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 10px var(--sans); }
       .overview-clear { padding: 3px 4px; border: 0; border-radius: 4px; background: transparent; color: var(--accent); font: 10px var(--sans); }
       .overview-clear:hover { background: var(--panel-3); }
-      /* A short stacked inspector leaves the ledger the strip's height unless a range is set. */
+      /* A short stacked inspector leaves the ledger the strip's height unless a range is set,
+         and the budget line's: the open request's Payload and Response tabs name its budget. */
       @media (max-width: 1100px) and (max-height: 650px) {
         #screen-traffic .traffic-grid[data-detail-open="true"] .request-overview[data-range="false"] { display: none; }
+        #screen-traffic .traffic-grid[data-detail-open="true"] .request-window > .request-budget { display: none; }
       }
       .column-menu { position: fixed; z-index: 60; min-width: 150px; display: grid; gap: 1px; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); box-shadow: 0 8px 24px var(--shadow); }
       .column-menu button { display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 8px; border: 0; border-radius: 4px; background: transparent; color: var(--text); font: 11px var(--sans); text-align: left; }

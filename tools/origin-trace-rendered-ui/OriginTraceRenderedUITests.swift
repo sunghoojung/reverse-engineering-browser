@@ -1325,12 +1325,6 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
-  // A renderer record that no initiator edge reached reads as its own, weaker
-  // class: after the gap it did not close, named as having no recorded link,
-  // and reported beside coverage rather than inside it.
-  // A content-session POST shows its query and retained JSON body on Payload as
-  // a keyboard tree and as source; a metadata-only POST says why no bytes
-  // exist. Markup in either never runs.
   // protocol/native-network-v3.md: a service worker's install-time fetch sits in
   // the tab that registered it, marked as such, and requests no page caused are
   // named in the footer instead of listed.
@@ -1362,6 +1356,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // A renderer record that no initiator edge reached reads as its own, weaker
+  // class: after the gap it did not close, named as having no recorded link,
+  // and reported beside coverage rather than inside it.
+  // A content-session POST shows its query and retained JSON body on Payload as
+  // a keyboard tree and as source; a metadata-only POST says why no bytes
+  // exist. Markup in either never runs.
   @MainActor
   func test16RequestTargetAndBody() async throws {
     let expected = try Expectations.load()

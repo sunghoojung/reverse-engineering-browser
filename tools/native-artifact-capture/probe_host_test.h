@@ -929,6 +929,16 @@ void NativeProbeHostWorkerTabLinks() {
   start(reb::NativeLoaderKind::kServiceWorker, shared_worker_token.fold(), 82);
   Check(events.size() == 3 && events[0].header.tab_id == 19 && proxy(12, 82).exclusion_class == 0,
         "After the page arrived both halves of a new request are kept");
+  // Brave patch 0022 decides each request once. Were the proxy to ask twice,
+  // the second ask would take its own answer and the drain would decide the
+  // renderer record anew, so a page arriving in between parts the halves.
+  resolver.ServiceWorkerStarted(23, {0xfb, 0xfc}, {}, "https://once.test/");
+  const auto once = proxy(23, 89);
+  resolver.ServiceWorkerControlleeAdded(23, "between", std::vector<std::uint32_t>{24});
+  const auto again = proxy(23, 89);
+  Check(once.exclusion_class == 68 && again.exclusion_class == 68 &&
+            !resolver.SharedServiceWorkerNoPage({1, 89}, 23),
+        "A repeated ask consumes the answer the drain needed, which 0022's one call avoids");
   // B: the drain asks first for a worker it does not know; the proxy keeps its half too.
   start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0xf3, 0xf4}.fold(), 83);
   Check(events.size() == 1 && events[0].header.tab_id == 0 && proxy(13, 83).exclusion_class == 0,

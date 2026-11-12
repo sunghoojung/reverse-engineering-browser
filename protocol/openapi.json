@@ -18578,7 +18578,7 @@
           },
           "race_network": {
             "type": "boolean",
-            "description": "A race network request the service worker answered: the renderer's own completion flagged from_service_worker sits on a row with browser records, and failed, interrupted, status and error_code are that completion's (protocol/native-network-v3.md)."
+            "description": "A service worker race route: the renderer's own completion flagged from_service_worker sits on a row with browser records. failed, interrupted, status and error_code are that completion's, what the page received; the worker or the network may have answered, and the records do not say which (protocol/native-network-v3.md)."
           },
           "end_lost": {
             "type": "boolean",

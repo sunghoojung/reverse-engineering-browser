@@ -1294,8 +1294,9 @@ Protocol is available from the header menu.
   renderer had reused the slot holding its start, so its outcome is unknown
   (a `service_worker_end_lost` gap). Once `response_started` arrives the row
   shows that HTTP code, and until a terminal record follows, Time reads a dash
-  and the tooltip says so. A race network request the worker answered shows
-  the worker's outcome, and General says the browser records are the network
+  and the tooltip says so. A service worker race route shows what the page
+  received, which the worker or the network may have answered (the records do
+  not say which), and General says the browser records are the network
   attempt's.
 - **Type** comes from the resource type, then the response MIME type when the
   resource type says only "other". Its tooltip has the MIME type.

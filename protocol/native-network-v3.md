@@ -258,7 +258,9 @@ only from the worker (`SaveResponseInfo`) or from a race the network won
 fallback's head gets service-worker timing only (`RewriteResponseHead`). So a
 renderer completion with `from_service_worker` on a row that also has browser
 records is always a race, and consumers take the row's outcome (failed,
-status, error) from that completion, and mark the row `race_network`.
+status, error) from that completion, and mark the row `race_network`. That
+completion is what the page received whichever side answered; the records do
+not say which side that was, so consumers do not name it.
 
 The loader knows only the renderer request ID, so the renderer keeps recorded
 http(s) starts in 1,024 slots indexed by the request ID's low 10 bits
@@ -634,8 +636,9 @@ proxy at the pin (`NavigationRequest` creates their factory without
 - A row a service worker ended without a response is failed like any other,
   with "(service worker)" in Size. A row whose renderer completion carries
   `from_service_worker` takes its outcome from that completion; with browser
-  records too it is `race_network`, and General says the browser records are
-  the network attempt's. A row a `service_worker_end_lost` gap names is
+  records too it is `race_network`, and General says the page received a race
+  route's answer, from the worker or the network, and that the browser
+  records are the network attempt's. A row a `service_worker_end_lost` gap names is
   `end_lost`, status "incomplete", and reads "End lost".
 
 ### Validation

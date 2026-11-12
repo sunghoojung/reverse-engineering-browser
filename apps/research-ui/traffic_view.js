@@ -868,9 +868,16 @@ function trafficHeaderCoverage(requests) {
   return {notRetained, missing, unattributedBlocks, unattributedLists};
 }
 
-const TRAFFIC_NOT_RETAINED_LABELS = Object.freeze({not_captured_block_limit: 'over the size limit',
+const TRAFFIC_NOT_RETAINED_LABELS = Object.freeze({not_captured_block_limit: 'size limit',
   not_captured_artifact_unavailable: 'no artifact channel', not_captured_transfer_refused: 'queue refused',
-  not_captured_session_budget: 'session budget used', not_captured_url: 'no HTTP(S) URL or untracked hop'});
+  not_captured_session_budget: 'session budget', not_captured_url: 'no HTTP(S) URL or hop'});
+
+// "(reason)" for one reason, else "(n reason, m reason)": the footer stays short.
+function trafficReasonList(reasons, labels) {
+  const label = reason => labels[reason] ?? reason.replaceAll('_', ' ');
+  return reasons.length === 1 ? `(${label(reasons[0][0])})`
+    : `(${reasons.map(([reason, value]) => `${value} ${label(reason)}`).join(', ')})`;
+}
 
 // The Traffic footer's part: what was not retained or joined, and why.
 function trafficHeaderCoverageNotice(coverage) {
@@ -881,16 +888,15 @@ function trafficHeaderCoverageNotice(coverage) {
       .map(([key, total]) => [key.slice(kind.length + 1), total]);
     const total = reasons.reduce((sum, [, value]) => sum + value, 0);
     if (!total) continue;
-    parts.push(`${total} ${noun}${total === 1 ? '' : 's'} not retained (${reasons
-      .map(([reason, value]) => `${value} ${TRAFFIC_NOT_RETAINED_LABELS[reason] ?? reason.replaceAll('_', ' ')}`).join(', ')})`);
+    parts.push(`${total} ${noun}${total === 1 ? '' : 's'} not retained ${trafficReasonList(reasons, TRAFFIC_NOT_RETAINED_LABELS)}`);
   }
+  // Network blocks and lists that arrived after their request ended: on no row.
   const late = coverage.unattributedBlocks + coverage.unattributedLists;
-  if (late) parts.push(`${late} late header ${late === 1 ? 'record' : 'records'} on no row`);
+  if (late) parts.push(`${late} late header ${late === 1 ? 'record' : 'records'}`);
   const missing = [...coverage.missing];
   const total = missing.reduce((sum, [, value]) => sum + value, 0);
   if (total) {
-    parts.push(`${total} ${total === 1 ? 'request' : 'requests'} without final headers (${missing
-      .map(([reason, value]) => `${value} ${TRAFFIC_MISSING_LABELS[reason] ?? reason}`).join(', ')})`);
+    parts.push(`${total} ${total === 1 ? 'request' : 'requests'} without final headers ${trafficReasonList(missing, TRAFFIC_MISSING_LABELS)}`);
   }
   return parts.join(' · ');
 }

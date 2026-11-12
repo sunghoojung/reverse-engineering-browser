@@ -1584,7 +1584,7 @@ budget ("N memory-cache reuses not recorded") and, apart, those in SVG images
 or popups that no tab owns. It also counts, for the loaded rows, header blocks
 and cookie lists that were not retained (with each reason: size limit,
 session budget, queue, channel or URL), network blocks that arrived after
-their request ended ("late header records on no row") and requests that
+their request ended, so no row shows them ("late header records"), and requests that
 ended with only provisional headers, by reason (HTTP cache, service worker,
 download, failed, not reported); `get_session_summary` has the same counts
 over the newest 64 MiB. Sources reads retained artifact bytes only. A failed

@@ -161,8 +161,8 @@ assert.equal(panel.querySelector('pre')?.textContent, 'Location: /final\r\nSet-C
   const coverage = api.trafficHeaderCoverage([...rows, redirected, sent, refused]);
   assert.deepEqual(Object.fromEntries(coverage.missing), {from_cache: 2, failed: 1, download: 1, service_worker: 1, not_reported: 1});
   assert.equal(api.trafficHeaderCoverageNotice(coverage),
-    '2 header blocks not retained (1 session budget used, 1 over the size limit) · 1 cookie list not retained (1 queue refused) · ' +
-    '3 late header records on no row · 6 requests without final headers (2 HTTP cache, 1 failed, 1 download, 1 service worker, 1 not reported)');
+    '2 header blocks not retained (1 session budget, 1 size limit) · 1 cookie list not retained (queue refused) · ' +
+    '3 late header records · 6 requests without final headers (2 HTTP cache, 1 failed, 1 download, 1 service worker, 1 not reported)');
   assert.equal(api.trafficHeaderCoverageNotice(api.trafficHeaderCoverage([sent])), '', 'a complete row adds nothing');
 }
 

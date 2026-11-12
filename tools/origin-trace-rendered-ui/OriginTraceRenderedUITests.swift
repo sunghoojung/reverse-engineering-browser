@@ -3561,9 +3561,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
         "(document.querySelector('#request-window-status')?.textContent ?? '').includes('without final headers')",
         "\(size.name): the footer did not count requests without final headers")
       let footer = try await ui.value("document.querySelector('#request-window-status').textContent") as? String ?? ""
-      XCTAssertTrue(footer.contains("1 header block not retained (1 session budget used)"),
+      XCTAssertTrue(footer.contains("1 header block not retained (session budget)"),
         "\(size.name): the footer names the refused block and its reason: \(footer)")
-      XCTAssertTrue(footer.contains("1 request without final headers (1 HTTP cache)"),
+      XCTAssertTrue(footer.contains("1 request without final headers (HTTP cache)"),
         "\(size.name): the footer names the request and why: \(footer)")
       try await ui.click("#screen-traffic .request-row", containing: expected.cachedHeadersHost)
       try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")

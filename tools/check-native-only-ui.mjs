@@ -255,7 +255,7 @@ runInContext(`state.headerCoverage = trafficHeaderCoverage([{headerBlocks: [
     {category: 'network', type: 'request_completed', flags: 0, browser_context_id_high: '1', browser_context_id_low: '2'}]}]);
   renderTrafficWindowStatus(1, 1, false);`, context);
 assert.match(document.getElementById('request-window-status').textContent,
-  /1 header block not retained \(1 session budget used\) · 1 late header record on no row · 1 request without final headers \(1 HTTP cache\)/);
+  /1 header block not retained \(session budget\) · 1 late header record · 1 request without final headers \(HTTP cache\)/);
 runInContext('state.headerCoverage = null; renderTrafficWindowStatus(1, 1, false);', context);
 assert.doesNotMatch(document.getElementById('request-window-status').textContent, /not retained|final headers/);
 // Payload reads the native body record and target only, never a CDP exchange.

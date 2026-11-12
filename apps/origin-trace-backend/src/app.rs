@@ -1316,7 +1316,7 @@ impl App {
             "/api/flow-graph" => {
                 q.only(&["session_id"], &[])?;
                 let session = q.number("session_id", None, 64, true)?;
-                let stores = crate::flow_graph::Stores {
+                let stores = crate::store_scan::Stores {
                     events: self.options.store.clone(),
                     artifacts: self.options.artifacts.clone(),
                 };
@@ -1349,7 +1349,7 @@ impl App {
                     }
                     None => None,
                 };
-                let stores = crate::xrefs::Stores {
+                let stores = crate::store_scan::Stores {
                     events: self.options.store.clone(),
                     artifacts: self.options.artifacts.clone(),
                 };

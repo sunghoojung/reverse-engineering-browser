@@ -13,18 +13,16 @@
 use crate::{
     app::Query,
     error::{Error, Result},
-    event_window, evidence, vm_opcode, wasm,
+    event_window, evidence,
+    store_scan::{Reader, Stopped, Stores, complete_end, field_pattern, same_session},
+    vm_opcode, wasm,
 };
 use regex::bytes::Regex;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    path::Path,
+    sync::{Arc, Mutex, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 use wasmparser::{ExternalKind, Operator, Parser, Payload, TypeRef};
@@ -37,8 +35,6 @@ const ANCHOR_EVERY: u64 = 2048;
 /// A pathological store is reported as a visible cut rather than an endless
 /// request. Reaching this is rare: the byte prefilter reads gigabytes in it.
 const SCAN_DEADLINE: Duration = Duration::from_secs(30);
-const MAX_RECORD_BYTES: usize = 64 * 1024;
-const READ_BUFFER_BYTES: usize = 256 * 1024;
 const FILTER_BYTES: usize = 256;
 const NAME_CHARS: usize = 256;
 const QUERY_KEYS: [&str; 14] = [
@@ -260,12 +256,6 @@ impl XrefQuery {
     fn cache_key(&self) -> String {
         format!("{:?}\u{0}{}", self.selection, self.filter)
     }
-}
-
-/// Evidence stores read by a scan.
-pub struct Stores {
-    pub events: PathBuf,
-    pub artifacts: PathBuf,
 }
 
 /// The retained handler row and its samples, extracted under the analysis lock.
@@ -552,135 +542,6 @@ fn gap(reason: &str, name: &str, detail: String) -> Value {
     json!({"reason":reason,"name":name,"detail":detail})
 }
 
-/// Reads complete newline-terminated records from `[start, end)`.
-struct Reader<'a> {
-    cancel: &'a AtomicBool,
-    deadline: Instant,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Stopped {
-    End,
-    Visitor,
-    Deadline,
-}
-
-struct Scanned {
-    position: u64,
-    stopped: Stopped,
-    malformed: u64,
-}
-
-impl Reader<'_> {
-    fn lines(
-        &self,
-        path: &Path,
-        start: u64,
-        end: u64,
-        prefilter: Option<&Regex>,
-        visit: &mut dyn FnMut(u64, &[u8]) -> Option<bool>,
-    ) -> Result<Scanned> {
-        let mut scanned = Scanned {
-            position: start,
-            stopped: Stopped::End,
-            malformed: 0,
-        };
-        let mut file = match evidence::regular_file(path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(scanned),
-            Err(error) => return Err(error.into()),
-        };
-        file.seek(SeekFrom::Start(start))?;
-        let mut reader = BufReader::with_capacity(READ_BUFFER_BYTES, file.take(end - start));
-        let mut line = Vec::with_capacity(8 * 1024);
-        let mut read = 0u32;
-        loop {
-            read = read.wrapping_add(1);
-            if read & 0x3ff == 0 {
-                if self.cancel.load(Ordering::Relaxed) {
-                    return Err(Error::new(499, "The cross-reference request was cancelled"));
-                }
-                if Instant::now() >= self.deadline {
-                    scanned.stopped = Stopped::Deadline;
-                    return Ok(scanned);
-                }
-            }
-            let line_start = scanned.position;
-            line.clear();
-            let taken = reader
-                .by_ref()
-                .take(MAX_RECORD_BYTES as u64 + 1)
-                .read_until(b'\n', &mut line)?;
-            if taken == 0 {
-                return Ok(scanned);
-            }
-            if line.last() != Some(&b'\n') {
-                if taken <= MAX_RECORD_BYTES {
-                    // Unterminated tail: a record still being written.
-                    return Ok(scanned);
-                }
-                // Oversized record: skip to its newline and count it.
-                scanned.malformed += 1;
-                scanned.position += taken as u64;
-                loop {
-                    let buffer = reader.fill_buf()?;
-                    if buffer.is_empty() {
-                        return Ok(scanned);
-                    }
-                    if let Some(index) = buffer.iter().position(|byte| *byte == b'\n') {
-                        reader.consume(index + 1);
-                        scanned.position += index as u64 + 1;
-                        break;
-                    }
-                    let length = buffer.len();
-                    reader.consume(length);
-                    scanned.position += length as u64;
-                }
-                continue;
-            }
-            scanned.position += taken as u64;
-            let record = &line[..line.len() - 1];
-            if record.iter().all(u8::is_ascii_whitespace)
-                || prefilter.is_some_and(|filter| !filter.is_match(record))
-            {
-                continue;
-            }
-            match visit(line_start, record) {
-                Some(true) => {}
-                Some(false) => {
-                    scanned.stopped = Stopped::Visitor;
-                    return Ok(scanned);
-                }
-                None => scanned.malformed += 1,
-            }
-        }
-    }
-}
-
-/// The end of the last complete record: the read boundary of a snapshot.
-fn complete_end(path: &Path) -> Result<u64> {
-    let mut file = match evidence::regular_file(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error.into()),
-    };
-    let length = file.metadata()?.len();
-    let window = length.min(MAX_RECORD_BYTES as u64 + 1);
-    file.seek(SeekFrom::Start(length - window))?;
-    let mut tail = vec![0; window as usize];
-    file.read_exact(&mut tail)?;
-    Ok(tail
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(length.saturating_sub(window), |index| {
-            length - window + index as u64 + 1
-        }))
-}
-
-fn field_pattern(field: &str, value: impl std::fmt::Display) -> String {
-    format!(r#""{field}":"?{value}"?[,}}]"#)
-}
-
 fn compile(alternatives: &[String]) -> Result<Regex> {
     Regex::new(&alternatives.join("|"))
         .map_err(|_| Error::new(500, "Cross-reference filter failed"))
@@ -690,10 +551,6 @@ fn parse_event(record: &[u8]) -> Option<Value> {
     serde_json::from_slice::<Value>(record)
         .ok()
         .filter(Value::is_object)
-}
-
-fn same_session(event: &Value, session: u64) -> bool {
-    unsigned(&event["session_id"]) == session
 }
 
 /// Finds an event by exact identity. `process` of `None` matches any stream,
@@ -2027,6 +1884,7 @@ pub fn run(
     let reader = Reader {
         cancel,
         deadline: Instant::now() + SCAN_DEADLINE,
+        cancelled: "The cross-reference request was cancelled",
     };
     let end = complete_end(&stores.events)?;
     let snapshot = query.snapshot.map_or(end, |value| value.min(end));

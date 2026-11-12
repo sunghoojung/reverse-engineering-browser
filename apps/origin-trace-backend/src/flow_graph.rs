@@ -17,13 +17,12 @@ use crate::{
     error::{Error, Result},
     evidence, request_index,
     request_stack::{self, Frame, Identity, Record, Segment},
+    store_scan::{self, Stopped, Stores},
 };
 use regex::bytes::Regex;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -34,8 +33,7 @@ use std::{
 pub const SCHEMA: &str = "flow-graph-v1";
 /// A pathological store is a visible cut rather than an endless request.
 const SCAN_DEADLINE: Duration = Duration::from_secs(30);
-const MAX_RECORD_BYTES: usize = 64 * 1024;
-const READ_BUFFER_BYTES: usize = 256 * 1024;
+const CANCELLED: &str = "The flow graph request was cancelled";
 /// Distinct stacks decoded. A stack is one digest however often it repeats, and
 /// each renderer sends at most 1,024 request and 1,024 scheduling stacks per
 /// configuration; past this the rest are counted, not drawn.
@@ -368,102 +366,6 @@ fn decode_scheduling(bytes: &[u8]) -> Option<(&'static str, u32, [u8; 32], Frame
             innermost,
         )
     })
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Stopped {
-    End,
-    Deadline,
-}
-
-/// Reads complete records in `[0, end)` forward, parsing only lines the byte
-/// prefilter selects.
-fn scan_store(
-    path: &Path,
-    end: u64,
-    prefilter: &Regex,
-    deadline: Instant,
-    cancel: &AtomicBool,
-    visit: &mut dyn FnMut(&[u8]),
-) -> Result<(u64, u64, Stopped)> {
-    let (mut position, mut malformed) = (0u64, 0u64);
-    let mut file = match evidence::regular_file(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((0, 0, Stopped::End));
-        }
-        Err(error) => return Err(error.into()),
-    };
-    file.seek(SeekFrom::Start(0))?;
-    let mut reader = BufReader::with_capacity(READ_BUFFER_BYTES, file.take(end));
-    let mut line = Vec::with_capacity(8 * 1024);
-    let mut read = 0u32;
-    loop {
-        read = read.wrapping_add(1);
-        if read & 0x3ff == 0 {
-            if cancel.load(Ordering::Relaxed) {
-                return Err(Error::new(499, "The flow graph request was cancelled"));
-            }
-            if Instant::now() >= deadline {
-                return Ok((position, malformed, Stopped::Deadline));
-            }
-        }
-        line.clear();
-        let taken = reader
-            .by_ref()
-            .take(MAX_RECORD_BYTES as u64 + 1)
-            .read_until(b'\n', &mut line)?;
-        if taken == 0 {
-            return Ok((position, malformed, Stopped::End));
-        }
-        position += taken as u64;
-        if line.last() != Some(&b'\n') {
-            if taken <= MAX_RECORD_BYTES {
-                return Ok((position - taken as u64, malformed, Stopped::End));
-            }
-            // An oversized line: skip to its newline and count it.
-            malformed += 1;
-            loop {
-                let buffer = reader.fill_buf()?;
-                if buffer.is_empty() {
-                    return Ok((position, malformed, Stopped::End));
-                }
-                if let Some(index) = buffer.iter().position(|byte| *byte == b'\n') {
-                    reader.consume(index + 1);
-                    position += index as u64 + 1;
-                    break;
-                }
-                let length = buffer.len();
-                reader.consume(length);
-                position += length as u64;
-            }
-            continue;
-        }
-        let record = &line[..line.len() - 1];
-        if prefilter.is_match(record) {
-            visit(record);
-        }
-    }
-}
-
-/// The end of the last complete record: the snapshot this answer describes.
-fn complete_end(path: &Path) -> Result<u64> {
-    let mut file = match evidence::regular_file(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error.into()),
-    };
-    let length = file.metadata()?.len();
-    let window = length.min(MAX_RECORD_BYTES as u64 + 1);
-    file.seek(SeekFrom::Start(length - window))?;
-    let mut tail = vec![0; window as usize];
-    file.read_exact(&mut tail)?;
-    Ok(tail
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(length.saturating_sub(window), |index| {
-            length - window + index as u64 + 1
-        }))
 }
 
 /// A decoded stack: synchronous frames innermost first, the await chain, and
@@ -1283,11 +1185,6 @@ fn resolve_sources(
     out
 }
 
-pub struct Stores {
-    pub events: PathBuf,
-    pub artifacts: PathBuf,
-}
-
 fn snapshot_key(stores: &Stores, session: u64, end: u64) -> String {
     let manifest =
         std::fs::metadata(stores.artifacts.join("manifest.jsonl")).map_or(0, |meta| meta.len());
@@ -1302,7 +1199,7 @@ pub fn run(
     cache: &Cache,
     cancel: &AtomicBool,
 ) -> Result<Arc<Value>> {
-    let end = complete_end(&stores.events)?;
+    let end = store_scan::complete_end(&stores.events)?;
     let key = snapshot_key(stores, session, end);
     if let Some((cached, value)) = cache.0.lock().unwrap().as_ref()
         && *cached == key
@@ -1324,30 +1221,30 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
     let prefilter = Regex::new(&format!(r#""type":"(?:{})""#, TYPES.join("|")))
         .map_err(|_| Error::new(500, "Flow graph filter failed"))?;
     let session_text = session.to_string();
-    let mut scan = Scan::default();
-    let (scanned, malformed_lines, stopped) = scan_store(
-        &stores.events,
-        end,
-        &prefilter,
-        deadline,
+    let reader = store_scan::Reader {
         cancel,
-        &mut |line| {
-            let Ok(event) = serde_json::from_slice::<Value>(line) else {
-                scan.malformed += 1;
-                return;
-            };
+        deadline,
+        cancelled: CANCELLED,
+    };
+    let mut scan = Scan::default();
+    let scanned = reader.lines(
+        &stores.events,
+        0,
+        end,
+        Some(&prefilter),
+        &mut |_, line| {
+            let event = serde_json::from_slice::<Value>(line).ok()?;
             let same = match &event["session_id"] {
                 Value::String(text) => *text == session_text,
                 other => other.as_u64() == Some(session),
             };
-            if same && !scan.record(&event) {
-                scan.malformed += 1;
-            }
+            // A record the decoders refuse is counted as malformed.
+            (!same || scan.record(&event)).then_some(true)
         },
     )?;
-    scan.malformed += malformed_lines;
-    scan.scanned_bytes = scanned;
-    scan.stopped = if stopped == Stopped::Deadline {
+    scan.malformed = scanned.malformed;
+    scan.scanned_bytes = scanned.position;
+    scan.stopped = if scanned.stopped == Stopped::Deadline {
         "deadline"
     } else {
         "end"
@@ -1476,7 +1373,7 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
     };
     for (walk, decoded) in scan.walks.iter().zip(&decoded) {
         if cancel.load(Ordering::Relaxed) {
-            return Err(Error::new(499, "The flow graph request was cancelled"));
+            return Err(Error::new(499, CANCELLED));
         }
         builder.add(walk, decoded);
     }
@@ -1614,7 +1511,7 @@ fn build(stores: &Stores, session: u64, end: u64, cancel: &AtomicBool) -> Result
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
-    use std::io::Write;
+    use std::{io::Write, path::Path};
 
     fn frame(kind: u8, flags: u8, script: u32, position: u32, detail: u32) -> Vec<u8> {
         let mut bytes = vec![kind, flags, 0, 0];

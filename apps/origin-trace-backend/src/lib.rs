@@ -44,6 +44,7 @@ mod source_facts;
 mod source_format;
 mod source_format_doc;
 mod source_format_js;
+mod store_scan;
 mod validation;
 pub mod vm;
 mod vm_byte_coverage;

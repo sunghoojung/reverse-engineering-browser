@@ -18,7 +18,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    process::ChildStdout,
+    process::{Child, ChildStdout},
     sync::Semaphore,
 };
 
@@ -136,7 +136,7 @@ pub(crate) async fn route(bytes: Vec<u8>) -> Result<Vec<u8>> {
     let graphs = tokio::task::spawn_blocking(move || parse(&bytes))
         .await
         .map_err(|_| Error::new(500, "Graph layout validation failed"))??;
-    let graphs = lay_out_all(graphs, DEADLINE, None).await;
+    let graphs = lay_out_all(graphs, DEADLINE).await;
     let elapsed_ms = millis(started.elapsed());
     tokio::task::spawn_blocking(move || {
         serde_json::to_vec(&Response {
@@ -198,7 +198,7 @@ fn parse(bytes: &[u8]) -> Result<Vec<Graph>> {
     Ok(request.graphs)
 }
 
-async fn lay_out_all(graphs: Vec<Graph>, deadline: Duration, fault: Option<&str>) -> Vec<Outcome> {
+async fn lay_out_all(graphs: Vec<Graph>, deadline: Duration) -> Vec<Outcome> {
     let mut outcomes = graphs.iter().map(admit).collect::<Vec<_>>();
     let pending = (0..graphs.len())
         .filter(|&index| outcomes[index].is_none())
@@ -208,7 +208,7 @@ async fn lay_out_all(graphs: Vec<Graph>, deadline: Duration, fault: Option<&str>
             .iter()
             .map(|&index| &graphs[index])
             .collect::<Vec<_>>();
-        let replies = in_worker(&jobs, deadline, fault).await;
+        let replies = in_worker(&jobs, deadline).await;
         for (index, reply) in pending.into_iter().zip(replies) {
             outcomes[index] = Some(reply);
         }
@@ -261,13 +261,13 @@ enum Stop {
 /// budget inside the request deadline: a graph that overruns it, crashes the
 /// worker or exhausts its memory gets `timeout` or `failed`, and a new worker
 /// continues with the graphs after it.
-async fn in_worker(jobs: &[&Graph], deadline: Duration, fault: Option<&str>) -> Vec<Outcome> {
+async fn in_worker(jobs: &[&Graph], deadline: Duration) -> Vec<Outcome> {
     let mut outcomes = Vec::with_capacity(jobs.len());
     let _slot = WORKERS.acquire().await;
     let end = tokio::time::Instant::now() + deadline;
     while outcomes.len() < jobs.len() {
         let rest = &jobs[outcomes.len()..];
-        let missing = match exchange(rest, end, fault, &mut outcomes).await {
+        let missing = match exchange(rest, end, &mut outcomes).await {
             Stop::Complete => continue,
             Stop::Budget(budget) => {
                 outcomes.push(Outcome::Timeout {
@@ -303,28 +303,15 @@ fn budget(graph: &Graph) -> Duration {
     Duration::from_secs(1) + Duration::from_nanos(8_000 * nodes * nodes)
 }
 
-/// One worker for `jobs`; each result that arrives is pushed to `outcomes`.
-async fn exchange(
-    jobs: &[&Graph],
-    end: tokio::time::Instant,
-    fault: Option<&str>,
-    outcomes: &mut Vec<Outcome>,
-) -> Stop {
-    let not_started = || Stop::Abandon("The layout worker could not start".to_owned());
-    let Ok(input) = serde_json::to_vec(jobs) else {
-        return Stop::Abandon("The layout request could not be encoded".to_owned());
-    };
-    let Ok(mut command) =
+/// A contained worker in its own process group, which is killed with it.
+fn start_worker() -> Option<(Child, Option<crate::worker::ProcessGroup>)> {
+    let mut command =
         crate::vm::dispatch_shape::javascript::worker_command_for(WORKER_FLAG, WORKER_TEST_VALUE)
-    else {
-        return not_started();
-    };
+            .ok()?;
     #[cfg(test)]
-    if let Some(fault) = fault {
-        command.env(tests::FAULT, fault);
+    if let Some(fault) = tests::FAULT.get() {
+        command.env(tests::FAULT_VARIABLE, fault);
     }
-    #[cfg(not(test))]
-    let _ = fault;
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -332,11 +319,21 @@ async fn exchange(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
-    let Ok(mut child) = command.spawn() else {
+    let child = command.spawn().ok()?;
+    let group = child.id().map(crate::worker::ProcessGroup);
+    Some((child, group))
+}
+
+/// One worker for `jobs`; each result that arrives is pushed to `outcomes`.
+async fn exchange(jobs: &[&Graph], end: tokio::time::Instant, outcomes: &mut Vec<Outcome>) -> Stop {
+    let not_started = || Stop::Abandon("The layout worker could not start".to_owned());
+    let Ok(input) = serde_json::to_vec(jobs) else {
+        return Stop::Abandon("The layout request could not be encoded".to_owned());
+    };
+    // The group guard kills the worker's whole process group on every return path.
+    let Some((mut child, _group)) = start_worker() else {
         return not_started();
     };
-    // Kills the worker's whole process group on every return path.
-    let _group = child.id().map(crate::worker::ProcessGroup);
     let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
         return not_started();
     };
@@ -490,11 +487,9 @@ pub(crate) fn worker_main() -> i32 {
         return 72;
     };
     drop(input);
-    for (index, graph) in graphs.iter().enumerate() {
+    for graph in &graphs {
         #[cfg(test)]
-        tests::fault(index);
-        #[cfg(not(test))]
-        let _ = index;
+        tests::fault();
         let Ok(json) = serde_json::to_vec(&lay_out(graph)) else {
             return 73;
         };
@@ -1007,15 +1002,22 @@ fn place(graph: &Graph, raw: &Raw) -> Option<Drawing> {
 mod tests {
     use super::*;
 
-    pub(super) const FAULT: &str = "REB_GRAPH_LAYOUT_TEST_FAULT";
+    pub(super) const FAULT_VARIABLE: &str = "REB_GRAPH_LAYOUT_TEST_FAULT";
+
+    thread_local! {
+        /// The fault the workers a test starts on this thread inject.
+        pub(super) static FAULT: std::cell::Cell<Option<&'static str>> =
+            const { std::cell::Cell::new(None) };
+    }
 
     /// Test-only faults in the re-executed worker, after the first graph's
     /// reply so a test sees both a kept result and the missing ones.
-    pub(super) fn fault(index: usize) {
-        if index == 0 {
+    pub(super) fn fault() {
+        static GRAPHS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        if GRAPHS.fetch_add(1, Relaxed) == 0 {
             return;
         }
-        match std::env::var(FAULT).as_deref() {
+        match std::env::var(FAULT_VARIABLE).as_deref() {
             Ok("hang") => std::thread::sleep(Duration::from_secs(600)),
             // SAFETY: abort ends the worker with SIGABRT, as a C++ crash would.
             Ok("crash") => unsafe { libc::abort() },
@@ -1158,7 +1160,7 @@ mod tests {
             ("single node", graph(&[[120.0, 40.0]], &[])),
         ];
         let graphs = shapes.iter().map(|(_, shape)| shape.clone()).collect();
-        let outcomes = lay_out_all(graphs, DEADLINE, None).await;
+        let outcomes = lay_out_all(graphs, DEADLINE).await;
         for ((label, shape), outcome) in shapes.iter().zip(&outcomes) {
             assert_sound(shape, outcome, label);
         }
@@ -1197,7 +1199,7 @@ mod tests {
         let parts = parts(&forest);
         assert_eq!(parts.len(), 90);
         assert_eq!(parts[0].0.len(), 5, "largest part first");
-        let outcomes = lay_out_all(vec![forest.clone()], DEADLINE, None).await;
+        let outcomes = lay_out_all(vec![forest.clone()], DEADLINE).await;
         assert_sound(&forest, &outcomes[0], "forest");
         let Outcome::LaidOut { width, height, .. } = &outcomes[0] else {
             unreachable!()
@@ -1215,7 +1217,7 @@ mod tests {
             graph(&sized(2), &[[0, 1]]),
             graph(&sized(2), &vec![[0, 1]; MAX_GRAPH_EDGES + 1]),
         ];
-        let outcomes = lay_out_all(graphs, DEADLINE, None).await;
+        let outcomes = lay_out_all(graphs, DEADLINE).await;
         for index in [0, 2] {
             let Outcome::TooLarge { reason } = &outcomes[index] else {
                 panic!("{:?}", outcomes[index]);
@@ -1241,10 +1243,10 @@ mod tests {
             ("crash", 5_000, true, "signal 6 while laying out this graph"),
             ("memory", 5_000, true, "2 GiB memory limit on this graph"),
         ] {
+            FAULT.set(Some(fault));
             let outcomes = lay_out_all(
                 vec![small(), small(), small()],
                 Duration::from_millis(deadline),
-                Some(fault),
             )
             .await;
             let label = format!("{fault} in {deadline} ms");
@@ -1279,7 +1281,7 @@ mod tests {
         );
         let diamond = graph(&sized(4), &[[0, 1], [0, 2], [1, 3], [2, 3]]);
         let started = Instant::now();
-        let outcomes = lay_out_all(vec![looping, diamond.clone()], DEADLINE, None).await;
+        let outcomes = lay_out_all(vec![looping, diamond.clone()], DEADLINE).await;
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "{:?}",
@@ -1294,7 +1296,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_request_deadline_stops_a_real_layout() {
-        let outcomes = lay_out_all(vec![tree(1_500)], Duration::from_millis(20), None).await;
+        let outcomes = lay_out_all(vec![tree(1_500)], Duration::from_millis(20)).await;
         let Outcome::Timeout { reason } = &outcomes[0] else {
             panic!("{:?}", outcomes[0]);
         };
@@ -1305,9 +1307,9 @@ mod tests {
     async fn a_third_request_waits_for_a_worker_slot() {
         let small = || vec![graph(&sized(3), &[[0, 1], [1, 2]])];
         let (first, second, third) = tokio::join!(
-            lay_out_all(small(), DEADLINE, None),
-            lay_out_all(small(), DEADLINE, None),
-            lay_out_all(small(), DEADLINE, None)
+            lay_out_all(small(), DEADLINE),
+            lay_out_all(small(), DEADLINE),
+            lay_out_all(small(), DEADLINE)
         );
         for outcomes in [first, second, third] {
             assert_sound(&graph(&sized(3), &[[0, 1], [1, 2]]), &outcomes[0], "queued");
@@ -1334,7 +1336,7 @@ mod tests {
                 graph(&sized(count as usize), &edges)
             })
             .collect::<Vec<_>>();
-        let outcomes = lay_out_all(graphs.clone(), DEADLINE, None).await;
+        let outcomes = lay_out_all(graphs.clone(), DEADLINE).await;
         let mut laid_out = 0;
         for (index, (graph, outcome)) in graphs.iter().zip(&outcomes).enumerate() {
             match outcome {

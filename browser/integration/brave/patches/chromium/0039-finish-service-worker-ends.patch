@@ -1,0 +1,86 @@
+diff --git a/content/renderer/BUILD.gn b/content/renderer/BUILD.gn
+index 24128fe..b72ca91 100644
+--- a/content/renderer/BUILD.gn
++++ b/content/renderer/BUILD.gn
+@@ -229,6 +229,7 @@ target(link_target_type, "renderer") {
+   deps = [
+     "//base",
+     "//base:i18n",
++    "//brave/components/reverse_engineering_browser:renderer_sink",
+     "//build:chromecast_buildflags",
+     "//cc",
+     "//cc/animation",
+diff --git a/content/renderer/service_worker/service_worker_subresource_loader.cc b/content/renderer/service_worker/service_worker_subresource_loader.cc
+index 4f84533..97d79dd 100644
+--- a/content/renderer/service_worker/service_worker_subresource_loader.cc
++++ b/content/renderer/service_worker/service_worker_subresource_loader.cc
+@@ -5,6 +5,7 @@
+ #include "content/renderer/service_worker/service_worker_subresource_loader.h"
+ 
+ #include <optional>
++#include <string_view>
+ 
+ #include "base/debug/crash_logging.h"
+ #include "base/functional/bind.h"
+@@ -18,6 +19,7 @@
+ #include "base/task/sequenced_task_runner.h"
+ #include "base/timer/elapsed_timer.h"
+ #include "base/trace_event/trace_event.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "content/common/features.h"
+ #include "content/common/fetch/fetch_request_type_converters.h"
+ #include "content/common/service_worker/race_network_request_url_loader_client.h"
+@@ -183,6 +185,17 @@ blink::mojom::ServiceWorkerFetchEventTimingPtr AdjustTimingIfNeededCrBug1342408(
+   return timing;
+ }
+ 
++// The browser proxy never sees a request this loader keeps from the network,
++// so the renderer finishes one it ends without a response; see
++// protocol/native-network-v3.md.
++void RecordNativeServiceWorkerEnd(int32_t request_id,
++                                  const GURL& url,
++                                  int error_code) {
++  const std::string_view target = url.PathForRequestPiece();
++  reb::NativeProbeSink::Get().RecordServiceWorkerRequestEnd(
++      request_id, target, target.size(), url.IntPort(), error_code);
++}
++
+ }  // namespace
+ 
+ // A ServiceWorkerStreamCallback implementation which waits for completion of
+@@ -342,6 +355,12 @@ ServiceWorkerSubresourceLoader::~ServiceWorkerSubresourceLoader() {
+ }
+ 
+ void ServiceWorkerSubresourceLoader::OnMojoDisconnect() {
++  // The page cancelled a request this loader still held.
++  if (status_ != Status::kSentBody && status_ != Status::kCompleted &&
++      dispatched_preload_type() != DispatchedPreloadType::kRaceNetworkRequest) {
++    RecordNativeServiceWorkerEnd(request_id_, resource_request_.url,
++                                 net::ERR_ABORTED);
++  }
+   MaybeDeleteThis();
+ }
+ 
+@@ -1001,6 +1020,11 @@ void ServiceWorkerSubresourceLoader::CommitCompleted(int error_code,
+               "error_code", net::ErrorToString(error_code), "reason",
+               TRACE_STR_COPY(reason));
+ 
++  // An error before any response, with no network request of this loader's.
++  const bool reb_unanswered =
++      error_code != net::OK && status_ != Status::kSentBody &&
++      status_ != Status::kCompleted &&
++      dispatched_preload_type() != DispatchedPreloadType::kRaceNetworkRequest;
+   TransitionToStatus(Status::kCompleted);
+   if (error_code == net::OK) {
+     switch (commit_responsibility()) {
+@@ -1024,6 +1048,10 @@ void ServiceWorkerSubresourceLoader::CommitCompleted(int error_code,
+   status.error_code = error_code;
+   status.completion_time = base::TimeTicks::Now();
+   url_loader_client_->OnComplete(status);
++  if (reb_unanswered) {
++    RecordNativeServiceWorkerEnd(request_id_, resource_request_.url,
++                                 error_code);
++  }
+ 
+   // Invalidate weak pointers to prevent callbacks after commit.  This can
+   // occur if an error code is encountered which forces an early commit.

@@ -33,10 +33,11 @@ permissions:
   contents: read
 
 # A manual dispatch runs on a branch ref and a tag push on the tag ref. Both can
-# publish the same release, so every publishing run shares one group.
+# publish the same release, so every publishing run shares one group and none
+# is cancelled. A newer push to a pull request supersedes its older check.
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('release-check-{0}', github.ref) || 'release-publication' }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   route:
@@ -119,6 +120,12 @@ jobs:
           printf 'RELEASE_TAG=%s\nRELEASE_SOURCE_SHA=%s\n' "$tag" "$source_sha" >> "$GITHUB_ENV"
           printf 'release_tag=%s\nsource_sha=%s\n' "$tag" "$source_sha" >> "$GITHUB_OUTPUT"
 
+      # The paired Brave is reused only while every browser input matches the
+      # commit that built it. That is a git diff, so refuse a stale pin here
+      # rather than after the checks and the application build.
+      - name: Check the paired browser pin against this source
+        run: ./scripts/prepare-release-brave.sh --check-pin
+
       - name: Install Node
         uses: actions/setup-node@v6
         with:
@@ -130,11 +137,14 @@ jobs:
           python3 tools/publish-release-pair-test.py
           python3 tools/write-brave-provenance-test.py
 
+      # A pull request already runs make check on macOS and Linux in ci.yml.
+      # Publication runs it again here on the exact source it releases.
       - name: Run release checks
-        run: make check
+        if: github.event_name != 'pull_request'
+        run: ./tools/ci-run-make.sh check
 
       - name: Build macOS application bundle
-        run: make app-build
+        run: ./tools/ci-run-make.sh app-build
 
       - name: Verify macOS application signature
         run: codesign --verify --deep --strict "build/Origin Trace.app"

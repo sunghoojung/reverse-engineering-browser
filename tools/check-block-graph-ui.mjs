@@ -162,7 +162,8 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
   // layout stays when Triskel would draw much wider or the route fails.
   const graph = fixture(4, [[0, 1, KIND.taken], [0, 2, KIND.not_taken], [1, 3], [2, 3], [3, -1, KIND.unresolved, 'unknown target']]);
   const starts = layoutModule.rowStarts(graph.rows), sizes = layoutModule.nodeSizes(graph, starts, layoutModule.METRICS);
-  const base = () => ({graph, starts, layout: layoutModule.layoutGraph(graph, sizes, layoutModule.METRICS)});
+  // The client caches Triskel's answer per graph, so each case grows one block to be a new graph.
+  const base = () => { sizes.w[3] += 1; return {graph, starts, layout: layoutModule.layoutGraph(graph, sizes, layoutModule.METRICS)}; };
   const answers = [];
   globalThis.fetch = async (url, init) => {
     assert.equal(url, '/api/graph-layout'); assert.equal(init.method, 'POST');

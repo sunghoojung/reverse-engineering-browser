@@ -2531,7 +2531,9 @@ same engine report either way, on card sizes measured from their text.
 to 2,000 cards is then sent to
 [Triskel](https://github.com/triskellib/triskel), in band order, at most 64
 realms and 8,000 cards per request; a realm past either total keeps the layered
-layout and says which total it hit. A realm takes Triskel's coordinates and waypoints unless Triskel would
+layout and says which total it hit. The layout worker keeps Triskel's last 64
+answers by realm, so a new layout of mostly the same realms, such as a chain
+folded or a refresh, sends only the realms that changed. A realm takes Triskel's coordinates and waypoints unless Triskel would
 draw it more than 1.6 times wider than the layered layout and over 1,400 px,
 or more than 1.6 times taller and over 1,600 px taller.
 Triskel does not stack a wide fan of calls, and a call tree's breadth would

@@ -28,6 +28,11 @@ const graphLayoutClient = (() => {
    * loop bodies. */
   const ACCEPT = Object.freeze({widen: 1.6, freeWidth: 1400, freeHeight: 1600});
   const TIMEOUT_MS = 20000;
+  /* Triskel's answers by graph: a new layout of mostly the same graphs (a
+   * chain folded in one realm, a refresh) sends only those that changed. A
+   * worker lives while its view is shown; this keeps its last answers. */
+  const CACHE_ENTRIES = 64;
+  const cache = new Map();
 
   const round = value => Math.round(value * 100) / 100;
   const near = (a, b) => Math.abs(a - b) < 0.01;
@@ -49,15 +54,37 @@ const graphLayoutClient = (() => {
     return points;
   }
 
-  /** Each graph's place in one request, in order, or the reason it stays out. */
+  /** A graph's cache key: its counts and a 64-bit hash of its node sizes,
+   * as sent, and edges. */
+  function graphKey(graph) {
+    let a = 0x811c9dc5, b = 0x9747b28c;
+    const mix = value => {
+      a = Math.imul(a ^ value, 0x01000193);
+      b = Math.imul(b ^ value, 0x5bd1e995) ^ (b >>> 15);
+    };
+    for (const [w, h] of graph.nodes) { mix(Math.round(w * 100)); mix(Math.round(h * 100)); }
+    mix(-1);
+    for (const [from, to] of graph.edges) { mix(from); mix(to); }
+    return `${graph.nodes.length}:${graph.edges.length}:${(a >>> 0).toString(36)}:${(b >>> 0).toString(36)}`;
+  }
+  function remember(key, entry) {
+    cache.delete(key);
+    cache.set(key, entry);
+    if (cache.size > CACHE_ENTRIES) cache.delete(cache.keys().next().value);
+  }
+
+  /** Each graph's place in one request, in order, its cached answer, or the
+   * reason it stays out. A cached graph takes no room in the request. */
   function plan(graphs) {
     let sent = 0, nodes = 0;
     return graphs.map(graph => {
       if (graph.nodes.length > LIMITS.graphNodes || graph.edges.length > LIMITS.graphEdges) return {reason: {code: 'too_large'}};
+      const key = graphKey(graph), cached = cache.get(key);
+      if (cached) { remember(key, cached); return {cached}; }
       if (sent >= LIMITS.graphs) return {reason: {code: 'request_budget', limit: 'graphs'}};
       if (nodes + graph.nodes.length > LIMITS.nodes) return {reason: {code: 'request_budget', limit: 'nodes'}};
       nodes += graph.nodes.length;
-      return {position: sent++};
+      return {position: sent++, key};
     });
   }
 
@@ -103,8 +130,11 @@ const graphLayoutClient = (() => {
       if (entry.position === undefined) return;
       body.graphs.push({nodes: graphs[index].nodes.map(([w, h]) => [round(w), round(h)]), edges: graphs[index].edges});
     });
+    // A cached answer is judged afresh: the caller's own layout may differ.
+    const unsent = (entry, index) => (entry.cached ? judge(entry.cached.result, graphs[index]) : entry);
+    const revision = planned.find(entry => entry.cached)?.cached.revision ?? null;
     // Every graph that was sent shares the request's fate.
-    const everySent = (reason, failure) => ({outcomes: planned.map(entry => (entry.position === undefined ? entry : {reason})), revision: null, failure});
+    const everySent = (reason, failure) => ({outcomes: planned.map((entry, index) => (entry.position === undefined ? unsent(entry, index) : {reason})), revision, failure});
     if (!body.graphs.length) return everySent(null, null);
     let answer;
     try {
@@ -115,8 +145,15 @@ const graphLayoutClient = (() => {
     }
     if (answer?.schema !== 'graph-layout-v1' || !Array.isArray(answer.graphs) || answer.graphs.length !== body.graphs.length)
       return everySent({code: 'mismatch'}, 'The layout route returned an unexpected answer.');
-    const outcomes = planned.map((entry, index) => (entry.position === undefined ? entry : judge(answer.graphs[entry.position], graphs[index])));
-    return {outcomes, revision: answer.engine?.revision ?? null, failure: null};
+    const fresh = answer.engine?.revision ?? null;
+    planned.forEach(entry => {
+      // Only a layout or a size refusal is the same next time; a timeout or
+      // a failure may not be.
+      const result = entry.position === undefined ? null : answer.graphs[entry.position];
+      if (result?.status === 'laid_out' || result?.status === 'too_large') remember(entry.key, {result, revision: fresh});
+    });
+    const outcomes = planned.map((entry, index) => (entry.position === undefined ? unsent(entry, index) : judge(answer.graphs[entry.position], graphs[index])));
+    return {outcomes, revision: fresh ?? revision, failure: null};
   }
 
   return {LIMITS, layOut, routePoints};

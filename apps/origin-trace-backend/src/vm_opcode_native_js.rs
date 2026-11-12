@@ -97,7 +97,7 @@ fn utf16_offsets(text: &str, bom: usize, offsets: &[usize]) -> Vec<Option<u32>> 
     output
 }
 
-const SELECTOR_KINDS: [&str; 9] = [
+pub(crate) const SELECTOR_KINDS: [&str; 9] = [
     "integer",
     "number",
     "string",

@@ -2,7 +2,7 @@
 //! exact value search behind `invocation_value_flow`. Every rule here mirrors
 //! protocol/native-js-invocation-v1.md and the C++, Python and JavaScript
 //! readers; a record any of them refuses is never read as evidence.
-use crate::evidence;
+use crate::{evidence, vm_opcode::native_js::SELECTOR_KINDS};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -277,18 +277,10 @@ pub fn request(event: &Value) -> Option<Request> {
     })
 }
 
-/// API names of value kinds 1 to 14 in wire order. The first nine are the
-/// JavaScript dispatch selector names; 13 is a typed array or `DataView`.
-const VALUE_KINDS: [&str; 14] = [
-    "integer",
-    "number",
-    "string",
-    "symbol",
-    "undefined",
-    "null",
-    "boolean",
-    "bigint",
-    "object",
+/// API names of value kinds 10 to 14 in wire order, after the nine JavaScript
+/// dispatch selector kinds that kinds 1 to 9 share; 13 is a typed array or
+/// `DataView`.
+const OBJECT_KINDS: [&str; 5] = [
     "function",
     "array",
     "array_buffer",
@@ -311,6 +303,16 @@ const DIGEST_STATES: [&str; 5] = [
 /// is `{status: invalid}` with no fields, never a partial row. A settle names
 /// only its digest state: the digest is sensitive capture that only the
 /// value-flow join reads, and the API never decodes it.
+/// The API name of value kind 1 to 14.
+fn value_kind(kind: u8) -> Option<&'static str> {
+    let index = usize::from(kind).checked_sub(1)?;
+    SELECTOR_KINDS
+        .iter()
+        .chain(&OBJECT_KINDS)
+        .nth(index)
+        .copied()
+}
+
 pub fn query(event: &Value) -> Option<Value> {
     let decoded = match event["type"].as_str()? {
         "js_invocation_start" => start(event).map(|s| {
@@ -328,7 +330,7 @@ pub fn query(event: &Value) -> Option<Value> {
                 json!({"status":"decoded","kind":"settle","site_slot":s.site_slot,
                 "invocation_id":s.invocation_id,"fulfilled":s.fulfilled,
                 "via":name(&VIA, usize::from(s.via).checked_sub(1)?)?,
-                "value_kind":name(&VALUE_KINDS, usize::from(s.value_kind).checked_sub(1)?)?,
+                "value_kind":value_kind(s.value_kind)?,
                 "value_length":s.value_length,
                 "digest_state":name(&DIGEST_STATES, usize::from(s.digest_state))?,
                 "document_id":s.document_id.to_string()}),

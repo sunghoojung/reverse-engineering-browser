@@ -785,7 +785,12 @@ mod tests {
         let check = &summary["checks"][0];
         assert_eq!(check["code"], "response_bodies_not_observed");
         assert_eq!(check["count"], "4");
-        assert!(check["message"].as_str().unwrap().contains("2 served by a service worker, 1 reused"));
+        assert!(
+            check["message"]
+                .as_str()
+                .unwrap()
+                .contains("2 served by a service worker, 1 reused")
+        );
         assert!(
             check["message"]
                 .as_str()

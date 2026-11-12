@@ -298,6 +298,31 @@ const eventsOf = (id, records) => Array.from({length: records}, (_, sequence) =>
   assert.equal(t.state.trafficLoaded.get('request-5').endLost, true, 'The store copy keeps the index row\'s End lost');
 }
 {
+  // The row a reuse names, with its body, lives only in the index row: the
+  // store copy, a row the window holds whole and a later poll all keep it.
+  const source = {id: 'S1:R9:41', found: true, path: '/sprite', type: 'img', response_body: {case: 'captured', artifact_id: '7'}};
+  const t = indexFixture({windowCount: 1});
+  t.setIndexRows([{...t.row(5, 2), memory_cache_source: source, response_body: {case: 'memory_cache'}}]);
+  t.api.renderRequests(); await quiet();
+  t.api.selectTrafficRow('request-5');
+  await quiet();
+  t.pending[0].gate.resolve(t.answer({events: eventsOf('5', 2), query: {limited: false, budget_exhausted: false, next_after: '9'}}));
+  await quiet();
+  assert.deepEqual(t.state.trafficLoaded.get('request-5').memoryCacheSourceRow, source, 'The store copy keeps the reuse\'s source');
+  const w = indexFixture({windowCount: 2});
+  w.state.requests = w.state.nativeRequests = w.state.nativeRequests.map(request =>
+    ({...request, events: [{}, {}], details: [], origin: 'live', rank: 2, status: 'pending'}));
+  const whole = w.state.requests[1];
+  w.setIndexRows([{...w.row(1, 2), memory_cache_source: source}, w.row(0, 2)]);
+  w.api.renderRequests(); await quiet();
+  w.api.selectTrafficRow(whole.id);
+  const held = () => w.state.requests.find(request => request.id === whole.id);
+  assert.deepEqual(held().memoryCacheSourceRow, source, 'A row the window holds whole keeps the reuse\'s source');
+  w.state.nativeRequests = w.state.nativeRequests.map(request => ({...request, memoryCacheSourceRow: null}));
+  w.api.rebuildTrafficRequests();
+  assert.deepEqual(held().memoryCacheSourceRow, source, 'A later poll keeps the reuse\'s source');
+}
+{
   // The window can hold the row whole and still lack the gap: selecting it, and
   // the rebuild after a later poll, keep End lost from the index row.
   const t = indexFixture({windowCount: 2});

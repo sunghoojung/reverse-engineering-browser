@@ -35,8 +35,9 @@ TAB_LINK_TEST := $(BUILD_DIR)/tests/tab-link-test
 JS_INVOCATION_TEST := $(BUILD_DIR)/tests/js-invocation-test
 REQUEST_STACK_TEST := $(BUILD_DIR)/tests/request-stack-test
 DEBUGGER_OBSERVATION_TEST := $(BUILD_DIR)/tests/debugger-observation-test
+DEBUGGER_PAUSE_WIRE_TEST := $(BUILD_DIR)/tests/debugger-pause-wire-test
 ARTIFACT_TEST_BINARY := $(BUILD_DIR)/tests/artifact-test
-NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST) $(NATIVE_GUEST_TEST) $(JS_DISPATCH_TEST) $(NETWORK_REQUEST_TEST) $(NETWORK_SCOPE_TEST) $(TAB_LINK_TEST) $(JS_INVOCATION_TEST) $(REQUEST_STACK_TEST) $(DEBUGGER_OBSERVATION_TEST) $(NATIVE_CONSOLE_DOCUMENT_START_TEST)
+NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST) $(NATIVE_GUEST_TEST) $(JS_DISPATCH_TEST) $(NETWORK_REQUEST_TEST) $(NETWORK_SCOPE_TEST) $(TAB_LINK_TEST) $(JS_INVOCATION_TEST) $(REQUEST_STACK_TEST) $(DEBUGGER_OBSERVATION_TEST) $(DEBUGGER_PAUSE_WIRE_TEST) $(NATIVE_CONSOLE_DOCUMENT_START_TEST)
 ORIGIN_TRACE_BACKEND := apps/origin-trace-backend/target/debug/origin-trace-backend
 VM_ANALYZER := apps/origin-trace-backend/target/debug/origin-trace-vm
 
@@ -191,6 +192,10 @@ $(REQUEST_STACK_TEST): $(BUILD_DIR)/tests/request_stack_test.o $(BUILD_DIR)/src/
 $(BUILD_DIR)/tests/debugger_observation_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
 $(DEBUGGER_OBSERVATION_TEST): $(BUILD_DIR)/tests/debugger_observation_test.o $(BUILD_DIR)/src/capture/event.o \
 	$(BUILD_DIR)/src/evidence/event_broker.o $(BUILD_DIR)/src/evidence/origin_trace.o
+# The overlay's wire header needs nothing from Chromium, so the host compiles
+# and runs it with the repository's own flags.
+$(BUILD_DIR)/tests/debugger_pause_wire_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
+$(DEBUGGER_PAUSE_WIRE_TEST): $(BUILD_DIR)/tests/debugger_pause_wire_test.o
 NATIVE_JS_DISPATCH_GOLDEN := $(BUILD_DIR)/reb-native-js-dispatch-golden
 .PHONY: native-js-dispatch-golden
 native-js-dispatch-golden: $(NATIVE_JS_DISPATCH_GOLDEN)

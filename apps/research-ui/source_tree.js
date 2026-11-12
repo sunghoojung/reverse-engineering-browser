@@ -377,7 +377,7 @@ function createSourceTree(options) {
     const toggleFocused = Boolean(toggle) && document.activeElement === toggle;
     nav.notice.textContent = notices.join(' ');
     // Above listed rows it is a disclosure, not the empty state, so it takes no empty-state padding.
-    nav.notice.classList.toggle('source-tree-disclosure', nav.list.length > 0);
+    nav.notice.className = nav.list.length ? 'source-tree-empty source-tree-disclosure' : 'source-tree-empty';
     if (toggle) nav.notice.append(toggle);
     if (toggleFocused) toggle.focus({preventScroll: true});
     // Limit disclosures stay above the rows, including when nothing is listed.

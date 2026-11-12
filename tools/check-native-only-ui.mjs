@@ -105,7 +105,58 @@ assert.deepEqual(context.removedReads, [], 'shipped UI must not read removed deb
 const document = window.document;
 // "Request call stack" is the native initiator stack (protocol/native-network-v3.md).
 const removedFeature = /breakpoint|paused frame|(?<!request )call stack|step over|step into|websocket (?:message|inspector|connection)|websockets ·|cookie import|import cookies|element screenshot|screenshot markup|marker (?:execution|run|fuzz)|run marker|local override|runtime hook|hook pivot|live script|page scripts|find in memory|memory origin/i;
-const reachable = node => [node.textContent, node.getAttribute('aria-label'), node.getAttribute('title')].filter(Boolean).join(' ');
+// The pausing vocabulary has a native meaning only inside the debugger
+// sidebar (#debugger-sidebar): the statement of the availability
+// get_native_debugger reports (data-debugger-native="availability"), and
+// sections registered with native: 'pausing' (data-debugger-native="pausing"),
+// which present that debugger. Within them only the paused-state words are
+// exempt; every other removed feature (cookie import, find in memory,
+// websockets and the rest) still fails there. A marker anywhere else, or with
+// another value, exempts nothing and fails on its own.
+const nativeAvailability = '#debugger-sidebar [data-debugger-native="availability"]';
+const nativeMarkers = new Set(['availability', 'pausing']);
+const nativeExempt = node => {
+  const marker = node.closest?.('[data-debugger-native]');
+  return Boolean(marker && nativeMarkers.has(marker.dataset.debuggerNative) && marker.parentElement?.closest('#debugger-sidebar'));
+};
+const nativeMarkerProblems = () => [...window.document.querySelectorAll('[data-debugger-native]')].filter(node => !nativeExempt(node))
+  .map(node => `${node.tagName.toLowerCase()}[data-debugger-native="${node.dataset.debuggerNative}"] ${node.textContent.slice(0, 60)}`);
+const pausedWords = /breakpoint|paused frame|(?<!request )call stack|step over|step into/gi;
+const pausedFree = text => text.replace(pausedWords, ' ');
+const reachable = node => {
+  const own = nativeExempt(node);
+  let text = own ? pausedFree(node.textContent) : node.textContent;
+  if (!own) for (const native of node.querySelectorAll?.('[data-debugger-native]') ?? []) if (nativeExempt(native)) text = text.replace(native.textContent, pausedFree(native.textContent));
+  const labels = [node.getAttribute('aria-label'), node.getAttribute('title')].filter(Boolean).map(value => own ? pausedFree(value) : value);
+  return [text, ...labels].join(' ');
+};
+// Every element in a native pausing section a researcher could activate must
+// be a form control that is really disabled; aria-disabled leaves its handler
+// running, and a summary, a role or an editable region cannot be disabled.
+const pausingControls = 'button, input, select, textarea, a[href], summary, [tabindex], [role="button"], [role="option"], [role="checkbox"], [role="tab"], [contenteditable]:not([contenteditable="false"])';
+const reallyDisabled = control => ['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(control.tagName) &&
+  (control.disabled === true || Boolean(control.closest('fieldset[disabled]')));
+// Only the sidebar's registry writes the marker.
+for (const [file, source] of [...sources, ['index.html', html]]) {
+  if (file !== 'debugger_sidebar.js') assert(!/data-debugger-native|debuggerNative/.test(source), `${file} must not mark text as native debugger text`);
+}
+{
+  // Self-test: a marker outside the sidebar, or with another value, exempts nothing.
+  const outside = window.document.createElement('button');
+  outside.dataset.debuggerNative = 'pausing';
+  outside.textContent = 'Breakpoints';
+  window.document.getElementById('screen-traffic').append(outside);
+  const inside = window.document.createElement('span');
+  inside.dataset.debuggerNative = 'cdp';
+  inside.textContent = 'Step over';
+  window.document.getElementById('debugger-sidebar').append(inside);
+  assert(!nativeExempt(outside) && removedFeature.test(reachable(outside)), 'self-test: a marker outside the sidebar exempts nothing');
+  assert(!nativeExempt(inside) && removedFeature.test(reachable(inside)), 'self-test: an unknown marker value exempts nothing');
+  assert.equal(nativeMarkerProblems().length, 2, 'self-test: stray markers are reported');
+  outside.remove();
+  inside.remove();
+  assert.deepEqual(nativeMarkerProblems(), []);
+}
 for (const id of ['screen-traffic', 'screen-sources', 'screen-vm', 'investigation-navigation']) {
   const screen = document.getElementById(id);
   assert(screen, `missing ${id}`);
@@ -265,6 +316,234 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   assert.equal(dock.querySelectorAll('.xrefs-row').length, 0, 'closing releases the rows');
   await nextTurn();
   assert.equal(context.__xrefRequests.length, 1, 'closed dock stays idle');
+  window.location.protocol = 'file:';
+}
+
+// Debugger sidebar (debugger_sidebar.js, docs/product/native-debugger-v1.md):
+// a closed sidebar asks nothing, its labels come from get_native_debugger,
+// pausing is one stated availability and never a control, captured names stay
+// text, only rows in view mount, and an observed frame scopes the Sources tree.
+{
+  for (const [path, assets] of [['scripts/build-research-app.sh', ['debugger_sidebar.js', 'debugger_sidebar.css']],
+    ['apps/origin-trace-backend/src/app.rs', ['"debugger_sidebar.js"', '"debugger_sidebar.css"']],
+    ['apps/research-ui/macos/OriginTraceApp.swift', ['/debugger_sidebar.js', '/debugger_sidebar.css']]]) {
+    const text = await readFile(join(root, path), 'utf8');
+    for (const asset of assets) assert(text.includes(asset), `${path} ships ${asset}`);
+  }
+  const sidebar = document.querySelector('#debugger-sidebar'), toggle = document.querySelector('#source-debugger-toggle');
+  assert.equal(sidebar.hidden, true, 'the debugger sidebar starts closed');
+  context.__debuggerRequests = [];
+  const site = {script_id: 7, position: 40, function_start: 40};
+  const record = (index, type, detail, extra = {}) => ({type, session_id: '1', process_id: 42, frame_id: index % 2 ? '7101' : '200',
+    sequence_number: String(5000 - index), parent_event_id: '0', request_id: '0', monotonic_time_ns: String(1e9 + index), detail,
+    stack: {state: 'no_script', total_depth: 0, recorded: 0, async_frames: 0, digest: null, innermost: null}, ...extra});
+  // One row fails the sidebar's own checks: it is counted, never shown.
+  const records = Array.from({length: 128}, (_, index) => index === 9 ? record(index, 'timer_observation', {}, {sequence_number: 'x'}) : index === 3
+    ? record(index, 'listener_dispatch', {rule: 0, target: 'element', node_type: 1, listener: site, event_type: '<img/src=x/onerror=f()>'})
+    : index === 5 ? record(index, 'request_watch_match', {rule: 0, method_matched: true}, {request_id: '77', parent_event_id: '4000'})
+      : record(index, 'timer_observation', {phase: 'fired', kind: 'timeout', string_callback: false, timer_id: index, delay_ms: 0, callback: site}));
+  const observed = Array.from({length: 40}, (_, index) => ({session_id: '1', process_id: 42, frame_id: String(index ? 7100 + index : 200),
+    last_sequence: String(9000 - index), records: 60}));
+  const answer = (overrides = {}) => ({contract_version: 1, availability: 'unsupported', reason: 'browser_debugger_unsupported',
+    experiment_flag: '--reb-native-debugger', policy: 'proposed_pending_approval', detectable: true, lease_limit_ms: 60000, lease: null,
+    paused: false, breakpoints: [], threads: {console: 'idle', frames: [{target_id: '22', label: 'top #22', origin: 'https://a.test', frame: 'top', out_of_process: false}],
+      workers: [{kind: 'dedicated_worker', session_id: '1', process_id: 42, context_id: '9001', last_sequence: '12', requests: 3}], observed},
+    watch: {state: 'none', armed: null}, observations: records, observations_malformed: 2,
+    observations_query: {type: null, thread: null, scope: 'bounded_range', direction: 'backward', limit: 128, returned: 128, store_end: '9000',
+      next_after: '9000', next_before: '4000', limited: true, budget_exhausted: false},
+    observation_budget_gaps: [{session_id: '1', process_id: 42, frame_id: '7101', sequence_number: '9001'}], ...overrides});
+  context.__debuggerAnswer = () => answer();
+  context.__stackAnswer = () => ({status: 'recorded', request: {session_id: '1', process_id: 42, sequence_number: '4997'}, state: 'no_script', frames: [],
+    observation: {type: 'listener_dispatch', detail: {}, site: {index: 0, kind: 'javascript', script_id: 7, position: 40, function_position: 40,
+      resolution: {status: 'resolved', artifact_id: '350', url: 'https://app.test/handlers.js', artifact_line: 2, artifact_column: 9, line: 2, column: 9, function_name: 'onTap'}}}});
+  runInContext(`const __debuggerPriorFetch = fetch; globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (!url.startsWith('/api/native-debugger') && !url.startsWith('/api/request-stack')) return __debuggerPriorFetch(input, init);
+    __debuggerRequests.push(url);
+    const body = url.startsWith('/api/native-debugger') ? __debuggerAnswer() : __stackAnswer();
+    if (body instanceof Error) throw body;
+    return new Response(JSON.stringify(body), {status: 200});
+  };`, context);
+  const settle = async () => { for (let turn = 0; turn < 10; turn += 1) await nextTurn(); };
+  window.AbortSignal ??= AbortSignal;
+  const click = node => node.dispatchEvent(new window.Event('click', {bubbles: true}));
+  runInContext(`showScreen('sources')`, context);
+  await settle();
+  assert.equal(context.__debuggerRequests.length, 0, 'a closed sidebar makes no requests');
+  toggle.click();
+  await settle();
+  assert.equal(sidebar.hidden, false, 'the toggle opens the sidebar');
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+  assert.equal(document.querySelector('#source-sidebar').hidden, true, 'Details and the debugger share one column');
+  assert.equal(context.__debuggerRequests.length, 0, 'the offline file window has no backend to ask');
+  assert.match(sidebar.querySelector('.debugger-sidebar-status').textContent, /No backend serves this window/);
+  toggle.click();
+  window.location.protocol = 'http:';
+  toggle.click();
+  await settle();
+  assert.match(context.__debuggerRequests[0], /^\/api\/native-debugger\?limit=128$/, context.__debuggerRequests[0]);
+  const sectionIds = () => [...sidebar.querySelectorAll('.debugger-section')].map(node => node.dataset.debuggerSection);
+  assert.deepEqual(sectionIds().slice(0, 4), ['threads', 'watch-rules', 'observations', 'pausing'], 'the phase 1 sections come first');
+  const rows = [...sidebar.querySelectorAll('#debugger-observations .debugger-list-row')];
+  assert(rows.length > 0 && rows.length < 40, `only rows in view mount: ${rows.length} of 128`);
+  assert.equal(rows[0].getAttribute('aria-setsize'), '127');
+  assert(rows.some(row => row.textContent.includes('<img/src=x/onerror=f()> listener on element')), 'a captured event type renders as text');
+  assert.equal(sidebar.querySelector('img'), null, 'captured names never become elements');
+  for (const text of [/3 records in these reads were malformed/, /Renderer 42 reached 1,024 observation records in frame 7101/]) {
+    assert.match(sidebar.querySelector('.debugger-observation-notes').textContent, text);
+  }
+  const threadRows = sidebar.querySelectorAll('#debugger-threads .debugger-list-row');
+  assert(threadRows.length > 0 && threadRows.length < 42, `thread rows mount by view: ${threadRows.length} of 42`);
+  // Pausing is one statement of the reported availability, with no control.
+  const statement = sidebar.querySelector(nativeAvailability);
+  assert.equal(statement.dataset.availability, 'unsupported');
+  assert.equal(statement.closest('[data-debugger-section]').dataset.debuggerSection, 'pausing');
+  assert.match(statement.textContent, /^Unsupported\. No Brave build serves the pausing debugger \(browser_debugger_unsupported\)/);
+  assert.equal(statement.querySelectorAll('button, input, select, textarea, a, summary, [tabindex]').length, 0, 'the pausing state is text');
+  assert.equal(document.querySelectorAll(nativeAvailability).length, 1, 'the availability statement appears once');
+  // Outside native sections the paused-state words never appear, and inside
+  // them only those words. While the backend reports the debugger anything but
+  // available, or the sidebar's last read is not ready, every control in a
+  // native pausing section's body is a really disabled form control.
+  const checkVocabulary = () => {
+    for (const control of sidebar.querySelectorAll('button, summary, [role="option"], label, h1, h2, h3, h4, section, details, a')) {
+      assert(!removedFeature.test(reachable(control)), `the debugger sidebar implies a CDP control: ${reachable(control).slice(0, 160)}`);
+    }
+    assert.deepEqual(nativeMarkerProblems(), [], 'native debugger markers appear only inside the sidebar, with a known value');
+    if (sidebar.querySelector(nativeAvailability)?.dataset.availability === 'available' && sidebar.dataset.state === 'ready') return;
+    for (const section of sidebar.querySelectorAll('.debugger-section[data-debugger-native="pausing"]')) {
+      for (const body of section.querySelectorAll(':scope > .debugger-section-body')) {
+        for (const control of body.querySelectorAll(pausingControls)) {
+          assert(reallyDisabled(control),
+            `every control of ${section.dataset.debuggerSection} stays disabled while the debugger is unsupported: ${control.tagName} ${control.textContent.slice(0, 60)}`);
+        }
+      }
+    }
+  };
+  checkVocabulary();
+  // A record opens its own resolved frame in Sources.
+  context.__opened = [];
+  runInContext(`var __selectArtifact = selectArtifact; selectArtifact = (...args) => { __opened.push(args); return true; };`, context);
+  click(sidebar.querySelector('#debugger-observations .debugger-list-row[data-kind="listener_dispatch"]'));
+  await settle();
+  assert.match(context.__debuggerRequests.at(-1), /^\/api\/request-stack\?session_id=1&process_id=42&observation_sequence=4997$/);
+  const open = sidebar.querySelector('.debugger-open-source');
+  assert.equal(open?.textContent, 'Open onTap @ handlers.js:2:9');
+  for (const text of ['Operation', 'listener_dispatch', 'Category', 'runtime', 'Time', 'Source', 'renderer process 42, frame 7101', 'sequence 4997']) {
+    assert(sidebar.querySelector('.debugger-detail').textContent.includes(text), `details name ${text}`);
+  }
+  open.click();
+  assert.equal(JSON.stringify(context.__opened), JSON.stringify([['350', 1, {column: 8}]]), 'Sources opens at the one-based resolved line and column');
+  runInContext(`selectArtifact = __selectArtifact;`, context);
+  // A failed stack read says why and is not retried until its pause has passed.
+  context.__stackAnswer = () => new Error('store offline');
+  const stackReads = () => context.__debuggerRequests.filter(url => url.startsWith('/api/request-stack')).length;
+  const readsBefore = stackReads();
+  click(sidebar.querySelector('#debugger-observations .debugger-list-row[data-kind="timer_observation"]'));
+  await settle();
+  assert.equal(stackReads(), readsBefore + 1, 'one read per record, not a loop');
+  assert.match(sidebar.querySelector('.debugger-detail').textContent, /Positions unavailable: store offline/);
+  // A watched request opens its Traffic row only when that exact row is loaded.
+  click(sidebar.querySelector('#debugger-observations .debugger-list-row[data-kind="request_watch_match"]'));
+  await settle();
+  [...sidebar.querySelectorAll('.debugger-detail button')].find(button => button.textContent === 'Open request in Traffic').click();
+  await settle();
+  assert.match(sidebar.querySelector('.debugger-detail').textContent, /Request 77 of renderer 42 is not among the Traffic rows loaded now/);
+  // An observed frame scopes Observations and the Sources tree by exact identity.
+  click(sidebar.querySelector('#debugger-threads .debugger-list-row[data-key="F:1:42:200"]'));
+  await settle();
+  assert.match(context.__debuggerRequests.at(-1), /^\/api\/native-debugger\?limit=128&session_id=1&process_id=42&frame_id=200$/, context.__debuggerRequests.at(-1));
+  const scope = runInContext('RebDebuggerSidebar.sourceScope()', context);
+  assert.equal(scope.includes({session_id: '1', frame_id: '200'}), true);
+  assert.equal(scope.includes({session_id: '1', frame_id: '2000'}), false);
+  assert.equal(scope.includes({session_id: '2', frame_id: '200'}), false);
+  assert.match(document.querySelector('#source-tree').textContent, /Frame 200 of session 1, selected in Debugger Threads/);
+  // A malformed or failed read keeps the last understandable evidence.
+  for (const [body, text] of [[{contract_version: 2}, /malformed \(an unknown contract version\) and was not used/], [new Error('offline'), /Disconnected: offline/]]) {
+    context.__debuggerAnswer = () => body;
+    click(sidebar.querySelector('.debugger-kind[data-kind="timer_observation"]'));
+    await settle();
+    assert.match(sidebar.querySelector('.debugger-sidebar-status').textContent, text);
+    assert(sidebar.querySelectorAll('#debugger-observations .debugger-list-row').length > 0, 'rows stay after a failed read');
+    assert.equal(sidebar.querySelector('[data-debugger-section="threads"]').dataset.stale, 'true', 'a stale section says so');
+  }
+  // Arming goes through the Console's live document only, and invalid rules send nothing.
+  context.__debuggerAnswer = () => answer();
+  context.__watchCalls = [];
+  runInContext(`globalThis.RebNativeConsole = {liveDocument: () => ({session_id: '5', target_id: '22', label: 'top #22'}),
+    watch: async rules => { __watchCalls.push(JSON.stringify(rules)); return {status: 'ok', text: 'Armed'}; }};`, context);
+  click(sidebar.querySelector('.debugger-kind[data-kind="all"]'));
+  await settle();
+  const form = sidebar.querySelector('.debugger-watch-form');
+  assert(form, 'a live Console document offers the rules form');
+  assert.equal(form.querySelector('.debugger-arm').textContent, 'Arm on document 22');
+  form.querySelector('textarea').value = 'POST /api/x\n/collect';
+  form.querySelector('input[type="text"]').value = 'click, submit';
+  form.querySelector('input[type="checkbox"]').checked = true;
+  form.querySelector('select').value = 'uncaught';
+  form.dispatchEvent(new window.Event('submit', {cancelable: true}));
+  await settle();
+  assert.deepEqual(context.__watchCalls.map(text => JSON.parse(text)), [{requests: [{method: 'POST', url_contains: '/api/x'}, {url_contains: '/collect'}],
+    events: ['click', 'submit'], timers: true, csp: false, exceptions: 'uncaught', dom: []}]);
+  assert.match(form.querySelector('.debugger-watch-result').textContent, /Armed on document 22/);
+  form.querySelector('input[type="text"]').value = 'x'.repeat(28);
+  form.dispatchEvent(new window.Event('submit', {cancelable: true}));
+  await settle();
+  assert.equal(context.__watchCalls.length, 1, 'invalid rules send nothing');
+  assert.match(form.querySelector('.debugger-watch-result').textContent, /At most 16 event types/);
+  runInContext(`delete globalThis.RebNativeConsole;`, context);
+  // The registry: later sections join in order; malformed ones are refused.
+  assert.throws(() => runInContext(`RebDebuggerSidebar.addSection({id: 'Bad id', title: 'x', order: 1, render() {}})`, context), /lowercase/);
+  assert.throws(() => runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'x', order: 1, native: 'cdp', render() {}})`, context), /native must be pausing/);
+  // A native section may name what it presents. While unsupported, an enabled
+  // control in it fails whatever it is called; disabled, the section passes.
+  runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Breakpoints', order: 55, native: 'pausing', render(body) {
+    body.textContent = 'from the registry';
+    const go = document.createElement('button'); go.textContent = 'Go'; body.append(go);
+  }})`, context);
+  assert.throws(checkVocabulary, /every control of later stays disabled/, 'self-test: an enabled control in a pausing section fails');
+  // Self-tests: no control escapes by aria-disabled, a role, a nested summary
+  // or an editable region, and only paused-state words are exempt.
+  for (const [label, make, failure] of [
+    ['an aria-disabled button', "const b = document.createElement('button'); b.textContent = 'Go'; b.setAttribute('aria-disabled', 'true'); b.addEventListener('click', () => {}); body.append(b);", /stays disabled/],
+    ['a div with role button', "const d = document.createElement('div'); d.setAttribute('role', 'button'); d.textContent = 'Go'; body.append(d);", /stays disabled/],
+    ['a nested summary', "const d = document.createElement('details'); const m = document.createElement('summary'); m.textContent = 'More'; d.append(m); body.append(d);", /stays disabled/],
+    ['an editable region', "const d = document.createElement('div'); d.setAttribute('contenteditable', 'true'); body.append(d);", /stays disabled/],
+    ['a tab', "const d = document.createElement('div'); d.setAttribute('role', 'tab'); body.append(d);", /stays disabled/],
+    ['another removed feature', "const b = document.createElement('button'); b.textContent = 'Import cookies'; b.disabled = true; body.append(b);", /implies a CDP control/]]) {
+    runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Breakpoints', order: 55, native: 'pausing', render(body) {
+      body.textContent = 'from the registry'; ${make}
+    }})`, context);
+    assert.throws(checkVocabulary, failure, `self-test: ${label} in a pausing section fails`);
+  }
+  const remove = runInContext(`RebDebuggerSidebar.addSection({id: 'later', title: 'Breakpoints', order: 55, native: 'pausing', render(body) {
+    body.textContent = 'from the registry';
+    const step = document.createElement('button'); step.textContent = 'Step over'; step.disabled = true; body.append(step);
+  }})`, context);
+  assert.match(sidebar.querySelector(nativeAvailability).textContent, /The controls in the Breakpoints section stay disabled\./,
+    'the Pausing statement names the native sections registered');
+  const ids = sectionIds();
+  assert(ids.indexOf('pausing') < ids.indexOf('later'), `sections join by order: ${ids}`);
+  // The built-in sections cannot be replaced, so the statement stays.
+  for (const id of ['threads', 'watch-rules', 'observations', 'pausing']) {
+    assert.throws(() => runInContext(`RebDebuggerSidebar.addSection({id: '${id}', title: 'x', order: 1, render() {}})`, context), /built-in section/);
+  }
+  const later = sidebar.querySelector('[data-debugger-section="later"]');
+  assert.match(later.textContent, /from the registry/);
+  assert.equal(later.dataset.debuggerNative, 'pausing', 'a native section is marked for the guards');
+  checkVocabulary();
+  remove();
+  assert.equal(sidebar.querySelector('[data-debugger-section="later"]'), null, 'a removed section leaves');
+  assert.doesNotMatch(sidebar.querySelector(nativeAvailability).textContent, /Breakpoints/, 'a removed native section is no longer named');
+  // Closing stops every read and releases rows and the tree scope.
+  toggle.click();
+  await settle();
+  const asked = context.__debuggerRequests.length;
+  await settle();
+  assert.equal(context.__debuggerRequests.length, asked, 'a closed sidebar stays idle');
+  assert.equal(sidebar.querySelectorAll('.debugger-list-row').length, 0, 'closing releases the rows');
+  assert.equal(runInContext('RebDebuggerSidebar.sourceScope()', context), null, 'a closed sidebar scopes nothing');
+  assert.doesNotMatch(document.querySelector('#source-tree').textContent, /selected in Debugger Threads/);
   window.location.protocol = 'file:';
 }
 

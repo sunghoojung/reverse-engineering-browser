@@ -589,6 +589,99 @@ function serviceWorkerRegistrantRequest(template, firstSequence, firstTime) {
     browser({type: 'capture_exclusion', tab_id: 0, frame_id: '0', initiator_process_id: 0, initiator_request_id: 0}, counted)];
 }
 
+// Debugger observation records (protocol/native-debugger-observation-v1.md)
+// from one renderer of its own: frame 200 holds the retained sources, so its
+// thread scope narrows the Sources tree, and the listener, timer and throw
+// sites name a retained compiled script. Workers come from request records
+// with loader kinds 17 to 19. No budget gap is written: a runtime gap would
+// mark Fingerprinting coverage partial, which test14 rules out for this store.
+// Runtime records also count as Fingerprinting activity, so the default stays
+// well under its 500-event window. REB_RENDERED_UI_DEBUGGER_RECORDS raises it.
+export const DEBUGGER_PROCESS = 4747;
+export const DEBUGGER_FRAME = '200';
+// At most 27 printable bytes, the event type bound; it would load an image if parsed as HTML.
+export const DEBUGGER_HOSTILE_EVENT = '<img/src=x/onerror=f()>';
+export const DEBUGGER_SOURCE = "// Debugger fixture: the handlers observation records name.\n" +
+  "document.querySelector('#go').addEventListener('click', function onTap(event) {\n" +
+  "  event.preventDefault();\n" +
+  "  setTimeout(function later() { fetch('/api/x'); }, 100);\n" +
+  "});\n";
+export const DEBUGGER_ARTIFACT_ID = '360';
+export async function debuggerObservations(template, artifactsRoot, {records = Number(process.env.REB_RENDERED_UI_DEBUGGER_RECORDS ?? 120),
+  frames = ['200', '7101', '7102', '7103', '7104', '7105'], workers = 3} = {}) {
+  assert(Number.isSafeInteger(records) && records >= 8 && records <= 20000, 'REB_RENDERED_UI_DEBUGGER_RECORDS must be 8 to 20000');
+  const source = Buffer.from(DEBUGGER_SOURCE, 'utf8');
+  const tap = DEBUGGER_SOURCE.indexOf('(event) {'), later = DEBUGGER_SOURCE.indexOf('() { fetch'), fetchAt = DEBUGGER_SOURCE.indexOf("fetch('/api/x')");
+  const frameBytes = (position, start) => {
+    const bytes = Buffer.alloc(16);
+    bytes[0] = 1;
+    bytes.writeUInt32LE(7, 4);
+    bytes.writeUInt32LE(position, 8);
+    bytes.writeUInt32LE(start, 12);
+    return bytes;
+  };
+  const observation = tail => {
+    const payload = Buffer.alloc(128);
+    payload.set([1, 0, 128, 0, 2, 0x08]);
+    Buffer.from(tail).copy(payload, 80);
+    return payload.toString('hex');
+  };
+  const name = (length, text) => [length, ...Buffer.from(text, 'latin1')];
+  const tails = {
+    listener_dispatch: index => [index % 2, 1, 1, 0, ...frameBytes(tap, tap), ...name(index % 7 ? 5 : DEBUGGER_HOSTILE_EVENT.length, index % 7 ? 'click' : DEBUGGER_HOSTILE_EVENT)],
+    timer_observation: index => {
+      const tail = Buffer.alloc(48);
+      tail[0] = 1 + (index % 2); tail[1] = 1;
+      tail.writeUInt32LE(100 + index, 4);
+      tail.writeUInt32LE(index % 2 ? 0 : 100, 8);
+      frameBytes(later, later).copy(tail, 12);
+      return [...tail];
+    },
+    csp_violation: () => [19, 1, ...name(16, 'cdn.blocked.test')],
+    exception_observation: index => [1 + (index % 3), 0, 0, 0, ...(index % 3 === 2 ? Buffer.alloc(16) : frameBytes(fetchAt, later))],
+    dom_mutation: () => [1, 0, 1, 0, ...name(5, 'class')]
+  };
+  const kinds = Object.keys(tails);
+  const events = [];
+  let sequence = 0, time = BigInt(template.monotonic_time_ns);
+  const row = (fields, type, payload) => {
+    sequence += 1; time += 1000n;
+    const event = {...template, process_id: DEBUGGER_PROCESS, thread_id: DEBUGGER_PROCESS, sequence_number: String(sequence),
+      monotonic_time_ns: String(time), navigation_id: '0', artifact_id: '0', parent_event_id: '0', request_id: '0', category: 'runtime',
+      initiator_process_id: 0, initiator_request_id: 0, status_code: 0, error_code: 0, resource_type: 0, flags: 0,
+      encoded_data_length: '0', decoded_body_length: '0', payload_truncated: false, payload_size: payload.length / 2, payload, type, ...fields};
+    events.push(event);
+    return event;
+  };
+  const identity = Buffer.alloc(128);
+  identity.set([1, 0, 128, 0, 1, 0x02]);
+  identity.writeUInt32LE(7, 8);
+  identity.writeBigUInt64LE(99n, 24);
+  identity.writeBigUInt64LE(BigInt(source.length), 32);
+  createHash('sha256').update(source).digest().copy(identity, 40);
+  const scriptIdentity = row({category: 'network', frame_id: DEBUGGER_FRAME}, 'script_identity', identity.toString('hex'));
+  // A watched request and its match; the match names the request record as parent.
+  const watched = row({category: 'network', frame_id: DEBUGGER_FRAME, request_id: '5100', loader_kind: 16}, 'request_initiated', hex('GET watch.debugger.test'));
+  row({category: 'network', frame_id: DEBUGGER_FRAME, request_id: '5100', parent_event_id: watched.sequence_number}, 'request_watch_match', observation([0, 1]));
+  for (let index = 0; index < workers; index += 1) {
+    for (let request = 0; request <= index; request += 1) {
+      row({category: 'network', frame_id: String(9001 + index), request_id: String(6000 + index * 40 + request), loader_kind: 17 + (index % 3)},
+        'request_initiated', hex(`GET worker-${index}.debugger.test`));
+    }
+  }
+  for (let index = 0; index < records; index += 1) {
+    const kind = kinds[index % kinds.length];
+    row({frame_id: frames[index % frames.length]}, kind, observation(tails[kind](index)));
+  }
+  // Two records the core refuses.
+  row({frame_id: DEBUGGER_FRAME}, 'listener_dispatch', observation([0, 1, 1, 0]));
+  row({frame_id: DEBUGGER_FRAME}, 'dom_mutation', observation([2, 0, 1, 0, 1, 120]));
+  const script = await artifact(artifactsRoot, {artifact_id: DEBUGGER_ARTIFACT_ID, session_id: template.session_id, navigation_id: '100',
+    frame_id: DEBUGGER_FRAME, creator_event_id: scriptIdentity.sequence_number, capture_origin: 'compiled_script', kind: 'javascript',
+    mime_type: 'text/javascript', url: 'https://app.debugger.test/handlers.js'}, source);
+  return {events, artifacts: [script]};
+}
+
 // Like the browser, each gap takes its renderer's own sequence slot, so the
 // stream has no hole. The payload is the reason text, as the producers write it.
 function namedBudgetGaps(template, events) {
@@ -658,7 +751,8 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   // static arm label, and an inner interpreter linked to its outer handler.
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, ...withBodies.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
+  const debuggerRecords = await debuggerObservations(network, artifacts);
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, ...withBodies.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   for (const process of WORKER_STACK_PROCESSES) {
     assert.equal(retained.filter(event => event.process_id === process).length,
@@ -666,7 +760,8 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   }
   const vm = demoEvents.find(event => event.category === 'vm');
   assert(vm, 'demo store must contain a native vm event');
-  const events = [...retained, ...namedBudgetGaps(vm, retained)];
+  // The debugger renderer's records come first, so its requests list last in Traffic.
+  const events = [...debuggerRecords.events, ...retained, ...namedBudgetGaps(vm, retained)];
   await writeFile(join(artifacts, 'manifest.jsonl'), manifest.map(record => JSON.stringify(record) + '\n').join(''));
   await writeFile(join(root, 'events.jsonl'), events.map(event => JSON.stringify(event) + '\n').join(''));
   return {

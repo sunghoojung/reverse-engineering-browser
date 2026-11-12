@@ -14,6 +14,7 @@
     <link rel="stylesheet" href="flow_workspace.css">
     <link rel="stylesheet" href="agent_panel.css">
     <link rel="stylesheet" href="session_panel.css">
+    <link rel="stylesheet" href="debugger_sidebar.css">
   </head>
   <body>
     <div class="app">
@@ -284,6 +285,7 @@
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
                 <button id="source-graph" class="source-tool" type="button" aria-label="Show basic-block graph" aria-pressed="false" hidden>Graph</button>
                 <button id="source-map" class="source-tool" type="button" aria-label="Show artifact map" aria-pressed="false" hidden>Map</button>
+                <button id="source-debugger-toggle" class="source-tool" type="button" aria-controls="debugger-sidebar" aria-expanded="false" aria-pressed="false" title="Threads, watch rules and native observations; never pauses">Debugger</button>
                 <details id="source-more" class="source-more">
                   <summary class="source-tool" title="More source actions">More</summary>
                   <div class="source-more-menu" role="group" aria-label="Source actions">
@@ -343,6 +345,7 @@
 
               </div>
             </aside>
+            <aside id="debugger-sidebar" class="sources-debugger debugger-sidebar" aria-label="Debugger" hidden></aside>
           </section>
 
           <section id="screen-vm" class="screen" aria-label="Virtual machine investigation" hidden>
@@ -905,6 +908,8 @@
     </div>
 
     <script src="command_palette.js"></script>
+    <!-- The debugger sidebar's section registry, before any script that adds a section. -->
+    <script src="debugger_sidebar.js"></script>
     <script src="app_state.js"></script>
     <script src="evidence_models.js"></script>
     <script src="evidence_package.js"></script>

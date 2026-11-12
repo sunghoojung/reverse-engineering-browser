@@ -19,7 +19,8 @@ broker events, retained artifacts and analyzer documents:
 - **Traffic** lists native network events with exact session, process and
   sequence identities, linked origin traces and local exports.
 - **Sources** shows retained artifacts, static facts, decoding and formatting;
-  it never fetches or executes source.
+  it never fetches or executes source. Its debugger sidebar shows native
+  observation records and never pauses the page.
 - **VM** shows analyzer findings, the opcode workspace, native Wasm dispatch and
   guest observations, the owned native fixture, static bytecode, packs and the
   opcode ledger.
@@ -31,7 +32,13 @@ broker events, retained artifacts and analyzer documents:
 The application does not launch, attach to or emulate a Chrome DevTools
 Protocol debugger. Historical `cdp-attached` provenance labels and recorded
 event schemas remain readable for old captures; they do not enable an
-attachment or any live control.
+attachment or any live control. Words of the removed debugger (breakpoint,
+call stack, step over and the like) appear only inside the debugger sidebar:
+in its statement of the pausing availability `get_native_debugger` reports,
+which is text and never a control, and in sections registered as presenting
+that debugger (`native: 'pausing'`), whose every control stays disabled while
+the backend reports it unsupported. `make native-only-check` and the rendered
+suite check both.
 
 The Findings **Native observations** tab displays native Wasm module offsets,
 function indexes and unsigned selectors/default arms. These are physical Wasm
@@ -223,6 +230,149 @@ Only visible rows are mounted, and at most a few nearby pages stay in memory; th
 rest are refetched as the list scrolls. Closing the dock drops the results and
 stops its timers. The stored-evidence window has no backend, so the dock says so
 instead of listing nothing.
+
+## Debugger sidebar
+
+**Debugger** in the Sources toolbar opens a sidebar in the column Details uses,
+so opening one closes the other; below a 1,112 px window it overlays the editor
+as Details does. It is phase 1 of [native debugger v1](../../docs/product/native-debugger-v1.md):
+native observation records that never pause the page, read from
+`get_native_debugger` ([native debugger observation v1](../../protocol/native-debugger-observation-v1.md)).
+The header says "Observes, never pauses" and the status line says what the
+sidebar reads and when it last read; only a change of that state is
+announced, not the time of each read or the interval. In a live window, while it is open and
+Sources is showing, it reads every 2 seconds, or four times as long as the
+last read took, up to 30 seconds. The stored-evidence window (`reb://`)
+answers the same reads from its fixed store, so it reads once when opened and
+again only on **Read again**; its reads wait up to 45 seconds, since the
+bundled backend may take 15 seconds to start before it scans the newest
+64 MiB. A window without a backend (`file:`) sends
+nothing and says it cannot read. Closed or behind another workspace, the
+sidebar runs no timer and sends nothing. One read is in flight at a time: a
+newer read, closing, leaving Sources or a cleared or replaced store aborts it.
+A failed or malformed read keeps the last state, marks each section "last
+read" and dims it, and says why.
+
+Each section is a collapsible pane:
+
+- **Threads**, the Threads view: Console documents (top, child and
+  out-of-process frames, as the Console listing derives them), observed frames
+  (the session, renderer and frame of the observation records among the
+  newest 2,048 records that are observations or gaps of any kind, within the
+  newest 64 MiB of the store, with the origin of a retained document of that exact frame when there is one)
+  and workers that started requests (from the newest 2,048 request records).
+  Each row gives the origin a line of its own; the selected thread's kind,
+  origin, frame, process and state are listed in full below the list. Arrow
+  keys, Home, End and the Page keys move through the list, and Enter, Space, a
+  click or a double-click selects or clears a thread once. An observed frame scopes
+  Observations and the Sources tree to that exact session and frame, and the
+  tree says so. A Console document scopes only Watch rules, because it carries
+  no native frame ID; a worker scopes nothing, because rules match only a
+  document's main thread and compiled worker scripts carry frame 0.
+- **Watch rules**: what the renderer confirmed armed, rule by rule. When the
+  Console is connected to a live capture document, selected and confirmed in
+  the Console as before, one form, drawn for that document and naming it on
+  its button, arms request rules (an optional method, then URL text), event
+  types, timers, CSP violations and exceptions there through that
+  connection's `watch` command, or clears them with `unwatch`. When the
+  Console holds another document by the time the form is submitted, nothing
+  is sent, the section says so, and the form is drawn again for the new
+  document. Arming replaces the set and keeps the DOM rules the Console armed
+  on the same document. A refused set leaves nothing armed, and nothing is
+  retried. Without a live connection the section says how to get one and
+  shows no form.
+- **Observations**: the newest records, 128 at a time and up to 4,096 with
+  **Show older records**, filtered by kind. A note says how much of the store
+  the rows were read from: the whole store, or its newest bytes and why the
+  read stopped. An empty list says that no record exists only when the whole
+  store was read. Each row names the kind, what happened, its monotonic time,
+  category, renderer process, frame, sequence and request. Choosing a row
+  (a click, or the arrow keys) marks it at once, brings its details into view,
+  and again once its positions resolve, lists every identifier and resolves its own
+  frame (listener, timer callback or throw site) and its stack with
+  `get_request_stack`. Enter or **Open …** opens that position in Sources; a
+  watched request opens its Traffic row on the Initiator tab through Traffic's
+  own row selection, after locating it in the request index when it is
+  outside the block Traffic holds. Its link says it is working, and a newer
+  click, closing the sidebar or leaving Sources cancels it, so Traffic never
+  opens after the researcher moved on. Until the researcher has a place, the
+  list follows the newest page. Once a row is selected, the list is scrolled
+  from its top or older pages are loaded, the rows are kept: each read adds
+  the records written since, reading at most two more pages to reach them,
+  and keeps the scroll position and selection. When more was written than
+  that, the list stays as it is, names the byte span it does not hold, and
+  **Show newest** returns to the newest page. Past 4,096 rows the oldest are
+  dropped, and the list says how many. A failed read changes neither the rows
+  nor their note. Malformed
+  records, a renderer's `debugger_observation_budget` gap and store sequence
+  gaps are stated above the list, which is as tall as its rows up to a cap.
+- **Pausing**: one statement of the availability `get_native_debugger` reports.
+  Today it is unsupported, so the sidebar offers no control to stop, step or
+  inspect a paused frame. When sections registered with `native: 'pausing'`
+  exist, the statement names them: available, their controls are there;
+  unsupported, those controls stay disabled.
+
+Threads and Observations mount only the rows in view, and captured names such
+as event types and hosts are inserted as text.
+
+Sections come from one registry, so a later change adds its own; the pausing
+debugger adds its sections here. `debugger_sidebar.js` loads right after
+`command_palette.js`, so `addSection` exists while any later script evaluates:
+
+```js
+const remove = globalThis.RebDebuggerSidebar.addSection({
+  id: 'breakpoints',     // 1 to 32 lowercase letters, digits or dashes; the same id replaces
+  title: 'Breakpoints',  // the pane's summary, at most 64 characters
+  order: 50,             // 50 and above: Threads 10, Watch rules 20, Observations 30, Pausing 40
+  collapsed: false,      // optional: start collapsed
+  native: 'pausing',     // required for a section of the pausing debugger
+  summary(view) { return String(view.document?.breakpoints?.length ?? ''); },  // optional count
+  render(body, view) { /* fill body from view; called after every read while the pane is open */ },
+  release(body) { /* optional: drop rows and timers when collapsed or closed */ }
+});
+```
+
+`view` holds `status` (`loading`, `ready`, `disconnected`, `malformed` or
+`unavailable`), `document` (the last valid `get_native_debugger` answer, or
+null), `error`, `updatedAt`, the selected `thread`, `selectThread(thread)`,
+`refresh()`, `repaint()` and `nativeSections()`. `refresh()` asks for a read
+soon: from a render, or anything a render queued, it does nothing; while a
+read is in flight it runs one more afterwards; otherwise it reads once a
+second has passed since the last read started. `repaint()` renders again from
+the last read without a read. A section whose `summary` throws keeps its
+body, and one whose `render` throws shows the error in its own pane only.
+`addSection` throws a `TypeError` for a malformed section and returns a
+function that removes exactly that registration.
+
+The contract for a later section, which `make native-only-check` and the
+rendered suite enforce:
+
+- A section of the pausing debugger sets `native: 'pausing'` (marked
+  `data-debugger-native="pausing"`). Only such sections and the Pausing
+  statement (`data-debugger-native="availability"`), and only inside
+  `#debugger-sidebar`, may use the paused-state words (breakpoint, paused
+  frame, call stack, step over, step into, resume); every other removed
+  feature fails there too, and a marker anywhere else, or with another value,
+  is a failure.
+- While `view.document?.availability` is not `available`, and while
+  `view.status` is not `ready`, every control in such a section is a form
+  control (`button`, `input`, `select`, `textarea`) with `disabled` set.
+  `aria-disabled` does not count, and a `summary`, a link, a `role` of
+  button, option, checkbox or tab, a `tabindex` or an editable region cannot
+  be disabled, so none may appear then.
+- `render` handles `view.document === null` (before the first read, and in a
+  window without a backend).
+- Ids other than the built-in `threads`, `watch-rules`, `observations` and
+  `pausing`, which cannot be replaced, and an order of 50 or above, so the
+  section follows the Pausing statement; `nativeSections()` lists it and the
+  statement names it.
+- Never call `view.refresh()` from inside `render`, directly or deferred; the
+  sidebar reads on its own after every change it makes.
+
+`make native-only-check` drives the production sidebar in DOM models
+(`tools/check-native-only-ui.mjs`, and `tools/check-debugger-sidebar.mjs` with
+real timers and a stub backend) and `test31DebuggerSidebar` drives it in the
+packaged app.
 
 ## Local passive security report
 
@@ -1375,12 +1525,13 @@ capture, fetch anything or change a row.
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
 | `source_tree.js` | The Sources navigator: frame, group, origin and folder model, hand-parsed non-special URLs, mounted-window rows, keyboard, type-ahead and filter; `app.js` supplies the catalog and the open path |
+| `debugger_sidebar.js`, `debugger_sidebar.css` | The Sources debugger sidebar: its section registry, the Threads view, Watch rules, Observations and Pausing, and their reads of `get_native_debugger` and `get_request_stack` |
 | `xrefs_view.js`, `xrefs_view.css` | The cross-references dock: selection following, the paged and virtualized list, and links to existing rows; the projection is [`/api/xrefs`](../../protocol/http-api.md#cross-references) in `../origin-trace-backend/src/xrefs.rs` |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
 | `source_format.js` | The backend layout client (whole bodies and 1,000-line Sources pages) and its whitespace-only mapping to the displayed evidence |
 | `code_view.js` | The code view Payload, Response, Native Console, Analyst and the agent panel share: Sources colors, rows mounted near the view in blocks of at most 200 rows and 64 KiB, find marks, layouts with raw ranges and the colored textarea editor |
-| `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |
+| `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion; the live document the debugger sidebar arms rules through |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
 | `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `workspace_lease.rs` | Workspace contracts, explicit analyst execution, private durable replacement |
 | `../origin-trace-backend/src/decoder.rs`, `origin_trace.rs`, `vm.rs` | Native decoder adapter, trace projection, and VM analysis |
@@ -1432,9 +1583,9 @@ This runs the packaged app, not a browser. `tools/check-origin-trace-rendered-ui
 copies `build/Origin Trace.app` to a temporary directory, verifies its signature,
 and starts the bundled `OriginTraceBackend` on loopback with a bounded synthetic
 session: the `make e2e` demo stores, 72 native network rows, a 400-line retained
-source, a synthetic guest bytecode buffer, and Wasm dispatch and guest events
+source, a synthetic guest bytecode buffer, Wasm dispatch and guest events
 emitted by the real C++ encoders (`build/reb-native-wasm-dispatch-golden` and
-`build/reb-native-wasm-guest-golden`). Captured strings and bytecode include
+`build/reb-native-wasm-guest-golden`), and debugger observation records. Captured strings and bytecode include
 markup that would execute if it were inserted as HTML.
 
 The hosted XCTest bundle in
@@ -1472,7 +1623,13 @@ window and the enforced 760×560 minimum it checks:
 - no removed CDP control or markup anywhere in the shipped screens;
 - cross-references: the dock opens with X, follows the Traffic selection, lists the
   recorded initiator and lifecycle links, and keeps arrow keys, the filter shortcut,
-  Escape, truncation and the light theme usable at both window sizes.
+  Escape, truncation and the light theme usable at both window sizes;
+- the debugger sidebar: sections in order with Pausing stated as the reported
+  availability and no pausing control, rows mounted by view, inert captured
+  event types, keyboard focus on the Threads list, an observed frame scoping
+  the Sources tree and Observations, a listener record opening its site in
+  Sources at the exact line and column, the light theme, Escape, and no read
+  while closed.
 
 Layout checks reject horizontal page overflow, controls cut off by a
 non-scrolling ancestor, controls covered at their hit-test point, overlapping
@@ -1742,11 +1899,11 @@ Ordinary evidence refresh leaves Find and the current window in place; explicit
 original-source pivots choose their own retained location.
 
 The editor toolbar is one row: the URL, **Open file**, Find (Cmd+F), **Inspect**
-and **Graph** for a Wasm module, **Map** and **More**, which holds Go to line,
+and **Graph** for a Wasm module, **Map**, **Debugger** and **More**, which holds Go to line,
 Rename, Decode range, Facts, Track calls, Static cleanup and Details. The row
 never wraps at any width: the URL shortens first (its tooltip keeps it whole),
-then Find, and when the commands still do not fit, Map, Graph and Inspect move in
-that order to the top of More and return once there is room. Find's coverage
+then Find, and when the commands still do not fit, Debugger, Map, Graph and
+Inspect move in that order to the top of More and return once there is room. Find's coverage
 sentence is its tooltip. The status bar shows the
 caret line and column, with the original location in a pretty-printed or derived
 view (`Line 1204, Column 5 (original 1:48213)`), the selection length, the

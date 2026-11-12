@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use crate::{
     error::Result,
     event_query::{self, Cursor, EventFilter},
+    event_window,
     request_stack::{self, u16_at, u32_at},
 };
 
@@ -19,8 +20,14 @@ pub const TYPES: [&str; 6] = [
     "dom_mutation",
 ];
 pub const RECENT: usize = 32;
+/// The most records one filtered read returns.
+pub const PAGE: usize = 256;
 const WORKER_SCAN: usize = 2048;
 const WORKERS: usize = 64;
+const OBSERVED_SCAN: usize = 2048;
+const OBSERVED: usize = 64;
+const BUDGET_GAPS: usize = 16;
+const BUDGET_REASON: &str = "debugger_observation_budget";
 
 const TARGETS: [&str; 5] = ["element", "document", "window", "node", "other"];
 const EXCEPTIONS: [&str; 3] = ["uncaught", "caught", "unhandled_rejection"];
@@ -170,12 +177,160 @@ fn tail(store: &Path, types: &[&str], limit: usize) -> Result<(Vec<Value>, u64)>
     Ok((page.records, malformed))
 }
 
-/// The newest records first; a record the core would refuse is counted, not shown.
-pub fn recent(store: &Path) -> Result<(Vec<Value>, usize)> {
-    let (events, damaged) = tail(store, &TYPES, RECENT)?;
-    let decoded: Vec<Value> = events.iter().rev().filter_map(decode).collect();
-    let malformed = events.len() - decoded.len() + damaged as usize;
-    Ok((decoded, malformed))
+/// One native frame's records, matched exactly on all three identities.
+#[derive(Clone, Copy)]
+pub struct Thread {
+    pub session: u64,
+    pub process: u64,
+    pub frame: u64,
+}
+
+/// Which records a read returns: one type or all six, one frame or every
+/// frame, and the newest records ending at or before `before`.
+pub struct Query {
+    pub kind: Option<&'static str>,
+    pub thread: Option<Thread>,
+    pub before: Option<u64>,
+    pub limit: usize,
+}
+
+impl Default for Query {
+    fn default() -> Self {
+        Self {
+            kind: None,
+            thread: None,
+            before: None,
+            limit: RECENT,
+        }
+    }
+}
+
+pub struct Recent {
+    pub records: Vec<Value>,
+    pub malformed: usize,
+    /// The query echoed with the read's byte scope, as `get_events` pages.
+    pub query: Value,
+}
+
+fn echo(page: &event_query::Page, query: &Query, returned: usize) -> Value {
+    let mut echo = page.paging("backward", query.limit);
+    echo["returned"] = json!(returned);
+    echo["scope"] = json!(page.scope());
+    echo["type"] = json!(query.kind);
+    echo["thread"] = query.thread.map_or(Value::Null, |thread| {
+        json!({"session_id": thread.session.to_string(), "process_id": thread.process,
+            "frame_id": thread.frame.to_string()})
+    });
+    echo
+}
+
+/// The newest observation and gap records, read once per answer: the frames
+/// and budget gaps come from it, and so do the newest records whenever it
+/// already holds every one an unfiltered read would return.
+pub struct Scan {
+    page: event_query::Page,
+    damaged: u64,
+}
+
+pub fn scan(store: &Path) -> Result<Scan> {
+    let mut types = TYPES.to_vec();
+    types.push("gap");
+    let filter = EventFilter::exact(&types, Vec::new());
+    let (page, damaged) = event_query::read_tolerant(
+        store,
+        Cursor::Tail,
+        OBSERVED_SCAN,
+        event_query::SCAN_BYTES,
+        &filter,
+    )?;
+    Ok(Scan { page, damaged })
+}
+
+impl Scan {
+    /// The native frames whose records the scan holds, the identity a thread
+    /// scope filters by, and the renderers that ran out of their observation
+    /// budget there.
+    pub fn observed(&self) -> (Vec<Value>, Vec<Value>) {
+        let (mut frames, mut gaps): (Vec<Value>, Vec<Value>) = (Vec::new(), Vec::new());
+        for event in self.page.records.iter().rev() {
+            if event["type"] == "gap" {
+                let named = event_window::named_gap(event);
+                if gaps.len() < BUDGET_GAPS
+                    && named.is_some_and(|named| named.0 == "runtime" && named.1 == BUDGET_REASON)
+                {
+                    gaps.push(json!({"session_id": event["session_id"], "process_id": event["process_id"],
+                        "frame_id": event["frame_id"], "sequence_number": event["sequence_number"]}));
+                }
+                continue;
+            }
+            let Some(record) = decode(event) else {
+                continue;
+            };
+            let same = |frame: &&mut Value| {
+                frame["session_id"] == record["session_id"]
+                    && frame["process_id"] == record["process_id"]
+                    && frame["frame_id"] == record["frame_id"]
+            };
+            if let Some(frame) = frames.iter_mut().find(same) {
+                frame["records"] = json!(frame["records"].as_u64().unwrap_or(0) + 1);
+            } else if frames.len() < OBSERVED {
+                frames.push(json!({"session_id": record["session_id"], "process_id": record["process_id"],
+                    "frame_id": record["frame_id"], "last_sequence": record["sequence_number"], "records": 1}));
+            }
+        }
+        (frames, gaps)
+    }
+
+    /// An unfiltered read's answer when the scan stopped before its own limit
+    /// and holds no more records than the read would: the same records, and
+    /// the same place to continue from.
+    fn unfiltered(&self, query: &Query) -> Option<Recent> {
+        let records: Vec<&Value> = self
+            .page
+            .records
+            .iter()
+            .filter(|e| e["type"] != "gap")
+            .collect();
+        if self.page.limited || records.len() > query.limit {
+            return None;
+        }
+        let decoded: Vec<Value> = records.iter().rev().filter_map(|e| decode(e)).collect();
+        Some(Recent {
+            malformed: records.len() - decoded.len() + self.damaged as usize,
+            records: decoded,
+            query: echo(&self.page, query, records.len()),
+        })
+    }
+}
+
+/// The newest matching records first; a record the core would refuse is
+/// counted, not shown.
+pub fn recent(store: &Path, query: &Query, scan: &Scan) -> Result<Recent> {
+    if query.kind.is_none()
+        && query.thread.is_none()
+        && query.before.is_none()
+        && let Some(recent) = scan.unfiltered(query)
+    {
+        return Ok(recent);
+    }
+    let types = query.kind.map_or(TYPES.to_vec(), |kind| vec![kind]);
+    let ids = query.thread.map_or_else(Vec::new, |thread| {
+        vec![
+            ("session_id", thread.session),
+            ("process_id", thread.process),
+            ("frame_id", thread.frame),
+        ]
+    });
+    let filter = EventFilter::exact(&types, ids);
+    let cursor = query.before.map_or(Cursor::Tail, Cursor::Before);
+    let (page, damaged) =
+        event_query::read_tolerant(store, cursor, query.limit, event_query::SCAN_BYTES, &filter)?;
+    let decoded: Vec<Value> = page.records.iter().rev().filter_map(decode).collect();
+    Ok(Recent {
+        malformed: page.records.len() - decoded.len() + damaged as usize,
+        records: decoded,
+        query: echo(&page, query, page.records.len()),
+    })
 }
 
 /// Workers the renderer saw start requests, from `request_initiated` loader

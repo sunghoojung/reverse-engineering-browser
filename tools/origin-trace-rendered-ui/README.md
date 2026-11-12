@@ -110,6 +110,37 @@ the test then continues offline and returns to the harness page. The harness
 backend and the app share one temporary saved set through
 `--js-invocation-site-store` and `REB_JS_INVOCATION_SITE_STORE`.
 
+`test31DebuggerSidebar` opens the Sources debugger sidebar on the fixture's
+observation records: a renderer of its own (process 4747) with records in six
+frames, three workers, a watched request and two malformed records, and a
+retained compiled script (artifact 360) whose listener, timer and
+throw sites the records name. One listener's event type is markup and must
+stay text. At both window sizes the sections must be Threads, Watch rules,
+Observations and Pausing, Pausing must state the availability the backend
+reports with no pausing control, only rows near the view may mount, Tab from
+the focused Threads pane must reach the list with a visible indicator, frame
+200 must scope the Sources tree and Observations, a listener record must be
+marked selected as soon as it is clicked, its **Open onTap @ handlers.js:2:71**
+button must sit wholly inside the sidebar pane once it resolves and must open
+`onTap` in Sources at line 2, column 71, and the light theme must pass the
+layout checks. In Observations an arrow key must move the active row, the
+selection mark and the details, in view, to the next record, and the watched
+request (5100) must open its own Traffic row on the Initiator tab both by its
+**Open request in Traffic** link and by Enter. With `/api/native-debugger`
+failing, and then answering a malformed document, the status must say so
+while the last rows stay, marked stale, until a good read clears it. The
+record and both stale states are also photographed in the light theme. Escape must return to the toggle, or to
+**More** while a docked sidebar has moved the toggle into that menu, and a
+closed sidebar must make no read for 4.5 seconds. `REB_RENDERED_UI_DEBUGGER_RECORDS` (8 to 20,000, default
+120) sets how many records the fixture writes; they also count as
+Fingerprinting activity. `test6RemovedFeaturesAreAbsent`
+reads Sources with the sidebar open, leaving out only the paused-state words
+of the availability statement and native pausing sections inside
+`#debugger-sidebar`, fails on a native marker anywhere else and on any control
+in a native pausing section that is not a really disabled form control while
+the debugger is unsupported, and compares that statement with
+`/api/native-debugger`.
+
 `test27StartPanelStartRetryAndKeyboard` takes the start panel through a whole
 decision at both window sizes. The driver names a `REB_BRAVE_BINARY` that does
 not exist, so Start fails at once and no browser launches on any machine. The

@@ -242,12 +242,14 @@ function sourceTreeSuffixes(children) {
 }
 
 // A filter shows matches and their ancestors with its own expansion.
-function sourceTreeRows(model, collapsed, filter = '') {
+// `scope` keeps only files whose exact identity it accepts, with their ancestors.
+function sourceTreeRows(model, collapsed, filter = '', scope = null) {
   const rows = [], index = new Map();
   let include = null, counts = null;
-  if (filter) {
+  if (filter || scope) {
     include = new Set(); counts = new Map();
     for (const file of model.files.values()) {
+      if (scope && !scope.includes(file.source)) continue;
       file.text ??= `${file.label}\n${file.source.url}\n${file.source.artifact_id}`.toLowerCase();
       if (!file.text.includes(filter)) continue;
       for (let key = file.key; key; key = model.nodes.get(key).parent) {
@@ -270,7 +272,7 @@ function createSourceTree(options) {
   const {tree, filter, expand, collapse, helpers} = options;
   const ROW = SOURCE_TREE_LIMITS.row;
   const nav = {scopes: new Map(), rows: new Map(), model: null, list: [], index: new Map(), counts: null, stale: true, generation: 0,
-    refs: null, filter: '', filterCollapsed: new Set(), typeahead: {text: '', time: 0}, selected: null, notice: null};
+    refs: null, filter: '', filterCollapsed: new Set(), typeahead: {text: '', time: 0}, selected: null, notice: null, scopeKey: null};
   const canvas = document.createElement('div');
   canvas.className = 'source-tree-canvas';
   tree.append(canvas);
@@ -330,10 +332,11 @@ function createSourceTree(options) {
     const kept = previous?.collection === collection ? anchor() : null;
     if (previous) scopeOf(previous.collection).scrollTop = tree.scrollTop;
     if (!previous || previous.collection !== collection || (refresh && catalogChanged())) rebuild();
-    const model = nav.model, current = scope();
+    const model = nav.model, current = scope(), narrowed = options.scope?.() ?? null;
+    if (nav.scopeKey !== (narrowed?.key ?? null)) {nav.scopeKey = narrowed?.key ?? null; nav.stale = true;}
     if (nav.stale) {
       const filterText = nav.filter.toLowerCase();
-      ({rows: nav.list, index: nav.index, counts: nav.counts} = sourceTreeRows(model, collapsed, filterText));
+      ({rows: nav.list, index: nav.index, counts: nav.counts} = sourceTreeRows(model, collapsed, filterText, narrowed));
       nav.stale = false;
     }
     const candidates = model.byArtifact.get(options.selectedId()) ?? [];
@@ -342,7 +345,7 @@ function createSourceTree(options) {
     nav.selected = !model.limits.catalog && candidates.length === 1 && !candidates[0].ambiguous &&
       nav.index.has(candidates[0].key) && helpers.isCurrent(candidates[0].source) ? candidates[0] : null;
     current.focus = nearest(activeKey ?? current.focus, previous) ?? nav.selected?.key ?? nav.list[0]?.key ?? null;
-    renderNotice(model);
+    renderNotice(model, narrowed);
     canvas.style.setProperty('height', `${nav.list.length * ROW}px`);
     if (kept && nav.index.has(kept.key)) tree.scrollTop = canvasTop() + nav.index.get(kept.key) * ROW + kept.offset;
     else if (!previous || previous.collection !== collection) tree.scrollTop = current.scrollTop;
@@ -355,8 +358,8 @@ function createSourceTree(options) {
     }
   }
 
-  function renderNotice(model) {
-    const notices = [];
+  function renderNotice(model, narrowed) {
+    const notices = narrowed ? [narrowed.label] : [];
     if (model.limits.catalog) notices.push(`More than ${model.limits.catalog.toLocaleString()} sources are retained; later ones are not loaded. Selection markers are withheld until the whole catalog loads.`);
     if (model.limits.omitted) notices.push(`${model.limits.omitted} sources exceed the navigator URL, identity or node limit and are not listed.`);
     if (model.limits.ambiguous) notices.push(`${model.limits.ambiguous} duplicate source identities are not shown twice; ambiguous sources cannot be opened.`);
@@ -364,6 +367,7 @@ function createSourceTree(options) {
     const hidden = model.limits.internal && options.hideInternal?.();
     if (hidden) notices.push(`${model.limits.internal} browser-internal ${model.limits.internal === 1 ? 'source is' : 'sources are'} hidden.`);
     if (!nav.list.length && nav.filter && model.files.size) notices.push(`No files match “${nav.filter}”.`);
+    else if (!nav.list.length && narrowed && model.files.size) notices.push(narrowed.empty);
     else if (!nav.list.length && !hidden) notices.push('No source artifacts captured. Canvas images are shown in Fingerprinting.');
     const toggle = model.limits.internal ? options.internalToggle?.(model.limits.internal) : null;
     if (!notices.length && !toggle) {nav.notice?.remove(); return;}
@@ -372,6 +376,8 @@ function createSourceTree(options) {
     }
     const toggleFocused = Boolean(toggle) && document.activeElement === toggle;
     nav.notice.textContent = notices.join(' ');
+    // Above listed rows it is a disclosure, not the empty state, so it takes no empty-state padding.
+    nav.notice.className = nav.list.length ? 'source-tree-empty source-tree-disclosure' : 'source-tree-empty';
     if (toggle) nav.notice.append(toggle);
     if (toggleFocused) toggle.focus({preventScroll: true});
     // Limit disclosures stay above the rows, including when nothing is listed.

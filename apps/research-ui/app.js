@@ -88,12 +88,13 @@ if (typeof MutationObserver === 'function' && elements.sourcePosition?.parentEle
   if (typeof ResizeObserver === 'function') new ResizeObserver(fitSourceStatus).observe(bar);
 }
 // The Sources commands stay on one row at every width. The URL and then Find
-// shrink (app.css); when the row still overflows, Map, then Graph, then
-// Inspect move to the top of More, and return in reverse order once they fit.
+// shrink (app.css); when the row still overflows, Debugger, then Map, then
+// Graph, then Inspect move to the top of More, and return in reverse order
+// once they fit.
 // A wrapped second row is not an option: WebKit does not re-measure the
 // toolbar's auto grid row when a width change alters its line count, so the
 // code view would cover that row. The menu is left alone while it is open.
-const SOURCE_TOOLBAR_OVERFLOW = ['source-wasm', 'source-graph', 'source-map'];
+const SOURCE_TOOLBAR_OVERFLOW = ['source-wasm', 'source-graph', 'source-map', 'source-debugger-toggle'];
 let sourceToolbarObserver = null;
 function fitSourceToolbar() {
   const row = document.querySelector('#source-editor-controls'), more = elements.sourceMore, first = elements.sourceGoto;
@@ -132,6 +133,8 @@ const sourceTreeView = createSourceTree({
   helpers: {isSource: isSourceArtifact, identity: sourceIdentity, reference: sourceReference, name: sourceDisplayName, isCurrent: sourceIsCurrent},
   catalog: () => state.artifacts, collection: () => state.sourceCollection, selectedId: () => state.selectedArtifactId,
   catalogLimit: () => state.artifactCatalogLimit, consoleDocuments: () => state.consoleDocuments,
+  // An observed frame selected in the debugger sidebar's Threads (debugger_sidebar.js).
+  scope: () => globalThis.RebDebuggerSidebar?.sourceScope() ?? null,
   hideInternal: () => state.hideBrowserInternal, internalToggle: internal => sourceInternalToggle(internal),
   kindLabel: source => sourceKindLabel(source.kind),
   researcherName(source) {
@@ -4017,9 +4020,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       const trafficResponse = createTrafficResponse({getArtifacts: () => state.artifacts, getEvents: () => state.events,
         contentSession: () => state.requestContentCaptureEnabled, readable: () => location.protocol !== 'file:',
         lookup: (record, request) => trafficArtifacts.lookup(record, trafficStoreOffset(request)), onChange: () => renderInspector()});
+      // get_request_stack positions are one-based; Sources reveals zero-based ones.
       function openResolvedFrame(resolution) {
-        if (selectArtifact(resolution.artifact_id, resolution.artifact_line ?? null,
-          {column: resolution.artifact_column ?? 0}) !== false) showScreen('sources');
+        const line = Number.isSafeInteger(resolution.artifact_line) && resolution.artifact_line > 0 ? resolution.artifact_line - 1 : null;
+        const column = Number.isSafeInteger(resolution.artifact_column) && resolution.artifact_column > 0 ? resolution.artifact_column - 1 : 0;
+        if (selectArtifact(resolution.artifact_id, line, {column}) !== false) showScreen('sources');
       }
       const requestStackPanel = createRequestStackPanel({
         refresh: () => { if (state.inspectorTab === 'initiator') renderInspector(); },
@@ -8581,7 +8586,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         requestAnimationFrame(() => elements.quickOpenInput.focus());
       }
 
-      function renderSourceSidebar() { const open = Boolean(state.sourceSidebarOpen); elements.sourceSidebar.hidden = !open; document.querySelector('#screen-sources').dataset.sidebarOpen = String(open); elements.sourceSidebarToggle.setAttribute('aria-expanded', String(open)); }
+      // Details and the debugger sidebar share one column, so opening one closes the other.
+      function renderSourceSidebar() {
+        const open = Boolean(state.sourceSidebarOpen);
+        if (open) globalThis.RebDebuggerSidebar?.close();
+        elements.sourceSidebar.hidden = !open;
+        document.querySelector('#screen-sources').dataset.sidebarOpen = String(open || Boolean(globalThis.RebDebuggerSidebar?.isOpen()));
+        elements.sourceSidebarToggle.setAttribute('aria-expanded', String(open));
+      }
 
       async function refreshArtifacts() {
         if (state.artifactRefreshing || location.protocol === 'file:') return;

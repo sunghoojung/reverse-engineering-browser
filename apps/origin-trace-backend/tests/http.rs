@@ -1177,6 +1177,48 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
             "/api/request-stack",
             400,
         ),
+        (
+            "/api/request-stack?process_id=4&observation_sequence=9",
+            "/api/request-stack",
+            200,
+        ),
+        (
+            "/api/request-stack?process_id=4&request_id=3&observation_sequence=9",
+            "/api/request-stack",
+            400,
+        ),
+        ("/api/request-stack?process_id=4", "/api/request-stack", 400),
+        ("/api/native-debugger", "/api/native-debugger", 200),
+        (
+            "/api/native-debugger?type=timer_observation&limit=300",
+            "/api/native-debugger",
+            200,
+        ),
+        (
+            "/api/native-debugger?session_id=1&process_id=2&frame_id=9&before=0",
+            "/api/native-debugger",
+            200,
+        ),
+        (
+            "/api/native-debugger?type=breakpoint",
+            "/api/native-debugger",
+            400,
+        ),
+        (
+            "/api/native-debugger?session_id=1&process_id=2",
+            "/api/native-debugger",
+            400,
+        ),
+        (
+            "/api/native-debugger?session_id=1&process_id=2&frame_id=0",
+            "/api/native-debugger",
+            400,
+        ),
+        (
+            "/api/native-debugger?selector=%23login",
+            "/api/native-debugger",
+            400,
+        ),
         ("/api/xrefs?kind=request&session_id=oops", "/api/xrefs", 400),
         ("/api/xrefs?kind=guess&session_id=1", "/api/xrefs", 400),
         (

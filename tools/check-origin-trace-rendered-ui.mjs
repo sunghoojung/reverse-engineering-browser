@@ -16,7 +16,7 @@ import {fileURLToPath} from 'node:url';
 import {buildEvidence, HOSTILE_BYTECODE_MARKUP, HOSTILE_SOURCE_MARKER, HOSTILE_SOURCE_URL, HOSTILE_URL, HOSTILE_URL_MARKER, NAMED_GAP_REASONS, SOURCE_LINE_COUNT,
   SYNTHETIC_REQUEST_COUNT, REQUEST_BODY_HOST, REQUEST_BODY_TARGET, REQUEST_BODY_MARKER, METADATA_BODY_HOST, RESPONSE_BODY_HOST, RESPONSE_BODY_MARKER, HEADER_VALUE_MARKER, COOKIE_VALUE_MARKER, INVOCATION_ARTIFACT_ID, MINIFIED_ARTIFACT_ID,
   MEMORY_CACHE_HOST, MEMORY_CACHE_TARGET, SERVICE_WORKER_FAILED_HOST, SERVICE_WORKER_LOST_HOST,
-  WORKER_STACK_HOST, WORKER_STACK_PROCESSES, REGISTRANT_HOST} from './origin-trace-rendered-ui/evidence-fixture.mjs';
+  WORKER_STACK_HOST, WORKER_STACK_PROCESSES, REGISTRANT_HOST, DEBUGGER_PROCESS, DEBUGGER_FRAME, DEBUGGER_ARTIFACT_ID} from './origin-trace-rendered-ui/evidence-fixture.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const harness = join(root, 'tools/origin-trace-rendered-ui');
@@ -247,7 +247,8 @@ fetch("/getcaptcha");
         memoryCacheHost: MEMORY_CACHE_HOST, memoryCacheTarget: MEMORY_CACHE_TARGET, serviceWorkerFailedHost: SERVICE_WORKER_FAILED_HOST,
         serviceWorkerLostHost: SERVICE_WORKER_LOST_HOST,
         invocationSiteStore: stores.invocationSites, workerStackHost: WORKER_STACK_HOST, registrantHost: REGISTRANT_HOST,
-        workerStackPostingProcess: WORKER_STACK_PROCESSES[1]}),
+        workerStackPostingProcess: WORKER_STACK_PROCESSES[1], debuggerProcess: DEBUGGER_PROCESS, debuggerFrame: DEBUGGER_FRAME,
+        debuggerArtifactId: DEBUGGER_ARTIFACT_ID}),
     },
   });
   target.TestingEnvironmentVariables = {...target.TestingEnvironmentVariables,

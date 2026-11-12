@@ -4319,6 +4319,8 @@ input[type="file"]:hover::file-selector-button { background: var(--panel-3); }
 #screen-sources .source-side-tab { padding: 0 12px; font-size: 12px; }
 #screen-sources .source-side-tab[aria-selected="true"]::after { left: 12px; right: 12px; background: var(--faint); }
 #screen-sources .source-tree-empty { padding: 24px 12px; }
+/* Above listed rows the notice is a disclosure, not the empty state. */
+#screen-sources .source-tree-empty.source-tree-disclosure { padding: 4px 12px 8px; }
 /* Hidden siblings must not shift the tree or Search into an auto-sized row. */
 #screen-sources .source-side-tabs { grid-row: 1; }
 #screen-sources .source-health { grid-row: 2; }

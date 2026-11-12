@@ -19,8 +19,8 @@ nothing armed. Navigation, a new configuration, `unwatch`, or a Console Stop
 them armed until navigation or the configuration ends. Records need an active
 capture session; without one the Console replies with an error and arms
 nothing. `get_native_debugger` reports the rules the renderer confirmed, the
-Console documents and recorded workers (`threads`), and the newest 32 records
-decoded.
+Console documents, recorded workers and observed frames (`threads`), and the
+newest 32 records decoded.
 
 | Rule | Bound |
 | --- | --- |
@@ -32,6 +32,26 @@ decoded.
 
 Each configuration admits at most 1,024 observation records per renderer;
 the next refused record leaves one `debugger_observation_budget` gap.
+
+## Reading observations
+
+`get_native_debugger` takes optional filters, read-only like the rest of the
+operation: `type` (one of the six below), a thread scope of `session_id`,
+`process_id` and `frame_id` together, `before` (a byte cursor from
+`observations_query.next_before`) and `limit` (1 to 256). The scope matches the
+record envelope exactly. Console documents carry no native frame ID, so the
+scope names a `threads.observed` frame: the session, renderer and frame of the
+observation records among the newest 2,048 records that are observations or
+gaps of any kind, within the newest 64 MiB of the store, at most 64.
+`observation_budget_gaps` lists the newest `debugger_observation_budget` gaps
+(above) in that scan, at most 16.
+
+`get_request_stack` with `process_id` and `observation_sequence` reads one
+record of types 40 to 45 and resolves its stack like a request's. It adds
+`observation`: the type, the decoded detail and `site`, the record's own frame
+(the listener, the timer callback or the throw site) resolved alone, or null
+when the type has none or the frame is zero. A listener for a click usually
+runs with no script on the stack, so `site` is the position to open.
 
 ## Gate
 

@@ -1395,6 +1395,9 @@ pub(crate) fn mark_identities_outside_scan(document: &mut Value) {
     }
 }
 
+/// The stack document, and `site` resolved alone through the same
+/// identities: a debugger observation's listener, callback or throw site,
+/// which can name a script while the stack itself holds none.
 fn resolve_stored(
     store: &Path,
     artifacts_root: &Path,
@@ -1402,8 +1405,9 @@ fn resolve_stored(
     stack: &Value,
     record: &Record,
     process_id: u64,
-) -> Result<Value> {
-    let (mut identities, mut known) = if !unwalked_state(record.state) {
+    site: Option<&[u8; FRAME]>,
+) -> Result<(Value, Option<Value>)> {
+    let (mut identities, mut known) = if !unwalked_state(record.state) || site.is_some() {
         stored_identities(store, requests, stack, process_id)?
     } else {
         (HashMap::new(), true)
@@ -1468,10 +1472,25 @@ fn resolve_stored(
         }
     }
     let mut document = resolve(stack, record, &identities, &artifacts, &read);
+    let site = site.map(|site| {
+        let mut alone = resolve_call(
+            stack,
+            record.scope,
+            site,
+            None,
+            &identities,
+            &artifacts,
+            &read,
+        );
+        if !known {
+            mark_identities_outside_scan(&mut alone);
+        }
+        alone["frames"][0].take()
+    });
     if !known {
         mark_identities_outside_scan(&mut document);
     }
-    Ok(document)
+    Ok((document, site))
 }
 
 fn absent_status(coverage: event_query::Coverage) -> &'static str {
@@ -1525,8 +1544,15 @@ pub fn document(
             "request_id": stack["request_id"], "sequence_number": stack["sequence_number"]},
             "coverage": coverage.to_json()}));
     };
-    let mut document =
-        resolve_stored(store, artifacts_root, requests, &stack, &record, process_id)?;
+    let (mut document, _) = resolve_stored(
+        store,
+        artifacts_root,
+        requests,
+        &stack,
+        &record,
+        process_id,
+        None,
+    )?;
     document["coverage"] = coverage.to_json();
     Ok(document)
 }
@@ -1562,9 +1588,83 @@ pub fn navigation_document(
             "sequence_number": stack["sequence_number"]},
             "coverage": coverage.to_json()}));
     };
-    let mut document =
-        resolve_stored(store, artifacts_root, requests, &stack, &record, process_id)?;
+    let (mut document, _) = resolve_stored(
+        store,
+        artifacts_root,
+        requests,
+        &stack,
+        &record,
+        process_id,
+        None,
+    )?;
     document["navigation"] = json!({"kind": kind, "target_frame_id": target.to_string()});
+    document["coverage"] = coverage.to_json();
+    Ok(document)
+}
+
+/// Payload bytes of a debugger observation's own frame: the listener, the
+/// timer callback or the throw site (protocol/native-debugger-observation-v1.md).
+fn observation_site(kind: &str, payload: &[u8]) -> Option<[u8; FRAME]> {
+    let at = match kind {
+        "listener_dispatch" | "exception_observation" => 84,
+        "timer_observation" => 92,
+        _ => return None,
+    };
+    let site: [u8; FRAME] = payload[at..at + FRAME].try_into().ok()?;
+    site.iter().any(|b| *b != 0).then_some(site)
+}
+
+/// One debugger observation record (types 40 to 45) of a renderer: its stack
+/// resolved like a request's and its own frame resolved alone.
+pub fn observation_document(
+    store: &Path,
+    artifacts_root: &Path,
+    requests: &Mutex<RequestIndex>,
+    session_id: Option<u64>,
+    process_id: u64,
+    sequence: u64,
+) -> Result<Value> {
+    let mut ids = vec![("process_id", process_id), ("sequence_number", sequence)];
+    if let Some(session) = session_id {
+        ids.push(("session_id", session));
+    }
+    let filter = EventFilter::exact(&crate::debugger_observation::TYPES, ids);
+    // Observations have no row, so only the newest bytes are read.
+    let detail = event_query::read_newest_record(store, None, &filter)?;
+    let coverage = detail.coverage;
+    let Some(event) = detail.records.into_iter().next_back() else {
+        return Ok(json!({
+            "status": absent_status(coverage),
+            "request": {"process_id": process_id, "sequence_number": sequence.to_string()},
+            "coverage": coverage.to_json(),
+        }));
+    };
+    let decoded = crate::debugger_observation::decode(&event);
+    let mut stack = payload(&event).unwrap_or_default();
+    let site = decoded
+        .as_ref()
+        .and_then(|_| observation_site(event["type"].as_str().unwrap_or(""), &stack));
+    let record = decoded.as_ref().and_then(|_| {
+        stack[80..].fill(0);
+        decode_record(&stack)
+    });
+    let (Some(observation), Some(record)) = (decoded, record) else {
+        return Ok(json!({"status": "malformed", "request": {
+            "session_id": event["session_id"], "process_id": event["process_id"],
+            "sequence_number": event["sequence_number"]},
+            "coverage": coverage.to_json()}));
+    };
+    let (mut document, site) = resolve_stored(
+        store,
+        artifacts_root,
+        requests,
+        &event,
+        &record,
+        process_id,
+        site.as_ref(),
+    )?;
+    document["observation"] = json!({"type": observation["type"], "detail": observation["detail"],
+        "site": site});
     document["coverage"] = coverage.to_json();
     Ok(document)
 }
@@ -1930,6 +2030,97 @@ pub(crate) mod tests {
         // The same bytes under two origins: the newest is shown.
         assert_eq!(f[2]["resolution"]["artifact_id"], "5", "{doc}");
         assert_eq!(f[2]["resolution"]["function_name"], "wrap");
+    }
+
+    #[test]
+    fn observation_sites_resolve_when_the_stack_holds_no_script() {
+        use std::io::Write;
+        let source = "let n = 0;\ndocument.body.onclick = function onTap(event) {\n  n += 1;\n};\n";
+        let start = source.find("(event)").unwrap() as u32;
+        let listener = |site: &[u8]| {
+            let mut tail = vec![0, 1, 1, 0];
+            tail.extend_from_slice(site);
+            tail.push(5);
+            tail.extend_from_slice(b"click");
+            tail
+        };
+        let observation = |tail: &[u8]| {
+            let mut payload = vec![1, 0, 128, 0, 2, 0x08, 0, 0];
+            payload.resize(80, 0);
+            payload.extend_from_slice(tail);
+            payload.resize(128, 0);
+            payload
+        };
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("events.jsonl");
+        let mut events = std::fs::File::create(&store).unwrap();
+        for (sequence, category, kind, payload) in [
+            (
+                1,
+                "network",
+                "script_identity",
+                identity_bytes(1, 0x10, 7, (0, 0), 99, source.as_bytes()),
+            ),
+            (
+                2,
+                "runtime",
+                "listener_dispatch",
+                observation(&listener(&frame(1, 0, 7, start, start))),
+            ),
+            (3, "network", "request_watch_match", observation(&[0, 1])),
+            // A listener record whose event type is cut is refused.
+            (
+                4,
+                "runtime",
+                "listener_dispatch",
+                observation(&[0, 1, 1, 0]),
+            ),
+        ] {
+            let event = json!({"protocol_version":3,"session_id":"9",
+                "sequence_number":sequence.to_string(),"monotonic_time_ns":sequence.to_string(),
+                "navigation_id":"0","frame_id":"1","artifact_id":"0","parent_event_id":"0",
+                "request_id":"0","process_id":42,"thread_id":1,"tab_id":0,
+                "category":category,"type":kind,"flags":0,"payload_encoding":"hex",
+                "payload":hex::encode(&payload),"payload_size":payload.len(),"payload_truncated":false});
+            writeln!(events, "{event}").unwrap();
+        }
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
+        let sha = hex::encode(Sha256::digest(source));
+        std::fs::write(artifacts.join(format!("blobs/{sha}.bin")), source).unwrap();
+        let entry = json!({"protocol_version":1,"artifact_id":"2","session_id":"9",
+            "navigation_id":"0","frame_id":"1","parent_artifact_id":"0","creator_event_id":"1",
+            "execution_context_id":"99","capture_origin":"compiled_script","kind":"javascript",
+            "url":"https://app.example.test/app.js","mime_type":"text/javascript",
+            "byte_size":source.len(),"sha256":sha,"sensitive":false,
+            "content_path":format!("blobs/{sha}.bin")});
+        std::fs::write(artifacts.join("manifest.jsonl"), format!("{entry}\n")).unwrap();
+        let index = Mutex::new(RequestIndex::new(&store));
+        caught_up(&index);
+        let read = |sequence| {
+            observation_document(&store, &artifacts, &index, Some(9), 42, sequence).unwrap()
+        };
+
+        let tap = read(2);
+        assert_eq!(tap["status"], "recorded", "{tap}");
+        assert_eq!(tap["state"], "no_script");
+        assert_eq!(tap["frames"], json!([]));
+        assert_eq!(tap["observation"]["type"], "listener_dispatch");
+        assert_eq!(tap["observation"]["detail"]["event_type"], "click");
+        let site = &tap["observation"]["site"]["resolution"];
+        assert_eq!(site["status"], "resolved", "{tap}");
+        assert_eq!(site["artifact_id"], "2");
+        assert_eq!(site["artifact_line"], 2);
+        assert_eq!(site["function_name"], "onTap");
+        assert_eq!(tap["request"]["sequence_number"], "2");
+
+        let matched = read(3);
+        assert_eq!(matched["observation"]["type"], "request_watch_match");
+        assert_eq!(matched["observation"]["site"], Value::Null);
+        assert_eq!(read(4)["status"], "malformed");
+        // A request stack is never answered as an observation.
+        assert_eq!(read(1)["status"], "not_recorded");
+        assert_eq!(read(9)["status"], "not_recorded");
     }
 
     #[test]

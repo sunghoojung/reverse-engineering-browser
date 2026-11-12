@@ -351,16 +351,22 @@ reb::MemoryCacheReusePayload ReuseOf(const reb::EventRecord& record) {
 void MemoryCacheReuses() {
   NativeProbeQueue queue;
   ConfigureScope(queue, true, false, 67);
-  reb::NativeMemoryCacheReuse image{.request_id = 6000,
-                                    .owner = {reb::NativeLoaderKind::kDocument, 0x6161},
-                                    .scheme = "https",
-                                    .host = "cdn.example.test",
-                                    .target = "/logo.png?v=2",
-                                    .target_length = 13,
-                                    .port = -1,
-                                    .resource_type = 1,
-                                    .status_code = 200,
-                                    .decoded_body_length = 5120};
+  // Field by field: GCC's -Wmissing-field-initializers rejects partial designated lists.
+  const auto reuse_of = [](const std::int32_t request_id, const std::string_view scheme,
+                           const std::uint8_t resource_type) {
+    reb::NativeMemoryCacheReuse value;
+    value.request_id = request_id;
+    value.scheme = scheme;
+    value.resource_type = resource_type;
+    return value;
+  };
+  auto image = reuse_of(6000, "https", 1);
+  image.owner = {reb::NativeLoaderKind::kDocument, 0x6161};
+  image.host = "cdn.example.test";
+  image.target = "/logo.png?v=2";
+  image.target_length = 13;
+  image.status_code = 200;
+  image.decoded_body_length = 5120;
   sink.RecordMemoryCacheReuse(image);
   const auto reuse = Core(Pop(queue));
   const auto target = TargetOf(One(queue));
@@ -377,15 +383,14 @@ void MemoryCacheReuses() {
 
   // Static data has no host, no status of its own beyond Blink's 200, and no owner here:
   // the running script's frame stands in, as on request_initiated.
+  auto decoded = reuse_of(6001, "data", 1);
+  decoded.target = "image/png;base64,AAAA";
+  decoded.target_length = 21;
+  decoded.static_data = true;
+  decoded.status_code = 200;
+  decoded.decoded_body_length = 3;
   blink::test_frame_present = true;
-  sink.RecordMemoryCacheReuse({.request_id = 6001,
-                               .scheme = "data",
-                               .target = "image/png;base64,AAAA",
-                               .target_length = 21,
-                               .resource_type = 1,
-                               .static_data = true,
-                               .status_code = 200,
-                               .decoded_body_length = 3});
+  sink.RecordMemoryCacheReuse(decoded);
   blink::test_frame_present = false;
   const auto data = Core(Pop(queue));
   Pop(queue);
@@ -395,13 +400,12 @@ void MemoryCacheReuses() {
 
   // A long host keeps 120 bytes and says so; a negative length or status is never written.
   const std::string long_host(200, 'h');
-  sink.RecordMemoryCacheReuse({.request_id = 6002,
-                               .owner = {reb::NativeLoaderKind::kDedicatedWorker, 0x77},
-                               .scheme = "https",
-                               .host = long_host,
-                               .resource_type = 3,
-                               .status_code = -1,
-                               .decoded_body_length = -1});
+  auto script = reuse_of(6002, "https", 3);
+  script.owner = {reb::NativeLoaderKind::kDedicatedWorker, 0x77};
+  script.host = long_host;
+  script.status_code = -1;
+  script.decoded_body_length = -1;
+  sink.RecordMemoryCacheReuse(script);
   const auto worker = Core(Pop(queue));
   Pop(queue);
   assert(ReuseOf(worker).host_length == 120 && ReuseOf(worker).flags == 2 &&
@@ -409,7 +413,7 @@ void MemoryCacheReuses() {
          worker.header.decoded_body_length == 0);
 
   // Browser-internal URLs are counted like requests unless the session opts in.
-  sink.RecordMemoryCacheReuse({.request_id = 6003, .scheme = "chrome", .resource_type = 3});
+  sink.RecordMemoryCacheReuse(reuse_of(6003, "chrome", 3));
   assert(Drain(queue) == 0 && queue.ExclusionCount(0) == 1 && queue.ExclusionCount(5) == 0);
 
   // Metadata sessions record the reuse without its path, at most 4,096 per

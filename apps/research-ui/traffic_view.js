@@ -241,7 +241,7 @@ function trafficSizeCell(request) {
   const served = request?.memoryCache ? '(memory cache)' : request?.fromServiceWorker ? '(service worker)'
     : request?.fromCache ? '(disk cache)' : null;
   const notes = {'(memory cache)': request?.staticData
-    ? 'Decoded in the renderer from a data: URL, so no request was made.'
+    ? 'Decoded in the renderer from a data: URL or an MHTML archive, so no request was made.'
     : 'Served from the memory cache: Blink reused a resource it held, so no request was made.',
   '(service worker)': 'Served by a service worker.', '(disk cache)': 'Served from the HTTP cache.'};
   const lines = [served ? notes[served] : '',

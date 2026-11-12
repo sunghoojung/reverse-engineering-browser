@@ -125,10 +125,14 @@ renderer completion. Chromium patch `0038-record-synchronous-requests-on-calling
 records a synchronous load's start on its calling thread and hands it to the
 pool thread that sends it. Chromium patch `0039-finish-service-worker-ends` has
 `content::ServiceWorkerSubresourceLoader` finish a request it ends without a
-response through the sink's table of the newest 1,024 http(s) starts, and
-Chromium patch `0040-record-memory-cache-reuse` records each
-`ResourceFetcher::DidLoadResourceFromMemoryCache` as a `memory_cache_reuse`
-record, 4,096 per configuration with the rest counted in the queue (version 4).
+response, race network requests included, through
+`renderer/native_service_worker_starts.h`: 1,024 sequence-locked slots of
+recorded http(s) starts indexed by the request ID's low 10 bits. Chromium patch
+`0040-record-memory-cache-reuse` records each
+`ResourceFetcher::DidLoadResourceFromMemoryCache` in an ordinary page as a
+`memory_cache_reuse` record once the sink admits it, 4,096 per configuration,
+with the rest and those of pages that are not ordinary counted in the queue
+(version 4) as class 70.
 See [Native network v3](../../../../../../protocol/native-network-v3.md).
 
 Each request names the tab that caused it. Brave patch

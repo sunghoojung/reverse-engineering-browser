@@ -48,7 +48,7 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | Chromium patch 0048 | `record-promise-registration-stacks` | Navigation and async task callers |
 | V8 patch 0021 | `record-native-promise-registrations` | Navigation and async task callers |
 | Event type 52 | `memory_cache_reuse` | Request scope and tabs |
-| Exclusion class 68 | `memory_cache_reuse` | Request scope and tabs |
+| Exclusion class 70 | `memory_cache_reuse` (68 and 69 belong to another part) | Request scope and tabs |
 | Probe queue version 4 | the memory-cache counter | Request scope and tabs |
 | Chromium patch 0038 | `record-synchronous-requests-on-calling-thread` | Request scope and tabs |
 | Chromium patch 0039, 0040 | `finish-service-worker-ends`, `record-memory-cache-reuse` | Request scope and tabs |
@@ -155,9 +155,10 @@ Exclusion classes 16 to 20 count requests of that scheme class. Class 64
 `webui_renderer` counts renderer processes that were not admitted, and class 67
 `webui_request` the requests such processes sent through the proxy; both have
 `initiator_process_id` 0. Classes 65 `extension_worker` and 66
-`devtools_load` count requests (see [below](#traffic-no-tab-caused)). Class 68
-`memory_cache_reuse` counts the reuses a renderer did not record past its
-[budget](#memory-cache-reuse), always with its `initiator_process_id`. The count is cumulative within the session for
+`devtools_load` count requests (see [below](#traffic-no-tab-caused)). Class 70
+`memory_cache_reuse` counts the [memory-cache reuses](#memory-cache-reuse) a
+renderer did not record, past its budget or in a page that is not ordinary,
+always with its `initiator_process_id`. Consumers keep 68 and 69 valid. The count is cumulative within the session for
 one `(initiator_process_id, class)`, so a later record supersedes an earlier
 one and a lost record loses nothing that a later one reports. Consumers take
 the newest count per producer and class and sum by class. An exclusion is
@@ -228,53 +229,94 @@ A page request the controlling service worker handles has no browser record:
 `content::ServiceWorkerSubresourceLoader` dispatches it to the service worker
 inside the renderer. A response it sends carries `from_service_worker` and
 finishes as above. Chromium patch `0039-finish-service-worker-ends` finishes the
-rest, when the loader ends a request it holds without sending a response and
-without handing it to the network:
+rest, when the loader ends a request itself
+(`NativeServiceWorkerEndsRequest` in `renderer/native_renderer_request.h`): it
+sent no response (`kSentBody`), has not ended the request already
+(`kCompleted`), and no race network request answered the page
+(`kWithoutServiceWorker`):
 
-- `CommitCompleted` with an error before `kSentBody`: a rejected or timed-out
-  `respondWith`, `Response.error()`, a failed Cache Storage route, a worker
-  that could not start, too many redirects. The completion is `request_failed`
-  with that error.
-- Its `URLLoader` pipe closing before it committed (the page cancelled or
-  went away): `request_failed` with `ERR_ABORTED`.
+- `CommitCompleted` with an error: a rejected or timed-out `respondWith`,
+  `Response.error()`, a failed Cache Storage route, a worker that could not
+  start, too many redirects. The completion is `request_failed` with that
+  error.
+- Its `URLLoader` pipe closing (the page cancelled or went away):
+  `request_failed` with `ERR_ABORTED`.
 
-Requests the loader hands to the network (fallback, a lost controller, a race
-network request) are finished by the browser proxy, so the loader records
-nothing for them.
+Requests the loader hands to the network (fallback, a lost controller) are
+finished by the browser proxy, so the loader records nothing for them.
 
-The loader knows only the renderer request ID, so the renderer keeps the
-newest http(s) starts it recorded: 1,024 slots indexed by the request ID's low
-10 bits, each with its configuration, sequence, time, frame, thread and scheme
-class. The end then emits, from the loader's thread, the same records as
-above: a `request_target` child in content sessions and the completion, with
-the start's frame, flags `from_service_worker` and status 0. A slot that holds
-another start of the same configuration (1,024 later http(s) starts reused
-it), or that a writer is filling, loses that end: the renderer emits a `gap` of
-category `network` and payload `service_worker_end_lost`, the start's row stays
-without completion, and the summary names the gap. A writer that finds its
-slot busy, which takes two starts 1,024 request IDs apart at the same moment,
-skips it, so that end is reported lost too. A slot of an earlier configuration
-means the start was not recorded in this one, so nothing is emitted; a start
-of this configuration that has since reused the slot of a request started
-before it makes that request's end read as lost.
+A race network request (`RaceNetworkRequest`, a `race-network-and-fetch-handler`
+or `race-network-and-cache` route) sends the request through the browser too,
+with the same request ID, so the browser's records join the row. When the
+network answers first the page gets its response, and the loader leaves the
+end to the browser record. When the worker answers, its response or its end
+above is what the page received, and the browser's records are the network
+attempt's, which may have completed or been cancelled. At the pin a response
+the page receives from this loader carries `was_fetched_via_service_worker`
+only from the worker (`SaveResponseInfo`) or from a race the network won
+(`ServiceWorkerRaceNetworkRequestURLLoaderClient::OnReceiveResponse`); a
+fallback's head gets service-worker timing only (`RewriteResponseHead`). So a
+renderer completion with `from_service_worker` on a row that also has browser
+records is always a race, and consumers take the row's outcome (failed,
+status, error) from that completion, and mark the row `race_network`.
+
+The loader knows only the renderer request ID, so the renderer keeps recorded
+http(s) starts in 1,024 slots indexed by the request ID's low 10 bits
+(`renderer/native_service_worker_starts.h`), each with its configuration,
+sequence, time, frame, thread and scheme class. Every renderer request and
+every admitted memory-cache reuse takes a request ID, so any later http(s)
+start whose ID is a multiple of 1,024 away replaces a slot. Each slot is a
+Boehm-style sequence lock with atomic fields: a reader keeps only a copy that
+no writer touched. The end then emits, from the loader's thread, the same
+records as above: a `request_target` child in content sessions and the
+completion, with the start's frame, flags `from_service_worker` and status 0.
+
+A slot that holds another start of the same configuration, or that a writer is
+filling, loses that end: the renderer emits a `gap` of category `network` and
+payload `service_worker_end_lost` that names the row as a `request_tab_link`
+names a renderer record, `initiator_process_id` and `initiator_request_id` its
+process and request ID, with `request_id` and `frame_id` 0 (the start's frame
+went with the slot). Consumers mark that row `end_lost`: Traffic reads "End
+lost" instead of Pending, and the summary names the gap. A writer that finds
+its slot busy, which takes two starts a multiple of 1,024 request IDs apart at
+the same moment, skips it, so that end is reported lost too. A slot of an
+earlier configuration means the start was not recorded in this one, so nothing
+is emitted; a start of this configuration that has since reused the slot of a
+request started before it makes that request's end read as lost.
 
 #### Memory-cache reuse
 
 Blink answers some loads from resources it already holds and creates no
 request: `ResourceFetcher::DidLoadResourceFromMemoryCache`, the reuse DevTools
 shows as "(memory cache)". It runs when a document first uses a resource
-another document loaded (the memory cache), a matching preload, or a `data:`
-image, style sheet, script or font that `ResourceFetcher` decoded itself
-(static data), and when DevTools emulates the load of a resource loaded before
-it opened (`EmulateLoadStartedForInspector`). Chromium patch `0040-record-memory-cache-reuse` records each
-call after its detached and observer check as one `memory_cache_reuse`
-(type 52) record, with a fresh renderer request ID, so it is a Traffic row of
-its own. In content sessions it has a `request_target` child, as above, with
-`parent_event_id` its sequence. The record names no method: Blink adds only
-GET resources to the memory cache (`ShouldResourceBeAddedToMemoryCache`), and
-preloads and static data are GET too, so consumers show GET. A reuse a worker
-owns is linked to its tabs by the drain with a `request_tab_link`, as a worker
-request start is.
+another document loaded (the memory cache), for a `data:` image, style sheet,
+script or font, or an MHTML archive resource, that `ResourceFetcher` decoded
+itself (static data), and from `EmulateLoadStartedForInspector`, which
+`CSSImageValue` and `CSSFontFaceSrcValue` call when a style sheet's cached
+image or font is restored into a document, DevTools open or not. A matching
+preload never reaches it: the preload's own request already put the resource
+in the document's cached resources. Chromium patch `0040-record-memory-cache-reuse`
+handles each call after its detached and observer check:
+
+1. `NativeProbeSink::AdmitMemoryCacheReuse` checks the Network category,
+   expiry and the page, then charges the configuration's budget. A reuse in a
+   page that is not ordinary (`Page::IsOrdinary`, checked by
+   `FetchContext::IsOrdinaryPageForNativeCapture`: an SVG image's own document,
+   whose `IsolatedSVGDocumentHost` frame the browser never registers, or a
+   page popup) belongs to no tab. It, and every reuse past the budget, is
+   counted as exclusion class 70 and nothing else is done.
+2. Only an admitted reuse takes a fresh renderer request ID, its fetch owner,
+   and bounded prefixes of its host and, in content sessions only, its target
+   (`NativeRequestTargetRange` keeps the range inside the URL whatever the
+   parser left).
+3. One `memory_cache_reuse` (type 52) record, a Traffic row of its own, and in
+   content sessions a `request_target` child, as above, with `parent_event_id`
+   its sequence.
+
+The record names no method: Blink adds only GET resources to the memory cache
+(`ShouldResourceBeAddedToMemoryCache`), and static data is GET too, so
+consumers show GET. A reuse a worker owns is linked to its tabs by the drain
+with a `request_tab_link`, as a worker request start is.
 
 ##### `memory_cache_reuse` (type 52)
 
@@ -314,11 +356,15 @@ in place). Bit 1 marks a host longer than 120 bytes, and then the length is
 120. Host bytes are printable ASCII. Other bits and reserved bytes are zero.
 
 A browser-internal URL (class 16 to 20) is counted per class as a request
-would be, unless the configuration opts in. Each renderer configuration
-records at most 4,096 reuses. Every later one is counted, not recorded: the
-queue's counter for exclusion class 68 `memory_cache_reuse`, which the browser
+would be, unless the configuration opts in, and returns its budget charge.
+Each renderer configuration records at most 4,096 reuses. Every later one, and
+every reuse in a page that is not ordinary, is counted, not recorded: the
+queue's counter for exclusion class 70 `memory_cache_reuse`, which the browser
 reports as a cumulative `capture_exclusion` of that renderer like the scheme
-counters.
+counters. The count is tagged with the admitting configuration's generation,
+so a reuse still in flight from a replaced configuration neither charges nor
+resets the new one's budget, and one it admitted is not recorded into the new
+configuration.
 
 ### Request owners and tabs
 
@@ -540,9 +586,13 @@ proxy at the pin (`NavigationRequest` creates their factory without
   then reports as lost), and each end reads one slot and emits at most two
   records and one gap.
 - Memory-cache reuse, inactive: one atomic load before the hook converts
-  anything. Active: one fixed-size record, plus a 116-byte target prefix with
-  request content, and one atomic increment of the configuration's count;
-  past 4,096 records one counter increment per reuse.
+  anything. Active: one virtual page check and the admission (the category,
+  expiry and budget reads and one compare-and-swap of the budget word). Past
+  4,096, or in a page that is not ordinary, that is all, plus one counter
+  increment; nothing is converted or allocated. An admitted reuse then takes a
+  request ID and its owner, copies at most 121 host bytes and, with request
+  content only, a 116-byte target prefix, and emits one fixed-size record and
+  that target.
 - Tabs, inactive: the loaders' owner scope and the proxy's factory hook add at
   most one atomic load and allocate nothing. Active: one virtual
   call and a thread-local write per load, one registry insert per factory, and
@@ -562,7 +612,7 @@ proxy at the pin (`NavigationRequest` creates their factory without
 - `get_session_summary` lists `exclusions` by class and adds the info checks
   `browser_internal_excluded` and `no_tab_traffic_excluded`, `request_tabs`
   (with `extension_rows`), and the error check `network_tab_unresolved`. Class
-  68 is its own info check, `memory_cache_reuse_not_recorded`. The backend keeps
+  70 is its own info check, `memory_cache_reuse_not_recorded`. The backend keeps
   types 36 to 38, 50 and 52 in its network window.
 - Traffic has no Unattributed group. A row is in every tab its records or link
   name, with a marker such as "Service worker · 2 tabs"; All tabs counts it
@@ -577,11 +627,16 @@ proxy at the pin (`NavigationRequest` creates their factory without
   bare label. It shows the hidden count and never changes stored evidence.
 - A `memory_cache_reuse` row is complete: the request index gives it
   `memory_cache` true, its status, its decoded size and a type from its
-  resource type, and Traffic labels it "(memory cache)" in Size and
-  "From memory cache" (or "Decoded in the renderer" for static data) in
-  General. The footer shows "N memory-cache reuses not recorded" for class 68.
+  resource type, and Traffic labels it "(memory cache)" in Size, with a General
+  note that no request was made (from the memory cache, or decoded from a
+  `data:` URL or MHTML archive for static data). The footer shows
+  "N memory-cache reuses not recorded" for class 70.
 - A row a service worker ended without a response is failed like any other,
-  with "Service worker" in General.
+  with "(service worker)" in Size. A row whose renderer completion carries
+  `from_service_worker` takes its outcome from that completion; with browser
+  records too it is `race_network`, and General says the browser records are
+  the network attempt's. A row a `service_worker_end_lost` gap names is
+  `end_lost`, status "incomplete", and reads "End lost".
 
 ### Validation
 
@@ -593,16 +648,22 @@ service-worker, opted-in internal and pre-v3 rows.
 `make native-probe-admission-check` drives the real renderer sink and
 transport through exclusion counting, opt-in, renderer completion, stale and
 refused starts and the inactive path; service-worker ends with and without
-request content, ERR_ABORTED, a non-http ID, an evicted slot, an earlier
-configuration and the inactive path, and four writers racing ends on one slot
-with no torn start; and memory-cache reuses with their owner, host, status,
-size, target, static data, a 200-byte host, counted internal URLs, the
-4,096 budget and its class 68 count, a new configuration and the inactive
-path. `tests/network_scope_test.cpp` also checks type 52 and class 68 for
-parity and malformed records, and `make network-scope-wire-check` drives the
-Traffic model through memory-cache rows and a service-worker failure.
-`make request-index-check` holds the index to the model on `data:`,
-memory-cache and service-worker-failure rows. `test28RendererAnsweredRows` in
+request content, ERR_ABORTED, a non-http ID, an evicted slot and the row its
+gap names, an earlier configuration, one completion on either side of the
+`kSentBody` boundary, and the inactive path; four writers against a reader
+on one start slot, where any accepted mix of two starts fails (accepting every
+read, or ignoring the odd version, fails it); target ranges with empty and
+invalid components; and memory-cache reuses with their owner, host, status,
+size, target, static data, a 200-byte host, counted internal URLs that return
+their charge, a page that is not ordinary, the 4,096 budget and its class 70
+count at no allocation, a new configuration's fresh budget, a reuse admitted
+by a replaced configuration, and the inactive path.
+`tests/network_scope_test.cpp` also checks type 52 and class 70 for parity and
+malformed records and keeps 68 and 69 valid, and `make network-scope-wire-check`
+drives the Traffic model through memory-cache rows, a service-worker failure, a
+race network row and a lost end. `make request-index-check` holds the index to
+the model on `data:`, memory-cache, service-worker-failure, race network and
+lost-end rows and reads the lost end's status cell. `test29RendererAnsweredRows` in
 `make rendered-ui-check` opens a memory-cache row and a service-worker
 failure in the packaged app. `make native-network-capture-check`
 checks the browser `request_started` scheme class and loader kind, and the
@@ -617,7 +678,7 @@ native-artifact-capture-check` drives the real `NativeProbeHost` drain and
 `NativeTabResolver` through tombstoned frames, nested dedicated workers, shared
 worker clients, a service worker with 30 clients, last clients, counted and
 opted-in extension workers, renderers locked to an internal scheme, a worker's
-memory-cache reuse and the class 68 report. `make
+memory-cache reuse and the class 70 report. `make
 native-probe-admission-check` covers the renderer fetch owner.
 
 ### Acceptance
@@ -657,9 +718,13 @@ Still required before declaring this browser-ready:
    tab with its document frame or worker owner, and the page's has its call
    stack in Initiator. A controlled page whose service worker answers
    `Response.error()`, rejects `respondWith`, and stalls until the page aborts
-   the fetch shows three failed rows, none Pending. A second document loading
-   the first one's script, image and style sheet, and a `data:` image, show
-   "(memory cache)" rows on their tab; a page that reuses more than 4,096
+   the fetch shows three failed rows, none Pending. A `race-network-and-fetch-handler`
+   route whose worker answers `Response.error()` before the network shows one
+   failed `race_network` row, and one whose network answers first shows its
+   network status. A second document loading the first one's script, image
+   and style sheet, and a `data:` image, show "(memory cache)" rows on their
+   tab; a `data:` image inside an SVG used as an `<img>` adds no row and one
+   `memory_cache_reuse` exclusion; a page that reuses more than 4,096
    resources reports the rest as `memory_cache_reuse` exclusions.
 
 ## Response bodies

@@ -7,7 +7,7 @@
  * captured value reaches the DOM as text. */
 // A read waits at least `poll`, and four times as long as the last read took,
 // so a large store is never read back to back.
-const DEBUGGER_SIDEBAR = Object.freeze({poll: 2000, slowest: 30000, deadline: 10000, retry: 2000, page: 128, rows: 4096, stacks: 32,
+const DEBUGGER_SIDEBAR = Object.freeze({poll: 2000, slowest: 30000, deadline: 10000, retry: 2000, page: 128, rows: 4096, stacks: 32, bridge: 2,
   threadRow: 40, groupRow: 26, observationRow: 44, overscan: 6, listHeight: 240});
 
 const DEBUGGER_OBSERVATION_KINDS = Object.freeze({
@@ -229,7 +229,8 @@ function createDebuggerList({id, label, onActive = null, onChoose, render}) {
   });
   element.addEventListener('click', event => {
     const row = event.target.closest?.('.debugger-list-row');
-    if (!row) return;
+    // The second click of a double-click is the dblclick's, not a new choice.
+    if (!row || event.detail > 1) return;
     const item = options.find(option => option.key === row.dataset.key);
     if (!item) return;
     active = item.key;
@@ -313,21 +314,30 @@ function debuggerThreads(answer, {frameOrigin = () => null, consoleTarget = null
   return [documents, observed, workers];
 }
 
+function debuggerThreadFields(thread) {
+  return [['Kind', thread.title], ['Origin', thread.origin], ['Frame', thread.frame], ['Process', thread.process],
+    ['State', thread.state], ...(thread.last ? [['Last record', `#${thread.last}`]] : [])];
+}
+
 function createDebuggerThreadsView({id = 'debugger-threads', onSelect}) {
   const root = debuggerNode('div', 'debugger-threads');
-  const list = createDebuggerList({id, label: 'Threads', onChoose: item => onSelect(item), render(row, item) {
+  // A click or a key chooses a thread; a double-click is not a third toggle.
+  const list = createDebuggerList({id, label: 'Threads', onChoose: (item, how) => { if (how !== 'dblclick') onSelect(item); }, render(row, item) {
     if (item.header) {
       row.append(debuggerNode('span', 'debugger-list-group-name', item.title), debuggerNode('b', 'debugger-list-count', item.count));
       return;
     }
     row.dataset.kind = item.kind;
+    // The origin has the first line to itself; the selected thread's
+    // details below the list repeat every field in full.
     const head = debuggerNode('div', 'debugger-row-head');
     const origin = debuggerNode('span', 'debugger-row-main', item.origin);
     if (item.missing) origin.dataset.missing = 'true';
-    head.append(debuggerNode('span', 'debugger-chip', item.title), origin, debuggerNode('span', 'debugger-row-state', item.state));
-    const meta = debuggerNode('div', 'debugger-row-meta', `${item.frame} · ${item.process}`);
-    row.title = [item.title, item.origin, item.frame, item.process, item.state, item.last ? `last record #${item.last}` : ''].filter(Boolean).join(' · ');
-    row.append(head, meta);
+    head.append(origin, debuggerNode('span', 'debugger-row-state', item.state));
+    const foot = debuggerNode('div', 'debugger-row-foot');
+    foot.append(debuggerNode('span', 'debugger-chip', item.title), debuggerNode('span', 'debugger-row-meta', `${item.frame} · ${item.process}`));
+    row.title = debuggerThreadFields(item).map(([label, value]) => `${label}: ${value}`).join(' · ');
+    row.append(head, foot);
   }});
   const empty = debuggerNode('p', 'debugger-note');
   root.append(list.element, empty);
@@ -349,6 +359,11 @@ function createDebuggerThreadsView({id = 'debugger-threads', onSelect}) {
   };
 }
 
+/* The controller. In a live window it reads get_native_debugger while open
+ * and visible; the stored-evidence window (reb://) answers the same reads
+ * from its store through the bundled backend, so it reads once and on
+ * request; a window with no backend reads nothing. One read is in flight at
+ * a time: a newer one, closing, leaving Sources or a replaced store aborts it. */
 function createDebuggerSidebar({root, toggle, screen, hooks}) {
   root.replaceChildren();
   const head = debuggerNode('header', 'debugger-sidebar-head');
@@ -362,20 +377,31 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
   close.setAttribute('aria-label', 'Close debugger');
   close.title = 'Close debugger (Esc)';
   head.append(title, mode, close);
+  // Only the state is announced; the time of the last read changes every poll.
   const status = debuggerNode('p', 'debugger-sidebar-status');
-  status.setAttribute('role', 'status');
-  status.setAttribute('aria-live', 'polite');
+  const announced = debuggerNode('span', 'debugger-status-state');
+  announced.setAttribute('role', 'status');
+  announced.setAttribute('aria-live', 'polite');
+  const when = debuggerNode('span', 'debugger-status-time');
+  const again = debuggerButton('Read again', 'debugger-link debugger-status-again', () => read());
+  status.append(announced, ' ', when, ' ', again);
   const body = debuggerNode('div', 'debugger-sidebar-sections');
   root.append(head, status, body);
   root.setAttribute('aria-labelledby', title.id);
 
-  let open = false, timer = 0, reading = null, generation = 0, interval = DEBUGGER_SIDEBAR.poll;
+  let open = false, timer = 0, generation = 0, interval = DEBUGGER_SIDEBAR.poll, controller = null;
+  let rendering = false;
   const mounted = new Map();
+  const blankObservations = () => ({key: null, head: [], refused: 0, query: null, list: null, loadingOlder: false, olderError: null, olderController: null});
   const view = {
     status: 'loading', document: null, error: null, updatedAt: null, thread: null, kind: null,
-    // `refused` counts rows of these pages that failed this view's own checks.
-    observations: {key: null, head: [], older: [], refused: 0, olderRefused: 0, firstBefore: null, next: null, loadingOlder: false, olderError: null},
-    refresh: () => read(),
+    observations: blankObservations(),
+    // Reads again. Called while sections render it does nothing: a render
+    // follows a read, so what it shows was just read, and a section that
+    // refreshed from render would otherwise read back to back.
+    refresh: () => { if (!rendering) read(); },
+    // Paints the sections again from what was last read, without a read.
+    repaint: () => render(),
     selectThread(thread) {
       view.thread = thread && view.thread?.key === thread.key ? null : thread;
       hooks.refreshTree?.();
@@ -386,10 +412,14 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
       read();
     },
     older: () => readOlder(),
+    showNewest() { dropList(); render(); read(); },
+    // The other sections registered as presenting the pausing debugger.
+    nativeSections: () => sections().filter(section => section.native === 'pausing' && section.id !== 'pausing').map(section => ({id: section.id, title: section.title})),
     hooks
   };
 
-  const visible = () => open && !screen.hidden && hooks.available();
+  const windowMode = () => hooks.mode();
+  const visible = () => open && !screen.hidden && windowMode() !== 'none';
   function query(extra = {}) {
     const parameters = new URLSearchParams({limit: String(DEBUGGER_SIDEBAR.page)});
     if (view.kind) parameters.set('type', view.kind);
@@ -403,93 +433,142 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
   }
   const observationKey = () => `${view.kind ?? 'all'}|${view.thread?.kind === 'observed' ? view.thread.key : 'all'}`;
 
-  async function fetchDocument(parameters) {
-    const response = await hooks.fetch(`/api/native-debugger?${parameters}`, {cache: 'no-store', signal: AbortSignal.timeout(DEBUGGER_SIDEBAR.deadline)});
+  async function fetchDocument(parameters, signal) {
+    const deadline = AbortSignal.timeout(DEBUGGER_SIDEBAR.deadline);
+    const response = await hooks.fetch(`/api/native-debugger?${parameters}`,
+      {cache: 'no-store', signal: typeof AbortSignal.any === 'function' ? AbortSignal.any([signal, deadline]) : signal});
     const value = await response.json().catch(() => null);
     if (!response.ok) throw new Error(typeof value?.error === 'string' ? value.error : `the backend returned HTTP ${response.status}`);
     const problem = debuggerDocumentProblem(value);
     if (problem) { const error = new Error(problem); error.malformed = true; throw error; }
     return value;
   }
+  const cursor = page => BigInt(page.next_before ?? 0);
+  const valid = answer => answer.observations.filter(debuggerValidObservation);
+  function dropList() {
+    const observations = view.observations;
+    observations.olderController?.abort();
+    Object.assign(observations, {list: null, loadingOlder: false, olderError: null, olderController: null});
+  }
 
-  // Newer records first; an older page is kept only while no record can be
-  // missing between it and the newest page.
-  function applyHead(answer) {
-    const observations = view.observations, key = observationKey();
-    if (observations.key !== key) Object.assign(observations, {key, older: [], olderRefused: 0, firstBefore: null, next: null, olderError: null});
-    observations.head = answer.observations.filter(debuggerValidObservation);
+  /* Without loaded older pages the list is the newest page. Once older pages
+   * are loaded they stay: each poll adds the records written since, reading
+   * the span between the newest page and them (at most DEBUGGER_SIDEBAR.bridge
+   * more pages). When that span is longer, or the list is full, the list stays
+   * as it is and says which bytes it does not hold. */
+  async function applyHead(answer, signal) {
+    const observations = view.observations, key = observationKey(), page = answer.observations_query;
+    // A shorter store was cleared or replaced: its older pages, and any read
+    // of them still running, belong to the evidence before it.
+    const replaced = observations.query && BigInt(page.store_end) < BigInt(observations.query.store_end);
+    if (observations.key !== key || replaced) { dropList(); observations.key = key; }
+    observations.head = valid(answer);
     observations.refused = answer.observations.length - observations.head.length;
-    const headNext = answer.observations_query.next_before ?? null;
-    if (observations.older.length && (headNext === null || BigInt(headNext) > BigInt(observations.firstBefore))) {
-      Object.assign(observations, {older: [], olderRefused: 0, firstBefore: null, next: null});
+    observations.query = page;
+    const list = observations.list;
+    if (!list) return;
+    if (list.pinned) { list.pinned.to = BigInt(page.store_end); return; }
+    const added = [...observations.head];
+    let start = cursor(page);
+    for (let reads = 0; start > list.top && reads < DEBUGGER_SIDEBAR.bridge; reads += 1) {
+      const more = await fetchDocument(query({before: String(start)}), signal);
+      if (observations.key !== key || observations.list !== list) return;
+      const records = valid(more);
+      list.refused += more.observations_malformed + more.observations.length - records.length;
+      added.push(...records);
+      start = cursor(more.observations_query);
     }
-    if (!observations.older.length) observations.next = headNext;
+    const merged = debuggerUnique([...added, ...list.records]);
+    if (start <= list.top && merged.length <= DEBUGGER_SIDEBAR.rows) {
+      list.records = merged;
+      list.top = BigInt(page.store_end);
+    } else {
+      list.pinned = {reason: start > list.top ? 'span' : 'full', from: list.top, to: BigInt(page.store_end)};
+    }
   }
 
   async function read() {
     clearTimeout(timer);
     timer = 0;
-    if (!visible()) {
-      if (open && !hooks.available()) { view.status = 'unavailable'; render(); }
-      return;
-    }
+    if (!open) return;
+    const kind = windowMode();
+    if (kind === 'none') { view.status = 'unavailable'; render(); return; }
+    if (screen.hidden) return;
+    controller?.abort();
+    const own = new AbortController();
+    controller = own;
     const mine = ++generation, started = Date.now();
-    reading = fetchDocument(query());
+    if (!view.document) { view.status = 'loading'; render(); }
     try {
-      const answer = await reading;
+      const answer = await fetchDocument(query(), own.signal);
+      if (mine !== generation) return;
+      await applyHead(answer, own.signal);
       if (mine !== generation) return;
       view.document = answer;
       view.status = 'ready';
       view.error = null;
       view.updatedAt = new Date();
-      applyHead(answer);
     } catch (error) {
       if (mine !== generation) return;
       view.status = error?.malformed ? 'malformed' : 'disconnected';
       view.error = error?.name === 'TimeoutError' ? 'the backend did not answer within 10 seconds' : String(error?.message ?? error);
     } finally {
       if (mine === generation) {
-        reading = null;
+        controller = null;
         interval = Math.min(DEBUGGER_SIDEBAR.slowest, Math.max(DEBUGGER_SIDEBAR.poll, 4 * (Date.now() - started)));
         render();
-        if (visible()) timer = setTimeout(read, interval);
+        // The stored-evidence window holds a fixed store: no poll there.
+        if (kind === 'live' && visible()) timer = setTimeout(read, interval);
       }
     }
   }
 
   async function readOlder() {
-    const observations = view.observations, key = observations.key;
-    if (observations.loadingOlder || observations.next === null || !visible()) return;
-    const before = observations.next;
+    const observations = view.observations, key = observations.key, list = observations.list;
+    const before = list ? list.bottom : observations.query?.next_before ?? null;
+    if (observations.loadingOlder || before === null || !visible()) return;
+    const own = new AbortController();
+    observations.olderController = own;
     observations.loadingOlder = true;
     render();
     try {
-      const answer = await fetchDocument(query({before}));
-      if (observations.key !== key) return;
-      const valid = answer.observations.filter(debuggerValidObservation);
-      observations.older.push(...valid);
-      observations.olderRefused += answer.observations.length - valid.length;
-      observations.firstBefore ??= before;
-      observations.next = answer.observations_query.next_before ?? null;
+      const answer = await fetchDocument(query({before: String(before)}), own.signal);
+      if (observations.key !== key || observations.olderController !== own) return;
+      const records = valid(answer);
+      const target = observations.list ?? {records: [...observations.head], top: BigInt(observations.query.store_end), bottom: null, refused: 0, pinned: null};
+      target.records = debuggerUnique([...target.records, ...records]);
+      target.refused += answer.observations_malformed + answer.observations.length - records.length;
+      target.bottom = answer.observations_query.next_before ?? null;
+      target.query = answer.observations_query;
+      observations.list = target;
       observations.olderError = null;
     } catch (error) {
+      if (observations.olderController !== own) return;
       observations.olderError = String(error?.message ?? error);
     } finally {
-      observations.loadingOlder = false;
-      render();
+      if (observations.olderController === own) {
+        observations.loadingOlder = false;
+        observations.olderController = null;
+        render();
+      }
     }
   }
 
   function renderStatus() {
-    const when = view.updatedAt ? view.updatedAt.toLocaleTimeString() : null;
+    const kind = windowMode(), stored = kind === 'stored';
+    const time = view.updatedAt ? view.updatedAt.toLocaleTimeString() : null;
     const text = {
-      loading: 'Reading the native debugger state…',
+      loading: stored ? 'Reading the stored evidence…' : 'Reading the native debugger state…',
       unavailable: 'No backend serves this window, so the debugger state cannot be read.',
-      ready: `Updated ${when}. Read every ${Math.round(interval / 1000)} seconds while open.`,
-      disconnected: when ? `Disconnected: ${view.error}. Showing what was read at ${when}; reading again.` : `Cannot read the native debugger state: ${view.error}. Reading again.`,
-      malformed: when ? `The last answer was malformed (${view.error}) and was not used. Showing what was read at ${when}.` : `The answer was malformed (${view.error}) and was not used.`
+      ready: stored ? 'Stored evidence: read once, since nothing captures in this window.' : `Read every ${Math.round(interval / 1000)} seconds while open.`,
+      disconnected: stored ? `The stored-evidence backend did not answer: ${view.error}.`
+        : time ? `Disconnected: ${view.error}. Showing what was read before; reading again.` : `Cannot read the native debugger state: ${view.error}. Reading again.`,
+      malformed: `The last answer was malformed (${view.error}) and was not used.${time ? ' Showing what was read before.' : ''}`
     }[view.status];
-    status.textContent = text;
+    if (announced.textContent !== text) announced.textContent = text;
+    when.textContent = time ? `Read at ${time}.` : '';
+    when.hidden = !time;
+    again.hidden = !stored || view.status === 'loading';
     status.dataset.kind = view.status;
     root.dataset.state = view.status;
   }
@@ -502,44 +581,66 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
   }
   // Mounts every registered section in order; only expanded ones render.
   function render() {
-    if (!open) return;
-    renderStatus();
-    const wanted = sections();
-    for (const [id, entry] of mounted) {
-      if (!wanted.some(section => section.id === id && section === entry.section)) { release(entry); entry.details.remove(); mounted.delete(id); }
-    }
-    wanted.forEach((section, index) => {
-      let entry = mounted.get(section.id);
-      if (!entry) {
-        const details = debuggerNode('details', 'debug-pane debugger-section');
-        details.dataset.debuggerSection = section.id;
-        if (section.native) details.dataset.debuggerNative = section.native;
-        details.open = !section.collapsed;
-        const summary = debuggerNode('summary');
-        const name = debuggerNode('span', 'debugger-section-title', section.title);
-        const count = debuggerNode('span', 'debugger-section-count');
-        summary.append(name, count);
-        const sectionBody = debuggerNode('div', 'debug-pane-body debugger-section-body');
-        details.append(summary, sectionBody);
-        entry = {section, details, body: sectionBody, count};
-        details.addEventListener('toggle', () => { if (details.open) paintSection(entry); else release(entry); });
-        mounted.set(section.id, entry);
+    if (!open || rendering) return;
+    rendering = true;
+    try {
+      renderStatus();
+      const wanted = sections();
+      for (const [id, entry] of mounted) {
+        if (!wanted.some(section => section.id === id && section === entry.section)) { release(entry); entry.details.remove(); mounted.delete(id); }
       }
-      if (body.children[index] !== entry.details) body.insertBefore(entry.details, body.children[index] ?? null);
-      paintSection(entry);
-    });
+      wanted.forEach((section, index) => {
+        let entry = mounted.get(section.id);
+        if (!entry) {
+          const details = debuggerNode('details', 'debug-pane debugger-section');
+          details.dataset.debuggerSection = section.id;
+          if (section.native) details.dataset.debuggerNative = section.native;
+          details.open = !section.collapsed;
+          const summary = debuggerNode('summary');
+          const name = debuggerNode('span', 'debugger-section-title', section.title);
+          const count = debuggerNode('span', 'debugger-section-count');
+          summary.append(name, count);
+          const sectionBody = debuggerNode('div', 'debug-pane-body debugger-section-body');
+          details.append(summary, sectionBody);
+          entry = {section, details, body: sectionBody, count};
+          details.addEventListener('toggle', () => { if (details.open) paintSection(entry); else release(entry); });
+          mounted.set(section.id, entry);
+        }
+        if (body.children[index] !== entry.details) body.insertBefore(entry.details, body.children[index] ?? null);
+        paintSection(entry);
+      });
+    } finally {
+      rendering = false;
+    }
   }
+  // A section's count and body fail apart: a throwing summary leaves the body.
   function paintSection(entry) {
     entry.details.dataset.stale = String(view.status !== 'ready' && view.document !== null);
     try {
       entry.count.textContent = entry.section.summary ? String(entry.section.summary(view) ?? '') : '';
-      if (entry.details.open) entry.section.render(entry.body, view);
+    } catch (error) {
+      console.error('Debugger sidebar section summary failed', error);
+      entry.count.textContent = '';
+    }
+    if (!entry.details.open) return;
+    try {
+      entry.section.render(entry.body, view);
     } catch (error) {
       console.error('Debugger sidebar section failed', error);
       entry.body.replaceChildren(debuggerNode('p', 'debugger-note debugger-note-error', `This section failed to render: ${error?.message ?? error}`));
     }
   }
 
+  function stop() {
+    generation += 1;
+    clearTimeout(timer);
+    timer = 0;
+    controller?.abort();
+    controller = null;
+    view.observations.olderController?.abort();
+    view.observations.olderController = null;
+    view.observations.loadingOlder = false;
+  }
   function setOpen(value) {
     if (open === value) return;
     open = value;
@@ -553,9 +654,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
       render();
       read();
     } else {
-      generation += 1;
-      clearTimeout(timer);
-      timer = 0;
+      stop();
       for (const entry of mounted.values()) release(entry);
       hooks.syncLayout(false);
     }
@@ -572,9 +671,14 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     if (hooks.overlays()) setOpen(false);
     focusToggle();
   });
-  // Leaving Sources stops the reads; coming back resumes them.
+  // Leaving Sources aborts the read and stops polling; coming back resumes it.
+  // The stored-evidence window, whose store does not change, reads again only
+  // when leaving aborted its first read.
   if (typeof MutationObserver === 'function') {
-    new MutationObserver(() => { if (visible() && !reading && !timer) read(); }).observe(screen, {attributes: true, attributeFilter: ['hidden']});
+    new MutationObserver(() => {
+      if (screen.hidden) stop();
+      else if (open && !timer && !controller && (windowMode() === 'live' || !view.document)) read();
+    }).observe(screen, {attributes: true, attributeFilter: ['hidden']});
   }
 
   return {
@@ -590,6 +694,24 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
         includes: source => String(source.session_id) === String(thread.session_id) && String(source.frame_id) === String(thread.frame_id)};
     }
   };
+}
+
+// Records newest first, each once.
+function debuggerUnique(records) {
+  const seen = new Set();
+  return records.filter(record => {
+    const key = debuggerRecordKey(record);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function debuggerBytes(value) {
+  const bytes = Number(value);
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KiB`;
+  return `${bytes} ${bytes === 1 ? 'byte' : 'bytes'}`;
 }
 
 function debuggerNote(text, kind = '') {
@@ -636,9 +758,17 @@ function debuggerThreadsSection() {
         body.replaceChildren(threadsView.element, debuggerNode('div', 'debugger-thread-notes'));
       }
       const live = view.hooks.consoleLive?.() ?? null;
-      threadsView.render(debuggerThreads(view.document, {frameOrigin: view.hooks.frameOrigin, consoleTarget: live?.target_id ?? null}), view.thread?.key ?? null);
+      const groups = debuggerThreads(view.document, {frameOrigin: view.hooks.frameOrigin, consoleTarget: live?.target_id ?? null});
+      threadsView.render(groups, view.thread?.key ?? null);
       const notes = [];
-      const thread = view.thread;
+      // The selected thread's fields in full, as text the keyboard reaches.
+      const thread = view.thread ? groups.flat().find(item => item.key === view.thread.key) ?? view.thread : null;
+      if (thread) {
+        const fields = debuggerNode('dl', 'debugger-fields debugger-thread-detail');
+        fields.setAttribute('aria-label', 'Selected thread');
+        for (const [label, value] of debuggerThreadFields(thread)) fields.append(debuggerNode('dt', '', label), debuggerNode('dd', '', value));
+        notes.push(fields);
+      }
       if (thread?.kind === 'observed') {
         const scope = debuggerNode('p', 'debugger-note debugger-scope');
         scope.append(`Scoped to frame ${thread.frame_id}: Observations and the Sources tree show only this frame's records and files. `,
@@ -649,7 +779,7 @@ function debuggerThreadsSection() {
       } else if (thread?.kind === 'worker') {
         notes.push(debuggerNote('Workers record no observations: rules match only a document\'s main thread. Compiled worker scripts carry frame 0, so the Sources tree is not scoped.'));
       }
-      notes.push(debuggerNote(`Console listing: ${view.document.threads.console}. Workers come from the newest 2,048 request records and observed frames from the newest 2,048 observation records.`));
+      notes.push(debuggerNote(`Console listing: ${view.document.threads.console}. Workers come from the newest 2,048 request records, and observed frames from the observation records among the newest 2,048 records that are observations or gaps of any kind, each within the newest 64 MiB of the store.`));
       const gap = debuggerGapNote(view);
       if (gap) notes.push(gap);
       debuggerReplace(body.querySelector(':scope > .debugger-thread-notes'), notes);
@@ -695,11 +825,16 @@ function debuggerParseRules(form, carried) {
 
 // Watch rules: what the renderer confirmed, and arming through the Console's
 // own live connection to the document the researcher selected and confirmed.
+// There is one form, drawn for one Console document; it is drawn again when
+// the Console holds another, and it sends nothing if that changed since.
 function debuggerWatchSection() {
-  let form = null, sending = false, result = '', draftFor = null;
-  function build(view) {
+  // The last outcome names its document, so it outlives a form drawn again.
+  let form = null, outcome = '';
+  const sameDocument = (left, right) => Boolean(left && right) && left.session_id === right.session_id && left.target_id === right.target_id;
+  function build(view, live) {
     const element = debuggerNode('form', 'debugger-watch-form');
     element.noValidate = true;
+    element.dataset.target = live.target_id;
     const field = (label, control, hint) => {
       const wrap = debuggerNode('label', 'debugger-field');
       wrap.append(debuggerNode('span', 'debugger-field-label', label), control);
@@ -721,57 +856,72 @@ function debuggerWatchSection() {
     const dom = debuggerNode('p', 'debugger-note');
     const arm = debuggerNode('button', 'secondary-button debugger-arm');
     arm.type = 'submit';
-    const clear = debuggerButton('Clear rules', 'secondary-button', () => send(view, null));
     const actions = debuggerNode('div', 'debugger-watch-actions');
-    actions.append(arm, clear);
     const output = debuggerNode('p', 'debugger-note debugger-watch-result');
     output.setAttribute('role', 'status');
+    const own = {element, document: {session_id: live.session_id, target_id: live.target_id, label: live.label ?? ''},
+      requests, events, timers: timers.box, csp: csp.box, exceptions, dom, arm, output, sending: false, draftFor: null};
+    own.clear = debuggerButton('Clear rules', 'secondary-button', () => send(view, own, null));
+    actions.append(arm, own.clear);
     element.append(field('Requests', requests, 'One per line: an optional method, then text the URL contains.'),
       field('Event listeners', events, 'Event types, separated by commas.'), switches, dom, actions, output);
-    element.addEventListener('submit', event => { event.preventDefault(); send(view, 'arm'); });
-    form = {element, requests, events, timers: timers.box, csp: csp.box, exceptions, dom, arm, clear, output};
+    element.addEventListener('submit', event => { event.preventDefault(); send(view, own, 'arm'); });
+    return own;
   }
-  function fill(rules) {
-    form.requests.value = (rules?.requests ?? []).map(rule => rule.method ? `${rule.method} ${rule.url_contains}` : rule.url_contains).join('\n');
-    form.events.value = (rules?.events ?? []).join(', ');
-    form.timers.checked = Boolean(rules?.timers);
-    form.csp.checked = Boolean(rules?.csp);
-    form.exceptions.value = ['uncaught', 'all'].includes(rules?.exceptions) ? rules.exceptions : 'off';
+  function fill(own, rules) {
+    own.requests.value = (rules?.requests ?? []).map(rule => rule.method ? `${rule.method} ${rule.url_contains}` : rule.url_contains).join('\n');
+    own.events.value = (rules?.events ?? []).join(', ');
+    own.timers.checked = Boolean(rules?.timers);
+    own.csp.checked = Boolean(rules?.csp);
+    own.exceptions.value = ['uncaught', 'all'].includes(rules?.exceptions) ? rules.exceptions : 'off';
   }
-  async function send(view, action) {
-    const live = view.hooks.consoleLive?.();
-    if (sending || !live) return;
+  // Rules come from the form that was submitted, and go only to the document
+  // that form names, which must still be the Console's live document.
+  async function send(view, own, action) {
+    if (own.sending) return;
+    const live = view.hooks.consoleLive?.() ?? null;
+    if (!sameDocument(live, own.document)) {
+      outcome = live
+        ? `Not sent: the Console now holds document ${live.target_id}, not document ${own.document.target_id} this form was drawn for. Nothing was armed.`
+        : `Not sent: the Console is no longer connected to document ${own.document.target_id}. Nothing was armed.`;
+      view.repaint();
+      return;
+    }
     const armed = view.document?.watch?.armed;
-    const carried = armed && armed.session_id === live.session_id && armed.target_id === live.target_id && Array.isArray(armed.rules?.dom) ? armed.rules.dom : [];
+    const carried = sameDocument(armed, live) && Array.isArray(armed.rules?.dom) ? armed.rules.dom : [];
     let rules = null;
     if (action === 'arm') {
-      const parsed = debuggerParseRules(form, carried);
-      if (parsed.error) { result = parsed.error; view.refresh(); return; }
+      const parsed = debuggerParseRules(own, carried);
+      if (parsed.error) { outcome = parsed.error; view.repaint(); return; }
       rules = parsed.rules;
     }
-    sending = true;
-    result = action === 'arm' ? `Arming on document ${live.target_id}…` : `Clearing the rules of document ${live.target_id}…`;
-    view.refresh();
+    own.sending = true;
+    outcome = action === 'arm' ? `Arming on document ${live.target_id}…` : `Clearing the rules of document ${live.target_id}…`;
+    view.repaint();
     try {
       const reply = await view.hooks.watch(rules);
-      result = !reply ? 'No confirmed answer. The rules may have changed; nothing was retried.'
+      outcome = !reply ? `No confirmed answer from document ${live.target_id}. The rules may have changed; nothing was retried.`
         : reply.status === 'ok' ? (action === 'arm' ? `Armed on document ${live.target_id}. The renderer confirmed the set below.` : `Cleared on document ${live.target_id}.`)
-          : `Refused: ${reply.text || reply.status}. A refused set leaves nothing armed.`;
+          : `Refused by document ${live.target_id}: ${reply.text || reply.status}. A refused set leaves nothing armed.`;
     } catch (error) {
-      result = `Not confirmed: ${error?.message ?? error}. Nothing was retried.`;
+      outcome = `Not confirmed by document ${live.target_id}: ${error?.message ?? error}. Nothing was retried.`;
     } finally {
-      sending = false;
+      own.sending = false;
       view.refresh();
     }
+  }
+  function drop() {
+    form?.element.remove();
+    form = null;
   }
   return {
     id: 'watch-rules', title: 'Watch rules', order: 20,
     summary: view => view.document?.watch?.state ?? '',
     render(body, view) {
       const unread = debuggerUnread(view);
-      if (unread) { body.replaceChildren(unread); form = null; return; }
+      if (unread) { drop(); body.replaceChildren(unread); return; }
       let armedBox = body.querySelector(':scope > .debugger-watch-state');
-      if (!armedBox) { armedBox = debuggerNode('div', 'debugger-watch-state'); body.replaceChildren(armedBox); }
+      if (!armedBox) { drop(); armedBox = debuggerNode('div', 'debugger-watch-state'); body.replaceChildren(armedBox); }
       const watch = view.document.watch, armed = watch.state === 'armed' ? watch.armed : null;
       const nodes = [];
       if (watch.state === 'busy') nodes.push(debuggerNote('A Console action holds the session, so the armed set is read again shortly.', 'warning'));
@@ -789,43 +939,49 @@ function debuggerWatchSection() {
       }
       const live = view.hooks.consoleLive?.() ?? null;
       if (!live) {
-        form?.element.remove();
-        form = null;
+        drop();
+        if (outcome) nodes.push(debuggerNote(outcome, 'warning'));
         nodes.push(debuggerNote('To arm or clear rules, connect the Console to a live capture document: select it, confirm that commands can change it, then Connect. The rules arm through that connection\'s watch command; this sidebar never selects or confirms a document.'));
         debuggerReplace(armedBox, nodes);
         return;
       }
       debuggerReplace(armedBox, nodes);
-      if (!form) { build(view); body.append(form.element); }
-      const sameDocument = armed && armed.session_id === live.session_id && armed.target_id === live.target_id;
-      const key = `${live.session_id}:${live.target_id}:${JSON.stringify(sameDocument ? armed.rules : null)}`;
-      if (draftFor !== key && !form.element.contains(document.activeElement)) { fill(sameDocument ? armed.rules : null); draftFor = key; }
-      const carried = sameDocument && Array.isArray(armed.rules?.dom) ? armed.rules.dom.length : 0;
+      // The Console holds another document: that document gets a form of its own.
+      if (form && (!sameDocument(form.document, live) || !body.contains(form.element))) drop();
+      if (!form) { form = build(view, live); body.append(form.element); }
+      const same = sameDocument(armed, live);
+      const key = JSON.stringify(same ? armed.rules : null);
+      // A draft being typed is never overwritten by a poll.
+      const focused = document.activeElement;
+      if (form.draftFor !== key && !(focused && form.element.contains(focused))) { fill(form, same ? armed.rules : null); form.draftFor = key; }
+      const carried = same && Array.isArray(armed.rules?.dom) ? armed.rules.dom.length : 0;
       form.dom.textContent = carried
         ? `Arming here keeps the ${carried} DOM ${carried === 1 ? 'rule' : 'rules'} armed from the Console. Arming replaces the whole set; a refused set leaves nothing armed.`
         : 'DOM mutation rules need an element handle from the Console watch command. Arming replaces the whole set; a refused set leaves nothing armed.';
-      form.arm.textContent = sending ? 'Working…' : `Arm on document ${live.target_id}`;
-      form.arm.title = `Arms these rules on Console document ${live.target_id}${live.label ? ` (${live.label})` : ''} through the live Console connection. Nothing pauses and no value is read.`;
-      form.arm.disabled = sending;
-      form.clear.disabled = sending || !sameDocument;
-      form.output.textContent = result;
-      form.output.hidden = !result;
+      form.arm.textContent = form.sending ? 'Working…' : `Arm on document ${form.document.target_id}`;
+      form.arm.title = `Arms these rules on Console document ${form.document.target_id}${form.document.label ? ` (${form.document.label})` : ''} through the live Console connection. Nothing pauses and no value is read.`;
+      form.arm.disabled = form.sending;
+      form.clear.disabled = form.sending || !same;
+      if (form.output.textContent !== outcome) form.output.textContent = outcome;
+      form.output.hidden = !outcome;
     },
-    release() { form = null; draftFor = null; }
+    release() { drop(); }
   };
 }
 
 // Observations: the newest records per kind, with their identities. A row
-// opens its script position in Sources or its request in Traffic.
+// opens its script position in Sources or its request in Traffic. The notes
+// say how much of the store the rows come from: an empty list says that no
+// record exists only when the whole store was read.
 function debuggerObservationsSection() {
-  let list = null, controls = null, detail = null, selected = null, detailTimer = 0, notice = null;
+  let list = null, controls = null, detail = null, selected = null, detailTimer = 0, notice = null, revealDetail = false;
   const stacks = new Map();
   // Read once per record; a failed read is tried again only after a pause.
   function resolution(view, record) {
     const key = debuggerRecordKey(record);
     let entry = stacks.get(key);
     const retry = entry?.retryAt && Date.now() >= entry.retryAt;
-    if ((!entry || retry) && view.hooks.available()) {
+    if ((!entry || retry) && view.hooks.mode() !== 'none') {
       stacks.delete(key);
       entry = {status: 'loading'};
       stacks.set(key, entry);
@@ -857,10 +1013,12 @@ function debuggerObservationsSection() {
     if (site?.resolution?.status === 'resolved') return site;
     return (entry.document.frames ?? []).find(frame => frame.resolution?.status === 'resolved' && frame.resolution.artifact_id) ?? null;
   }
+  // A row the researcher chose brings its details into view.
   function choose(view, item, how) {
     if (!item) return;
     if (selected?.key !== item.key) notice = null;
     selected = item;
+    revealDetail = true;
     paintDetail(view);
     if (how === 'Enter' || how === 'dblclick') openPrimary(view, item.record);
   }
@@ -880,18 +1038,27 @@ function debuggerObservationsSection() {
     });
   }
   function openRequest(view, record) {
-    const problem = view.hooks.openRequest(record);
-    if (problem) say(view, record, problem);
+    const key = debuggerRecordKey(record);
+    Promise.resolve(view.hooks.openRequest(record)).then(problem => { if (problem && selected?.key === key) say(view, record, problem); },
+      error => { if (selected?.key === key) say(view, record, `The request was not opened: ${error?.message ?? error}.`); });
   }
   function paintDetail(view) {
     if (!detail) return;
-    if (!selected) { detail.hidden = true; detail.replaceChildren(); delete detail.dataset.signature; return; }
+    if (!selected) { detail.hidden = true; detail.replaceChildren(); delete detail.dataset.signature; revealDetail = false; return; }
     const record = selected.record, entry = resolution(view, record);
     // Repainting only on a change keeps focus on its buttons between polls.
     const signature = `${selected.key}|${entry.status}|${notice?.key === selected.key ? notice.text : ''}`;
-    if (detail.dataset.signature === signature && !detail.hidden) return;
-    detail.dataset.signature = signature;
-    detail.hidden = false;
+    if (detail.dataset.signature !== signature || detail.hidden) {
+      detail.dataset.signature = signature;
+      detail.hidden = false;
+      detail.replaceChildren(...detailNodes(view, record, entry));
+    }
+    if (revealDetail) {
+      revealDetail = false;
+      if (typeof detail.scrollIntoView === 'function') detail.scrollIntoView({block: 'nearest'});
+    }
+  }
+  function detailNodes(view, record, entry) {
     const heading = debuggerNode('div', 'debugger-detail-head');
     heading.append(debuggerNode('strong', '', debuggerObservationText(record)), debuggerButton('×', 'debugger-detail-close', () => { selected = null; notice = null; paintDetail(view); list?.set(rows(view), {selectedKey: null}); list?.focus(); }));
     heading.lastChild.setAttribute('aria-label', 'Close record details');
@@ -907,7 +1074,7 @@ function debuggerObservationsSection() {
     add('Stack', `${DEBUGGER_STACK_STATES[record.stack.state] ?? record.stack.state}${record.stack.total_depth ? `, ${record.stack.total_depth} frames` : ''}`);
     const nodes = [heading, fields];
     const actions = debuggerNode('div', 'debugger-detail-actions');
-    if (record.type === 'request_watch_match' && record.request_id !== '0') actions.append(debuggerButton('Open request in Traffic', 'secondary-button', () => openRequest(view, record)));
+    if (record.type === 'request_watch_match' && record.request_id !== '0') actions.append(debuggerButton('Open request in Traffic', 'secondary-button debugger-open-request', () => openRequest(view, record)));
     const frame = target(entry);
     if (notice?.key === selected.key) nodes.push(debuggerNote(notice.text, 'warning'));
     if (entry.status === 'loading') nodes.push(debuggerNote('Resolving positions from retained sources…'));
@@ -931,17 +1098,32 @@ function debuggerObservationsSection() {
       }
     }
     if (actions.children.length) nodes.splice(2, 0, actions);
-    detail.replaceChildren(...nodes);
+    return nodes;
   }
+  // The loaded pages when older ones were read, else the newest page.
   function rows(view) {
-    const observations = view.observations, seen = new Set(), items = [];
-    for (const record of [...observations.head, ...observations.older]) {
-      const key = debuggerRecordKey(record);
-      if (seen.has(key) || items.length >= DEBUGGER_SIDEBAR.rows) continue;
-      seen.add(key);
-      items.push({key, record, height: DEBUGGER_SIDEBAR.observationRow});
+    const observations = view.observations;
+    return (observations.list?.records ?? observations.head).slice(0, DEBUGGER_SIDEBAR.rows)
+      .map(record => ({key: debuggerRecordKey(record), record, height: DEBUGGER_SIDEBAR.observationRow}));
+  }
+  // How much of the store the rows were read from.
+  function coverage(view, count, kind, scope) {
+    const observations = view.observations, query = observations.query, loaded = observations.list;
+    const end = BigInt(query.store_end);
+    const top = loaded ? loaded.top : end;
+    const bottom = loaded ? loaded.bottom : query.next_before;
+    const whole = bottom === null && !loaded?.pinned && (loaded ? true : query.scope === 'store');
+    const read = top - (bottom === null ? 0n : BigInt(bottom));
+    const where = whole ? 'the whole event store'
+      : loaded?.pinned ? `${debuggerBytes(read)} of the event store's ${debuggerBytes(end)}, read before the newest records`
+        : `the newest ${debuggerBytes(read)} of the event store's ${debuggerBytes(end)}`;
+    const why = !whole && (loaded?.query ?? query).budget_exhausted ? ', where the last read stopped at its 64 MiB budget' : '';
+    if (!count) {
+      if (whole) return view.kind || scope ? `No ${kind}${scope} in ${where}.` : 'No observation records in the event store. Arm rules on a live document to record them; nothing pauses.';
+      return `No ${kind}${scope} in ${where}${why}. Older bytes were not read, so older records may exist: Show older records reads them.`;
     }
-    return items;
+    const capped = count >= DEBUGGER_SIDEBAR.rows ? `, the most this list keeps; get_events pages the rest` : '';
+    return `${count.toLocaleString('en-US')} ${kind}${scope}, newest first, from ${where}${why}${capped}. Enter opens a row's position in Sources, or its request in Traffic.`;
   }
   function build(view) {
     const root = debuggerNode('div', 'debugger-observations');
@@ -954,6 +1136,11 @@ function debuggerObservationsSection() {
       kinds.append(pill);
     }
     const notes = debuggerNode('div', 'debugger-observation-notes');
+    // A list kept at older pages says what was written since and offers the newest.
+    const pinned = debuggerNode('div', 'debugger-observation-pinned');
+    const pinnedText = debuggerNote('', 'warning');
+    pinned.append(pinnedText, debuggerButton('Show newest', 'secondary-button debugger-show-newest', () => { selected = null; view.showNewest(); }));
+    pinned.hidden = true;
     list = createDebuggerList({id: 'debugger-observations', label: 'Observation records, newest first',
       onActive: item => { clearTimeout(detailTimer); detailTimer = setTimeout(() => choose(view, item, 'active'), 120); },
       onChoose: (item, how) => { clearTimeout(detailTimer); choose(view, item, how); },
@@ -970,8 +1157,8 @@ function debuggerObservationsSection() {
     const more = debuggerButton('Show older records', 'secondary-button debugger-older', () => view.older());
     detail = debuggerNode('div', 'debugger-detail');
     detail.hidden = true;
-    root.append(kinds, notes, list.element, more, detail);
-    controls = {root, kinds, notes, more};
+    root.append(kinds, notes, pinned, list.element, more, detail);
+    controls = {root, kinds, notes, pinned, pinnedText, more};
   }
   return {
     id: 'observations', title: 'Observations', order: 30,
@@ -981,15 +1168,22 @@ function debuggerObservationsSection() {
       if (unread) { list?.release(); list = null; controls = null; detail = null; body.replaceChildren(unread); return; }
       if (!controls || !body.contains(controls.root)) { build(view); body.replaceChildren(controls.root); }
       for (const pill of controls.kinds.children) pill.setAttribute('aria-pressed', String((pill.dataset.kind === 'all' ? null : pill.dataset.kind) === view.kind));
-      const items = rows(view), answer = view.document, observations = view.observations;
+      const answer = view.document, observations = view.observations, loaded = observations.list;
+      const current = Boolean(observations.query) && observations.key === `${view.kind ?? 'all'}|${view.thread?.kind === 'observed' ? view.thread.key : 'all'}`;
+      // Until the new filter is read, the rows read before stay, named as what they are.
+      const items = observations.query ? rows(view) : [];
       const notes = [];
       const scope = view.thread?.kind === 'observed' ? ` in frame ${view.thread.frame_id}` : '';
-      const kind = view.kind ? DEBUGGER_OBSERVATION_KINDS[view.kind].filter.toLowerCase() : 'records of every kind';
-      if (observations.key !== `${view.kind ?? 'all'}|${view.thread?.kind === 'observed' ? view.thread.key : 'all'}`) notes.push(debuggerNote('Reading…'));
-      else if (!items.length) notes.push(debuggerNote(view.kind || scope ? `No ${kind}${scope} in the event store's newest records.` : 'No observation records. Arm rules on a live document to record them; nothing pauses.'));
-      else notes.push(debuggerNote(`Newest ${items.length.toLocaleString('en-US')} ${kind}${scope}${items.length >= DEBUGGER_SIDEBAR.rows ? ', the most this list keeps; get_events pages the rest' : ''}. Enter opens a row's position in Sources, or its request in Traffic.`));
-      const malformed = answer.observations_malformed + observations.refused + observations.olderRefused;
-      if (malformed > 0) notes.push(debuggerNote(`${malformed} ${malformed === 1 ? 'record' : 'records'} in the newest read ${malformed === 1 ? 'was' : 'were'} malformed and ${malformed === 1 ? 'is' : 'are'} not shown.`, 'warning'));
+      const kind = view.kind ? DEBUGGER_OBSERVATION_KINDS[view.kind].filter.toLowerCase() : 'records';
+      if (current) notes.push(debuggerNote(coverage(view, items.length, kind, scope)));
+      else if (!observations.query || view.status === 'ready' || view.status === 'loading') notes.push(debuggerNote('Reading…'));
+      else {
+        const shown = observations.query.type ? DEBUGGER_OBSERVATION_KINDS[observations.query.type].filter.toLowerCase() : 'records';
+        const where = observations.query.thread ? ` in frame ${observations.query.thread.frame_id}` : '';
+        notes.push(debuggerNote(`The ${kind}${scope} were not read. The rows below are the ${shown}${where} read before.`, 'warning'));
+      }
+      const malformed = answer.observations_malformed + observations.refused + (loaded?.refused ?? 0);
+      if (malformed > 0) notes.push(debuggerNote(`${malformed} ${malformed === 1 ? 'record' : 'records'} in these reads ${malformed === 1 ? 'was' : 'were'} malformed and ${malformed === 1 ? 'is' : 'are'} not shown.`, 'warning'));
       for (const gap of answer.observation_budget_gaps.slice(0, 2)) {
         notes.push(debuggerNote(`Renderer ${gap.process_id} reached 1,024 observation records in frame ${gap.frame_id} (gap #${gap.sequence_number}); its later records were refused until the next capture.`, 'gap'));
       }
@@ -997,14 +1191,24 @@ function debuggerObservationsSection() {
       if (gap) notes.push(gap);
       if (observations.olderError) notes.push(debuggerNote(`Older records were not read: ${observations.olderError}`, 'warning'));
       debuggerReplace(controls.notes, notes);
+      const pin = current ? loaded?.pinned : null;
+      controls.pinned.hidden = !pin;
+      if (pin) {
+        const span = debuggerBytes(pin.to - pin.from);
+        const text = pin.reason === 'full'
+          ? `This list holds its most, ${DEBUGGER_SIDEBAR.rows.toLocaleString('en-US')} records, so the ${span} written since it was read (bytes ${pin.from} to ${pin.to}) are not in it.`
+          : `Kept at the older pages read: the ${span} written since (bytes ${pin.from} to ${pin.to}) are more than ${DEBUGGER_SIDEBAR.bridge} reads and are not in this list.`;
+        if (controls.pinnedText.textContent !== text) controls.pinnedText.textContent = text;
+      }
       list.element.hidden = !items.length;
       list.set(items, {selectedKey: selected?.key ?? null});
-      controls.more.hidden = observations.next === null || items.length >= DEBUGGER_SIDEBAR.rows;
+      const end = loaded ? loaded.bottom : observations.query?.next_before ?? null;
+      controls.more.hidden = !current || end === null || items.length >= DEBUGGER_SIDEBAR.rows;
       controls.more.disabled = observations.loadingOlder;
       controls.more.textContent = observations.loadingOlder ? 'Reading older records…' : 'Show older records';
       if (selected) {
-        const current = items.find(item => item.key === selected.key);
-        if (current) selected = current;
+        const kept = items.find(item => item.key === selected.key);
+        if (kept) selected = kept;
       }
       paintDetail(view);
     },
@@ -1012,22 +1216,27 @@ function debuggerObservationsSection() {
   };
 }
 
-// Pausing: one state, from the availability get_native_debugger reports. The
-// pausing debugger adds its own sections here; none are imitated.
+// Pausing: one state, from the availability get_native_debugger reports. A
+// section registered with native: 'pausing' either replaces this one (id
+// pausing) or follows it, and then this statement names it; none is imitated.
 function debuggerPausingSection() {
   return {
     id: 'pausing', title: 'Pausing', order: 40,
     summary: view => view.document?.availability ?? '',
     render(body, view) {
       const unread = debuggerUnread(view);
-      if (unread) { body.replaceChildren(unread); return; }
+      if (unread) { delete body.dataset.signature; body.replaceChildren(unread); return; }
       const answer = view.document, available = answer.availability === 'available';
+      const others = view.nativeSections();
+      const names = others.map(section => section.title).join(', ');
+      const where = others.length === 1 ? `the ${names} section` : `the ${names} sections`;
       const state = debuggerNode('p', 'debugger-note debugger-pausing-state');
       state.dataset.debuggerNative = 'availability';
       state.dataset.availability = answer.availability;
       state.append(debuggerNode('strong', '', available ? 'Available. ' : 'Unsupported. '), available
-        ? 'A Brave build serves the pausing debugger, but its controls are not part of this sidebar yet, so nothing here can pause the page.'
-        : `No Brave build serves the pausing debugger (${answer.reason}), so breakpoints, scopes, a paused call stack and stepping are unavailable. Nothing is attached and no page is paused.`);
+        ? others.length ? `A Brave build serves the pausing debugger. Its controls are in ${where}.`
+          : 'A Brave build serves the pausing debugger, but its controls are not part of this sidebar yet, so nothing here can pause the page.'
+        : `No Brave build serves the pausing debugger (${answer.reason}), so breakpoints, scopes, a paused call stack and stepping are unavailable. Nothing is attached and no page is paused.${others.length ? ` The controls in ${where} stay disabled.` : ''}`);
       const fields = debuggerNode('dl', 'debugger-fields');
       for (const [label, value] of [
         ['Policy', answer.policy === 'approved' ? 'approved in SAFETY.md' : 'proposed, pending maintainer approval'],
@@ -1035,7 +1244,7 @@ function debuggerPausingSection() {
         ['Pause lease', `at most ${Math.round(answer.lease_limit_ms / 1000)} seconds`],
         ['Detectable', answer.detectable ? 'yes, a page can detect an active debugger' : 'no']
       ]) fields.append(debuggerNode('dt', '', label), debuggerNode('dd', '', value));
-      body.replaceChildren(state, fields);
+      debuggerReplace(body, [state, fields]);
     }
   };
 }
@@ -1053,7 +1262,9 @@ for (const section of [debuggerThreadsSection(), debuggerWatchSection(), debugge
   const appState = () => typeof state === 'object' && state ? state : null;
   let origins = {artifacts: null, map: new Map()};
   const hooks = {
-    available: () => location.protocol !== 'file:',
+    // A live window polls its backend; the stored-evidence window (reb://)
+    // answers from its fixed store; any other window has no backend.
+    mode: () => location.protocol === 'http:' || location.protocol === 'https:' ? 'live' : location.protocol === 'reb:' ? 'stored' : 'none',
     fetch: (input, init) => fetch(input, init),
     overlays: () => getComputedStyle(root).position === 'absolute',
     closeDetails() {
@@ -1083,17 +1294,42 @@ for (const section of [debuggerThreadsSection(), debuggerWatchSection(), debugge
       if (hooks.overlays()) debuggerSidebarController?.setOpen(false);
       openResolvedFrame(resolution);
     },
-    // The renderer request's Traffic row, named by the request index's own row identity.
-    openRequest(record) {
+    // The renderer request's Traffic row, named by the request index's own row
+    // identity, selected the way a click on that row selects it. A row outside
+    // the block Traffic holds is located in the request index first.
+    async openRequest(record) {
       const app = appState(), id = `S${record.session_id}:R${record.process_id}:${record.request_id}`;
-      const rows = (app?.requests ?? []).filter(request => request.id === id);
-      if (rows.length !== 1 || typeof showScreen !== 'function' || typeof selectRequest !== 'function') {
-        return `Request ${record.request_id} of renderer ${record.process_id} is not among the Traffic rows loaded now. Its stack is shown here.`;
+      const name = `Request ${record.request_id} of renderer ${record.process_id}`;
+      if (!app || typeof selectTrafficRow !== 'function' || typeof showScreen !== 'function') return `${name} cannot be opened: Traffic is not available here.`;
+      let located = null;
+      if (!app.trafficIndex?.row?.(id) && !(app.requests ?? []).some(request => request.id === id)) {
+        if (!app.trafficIndex || typeof loadTrafficRequest !== 'function' || typeof trafficIndexRequest !== 'function') {
+          return `${name} is not among the Traffic rows loaded now, and no request index can locate it. Its stack is shown here.`;
+        }
+        const ask = async parameters => {
+          const response = await hooks.fetch(`/api/requests?${new URLSearchParams({sort: 'capture', order: 'asc', limit: '1', ...parameters})}`,
+            {cache: 'no-store', signal: AbortSignal.timeout(DEBUGGER_SIDEBAR.deadline)});
+          const page = await response.json().catch(() => null);
+          if (!response.ok || page?.format !== 'reb-request-index-v1' || !Array.isArray(page.requests)) throw new Error(`the request index answered HTTP ${response.status}`);
+          return page;
+        };
+        try {
+          const position = (await ask({offset: '0', locate: id})).located?.[id];
+          if (!Number.isSafeInteger(position)) return `${name} is not in the request index. Its stack is shown here.`;
+          const row = (await ask({offset: String(position)})).requests[0];
+          if (row?.id !== id) return `${name} moved in the request index while it was located. Nothing was selected.`;
+          located = trafficIndexRequest(row, app.sessionMode === 'demo' ? 'demo' : 'live');
+        } catch (error) {
+          return `${name} was not located: ${error?.name === 'TimeoutError' ? 'the request index did not answer within 10 seconds' : error?.message ?? error}.`;
+        }
       }
+      if (hooks.overlays()) debuggerSidebarController?.setOpen(false);
       showScreen('traffic');
-      if (!document.querySelector('#console-experiment-traffic')?.hidden) document.querySelector('#console-traffic-back')?.click();
-      selectRequest(id);
+      if (typeof setConsoleTrafficView === 'function') setConsoleTrafficView(false);
       app.inspectorTab = 'initiator';
+      // Traffic's own selection; it reads the row's records when the newest window lacks them.
+      if (located && !app.trafficIndex.row(id)) loadTrafficRequest(located, true);
+      else selectTrafficRow(id);
       if (typeof renderInspector === 'function') renderInspector();
       return null;
     },

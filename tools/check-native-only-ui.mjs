@@ -350,7 +350,7 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   assert.equal(rows[0].getAttribute('aria-setsize'), '127');
   assert(rows.some(row => row.textContent.includes('<img/src=x/onerror=f()> listener on element')), 'a captured event type renders as text');
   assert.equal(sidebar.querySelector('img'), null, 'captured names never become elements');
-  for (const text of [/3 records in the newest read were malformed/, /Renderer 42 reached 1,024 observation records in frame 7101/]) {
+  for (const text of [/3 records in these reads were malformed/, /Renderer 42 reached 1,024 observation records in frame 7101/]) {
     assert.match(sidebar.querySelector('.debugger-observation-notes').textContent, text);
   }
   const threadRows = sidebar.querySelectorAll('#debugger-threads .debugger-list-row');

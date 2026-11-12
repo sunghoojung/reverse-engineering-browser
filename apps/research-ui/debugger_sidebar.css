@@ -13,7 +13,8 @@
 .debugger-sidebar-close { flex: none; width: 24px; height: 24px; display: grid; place-items: center; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--muted); font-size: 14px; line-height: 1; }
 .debugger-sidebar-close:hover { background: var(--panel-3); color: var(--text); }
 .debugger-sidebar-status { margin: 0; padding: 6px 12px; border-bottom: 1px solid var(--line-soft); color: var(--muted); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
-.debugger-sidebar-status:is([data-kind="disconnected"], [data-kind="malformed"]) { color: var(--amber); }
+.debugger-sidebar-status:is([data-kind="disconnected"], [data-kind="malformed"]) .debugger-status-state { color: var(--amber); }
+.debugger-status-time { color: var(--faint); font-variant-numeric: tabular-nums; }
 .debugger-sidebar-sections { min-height: 0; overflow: auto; overscroll-behavior: contain; }
 #screen-sources .debugger-section > summary { gap: 8px; }
 .debugger-section-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -32,7 +33,8 @@
 
 /* Lists mount only the rows in view; rows are absolutely positioned. */
 .debugger-list { position: relative; max-height: 240px; overflow: auto; overscroll-behavior: contain; border-block: 1px solid var(--line-soft); background: var(--panel); }
-.debugger-observations .debugger-list { height: clamp(132px, 36vh, 360px); max-height: none; }
+/* Sized to its rows up to the cap, so a short list leaves no blank band. */
+.debugger-observations .debugger-list { max-height: clamp(132px, 36vh, 360px); }
 .debugger-list-space { position: relative; width: 100%; }
 .debugger-list-row, .debugger-list-group { position: absolute; left: 0; right: 0; box-sizing: border-box; }
 .debugger-list-group { display: flex; align-items: center; gap: 6px; padding: 0 12px 0 24px; color: var(--muted); font-size: 11px; }
@@ -49,6 +51,9 @@
 .debugger-row-main[data-missing="true"] { color: var(--faint); font-family: var(--sans); font-size: 11px; }
 .debugger-row-state { flex: none; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 11px var(--sans); font-variant-numeric: tabular-nums; }
 .debugger-row-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 11px/16px var(--mono); font-variant-numeric: tabular-nums; }
+.debugger-row-foot { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.debugger-row-foot .debugger-row-meta { flex: 1 1 auto; }
+.debugger-thread-detail { padding: 0 12px 0 24px; font-size: 11px; line-height: 16px; }
 
 /* Observations: kind filter, notes, list, older page and record details. */
 .debugger-observations { display: grid; gap: 6px; min-width: 0; }
@@ -58,6 +63,8 @@
 .debugger-kind[aria-pressed="true"] { border-color: var(--line); background: var(--panel-3); color: var(--text); }
 .debugger-observation-notes, .debugger-thread-notes, .debugger-watch-state { display: grid; gap: 4px; min-width: 0; }
 .debugger-older { justify-self: start; margin-left: 24px; }
+.debugger-observation-pinned { display: grid; gap: 4px; }
+.debugger-show-newest { justify-self: start; margin-left: 24px; }
 .debugger-detail { display: grid; gap: 6px; margin: 0 12px 0 24px; padding: 8px; border: 1px solid var(--line-soft); border-radius: var(--control-radius); background: var(--panel); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
 .debugger-detail .debugger-note { padding: 0; }
 .debugger-detail-head { display: flex; align-items: flex-start; gap: 8px; }

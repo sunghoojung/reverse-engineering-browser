@@ -48,7 +48,8 @@ function trafficResponseAfter(record, request) {
   const [at, start] = [record?.monotonicTimeNs, request?.responseStarted?.monotonicTimeNs];
   if (typeof at !== 'string' || typeof start !== 'string') return null;
   const elapsed = BigInt(at) - BigInt(start);
-  return elapsed >= 0n ? `${(Number(elapsed / 1000000n) / 1000).toFixed(1)} s` : null;
+  if (elapsed < 0n) return null;
+  return elapsed < 1000000000n ? `${elapsed / 1000000n} ms` : `${(Number(elapsed / 1000000n) / 1000).toFixed(1)} s`;
 }
 
 // Why a request with no body record has none, by its body case.
@@ -461,8 +462,8 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     bar.setAttribute('role', 'group');
     bar.setAttribute('aria-label', 'Hex range');
     for (const [control, label, step, disabled] of [
-      ['hex-previous', `Previous ${trafficResponseBytes(TRAFFIC_RESPONSE_HEX_BYTES)}`, -1, range.start === 0],
-      ['hex-next', `Next ${trafficResponseBytes(TRAFFIC_RESPONSE_HEX_BYTES)}`, 1, range.end >= view.total]]) {
+      ['hex-previous', 'Previous 256 KiB', -1, range.start === 0],
+      ['hex-next', 'Next 256 KiB', 1, range.end >= view.total]]) {
       const button = trafficNode('button', 'secondary-button', label);
       button.type = 'button';
       button.dataset.control = control;

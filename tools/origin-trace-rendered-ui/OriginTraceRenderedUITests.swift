@@ -1857,8 +1857,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
     for size in windowSizes {
       let ui = try await prepare(size)
       try await show(ui, "traffic")
-      // Rows mount as they scroll, so each is revealed by its path first.
-      try await ui.click("#screen-traffic .request-row", containing: "\(expected.reusedHost)/sprite.json")
+      // Rows mount as they scroll, so each is revealed by its path first. A
+      // row shows its name (REUSED_TARGET without the slash) above its host.
+      try await ui.click("#screen-traffic .request-row", containing: "sprite.json?v=1")
       try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
       let selectedReuse = try await ui.value("document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"]')?.dataset.requestId ?? ''") as? String ?? ""
       XCTAssertTrue(selectedReuse.hasSuffix(":R\(expected.bodyCaseProcess):62"), "\(size.name): the reuse row is selected: \(selectedReuse)")

@@ -586,6 +586,7 @@ function responseBodyRecord(state, length, captured, digest, partial = 0, conten
   return payload.toString('hex');
 }
 
+// Artifact IDs 370 to 373; every other fixture ID is distinct from them.
 async function bodyCaseRequests(template, firstSequence, firstTime, artifactsRoot) {
   const renderer = BODY_CASE_PROCESS, workerRenderer = BODY_CASE_PROCESS + 1;
   let browserSequence = firstSequence, rendererSequence = 0, time = BigInt(firstTime);
@@ -621,9 +622,9 @@ async function bodyCaseRequests(template, firstSequence, firstTime, artifactsRoo
   rendered('61', 'request_initiated', hex(`GET ${REUSED_HOST}`), {scheme_class: 2, loader_kind: 16});
   browser('3100', 'request_started', hex(`GET ${REUSED_HOST}`), {...owner, resource_type: 13});
   const loaded = browser('3100', 'response_started', hex('application/json'), {...owner, status_code: 200});
-  const spriteDigest = await retain('330', loaded, sprite, 'application/json', `https://${REUSED_HOST}/sprite.json`);
+  const spriteDigest = await retain('370', loaded, sprite, 'application/json', `https://${REUSED_HOST}/sprite.json`);
   browser('3100', 'response_body', responseBodyRecord(1, sprite.length, sprite.length, spriteDigest),
-    {...owner, parent_event_id: loaded.sequence_number, artifact_id: '330'});
+    {...owner, parent_event_id: loaded.sequence_number, artifact_id: '370'});
   browser('3100', 'request_completed', hex('completed'), {...owner, status_code: 200, decoded_body_length: String(sprite.length)});
   const reuse = Buffer.alloc(128);
   reuse.writeUInt16LE(2, 0);
@@ -644,9 +645,9 @@ async function bodyCaseRequests(template, firstSequence, firstTime, artifactsRoo
   browser('3101', 'request_target', requestTargetPayload('/feed?x=1'), {...worker, parent_event_id: fetched.sequence_number});
   const feed = Buffer.from('{"feed":[1,2,3]}');
   const feedStarted = browser('3101', 'response_started', hex('application/json'), {...worker, status_code: 200});
-  const feedDigest = await retain('331', feedStarted, feed, 'application/json', `https://${WORKER_ANSWER_HOST}/feed?x=1`);
+  const feedDigest = await retain('371', feedStarted, feed, 'application/json', `https://${WORKER_ANSWER_HOST}/feed?x=1`);
   browser('3101', 'response_body', responseBodyRecord(1, feed.length, feed.length, feedDigest),
-    {...worker, parent_event_id: feedStarted.sequence_number, artifact_id: '331'});
+    {...worker, parent_event_id: feedStarted.sequence_number, artifact_id: '371'});
   browser('3101', 'request_completed', hex('completed'), {...worker, status_code: 200});
   rendered('63', 'request_completed', hex('completed'), {scheme_class: 2, status_code: 200, flags: 4,
     decoded_body_length: String(feed.length)});
@@ -654,17 +655,17 @@ async function bodyCaseRequests(template, firstSequence, firstTime, artifactsRoo
   const stream = Buffer.from('data: one\n\n'.repeat(100));
   browser('3102', 'request_started', hex(`GET ${PARTIAL_HOST}`), {resource_type: 13});
   const opened = browser('3102', 'response_started', hex('text/event-stream'), {status_code: 200});
-  const streamDigest = await retain('332', opened, stream, 'text/event-stream', `https://${PARTIAL_HOST}/events`);
+  const streamDigest = await retain('372', opened, stream, 'text/event-stream', `https://${PARTIAL_HOST}/events`);
   browser('3102', 'response_body', responseBodyRecord(3, stream.length, stream.length, streamDigest, 2, 'text/event-stream'),
-    {parent_event_id: opened.sequence_number, artifact_id: '332'});
+    {parent_event_id: opened.sequence_number, artifact_id: '372'});
   // A binary body longer than one 256 KiB hex window.
   const blob = Buffer.alloc(HEX_BODY_BYTES);
   for (let offset = 0; offset < blob.length; offset += 1) blob[offset] = (offset * 13 + 1) & 0xff;
   browser('3103', 'request_started', hex(`GET ${HEX_BODY_HOST}`), {resource_type: 13});
   const binary = browser('3103', 'response_started', hex('application/octet-stream'), {status_code: 200});
-  const blobDigest = await retain('333', binary, blob, 'application/octet-stream', `https://${HEX_BODY_HOST}/blob.bin`);
+  const blobDigest = await retain('373', binary, blob, 'application/octet-stream', `https://${HEX_BODY_HOST}/blob.bin`);
   browser('3103', 'response_body', responseBodyRecord(1, blob.length, blob.length, blobDigest, 0, 'application/octet-stream'),
-    {parent_event_id: binary.sequence_number, artifact_id: '333'});
+    {parent_event_id: binary.sequence_number, artifact_id: '373'});
   browser('3103', 'request_completed', hex('completed'), {status_code: 200, decoded_body_length: String(blob.length)});
   return {events, artifacts};
 }

@@ -523,6 +523,7 @@ assert(renders > 0);
   await render(first);
   assert(reads.length > before, 'The first preview was evicted, because bytes and parsed source together passed the budget');
 }
-console.log(`PASS traffic response UI: every capture state and reason, artifact join, pretty print by the Oxc layout with token raw ranges or the in-page layout with its reason, wrap/find/copy/hex, ` +
+console.log(`PASS traffic response UI: every capture state and body case with its reason, a partial body's arrived bytes and seal, ` +
+  `a memory-cache reuse showing and opening the request it names, a service worker's own fetches of the same URL, hex paged by range to the end, artifact join, pretty print by the Oxc layout with token raw ranges or the in-page layout with its reason, wrap/find/copy/hex, ` +
   `JSON tree bound, inert HTML and SVG, signature-checked image, ranged verified reads, integrity and refusal notes ` +
   `(${reads.length} reads; DOM model, not rendered QA)`);

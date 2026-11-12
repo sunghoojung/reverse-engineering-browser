@@ -200,6 +200,15 @@ void RendererFetchOwners() {
   assert(worker.header.frame_id == 0x77 && worker.header.loader_kind == 17);
   assert(worklet.header.frame_id == 0x1234 && worklet.header.loader_kind == 22 &&
          reb::IsValidEvent(worklet));
+  // Patch 0042's branch: a worklet with a creating frame names it; a shared
+  // storage worklet and a worklet without a frame parent name no owner.
+  constexpr auto named = reb::NativeWorkletFetchOwner(false, true, 0x21, 0x42);
+  static_assert(named.kind == reb::NativeLoaderKind::kWorklet &&
+                named.context_id == reb::NativeContextFold(0x21, 0x42));
+  static_assert(reb::NativeWorkletFetchOwner(true, true, 0x21, 0x42).kind ==
+                    reb::NativeLoaderKind::kNotRecorded &&
+                reb::NativeWorkletFetchOwner(false, false, 0x21, 0x42).kind ==
+                    reb::NativeLoaderKind::kNotRecorded);
   assert(restored.header.frame_id == 0x1234 && restored.header.loader_kind == 16);
   // Without an owner the running script's frame is kept and labelled as such.
   static_cast<void>(sink.RecordRequestInitiated(23, "GET", "https", "example.test"));

@@ -1475,7 +1475,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.sessionContent.hidden = !live || !retained.length;
         // The launch turned these on; a browser built before them ignores the
         // switch, so each row and body still says what was actually captured.
-        elements.sessionContent.title = `Content capture is on for this session: ${retained.join(' and ')}, kept locally. Each Traffic row and body shows what was actually captured. A Metadata only session keeps request hosts and body digests instead.`;
+        // The limits the launcher wrote into the address, so the session's
+        // budgets stay visible after the start panel closes.
+        const limits = state.requestContentCaptureEnabled ? state.sessionContentLimits : null;
+        const mib = value => `${value.toLocaleString('en-US')} MiB`;
+        const budgets = limits?.request_content_budget_mib && limits?.response_body_budget_mib
+          ? ` Budgets: ${mib(limits.request_content_budget_mib)} of request content and ${mib(limits.response_body_budget_mib)} of response bodies; media and fonts ${limits.response_media ? 'kept' : 'skipped'}.`
+          : '';
+        elements.sessionContent.title = `Content capture is on for this session: ${retained.join(' and ')}, kept locally.${budgets} Each Traffic row and body shows what was actually captured. A Metadata only session keeps request hosts and body digests instead.`;
         elements.sessionContent.setAttribute('aria-label', `Content capture: ${retained.join(' and ')}`);
         elements.capture.classList.toggle('offline', offline || artifactOffline);
         elements.capture.classList.toggle('demo', state.sessionMode === 'demo');

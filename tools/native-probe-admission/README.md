@@ -24,8 +24,9 @@ configuration-end remainder; and a full table and the Network category stay
 visible. A `document.cookie` read records one name record per cookie name it
 returned, split as the page would, with a name held twice counted once, at
 most 360 names, and every name past that bound or past a full table counted on
-the read record, which is then recorded at once; reads allocate nothing once a
-configuration has its table.
+the read record, which is then recorded at once; the sink allocates nothing on
+a read once a configuration has its table (Blink's UTF-8 conversion of a
+non-ASCII jar is outside the sink).
 
 Native JavaScript dispatch cases check the byte-exact 128-byte payload and every
 validation rule, the 44-byte site records, the inactive epoch, expiry and VM

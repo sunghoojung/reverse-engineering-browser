@@ -1812,8 +1812,11 @@ Store read while the table is full is recorded alone with bit 3; a new name
 then is counted on its read record instead. The table is open-addressed at
 most half full, so a lookup is a hash and a few probes; it is allocated when a
 content-capture configuration starts, on the transport sequence (336 KiB),
-and freed when it ends, so a read never allocates and a metadata-only session
-holds none.
+and freed when it ends, so the sink never allocates on a read and a
+metadata-only session holds none. Blink hands the sink the jar through
+`blink::StringUtf8Adaptor` (patch 0028): an 8-bit ASCII jar is read in place,
+and any other jar is converted to UTF-8 once per read, which allocates that
+string while content capture is on.
 
 #### Cookie bounds
 
@@ -1967,7 +1970,7 @@ drives the renderer cookie sink: disabled, metadata-only, writes, read
 aggregation, a full table and the configuration-end remainder, and per-name
 reads: the page's split, a name held twice, the empty jar, the 360-name bound,
 a table that fills during a read, a read with unrecorded names recorded at once
-(also past its powers of two), and reads that allocate nothing. The capture check also asserts that
+(also past its powers of two), and that the sink allocates nothing on a read. The capture check also asserts that
 `NativeNetworkHeadersObserved`, the gate of patch 0058, holds only for a
 current content session with the Network category before its expiry.
 `tools/check-header-observer-patch.py` refuses an agentless observer outside

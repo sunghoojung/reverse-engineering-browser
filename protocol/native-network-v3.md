@@ -348,10 +348,12 @@ whose response is that load's, so Chromium patch
 `resource.GetResponse().RequestId()` to the sink. A revalidation that Blink
 answers `304` keeps the first response's request ID, because
 `Resource::RevalidationSucceeded` only updates its headers, so the named
-request is the one whose bytes Blink holds. Static data had no request, and
-`GenerateRequestId` counts from 0, which is also what a response no request
-set carries, so a reuse names a source only for an ID above 0 that is not
-static data. The source names a row as a `request_tab_link` names a renderer
+request is the one whose bytes Blink holds. Static data had no request.
+`GenerateRequestId` starts each renderer process at a random value from 0 to
+2^20 (`GetInitialRequestID` in `web_url_request_util.cc`) and counts up, so 0
+is a real ID only when that start is 0, and it is also what a response no
+request set carries; a reuse names a source only for an ID above 0 that is
+not static data. The source names a row as a `request_tab_link` names a renderer
 record: `initiator_process_id` (the record's own process) and
 `initiator_request_id`. A reuse's own row stays keyed by its own request ID;
 consumers never join it to its source by those fields, and they leave them
@@ -1250,9 +1252,22 @@ At the pin no response a service worker sends a page passes through
   `content::ServiceWorkerMainResourceLoader`, which the navigation's
   interceptor chain runs instead of the network factory, so the proxied
   network loader is never created for it.
-- Only a fallback or race network request reaches the network factory, and
-  its records are the network attempt's
+- A fallback, a race network request, a synthetic network request and a
+  navigation preload do reach a proxied factory. A subresource fallback uses
+  the page's own network factory. For a main resource,
+  `ServiceWorkerClient::CreateNetworkURLLoaderFactory` passes the factory for
+  each of `kNavigationPreload`, `kRaceNetworkRequest` and
+  `kSyntheticNetworkRequest` through `WillCreateURLLoaderFactory` as
+  `kNavigation`. Those records are the network attempt's
   ([service worker ends](#service-worker-ends-without-a-response)).
+- A navigation the worker answers from `event.preloadResponse` therefore shows
+  as its preload request's row: a browser request that
+  `ServiceWorkerFetchDispatcher::MaybeStartNavigationPreload` gives resource
+  type `kNavigationPreloadMainFrame` or `kNavigationPreloadSubFrame` and the
+  `Service-Worker-Navigation-Preload` header, whose body case is that of any
+  proxied response and whose body is retained under that row. The navigation
+  itself has no row of its own, and the records do not say whether the worker
+  answered with those bytes unchanged.
 
 Retaining those bytes would mean a second tee in one of those loaders, one in
 the renderer, which may not open harness sockets or send artifacts, and one in

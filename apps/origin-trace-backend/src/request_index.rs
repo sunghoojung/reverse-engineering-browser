@@ -906,7 +906,7 @@ fn extension_link(event: &Value) -> Option<String> {
 
 fn tab_link(event: &Value) -> Option<(String, (u8, u32))> {
     let bytes = hex::decode(event["payload"].as_str()?).ok()?;
-    if bytes.len() != 24 || !(1..=4).contains(&bytes[4]) {
+    if bytes.len() != 24 || !(1..=5).contains(&bytes[4]) {
         return None;
     }
     let set_id = u64::from_le_bytes(bytes[8..16].try_into().unwrap());

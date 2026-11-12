@@ -9173,6 +9173,18 @@
         "minimum": 0,
         "maximum": 9007199254740991
       },
+      "RequestTabUnresolvedReason": {
+        "type": "string",
+        "description": "Why a request row has no tab (protocol/native-network-v3.md \"Unresolved requests\"): document_frame, a document, worklet or script-context renderer record whose frame the browser held no tab for; worker, a worker renderer record no link names; no_document, a context with no parent document; no_frame, a renderer record with frame 0; browser_factory, only browser records, from a factory with no frame, owner or version tab; no_loader_kind, an earlier producer.",
+        "enum": [
+          "document_frame",
+          "worker",
+          "no_document",
+          "no_frame",
+          "browser_factory",
+          "no_loader_kind"
+        ]
+      },
       "Uint64String": {
         "type": "string",
         "pattern": "^(0|[1-9][0-9]*)$",
@@ -34046,6 +34058,7 @@
               "rows",
               "extension_rows",
               "unresolved",
+              "unresolved_reasons",
               "unresolved_requests",
               "unresolved_omitted",
               "untracked_records"
@@ -34061,6 +34074,16 @@
               "unresolved": {
                 "$ref": "#/components/schemas/Uint64String"
               },
+              "unresolved_reasons": {
+                "type": "object",
+                "description": "Unresolved rows by reason, taken from the row's own records (protocol/native-network-v3.md \"Unresolved requests\"). Only reasons with rows appear.",
+                "propertyNames": {
+                  "$ref": "#/components/schemas/RequestTabUnresolvedReason"
+                },
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/Uint64String"
+                }
+              },
               "unresolved_requests": {
                 "type": "array",
                 "maxItems": 16,
@@ -34069,7 +34092,8 @@
                   "additionalProperties": false,
                   "required": [
                     "process_id",
-                    "request_id"
+                    "request_id",
+                    "reason"
                   ],
                   "properties": {
                     "process_id": {
@@ -34079,6 +34103,9 @@
                     },
                     "request_id": {
                       "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "reason": {
+                      "$ref": "#/components/schemas/RequestTabUnresolvedReason"
                     }
                   }
                 }
@@ -34093,7 +34120,7 @@
           },
           "exclusions": {
             "type": "array",
-            "description": "Evidence the capture counted instead of recording, by class, from capture_exclusion records (protocol/native-network-v3.md). Requests are chrome, chrome_untrusted, brave, devtools and chrome_search scheme loads, webui_request requests WebUI renderers sent through the browser proxy, extension_worker requests of extension workers and devtools_load requests of the DevTools factory; webui_renderer counts renderer processes with WebUI bindings or a WebUI process lock that were not admitted; memory_cache_reuse counts the memory-cache reuses a renderer did not record past its 4,096 per configuration, which would have been tab rows; non_ordinary_page_reuse counts its reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns. These are named exclusions, never gaps or drops. Empty when nothing was excluded or REB_CAPTURE_BROWSER_INTERNAL=1 recorded browser-internal loads.",
+            "description": "Evidence the capture counted instead of recording, by class, from capture_exclusion records (protocol/native-network-v3.md). Requests are chrome, chrome_untrusted, brave, devtools and chrome_search scheme loads, webui_request requests WebUI renderers sent through the browser proxy, extension_worker requests of extension workers, devtools_load requests of the DevTools factory, service_worker_no_page requests of service workers no page used in this browser and browser_prefetch browser-initiated prefetches with no page; webui_renderer counts renderer processes with WebUI bindings or a WebUI process lock that were not admitted; memory_cache_reuse counts the memory-cache reuses a renderer did not record past its 4,096 per configuration, which would have been tab rows; non_ordinary_page_reuse counts its reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns. These are named exclusions, never gaps or drops. Empty when nothing was excluded or REB_CAPTURE_BROWSER_INTERNAL=1 recorded browser-internal loads.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -34115,6 +34142,8 @@
                     "extension_worker",
                     "devtools_load",
                     "webui_request",
+                    "service_worker_no_page",
+                    "browser_prefetch",
                     "memory_cache_reuse",
                     "non_ordinary_page_reuse"
                   ]

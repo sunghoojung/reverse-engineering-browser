@@ -369,7 +369,8 @@ fn exclusion_class(code: u8) -> Option<(&'static str, &'static str)> {
         65 => ("extension_worker", "requests"),
         66 => ("devtools_load", "requests"),
         67 => ("webui_request", "requests"),
-        // 68 and 69 belong to another part of the contract.
+        68 => ("service_worker_no_page", "requests"),
+        69 => ("browser_prefetch", "requests"),
         70 => ("memory_cache_reuse", "reuses"),
         71 => ("non_ordinary_page_reuse", "reuses"),
         _ => return None,
@@ -539,29 +540,38 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
     }
     let unresolved = request_tabs.unresolved();
     if unresolved > 0 {
+        let reasons = request_tabs
+            .unresolved_reasons()
+            .iter()
+            .map(|(reason, count)| format!("{reason} {count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let mut item = check(
             "network_tab_unresolved",
             "error",
             format!(
-                "{unresolved} requests have no tab. This is a capture bug, not a property of the page; request_tabs lists them by process and request id for get_events."
+                "{unresolved} requests have no tab ({reasons}). This is a capture bug, not a property of the page; request_tabs lists them by process and request id, with their reason, for get_events."
             ),
         );
         item["count"] = json!(unresolved.to_string());
         checks.insert(0, item);
     }
     let excluded = exclusions.totals();
-    let no_tab: u64 = [65, 66]
+    let no_tab: u64 = [65, 66, 68, 69]
         .iter()
         .filter_map(|class| excluded.get(class))
         .fold(0, |sum, count| sum.saturating_add(*count));
     if no_tab > 0 {
+        let count = |class: u8| excluded.get(&class).copied().unwrap_or(0);
         let mut item = check(
             "no_tab_traffic_excluded",
             "info",
             format!(
-                "{no_tab} requests no tab caused were not recorded (extension workers {}, DevTools loads {}). These are named exclusions, not gaps.",
-                excluded.get(&65).copied().unwrap_or(0),
-                excluded.get(&66).copied().unwrap_or(0)
+                "{no_tab} requests no tab caused were not recorded (extension workers {}, DevTools loads {}, service workers no page used {}, browser prefetches with no page {}). These are named exclusions, not gaps.",
+                count(65),
+                count(66),
+                count(68),
+                count(69)
             ),
         );
         item["count"] = json!(no_tab.to_string());
@@ -771,6 +781,9 @@ mod tests {
             exclusion(12, 41, 70, 4),
             exclusion(13, 41, 70, 9),
             exclusion(14, 41, 71, 2),
+            exclusion(15, 41, 68, 2),
+            exclusion(16, 0, 68, 1),
+            exclusion(17, 0, 69, 4),
         ]
         .map(|event| event.to_string())
         .to_vec();
@@ -804,6 +817,8 @@ mod tests {
                 {"class": "extension_worker", "unit": "requests", "count": "2"},
                 {"class": "devtools_load", "unit": "requests", "count": "1"},
                 {"class": "webui_request", "unit": "requests", "count": "3"},
+                {"class": "service_worker_no_page", "unit": "requests", "count": "3"},
+                {"class": "browser_prefetch", "unit": "requests", "count": "4"},
                 {"class": "memory_cache_reuse", "unit": "reuses", "count": "9"},
                 {"class": "non_ordinary_page_reuse", "unit": "reuses", "count": "2"},
             ])
@@ -822,13 +837,22 @@ mod tests {
         assert_eq!(checks[0]["severity"], "error");
         assert_eq!(
             summary["request_tabs"]["unresolved_requests"],
-            json!([{"process_id": 7, "request_id": "77"}])
+            json!([{"process_id": 7, "request_id": "77", "reason": "no_loader_kind"}])
+        );
+        assert!(
+            checks[0]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("1 requests have no tab (no_loader_kind 1).")
         );
         let no_tab = checks
             .iter()
             .find(|check| check["code"] == "no_tab_traffic_excluded")
             .unwrap();
-        assert_eq!(no_tab["count"], "3");
+        assert_eq!(no_tab["count"], "10");
+        assert!(no_tab["message"].as_str().unwrap().contains(
+            "(extension workers 2, DevTools loads 1, service workers no page used 3, browser prefetches with no page 4)"
+        ));
         assert_eq!(summary["events"]["sequence_gaps"], "0");
         let checks = summary["checks"].as_array().unwrap();
         assert!(checks.iter().all(|check| check["code"] != "named_gap"));

@@ -443,7 +443,8 @@ frame ids. A shadow realm fetches through its initiator's `ResourceFetcher`
 (`ShadowRealmGlobalScope::Fetcher`), so its requests name that document or
 worker. A worklet's `WorkletGlobalScope::GetParentExecutionContextToken` is the
 creating document's `LocalFrameToken` for every worklet but a shared storage
-worklet, which has none.
+worklet, whose parent token is a fresh one, so it is told apart by its own
+`SharedStorageWorkletToken`.
 
 #### Where the owner comes from
 
@@ -462,7 +463,7 @@ worklet, which has none.
 | Service-worker main script and update check | `ServiceWorkerRegisterJob` keeps its cause: the `register()` caller (`requesting_frame_id_`), else the frame scoped while the job was created, which is the page calling `registration.update()` (`ServiceWorkerContainerHostForClient::Update`) or the page a payment app is installed for (`PaymentAppInstaller`). It scopes that cause and the registration's active version around both factory creations. The cause's tab is the factory's tab; without one, the request links to the active version's tabs | Patches 0036 and `0045-name-service-worker-job-causes`; `request_tab_link` kinds 3 to 5 naming the browser record |
 | A service-worker version's registrant | The cause's tab when the job starts the version, else the active version's tabs at that moment. `ServiceWorkerRegisterJob::StartWorkerForUpdate` notes the version and the cause; the version's install-time fetches and imported scripts link to it while it has no client | Patch 0045; kind 5 |
 | Scripts a starting service worker imports | `EmbeddedWorkerInstance` scopes its version around both factory bundles; the browser record links to that version's tabs | Patch 0045 |
-| Early-hints preload | The navigating main frame's tab | Chromium patch `0043-record-early-hints-preloads`: `NavigationRequest::CreateNavigationEarlyHintsManagerParams` creates the factory through `ContentClientParams`, with no frame because the document has not committed, and scopes `FrameTreeNode::current_frame_host()` |
+| Early-hints preload | The navigating main frame's tab | Chromium patch `0043-record-early-hints-preloads`: `NavigationRequest::CreateNavigationEarlyHintsManagerParams` creates the factory through `ContentClientParams`, with no frame because the document has not committed, and scopes `FrameTreeNode::current_frame_host()`. Every `WillCreateURLLoaderFactory` proxy now sees these preloads, so Brave Shields and an extension's `webRequest` apply to them as to other loads |
 | Browser-initiated prefetch | The referring `WebContents`' primary main frame | Chromium patch `0044-name-browser-prefetch-owners`: `CreatePrefetchURLLoaderFactory` scopes it; a prefetch with no live `WebContents` is traffic no tab caused (class 69) |
 
 In a capture launch the proxy observes the owned profile's frames and worker
@@ -624,17 +625,18 @@ and the error check `network_tab_unresolved`, whose message counts the rows by
 reason. Traffic shows the count in its footer; the button lists those rows.
 They are never hidden.
 
-The reason comes from the row's records. A renderer `request_initiated`
-decides it; a row with only browser records takes the last one:
+The reason comes from the row's records: the renderer `request_initiated` when
+the row has one, else the newest browser record's loader kind. The first that
+applies:
 
 | Reason | Row |
 | --- | --- |
-| `document_frame` | A renderer record of loader kind 16, 21 or 22 whose frame the browser held no tab for: never seen, evicted, or sharing its fold with another frame of the process |
+| `no_loader_kind` | The renderer record, or every browser record, has no loader kind (an earlier producer) |
 | `worker` | A renderer record of loader kind 17 to 19 that no link names: the worker was never seen or was evicted, its creator chain is longer than 64 workers, or it had no tab and was not counted as traffic no tab caused |
 | `no_document` | A renderer record of loader kind 20 |
 | `no_frame` | A renderer record with frame 0 |
-| `browser_factory` | Only browser records with a loader kind: a factory with no frame, scoped owner or version tab, or a scoped owner whose frame was gone |
-| `no_loader_kind` | No loader kind (an earlier producer) |
+| `document_frame` | A renderer record of loader kind 16, 21 or 22 whose frame the browser held no tab for: never seen, evicted, or sharing its fold with another frame of the process |
+| `browser_factory` | Only browser records: a factory with no frame, scoped owner or version tab, or a scoped owner whose frame was gone |
 
 ### Hot path and bounds
 

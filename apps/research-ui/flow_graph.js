@@ -210,7 +210,8 @@ function flowGraphDisplay(model, expanded = new Set(), collapse = true) {
     inbound[edge.to].push(index);
     for (const member of edge.members) edgeOf[member] = index;
   });
-  return {nodes: shown, edges: drawn, sinkRows, displayOf, groups: groups.length, foldKey, ins: inbound, outs: outbound, edgeOf};
+  const maxCount = drawn.reduce((max, edge) => Math.max(max, edge.count), 1);
+  return {nodes: shown, edges: drawn, sinkRows, displayOf, groups: groups.length, foldKey, ins: inbound, outs: outbound, edgeOf, maxCount};
 }
 
 /** What colours an edge: a crossing (frame, JavaScript and Wasm, into eval)
@@ -537,7 +538,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     for (const family of FLOW_GRAPH_EDGE_FAMILIES) { next.edge[family] = read(`--flow-edge-${family}`); next.rowInk[family] = read(`--flow-ink-${family}`); }
     next.realm = Array.from({length: FLOW_GRAPH_REALM_HUES}, (_, index) => read(`--flow-realm-${index}`));
     for (const [key, name] of Object.entries(alphaNames)) next.alpha[key] = Number.parseFloat(read(name));
-    tokens = next; miniKey = ''; labelSides = null; pillWidths.clear();
+    tokens = next; tokensRead = true; miniKey = ''; labelSides = null; pillWidths.clear();
+    for (const card of cards ?? []) card.fit = null;
     if (ctx) {
       // Monospace: one advance per font sizes every card.
       const advance = font => { ctx.font = font; return ctx.measureText('0000000000').width / 10; };
@@ -575,6 +577,9 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   const expect = (kind, wanted) => { intent = {...intent, [kind]: wanted}; };
   // A layout the view was hidden during is redone when it shows again.
   let layoutStale = false, layingOut = false, highlightFromRequest = false, detailsOpen = false, minimapOn = true;
+  // A read in flight; the stack count the host gave on the last show() and
+  // when the last read started, so an empty graph asks again only for more.
+  let reading = false, hostStacks = null, loadedStacks = null, tokensRead = false;
   // Cards visited by following calls, for Backspace.
   const history = [];
   let hover = {node: -1, row: -1, edge: -1}, edgeBounds = null, edgeFlat = [];
@@ -634,10 +639,14 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       return;
     }
     if (!session) { setState('empty', 'No capture session', 'Capture requests in a live session, then return here to see every recorded stack as one graph.'); return; }
-    if (!force && requested === sessionKey() && (model || status_ === 'loading')) return;
+    // A read already running for this session is left to finish.
+    if (reading && requested === sessionKey()) return;
+    if (!force && requested === sessionKey() && model) return;
     requested = sessionKey();
+    loadedStacks = hostStacks;
     controller?.abort(); controller = new AbortController();
     const mine = ++generation;
+    reading = true;
     if (!model) setState('loading', 'Building the flow graph…', 'Folding every recorded stack of this session.');
     else setBanner('loading', 'Refreshing the flow graph…');
     refresh.disabled = true;
@@ -664,7 +673,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       if (model) setBanner('error', `Refresh failed. Showing the previous graph. ${error}`);
       else setState('error', 'Could not build the flow graph', error, true);
     } finally {
-      if (mine === generation) refresh.disabled = false;
+      if (mine === generation) { reading = false; refresh.disabled = false; }
     }
   }
 
@@ -694,7 +703,6 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     const mine = generation;
     if (fresh || !layout) setState('loading', 'Laying out…', `${next.nodes.length.toLocaleString()} cards in ${model.contexts.length} ${model.contexts.length === 1 ? 'realm' : 'realms'}.`);
     layingOut = true;
-    readTokens();
     const nextCards = flowGraphCards(model, next, measure);
     try {
       // Triskel runs in the backend; a shell without the route lays out here.
@@ -952,21 +960,26 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   }
 
   const edgeColor = edge => tokens.edge[flowGraphEdgeFamily(edge)] ?? tokens.edge.call;
-  let maxEdgeCount = 1;
+  /** Edges off the lit stack first, then on it, per display and highlight;
+   * the hovered and chosen edges are drawn last, over both. */
+  let edgeOrder = null;
+  function drawOrder() {
+    if (edgeOrder?.display === display && edgeOrder.highlight === highlight) return edgeOrder.order;
+    const order = [];
+    display.edges.forEach((edge, index) => { if (highlight && !highlight.edges.has(index)) order.push(index); });
+    display.edges.forEach((edge, index) => { if (!highlight || highlight.edges.has(index)) order.push(index); });
+    edgeOrder = {display, highlight, order};
+    return order;
+  }
   function drawEdges() {
-    maxEdgeCount = display.edges.reduce((max, edge) => Math.max(max, edge.count), 1);
     const bounds = boundsOfEdges(), dim = Boolean(highlight), rowEdge = selectedRow >= 0 ? cards[selected]?.rows[selectedRow]?.edge ?? -1 : -1;
     const hot = new Set([hover.edge, hover.row >= 0 ? cards[hover.node]?.rows[hover.row]?.edge ?? -1 : -1, rowEdge].filter(index => index >= 0));
     const lit = index => !dim || highlight.edges.has(index) || hot.has(index);
-    const order = [];
-    display.edges.forEach((edge, index) => { if (!lit(index)) order.push(index); });
-    display.edges.forEach((edge, index) => { if (lit(index) && !hot.has(index)) order.push(index); });
-    hot.forEach(index => order.push(index));
     // The lit stack glows: a heavier stroke and a soft shadow of its colour.
     // A huge lit set skips the shadow, which costs a blur per edge.
-    const casing = view.z >= 0.3, log = Math.log(maxEdgeCount + 1), glows = dim && view.z >= 0.25 && highlight.edges.size <= 600;
+    const casing = view.z >= 0.3, log = Math.log(display.maxCount + 1), glows = dim && view.z >= 0.25 && highlight.edges.size <= 600;
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    for (const index of order) {
+    for (const index of [...drawOrder().filter(index => !hot.has(index)), ...hot]) {
       const at = index * 4;
       if (!visibleBox(bounds[at] - 6, bounds[at + 1] - 6, bounds[at + 2] - bounds[at] + 12, bounds[at + 3] - bounds[at + 1] + 12)) continue;
       const edge = display.edges[index], on = lit(index), strong = hot.has(index), color = edgeColor(edge), family = flowGraphEdgeFamily(edge);
@@ -1081,13 +1094,14 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     ctx.fillText(card.tag.toUpperCase(), pillX + card.pillW / 2, y + 19.5); ctx.textAlign = 'left'; clearLetterSpacing();
     ctx.fillStyle = tokens.badgeFill; ctx.strokeStyle = tokens.badge; ctx.lineWidth = hair; ctx.beginPath(); graphRoundedRect(ctx, badgeX, y + 8, card.badgeW, 16, 4); ctx.fill(); ctx.stroke();
     ctx.font = `10.5px ${tokens.mono}`; ctx.fillStyle = tokens.muted; ctx.fillText(card.badge, badgeX + 5, y + 19.5);
+    const fit = card.fit ??= fitCard(card);
     ctx.font = `600 12.5px ${tokens.mono}`; ctx.fillStyle = node.status === 'resolved' && !dim ? tokens.text : tokens.muted;
-    ctx.fillText(fitText(card.title, badgeX - x - C.pad - 8), x + C.pad, y + 21);
+    ctx.fillText(fit.title, x + C.pad, y + 21);
     ctx.font = `11px ${tokens.mono}`; ctx.fillStyle = tokens.site;
-    ctx.fillText(fitText(card.location, w - C.pad * 2), x + C.pad, y + C.head + 15);
+    ctx.fillText(fit.location, x + C.pad, y + C.head + 15);
     // Rows: site, mnemonic, callee, then the note and the count.
     ctx.font = `11.5px ${tokens.mono}`;
-    const opX = x + C.pad + (card.siteW ? card.siteW + 12 : 0), targetX = opX + (card.opW ? card.opW + 10 : 0);
+    const opX = x + C.pad + (card.siteW ? card.siteW + 12 : 0), targetX = x + fit.targetX;
     const rowCount = card.rows.length + (card.more ? 1 : 0);
     for (let row = 0; row < rowCount; row += 1) {
       const top = rowTop(box, row), base = top + 13.5, item = card.rows[row];
@@ -1099,17 +1113,33 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       ctx.fillStyle = tokens.site; ctx.fillText(item.site, x + C.pad, base);
       const edge = item.edge >= 0 ? display.edges[item.edge] : null;
       ctx.fillStyle = tone; ctx.fillText(item.op, opX, base);
-      const countW = item.count ? ctx.measureText(item.count).width + 10 : 0, room = x + w - C.pad - countW - targetX;
-      const target = fitText(item.target, room);
-      ctx.fillStyle = dim || (edge && display.nodes[edge.to]?.status !== 'resolved') ? tokens.muted : tokens.text; ctx.fillText(target, targetX, base);
-      if (item.note) {
-        const used = ctx.measureText(target).width + 10;
-        if (room - used > 30) { ctx.fillStyle = family === 'call' || dim ? tokens.note : tone; ctx.fillText(fitText(`; ${item.note}`, room - used), targetX + used, base); }
-      }
-      if (item.count) { ctx.fillStyle = tokens.muted; ctx.fillText(item.count, x + w - C.pad - countW + 10, base); }
+      const text = fit.rows[row];
+      ctx.fillStyle = dim || (edge && display.nodes[edge.to]?.status !== 'resolved') ? tokens.muted : tokens.text; ctx.fillText(text.target, targetX, base);
+      if (text.note) { ctx.fillStyle = family === 'call' || dim ? tokens.note : tone; ctx.fillText(text.note, x + text.noteX, base); }
+      if (item.count) { ctx.fillStyle = tokens.muted; ctx.fillText(item.count, x + text.countX, base); }
     }
     ctx.restore();
     ctx.globalAlpha = 1;
+  }
+
+  /** A card's text cut to its room. Both are in graph units and fixed per
+   * card, so this is measured once per card and font, never per frame;
+   * positions are from the card's left edge. */
+  function fitCard(card) {
+    const C = FLOW_GRAPH_CARD, w = card.w;
+    const targetX = C.pad + (card.siteW ? card.siteW + 12 : 0) + (card.opW ? card.opW + 10 : 0);
+    ctx.font = `600 12.5px ${tokens.mono}`;
+    const title = fitText(card.title, w - C.pad - card.pillW - 6 - card.badgeW - C.pad - 8);
+    ctx.font = `11px ${tokens.mono}`;
+    const location = fitText(card.location, w - C.pad * 2);
+    ctx.font = `11.5px ${tokens.mono}`;
+    const rows = card.rows.map(item => {
+      const countW = item.count ? ctx.measureText(item.count).width + 10 : 0, room = w - C.pad - countW - targetX;
+      const target = fitText(item.target, room), used = ctx.measureText(target).width + 10;
+      const note = item.note && room - used > 30 ? fitText(`; ${item.note}`, room - used) : '';
+      return {target, note, noteX: targetX + used, countX: w - C.pad - countW + 10};
+    });
+    return {title, location, rows, targetX};
   }
 
   /** Between the sketch and text zooms, each card keeps a legible name. */
@@ -1318,6 +1348,18 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     notify();
   }
 
+  /** Drops what only drawing needs while the view is hidden: the backing
+   * stores, the minimap, and the route, label and text caches. Showing the
+   * view again sizes and fills them anew. */
+  function releaseDrawing() {
+    if (frame) { cancelAnimationFrame(frame); frame = 0; }
+    canvas.width = 0; canvas.height = 0;
+    minimap.width = 0; minimap.height = 0;
+    miniBase = null; miniKey = '';
+    edgeFlat = []; edgeBounds = null; labelSides = null; edgeOrder = null; findText = null;
+    for (const card of cards ?? []) card.fit = null;
+  }
+
   // Workspace API ---------------------------------------------------------------
   /** What a host is told about a card and its chosen row. A chain card is
    * keyed by its first member, and `select(key)` with any member's key finds
@@ -1519,15 +1561,20 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     clipboard.writeText(text).then(() => flash(`Copied ${what.toLowerCase()}`), () => flash(`Could not copy the ${what.toLowerCase()}`, 'error'));
   }
 
+  /** What Find matches on each card, made once per display: its names,
+   * file, host, folded members and the requests it made. */
+  let findText = null;
+  function cardText() {
+    if (findText?.display === display) return findText.text;
+    const text = display.nodes.map((node, index) => [flowGraphNodeName(node), flowGraphNodeDetail(node), node.url ?? '', model.contexts[node.context]?.label.title ?? '',
+      ...(node.kind === 'chain' ? node.members.map(member => flowGraphNodeName(model.nodes[member])) : []), ...display.sinkRows[index].map(row => flowGraphNodeName(row.sink))].join(' ').toLowerCase());
+    findText = {display, text};
+    return text;
+  }
   function applyFilter() {
     const needle = filter.value.trim().toLowerCase();
     matches = [];
-    if (needle && display) display.nodes.forEach((node, index) => {
-      const context = model.contexts[node.context]?.label;
-      const haystack = [flowGraphNodeName(node), flowGraphNodeDetail(node), node.url ?? '', context?.title ?? '', ...(node.kind === 'chain' ? node.members.map(member => flowGraphNodeName(model.nodes[member])) : []),
-        ...(display.sinkRows?.[index] ?? []).map(row => flowGraphNodeName(row.sink))].join(' ').toLowerCase();
-      if (haystack.includes(needle)) matches.push(index);
-    });
+    if (needle && display) cardText().forEach((text, index) => { if (text.includes(needle)) matches.push(index); });
     matchSet = new Set(matches);
     matchIndex = -1;
     find.hidden = !needle;
@@ -1555,6 +1602,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   // Details -------------------------------------------------------------------
   function renderInspector() {
     host.toggleAttribute('data-selected', selected >= 0);
+    // Details is built only while it is open; opening it builds it.
+    if (!detailsOpen) return;
     inspector.replaceChildren();
     if (!model) return;
     const close = button('Close', () => { setDetails(false); canvas.focus({preventScroll: true}); }, 'Hide details', 'flow-graph-tool flow-graph-inspector-close');
@@ -1669,7 +1718,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
 
   // Tooltip -------------------------------------------------------------------
   function hideTooltip() { tooltip.hidden = true; }
-  function showTooltip(px, py) {
+  function buildTooltip() {
     const facts = [];
     let heading = '', kind = '';
     if (hover.node >= 0 && hover.row < 0) {
@@ -1694,7 +1743,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       facts.push(['seen', `${(sink.hits ?? 0).toLocaleString()} in this session, ${row.count ? row.count.slice(1) : '1'} from here`, 'count']);
     } else {
       const edgeIndex = hover.row >= 0 ? cards[hover.node]?.rows[hover.row]?.edge : hover.edge, edge = display.edges[edgeIndex];
-      if (!edge) { hideTooltip(); return; }
+      if (!edge) { hideTooltip(); return false; }
       heading = `${edge.kind === 'task' ? REQUEST_STACK_TASKS[edge.task] ?? edge.task : edge.kind}`; kind = flowGraphEdgeFamily(edge);
       facts.push(['from', flowGraphNodeName(display.nodes[edge.from]), '']);
       facts.push(['to', flowGraphNodeName(display.nodes[edge.to]), '']);
@@ -1710,9 +1759,12 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     for (const [label, value, tone] of facts) { const dd = make('dd', '', value); if (tone) dd.dataset.tone = tone; list.append(make('dt', '', label), dd); }
     tooltip.append(list);
     tooltip.hidden = false;
+    return true;
+  }
+  /** Beside the card, at the row, so it never covers what it describes or
+   * the callee about to be followed; at the pointer only for an edge. */
+  function placeTooltip(px, py) {
     const tw = tooltip.offsetWidth || 240, th = tooltip.offsetHeight || 100;
-    // Beside the card, at the row, so it never covers what it describes or
-    // the callee about to be followed; at the pointer only for an edge.
     let left = px + 16, top = py + 18;
     if (hover.node >= 0) {
       const box = nodeBox(hover.node), right = (box.x + box.w - view.x) * view.z + 12, leftSide = (box.x - view.x) * view.z - 12 - tw;
@@ -1832,7 +1884,9 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     const changed = next.node !== hover.node || next.row !== hover.row || next.edge !== hover.edge;
     hover = next;
     canvas.style.cursor = next.row >= 0 || next.edge >= 0 ? 'pointer' : '';
-    if (next.node < 0 && next.edge < 0) hideTooltip(); else if (menu.hidden) showTooltip(px, py);
+    if (next.node < 0 && next.edge < 0) hideTooltip();
+    else if (menu.hidden && (changed || tooltip.hidden)) { if (buildTooltip()) placeTooltip(px, py); }
+    else if (menu.hidden && next.node < 0) placeTooltip(px, py);
     if (changed) requestDraw();
   });
   canvas.addEventListener('pointerleave', () => { if (pointer.down) return; hover = {node: -1, row: -1, edge: -1}; hideTooltip(); requestDraw(); });
@@ -1965,13 +2019,16 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
 
   return {
     /** Shows the view for one session; loads it the first time or when the session changes. */
-    show({session: next, request = null}) {
+    show({session: next, request = null, stacks = null}) {
+      const wasVisible = visible;
       visible = true; host.hidden = false;
-      readTokens();
+      // Tokens change only with the theme, which the observers above follow.
+      if (!tokensRead) readTokens();
       const changed = String(next ?? '') !== String(session ?? ''), first = session === null;
       session = next ?? null;
       if (changed) {
         model = null; display = null; cards = null; layout = null; selected = -1; selectedRow = -1; highlight = null; highlightFromRequest = false; keyIndex = null; markTarget = null;
+        status_ = 'idle';
         // A key asked for before the first session waits for it; what was
         // asked for in another session does not carry over, and this
         // session's request is lit afresh.
@@ -1986,17 +2043,25 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       const newRequest = requestText !== shownRequest;
       shownRequest = requestText;
       requestKey = request;
-      resize();
-      if (!model || (status_ === 'empty' && !layingOut)) load(Boolean(model));
-      // Polls call show() often; a layout already running is left to finish.
-      else if (!layingOut && (layoutStale || !layout)) rebuild({fresh: !layout, cause: 'replay'});
+      // The stage's size is the ResizeObserver's, except as the view appears.
+      if (!wasVisible) resize();
+      // Polls call show() often. An empty or failed graph asks again only
+      // when the view reopens or the host has seen more stacks (Refresh and
+      // Retry ask at once), and a layout already running is left to finish.
+      hostStacks = stacks;
+      const settled = status_ === 'empty' || status_ === 'error';
+      const more = stacks !== null && loadedStacks !== null && stacks > loadedStacks;
+      if (settled && (!wasVisible || more)) load(true);
+      else if (!model && !settled) load();
+      else if (!settled && !layingOut && (layoutStale || !layout)) rebuild({fresh: !layout, cause: 'replay'});
       if (newRequest) as('host', () => showRequest(request));
-      requestDraw();
     },
     hide() {
       visible = false; host.hidden = true;
       controller?.abort(); runner.cancel(); hideTooltip(); closeMenu(false);
       if (status_ === 'loading' && !layout) { requested = null; status_ = 'idle'; }
+      if (banner.dataset.kind === 'loading') setBanner(null);
+      releaseDrawing();
     },
     focus() { canvas.focus({preventScroll: true}); },
     // The setters act for the host: a change they make is never a pick. By

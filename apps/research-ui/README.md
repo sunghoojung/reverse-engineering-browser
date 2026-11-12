@@ -2373,7 +2373,10 @@ steps with Enter, Shift+Enter or its arrows, and never dims a match.
 - Copy feedback is a toast, so a refresh-failure warning stays until Retry.
 - A refresh keeps the selection, the expanded chains, the mark and the view
   wherever the same functions are still in the graph.
-- An empty graph offers **Refresh** and asks again when the view reopens.
+- An empty or failed graph asks again on **Refresh** or **Retry**, when the
+  view reopens, or when the app has seen more script-started requests; an
+  evidence poll never asks again otherwise, and never restarts a read that is
+  still running.
 
 ### Keyboard and zoom
 
@@ -2465,6 +2468,11 @@ takes, besides `host`, `open` and `available`:
 | `callers` | up to eight cards on drawn edges into this one, most stacks first, each `{key, name, kind, note, count}` with `note` the edge kind |
 | `callees` | the same for drawn edges out of this card |
 
+`show({session, request, stacks})` shows the view for a session and the
+renderer request the app has selected; `stacks`, when given, is how many
+captured requests a script started, so an empty graph asks again when it
+grows. `hide()` releases the canvas, the minimap and the drawing caches.
+
 The panel returns, besides `show`, `hide` and `focus`, the methods below.
 Its setters, `select`, `highlightRequest` and `setMark`, act for the host: a
 change they make is never a `pick`. By default they are silent and their
@@ -2534,7 +2542,10 @@ status bar says `Triskel layout`, or how many realms it took, and hovering it
 gives each other realm's reason.
 
 Six thousand cards lay out in well under a second. The canvas is one bounded
-backing store, and only visible bands, cards and edges are drawn; cards drop
+backing store, released with the minimap while the view is hidden, and only
+visible bands, cards and edges are drawn. Card text is cut to its card once
+per layout, not per frame, and a selection reads per-model path indexes and
+per-display edge lists rather than walking every path; cards drop
 their lift shadow when more than 160 are in view, and the lit stack drops its
 glow past 600 edges. A refresh failure keeps the last graph under a banner.
 The `reb://` stored-evidence window has no flow graph route and says so.

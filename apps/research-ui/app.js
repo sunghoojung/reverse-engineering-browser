@@ -4405,6 +4405,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const session = investigationId(root?.session_id);
         return session && session !== '0' ? session : null;
       }
+      /** Captured requests a script started, which carry the stacks the Flow
+       * graph draws: an empty graph asks again only when this grows. */
+      const flowGraphStackCount = () => state.requests.reduce((count, request) => count + (request.initiator === 'script' ? 1 : 0), 0);
       /** The renderer request a Flow graph path names, from the row's request_initiated record. */
       function flowGraphRequestKey() {
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId) ?? null;
@@ -4417,7 +4420,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const screen = document.querySelector('#screen-backtrace');
         const showing = Boolean(screen && !screen.hidden);
         if (typeof flowGraphPanel !== 'undefined' && flowGraphPanel) {
-          if (showing) flowGraphPanel.show({session: flowGraphSession(), request: flowGraphRequestKey()});
+          if (showing) flowGraphPanel.show({session: flowGraphSession(), request: flowGraphRequestKey(), stacks: flowGraphStackCount()});
           else flowGraphPanel.hide();
         }
         if (typeof flowWorkspace !== 'undefined' && flowWorkspace) flowWorkspace.sync({visible: showing, session: flowGraphSession(), request: showing ? flowWorkspaceRequest() : null});

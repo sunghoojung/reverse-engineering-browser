@@ -225,9 +225,9 @@ repository's overlays, services and companion app.
 
 The project's current pins are:
 
-- [Brave](../../browser/config/brave-core.rev): `v1.95.52`
-- [Chromium](../../browser/config/chromium.rev): `151.0.7922.108`
-- [V8](../../browser/config/v8.rev): `20ad8d002c17ccc7ccfbefc6c4dcf1242fe80921`
+- [Brave](../../browser/config/brave-core.rev): `v1.99.57`
+- [Chromium](../../browser/config/chromium.rev): `157.0.8103.79`
+- [V8](../../browser/config/v8.rev): `307108153d1e35e6e74528ee55f97b0cd59bf182`
 
 Treat those files as authoritative if they change. Do not substitute today's
 upstream main branch or mix a browser with an unrelated companion revision.

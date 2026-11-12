@@ -131,10 +131,10 @@ truncation, queue drops and real local IPC admission/backlog behavior. These tes
 do not compile the upstream proxy template or prove browser hook execution.
 The ordinary JS gate checks incomplete vs real-error projections.
 
-Patch 0013 is based on Brave `v1.95.52`; Chromium remains `151.0.7922.108` and V8
-`20ad8d002c17ccc7ccfbefc6c4dcf1242fe80921`. No pins change. Partial replay against
-fetched exact pinned Brave files is useful source evidence, but is not full
-three-stack replay on a Brave-initialized checkout.
+Patch 0013 was written against Brave `v1.95.52` (Chromium `151.0.7922.108`) and
+rebased onto Brave `v1.99.57` (Chromium `157.0.8103.79`) in #439. Both rest on
+replay against fetched exact pinned Brave files, which is useful source
+evidence but not full three-stack replay on a Brave-initialized checkout.
 
 Before declaring this browser-ready:
 

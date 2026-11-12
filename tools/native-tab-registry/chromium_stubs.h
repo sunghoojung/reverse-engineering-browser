@@ -1,4 +1,4 @@
-// Narrow stand-ins for the pinned Chromium 151 content API that
+// Narrow stand-ins for the pinned Chromium 157 content API that
 // native_tab_registry.cc, native_factory_scope.cc and native_tab_of.h call.
 // Each signature the overlay overrides or calls matches the pinned header;
 // behavior is test-controlled state, not a browser.

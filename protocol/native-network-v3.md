@@ -397,7 +397,8 @@ assigned by host, URL or timing.
 
 `tab_id` is the `FrameTreeNodeId` of the primary main frame of the outermost
 `WebContents` (`GetOutermostWebContents()`, so guest views count as their
-embedding tab). At pinned Chromium 151.0.7922.108 it is stable for a tab:
+embedding tab). At pinned Chromium 157.0.8103.79, as at 151.0.7922.108, it is
+stable for a tab:
 
 - Prerender activation moves the prerendered main `RenderFrameHost` into the
   primary tree's root node (`PrerenderHost::Activate` calls

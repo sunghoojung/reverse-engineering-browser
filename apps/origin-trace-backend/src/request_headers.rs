@@ -73,7 +73,7 @@ const POLICIES: [&str; 9] = [
 /// Why a hop of a content session's request has no `network` request block,
 /// from the request's own browser lifecycle records ("Missing final blocks"
 /// in protocol/native-network-v3.md), in the order they are decided.
-pub(crate) const MISSING_REASONS: [(&str, &str); 6] = [
+pub(crate) const MISSING_REASONS: [(&str, &str); 8] = [
     (
         "in_progress",
         "the request has not ended, so the network service may still report what it sent",
@@ -95,8 +95,17 @@ pub(crate) const MISSING_REASONS: [(&str, &str); 6] = [
         "it failed before the network service reported the headers it sent",
     ),
     (
+        "redirect_not_sent",
+        "nothing was sent for this redirect hop: it was an internal redirect, such as an HSTS upgrade, or one the HTTP cache answered, while a later hop of the request reported what it sent",
+    ),
+    (
         "not_reported",
         "the network service reported no sent headers for this hop: its factory had no DevTools observer, or the block arrived for a request the capture no longer tracked",
+    ),
+    // A hop with a sent cookie list and no received one.
+    (
+        "no_raw_response",
+        "the network service reported what was sent for this hop but no response headers: no response arrived, or it arrived after the capture stopped tracking the request",
     ),
 ];
 
@@ -132,12 +141,16 @@ impl Lifecycle {
     }
 
     /// The reason a hop without a `network` block has none; `last` is whether
-    /// it is the request's final hop, the one its response belongs to.
-    pub(crate) fn missing_reason(&self, last: bool) -> &'static str {
+    /// it is the request's final hop, the one its response belongs to, and
+    /// `later_reported` whether a later hop of the request has a block.
+    pub(crate) fn missing_reason(&self, last: bool, later_reported: bool) -> &'static str {
         if last && !self.ended {
             "in_progress"
         } else if self.download {
             "download"
+        } else if !last && later_reported {
+            // The factory observes and tracks this request, so nothing was sent.
+            "redirect_not_sent"
         } else if last && self.from_service_worker {
             "service_worker"
         } else if last && self.from_cache {
@@ -159,7 +172,7 @@ impl Lifecycle {
         } else if last && self.failed && !self.responded {
             "failed"
         } else {
-            "not_reported"
+            "no_raw_response"
         }
     }
 }
@@ -559,8 +572,11 @@ pub fn build(
             let provisional =
                 !request.is_empty() && request.iter().all(|block| block["source"] == "browser");
             // A content session's hop that the network never reported.
+            let later_reported = sources.range(hop + 1..).any(|(_, seen)| seen.1);
             let missing = match sources.get(&hop) {
-                Some((true, false)) => json!(lifecycle.missing_reason(Some(hop) == last)),
+                Some((true, false)) => {
+                    json!(lifecycle.missing_reason(Some(hop) == last, later_reported))
+                }
                 _ => Value::Null,
             };
             json!({"hop": hop, "provisional": provisional, "network_block_missing": missing,
@@ -699,21 +715,48 @@ mod tests {
             life
         };
         assert_eq!(
-            lifecycle(&[("request_failed", 0)], 3).missing_reason(true),
+            lifecycle(&[("request_failed", 0)], 3).missing_reason(true, false),
             "failed"
         );
         assert_eq!(
-            lifecycle(&[("response_started", 0), ("request_failed", 0)], 3).missing_reason(true),
+            lifecycle(&[("response_started", 0), ("request_failed", 0)], 3)
+                .missing_reason(true, false),
             "not_reported"
         );
         assert_eq!(
-            lifecycle(&[("response_started", 4), ("request_completed", 0)], 3).missing_reason(true),
+            lifecycle(&[("response_started", 4), ("request_completed", 0)], 3)
+                .missing_reason(true, false),
             "service_worker"
         );
         assert_eq!(
-            lifecycle(&[("request_completed", 0)], 2).missing_reason(true),
+            lifecycle(&[("request_completed", 0)], 2).missing_reason(true, false),
             "download"
         );
+        // A service worker answered from its cache: no request reached the network.
+        assert_eq!(
+            lifecycle(&[("response_started", 6), ("request_completed", 0)], 3)
+                .missing_reason(true, false),
+            "service_worker"
+        );
+        // An earlier hop of a request whose later hop was reported sent nothing.
+        let ended = lifecycle(&[("response_started", 0), ("request_completed", 0)], 3);
+        assert_eq!(ended.missing_reason(false, true), "redirect_not_sent");
+        assert_eq!(ended.missing_reason(false, false), "not_reported");
+        assert_eq!(ended.missing_received_reason(true), "no_raw_response");
+        let mut redirected = events.clone();
+        redirected.push(record(
+            "request_headers",
+            25,
+            20,
+            payload(2, 3, 0, b"", 1, 0),
+            "0",
+        ));
+        let reported = build(&redirected, &artifacts, &root, "7", "17");
+        assert_eq!(
+            reported["hops"][0]["network_block_missing"],
+            "redirect_not_sent"
+        );
+        assert_eq!(reported["hops"][1]["network_block_missing"], Value::Null);
         assert!(
             MISSING_REASONS
                 .iter()

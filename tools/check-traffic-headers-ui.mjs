@@ -128,6 +128,8 @@ assert.equal(panel.querySelector('pre')?.textContent, 'Location: /final\r\nSet-C
     [[browser('request_started'), browser('request_failed')], /It failed before the network stack reported the headers it sent/],
     [[browser('request_started', {loader_kind: 2}), browser('response_started'), browser('request_completed')], /Downloads load through the browser's own factory/],
     [[browser('request_started'), browser('response_started', {flags: 4}), browser('request_completed')], /A service worker answered it/],
+    // A service worker that answered from its cache answered without the network either.
+    [[browser('request_started'), browser('response_started', {flags: 6}), browser('request_completed')], /A service worker answered it/],
     [[browser('request_started'), browser('response_started'), browser('request_completed')], /its factory had no DevTools observer/],
     [[browser('request_started'), {category: 'network', type: 'request_completed', flags: 0, browser_context_id_high: '0', browser_context_id_low: '0'}],
       /The request has not ended/]];
@@ -151,6 +153,17 @@ assert.equal(panel.querySelector('pre')?.textContent, 'Location: /final\r\nSet-C
   const byHop = hop => [...view.querySelectorAll('details')].find(node => node.dataset.section === `request-${hop}`).textContent;
   assert.match(byHop(1), /The HTTP cache answered it/);
   assert.match(byHop(0), /its factory had no DevTools observer/);
+  // When a later hop was reported, an earlier hop without a block sent nothing:
+  // an internal or cached redirect, never a missing observer.
+  const reported = row([browser('request_started'), browser('request_redirected'), browser('response_started'),
+    browser('request_completed')], [block('request', 'browser', 'Accept: */*\r\n', {hop: 1}),
+    block('request', 'network', ':method: GET\r\n', {hop: 1})]);
+  const reportedView = document.createElement('div');
+  api.renderTrafficHeaders(reportedView, reported, () => {});
+  await settle();
+  const hopZero = [...reportedView.querySelectorAll('details')].find(node => node.dataset.section === 'request-0').textContent;
+  assert.match(hopZero, /Nothing was sent for this redirect hop: it was an internal redirect, such as an HSTS upgrade/);
+  assert.doesNotMatch(hopZero, /DevTools observer/);
   // The footer counts each reason once per request, and what was not retained.
   const sent = row([browser('request_started'), browser('request_completed')],
     [block('request', 'network', 'cookie: a=1\r\n')]);
@@ -159,10 +172,10 @@ assert.equal(panel.querySelector('pre')?.textContent, 'Location: /final\r\nSet-C
     block('response', 'browser', 'a: b\r\n', {state: 'not_captured_block_limit'})]);
   refused.cookieLists = [{direction: 'sent', state: 'not_captured_transfer_refused', hop: 0, unattributedLists: 1}];
   const coverage = api.trafficHeaderCoverage([...rows, redirected, sent, refused]);
-  assert.deepEqual(Object.fromEntries(coverage.missing), {from_cache: 2, failed: 1, download: 1, service_worker: 1, not_reported: 1});
+  assert.deepEqual(Object.fromEntries(coverage.missing), {from_cache: 2, failed: 1, download: 1, service_worker: 2, not_reported: 1});
   assert.equal(api.trafficHeaderCoverageNotice(coverage),
     '2 header blocks not retained (1 session budget, 1 size limit) · 1 cookie list not retained (queue refused) · ' +
-    '3 late header records · 6 requests without final headers (2 HTTP cache, 1 failed, 1 download, 1 service worker, 1 not reported)');
+    '3 late header records · 7 requests without final headers (2 HTTP cache, 1 failed, 1 download, 2 service worker, 1 not reported)');
   assert.equal(api.trafficHeaderCoverageNotice(api.trafficHeaderCoverage([sent])), '', 'a complete row adds nothing');
 }
 

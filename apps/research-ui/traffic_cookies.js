@@ -545,11 +545,13 @@ function renderTrafficCookies(container, request, rerender, context = {}) {
   else if (!hops.length && !malformed) message = request.hostOnly
     ? 'Cookies are recorded only in content capture sessions.' : 'No cookie list was retained for this request.';
   if (malformed) message = `${message} ${malformed} cookie record${malformed === 1 ? ' is' : 's are'} malformed and not shown.`.trim();
-  const missingNote = (hop, title, reason) => {
+  const missingNote = (hop, title, reason, received) => {
     const section = trafficNode('section', 'traffic-cookie-missing');
     section.dataset.reason = reason;
     section.append(trafficNode('h3', '', `${title}${hops.length > 1 ? ` · hop ${hop}` : ''}`),
-      trafficNode('p', 'traffic-headers-note', `The network stack reported no cookie list for this hop. ${TRAFFIC_MISSING_REASONS[reason]}`));
+      trafficNode('p', 'traffic-headers-note', received
+        ? `The network stack reported no response cookie list for this hop. ${TRAFFIC_MISSING_RECEIVED_REASONS[reason]}`
+        : `The network stack reported no cookie list for this hop. ${TRAFFIC_MISSING_REASONS[reason]}`));
     return {section, key: `missing|${title}|${hop}|${reason}`};
   };
   for (const hop of [...hops].reverse()) {
@@ -559,11 +561,15 @@ function renderTrafficCookies(container, request, rerender, context = {}) {
     hop.received.forEach((list, index) => parts.push(trafficCookieSection(`received-${hop.hop}-${index}`,
       `Response cookies${suffix}`, list, rerender, {received: true, onProvenance})));
     if (counted && hop.sent.length && !hop.received.length) {
-      parts.push(missingNote(hop.hop, 'Response cookies', trafficMissingReceivedReason(finals.life, last)));
+      parts.push(missingNote(hop.hop, 'Response cookies', trafficMissingReceivedReason(finals.life, last), true));
     }
     hop.sent.forEach((list, index) => parts.push(trafficCookieSection(`sent-${hop.hop}-${index}`,
       `Request cookies${suffix}`, list, rerender, {received: false, onProvenance})));
-    if (counted && !hop.sent.length) parts.push(missingNote(hop.hop, 'Request cookies', trafficMissingReason(finals.life, last)));
+    // A later hop's sent list shows the factory observes the request.
+    const laterSent = hops.some(other => other.hop > hop.hop && other.sent.length);
+    if (counted && !hop.sent.length) {
+      parts.push(missingNote(hop.hop, 'Request cookies', trafficMissingReason(finals.life, last, laterSent), false));
+    }
   }
   if (trafficCookieOptions.provenance !== null) {
     const sessionId = (request.cookieLists ?? []).find(list => list.sessionId)?.sessionId ?? null;

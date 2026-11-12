@@ -787,7 +787,14 @@ const TRAFFIC_MISSING_REASONS = Object.freeze({
   service_worker: 'A service worker answered it, so no request reached the network.',
   from_cache: 'The HTTP cache answered it without sending a request, so there are no sent headers or cookies.',
   failed: 'It failed before the network stack reported the headers it sent.',
+  redirect_not_sent: 'Nothing was sent for this redirect hop: it was an internal redirect, such as an HSTS upgrade, or one the HTTP cache answered, while a later hop reported what it sent.',
   not_reported: 'The network stack reported no sent headers for this hop: its factory had no DevTools observer, or the block arrived after the capture stopped tracking the request.'
+});
+// A hop with sent cookies and no response list: the response headers bring it.
+const TRAFFIC_MISSING_RECEIVED_REASONS = Object.freeze({
+  in_progress: TRAFFIC_MISSING_REASONS.in_progress,
+  failed: 'It failed before a response arrived.',
+  no_raw_response: 'The network stack reported what was sent for this hop but no response headers: no response arrived, or it arrived after the capture stopped tracking the request.'
 });
 const TRAFFIC_MISSING_LABELS = Object.freeze({download: 'download', service_worker: 'service worker',
   from_cache: 'HTTP cache', failed: 'failed', not_reported: 'not reported'});
@@ -809,9 +816,12 @@ function trafficRequestLifecycle(request) {
   return life;
 }
 
-function trafficMissingReason(life, last) {
+// `laterReported`: a later hop of the request has a network block, so its
+// factory observes it and an earlier hop without one sent nothing.
+function trafficMissingReason(life, last, laterReported = false) {
   if (last && !life.ended) return 'in_progress';
   if (life.download) return 'download';
+  if (!last && laterReported) return 'redirect_not_sent';
   if (last && life.fromServiceWorker) return 'service_worker';
   if (last && life.fromCache) return 'from_cache';
   if (last && life.failed && !life.responded) return 'failed';
@@ -823,7 +833,7 @@ function trafficMissingReason(life, last) {
 function trafficMissingReceivedReason(life, last) {
   if (last && !life.ended) return 'in_progress';
   if (last && life.failed && !life.responded) return 'failed';
-  return 'not_reported';
+  return 'no_raw_response';
 }
 
 // Each hop of a row with a provisional block and whether the network
@@ -839,7 +849,8 @@ function trafficFinalBlocks(request) {
   }
   const provisional = [...hops].filter(([, hop]) => hop.provisional).map(([hop]) => hop);
   const last = provisional.length ? Math.max(...provisional) : null;
-  return {hops, last, life: trafficRequestLifecycle(request)};
+  const laterReported = hop => [...hops].some(([other, blocks]) => other > hop && blocks.network);
+  return {hops, last, laterReported, life: trafficRequestLifecycle(request)};
 }
 
 // What the loaded rows did not retain or could not join: header blocks and

@@ -212,7 +212,8 @@ function renderTrafficHeaders(container, request, rerender, targetView = null) {
     const shown = sent ?? provisional;
     if (shown) {
       // Every hop without the headers the network sent says why.
-      const reason = !sent && finals ? trafficMissingReason(finals.life, hop.hop === finals.last) : null;
+      const reason = !sent && finals
+        ? trafficMissingReason(finals.life, hop.hop === finals.last, finals.laterReported(hop.hop)) : null;
       parts.push(trafficHeaderBlockSection(`request-${hop.hop}`, `Request headers${suffix}`, shown, rerender,
         sent ? '' : `Provisional headers are shown: the network stack did not report what it sent, such as Cookie and Host. ${
           reason ? TRAFFIC_MISSING_REASONS[reason] : ''}`.trim()));

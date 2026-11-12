@@ -334,7 +334,7 @@ impl HeaderCoverage {
             if request.network & (1 << last) != 0 {
                 continue;
             }
-            let reason = request.lifecycle.missing_reason(true);
+            let reason = request.lifecycle.missing_reason(true, false);
             if reason != "in_progress" {
                 *missing.entry(reason).or_default() += 1;
             }

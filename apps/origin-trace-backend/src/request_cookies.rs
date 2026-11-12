@@ -417,12 +417,20 @@ pub fn build(
     for hop in &provisional {
         hops.entry(*hop).or_default();
     }
+    // A sent list comes with the raw request, so a later hop's list means the
+    // factory observed and tracked the request.
+    let sent_hops: BTreeSet<u32> = hops
+        .iter()
+        .filter(|(_, (sent, _))| !sent.is_empty())
+        .map(|(hop, _)| *hop)
+        .collect();
     let hops: Vec<Value> = hops
         .into_iter()
         .map(|(hop, (sent, received))| {
             let counted = provisional.contains(&hop);
+            let later_reported = sent_hops.range(hop + 1..).next().is_some();
             let sent_missing = if counted && sent.is_empty() {
-                json!(lifecycle.missing_reason(Some(hop) == last))
+                json!(lifecycle.missing_reason(Some(hop) == last, later_reported))
             } else {
                 Value::Null
             };
@@ -1057,6 +1065,24 @@ mod tests {
         assert_eq!(missing["hops"][1]["sent_missing"], "failed");
         assert_eq!(missing["hops"][1]["received_missing"], Value::Null);
         assert_eq!(missing["hops"][0]["sent_missing"], Value::Null);
+        // A sent list without a received one has its own reason, and a hop
+        // before one with a sent list sent nothing.
+        let mut sent_only: Vec<Value> = hops
+            .iter()
+            .filter(|event| event["sequence_number"] != "13")
+            .cloned()
+            .collect();
+        sent_only.push(record(
+            "cookie_list",
+            24,
+            20,
+            &list_payload(true, 3, b"", 0, 0, 1),
+            "0",
+        ));
+        let received = build(&sent_only, &artifacts, &root, "7", "17");
+        assert_eq!(received["hops"][0]["received_missing"], "no_raw_response");
+        assert_eq!(received["hops"][1]["sent_missing"], Value::Null);
+        assert_eq!(received["hops"][1]["received_missing"], "failed");
 
         let origin = provenance(&events, &artifacts, &root, "7", "_abck", &no_index);
         assert_eq!(

@@ -434,8 +434,11 @@ assert.equal(panel.querySelectorAll('img').length, 0, 'captured markup is still 
   const notes = [...view.querySelectorAll('.traffic-cookie-missing')].map(node =>
     [node.querySelector('h3').textContent, node.dataset.reason, node.textContent]);
   assert.deepEqual(notes.map(([title, reason]) => [title, reason]),
-    [['Request cookies · hop 1', 'failed'], ['Response cookies · hop 0', 'not_reported']]);
+    [['Request cookies · hop 1', 'failed'], ['Response cookies · hop 0', 'no_raw_response']]);
   assert.match(notes[0][2], /reported no cookie list for this hop\. It failed before the network stack reported the headers it sent/);
+  // The missing response list never claims nothing was sent: hop 0 sent cookies.
+  assert.match(notes[1][2], /reported no response cookie list for this hop\. The network stack reported what was sent for this hop but no response headers/);
+  assert.doesNotMatch(notes[1][2], /no sent headers/);
   // A row without header blocks (metadata-only, legacy) adds no hop of its own.
   assert.equal(panel.querySelectorAll('.traffic-cookie-missing').length, 0);
 }

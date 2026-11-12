@@ -10684,10 +10684,11 @@
                     "service_worker",
                     "from_cache",
                     "failed",
+                    "redirect_not_sent",
                     "not_reported",
                     null
                   ],
-                  "description": "Why a hop with a provisional block has no network block, from the request's own browser records (\"Missing final blocks\" in protocol/native-network-v3.md): in_progress (not ended), download (the browser factory has no DevTools observer), service_worker or from_cache (no request reached the network), failed (before the network service reported sent headers), not_reported (no observer on its factory, or the block arrived for a request no longer tracked; see unattributed_blocks). Null when the hop has a network block or no provisional one."
+                  "description": "Why a hop with a provisional block has no network block, from the request's own browser records (\"Missing final blocks\" in protocol/native-network-v3.md): in_progress (not ended), download (the browser factory has no DevTools observer), service_worker or from_cache (no request reached the network), failed (before the network service reported sent headers), redirect_not_sent (an earlier hop, internal or cached, while a later hop was reported), not_reported (no observer on its factory, or the block arrived for a request no longer tracked; see unattributed_blocks). Null when the hop has a network block or no provisional one."
                 },
                 "request": {
                   "type": "array",
@@ -10919,6 +10920,7 @@
                     "service_worker",
                     "from_cache",
                     "failed",
+                    "redirect_not_sent",
                     "not_reported",
                     null
                   ],
@@ -10927,14 +10929,11 @@
                 "received_missing": {
                   "enum": [
                     "in_progress",
-                    "download",
-                    "service_worker",
-                    "from_cache",
                     "failed",
-                    "not_reported",
+                    "no_raw_response",
                     null
                   ],
-                  "description": "Why a hop with a sent list has no received one: in_progress, failed or not_reported; null otherwise."
+                  "description": "Why a hop with a sent list has no received one: in_progress, failed (before a response), or no_raw_response (what was sent was reported, but no response headers); null otherwise."
                 }
               }
             }

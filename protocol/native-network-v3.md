@@ -1916,12 +1916,15 @@ browser context), decided in this order:
 | `service_worker` | The final hop's `response_started` has flag 4 | A service worker answered; nothing reached the network |
 | `from_cache` | The final hop's `response_started` has flag 2 | The HTTP cache answered without sending a request, so there are no sent headers or cookies; DevTools shows provisional headers too |
 | `failed` | The final hop ended with `request_failed` and no response | It failed before the network service reported what it sent |
-| `not_reported` | Anything else, and every earlier hop without a block | No observer on its factory, or the block arrived for a request the sink no longer tracked (the unattributed count) |
+| `redirect_not_sent` | An earlier hop, while a later hop of the request has a `network` block | The factory observes and tracks the request, so nothing was sent for this hop: an internal redirect, such as an HSTS upgrade, or one the HTTP cache answered |
+| `not_reported` | Anything else | No observer on its factory, or the block arrived for a request the sink no longer tracked (the unattributed count) |
 
 `get_request_headers` gives each hop `network_block_missing` and
-`get_request_cookies` gives each hop `sent_missing` and, for a hop with a sent
-list but no received one, `received_missing` (`in_progress`, `failed` or
-`not_reported`, since the received list comes with the response headers).
+`get_request_cookies` gives each hop `sent_missing` (the same reasons, a later
+hop's sent list standing for its network block) and, for a hop with a sent
+list but no received one, `received_missing`: `in_progress`, `failed` (before
+a response) or `no_raw_response`, since the received list comes with the
+response headers and what was sent was reported.
 Origin Trace's Headers tab adds the reason to "Provisional headers are shown",
 and the Cookies tab lists each such hop with it.
 

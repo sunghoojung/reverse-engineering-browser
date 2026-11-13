@@ -1552,11 +1552,15 @@ budget, for example `Response body budget (512 MiB) used, 511.8 MiB kept: 2,400
 response bodies not kept · Raise it in New Live Session… for the next session.`
 
 - The counts are the whole session's, from `get_session_summary`'s budget
-  checks, like the `N / M requests` beside them. In a content session Traffic
-  reads the summary at most every 30 s while it shows, so a budget met outside
-  the loaded rows still shows. Until that read answers, the loaded rows give
-  `at least N`, as does a summary whose scan stopped at its 64 MiB bound. A
-  failed read keeps the last figure.
+  checks, like the `N / M requests` beside them. Traffic reads the summary once
+  in every session, a stored one included, so a budget met outside the loaded
+  rows still shows, and again at most every 30 s while it shows in a content
+  session or while a budget shows as used.
+- A count is exact only while nothing has arrived since the summary was read:
+  it records the event poll's tag then, and in a live session a later change
+  of that tag makes it `at least N` until the next read. So do a failed re-read
+  (which keeps the last figure), a summary whose scan stopped at its 64 MiB
+  bound, and the loaded rows before the first read answers.
 - The size is the session context's `capture_options.content_limits`
   (`get_session_context`), read once after the first valid poll; a session that
   is not live, or keeps no content, names the budget without a size. The bytes

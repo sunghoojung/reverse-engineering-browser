@@ -3115,14 +3115,22 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!notice) return;
         const loaded = TRAFFIC_BUDGETS.map(() => 0);
         for (const request of state.requests) TRAFFIC_BUDGETS.forEach((budget, index) => { if (budget.refused(request)) loaded[index] += 1; });
-        // A content session can meet a budget outside the loaded rows, so its
-        // summary is read whether or not they show a refusal.
-        if (state.requestContentCaptureEnabled || state.sessionContentLimits || loaded.some(Boolean)) refreshTrafficBudgetUse();
+        // Every session's summary is read once, a stored one included, since a
+        // budget can be met outside the loaded rows; it is read again, at most
+        // every 30 s, in a content session or while a budget shows as used.
+        const last = state.trafficBudgetUse?.use ?? null;
+        const used = last && Object.values(last.counts).some(Boolean);
+        if (!last || used || state.requestContentCaptureEnabled || state.sessionContentLimits || loaded.some(Boolean)) refreshTrafficBudgetUse();
         const use = state.trafficBudgetUse?.use ?? null;
+        // Exact only while nothing has arrived since the summary was read: a
+        // live session whose event store changed, or a read that failed after
+        // it, makes the figure a lower bound. Other backends gain no events.
+        const current = Boolean(use) && !use.stale &&
+          (state.sessionMode !== 'live' || (use.marker !== null && use.marker === (state.eventEtag ?? null)));
         const shown = TRAFFIC_BUDGETS.map((budget, index) => {
           const summary = use ? use.counts[budget.category] ?? 0 : null;
           const count = Math.max(loaded[index], summary ?? 0);
-          return {budget, count, exact: summary !== null && !use.bounded && summary >= loaded[index]};
+          return {budget, count, exact: summary !== null && current && !use.bounded && summary >= loaded[index]};
         }).filter(entry => entry.count > 0);
         notice.hidden = shown.length === 0;
         const toggle = notice.querySelector('#request-budget-toggle'), line = notice.querySelector('#request-budget-text');
@@ -3161,20 +3169,23 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       // The summary's budget checks: their counts, the unique bytes kept and
-      // the budget each names, and whether its event scan stopped at its bound.
-      // Read at most every 30 s while Traffic shows; a refused or malformed
-      // read keeps the last answer.
+      // the budget each names, whether its event scan stopped at its bound,
+      // and the event poll's tag when it was read (`marker`), so a later store
+      // change is known. Read at most every 30 s while Traffic shows; a refused
+      // or malformed read keeps the last answer, marked stale.
       function refreshTrafficBudgetUse() {
         const use = state.trafficBudgetUse;
         if (typeof fetch !== 'function' || use?.pending || (use && Date.now() - use.at < 30000)) return;
         if (document.querySelector('#screen-traffic')?.hidden === true) return;
         state.trafficBudgetUse = {at: Date.now(), pending: true, use: use?.use ?? null};
+        const marker = state.eventEtag ?? null;
         const integer = text => /^(0|[1-9][0-9]{0,19})$/.test(text ?? '') ? Number(text) : null;
         fetch('/api/session/summary', {cache: 'no-store'})
           .then(response => response.ok ? response.json() : null)
           .then(summary => {
             if (!Array.isArray(summary?.checks)) throw new Error('No session summary');
-            const next = {counts: {}, retained: {}, budgets: {}, bounded: summary.checks.some(check => check?.code === 'bounded_scope')};
+            const next = {counts: {}, retained: {}, budgets: {}, marker, stale: false,
+              bounded: summary.checks.some(check => check?.code === 'bounded_scope')};
             for (const budget of TRAFFIC_BUDGETS) {
               for (const check of summary.checks) {
                 if (check?.code !== 'request_content_not_retained' ||
@@ -3188,7 +3199,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             }
             state.trafficBudgetUse = {at: Date.now(), pending: false, use: next};
           })
-          .catch(() => { state.trafficBudgetUse = {at: Date.now(), pending: false, use: state.trafficBudgetUse?.use ?? null}; })
+          .catch(() => {
+            const kept = state.trafficBudgetUse?.use ?? null;
+            state.trafficBudgetUse = {at: Date.now(), pending: false, use: kept && {...kept, stale: true}};
+          })
           .finally(renderTrafficBudget);
       }
 

@@ -524,67 +524,111 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
 // The Traffic footer names each used budget. Its counts are the session
 // summary's (the whole session), not the loaded rows', which give only a lower
 // bound until the summary answers; the size comes from the session context.
+// In a live session the figure is exact only while nothing has arrived since
+// the summary was read.
 {
-  const reads = [];
   const check = (category, reason, count, extra = {}) => ({code: 'request_content_not_retained', category, reason, count: String(count),
     budget_mib: null, retained_bytes: '0', retained_complete: true, ...extra});
-  let summary = {checks: [check('response_body', 'not_captured_session_budget', 2400, {retained_bytes: String(511 * 1048576)}),
-    check('request_body', 'not_captured_session_budget', 30, {retained_bytes: '1048576', retained_complete: false}),
-    check('request_target', 'not_retained_session_budget', 12, {retained_bytes: '1048576', retained_complete: false}),
-    check('response_body', 'not_captured_type', 7)]};
-  let context = {capture_options: {content_limits: {version: 1, request_content_budget_mib: 256, response_body_budget_mib: 512, response_media: false}}};
-  const answers = {'/api/session/summary': () => summary, '/api/session/context': () => context};
-  let release = null;
-  const fetch = async (url, options) => {
-    reads.push(url);
-    if (release) await new Promise(resolve => { const go = release; release = null; go(resolve); });
-    const body = answers[url]();
-    return {ok: body !== null, json: async () => body};
-  };
   const settle = async () => { for (let turn = 0; turn < 4; turn += 1) await new Promise(resolve => setImmediate(resolve)); };
-  const clock = {now: 1_000_000};
-  const t = fixture(app, traffic, 40, {fetch, Date: {now: () => clock.now}, renderShellStatus() {}});
-  const notice = t.document.querySelector('#request-budget');
-  const toggle = t.document.createElement('button'), line = t.document.createElement('span');
-  notice.querySelector = selector => ({'#request-budget-toggle': toggle, '#request-budget-text': line})[selector] ?? null;
-  notice.dataset.expanded = 'false';
-  const api = runInNewContext(`({renderTrafficBudget, refreshSessionContentLimits, toggleTrafficBudget})`, t.context);
-  // A metadata session with no refusal shows nothing and reads nothing.
-  api.renderTrafficBudget();
-  assert.equal(notice.hidden, true, 'no refusal, no notice');
-  assert.deepEqual(reads, [], 'no content session and no refusal reads no summary');
-  // The loaded rows hold 2 of the session's response refusals and 1 request
-  // refusal: a lower bound until the summary answers.
+  const footer = ({summary, context = null, live = false} = {}) => {
+    const reads = [];
+    const answers = {summary, context};
+    let release = null;
+    const fetch = async url => {
+      reads.push(url);
+      if (release) await new Promise(resolve => { const go = release; release = null; go(resolve); });
+      const body = url === '/api/session/summary' ? answers.summary : answers.context;
+      return {ok: body !== null, json: async () => body};
+    };
+    const clock = {now: 1_000_000};
+    const t = fixture(app, traffic, 40, {fetch, Date: {now: () => clock.now}, renderShellStatus() {}});
+    if (live) { t.state.sessionMode = 'live'; t.state.requestContentCaptureEnabled = true; t.state.eventEtag = '"store-1"'; }
+    const notice = t.document.querySelector('#request-budget');
+    const toggle = t.document.createElement('button'), line = t.document.createElement('span');
+    notice.querySelector = selector => ({'#request-budget-toggle': toggle, '#request-budget-text': line})[selector] ?? null;
+    notice.dataset.expanded = 'false';
+    const api = runInNewContext(`({renderTrafficBudget, refreshSessionContentLimits, toggleTrafficBudget})`, t.context);
+    return {t, api, reads, answers, clock, notice, toggle, line, hold: () => { let go; release = resume => { go = resume; }; return () => go(); }};
+  };
+
+  // A session that used no budget reads the summary once and shows nothing.
+  {
+    const quiet = footer({summary: {checks: []}});
+    quiet.api.renderTrafficBudget(); await settle();
+    assert.deepEqual(quiet.reads, ['/api/session/summary'], 'every session reads the summary once');
+    assert.equal(quiet.notice.hidden, true, 'no refusal, no notice');
+    quiet.api.renderTrafficBudget(); await settle();
+    assert.equal(quiet.reads.length, 1, 'a session with nothing used and no content does not read it again');
+  }
+  // A stored capture whose refusals are all outside the loaded rows still shows
+  // them: nothing arrives in a stored window, so the figure is exact.
+  {
+    const stored = footer({summary: {checks: [check('response_body', 'not_captured_session_budget', 5)]}});
+    stored.api.renderTrafficBudget(); await settle();
+    assert.equal(stored.notice.hidden, false);
+    assert.equal(stored.line.textContent, 'Response body budget used, 0 KiB kept: 5 response bodies not kept · Raise it in New Live Session… for the next session.');
+  }
+
+  // A live content session.
+  const f = footer({live: true,
+    summary: {checks: [check('response_body', 'not_captured_session_budget', 2400, {retained_bytes: String(511 * 1048576)}),
+      check('request_body', 'not_captured_session_budget', 30, {retained_bytes: '1048576', retained_complete: false}),
+      check('request_target', 'not_retained_session_budget', 12, {retained_bytes: '1048576', retained_complete: false}),
+      check('response_body', 'not_captured_type', 7)]},
+    context: {capture_options: {content_limits: {version: 1, request_content_budget_mib: 256, response_body_budget_mib: 512, response_media: false}}}});
+  const {t, api, reads, line, toggle, notice, clock} = f;
+  // Two response refusals and one request refusal are loaded: a lower bound
+  // until the summary answers.
   t.state.requests[3].responseBody = {state: 'not_captured_session_budget'};
   t.state.requests[4].responseBody = {state: 'not_captured_session_budget'};
   t.state.requests[5].body = {state: 'not_captured_session_budget'};
   t.state.requests[7].responseBody = {state: 'captured'};
-  let waiting = null;
-  release = go => { waiting = go; };
+  const resume = f.hold();
   api.renderTrafficBudget();
   assert.equal(notice.hidden, false);
   assert.equal(line.textContent, 'Request content budget used: at least 1 request body or URL not kept · '
     + 'Response body budget used: at least 2 response bodies not kept · Raise them in New Live Session… for the next session.');
   assert.equal(toggle.textContent, 'Budgets used', 'the stacked layout\'s one-line button');
-  // The session context names each budget's size; the summary its whole count.
+  // The session context names each budget's size; the summary its whole count,
+  // exact while the store is as it was when the summary was read.
   api.refreshSessionContentLimits();
-  waiting(); await settle();
+  resume(); await settle();
   assert.deepEqual(reads, ['/api/session/summary', '/api/session/context']);
   assert.equal(line.textContent, 'Request content budget (256 MiB) used, at least 1.0 MiB kept: 42 request bodies or URLs not kept · '
     + 'Response body budget (512 MiB) used, 511.0 MiB kept: 2,400 response bodies not kept · Raise them in New Live Session… for the next session.');
   assert.doesNotMatch(line.textContent, /REB_/);
   api.refreshSessionContentLimits();
   assert.equal(reads.length, 2, 'the context is read once it answers');
-  // Refusals outside the loaded rows still show, from the summary alone.
-  for (const index of [3, 4, 5]) { t.state.requests[index].responseBody = null; t.state.requests[index].body = null; }
+  // 50 more bodies are refused and 3 of them load: the store changed since the
+  // summary was read, so its figure is a lower bound until the next read.
+  t.state.eventEtag = '"store-2"';
+  for (const index of [8, 9, 10]) t.state.requests[index].responseBody = {state: 'not_captured_session_budget'};
   api.renderTrafficBudget();
-  assert.match(line.textContent, /^Request content budget \(256 MiB\) used, at least 1\.0 MiB kept: 42 request bodies or URLs not kept · /);
   assert.equal(reads.length, 2, 'within 30 s the summary is not read again');
-  // A summary that stopped at its scan bound is a lower bound too.
+  assert.match(line.textContent, / · Response body budget \(512 MiB\) used, 511\.0 MiB kept: at least 2,400 response bodies not kept · /,
+    'a figure read before the store changed is a lower bound');
+  assert.match(line.textContent, /: at least 42 request bodies or URLs not kept · /);
+  // The next read is exact again while nothing arrives.
   clock.now += 30_000;
-  summary = {checks: [...summary.checks.slice(0, 1), {code: 'bounded_scope', severity: 'info', message: 'bounded'}]};
+  f.answers.summary = {checks: [check('response_body', 'not_captured_session_budget', 2450, {retained_bytes: String(511 * 1048576)})]};
   api.renderTrafficBudget(); await settle();
   assert.equal(reads.length, 3);
+  assert.match(line.textContent, /Response body budget \(512 MiB\) used, 511\.0 MiB kept: 2,450 response bodies not kept · Raise /);
+  // A failed re-read keeps the last figure, as a lower bound, even though the
+  // store has not changed since.
+  clock.now += 30_000;
+  f.answers.summary = null;
+  api.renderTrafficBudget(); await settle();
+  assert.equal(reads.length, 4);
+  assert.match(line.textContent, /: at least 2,450 response bodies not kept · /, 'a failed read makes the figure a lower bound');
+  // Refusals outside the loaded rows still show, from the summary alone; a
+  // bounded summary scan is a lower bound too.
+  clock.now += 30_000;
+  for (const index of [3, 4, 5, 8, 9, 10]) { t.state.requests[index].responseBody = null; t.state.requests[index].body = null; }
+  f.answers.summary = {checks: [check('response_body', 'not_captured_session_budget', 2400, {retained_bytes: String(511 * 1048576)}),
+    {code: 'bounded_scope', severity: 'info', message: 'bounded'}]};
+  api.renderTrafficBudget(); await settle();
+  assert.equal(reads.length, 5);
   assert.equal(line.textContent, 'Response body budget (512 MiB) used, 511.0 MiB kept: at least 2,400 response bodies not kept · '
     + 'Raise it in New Live Session… for the next session.');
   assert.equal(toggle.textContent, 'Response body budget used');
@@ -594,12 +638,6 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
   assert.equal(toggle.getAttribute('aria-expanded'), 'true');
   api.toggleTrafficBudget(false);
   assert.equal(toggle.getAttribute('aria-expanded'), 'false');
-  // A failed read keeps the last answer.
-  clock.now += 30_000;
-  summary = null;
-  api.renderTrafficBudget(); await settle();
-  assert.equal(reads.length, 4);
-  assert.match(line.textContent, /at least 2,400 response bodies not kept/, 'a failed read keeps the last answer');
   // A session that is not live or keeps no content has no size.
   const stored = fixture(app, traffic, 40, {fetch: async () => ({ok: true, json: async () => ({capture_options: {content_limits: null}})}),
     renderShellStatus() {}});
@@ -611,7 +649,7 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
   runInNewContext('refreshSessionContentLimits()', odd.context); await settle();
   assert.equal(odd.state.sessionContentLimits, null, 'an unknown version names no size');
 }
-console.log('PASS Traffic footer budget notice: the summary\'s whole-session counts, at least the loaded rows\' until it answers or when its scan was bounded, refusals outside the loaded rows, sizes only from the versioned session context, the bytes kept, the stacked layout\'s button and the start panel control for the next session');
+console.log('PASS Traffic footer budget notice: the summary read once in every session, its whole-session counts, at least the loaded rows\' until it answers, after the live store changed, after a failed read or when its scan was bounded, refusals outside the loaded rows, sizes only from the versioned session context, the bytes kept, the stacked layout\'s button and the start panel control for the next session');
 
 const baseline = process.argv.find(value => value.startsWith('--baseline-ref='))?.slice('--baseline-ref='.length);
 if (baseline) {

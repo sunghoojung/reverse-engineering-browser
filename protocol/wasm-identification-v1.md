@@ -61,7 +61,7 @@ never changed. Three rules hold everywhere:
   those sections hold, each with its offset.
 - `functions`: `imported_functions`, `defined_functions`, `labeled_functions`,
   and `suggestions` as compact rows named by `suggestion_fields`:
-  `[function_index, label, category, library, confidence, record, byte_offset]`.
+  `[function_index, label, category, library, confidence, source, byte_offset]`.
   Function indexes include imported functions.
 - `constants.matches`: `id`, `label`, `family`, `location` (`data` or
   `immediate`), `match` (`complete` or `partial`), `matched` and `total`
@@ -173,12 +173,16 @@ both sides of a complete one never hides it.
 - A legacy-mangled name counts as Rust only when it ends at its `E` with a
   `17h<hash>` segment, with or without LLVM's `.llvm.<n>` suffix. An Itanium
   C++ name such as `_ZN4core6Engine4stepEv` carries parameter types after the
-  `E` and names no Rust crate. A v0 name (`_RNv...`) is Rust, and its crate is
-  read from its first crate root. A demangled name without a `::h<hash>` tail
-  that has a parameter list, a `const` qualifier or a destructor
-  (`std::terminate()`, `std::exception::~exception()`) is C++ as wasm-ld writes
-  it, and when the producers declare C or C++, an unhashed path such as
-  `core::fmt::write` names no Rust crate either.
+  `E` and names no Rust crate. A v0 name (`_R` and a path tag) is Rust, crate
+  or not, and its crate is read from the first `C` that parses as a crate
+  root, since a closure (`NC`) or an impl disambiguator (`XsC_`) can come
+  first. A demangled name without a `::h<hash>` tail that has a parameter list,
+  a `const` qualifier or a destructor outside its `<...>` arguments
+  (`std::terminate()`, `std::exception::~exception()`) is C++ as wasm-ld
+  writes it, and when the producers declare C or C++, an unhashed path such as
+  `core::fmt::write` names no Rust crate either. For `<X as Trait>::f` the
+  crate is read from the trait after the top-level ` as `, then from the self
+  type.
 
 ## Content and permission levels
 

@@ -623,11 +623,10 @@ fn rust_crate(name: &str) -> (Option<&str>, bool) {
         }
         _ => name,
     };
-    if let Some(found) = v0_crate(name) {
-        return (
-            RUST_CRATES.iter().find(|known| **known == found).copied(),
-            true,
-        );
+    if let Some(found) = v0_symbol(name) {
+        let known =
+            found.and_then(|found| RUST_CRATES.iter().find(|known| **known == found).copied());
+        return (known, true);
     }
     if let Some(segments) = mangled_segments(name) {
         if !segments.last().is_some_and(|last| rust_hash(last)) {
@@ -734,34 +733,68 @@ fn demangled_paths(name: &str) -> Vec<&str> {
         return Vec::new();
     };
     let group = &inner[..close];
-    match group.find(" as ") {
+    // Only the ` as ` outside any nested `<...>` separates self type from
+    // trait: `<<Vec<u8> as Deref>::Target as alloc::Foo>` names alloc.
+    let mut depth = 0usize;
+    let mut split = None;
+    let bytes = group.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'-' if bytes.get(at + 1) == Some(&b'>') => at += 1,
+            b'<' => depth += 1,
+            b'>' => depth = depth.saturating_sub(1),
+            b' ' if depth == 0 && group[at..].starts_with(" as ") => {
+                split = Some(at);
+                break;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    match split {
         Some(split) => vec![trim_path(&group[split + 4..]), trim_path(&group[..split])],
         None => vec![trim_path(group)],
     }
 }
 
-/// The crate of a Rust v0 symbol: the identifier after the first crate root
-/// `C` and its optional `s<base62>_` disambiguator. `_R` must be followed by
-/// a path tag, so a C name such as `_ReadFile` is not read as one.
-fn v0_crate(name: &str) -> Option<&str> {
+/// A Rust v0 symbol (`_R` and a path tag) and, when one parses, its crate:
+/// the identifier after a crate root `C` and its optional `s<base62>_`
+/// disambiguator. A closure (`NC`) or an impl disambiguator (`XsC_`) can put
+/// a `C` before the crate root, so each `C` is tried until one parses. `_R`
+/// must be followed by a path tag, so a C name such as `_ReadFile` is not
+/// read as one; any name that is one is certainly Rust, crate or not.
+fn v0_symbol(name: &str) -> Option<Option<&str>> {
     let rest = name
         .strip_prefix("_R")
         .or_else(|| name.strip_prefix("__R"))?;
     if !rest.starts_with(['C', 'N', 'M', 'X', 'Y', 'I', 'B']) {
         return None;
     }
-    let mut at = rest.find('C')? + 1;
-    if rest[at..].starts_with('s') {
-        at += rest[at..].find('_')? + 1;
+    Some(
+        rest.match_indices('C')
+            .find_map(|(at, _)| crate_root(&rest[at + 1..])),
+    )
+}
+
+/// The crate name of a v0 crate root, read from just after its `C`.
+fn crate_root(after: &str) -> Option<&str> {
+    let mut at = 0;
+    if after.starts_with('s') {
+        // A disambiguator is a base-62 u64, at most 11 digits, then `_`.
+        // Looking no further keeps a crafted name of many `Cs` linear, since
+        // every `C` of the name is tried as a root.
+        at += after.bytes().take(13).position(|b| b == b'_')? + 1;
     }
-    let digits = rest[at..].bytes().take_while(u8::is_ascii_digit).count();
-    let length: usize = rest[at..at + digits].parse().ok()?;
+    let digits = after[at..].bytes().take_while(u8::is_ascii_digit).count();
+    let length: usize = after[at..at + digits].parse().ok()?;
     at += digits;
-    if rest[at..].starts_with('_') {
+    if after[at..].starts_with('_') {
         at += 1;
     }
     // A crafted length near usize::MAX must not overflow the end.
-    rest.get(at..at.checked_add(length)?)
+    after
+        .get(at..at.checked_add(length)?)
         .filter(|crate_name| !crate_name.is_empty())
 }
 
@@ -1560,9 +1593,6 @@ struct Part {
     address: Option<u64>,
 }
 
-/// Runs kept per match; a 256-element table of 4-element runs has 64.
-const MAX_PARTS: usize = 64;
-
 /// One reported constant match.
 struct Match {
     set: usize,
@@ -1581,9 +1611,10 @@ struct Match {
     segments: Vec<u32>,
     encoding: Option<Encoding>,
     runs: usize,
-    /// The runs, up to `MAX_PARTS`; `parts_cut` when more were joined.
+    /// The runs. They cover disjoint, increasing element ranges of one set,
+    /// each at least the set's minimum run, so a match holds at most
+    /// `total / data_min_run` of them: 32 for the 256-element tables.
     parts: Vec<Part>,
-    parts_cut: bool,
     /// The memory address of `byte_offset` and of the match's end, when the
     /// segments' offsets are constants.
     address: Option<u64>,
@@ -1600,13 +1631,6 @@ struct Match {
 }
 
 impl Match {
-    fn add_part(&mut self, part: Part) {
-        if self.parts.len() < MAX_PARTS {
-            self.parts.push(part);
-        } else {
-            self.parts_cut = true;
-        }
-    }
     fn matched(&self) -> usize {
         self.covered
             .iter()
@@ -1677,7 +1701,6 @@ fn data_match(run: &Run, segment: &Segment<'_>) -> Match {
                 .address
                 .map(|base| base.wrapping_add(run.start as u64)),
         }],
-        parts_cut: false,
         address: segment
             .address
             .map(|base| base.wrapping_add(run.start as u64)),
@@ -1742,7 +1765,7 @@ fn cluster(mut runs: Vec<Run>, segment: &Segment<'_>, deadline: Instant, out: &m
                 .map(|base| base.wrapping_add(run.end as u64));
             open.end_index = run.end_index;
             open.cover(run.first, run.end_index);
-            open.add_part(Part {
+            open.parts.push(Part {
                 start: segment.data_offset + run.start,
                 end: segment.data_offset + run.end,
                 address: segment
@@ -1799,10 +1822,7 @@ fn merge_segments(mut matches: Vec<Match>) -> (Vec<Match>, usize) {
                 previous.address_end = entry.address_end;
                 previous.runs += entry.runs;
                 previous.segments.extend(entry.segments);
-                previous.parts_cut |= entry.parts_cut;
-                for part in entry.parts {
-                    previous.add_part(part);
-                }
+                previous.parts.extend(entry.parts);
                 continue;
             }
         }
@@ -1839,7 +1859,6 @@ fn suppress_data(matches: Vec<Match>, deadline: Instant, expired: &mut bool) -> 
     let mut runs = matches
         .iter()
         .enumerate()
-        .filter(|(_, entry)| !entry.parts_cut)
         .flat_map(|(owner, entry)| {
             entry
                 .parts
@@ -2227,7 +2246,6 @@ fn scan_functions(
                 encoding: None,
                 runs: 0,
                 parts: Vec::new(),
-                parts_cut: false,
                 address: None,
                 address_end: None,
                 references: Vec::new(),
@@ -3512,7 +3530,6 @@ mod tests {
                     address: None,
                 })
                 .collect(),
-            parts_cut: false,
             address: None,
             address_end: None,
             references: Vec::new(),
@@ -3685,7 +3702,8 @@ mod tests {
 
     #[test]
     fn rust_name_forms_and_crafted_names() {
-        assert_eq!(rust_crate("_RC18446744073709551615abc"), (None, false));
+        // No panic on a crafted length; the name is still a v0 symbol.
+        assert_eq!(rust_crate("_RC18446744073709551615abc"), (None, true));
         for name in [
             "core::ptr::drop_in_place<(alloc::string::String, u32)>",
             "<() as core::fmt::Debug>::fmt",
@@ -3704,6 +3722,82 @@ mod tests {
         ] {
             assert_eq!(rust_crate(name).0, None, "{name}");
         }
+    }
+
+    #[test]
+    fn v0_names_with_a_c_before_the_crate_root_are_rust() {
+        // A closure (NC) and an impl disambiguator (XsC_) come before the root.
+        assert_eq!(
+            rust_crate("_RNCNvCs1234_3std4main0B3_"),
+            (Some("std"), true)
+        );
+        assert_eq!(
+            rust_crate("_RNvXsC_NtCs1234_4core3fmtNtB5_9Formatter3pad"),
+            (Some("core"), true)
+        );
+        // A v0 name whose crate cannot be read is still certainly Rust.
+        assert_eq!(rust_crate("_RNvNtB2_3fmt5write"), (None, true));
+        assert_eq!(rust_crate("_ReadFile"), (None, false));
+    }
+
+    #[test]
+    fn a_crafted_v0_name_of_many_roots_is_read_in_linear_time() {
+        // Every `C` is tried as a crate root, and a `Cs` with no `_` after it
+        // must not search the rest of the name each time.
+        let name = format!("_RN{}", "Cs".repeat(500_000));
+        let started = Instant::now();
+        assert_eq!(rust_crate(&name), (None, true));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        // A disambiguator of the longest u64 still parses.
+        assert_eq!(
+            rust_crate("_RNvCsLygHFpkZqpB_4core3fmt"),
+            (Some("core"), true)
+        );
+    }
+
+    #[test]
+    fn a_nested_qualified_path_takes_its_top_level_trait() {
+        let name = "<<alloc::vec::Vec<u8> as core::ops::Deref>::Target as alloc::Foo>::bar";
+        assert_eq!(rust_crate(name), (Some("alloc"), false));
+    }
+
+    #[test]
+    fn a_match_holds_at_most_32_runs() {
+        // Runs of one match cover disjoint, increasing element ranges of at
+        // least the set's minimum run, which bounds their number without a cap.
+        let most = wasm_constants::catalog()
+            .iter()
+            .filter(|set| set.data_min_run > 0)
+            .map(|set| set.total() / set.data_min_run)
+            .max()
+            .unwrap();
+        assert_eq!(most, 32);
+        // A CRC-32 table in 32 runs of 8, each broken from the next by one
+        // inserted word, is one match of 32 runs.
+        let mut words = wasm_constants::crc_table(0xedb8_8320, true);
+        for run in 1..32 {
+            words.insert(run * 9 - 1, 0);
+        }
+        let report = identify(
+            &raw::module(&[raw::memory(1), raw::data(&[(1024, raw::words(&words))])]),
+            0,
+            16,
+        )
+        .unwrap();
+        let crc = constant(&report, "crc32_table");
+        assert_eq!(
+            (
+                crc.len(),
+                crc[0]["runs"].as_u64(),
+                crc[0]["matched"].as_u64()
+            ),
+            (1, Some(32), Some(256)),
+            "{report:#}"
+        );
     }
 
     #[test]

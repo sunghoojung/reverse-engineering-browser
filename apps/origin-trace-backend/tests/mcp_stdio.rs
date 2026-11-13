@@ -590,7 +590,7 @@ fn a_maximal_full_run_and_the_default_listing_inline() {
     }
     let listed = full.request(
         "tools/call",
-        json!({"name": "get_wasm_runs", "arguments": {}}),
+        json!({"name": "get_wasm_runs", "arguments": {"limit": 1}}),
     );
     let listing = inlined(&listed);
     assert_eq!(listing["total"], 3);
@@ -606,6 +606,73 @@ fn a_maximal_full_run_and_the_default_listing_inline() {
             .len(),
         4096
     );
+}
+
+/// One tool answer, inline: not a structural summary and not an error.
+fn inline_record(answer: &Value) -> Value {
+    assert_eq!(answer["result"]["isError"], false, "{answer}");
+    let value: Value = serde_json::from_str(tool_text(answer)).unwrap();
+    assert!(
+        value.get("mcp_projection").is_none(),
+        "a structural summary came back: {}",
+        tool_text(answer).len()
+    );
+    value
+}
+
+#[test]
+fn records_that_overflowed_after_trimming_now_inline() {
+    // Review repros at --permission full. (1) 48 calls of 16 i32 values each
+    // way and a 324-byte read fit alone but not nested in the listing.
+    // (2) 40 function and 40 global imports named with 128 control bytes, 768
+    // bytes each as JSON, stayed over the limit after every trim step.
+    let server = Server::start();
+    let sixteen = " i32".repeat(16);
+    let mut calls = format!(
+        "(module (import \"env\" \"f\" (func $f (param{sixteen}) (result{sixteen}))) (memory 1) (func (export \"run\") (local $n i32) (local.set $n (i32.const 48)) (block $done (loop $again (br_if $done (i32.eqz (local.get $n)))"
+    );
+    calls.push_str(&"(i32.const 1)".repeat(16));
+    calls.push_str("(call $f)");
+    calls.push_str(&"(drop)".repeat(16));
+    calls.push_str("(local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $again)))))");
+    let hash = retained_wasm(&server, &wat::parse_str(&calls).unwrap());
+    let mut full = at_level(&server, "full");
+    let value = json!({"type": "i32", "value": "-2147483648"});
+    inline_record(&run_wasm(
+        &mut full,
+        json!({"artifact_id": "1", "sha256": hash, "export": "run",
+        "imports": [{"module": "env", "field": "f", "results": vec![value; 16]}],
+        "memory_reads": [{"offset": 0, "length": 324}], "confirm_offline_execution": true}),
+    ));
+    let listing = inline_record(&full.request(
+        "tools/call",
+        json!({"name": "get_wasm_runs", "arguments": {}}),
+    ));
+    assert_eq!(listing["runs"][0]["import_calls_total"], 48);
+
+    let name = "\\01".repeat(128);
+    let mut escaped = String::from("(module");
+    for index in 0..40 {
+        escaped.push_str(&format!(
+            "(import \"{name}\" \"f{index}\" (func))(import \"{name}\" \"g{index}\" (global i32))"
+        ));
+    }
+    escaped.push_str("(memory 1) (func (export \"run\")))");
+    let hash = retained_wasm(&server, &wat::parse_str(&escaped).unwrap());
+    let record = inline_record(&run_wasm(
+        &mut full,
+        json!({"artifact_id": "1", "sha256": hash, "export": "run",
+        "memory_reads": (0..16).map(|index| json!({"offset": index * 2048, "length": 2048})).collect::<Vec<_>>(),
+        "confirm_offline_execution": true}),
+    ));
+    assert_eq!(
+        record["memory_reads"][15]["hex"].as_str().unwrap().len(),
+        4096
+    );
+    inline_record(&full.request(
+        "tools/call",
+        json!({"name": "get_wasm_runs", "arguments": {"limit": 1}}),
+    ));
 }
 
 fn float32_artifact_request(artifact: &Value) -> Value {

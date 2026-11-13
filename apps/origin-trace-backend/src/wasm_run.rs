@@ -1700,45 +1700,93 @@ fn run_blocking(root: &Path, request: &Request, limits: Limits) -> Result<Value>
     Ok(record)
 }
 
-/// At most `limit` bytes of `text` on a character boundary, marked when cut.
+/// The bytes `c` takes inside a JSON string: control characters, quotes and
+/// backslashes are escaped, so a name of 128 control bytes is 768 bytes of
+/// JSON.
+fn escaped_width(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+        c if (c as u32) < 0x20 => 6,
+        c => c.len_utf8(),
+    }
+}
+
+/// `text` cut to at most `limit` bytes as a JSON string (escapes counted),
+/// marked when cut. Two names that share their first `limit` bytes look the
+/// same afterwards; the function index tells them apart.
 fn bounded(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
-        return text.to_owned();
+    let mut width = 0;
+    for (at, c) in text.char_indices() {
+        width += escaped_width(c);
+        if width > limit {
+            return format!("{} [cut]", &text[..at]);
+        }
     }
-    let mut end = limit;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{} [cut]", &text[..end])
+    text.to_owned()
 }
 
 fn pretty_len(value: &Value) -> usize {
     serde_json::to_string_pretty(value).map_or(usize::MAX, |text| text.len())
 }
 
-/// Trims a record until its pretty-printed JSON fits RECORD_INLINE_BUDGET, in a
-/// fixed order, and lists each step in `size_trimmed`. Outcomes, counts,
+/// The pretty length of `record` as `get_wasm_runs` returns it, nested in
+/// `{"runs": [...]}` with the listing's fixed keys: nesting indents every line,
+/// so a record that fits alone can overflow as a listing.
+fn listed_len(record: &Value) -> usize {
+    pretty_len(&json!({
+        "schema": "wasm-runs-v1",
+        "artifact_id": u64::MAX.to_string(),
+        "total": MAX_RUNS,
+        "evicted_runs": u64::MAX,
+        "max_runs": MAX_RUNS,
+        "runs": [record],
+    }))
+}
+
+/// Keeps the longest prefix of the list under `key` with which `record` fits,
+/// and returns how many of how many entries were kept when that removed any.
+fn keep_prefix(
+    record: &mut Value,
+    key: &str,
+    fits: impl Fn(&Value) -> bool,
+) -> Option<(usize, usize)> {
+    let full = record[key].as_array()?.clone();
+    let total = full.len();
+    if total == 0 {
+        return None;
+    }
+    let (mut low, mut high) = (0usize, total);
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        record[key] = Value::Array(full[..middle].to_vec());
+        if fits(record) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    record[key] = Value::Array(full[..low].to_vec());
+    (low < total).then_some((low, total))
+}
+
+/// Trims a record until it fits RECORD_INLINE_BUDGET as a one-record
+/// `get_wasm_runs` listing (and so also alone), in a fixed order, recording in
+/// `size_trimmed` only the steps that removed something. Outcomes, counts,
 /// memory reads, digests and the expectation are never trimmed: the reads cap
-/// leaves room for them.
+/// leaves room for them. The store keeps the trimmed record, as returned.
 fn fit(record: &mut Value) {
     if let Some(message) = record["outcome"]["message"].as_str() {
         record["outcome"]["message"] = json!(bounded(message, MAX_RECORD_MESSAGE));
     }
     let mut trimmed = Vec::new();
-    let over = |record: &Value| pretty_len(record) > RECORD_INLINE_BUDGET;
-    if over(record) {
-        let kept = record["import_calls"].as_array().map_or(0, Vec::len);
-        record["import_calls"] = json!([]);
-        record["import_calls_truncated"] = json!(true);
-        trimmed.push(format!("import_calls: 0 of {kept} recorded calls kept"));
-    }
-    if over(record) {
+    let fits = |record: &Value| listed_len(record) <= RECORD_INLINE_BUDGET;
+    if !fits(record) && record["request"].get("omitted").is_none() {
         let bytes = serde_json::to_vec(&record["request"]).map_or(0, |bytes| bytes.len());
         record["request"] = json!({"omitted": "size", "bytes": bytes});
         trimmed.push("request: replaced by its size; provenance.inputs_digest names it".into());
     }
     for key in ["imports", "other_imports"] {
-        if over(record)
+        if !fits(record)
             && let Some(list) = record[key].as_array_mut()
             && list.len() > 32
         {
@@ -1747,7 +1795,33 @@ fn fit(record: &mut Value) {
             trimmed.push(format!("{key}: first 32 of {total}"));
         }
     }
-    if over(record)
+    let lists = |record: &Value| {
+        ["params", "results"]
+            .iter()
+            .map(|key| {
+                record["function"]["type"][key]
+                    .as_array()
+                    .map_or(0, Vec::len)
+            })
+            .collect::<Vec<_>>()
+    };
+    if !fits(record)
+        && record["function"]["type"].is_object()
+        && lists(record).iter().any(|n| *n > 0)
+    {
+        let counts = lists(record);
+        record["function"]["type"] = json!({"params_count": counts[0], "results_count": counts[1]});
+        trimmed.push("function.type: replaced by its counts".into());
+    }
+    if !fits(record)
+        && let Some((kept, total)) = keep_prefix(record, "import_calls", fits)
+    {
+        record["import_calls_truncated"] = json!(true);
+        trimmed.push(format!(
+            "import_calls: first {kept} of {total} recorded calls"
+        ));
+    }
+    if !fits(record)
         && let Some(list) = record["results"].as_array_mut()
         && list.len() > 64
     {
@@ -1755,15 +1829,13 @@ fn fit(record: &mut Value) {
         list.truncate(64);
         trimmed.push(format!("results: first 64 of {total}"));
     }
-    if over(record) && record["function"]["type"].is_object() {
-        let count = |key: &str| {
-            record["function"]["type"][key]
-                .as_array()
-                .map_or(0, Vec::len)
-        };
-        let (params, results) = (count("params"), count("results"));
-        record["function"]["type"] = json!({"params_count": params, "results_count": results});
-        trimmed.push("function.type: replaced by its counts".into());
+    // A last, hard step: the import lists keep only as many entries as fit.
+    for key in ["imports", "other_imports"] {
+        if !fits(record)
+            && let Some((kept, total)) = keep_prefix(record, key, fits)
+        {
+            trimmed.push(format!("{key}: first {kept} of {total}"));
+        }
     }
     record["size_trimmed"] = json!(trimmed);
 }
@@ -2743,19 +2815,24 @@ mod tests {
     }
 
     #[test]
-    fn nonces_differ_within_one_millisecond() {
-        // A run_id is wr-<milliseconds>-<nonce>, so two runs in one millisecond
-        // differ only by the nonce.
-        let started = Instant::now();
-        let nonces = (0..1000)
-            .map(|_| nonce().0)
+    fn nonces_are_distinct_across_back_to_back_calls() {
+        // A run_id is wr-<milliseconds>-<nonce>, so runs in the same
+        // millisecond differ only by the nonce. The test requires calls that
+        // did share a millisecond, and every nonce to be distinct.
+        let millis = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        };
+        let calls = (0..1000).map(|_| (millis(), nonce().0)).collect::<Vec<_>>();
+        let shared = calls.windows(2).any(|pair| pair[0].0 == pair[1].0);
+        assert!(shared, "no two calls fell in one millisecond");
+        let nonces = calls
+            .iter()
+            .map(|(_, nonce)| nonce)
             .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(
-            nonces.len(),
-            1000,
-            "a nonce repeated within {:?}",
-            started.elapsed()
-        );
+        assert_eq!(nonces.len(), 1000, "a nonce repeated");
         assert!(
             nonces
                 .iter()
@@ -2872,6 +2949,152 @@ mod tests {
             "memory_reads": (0..16).map(|index| json!({"offset": index * 2048, "length": 2048})).collect::<Vec<_>>(),
             "expect": {"memory": (0..16).map(|index| json!({"read": index, "hex": "ab".repeat(2048)})).collect::<Vec<_>>()},
             "limits": {"deadline_ms": 10000}})
+    }
+
+    /// 16 reads of 2 KiB: the 32 KiB read cap.
+    fn full_reads() -> Value {
+        json!(
+            (0..16)
+                .map(|index| json!({"offset": index * 2048, "length": 2048}))
+                .collect::<Vec<_>>()
+        )
+    }
+
+    #[test]
+    fn a_record_fits_as_a_one_record_listing() {
+        // fit() measured the record alone; nested in {"runs":[...]} every line
+        // gains four spaces, and a record at 122,902 bytes became a 150,830-byte
+        // listing that reb-api mcp summarized.
+        let sixteen = " i32".repeat(16);
+        let mut source = format!(
+            "(module (import \"env\" \"f\" (func $f (param{sixteen}) (result{sixteen}))) (memory 1) (func (export \"run\") (local $n i32) (local.set $n (i32.const 48)) (block $done (loop $again (br_if $done (i32.eqz (local.get $n)))"
+        );
+        source.push_str(&"(i32.const 1)".repeat(16));
+        source.push_str("(call $f)");
+        source.push_str(&"(drop)".repeat(16));
+        source.push_str("(local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $again)))))");
+        let value = json!({"type": "i32", "value": "-2147483648"});
+        let record = run_stored(
+            &module(&source),
+            json!({"export": "run",
+            "imports": [{"module": "env", "field": "f", "results": vec![value; 16]}],
+            "memory_reads": [{"offset": 0, "length": 324}]}),
+        );
+        assert_eq!(record["import_calls_total"], 48);
+        assert!(
+            listed_len(&record) <= RECORD_INLINE_BUDGET,
+            "{}",
+            listed_len(&record)
+        );
+    }
+
+    #[test]
+    fn escaped_names_are_bounded_by_their_json_length() {
+        // 40 function and 40 global imports named with 128 control bytes are
+        // 768 bytes each as JSON; the record stayed at 178,179 bytes after
+        // every trim step.
+        let name = "\\01".repeat(128);
+        let mut source = String::from("(module");
+        for index in 0..40 {
+            source.push_str(&format!("(import \"{name}\" \"f{index}\" (func))"));
+            source.push_str(&format!("(import \"{name}\" \"g{index}\" (global i32))"));
+        }
+        source.push_str("(memory 1) (func (export \"run\")))");
+        let record = run_stored(
+            &module(&source),
+            json!({"export": "run", "memory_reads": full_reads()}),
+        );
+        assert!(
+            listed_len(&record) <= RECORD_INLINE_BUDGET,
+            "{}",
+            listed_len(&record)
+        );
+        let module = record["imports"][0]["module"].as_str().unwrap();
+        assert!(
+            serde_json::to_string(module).unwrap().len() <= MAX_RECORD_NAME + 8,
+            "{module:?}"
+        );
+        assert!(module.ends_with(" [cut]"));
+    }
+
+    #[test]
+    fn the_longest_prefix_of_import_calls_that_fits_is_kept() {
+        // The whole call list was dropped ("0 of 256 kept") although about
+        // 48 KB of calls would have fit beside 32 KiB of reads.
+        let source = "(module (import \"env\" \"f\" (func $f (param i32))) (memory 1) (func (export \"run\") (local $n i32) (local.set $n (i32.const 256)) (block $done (loop $again (br_if $done (i32.eqz (local.get $n))) (call $f (local.get $n)) (local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $again)))))";
+        let record = run_stored(
+            &module(source),
+            json!({"export": "run",
+            "imports": [{"module": "env", "field": "f", "results": []}], "memory_reads": full_reads()}),
+        );
+        let kept = record["import_calls"].as_array().unwrap().len();
+        assert!(
+            kept > 64,
+            "only {kept} calls kept: {}",
+            record["size_trimmed"]
+        );
+        assert!(listed_len(&record) <= RECORD_INLINE_BUDGET);
+        if kept < 256 {
+            assert_eq!(record["import_calls_truncated"], true);
+            assert!(
+                record["size_trimmed"]
+                    .to_string()
+                    .contains(&format!("first {kept} of 256")),
+                "{}",
+                record["size_trimmed"]
+            );
+        }
+    }
+
+    #[test]
+    fn the_type_and_results_steps_trim_a_wide_function() {
+        // A function with 1000 parameters and 1000 results needs both steps;
+        // removing either used to pass every test.
+        let wide = " i64".repeat(1000);
+        let source = format!(
+            "(module (memory 1) (func (export \"run\") (param{wide}) (result{wide}) {}))",
+            "(i64.const -9223372036854775808)".repeat(1000)
+        );
+        let value = json!({"type": "i64", "value": "-9223372036854775808"});
+        let record = run_stored(
+            &module(&source),
+            json!({"export": "run", "args": vec![value; 1000], "memory_reads": full_reads()}),
+        );
+        assert_eq!(
+            record["outcome"]["status"], "returned",
+            "{}",
+            record["outcome"]
+        );
+        let steps = record["size_trimmed"].to_string();
+        assert!(
+            steps.contains("function.type: replaced by its counts"),
+            "{steps}"
+        );
+        assert!(steps.contains("results: first 64 of 1000"), "{steps}");
+        assert_eq!(record["results"].as_array().unwrap().len(), 64);
+        assert_eq!(
+            record["function"]["type"],
+            json!({"params_count": 1000, "results_count": 1000})
+        );
+        assert!(listed_len(&record) <= RECORD_INLINE_BUDGET);
+    }
+
+    #[test]
+    fn only_steps_that_removed_something_are_recorded() {
+        // A record over the budget only through its request echo recorded
+        // "import_calls: 0 of 0" too, and a function with no parameters or
+        // results could be "replaced by its counts".
+        let writes = (0..16)
+            .map(|index| json!({"offset": index * 16384, "hex": "ab".repeat(16384)}))
+            .collect::<Vec<_>>();
+        let record = run_stored(
+            &module("(module (memory 8) (func (export \"run\")))"),
+            json!({"export": "run", "memory_writes": writes}),
+        );
+        assert_eq!(
+            record["size_trimmed"],
+            json!(["request: replaced by its size; provenance.inputs_digest names it"])
+        );
     }
 
     #[test]

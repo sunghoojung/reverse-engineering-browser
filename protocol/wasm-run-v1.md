@@ -87,12 +87,26 @@ read the run's values anyway (see below).
 
 Fixed bounds: a 16 MiB module (larger artifacts are refused before compilation,
 which no deadline can interrupt), a 1 MiB request body, 1,000 arguments, 256
-stubs with up to 256 sequence entries, 16 writes and 16 reads of at most 256
-KiB each in total, 256 recorded import calls with up to 16 arguments and 16
-results each (`args_truncated`, `results_truncated`), 16 memories and 16
-tables, 64 operators in any constant expression, 262,144 element segment items,
-one expected memory entry per read (so at most 16), a 4 MiB record, 64 stored runs
-and a 16 MiB store. A limit outside its range is refused with 400.
+stubs with up to 256 sequence entries, 16 writes of at most 256 KiB in total,
+16 reads of at most 32 KiB in total, 256 recorded import calls with up to 16
+arguments and 16 results each (`args_truncated`, `results_truncated`), 16
+memories and 16 tables, 64 operators in any constant expression, 262,144
+element segment items, one expected memory entry per read (so at most 16),
+captured import and export names cut to 128 bytes and outcome messages to 1,024
+in the record, a 4 MiB record, 64 stored runs and a 16 MiB store. A limit
+outside its range is refused with 400.
+
+A record always fits the 128 KiB that `reb-api mcp` returns inline, so a Full
+client gets every byte it read rather than a structural summary. Reads are
+returned as hex, so their 32 KiB cap is 64 KiB of text. If the pretty-printed
+record would still exceed 120 KiB, it is trimmed in this order until it fits:
+the import call list is emptied (`import_calls_total` and
+`import_calls_truncated` stay), the request echo is replaced by its size
+(`provenance.inputs_digest` still names it), `imports` and `other_imports` keep
+their first 32 entries, `results` keeps its first 64 values, and
+`function.type` becomes its two counts. `size_trimmed` lists each step taken and
+is empty otherwise. Outcomes, counts, memory reads, digests and the expectation
+are never trimmed; the expectation is computed before any trimming.
 
 The memory and table limits are totals: every memory and every table the run
 creates, imported or defined, and every growth, counts against one budget each.
@@ -176,7 +190,10 @@ how to recover. The next run moves the file aside as
 `analysis/wasm-runs-v1.json.unreadable-<milliseconds>`, never overwriting or
 deleting it, starts a new store, and names the moved file in its
 `store_notice`. `GET /api/wasm/runs` takes optional `artifact_id` and `limit`
-(1 to 64, default 16) and returns runs newest first with the matching `total`.
+(1 to 64, default 1) and returns runs newest first with the matching `total`.
+One record always inlines through `reb-api mcp`; ask for more with a larger
+`limit` when the records are small, or larger listings may come back as a
+structural summary.
 
 ## Content and agent access
 

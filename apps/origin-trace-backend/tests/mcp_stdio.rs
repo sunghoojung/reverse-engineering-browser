@@ -529,6 +529,79 @@ fn a_read_only_client_cannot_list_runs_or_rebuild_their_inputs() {
     );
 }
 
+#[test]
+fn a_maximal_full_run_and_the_default_listing_inline() {
+    // A run with 64 KiB or more of reads, or a listing of 16 large records,
+    // came back from reb-api mcp as a structural summary without its bytes.
+    let server = Server::start();
+    let sixteen = " i64".repeat(16);
+    let mut source =
+        format!("(module (import \"env\" \"big\" (func $big (param{sixteen}) (result{sixteen})))");
+    for index in 0..200 {
+        source.push_str(&format!(
+            "(import \"{}\" \"f{index}\" (func (param{sixteen})))",
+            "m".repeat(200)
+        ));
+    }
+    source.push_str(&format!(
+        "(memory 8) (func (export \"run\") (param{sixteen}) (result{})",
+        " i64".repeat(100)
+    ));
+    source.push_str("(local $n i32) (local.set $n (i32.const 300)) (block $done (loop $again (br_if $done (i32.eqz (local.get $n)))");
+    for index in 0..16 {
+        source.push_str(&format!("(local.get {index})"));
+    }
+    source.push_str("(call $big)");
+    source.push_str(&"(drop)".repeat(16));
+    source.push_str("(local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $again)))");
+    source.push_str(&"(i64.const -9223372036854775808)".repeat(100));
+    source.push_str("))");
+    let hash = retained_wasm(&server, &wat::parse_str(&source).unwrap());
+    let value = json!({"type": "i64", "value": "-9223372036854775808"});
+    let body = json!({"artifact_id": "1", "sha256": hash, "export": "run",
+        "args": vec![value.clone(); 16],
+        "imports": [{"module": "env", "field": "big", "results": vec![value; 16]}],
+        "memory_writes": (0..16).map(|index| json!({"offset": index * 16384, "hex": "ab".repeat(16384)})).collect::<Vec<_>>(),
+        "memory_reads": (0..16).map(|index| json!({"offset": index * 2048, "length": 2048})).collect::<Vec<_>>(),
+        "limits": {"deadline_ms": 10000},
+        "confirm_offline_execution": true});
+    let mut full = at_level(&server, "full");
+    let inlined = |answer: &Value| {
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+        let record: Value = serde_json::from_str(tool_text(answer)).unwrap();
+        assert!(
+            record.get("mcp_projection").is_none(),
+            "a structural summary came back"
+        );
+        record
+    };
+    for _ in 0..3 {
+        let record = inlined(&run_wasm(&mut full, body.clone()));
+        assert_eq!(record["outcome"]["status"], "returned");
+        for read in record["memory_reads"].as_array().unwrap() {
+            assert_eq!(read["hex"].as_str().unwrap().len(), 4096);
+        }
+    }
+    let listed = full.request(
+        "tools/call",
+        json!({"name": "get_wasm_runs", "arguments": {}}),
+    );
+    let listing = inlined(&listed);
+    assert_eq!(listing["total"], 3);
+    assert_eq!(
+        listing["runs"].as_array().unwrap().len(),
+        1,
+        "the default listing is one record"
+    );
+    assert_eq!(
+        listing["runs"][0]["memory_reads"][0]["hex"]
+            .as_str()
+            .unwrap()
+            .len(),
+        4096
+    );
+}
+
 fn float32_artifact_request(artifact: &Value) -> Value {
     let frames = artifact["byte_size"].as_u64().unwrap() / 4;
     json!({"body": {"protocol_version": 1, "reference": null,

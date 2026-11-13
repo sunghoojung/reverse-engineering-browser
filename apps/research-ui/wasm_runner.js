@@ -118,7 +118,7 @@ function createWasmRunDialog({button, getSource}) {
     field('args', 'Arguments', input('i32 7, i32 5'), 'Type and value per parameter, comma separated.'),
     field('imports', 'Import stubs (JSON)', imports, 'A function import without a stub traps when called. Supply every clock or random source.'),
     field('writes', 'Memory writes before the call', input('16:01020304'), 'offset:hex, comma separated; memory 0.'),
-    field('reads', 'Memory reads after the call', input('0:32'), 'offset:length, comma separated; 256 KiB in total.'),
+    field('reads', 'Memory reads after the call', input('0:32'), 'offset:length, comma separated; 32 KiB in total.'),
     limits, startField, confirmField, error, actions, output);
   dialog.append(form);
   document.body.append(dialog);

@@ -55,7 +55,16 @@ const MAX_WRITES: usize = 16;
 const MAX_READS: usize = 16;
 /// Memory written before the call and read after it, each in total.
 pub const MAX_WRITE_BYTES: usize = 256 * 1024;
-pub const MAX_READ_BYTES: usize = 256 * 1024;
+/// Reads are returned as hex, so 32 KiB of reads is 64 KiB of text: with the
+/// rest of a record that still fits the 128 KiB MCP inline limit.
+pub const MAX_READ_BYTES: usize = 32 * 1024;
+/// A record is trimmed in a fixed order until its pretty-printed JSON fits
+/// this, so a whole run result always inlines through `reb-api mcp`.
+const RECORD_INLINE_BUDGET: usize = 120 * 1024;
+/// Captured import and export names, and messages that quote them, are cut to
+/// this many bytes in a record; a module can declare a name of any length.
+const MAX_RECORD_NAME: usize = 128;
+const MAX_RECORD_MESSAGE: usize = 1024;
 const MAX_RECORDED_CALLS: usize = 256;
 const MAX_RECORDED_ARGS: usize = 16;
 const MAX_RECORDED_RESULTS: usize = 16;
@@ -297,7 +306,7 @@ impl Request {
             .try_fold(0u64, |total, r| total.checked_add(r.length));
         if read.is_none_or(|total| total > MAX_READ_BYTES as u64) {
             return Err(Error::bad(
-                "WASM run memory reads exceed their 256 KiB limit",
+                "WASM run memory reads exceed their 32 KiB limit",
             ));
         }
         if request.memory_reads.iter().any(|r| r.length == 0) {
@@ -1235,7 +1244,7 @@ fn select(request: &Request, facts: &Scan) -> Result<Selected> {
     });
     Ok(Selected {
         index,
-        export,
+        export: export.map(|name| bounded(&name, MAX_RECORD_NAME)),
         body,
     })
 }
@@ -1304,8 +1313,8 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
             };
             functions.push(ImportFunction {
                 function_index,
-                module: import.module().into(),
-                field: import.name().into(),
+                module: bounded(import.module(), MAX_RECORD_NAME),
+                field: bounded(import.name(), MAX_RECORD_NAME),
                 plan,
                 calls: 0,
             });
@@ -1387,7 +1396,7 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
             }
             ExternType::Memory(ty) => match Memory::new(&mut store, ty) {
                 Ok(memory) => {
-                    others.push(json!({"kind":"memory","module":import.module(),"field":import.name(),"provided":"fresh_zeroed","minimum_pages":ty.minimum()}));
+                    others.push(json!({"kind":"memory","module":bounded(import.module(), MAX_RECORD_NAME),"field":bounded(import.name(), MAX_RECORD_NAME),"provided":"fresh_zeroed","minimum_pages":ty.minimum()}));
                     externs.push(Extern::Memory(memory));
                 }
                 Err(error) => {
@@ -1402,7 +1411,7 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
                 };
                 match Table::new(&mut store, ty, init) {
                     Ok(table) => {
-                        others.push(json!({"kind":"table","module":import.module(),"field":import.name(),"provided":"fresh_null","minimum_elements":ty.minimum()}));
+                        others.push(json!({"kind":"table","module":bounded(import.module(), MAX_RECORD_NAME),"field":bounded(import.name(), MAX_RECORD_NAME),"provided":"fresh_null","minimum_elements":ty.minimum()}));
                         externs.push(Extern::Table(table));
                     }
                     Err(error) => {
@@ -1412,7 +1421,7 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
                 }
             }
             ExternType::Global(ty) => {
-                others.push(json!({"kind":"global","module":import.module(),"field":import.name(),"provided":"zero","type":type_name(&ty.content()),"mutable":ty.mutability() == Mutability::Var}));
+                others.push(json!({"kind":"global","module":bounded(import.module(), MAX_RECORD_NAME),"field":bounded(import.name(), MAX_RECORD_NAME),"provided":"zero","type":type_name(&ty.content()),"mutable":ty.mutability() == Mutability::Var}));
                 externs.push(Extern::Global(Global::new(
                     &mut store,
                     zero(&ty.content()),
@@ -1685,7 +1694,76 @@ fn run_blocking(root: &Path, request: &Request, limits: Limits) -> Result<Value>
     record["notice"] = json!(
         "Captured code ran offline in a local interpreter with every import stubbed. This result describes these inputs only and is a derived experiment record, not captured evidence."
     );
+    fit(&mut record);
     Ok(record)
+}
+
+/// At most `limit` bytes of `text` on a character boundary, marked when cut.
+fn bounded(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_owned();
+    }
+    let mut end = limit;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{} [cut]", &text[..end])
+}
+
+fn pretty_len(value: &Value) -> usize {
+    serde_json::to_string_pretty(value).map_or(usize::MAX, |text| text.len())
+}
+
+/// Trims a record until its pretty-printed JSON fits RECORD_INLINE_BUDGET, in a
+/// fixed order, and lists each step in `size_trimmed`. Outcomes, counts,
+/// memory reads, digests and the expectation are never trimmed: the reads cap
+/// leaves room for them.
+fn fit(record: &mut Value) {
+    if let Some(message) = record["outcome"]["message"].as_str() {
+        record["outcome"]["message"] = json!(bounded(message, MAX_RECORD_MESSAGE));
+    }
+    let mut trimmed = Vec::new();
+    let over = |record: &Value| pretty_len(record) > RECORD_INLINE_BUDGET;
+    if over(record) {
+        let kept = record["import_calls"].as_array().map_or(0, Vec::len);
+        record["import_calls"] = json!([]);
+        record["import_calls_truncated"] = json!(true);
+        trimmed.push(format!("import_calls: 0 of {kept} recorded calls kept"));
+    }
+    if over(record) {
+        let bytes = serde_json::to_vec(&record["request"]).map_or(0, |bytes| bytes.len());
+        record["request"] = json!({"omitted": "size", "bytes": bytes});
+        trimmed.push("request: replaced by its size; provenance.inputs_digest names it".into());
+    }
+    for key in ["imports", "other_imports"] {
+        if over(record)
+            && let Some(list) = record[key].as_array_mut()
+            && list.len() > 32
+        {
+            let total = list.len();
+            list.truncate(32);
+            trimmed.push(format!("{key}: first 32 of {total}"));
+        }
+    }
+    if over(record)
+        && let Some(list) = record["results"].as_array_mut()
+        && list.len() > 64
+    {
+        let total = list.len();
+        list.truncate(64);
+        trimmed.push(format!("results: first 64 of {total}"));
+    }
+    if over(record) && record["function"]["type"].is_object() {
+        let count = |key: &str| {
+            record["function"]["type"][key]
+                .as_array()
+                .map_or(0, Vec::len)
+        };
+        let (params, results) = (count("params"), count("results"));
+        record["function"]["type"] = json!({"params_count": params, "results_count": results});
+        trimmed.push("function.type: replaced by its counts".into());
+    }
+    record["size_trimmed"] = json!(trimmed);
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -2180,7 +2258,7 @@ mod tests {
         let body = json!({"artifact_id":"1","sha256":"0".repeat(64),"export":"sum",
             "confirm_offline_execution":true,"memory_reads":[{"offset":0,"length":MAX_READ_BYTES + 1}]});
         let error = Request::parse(&serde_json::to_vec(&body).unwrap()).unwrap_err();
-        assert!(error.message.contains("256 KiB"));
+        assert!(error.message.contains("32 KiB"));
         let outside = run(
             &fixture("memory.wat"),
             json!({"export":"sum",
@@ -2661,6 +2739,104 @@ mod tests {
             },
         ];
         run_blocking(directory.path(), &request, limits).unwrap()
+    }
+
+    /// run_blocking on `bytes` in a fresh store, with `body` as the request
+    /// (artifact_id, sha256 and the confirmation are filled in).
+    fn run_stored(bytes: &[u8], mut body: Value) -> Value {
+        let directory = tempfile::tempdir().unwrap();
+        let hash = hex::encode(Sha256::digest(bytes));
+        std::fs::create_dir_all(directory.path().join("blobs")).unwrap();
+        std::fs::write(directory.path().join(format!("blobs/{hash}.bin")), bytes).unwrap();
+        let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/a.wasm","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+        std::fs::write(
+            directory.path().join("manifest.jsonl"),
+            format!("{artifact}\n"),
+        )
+        .unwrap();
+        body["artifact_id"] = json!("1");
+        body["sha256"] = json!(hash);
+        body["confirm_offline_execution"] = json!(true);
+        let (request, limits) = Request::parse(&serde_json::to_vec(&body).unwrap()).unwrap();
+        run_blocking(directory.path(), &request, limits).unwrap()
+    }
+
+    /// A module that fills every part of a record: 200 imports with long
+    /// names, 300 import calls of 16 values each way, 100 results and memory
+    /// for the largest writes and reads.
+    pub(super) fn maximal_module() -> Vec<u8> {
+        let sixteen = " i64".repeat(16);
+        let long = "m".repeat(200);
+        let mut source = format!(
+            "(module (import \"env\" \"big\" (func $big (param{sixteen}) (result{sixteen})))"
+        );
+        for index in 0..200 {
+            source.push_str(&format!(
+                "(import \"{long}\" \"f{index}\" (func (param{sixteen})))"
+            ));
+        }
+        source.push_str("(memory 8) (func (export \"run\") (param");
+        source.push_str(&sixteen);
+        source.push_str(") (result");
+        source.push_str(&" i64".repeat(100));
+        source
+            .push_str(") (local $n i32) (local.set $n (i32.const 300)) (block $done (loop $again");
+        source.push_str("(br_if $done (i32.eqz (local.get $n)))");
+        for index in 0..16 {
+            source.push_str(&format!("(local.get {index})"));
+        }
+        source.push_str("(call $big)");
+        source.push_str(&"(drop)".repeat(16));
+        source.push_str("(local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $again)))");
+        source.push_str(&"(i64.const -9223372036854775808)".repeat(100));
+        source.push_str("))");
+        module(&source)
+    }
+
+    /// The largest request a run admits against maximal_module.
+    pub(super) fn maximal_body() -> Value {
+        let value = json!({"type": "i64", "value": "-9223372036854775808"});
+        let sixteen = vec![value.clone(); 16];
+        json!({"export": "run", "args": sixteen,
+            "imports": [{"module": "env", "field": "big", "results": sixteen}],
+            "memory_writes": (0..16).map(|index| json!({"offset": index * 16384, "hex": "ab".repeat(16384)})).collect::<Vec<_>>(),
+            "memory_reads": (0..16).map(|index| json!({"offset": index * 2048, "length": 2048})).collect::<Vec<_>>(),
+            "expect": {"memory": (0..16).map(|index| json!({"read": index, "hex": "ab".repeat(2048)})).collect::<Vec<_>>()},
+            "limits": {"deadline_ms": 10000}})
+    }
+
+    #[test]
+    fn a_maximal_record_fits_the_mcp_inline_limit() {
+        // 64 KiB of reads and the rest of a large record came to more than the
+        // 128 KiB reb-api mcp inlines, so a Full client got a structural
+        // summary without the bytes.
+        let record = run_stored(&maximal_module(), maximal_body());
+        assert_eq!(
+            record["outcome"]["status"], "returned",
+            "{}",
+            record["outcome"]
+        );
+        let pretty = serde_json::to_string_pretty(&record).unwrap().len();
+        assert!(pretty <= RECORD_INLINE_BUDGET, "{pretty}");
+        assert!(!record["size_trimmed"].as_array().unwrap().is_empty());
+        assert_eq!(record["import_calls_total"], 300);
+        assert_eq!(record["expectation"]["all_match"], true);
+        for read in record["memory_reads"].as_array().unwrap() {
+            assert_eq!(
+                read["hex"].as_str().unwrap().len(),
+                4096,
+                "reads are never trimmed"
+            );
+        }
+        let names = record["imports"].as_array().unwrap();
+        assert!(
+            names
+                .iter()
+                .all(|entry| entry["module"].as_str().unwrap().len() <= MAX_RECORD_NAME + 6)
+        );
+        // A small record is left whole.
+        let small = run_blocking_record(&request(json!({})).0, request(json!({})).1);
+        assert_eq!(small["size_trimmed"], json!([]));
     }
 
     #[test]

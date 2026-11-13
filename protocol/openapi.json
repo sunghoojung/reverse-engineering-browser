@@ -4866,12 +4866,12 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Runs to return, 1 to 64. Default 16.",
+            "description": "Runs to return, 1 to 64. Default 1: one record always fits the MCP inline limit, and several large records may come back as a structural summary.",
             "schema": {
               "type": "integer",
               "minimum": 1,
               "maximum": 64,
-              "default": 16
+              "default": 1
             }
           }
         ],
@@ -23199,7 +23199,7 @@
           "memory_reads": {
             "type": "array",
             "maxItems": 16,
-            "description": "Regions of memory 0 read after the call, 256 KiB in total.",
+            "description": "Regions of memory 0 read after the call, 32 KiB in total, so the hex and the rest of the record fit the MCP inline limit.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -23215,7 +23215,7 @@
                 "length": {
                   "type": "integer",
                   "minimum": 1,
-                  "maximum": 262144
+                  "maximum": 32768
                 }
               }
             }
@@ -23619,6 +23619,13 @@
           "stored": {
             "type": "boolean",
             "description": "Present on the POST result: whether the record reached the run store."
+          },
+          "size_trimmed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What was trimmed, in order, so the pretty-printed record fits 120 KiB: the import call list, the request echo, import lists past 32, results past 64, the function type lists. Empty when nothing was."
           },
           "store_notice": {
             "type": [

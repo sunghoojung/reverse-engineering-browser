@@ -670,6 +670,26 @@ one expected entry. A
 match holds for these inputs only. `get_wasm_runs {"artifact_id": "9"}` lists
 earlier runs. Details: [WASM run v1](../../protocol/wasm-run-v1.md).
 
+## 28. Tell library code from custom code in a Wasm module
+
+Read the identification report before disassembling anything:
+
+```text
+get_wasm_identification {"artifact_id": "9"}
+get_wasm_identification {"artifact_id": "9", "row_offset": 1024}
+```
+
+Good: `summary.toolchains` and `toolchain.conclusions[].evidence` (each with
+`record` and `byte_offset`); `functions.suggestions` rows
+`[function_index, label, category, library, confidence, record, byte_offset]`,
+paged until `suggestion_window.next_offset` is null; `constants.matches` with
+`match`, `matched`/`total` and, for a data table, `referenced_by`. Functions with
+a high or medium suggestion are usually runtime, glue or library code; start
+with the unlabeled ones and with the functions that name a crypto table, then
+read them with `get_wasm_function_graph` or recipe 23. A suggestion is not a
+name and a constant match is not proof the algorithm runs; cite the offsets.
+Below Full access the matched bytes (`hex`) are omitted.
+
 ## Response shapes at a glance
 
 | Tool | Look at |
@@ -679,6 +699,7 @@ earlier runs. Details: [WASM run v1](../../protocol/wasm-run-v1.md).
 | `get_artifacts` | `artifacts`, `query` |
 | `wait_for_events` | `wait.timed_out`, `events`, `query.next_after`; `debugger_observation` on types 40 to 45 |
 | `inspect_wasm` | `coverage`, then the requested section rows; `analyst_names` for researcher names |
+| `get_wasm_identification` | `summary`, `toolchain.conclusions`, `functions.suggestions`, `constants.matches`, `omissions` |
 | `start_live_session` | `session_id`, `url_opened`, `capture_observed`, `options` |
 | `session_action` `list_inputs` | `elements` with `role`, `name`, `visible`, `x`, `y` |
 | `get_native_console` | `binding_id`, `targets` (`frame`, `origin`, `top_relation`, `out_of_process`), `selection` |

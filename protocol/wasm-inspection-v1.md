@@ -132,6 +132,9 @@ The Origin Trace UI requests whole-module inspection and renders `status` and
 `omissions`, so a filtered document would be shown as partial with its requested
 sections named. It does not send `sections` today.
 
+Toolchain, well-known function and constant identification for the same
+artifact is a separate report, [WASM identification](wasm-identification-v1.md).
+
 ## Function index and block graph
 
 `GET /api/wasm/functions?artifact_id=<id>` returns `wasm-function-index-v1`: each

@@ -623,11 +623,10 @@ fn rust_crate(name: &str) -> (Option<&str>, bool) {
         }
         _ => name,
     };
-    if let Some(found) = v0_crate(name) {
-        return (
-            RUST_CRATES.iter().find(|known| **known == found).copied(),
-            true,
-        );
+    if let Some(found) = v0_symbol(name) {
+        let known =
+            found.and_then(|found| RUST_CRATES.iter().find(|known| **known == found).copied());
+        return (known, true);
     }
     if let Some(segments) = mangled_segments(name) {
         if !segments.last().is_some_and(|last| rust_hash(last)) {
@@ -740,28 +739,40 @@ fn demangled_paths(name: &str) -> Vec<&str> {
     }
 }
 
-/// The crate of a Rust v0 symbol: the identifier after the first crate root
-/// `C` and its optional `s<base62>_` disambiguator. `_R` must be followed by
-/// a path tag, so a C name such as `_ReadFile` is not read as one.
-fn v0_crate(name: &str) -> Option<&str> {
+/// A Rust v0 symbol (`_R` and a path tag) and, when one parses, its crate:
+/// the identifier after a crate root `C` and its optional `s<base62>_`
+/// disambiguator. A closure (`NC`) or an impl disambiguator (`XsC_`) can put
+/// a `C` before the crate root, so each `C` is tried until one parses. `_R`
+/// must be followed by a path tag, so a C name such as `_ReadFile` is not
+/// read as one; any name that is one is certainly Rust, crate or not.
+fn v0_symbol(name: &str) -> Option<Option<&str>> {
     let rest = name
         .strip_prefix("_R")
         .or_else(|| name.strip_prefix("__R"))?;
     if !rest.starts_with(['C', 'N', 'M', 'X', 'Y', 'I', 'B']) {
         return None;
     }
-    let mut at = rest.find('C')? + 1;
-    if rest[at..].starts_with('s') {
-        at += rest[at..].find('_')? + 1;
+    Some(
+        rest.match_indices('C')
+            .find_map(|(at, _)| crate_root(&rest[at + 1..])),
+    )
+}
+
+/// The crate name of a v0 crate root, read from just after its `C`.
+fn crate_root(after: &str) -> Option<&str> {
+    let mut at = 0;
+    if after.starts_with('s') {
+        at += after.find('_')? + 1;
     }
-    let digits = rest[at..].bytes().take_while(u8::is_ascii_digit).count();
-    let length: usize = rest[at..at + digits].parse().ok()?;
+    let digits = after[at..].bytes().take_while(u8::is_ascii_digit).count();
+    let length: usize = after[at..at + digits].parse().ok()?;
     at += digits;
-    if rest[at..].starts_with('_') {
+    if after[at..].starts_with('_') {
         at += 1;
     }
     // A crafted length near usize::MAX must not overflow the end.
-    rest.get(at..at.checked_add(length)?)
+    after
+        .get(at..at.checked_add(length)?)
         .filter(|crate_name| !crate_name.is_empty())
 }
 
@@ -3685,7 +3696,8 @@ mod tests {
 
     #[test]
     fn rust_name_forms_and_crafted_names() {
-        assert_eq!(rust_crate("_RC18446744073709551615abc"), (None, false));
+        // No panic on a crafted length; the name is still a v0 symbol.
+        assert_eq!(rust_crate("_RC18446744073709551615abc"), (None, true));
         for name in [
             "core::ptr::drop_in_place<(alloc::string::String, u32)>",
             "<() as core::fmt::Debug>::fmt",
@@ -3704,6 +3716,22 @@ mod tests {
         ] {
             assert_eq!(rust_crate(name).0, None, "{name}");
         }
+    }
+
+    #[test]
+    fn v0_names_with_a_c_before_the_crate_root_are_rust() {
+        // A closure (NC) and an impl disambiguator (XsC_) come before the root.
+        assert_eq!(
+            rust_crate("_RNCNvCs1234_3std4main0B3_"),
+            (Some("std"), true)
+        );
+        assert_eq!(
+            rust_crate("_RNvXsC_NtCs1234_4core3fmtNtB5_9Formatter3pad"),
+            (Some("core"), true)
+        );
+        // A v0 name whose crate cannot be read is still certainly Rust.
+        assert_eq!(rust_crate("_RNvNtB2_3fmt5write"), (None, true));
+        assert_eq!(rust_crate("_ReadFile"), (None, false));
     }
 
     #[test]

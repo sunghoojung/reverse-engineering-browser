@@ -1289,3 +1289,33 @@ fn readers_of_moved_data_pair_by_the_offset_they_read() {
         ]
     );
 }
+
+#[test]
+fn several_structural_ties_come_out_the_same_every_run() {
+    // Six shapes of three functions each: six structural ties whose ids and
+    // row order must not follow hash map order.
+    let module = |v: i64| {
+        let mut text = String::from("(module");
+        for size in 1..=6 {
+            for j in 0..3 {
+                text.push_str(&format!(
+                    " (func{} i32.const {} drop)",
+                    " nop".repeat(size * 3),
+                    (size * 3 + j) as i64 * 2 + v
+                ));
+            }
+        }
+        text + ")"
+    };
+    let (a, b) = (module(0), module(1));
+    let first = report_with(&a, &b, untimed());
+    assert_eq!(first.groups.len(), 6, "{:?}", first.groups);
+    for _ in 0..30 {
+        let again = report_with(&a, &b, untimed());
+        assert_eq!(rows(&again), rows(&first));
+        assert_eq!(
+            again.rows.iter().map(|r| r.group).collect::<Vec<_>>(),
+            first.rows.iter().map(|r| r.group).collect::<Vec<_>>()
+        );
+    }
+}

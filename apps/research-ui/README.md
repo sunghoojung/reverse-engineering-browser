@@ -1796,7 +1796,7 @@ Every color keeps one meaning on every screen. The tokens sit at the top of
 
 | Meaning | Colors | Where |
 | --- | --- | --- |
-| Resource and evidence kind | scripts foam, WebAssembly and VM iris, dynamic code gold, requests and network records rose, documents pine, sockets gold; styles, images, fonts and media neutral | Traffic row markers, Type and waterfall bars; Sources file icons; Evidence categories; the Flow graph cards |
+| Resource and evidence kind | scripts foam, WebAssembly and VM iris, dynamic code gold, requests and network records rose, documents pine, sockets gold; styles, images, fonts and media neutral | Traffic row markers, Type and waterfall bars, the Watched chip (a `request_watch_match` network record); Sources file icons; Evidence categories; the Flow graph cards |
 | HTTP verb | POST, PUT and PATCH gold, DELETE love, GET, HEAD and OPTIONS neutral | Traffic Method and the selected request |
 | Status | 2xx plain text, 3xx iris, 4xx gold, 5xx and failures love | Traffic Status and the selected request |
 | State | ready foam, busy or limited gold, failed or unavailable love | session and availability tags, notices (as a faint wash), the status bar's loss and sampling counts |

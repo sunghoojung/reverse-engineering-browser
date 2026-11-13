@@ -4310,11 +4310,13 @@ input[type="file"]:hover::file-selector-button { background: var(--panel-3); }
 /* A request a debugger watch rule matched: a chip on its row and a section in General.
    Like a researcher name, the chip keeps the cell on one line, so the name it
    leads shrinks with an ellipsis instead of wrapping out of the row. */
-.request-name > .request-watched { flex: 0 0 auto; padding: 0 4px; border-radius: 3px; background: color-mix(in srgb, var(--cyan) 16%, transparent); color: var(--cyan); font: 600 9px/14px var(--sans); }
+/* The chip is a request_watch_match, a network record: the network kind's color
+   (rose), as Evidence colors that record, never foam, the script kind and ready state. */
+.request-name > .request-watched { flex: 0 0 auto; padding: 0 4px; border-radius: 3px; background: color-mix(in srgb, var(--kind-request-fill) 16%, transparent); color: var(--kind-request); font: 600 9px/14px var(--sans); }
 #screen-traffic .traffic-watch { padding-top: 0; }
 #screen-traffic .traffic-watch-record { color: var(--muted); }
 #screen-traffic .traffic-watch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 8px; }
-#screen-traffic .traffic-watch-status { margin: 0; color: var(--amber); font: 12px/16px var(--sans); }
+#screen-traffic .traffic-watch-status { margin: 0; color: var(--state-danger); font: 12px/16px var(--sans); }
 #screen-traffic .traffic-watch-status:empty { display: none; }
 
 /* Rows share the tree's columns, so values and types align whatever each

@@ -4000,6 +4000,36 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertEqual(row["others"] as? Int, 0, "\(size.name): only the watched row is marked: \(row)")
       XCTAssertTrue((row["label"] as? String ?? "").contains("Request watch rule 1 matched, method too"), "\(size.name): \(row)")
       XCTAssertTrue((row["title"] as? String ?? "").contains("Request watch rule 1 matched"), "\(size.name): \(row)")
+      // The color system: the chip is a network record, so the network kind's
+      // color in both themes, never foam, the script kind and ready state.
+      for theme in ["dark", "light"] {
+        let colors = try await ui.json("""
+          (async () => {
+            const root = document.documentElement, before = root.dataset.theme ?? null;
+            root.dataset.theme = '\(theme)';
+            await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+            const color = token => { const probe = document.createElement('span'); probe.style.color = `var(${token})`;
+              document.body.append(probe); const value = getComputedStyle(probe).color; probe.remove(); return value; };
+            const chip = [...document.querySelectorAll('#screen-traffic .request-row')].find(node => node.innerText.includes('\(host)'))
+              .querySelector('.request-watched');
+            const result = {chip: getComputedStyle(chip).color, request: color('--kind-request'), script: color('--kind-script')};
+            if (before === null) delete root.dataset.theme; else root.dataset.theme = before;
+            return result; })()
+          """)
+        XCTAssertEqual(colors["chip"] as? String, colors["request"] as? String, "\(size.name) \(theme): the chip takes --kind-request: \(colors)")
+        XCTAssertNotEqual(colors["chip"] as? String, colors["script"] as? String, "\(size.name) \(theme): never the script kind: \(colors)")
+      }
+      _ = try await ui.value("""
+        (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null;
+          document.documentElement.dataset.theme = 'light';
+          await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+        """)
+      try await assertLayout(ui, "#screen-traffic", "\(size.name) watched row light")
+      try await ui.screenshot("traffic-watched-row-light-\(size.name)")
+      _ = try await ui.value("""
+        (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
+          else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme; return true; })()
+        """)
 
       try await ui.click("#screen-traffic .request-row", containing: host)
       try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden && Boolean(document.querySelector('#exchange-inspector .traffic-watch'))",

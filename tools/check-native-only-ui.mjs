@@ -690,6 +690,12 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
     state.selectedRequestId = 'watched'; state.trafficDetailOpen = true; state.inspectorTab = 'general'; renderRequests(); renderInspector();`, context);
   const watchedRow = document.querySelector('#request-rows .request-row[data-request-id="watched"]');
   assert.equal(watchedRow.querySelector('.request-watched')?.textContent, 'Watched', 'the watched row carries its mark');
+  // The color system (README, Interface styling): the chip is a network record,
+  // so the network kind's color, and an unavailable debugger the failed color.
+  const rule = selector => css.match(new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]*)\\}`))?.[1] ?? '';
+  assert.match(rule('.request-name > .request-watched'), /color: var\(--kind-request\)/, 'the Watched chip takes the network kind color');
+  assert.doesNotMatch(rule('.request-name > .request-watched'), /--cyan|--rp-foam|--kind-script|--state-ok/, 'never foam, the script kind and ready state');
+  assert.match(rule('#screen-traffic .traffic-watch-status'), /color: var\(--state-danger\)/, 'an unavailable debugger reads as unavailable');
   assert.match(watchedRow.getAttribute('aria-label'), /Request watch rule 1 matched, method too/);
   assert.equal(document.querySelector('#request-rows .request-row[data-request-id="plain"] .request-watched'), null, 'only the watched row');
   assert.equal(document.querySelector('#watch-injected'), null, 'captured paths never become elements');

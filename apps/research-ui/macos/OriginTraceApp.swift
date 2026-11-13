@@ -1975,7 +1975,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           // The Rust provider validates every parameter; values are ASCII
           // digits or words, so the query passes through as it came.
           let names = items.map(\.name)
-          guard Set(names).count == names.count, items.allSatisfy({ ($0.value ?? "").range(of: #"^[a-z0-9]{1,16}$"#, options: .regularExpression) != nil }) else {
+          guard Set(names).count == names.count, items.allSatisfy({ ($0.value ?? "").range(of: #"^[a-z0-9]{1,20}$"#, options: .regularExpression) != nil }) else {
             throw NativeDecoderError(status: 400, message: "WASM value flow takes each parameter once, as a number or a word")
           }
           let query = items.filter { $0.name != "artifact_id" }.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")

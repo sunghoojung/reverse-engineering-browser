@@ -204,7 +204,9 @@ indices and edges stay readable at every level.
   `truncated.bytes` is set and an omission gives the counts. Every document
   lists at most four edges per listed node, nearest the seed first, with
   `truncated.edges` set past it, so a larger `max_nodes` never lists fewer
-  nodes.
+  nodes. The cut's search ends at the deadline, or 500 ms after it starts when
+  the slice already used the deadline, and keeps the largest prefix found to
+  fit; an omission then says more nodes may have fit.
 - `expression`: three levels deep and 160 bytes. `text`: 160 bytes; a
   `try_table` lists its first 8 catch clauses and then their count. A float
   constant whose decimal form is longer than 24 characters is written in its

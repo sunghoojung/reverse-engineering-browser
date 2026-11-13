@@ -42,6 +42,8 @@ const MAX_CALL_SITES: usize = 256;
 /// Web engines reject a body above this size, so a longer one cannot have run.
 const MAX_BODY_BYTES: usize = 7_654_321;
 const DEADLINE: Duration = Duration::from_secs(4);
+/// The response cut's time when the slice already used the deadline.
+const CUT_ALLOWANCE: Duration = Duration::from_millis(500);
 /// Incoming edges listed per join; `incoming_count` keeps the total. A
 /// dispatcher's exit join can have thousands.
 const MAX_JOIN_ENTRIES: usize = 64;
@@ -882,6 +884,17 @@ pub(crate) fn value_flow_with(
     request: &Request,
     limits: wasm_def_use::Limits,
 ) -> Result<Value> {
+    value_flow_timed(artifact, request, limits, None)
+}
+
+/// [`value_flow_with`] with the response cut's own deadline when given, so a
+/// test reaches the cut's clock stop.
+fn value_flow_timed(
+    artifact: &wasm_graph::Artifact,
+    request: &Request,
+    limits: wasm_def_use::Limits,
+    cut_by: Option<Instant>,
+) -> Result<Value> {
     let started = Instant::now();
     let deadline = started + DEADLINE;
     let module = Module::read(&artifact.bytes)?;
@@ -1381,7 +1394,9 @@ pub(crate) fn value_flow_with(
     };
     let mut ranked: Vec<usize> = (0..total).collect();
     ranked.sort_by_key(|id| (rank(*id), *id));
-    let assemble = |keep: usize| -> Value {
+    // `cut_stopped` marks a cut that the clock ended before it found the
+    // largest prefix that fits.
+    let assemble = |keep: usize, cut_stopped: bool| -> Value {
         let cut = keep < total;
         let mut chosen = vec![false; total];
         for id in &ranked[..keep] {
@@ -1400,6 +1415,12 @@ pub(crate) fn value_flow_with(
             notes.push(format!(
                 "Response budget of {MAX_RESPONSE_BYTES} bytes reached; {keep} of {total} nodes are listed: the seed, sources, sinks and joins first, then the nearest steps."
             ));
+        }
+        if cut_stopped {
+            notes.push(
+                "The response cut stopped at the deadline; more nodes may have fit than are listed."
+                    .into(),
+            );
         }
         let kept_nodes: Vec<Value> = (0..total)
             .filter(|id| chosen[*id])
@@ -1528,23 +1549,32 @@ pub(crate) fn value_flow_with(
             "notice": "Declared static value flow inside one function, from the module bytes. Memory is a source unless a same-block store to the same constant address is proven; nothing was executed.",
         })
     };
-    let whole = assemble(total);
+    let whole = assemble(total, false);
     if fits_response(&whole) {
         return Ok(whole);
     }
     // The longest ranked prefix that fits; fewer nodes never make the document
     // larger. The seed ranks first, and every node's text is capped, so one
     // node is far under the budget and the seed is always listed.
+    // The search is bounded by the clock too: past the request's deadline (or
+    // a short allowance when the slice used it all) it keeps the largest size
+    // found so far that fits, and says so.
+    let cut_deadline = cut_by.unwrap_or_else(|| deadline.max(Instant::now() + CUT_ALLOWANCE));
     let (mut low, mut high) = (1usize.min(total - 1), total - 1);
+    let mut stopped = false;
     while low < high {
+        if Instant::now() > cut_deadline {
+            stopped = true;
+            break;
+        }
         let middle = (low + high).div_ceil(2);
-        if fits_response(&assemble(middle)) {
+        if fits_response(&assemble(middle, false)) {
             low = middle;
         } else {
             high = middle - 1;
         }
     }
-    Ok(assemble(low))
+    Ok(assemble(low, stopped))
 }
 
 /// Whether a document fits the response budget pretty-printed both as it is
@@ -3339,6 +3369,38 @@ mod tests {
             "max_nodes 4096 lists {large} nodes, 256 lists {small}"
         );
         assert!(large >= 50, "{large} nodes");
+    }
+
+    #[test]
+    fn the_response_cut_stops_at_its_deadline() {
+        // A slice past the response budget, cut with a deadline already
+        // passed: the search stops at once, the prefix it has still fits, and
+        // the document says the cut stopped.
+        let mut text =
+            String::from("(module (import \"env\" \"f\" (func $f (param i32))) (func (param i32)");
+        text.push_str(&" local.get 0 call $f".repeat(3000));
+        text.push_str("))");
+        let bytes = wat::parse_str(text).unwrap();
+        let artifact = artifact_of(&bytes);
+        let request = parse_query("function=1&local=0&direction=forward&max_nodes=4096").unwrap();
+        let open =
+            value_flow_timed(&artifact, &request, wasm_def_use::Limits::default(), None).unwrap();
+        assert_eq!(open["truncated"]["bytes"], true);
+        assert!(!format!("{}", open["omissions"]).contains("response cut stopped"));
+        let stopped = value_flow_timed(
+            &artifact,
+            &request,
+            wasm_def_use::Limits::default(),
+            Some(Instant::now()),
+        )
+        .unwrap();
+        assert_fits(&stopped);
+        assert!(
+            format!("{}", stopped["omissions"]).contains("response cut stopped at the deadline"),
+            "{}",
+            stopped["omissions"]
+        );
+        assert!(stopped["node_count"].as_u64().unwrap() < open["node_count"].as_u64().unwrap());
     }
 
     #[test]

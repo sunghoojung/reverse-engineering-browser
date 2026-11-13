@@ -1168,6 +1168,9 @@ function debuggerObservationsSection() {
     if (!item) return;
     // Any other choice is the researcher moving on from a pending showObservation.
     if (how !== 'reveal') view.reveal = null;
+    // A key that leaves the chosen row active (an arrow past the last row,
+    // Home on the first) chooses nothing new and leaves the pane where it is.
+    if (how === 'active' && selected?.key === item.key) return;
     if (selected?.key !== item.key) notice = null;
     if (opening && opening.key !== item.key) cancelOpening();
     selected = item;

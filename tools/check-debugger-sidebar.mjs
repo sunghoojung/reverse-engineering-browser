@@ -980,6 +980,14 @@ await check('showObservation chooses the record Traffic names', async () => {
   assert(focused.includes('debugger-observations'), 'focus moves to the list it chose in');
   const listAt = ui.reveals.lastIndexOf('debugger-list');
   assert(listAt >= 0 && ui.reveals.indexOf('debugger-list-row', listAt) > listAt, `the chosen row is brought into view after its list: ${ui.reveals}`);
+  // An arrow that leaves the one row active chooses nothing new: the pane
+  // stays as the reveal left it, the row whole above its details.
+  const revealed = ui.reveals.length;
+  key(ui, list(), 'ArrowDown');
+  await sleep(250);
+  await settle();
+  assert.equal(ui.reveals.length, revealed, `an arrow on the chosen row scrolls nothing: ${ui.reveals.slice(revealed)}`);
+  assert.equal(list().querySelector('[aria-selected="true"]').dataset.key, '1:42:7');
   assert.equal(ui.context.RebDebuggerSidebar.showObservation({...target, sequence_number: '999'}), true);
   await until(() => /Observation #999 of renderer 42 is not among these requests\. Show older records reads older ones, and it is chosen once read\./.test(ui.text('.debugger-observation-notes')), 'an absent record is named');
   assert.equal(ui.context.RebDebuggerSidebar.showObservation({...target, type: 'gap'}), false, 'only an observation kind');

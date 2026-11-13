@@ -4088,6 +4088,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
       // WebKit draws focus a script moved only after the next key press; the
       // arrow keeps the one Requests row active and must show the list's focus.
       try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
+      // Measured once its actions appeared: the arrow leaves the one row
+      // active, so nothing scrolls the row out from under the pane's edge.
+      try await ui.waitUntil("Boolean(document.querySelector('#debugger-sidebar .debugger-detail .debugger-detail-actions'))",
+        "\(size.name): the chosen record's actions did not appear")
+      _ = try await ui.value("new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))")
       let shown = try await ui.json("""
         (() => { const detail = document.querySelector('#debugger-sidebar .debugger-detail'), box = detail.getBoundingClientRect();
           const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections').getBoundingClientRect();

@@ -21,7 +21,7 @@ use crate::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap},
     path::Path,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -1145,13 +1145,24 @@ fn single(status: u8, a: Option<u32>, b: Option<u32>) -> Row {
     }
 }
 
-/// Union-find over A functions (0..na) then B functions (na..na+nb).
-struct Sets(Vec<u32>);
+/// Union-find over A functions (0..na) then B functions (na..na+nb), with
+/// each set's size, so whether a function joined anything is explicit rather
+/// than read from which member became the root.
+struct Sets {
+    parent: Vec<u32>,
+    size: Vec<u32>,
+}
 impl Sets {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n as u32).collect(),
+            size: vec![1; n],
+        }
+    }
     fn find(&mut self, mut x: u32) -> u32 {
-        while self.0[x as usize] != x {
-            let parent = self.0[x as usize];
-            self.0[x as usize] = self.0[parent as usize];
+        while self.parent[x as usize] != x {
+            let parent = self.parent[x as usize];
+            self.parent[x as usize] = self.parent[parent as usize];
             x = parent;
         }
         x
@@ -1159,8 +1170,15 @@ impl Sets {
     fn union(&mut self, x: u32, y: u32) {
         let (x, y) = (self.find(x), self.find(y));
         if x != y {
-            self.0[x.max(y) as usize] = x.min(y);
+            let (root, child) = (x.min(y), x.max(y));
+            self.parent[child as usize] = root;
+            self.size[root as usize] += self.size[child as usize];
         }
+    }
+    /// Whether `x` was joined with anything.
+    fn joined(&mut self, x: u32) -> bool {
+        let root = self.find(x);
+        self.size[root as usize] > 1
     }
 }
 
@@ -1176,6 +1194,8 @@ struct Matcher<'m> {
     budget: Budget,
     /// A matched pair whose positional proposals were already made.
     positional_done: Vec<bool>,
+    /// Similarity scores already paid for during propagation.
+    scores: HashMap<(u32, u32), f64>,
     structural_incomplete: bool,
 }
 
@@ -1192,6 +1212,7 @@ impl<'m> Matcher<'m> {
             groups: Vec::new(),
             budget,
             positional_done: vec![false; a.funcs.len()],
+            scores: HashMap::new(),
             structural_incomplete: false,
         }
     }
@@ -1330,167 +1351,239 @@ impl<'m> Matcher<'m> {
             })
             .collect()
     }
-    /// Pairs between two neighbour sets that are each other's best scoring
-    /// same-signature candidate by at least the tie margin, at or above the
-    /// propagation floor. `None` when the budget ran out.
-    fn mutual_best(&mut self, xs: &[u32], ys: &[u32]) -> Option<Vec<(u32, u32, f64)>> {
+    /// A similarity score, computed once per pair and then reused, so a
+    /// pair seen from many parents or call sites spends the cap once.
+    fn cached_score(&mut self, a: u32, b: u32) -> Option<f64> {
+        if let Some(score) = self.scores.get(&(a, b)) {
+            return Some(*score);
+        }
+        let score = self.score(PROPAGATION, a, b)?;
+        self.scores.insert((a, b), score);
+        Some(score)
+    }
+    /// Scores of every same-signature pair between `xs` and `ys`, row by row;
+    /// other pairs are negative infinity. `None` when the budget ran out.
+    fn matrix(&mut self, xs: &[u32], ys: &[u32]) -> Option<Vec<f64>> {
         let mut scores = vec![f64::NEG_INFINITY; xs.len() * ys.len()];
         for (i, x) in xs.iter().enumerate() {
             for (j, y) in ys.iter().enumerate() {
                 if self.same_signature(*x, *y) {
-                    scores[i * ys.len() + j] = self.score(PROPAGATION, *x, *y)?;
+                    scores[i * ys.len() + j] = self.cached_score(*x, *y)?;
                 }
             }
         }
-        let best = |values: &mut dyn Iterator<Item = (usize, f64)>| {
-            let mut first = (usize::MAX, f64::NEG_INFINITY);
-            let mut second = f64::NEG_INFINITY;
-            for (at, value) in values {
-                if value > first.1 {
-                    second = first.1;
-                    first = (at, value);
-                } else if value > second {
-                    second = value;
-                }
-            }
-            (first.1 - second >= TIE_MARGIN).then_some(first)
-        };
-        let mut pairs = Vec::new();
-        for i in 0..xs.len() {
-            let Some((j, value)) = best(&mut (0..ys.len()).map(|j| (j, scores[i * ys.len() + j])))
-            else {
-                continue;
-            };
-            if value < PROPAGATION_FLOOR {
-                continue;
-            }
-            if best(&mut (0..xs.len()).map(|k| (k, scores[k * ys.len() + j])))
-                .is_some_and(|(k, _)| k == i)
-            {
-                pairs.push((xs[i], ys[j], value));
-            }
-        }
-        Some(pairs)
+        Some(scores)
     }
-    /// The best score of `x` against any same-signature member of `ys`.
-    fn best_against(&mut self, x: u32, ys: &[u32], x_on_a: bool) -> Option<f64> {
-        let mut best = f64::NEG_INFINITY;
-        for y in ys {
-            let (a, b) = if x_on_a { (x, *y) } else { (*y, x) };
-            if self.same_signature(a, b) {
-                best = best.max(self.score(PROPAGATION, a, b)?);
-            }
-        }
-        Some(best)
-    }
-    /// Carries matches along the call graph from the `seeds` (matched A
-    /// functions) with a worklist: a newly matched pair queues itself and the
-    /// matched pairs next to it, so each step looks only at what changed.
+    /// What one matched pair proposes. `None` when the budget ran out.
     ///
     /// A pair whose bodies normalize equally proposes its k-th callees, which
     /// sit at corresponding places in both bodies, but only when no other open
     /// callee looks more like either one. Any matched pair proposes the open
     /// callees, and separately the open callers, that are each other's best
-    /// candidate by similarity. A proposal never overrides a better-shaped
-    /// candidate, so a reordered call sequence cannot carry a wrong pair.
-    fn propagate(&mut self, seeds: &[u32]) -> Vec<u32> {
+    /// candidate by at least the tie margin. A proposal never overrides a
+    /// better-shaped candidate, so a reordered call sequence cannot carry a
+    /// wrong pair.
+    fn proposals(&mut self, a: u32, b: u32) -> Option<Vec<(u32, u32, f64)>> {
         let (module_a, module_b) = (self.a, self.b);
-        let mut made = Vec::new();
-        let mut queued = vec![false; module_a.funcs.len()];
-        let mut queue = VecDeque::new();
-        for seed in seeds {
-            if !queued[*seed as usize] {
-                queued[*seed as usize] = true;
-                queue.push_back(*seed);
-            }
-        }
-        while let Some(a) = queue.pop_front() {
-            queued[a as usize] = false;
-            if self.budget.late(PROPAGATION) {
-                break;
-            }
-            let b = self.a_to_b[a as usize];
-            if b == NONE {
+        let (fa, fb) = (&module_a.funcs[a as usize], &module_b.funcs[b as usize]);
+        let mut proposed = Vec::new();
+        let sets = [
+            (
+                self.open_neighbours(&fa.callees, true),
+                self.open_neighbours(&fb.callees, false),
+            ),
+            (
+                self.open_neighbours(&module_a.callers[a as usize], true),
+                self.open_neighbours(&module_b.callers[b as usize], false),
+            ),
+        ];
+        for (kind, (xs, ys)) in sets.iter().enumerate() {
+            if xs.is_empty()
+                || ys.is_empty()
+                || xs.len() > MAX_NEIGHBOURHOOD
+                || ys.len() > MAX_NEIGHBOURHOOD
+            {
                 continue;
             }
-            let (fa, fb) = (&module_a.funcs[a as usize], &module_b.funcs[b as usize]);
-            let callees_a = self.open_neighbours(&fa.callees, true);
-            let callees_b = self.open_neighbours(&fb.callees, false);
-            let mut accepted = Vec::new();
-            let small =
-                callees_a.len() <= MAX_NEIGHBOURHOOD && callees_b.len() <= MAX_NEIGHBOURHOOD;
-            if small
+            let scores = self.matrix(xs, ys)?;
+            let at = |i: usize, j: usize| scores[i * ys.len() + j];
+            let row_max = |i: usize| {
+                (0..ys.len())
+                    .map(|j| at(i, j))
+                    .fold(f64::NEG_INFINITY, f64::max)
+            };
+            let column_max = |j: usize| {
+                (0..xs.len())
+                    .map(|i| at(i, j))
+                    .fold(f64::NEG_INFINITY, f64::max)
+            };
+            if kind == 0
                 && !self.positional_done[a as usize]
                 && fa.import.is_none()
                 && fa.normalized == fb.normalized
                 && fa.calls.len() == fb.calls.len()
             {
                 self.positional_done[a as usize] = true;
-                for (x, y) in fa.calls.iter().zip(&fb.calls) {
-                    let (x, y) = (*x, *y);
-                    if !self.open_a(x) || !self.open_b(y) || !self.same_signature(x, y) {
+                // Each distinct pair of call targets once, however many call
+                // sites repeat it.
+                let sites = fa
+                    .calls
+                    .iter()
+                    .zip(&fb.calls)
+                    .map(|(x, y)| (*x, *y))
+                    .collect::<std::collections::BTreeSet<_>>();
+                for (x, y) in sites {
+                    let (Ok(i), Ok(j)) = (xs.binary_search(&x), ys.binary_search(&y)) else {
                         continue;
-                    }
-                    let Some(score) = self.score(PROPAGATION, x, y) else {
-                        break;
                     };
-                    let (Some(best_x), Some(best_y)) = (
-                        self.best_against(x, &callees_b, true),
-                        self.best_against(y, &callees_a, false),
-                    ) else {
-                        break;
-                    };
-                    if score >= PROPAGATION_FLOOR && score >= best_x && score >= best_y {
-                        accepted.push((x, y, score));
+                    let score = at(i, j);
+                    if score >= PROPAGATION_FLOOR && score >= row_max(i) && score >= column_max(j) {
+                        proposed.push((x, y, score));
                     }
                 }
             }
-            for (xs, ys) in [
-                (callees_a, callees_b),
-                (
-                    self.open_neighbours(&module_a.callers[a as usize], true),
-                    self.open_neighbours(&module_b.callers[b as usize], false),
-                ),
-            ] {
-                if xs.is_empty()
-                    || ys.is_empty()
-                    || xs.len() > MAX_NEIGHBOURHOOD
-                    || ys.len() > MAX_NEIGHBOURHOOD
-                {
-                    continue;
+            let best = |values: &mut dyn Iterator<Item = (usize, f64)>| {
+                let mut first = (usize::MAX, f64::NEG_INFINITY);
+                let mut second = f64::NEG_INFINITY;
+                for (index, value) in values {
+                    if value > first.1 {
+                        second = first.1;
+                        first = (index, value);
+                    } else if value > second {
+                        second = value;
+                    }
                 }
-                let Some(pairs) = self.mutual_best(&xs, &ys) else {
-                    break;
+                (first.1 - second >= TIE_MARGIN).then_some(first)
+            };
+            for i in 0..xs.len() {
+                let Some((j, value)) = best(&mut (0..ys.len()).map(|j| (j, at(i, j)))) else {
+                    continue;
                 };
-                accepted.extend(pairs);
+                if value >= PROPAGATION_FLOOR
+                    && best(&mut (0..xs.len()).map(|k| (k, at(k, j)))).is_some_and(|(k, _)| k == i)
+                {
+                    proposed.push((xs[i], ys[j], value));
+                }
             }
-            for (x, y, score) in accepted {
-                if !self.open_a(x) || !self.open_b(y) {
+        }
+        Some(proposed)
+    }
+    /// Carries matches along the call graph from the `seeds` (matched A
+    /// functions), one round at a time. A round collects what every pair in
+    /// it proposes and only then accepts: a function proposed for one partner
+    /// by every proposer is paired, and one proposed for two different
+    /// partners is a tie with them. The order pairs are visited in therefore
+    /// never decides a contested function. A round the budget stops accepts
+    /// nothing. The next round looks at the new pairs and the matched pairs
+    /// beside them, whose open neighbourhoods just shrank.
+    fn propagate(&mut self, seeds: &[u32]) -> Vec<u32> {
+        let (module_a, module_b) = (self.a, self.b);
+        let mut made = Vec::new();
+        let mut frontier = seeds.to_vec();
+        frontier.sort_unstable();
+        frontier.dedup();
+        while !frontier.is_empty() {
+            let mut proposed = BTreeMap::<(u32, u32), f64>::new();
+            for a in &frontier {
+                if self.budget.late(PROPAGATION) {
+                    return made;
+                }
+                let b = self.a_to_b[*a as usize];
+                if b == NONE {
                     continue;
                 }
+                let Some(pairs) = self.proposals(*a, b) else {
+                    return made;
+                };
+                for (x, y, score) in pairs {
+                    let entry = proposed.entry((x, y)).or_insert(score);
+                    *entry = entry.max(score);
+                }
+            }
+            let mut partners_a = BTreeMap::<u32, Vec<u32>>::new();
+            let mut partners_b = BTreeMap::<u32, Vec<u32>>::new();
+            for (x, y) in proposed.keys() {
+                partners_a.entry(*x).or_default().push(*y);
+                partners_b.entry(*y).or_default().push(*x);
+            }
+            let mut accepted = Vec::new();
+            let mut contested = Vec::new();
+            for ((x, y), score) in &proposed {
+                if partners_a[x].len() == 1 && partners_b[y].len() == 1 {
+                    accepted.push((*x, *y, *score));
+                } else {
+                    contested.push((*x, *y, *score));
+                }
+            }
+            if !contested.is_empty() {
+                // A small union-find over just the contested functions: A
+                // functions as themselves, B functions offset past every A.
+                let offset = module_a.funcs.len() as u64;
+                let mut parent = BTreeMap::<u64, u64>::new();
+                fn root(parent: &mut BTreeMap<u64, u64>, mut x: u64) -> u64 {
+                    while let Some(&up) = parent.get(&x) {
+                        if up == x {
+                            break;
+                        }
+                        x = up;
+                    }
+                    x
+                }
+                for (x, y, _) in &contested {
+                    let (x, y) = (u64::from(*x), offset + u64::from(*y));
+                    parent.entry(x).or_insert(x);
+                    parent.entry(y).or_insert(y);
+                    let (rx, ry) = (root(&mut parent, x), root(&mut parent, y));
+                    if rx != ry {
+                        parent.insert(rx.max(ry), rx.min(ry));
+                    }
+                }
+                type Tie = (
+                    std::collections::BTreeSet<u32>,
+                    std::collections::BTreeSet<u32>,
+                    f64,
+                );
+                let mut ties = BTreeMap::<u64, Tie>::new();
+                for (x, y, score) in &contested {
+                    let entry = ties.entry(root(&mut parent, u64::from(*x))).or_default();
+                    entry.0.insert(*x);
+                    entry.1.insert(*y);
+                    entry.2 = entry.2.max(*score);
+                }
+                for (_, (a, b, score)) in ties {
+                    self.group(
+                        BY_CALL_GRAPH,
+                        score,
+                        a.into_iter().collect(),
+                        b.into_iter().collect(),
+                    );
+                }
+            }
+            let mut next = Vec::new();
+            for (x, y, score) in accepted {
                 self.pair(x, y, BY_CALL_GRAPH, score);
                 made.push(x);
-                // The new pair, and the matched pairs beside it whose open
-                // neighbourhoods just shrank, are worth another look.
                 let fx = &module_a.funcs[x as usize];
                 let fy = &module_b.funcs[y as usize];
-                let near_a = fx.callees.iter().chain(&module_a.callers[x as usize]);
-                let near_b = fy
-                    .callees
-                    .iter()
-                    .chain(&module_b.callers[y as usize])
-                    .map(|n| self.b_to_a[*n as usize]);
-                for next in std::iter::once(x)
-                    .chain(near_a.copied().filter(|n| self.a_to_b[*n as usize] != NONE))
-                    .chain(near_b.filter(|n| *n != NONE))
-                    .collect::<Vec<_>>()
-                {
-                    if !queued[next as usize] {
-                        queued[next as usize] = true;
-                        queue.push_back(next);
-                    }
-                }
+                next.push(x);
+                next.extend(
+                    fx.callees
+                        .iter()
+                        .chain(&module_a.callers[x as usize])
+                        .copied()
+                        .filter(|n| self.a_to_b[*n as usize] != NONE),
+                );
+                next.extend(
+                    fy.callees
+                        .iter()
+                        .chain(&module_b.callers[y as usize])
+                        .map(|n| self.b_to_a[*n as usize])
+                        .filter(|n| *n != NONE),
+                );
             }
+            next.sort_unstable();
+            next.dedup();
+            frontier = next;
         }
         made
     }
@@ -1566,7 +1659,9 @@ impl<'m> Matcher<'m> {
                 excluded_b[*index as usize] = true;
             }
         }
-        let mut buckets = HashMap::<u64, Vec<u32>>::new();
+        // Ordered maps throughout: what this pass returns seeds propagation,
+        // so its order must not depend on a hasher.
+        let mut buckets = BTreeMap::<u64, Vec<u32>>::new();
         for func in &module_b.funcs {
             if func.import.is_none() && self.open_b(func.index) && !excluded_b[func.index as usize]
             {
@@ -1576,7 +1671,7 @@ impl<'m> Matcher<'m> {
         for list in buckets.values_mut() {
             list.sort_by_key(|index| (module_b.funcs[*index as usize].shape.instructions, *index));
         }
-        let mut buckets_a = HashMap::<u64, Vec<u32>>::new();
+        let mut buckets_a = BTreeMap::<u64, Vec<u32>>::new();
         for func in &module_a.funcs {
             if func.import.is_none() && self.open_a(func.index) && !excluded_a[func.index as usize]
             {
@@ -1591,7 +1686,7 @@ impl<'m> Matcher<'m> {
         }
         // Functions with someone of their signature on the other side. Both
         // directions may be scored, so the comparisons left are shared by all.
-        let paired = |buckets: &HashMap<u64, Vec<u32>>, other: &HashMap<u64, Vec<u32>>| {
+        let paired = |buckets: &BTreeMap<u64, Vec<u32>>, other: &BTreeMap<u64, Vec<u32>>| {
             buckets
                 .iter()
                 .filter(|(signature, _)| other.contains_key(*signature))
@@ -1669,7 +1764,7 @@ impl<'m> Matcher<'m> {
             }
         }
         // Claims on each B function from the A functions that rank it best.
-        let mut claims = HashMap::<u32, Vec<(u32, f64)>>::new();
+        let mut claims = BTreeMap::<u32, Vec<(u32, f64)>>::new();
         for (a, score, tied) in &best {
             if *score >= SIMILARITY_THRESHOLD {
                 for b in tied {
@@ -1678,7 +1773,7 @@ impl<'m> Matcher<'m> {
             }
         }
         let na = module_a.funcs.len() as u32;
-        let mut sets = Sets((0..na + module_b.funcs.len() as u32).collect());
+        let mut sets = Sets::new(na as usize + module_b.funcs.len());
         // Every tie is joined before any pair is accepted, so whether a pair
         // stands does not depend on the order functions were scored in.
         for (a, score, tied) in &best {
@@ -1688,8 +1783,17 @@ impl<'m> Matcher<'m> {
                 }
             }
         }
+        // A contested function's best is no longer unique, so its own best
+        // candidates join the tie with the contesting one.
+        let tied_of = best
+            .iter()
+            .map(|(a, _, tied)| (*a, tied.as_slice()))
+            .collect::<HashMap<_, _>>();
         for (a, b) in &contests {
             sets.union(*a, na + b);
+            for own in tied_of.get(a).copied().unwrap_or_default() {
+                sets.union(*a, na + own);
+            }
         }
         for (b, list) in &claims {
             let top = list.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
@@ -1713,8 +1817,8 @@ impl<'m> Matcher<'m> {
             // A function another claimant beats by the margin simply loses
             // this candidate; one that ties was joined into a group above.
             let alone = tied.len() == 1
-                && sets.find(*a) == *a
-                && sets.find(na + b) == na + b
+                && !sets.joined(*a)
+                && !sets.joined(na + b)
                 && claims[&b]
                     .iter()
                     .all(|(claimant, value)| *claimant == *a || *score - *value >= TIE_MARGIN);
@@ -1749,6 +1853,7 @@ impl<'m> Matcher<'m> {
                 self.group(BY_STRUCTURE, score, a, b);
             }
         }
+        made.sort_unstable();
         made
     }
     /// Scores `x` against up to `per` members of `candidates` (one signature,

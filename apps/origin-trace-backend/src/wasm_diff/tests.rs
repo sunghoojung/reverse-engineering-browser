@@ -854,3 +854,165 @@ fn a_default_page_of_long_names_fits_the_mcp_inline_limit_pretty_printed() {
     assert!(kept > 50, "only {kept} rows fit");
     assert_eq!(page["row_window"]["next_offset"], json!(kept));
 }
+
+/// No time limit: these tests are about matching rules, not the deadline.
+fn untimed() -> Limits {
+    Limits {
+        deadline: Duration::from_secs(600),
+        ..Limits::DEFAULT
+    }
+}
+
+#[test]
+fn a_twin_outside_the_window_contests_a_single_best_candidate() {
+    // A0 has one best candidate inside its window, B0. B64, another twin, is
+    // past the 63 fillers and outside it. Joining the contest used to leave
+    // A0 the root of its set, which read as "joined nothing".
+    let twin = |k: i64| format!("(func i32.const {k} drop i32.const {k} drop)");
+    let a = format!("(module {})", twin(1));
+    let b = format!(
+        "(module {}{}{})",
+        twin(2),
+        "(func nop nop nop nop)".repeat(63),
+        twin(3)
+    );
+    let report = report_with(&a, &b, untimed());
+    let found = rows(&report);
+    assert!(
+        !found.contains(&row("added", None, None, Some(64))),
+        "{found:?}"
+    );
+    assert!(
+        found.contains(&row("ambiguous", Some("structural"), Some(0), None)),
+        "{found:?}"
+    );
+    assert!(
+        found.contains(&row("ambiguous", Some("structural"), None, Some(0)))
+            && found.contains(&row("ambiguous", Some("structural"), None, Some(64))),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn repeated_call_sites_spend_the_comparison_cap_once() {
+    // One normalized-equal root with 500 x 64 calls to 64 changed leaves,
+    // and 200 unrelated changed functions only the structural pass pairs.
+    let leaf = |i: i64, v: i64| {
+        let mut text = String::from("(func");
+        for j in 0..1 + i % 7 {
+            text.push_str(&format!(" i32.const {} drop", i * 11 + v * 1000 + j));
+        }
+        text + ")"
+    };
+    let module = |v: i64| {
+        let mut text = String::from("(module");
+        for i in 0..64 {
+            text.push_str(&leaf(i, v));
+        }
+        text.push_str(" (func (export \"root\")");
+        for _ in 0..500 {
+            for i in 0..64 {
+                text.push_str(&format!(" call {i}"));
+            }
+        }
+        text.push(')');
+        for i in 0..200i64 {
+            text.push_str(&format!(
+                " (func (param i64) (result i64) local.get 0 i64.const {} i64.add{})",
+                i * 13 + v,
+                " i64.const 3 i64.mul".repeat((i % 9) as usize)
+            ));
+        }
+        text + ")"
+    };
+    let limits = Limits {
+        max_comparisons: 200_000,
+        ..untimed()
+    };
+    let report = report_with(&module(1), &module(2), limits);
+    assert!(report.complete, "{:?}", report.omissions);
+    assert!(report.rows.iter().all(|row| row.status != UNCLASSIFIED));
+}
+
+/// Two structural pairs of different signatures both call one A function,
+/// whose two B counterparts differ.
+const CONTESTED_A: &str = r#"(module
+    (func i32.const 1 drop)
+    (func (param i32) local.get 0 drop call 0 i32.const 11 drop i32.const 12 drop)
+    (func (param i64) local.get 0 drop call 0 i64.const 21 drop i64.const 22 drop))"#;
+const CONTESTED_B: &str = r#"(module
+    (func i32.const 2 drop nop nop nop nop nop nop)
+    (func i32.const 3 drop i32.const 4 drop i32.const 5 drop)
+    (func (param i32) local.get 0 drop call 0 i32.const 13 drop i32.const 14 drop)
+    (func (param i64) local.get 0 drop call 1 i64.const 23 drop i64.const 24 drop))"#;
+
+#[test]
+fn contested_propagation_is_a_tie_and_the_same_every_run() {
+    let first = rows(&report_with(CONTESTED_A, CONTESTED_B, untimed()));
+    for expected in [
+        row("ambiguous", Some("call_graph"), Some(0), None),
+        row("ambiguous", Some("call_graph"), None, Some(0)),
+        row("ambiguous", Some("call_graph"), None, Some(1)),
+    ] {
+        assert!(first.contains(&expected), "{expected:?} not in {first:?}");
+    }
+    for _ in 0..60 {
+        assert_eq!(
+            rows(&report_with(CONTESTED_A, CONTESTED_B, untimed())),
+            first
+        );
+    }
+}
+
+#[test]
+fn the_fixture_comparison_is_the_same_every_run() {
+    let builds = fixture_builds();
+    let run = || {
+        let report = compare(&builds[0], &builds[1], json!({}), json!({})).unwrap();
+        (rows(&report), report.groups)
+    };
+    let first = run();
+    for _ in 0..30 {
+        assert_eq!(run(), first);
+    }
+}
+
+/// Two callees of one shape under an exported root that changed, so its
+/// body does not normalize equally. `order` is the order B calls them in.
+fn equal_callees(order: [u32; 2]) -> (String, String) {
+    let a = r#"(module (func i32.const 1 drop) (func i32.const 2 drop)
+        (func (export "root") call 0 call 1 i32.const 7 drop))"#;
+    let b = format!(
+        r#"(module (func i32.const 3 drop) (func i32.const 4 drop)
+        (func (export "root") call {} call {} i32.const 8 drop))"#,
+        order[0], order[1]
+    );
+    (a.into(), b)
+}
+
+#[test]
+fn equally_shaped_callees_of_a_changed_parent_stay_ambiguous() {
+    // Every score ties, so no callee is anyone's best by the margin.
+    let (a, b) = equal_callees([0, 1]);
+    let found = rows(&report(&a, &b));
+    for expected in [
+        row("ambiguous", Some("structural"), Some(0), None),
+        row("ambiguous", Some("structural"), Some(1), None),
+        row("ambiguous", Some("structural"), None, Some(0)),
+        row("ambiguous", Some("structural"), None, Some(1)),
+    ] {
+        assert!(found.contains(&expected), "{expected:?} not in {found:?}");
+    }
+}
+
+#[test]
+fn call_position_counts_only_under_a_parent_that_normalizes_equally() {
+    // The root changed, so its call sites need not correspond: pairing the
+    // callees by position here would pair each with the other one.
+    let (a, b) = equal_callees([1, 0]);
+    let found = rows(&report(&a, &b));
+    assert!(
+        found.iter().filter(|row| row.0 == "ambiguous").count() == 4,
+        "{found:?}"
+    );
+}

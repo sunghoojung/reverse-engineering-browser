@@ -463,7 +463,9 @@ included), so a name follows identical module bytes into every session. Rename
 one from **Inspect** (the pencil on a function, import, declaration or start
 row), the **Graph** (**Rename** in its toolbar, or F2 on the graph or on a
 highlighted **Functions** row) or a Flow graph Wasm card (**Rename** in Details,
-or F2 with the card selected); F2 on a call row renames its callee. The name
+or F2 with the card selected). F2 on a call row renames its callee, and on an
+instruction or locals row the function containing it; the module file is still
+renamed from its tree row, its tab or the toolbar. The name
 then follows the Inspect listing (on headers and after call rows), the Graph
 title and function list, Flow cards and Details, Initiator frames and
 cross-reference rows, beside `func N` and any import, export or name-section

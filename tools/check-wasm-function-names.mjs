@@ -122,7 +122,9 @@ async function checkSurfaces() {
   wasm.decorateInspectRow(header, {kind: 'function', function_index: 5, text: 'func 5 (type 1)'}, SHA);
   wasm.decorateInspectRow(call, {kind: 'instruction', function_index: 2, target_function_index: 5, text: 'call'}, SHA);
   wasm.decorateInspectRow(body, {kind: 'instruction', function_index: 5, text: 'i32.const 7'}, SHA);
-  assert.equal(header.dataset.wasmFunction, '5'); assert.equal(call.dataset.wasmFunction, '5'); assert.equal(body.dataset.wasmFunction, undefined);
+  assert.equal(header.dataset.wasmFunction, '5'); assert.equal(call.dataset.wasmFunction, '5');
+  assert.equal(body.dataset.wasmFunction, '5', 'A body row stands for its containing function');
+  assert.equal(body.dataset.wasmBody, 'true'); assert.equal(body.querySelector('.wasm-function-name'), null, 'A body row shows no name of its own');
   assert.equal(header.children.length, 2, 'The grid keeps its gutter and excerpt');
   assert.equal(header.querySelector('.source-text').textContent, 'function    func 5 (type 1)', 'Captured text is unchanged');
   const rename = header.querySelector('.wasm-function-rename');
@@ -161,9 +163,11 @@ async function checkSurfaces() {
   assert(press(wrap), 'F2 on the code view after a click on a call row renames its callee');
   assert.equal(label(), 'Researcher name for func 5'); assert.equal(input().value, hostile);
   controller.close(false);
-  // A body row names nothing, so the key stays with the Sources handler.
+  // A body row (an instruction or locals) renames the function containing it.
   body.querySelector('.source-text').dispatchEvent(new Event('pointerdown', {bubbles: true}));
-  assert.equal(press(wrap), false, 'An unmarked row leaves F2 to the file rename');
+  assert(press(wrap), 'F2 on a body row renames its containing function');
+  assert.equal(label(), 'Researcher name for func 5');
+  controller.close(false);
   // A tree row always renames the file.
   header.querySelector('.source-text').dispatchEvent(new Event('pointerdown', {bubbles: true}));
   assert.equal(press(document.querySelector('.source-tree-row')), false, 'A tree row keeps the file rename');

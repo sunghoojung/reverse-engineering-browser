@@ -3888,7 +3888,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"420\"]")
       try await ui.waitUntil("!document.querySelector('#source-wasm').hidden", "\(size.name): Inspect is offered for the module")
       try await ui.click("#source-wasm")
-      let header = ".source-line[data-wasm-function='1']:not([data-wasm-target])"
+      let header = ".source-line[data-wasm-function='1']:not([data-wasm-target]):not([data-wasm-body])"
       try await ui.waitUntil("document.querySelector(\"\(header) .wasm-function-rename\") !== null", "\(size.name): the helper's header row has a rename control")
       try await ui.click("\(header) .wasm-function-rename")
       try await ui.waitUntil("document.activeElement === document.querySelector('#source-name-host input')", "\(size.name): the editor took focus")

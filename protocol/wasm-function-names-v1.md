@@ -149,8 +149,9 @@ F2 resolves the function under the cursor from where focus really is:
 Inspect rows take no focus, so with focus on the code view it uses the row
 under the caret selection, else the row last pointed at, else the current
 line; with the Graph open, and with focus on the code view or the body, it
-uses the Graph's function. Tree rows, tabs and the toolbar keep the file
-rename.
+uses the Graph's function. A body row (an instruction or locals row) stands
+for the function that contains it, so F2 on one renames that function. Tree
+rows, tabs and the toolbar keep the file rename.
 
 A view that carries a name to another module (a diff match) must write it under
 the other module's own key; a name never follows a match implicitly.

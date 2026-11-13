@@ -14,6 +14,9 @@
   // Rows whose function_index is the row's own function. Body rows (locals,
   // instructions) carry their function too but are not its header.
   const HEADER_KINDS = new Set(['function', 'import', 'declaration', 'start']);
+  // Rows inside a function body. They name nothing on screen, but F2 on one
+  // renames the function that contains it, as on its header.
+  const BODY_KINDS = new Set(['local', 'instruction']);
   const hash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
   const index = value => Number.isInteger(value) && value >= 0 && value <= 4294967295;
 
@@ -89,7 +92,13 @@
     // the captured text, so Find and coloring still see only that text.
     const line = node.querySelector?.(':scope > .source-excerpt') ?? node;
     const own = HEADER_KINDS.has(row.kind) && index(row.function_index), target = index(row.target_function_index);
-    if (!own && !target) return;
+    if (!own && !target) {
+      if (BODY_KINDS.has(row.kind) && index(row.function_index)) {
+        mark(node, sha256, row.function_index, `func ${row.function_index}`);
+        if (node.dataset) node.dataset.wasmBody = 'true';
+      }
+      return;
+    }
     if (own) {
       mark(node, sha256, row.function_index, `func ${row.function_index}`);
       const slot = nameNode(nameOf(sha256, row.function_index), 'wasm-function-name');

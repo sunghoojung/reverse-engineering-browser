@@ -3511,6 +3511,72 @@ mod tests {
         }
     }
 
+    /// Every place that assigns only part of the pending stack, with a
+    /// pending value below that conflicts with what it assigns. Each one
+    /// orders through spill_before or spill_forced (which add the effects of
+    /// what they mark) or assigns the whole frame (flush, spill_all); these
+    /// fixtures hold them to the guarantees.
+    #[test]
+    fn every_partial_assignment_keeps_the_guarantees() {
+        let prelude = r#"(module (memory 1) (table 2 funcref) (global (mut i32) (i32.const 0)) (tag $e (param i32))
+            (type $t (func (param i32) (result i32)))
+            (func $f (param i32) (result i32) local.get 0) (func $g (result i32) i32.const 1)
+            (func $h (param i32)) (func $two (result i32 i32) i32.const 1 i32.const 2)"#;
+        let sites = [
+            // br_if: a forced value writes a local read below it.
+            "(func (param i32) (result i32) (local i32)
+               block local.get 0 i32.const 3 local.tee 0 call $f i32.const 0 br_if 0 i32.add local.set 1 end local.get 1)",
+            "(func (param i32) (result i32)
+               block (result i32) local.get 0 i32.const 1 i32.add i32.const 9 local.tee 0 local.get 0 br_if 0 i32.add end)",
+            "(func (param i32) (result i32) (local i32)
+               block local.get 0 i32.const 0 local.tee 0 br_if 0 local.set 1 end local.get 1)",
+            // br and br_table: carried values and the frame below them.
+            "(func (param i32) (result i32)
+               block (result i32) local.get 0 i32.const 4 local.tee 0 br 0 end local.get 0 i32.add)",
+            "(func (param i32) (result i32)
+               block (result i32) block (result i32) call $g local.get 0 i32.const 2 local.tee 0 br_table 0 1 1 end end)",
+            "(func (param i32) (result i32)
+               block $o try_table (catch_all $o)
+                 call $g drop local.get 0 i32.const 1 local.tee 0 call $f br_table 0 1 end end local.get 0)",
+            // return and tail calls.
+            "(func (param i32) (result i32) local.get 0 i32.const 6 local.tee 0 i32.add return)",
+            "(func (param i32) (result i32) local.get 0 global.get 0 drop i32.const 1 local.tee 0 i32.add return_call $f)",
+            "(func (param i32) (result i32) call $g local.get 0 i32.const 7 local.tee 0 return_call_indirect (type $t))",
+            // call_indirect and select operands.
+            "(func (param i32) (result i32) local.get 0 i32.const 1 local.tee 0 local.get 0 call_indirect (type $t) i32.add)",
+            "(func (param i32) (result i32) call $g global.get 0 local.get 0 i32.load select)",
+            "(func (param i32) (result i32) local.get 0 i32.const 2 local.tee 0 local.get 0 select)",
+            // if entry: the condition writes a local read below it.
+            "(func (param i32) (result i32) local.get 0 i32.const 5 local.tee 0 if (result i32) i32.const 1 else i32.const 2 end i32.add)",
+            // try_table entry and end.
+            "(func (param i32) (result i32) block $c (result i32) try_table (catch $e $c) local.get 0 call $f throw $e end i32.const 0 end)",
+            "(func (param i32) (result i32) local.get 0 try_table (result i32) i32.const 8 local.tee 0 end i32.add)",
+            // end: a carried block result and a loop result above a read.
+            "(func (param i32) (result i32) local.get 0 block (result i32) i32.const 3 local.tee 0 end i32.add)",
+            "(func (param i32) (result i32) local.get 0 loop (result i32) i32.const 3 local.tee 0 end i32.add)",
+            "(func (param i32) (result i32) local.get 0 local.get 0 if (result i32) i32.const 1 local.tee 0 else i32.const 2 end i32.add)",
+            // memory.grow between loads, and a multi-value call.
+            "(func (param i32) (result i32) local.get 0 i32.load i32.const 1 memory.grow local.get 0 i32.load i32.add i32.add)",
+            "(func (param i32) (result i32) (local i32 i32) call $two local.set 1 local.set 2 local.get 1 local.get 2 i32.sub)",
+        ];
+        for body in sites {
+            let wat = format!("{prelude} {body})");
+            let bytes = wat::parse_str(&wat).unwrap_or_else(|error| panic!("{error}: {body}"));
+            Validator::new_with_features(WasmFeatures::all())
+                .validate_all(&bytes)
+                .unwrap_or_else(|error| panic!("{error}: {body}"));
+            let document = lift_of(&wat, 4);
+            assert_eq!(document["status"], "complete", "{body}");
+            let order = std::panic::catch_unwind(|| assert_effect_order(&bytes, 4));
+            assert!(
+                order.is_ok(),
+                "{body}\n{}",
+                document["text"].as_str().unwrap()
+            );
+            assert_bytes_owned_once(&bytes, 4);
+        }
+    }
+
     #[test]
     fn folding_keeps_effect_order_and_owns_every_byte_once() {
         let mut fixtures = vec![

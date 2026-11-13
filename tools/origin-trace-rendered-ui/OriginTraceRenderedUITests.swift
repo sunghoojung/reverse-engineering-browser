@@ -3586,8 +3586,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await traffic.waitUntil("!document.querySelector('#request-budget').hidden && \(line).textContent.includes(' kept:')",
         "\(size.name): the footer did not name the used budgets")
       let unsized = try await traffic.value("\(line).textContent") as? String ?? ""
-      let pattern = #"^Request content budget used, \d+ KiB kept: 2 request bodies or URLs not kept · "#
-        + #"Response body budget used, \d+ KiB kept: 1 response body not kept · Raise them in New Live Session… for the next session\.$"#
+      // The bytes kept depend on the fixture's other artifacts, in KiB below 0.1 MiB.
+      let kept = #"(?:\d+ KiB|\d+\.\d MiB)"#
+      let pattern = #"^Request content budget used, "# + kept + #" kept: 2 request bodies or URLs not kept · "#
+        + #"Response body budget used, "# + kept + #" kept: 1 response body not kept · Raise them in New Live Session… for the next session\.$"#
       XCTAssertNotNil(unsized.range(of: pattern, options: .regularExpression), "\(size.name): footer: \(unsized)")
       let context = try await traffic.json("({read: state.sessionContentLimitsRead, limits: state.sessionContentLimits})")
       XCTAssertEqual(context["read"] as? String, "answered", "\(size.name): the session context was read: \(context)")

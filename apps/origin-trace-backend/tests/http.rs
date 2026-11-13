@@ -4258,7 +4258,7 @@ async fn wasm_function_names_join_every_wasm_read_and_never_replace_captured_nam
     let bytes = wat::parse_str(
         r#"(module (import "env" "log" (func (param i32)))
             (func $helper (result i32) i32.const 7)
-            (func (export "run") (result i32) call $helper))"#,
+            (func (export "run") (param f64) (result i32) call $helper))"#,
     )
     .unwrap();
     let hash = hex::encode(Sha256::digest(&bytes));
@@ -4389,10 +4389,27 @@ async fn wasm_function_names_join_every_wasm_read_and_never_replace_captured_nam
         .find(|row| row["kind"] == "function" && row["function_index"] == 1)
         .unwrap();
     assert_eq!(header["analyst_name"], "encode_payload");
+    // Each function has its own type, and its header sits at its own body,
+    // so a name keyed on a wrong index (one that drops the imports) fails.
     assert_eq!(
         header["text"], "func 1 (type 1)",
         "Captured text is unchanged"
     );
+    let bodies: Vec<usize> = wasmparser::Parser::new(0)
+        .parse_all(&bytes)
+        .filter_map(|payload| match payload.unwrap() {
+            wasmparser::Payload::CodeSectionEntry(body) => Some(body.range().start),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(header["byte_offset"], bodies[0], "func 1 is the first body");
+    let run = rows
+        .iter()
+        .find(|row| row["kind"] == "function" && row["function_index"] == 2)
+        .unwrap();
+    assert_eq!(run["text"], "func 2 (type 2)");
+    assert_eq!(run["byte_offset"], bodies[1]);
+    assert!(run.get("analyst_name").is_none());
     let import = rows.iter().find(|row| row["kind"] == "import").unwrap();
     assert_eq!(import["analyst_name"], "host_log");
     let call = rows

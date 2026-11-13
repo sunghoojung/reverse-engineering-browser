@@ -292,124 +292,6 @@ fn retained_artifact(server: &Server, id: &str, kind: &str, body: &[u8]) -> Valu
     artifact
 }
 
-#[test]
-fn wasm_run_values_digests_and_errors_never_reach_an_ask_level_client() {
-    // The module returns 1234567, leaves the byte 0x5a in memory and returns
-    // 1e300 from a second export. At --permission ask none of them, their
-    // lengths or a digest of the byte may reach the model, on success or on any
-    // error path.
-    let server = Server::start();
-    let bytes = wat::parse_str(
-        r#"(module (memory (export "m") 1) (data (i32.const 0) "\5a")
-            (func (export "run") (result i32) i32.const 1234567)
-            (func (export "big") (result f64) f64.const 1e300))"#,
-    )
-    .unwrap();
-    let hash = {
-        use sha2::{Digest, Sha256};
-        hex::encode(Sha256::digest(&bytes))
-    };
-    let artifact = json!({"protocol_version": 1, "artifact_id": "1", "session_id": "1",
-        "navigation_id": "1", "frame_id": "1", "parent_artifact_id": "0", "creator_event_id": "0",
-        "kind": "wasm", "url": "https://owned.test/run.wasm", "mime_type": "application/wasm",
-        "byte_size": bytes.len(), "sha256": hash, "sensitive": false,
-        "content_path": format!("blobs/{hash}.bin")});
-    let artifacts = server._root.path().join("artifacts");
-    std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
-    std::fs::write(artifacts.join(format!("blobs/{hash}.bin")), &bytes).unwrap();
-    std::fs::write(artifacts.join("manifest.jsonl"), format!("{artifact}\n")).unwrap();
-    let mut mcp = Mcp::start_with(vec![
-        "mcp".into(),
-        "--base-url".into(),
-        server.url.clone(),
-        "--permission".into(),
-        "ask".into(),
-    ]);
-    let names = tool_names(&mcp.request("tools/list", json!({})));
-    assert!(names.iter().any(|name| name == "run_wasm_function"));
-    let call = |mcp: &mut Mcp, arguments: Value| {
-        mcp.request(
-            "tools/call",
-            json!({"name": "run_wasm_function", "arguments": {"body": arguments}}),
-        )
-    };
-    let base = json!({"artifact_id": "1", "sha256": artifact["sha256"], "confirm_offline_execution": true});
-    let mut run = base.clone();
-    run["export"] = json!("run");
-    run["memory_reads"] = json!([{"offset": 0, "length": 1}]);
-    let answer = call(&mut mcp, run);
-    assert_eq!(answer["result"]["isError"], false, "{answer}");
-    let text = tool_text(&answer).to_owned();
-    assert!(text.contains("returned"), "{text}");
-    let digest = {
-        use sha2::{Digest, Sha256};
-        hex::encode(Sha256::digest([0x5a]))
-    };
-    for needle in ["1234567", "\"5a\"", &digest] {
-        assert!(
-            !text.contains(needle),
-            "{needle} reached the client: {text}"
-        );
-    }
-    let record: Value = serde_json::from_str(&text).unwrap();
-    let marker = json!({"omitted": "content"});
-    assert_eq!(record["outcome"]["status"], "returned");
-    assert_eq!(
-        record["results"][0]["value"], marker,
-        "no length of the result"
-    );
-    assert_eq!(record["memory_reads"][0]["hex"], marker);
-    assert_eq!(
-        record["memory_reads"][0]["sha256"], marker,
-        "no digest of one byte"
-    );
-    assert_eq!(record["memory_reads"][0]["status"], "read");
-    let mut big = base.clone();
-    big["export"] = json!("big");
-    let answer = call(&mut mcp, big);
-    assert_eq!(answer["result"]["isError"], false, "{answer}");
-    // The long decimal form is how the value once leaked through a 500.
-    let long_form = "100000000000000005250476";
-    assert!(
-        !tool_text(&answer).contains("1e300") && !tool_text(&answer).contains(long_form),
-        "{answer}"
-    );
-    // Error paths: a missing confirmation, an argument mismatch and a bad hash.
-    let mut unconfirmed = base.clone();
-    unconfirmed["export"] = json!("run");
-    unconfirmed
-        .as_object_mut()
-        .unwrap()
-        .remove("confirm_offline_execution");
-    let mut mismatch = base.clone();
-    mismatch["export"] = json!("run");
-    mismatch["args"] = json!([{"type": "i32", "value": "7"}]);
-    let mut stale = base.clone();
-    stale["export"] = json!("run");
-    stale["sha256"] = json!("0".repeat(64));
-    for arguments in [unconfirmed, mismatch, stale] {
-        let answer = call(&mut mcp, arguments);
-        let text = tool_text(&answer);
-        for needle in ["1234567", "1e300", long_form, &digest] {
-            assert!(
-                !text.contains(needle),
-                "{needle} reached the client: {text}"
-            );
-        }
-    }
-    let listed = mcp.request(
-        "tools/call",
-        json!({"name": "get_wasm_runs", "arguments": {}}),
-    );
-    let text = tool_text(&listed);
-    for needle in ["1234567", "1e300", long_form, &digest] {
-        assert!(
-            !text.contains(needle),
-            "{needle} reached the client from stored runs: {text}"
-        );
-    }
-}
-
 /// Writes one non-sensitive retained Wasm artifact and returns its sha256.
 fn retained_wasm(server: &Server, bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -426,45 +308,128 @@ fn retained_wasm(server: &Server, bytes: &[u8]) -> String {
     hash
 }
 
-#[test]
-fn expectations_reveal_one_bit_per_run_below_full_access() {
-    // With per-entry match results, one run of 256 guesses per one-byte read
-    // read SECRETBYTES back at --permission auto while hex and sha256 were
-    // omitted. Now one guess per read is admitted and only the aggregate
-    // all_match is returned.
-    let server = Server::start();
-    let bytes = wat::parse_str(
-        r#"(module (memory 1) (data (i32.const 0) "SECRETBYTES") (func (export "run")))"#,
-    )
-    .unwrap();
-    let hash = retained_wasm(&server, &bytes);
-    let mut mcp = Mcp::start_with(vec![
+/// One `reb-api mcp` connection at a permission level.
+fn at_level(server: &Server, level: &str) -> Mcp {
+    Mcp::start_with(vec![
         "mcp".into(),
         "--base-url".into(),
         server.url.clone(),
         "--permission".into(),
-        "auto".into(),
-    ]);
-    let call = |mcp: &mut Mcp, body: Value| {
-        mcp.request(
+        level.into(),
+    ])
+}
+
+fn run_wasm(mcp: &mut Mcp, body: Value) -> Value {
+    mcp.request(
+        "tools/call",
+        json!({"name": "run_wasm_function", "arguments": {"body": body}}),
+    )
+}
+
+fn stored_runs(server: &Server) -> Value {
+    let mut full = at_level(server, "full");
+    let listed = full.request(
+        "tools/call",
+        json!({"name": "get_wasm_runs", "arguments": {}}),
+    );
+    assert_eq!(listed["result"]["isError"], false, "{listed}");
+    serde_json::from_str(tool_text(&listed)).unwrap()
+}
+
+/// A call the projection refused before sending anything: a JSON-RPC error
+/// that carries no tool result.
+fn refused(answer: &Value) -> bool {
+    answer.get("result").is_none()
+        && answer["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.ends_with("No request was sent"))
+}
+
+const SECRET_MODULE: &str =
+    r#"(module (memory 1) (data (i32.const 0) "SECRETBYTES") (func (export "run")))"#;
+
+#[test]
+fn running_captured_code_is_full_access_only() {
+    // A run's outcome, fuel, import calls, timing and repeated expectations
+    // each disclose values the code computed, so running captured code is a
+    // content read: below Full it is neither listed nor sent.
+    let server = Server::start();
+    let hash = retained_wasm(&server, &wat::parse_str(SECRET_MODULE).unwrap());
+    let body = json!({"artifact_id": "1", "sha256": hash, "export": "run",
+        "memory_reads": [{"offset": 0, "length": 11}], "confirm_offline_execution": true});
+    for level in ["read-only", "ask", "auto"] {
+        let mut mcp = at_level(&server, level);
+        let names = tool_names(&mcp.request("tools/list", json!({})));
+        for name in ["run_wasm_function", "get_wasm_runs"] {
+            assert!(
+                !names.iter().any(|listed| listed == name),
+                "{level} lists {name}"
+            );
+        }
+        let answer = run_wasm(&mut mcp, body.clone());
+        assert!(refused(&answer), "{level}: {answer}");
+        let listed = mcp.request(
             "tools/call",
-            json!({"name": "run_wasm_function", "arguments": {"body": body}}),
-        )
-    };
+            json!({"name": "get_wasm_runs", "arguments": {}}),
+        );
+        assert!(refused(&listed), "{level}: {listed}");
+    }
+    assert_eq!(
+        stored_runs(&server)["total"],
+        0,
+        "nothing reached the backend below Full"
+    );
+    // At Full the run happens and returns its bytes, which are content there.
+    let mut full = at_level(&server, "full");
+    let names = tool_names(&full.request("tools/list", json!({})));
+    assert!(
+        names.iter().any(|name| name == "run_wasm_function")
+            && names.iter().any(|name| name == "get_wasm_runs")
+    );
+    let answer = run_wasm(&mut full, body);
+    assert_eq!(answer["result"]["isError"], false, "{answer}");
+    let record: Value = serde_json::from_str(tool_text(&answer)).unwrap();
+    assert_eq!(
+        record["memory_reads"][0]["hex"],
+        hex::encode(b"SECRETBYTES")
+    );
+    assert_eq!(stored_runs(&server)["total"], 1);
+}
+
+#[test]
+fn repeated_expectations_cannot_read_bytes_back_below_full_access() {
+    // Review proof of concept: one-byte guesses checked by all_match, one run
+    // each, recovered SECR in 305 runs at --permission auto. Now every such
+    // run is refused before it is sent.
+    let server = Server::start();
+    let hash = retained_wasm(&server, &wat::parse_str(SECRET_MODULE).unwrap());
+    let mut auto = at_level(&server, "auto");
+    for guess in [0x52u8, 0x53, 0x54] {
+        let answer = run_wasm(
+            &mut auto,
+            json!({"artifact_id": "1", "sha256": hash, "export": "run",
+            "memory_reads": [{"offset": 0, "length": 1}],
+            "expect": {"memory": [{"read": 0, "hex": format!("{guess:02x}")}]},
+            "confirm_offline_execution": true}),
+        );
+        assert!(refused(&answer), "{answer}");
+        assert!(!answer.to_string().contains("all_match"), "{answer}");
+    }
+    assert_eq!(stored_runs(&server)["total"], 0);
+    // The expectation bounds still hold at Full: 16 entries and one per read.
+    let mut full = at_level(&server, "full");
     let guesses = (0..=255u8)
         .map(|byte| json!({"read": 0, "hex": format!("{byte:02x}")}))
         .collect::<Vec<_>>();
-    let answer = call(
-        &mut mcp,
+    let answer = run_wasm(
+        &mut full,
         json!({"artifact_id": "1", "sha256": hash, "export": "run",
         "memory_reads": [{"offset": 0, "length": 1}], "expect": {"memory": guesses},
         "confirm_offline_execution": true}),
     );
     assert_eq!(answer["result"]["isError"], true, "{answer}");
-    // Within the 16-entry schema bound, two guesses at one read are refused
-    // by the server.
-    let answer = call(
-        &mut mcp,
+    let answer = run_wasm(
+        &mut full,
         json!({"artifact_id": "1", "sha256": hash, "export": "run",
         "memory_reads": [{"offset": 0, "length": 1}],
         "expect": {"memory": [{"read": 0, "hex": "52"}, {"read": 0, "hex": "53"}]},
@@ -475,24 +440,93 @@ fn expectations_reveal_one_bit_per_run_below_full_access() {
         tool_text(&answer).contains("one expected memory entry per read"),
         "{answer}"
     );
-    // One right guess and one wrong one: the record shows only that not all matched.
-    let answer = call(
-        &mut mcp,
+}
+
+#[test]
+fn fuel_and_import_counts_reach_no_client_below_full_access() {
+    // Review proof of concept: a loop whose trip count is a loaded byte, with
+    // one import call per pass, gave SECRETBYTES back through
+    // import_calls_total and fuel_consumed in 11 runs at --permission auto.
+    let server = Server::start();
+    let bytes = wat::parse_str(
+        r#"(module
+        (import "env" "tick" (func $tick))
+        (memory 1) (data (i32.const 0) "SECRETBYTES")
+        (func (export "spin") (param $p i32) (local $n i32)
+          (local.set $n (i32.load8_u (local.get $p)))
+          (block $d (loop $l
+            (br_if $d (i32.eqz (local.get $n)))
+            (call $tick)
+            (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+            (br $l)))))"#,
+    )
+    .unwrap();
+    let hash = retained_wasm(&server, &bytes);
+    let spin = |p: usize| {
+        json!({"artifact_id": "1", "sha256": hash, "export": "spin",
+            "args": [{"type": "i32", "value": p.to_string()}],
+            "imports": [{"module": "env", "field": "tick", "results": []}],
+            "confirm_offline_execution": true})
+    };
+    let mut auto = at_level(&server, "auto");
+    for p in 0..11 {
+        let answer = run_wasm(&mut auto, spin(p));
+        assert!(refused(&answer), "{answer}");
+        let text = answer.to_string();
+        assert!(
+            !text.contains("import_calls_total") && !text.contains("fuel_consumed"),
+            "{text}"
+        );
+    }
+    assert_eq!(stored_runs(&server)["total"], 0);
+    // At Full the counts are the content they always were.
+    let mut full = at_level(&server, "full");
+    let counts = (0..11)
+        .map(|p| {
+            let answer = run_wasm(&mut full, spin(p));
+            let record: Value = serde_json::from_str(tool_text(&answer)).unwrap();
+            record["import_calls_total"].as_u64().unwrap() as u8
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(counts, b"SECRETBYTES");
+}
+
+#[test]
+fn a_read_only_client_cannot_list_runs_or_rebuild_their_inputs() {
+    // Review proof of concept: a read-only client listed a Full run and
+    // recovered its expected bytes from provenance.inputs_digest by brute
+    // force; run_id also carried 48 bits of that digest.
+    let server = Server::start();
+    let hash = retained_wasm(&server, &wat::parse_str(SECRET_MODULE).unwrap());
+    let mut full = at_level(&server, "full");
+    let answer = run_wasm(
+        &mut full,
         json!({"artifact_id": "1", "sha256": hash, "export": "run",
-        "memory_reads": [{"offset": 0, "length": 1}, {"offset": 1, "length": 1}],
-        "expect": {"memory": [{"read": 0, "hex": "53"}, {"read": 1, "hex": "00"}]},
+        "memory_reads": [{"offset": 0, "length": 2}],
+        "expect": {"memory": [{"read": 0, "hex": "5345"}]},
         "confirm_offline_execution": true}),
     );
     assert_eq!(answer["result"]["isError"], false, "{answer}");
-    let record: Value = serde_json::from_str(tool_text(&answer)).unwrap();
-    let marker = json!({"omitted": "content"});
-    let expectation = &record["expectation"];
-    assert_eq!(expectation["all_match"], false, "{expectation}");
-    assert_eq!(expectation["results_match"], marker, "{expectation}");
-    for entry in expectation["memory"].as_array().unwrap() {
-        assert_eq!(entry["match"], marker, "{expectation}");
+    for level in ["read-only", "ask", "auto"] {
+        let mut reader = at_level(&server, level);
+        let listed = reader.request(
+            "tools/call",
+            json!({"name": "get_wasm_runs", "arguments": {}}),
+        );
+        assert!(refused(&listed), "{level}: {listed}");
+        let text = listed.to_string();
+        assert!(
+            !text.contains("inputs_digest") && !text.contains("run_id"),
+            "{level}: {text}"
+        );
     }
-    assert!(!tool_text(&answer).contains("\"match\":true"), "{answer}");
+    let run = &stored_runs(&server)["runs"][0];
+    let digest = run["provenance"]["inputs_digest"].as_str().unwrap();
+    let id = run["run_id"].as_str().unwrap();
+    assert!(
+        !id.contains(&digest[..12]),
+        "run_id {id} carries the inputs digest"
+    );
 }
 
 fn float32_artifact_request(artifact: &Value) -> Value {
@@ -591,7 +625,12 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
         .collect::<Vec<_>>();
     assert_eq!(
         spec["x-reb-mcp"]["content_reads"]["operations"],
-        json!(["get_artifact_text", "search_artifact_text"])
+        json!([
+            "get_artifact_text",
+            "search_artifact_text",
+            "run_wasm_function",
+            "get_wasm_runs"
+        ])
     );
     let mut mcp = Mcp::start(&server.url, false);
     let listed = mcp.request("tools/list", json!({}));

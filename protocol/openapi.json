@@ -111,18 +111,21 @@
         "hex",
         "sha256",
         "results_match",
-        "match"
+        "match",
+        "inputs_digest"
       ],
-      "description": "Results, stub values and import arguments (value), memory bytes (hex) and memory read digests (sha256) of an offline Wasm run are computed by captured code. Below --allow-content (--permission full) every value under these keys is replaced by {\"omitted\":\"content\"} with no length or digest, because the length of a short return value, or the digest of a few memory bytes, is enough to recover it. Per-entry expectation results (results_match and each memory match) are omitted too, so a guess cannot be checked against one value; only the aggregate expectation.all_match remains, at most one bit per run. Outcomes, trap kinds, counts and import names remain. The gate is content admission itself, so --allow-effects alone omits them too."
+      "description": "A second line behind content_reads, which lists both operations only with --allow-content. If either were ever returned to a client without content admission, every value under these keys would be replaced by {\"omitted\":\"content\"} with no length: results, stub values and import arguments (value), memory bytes (hex), memory read digests (sha256), per-entry expectation results (results_match, match) and the inputs digest. This alone does not protect values a run computed: its outcome, fuel, import call count, timing and repeated expectations disclose them too, which is why running captured code is Full access only."
     },
     "content_reads": {
       "flag": "--allow-content",
       "conflicts": "--omit-content",
       "operations": [
         "get_artifact_text",
-        "search_artifact_text"
+        "search_artifact_text",
+        "run_wasm_function",
+        "get_wasm_runs"
       ],
-      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, and inspect_wasm with row_offset and row_limit. Binary responses are still refused."
+      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. Running captured code is a content read too: run_wasm_function, and get_wasm_runs which returns its records, are listed only with --allow-content, and running still needs --allow-effects, because a run's outcome, fuel, import calls, timing and repeated expectations can each disclose values the code computed. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, and inspect_wasm with row_offset and row_limit. Binary responses are still refused."
     },
     "session_start": {
       "tool": "start_live_session",
@@ -4843,7 +4846,7 @@
       "get": {
         "operationId": "get_wasm_runs",
         "summary": "Read stored offline runs of captured Wasm functions",
-        "description": "Lists derived run records written by run_wasm_function, newest first, optionally for one artifact. Reads the local run store only: nothing executes. Records are derived experiments, never captured evidence. Memory bytes (hex), their digests (sha256) and values (value) are content and are omitted below Full access; outcomes, trap kinds, import call counts, digests and expectation matches remain.",
+        "description": "Lists derived run records written by run_wasm_function, newest first, optionally for one artifact. Reads the local run store only: nothing executes. Records are derived experiments, never captured evidence. A run record is content in every field derived from execution or its inputs, so through reb-api mcp this read is listed only at Full access (--allow-content).",
         "tags": [
           "artifacts"
         ],
@@ -4942,7 +4945,7 @@
       "post": {
         "operationId": "run_wasm_function",
         "summary": "Run one function of a captured Wasm module offline",
-        "description": "Explicit, confirmed offline execution of one exported or indexed function of a hash-verified captured core Wasm module in wasmi 2.0.0, a pure-Rust interpreter with fuel metering and no JIT, inside the local backend. Every import is a stub: a function import returns the results the request supplies (results, or one sequence entry per call) and otherwise traps with outcome import_trap; imported memories and tables are fresh and empty, imported globals are zero. No filesystem, network, clock, randomness, browser or page is reachable, so supply every nondeterministic import. Data and element segments initialize as usual; the start function runs only with run_start. memory_writes apply after instantiation (and the start function) and before the call; memory_reads are taken after it, whatever the outcome. Every limit (fuel, memory_pages, table_elements, call_depth, deadline_ms) and every trap is a named outcome.status, with outcome.phase and outcome.trap_kind; wasmi does not report trap byte offsets. Every import call is recorded (first 256, with up to 16 arguments and 16 results each). The memory and table limits are totals across every memory and table of the run. expect compares results and reads exactly, with at most one expected entry per read; below Full access only expectation.all_match is returned, one bit per run. The result carries module_sha256, inputs_digest, the interpreter and the limits, and is stored as a derived experiment record, never captured evidence. Results, import arguments, memory bytes and memory read digests are content: below Full access the value, hex and sha256 fields are omitted with no length. Requires confirm_offline_execution true; nothing runs without it.",
+        "description": "Explicit, confirmed offline execution of one exported or indexed function of a hash-verified captured core Wasm module in wasmi 2.0.0, a pure-Rust interpreter with fuel metering and no JIT, inside the local backend. Every import is a stub: a function import returns the results the request supplies (results, or one sequence entry per call) and otherwise traps with outcome import_trap; imported memories and tables are fresh and empty, imported globals are zero. No filesystem, network, clock, randomness, browser or page is reachable, so supply every nondeterministic import. Data and element segments initialize as usual; the start function runs only with run_start. memory_writes apply after instantiation (and the start function) and before the call; memory_reads are taken after it, whatever the outcome. Every limit (fuel, memory_pages, table_elements, call_depth, deadline_ms) and every trap is a named outcome.status, with outcome.phase and outcome.trap_kind; wasmi does not report trap byte offsets. Every import call is recorded (first 256, with up to 16 arguments and 16 results each). The memory and table limits are totals across every memory and table of the run. expect compares results and reads exactly, with at most one expected entry per read. The result carries module_sha256, inputs_digest, the interpreter and the limits, and is stored as a derived experiment record, never captured evidence. Running captured code is a content read: through reb-api mcp this tool is listed only at Full access (--allow-content, with --allow-effects), because the outcome, fuel, import calls, timing and repeated expectations of a run can each disclose values the code computed. Requires confirm_offline_execution true; nothing runs without it.",
         "tags": [
           "artifacts"
         ],
@@ -22411,7 +22414,7 @@
           "expect": {
             "type": "object",
             "additionalProperties": false,
-            "description": "Test vectors. Below Full access only expectation.all_match is returned, so a caller without content access learns whether all vectors held, one bit per run, and cannot read bytes back.",
+            "description": "Test vectors, at most one memory entry per read. The record reports results_match, each memory match and all_match.",
             "properties": {
               "results": {
                 "type": "array",

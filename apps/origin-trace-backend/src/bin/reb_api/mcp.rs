@@ -2542,7 +2542,17 @@ mod tests {
         // value, so below --allow-content these keys keep no trace at all.
         let spec = specification().unwrap();
         let keys = super::policy_keys(&spec, "run_values", "run_wasm_function");
-        assert_eq!(keys, ["value", "hex", "sha256", "results_match", "match"]);
+        assert_eq!(
+            keys,
+            [
+                "value",
+                "hex",
+                "sha256",
+                "results_match",
+                "match",
+                "inputs_digest"
+            ]
+        );
         assert_eq!(
             super::policy_keys(&spec, "run_values", "get_wasm_runs"),
             keys

@@ -307,8 +307,9 @@ impl Request {
             for item in expect.results.iter().flatten() {
                 value(item)?;
             }
-            // One expectation per read: several guesses against one read would
-            // turn each match result into a way to read the bytes back.
+            // One expectation per read bounds the request and its record. It
+            // is not a disclosure control: only a caller that may read the
+            // run's values (Full access) can run captured code at all.
             let mut named = std::collections::BTreeSet::new();
             for memory in &expect.memory {
                 if memory.read >= request.memory_reads.len() {

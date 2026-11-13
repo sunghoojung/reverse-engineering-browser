@@ -24,7 +24,7 @@ cannot tell apart two globals of the same type. The comparison is static, reads
 only verified captured bytes, never runs either module, and shows no
 instruction text. Fingerprints, bounds and statuses are defined by the
 [versioned contract](../../protocol/wasm-module-diff-v1.md); agents use
-`get_wasm_module_diff` (recipe 26 in the
+`get_wasm_module_diff` (recipe 28 in the
 [agent cookbook](../development/agent-cookbook.md)).
 
 Remaining work: carrying analyst names and notes from A to B across matched

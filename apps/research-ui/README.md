@@ -2386,8 +2386,10 @@ method and the score. Each member of a tie is its own ambiguous row, and its
 empty side names the tie and how many functions of the other module are in it
 (`tie 1 · 2 in B`); no pair is chosen. Selecting a function opens **Graph** on that function in its own module
 and records the step, so Back returns. Imports have no body and are not
-links. Omissions from a partial comparison are listed above the table, and
-an error keeps **Retry comparison**; omissions of an earlier pair are cleared
+links. Omissions from a partial comparison are listed above the table,
+including that its pages can repeat or skip rows (Show more says so too), and
+a partial table is never kept, so reopening or choosing the pair again
+compares again. An error keeps **Retry comparison**; omissions of an earlier pair are cleared
 first. Graph, Map and Inspect close the table, and Escape or **Close** returns
 focus to **More**. Reopening it on either module of the last pair selects the
 other. In the stored window (`reb://`) each page runs the comparison again in

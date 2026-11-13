@@ -735,7 +735,9 @@ its rows are long.
 
 - **Identity**: `a.sha256` and a side's `function` identify a function in A;
   carry what you know about it to the B side of its row.
-- **`identical`**: the body bytes are equal.
+- **`identical`**: the body bytes are equal, the data each address points at
+  is the same, and every call reaches the matched function. It cannot tell
+  apart reads of two globals of the same type.
 - **`renumbered`**: the bytes differ only in ways the contract can explain as
   renumbering or relocation, and every call reaches the matched function. It
   cannot tell apart reads of two globals of the same type, so treat it as
@@ -746,7 +748,9 @@ its rows are long.
   functions of each module tie. No pair was chosen.
 - **`unclassified`, or a `partial` status**: a limit or the deadline stopped a
   step; `omissions` says which, and those functions may not really be added or
-  removed.
+  removed. Do not page a partial report: each page is compared again and can
+  stop elsewhere, so pages can repeat or skip rows. Ask again, and page only
+  once `status` is `complete`.
 
 ## Response shapes at a glance
 

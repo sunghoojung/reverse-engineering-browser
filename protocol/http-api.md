@@ -394,7 +394,8 @@ is read-only and structure only: rows give each side's function index, body
 range, name, signature and fingerprints, with the match method and score, and
 never instruction text or constant values. Each member of a tie is its own
 `ambiguous` row, and one four-second deadline, counted from the request's
-arrival, bounds the work. Only complete reports are cached. Page with
+arrival, bounds the work. Only complete reports are cached, and only they
+page reliably: a partial report says its pages can repeat or skip rows. Page with
 `row_window.next_offset`.
 See [WASM module diff v1](wasm-module-diff-v1.md).
 

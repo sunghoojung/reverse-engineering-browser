@@ -193,7 +193,7 @@ Every option is off unless the start names it, and none is inherited.
 
 ## Totals
 
-The tables have 110 rows.
+The tables have 111 rows.
 
 - **Before the change that added this page**, 76 rows were covered for a
   client started with `--allow-effects --allow-session-start`. The in-app agent had nine fixed
@@ -202,14 +202,14 @@ The tables have 110 rows.
   `get_analysis_catalog`, `get_js_invocation_sites`, `inspect_wasm`) plus,
   with actions on, every effectful operation. It could not read content or
   start sessions, and every action needed Allow once.
-- **Now** 95 rows are covered: 79 marked Covered (the 76, plus three rows
-  later changes added as covered) and 16 marked Added (request and response
+- **Now** 96 rows are covered: 79 marked Covered (the 76, plus three rows
+  later changes added as covered) and 17 marked Added (request and response
   bodies, source text, search across files and within one, Wasm row windows,
   guest bytecode, the two response options, the session flow graph, graph
   layout, Wasm function names, offline Wasm function runs and their stored
-  records, Wasm library identification and the readable Wasm function), and
-  the in-app agent can use all of them at the level each row names, including
-  session control at Full access.
+  records, Wasm library identification, the readable Wasm function and the
+  Wasm module diff), and the in-app agent can use all of them at the level
+  each row names, including session control at Full access.
 - **3 rows are partial**: Decode value and Decode range need the value read
   first (Full access, or a pin), and the Static bytecode, Contextual and
   Opcode ledger views decode researcher-imported definitions in the page.

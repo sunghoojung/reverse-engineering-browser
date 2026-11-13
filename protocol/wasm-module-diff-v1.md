@@ -104,8 +104,15 @@ a match; a key shared by more is a tie and is left for later passes.
    imports sharing those, then by module, field and position among the imports
    sharing the names, so a changed signature still pairs and an import name
    used twice pairs each use.
-2. `identical`: defined functions by body hash.
-3. `normalized`: defined functions by normalized body hash.
+2. `identical`: defined functions by body hash, but only bodies that name
+   nothing by an index that can renumber: no call, function reference,
+   global, table, element, data segment, tag, GC type or type-indexed block,
+   and no static data address. Equal bytes elsewhere can mean a different
+   function: after a function is inserted early, A's `call 1` thunk has the
+   bytes of B's `call 1` thunk, which calls what was A's function 0.
+3. `normalized`: defined functions by normalized body hash together with the
+   address map, then by normalized body hash alone, so readers of moved data
+   pair with the reader of the same offset.
 4. `export_name`, then `name`: defined functions by first export name, then by
    name-section name.
 5. `call_graph`: rounds starting from every matched pair. For each pair in a
@@ -139,11 +146,12 @@ Then:
    the same signature and the nearest instruction counts: up to 64, or fewer
    when the comparisons left, divided by every function on both sides that
    could be scored, cannot pay for 64; below 4 the pass is not run. Each A
-   function keeps the candidates within 0.01 of its best score. A B function
-   no A function scored, because it sat outside every window, scores its own
-   nearest A candidates, so it is not reported as added only for that reason:
-   if it ties an A function's own best within 0.01, it contests that
-   function. Then:
+   function keeps the candidates within 0.01 of its best score. Every open B
+   function also scores its own nearest A candidates, so a function outside
+   an A function's window, even one an unrelated A function happened to
+   score, is not reported as added only for that reason: if it ties an A
+   function's own best within 0.01 without being among that function's best
+   candidates already, it contests that function. Then:
    - every tie is joined into a group first: a function with more than one such
      candidate, a candidate that more than one function ranks best within
      0.01, and a contesting B function together with the contested function
@@ -199,7 +207,7 @@ Statuses, in page order:
 | `ambiguous` | A member of a tie; no pair was chosen. |
 | `unclassified` | Unmatched when a limit or the deadline stopped the comparison, so it may not really be added, removed or tied. |
 | `renumbered` | Matched; the bytes differ, but the normalized hashes and the address maps are equal, and every call site calls the matched function on the other side. |
-| `identical` | Matched; the body bytes are equal, or an import's names and signature are. Equal bytes can still call functions whose indexes now mean something else. |
+| `identical` | Matched; the body bytes and the address maps are equal and every call site calls the matched function on the other side, or an import's names and signature are equal. |
 
 Rows are ordered by status, then by tie, then by function index. `status`
 narrows the rows to a comma separated list of these names; an unknown or
@@ -210,6 +218,12 @@ bytes, so a page of long mangled names still fits the 131,072-byte limit.
 Continue from `row_window.next_offset`, which is null at the end; a page can
 hold fewer rows than `row_limit`. `row_window` also gives `offset`, `rows` and
 `total_rows`. `requested_statuses` echoes the filter, or null.
+
+Only a complete report pages reliably. A partial report is not kept, so each
+page is a new comparison that can stop at a different point, and since rows
+are ordered by status a later page can repeat or skip rows of an earlier one.
+Every partial report says so in `omissions`; retry for a complete report
+before paging.
 
 The report holds no instruction text, constant value, data byte or custom
 section content, so it is structure at every permission level. Function,

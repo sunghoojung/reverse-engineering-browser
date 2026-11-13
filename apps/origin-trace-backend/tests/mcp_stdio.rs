@@ -2748,8 +2748,10 @@ fn an_agent_waits_on_observation_records_and_reads_their_positions() {
 }
 
 /// A filtered read's tag covers what a site depends on besides the store: a
-/// source artifact that lands after its record changes the answer, so a
-/// client holding the old tag is answered again, not with 304.
+/// source artifact that lands after its record, or a manifest replaced by one
+/// of the same length, changes the answer, so a client holding the old tag is
+/// answered again, not with 304. The tag is the state's before the read, so
+/// a read that resolved something is answered in full once more.
 #[tokio::test]
 async fn a_landed_source_changes_the_tag_of_a_page_with_sites() {
     use sha2::{Digest, Sha256};
@@ -2799,6 +2801,9 @@ async fn a_landed_source_changes_the_tag_of_a_page_with_sites() {
         reason(&body),
         json!({"status": "unresolved", "reason": "source_artifact_missing"})
     );
+    let second = read(Some(tag)).await.unwrap();
+    assert_eq!(second.status(), 200, "the first read kept a pending site");
+    let tag = second.headers()["etag"].to_str().unwrap().to_owned();
     assert_eq!(read(Some(tag.clone())).await.unwrap().status(), 304);
     // The compiled script's artifact lands; the store does not change.
     native_artifact(
@@ -2813,6 +2818,38 @@ async fn a_landed_source_changes_the_tag_of_a_page_with_sites() {
     assert_eq!(again.status(), 200, "a landed source is a new answer");
     let body: Value = again.json().await.unwrap();
     assert_eq!(reason(&body)["status"], "resolved", "{body}");
+    let settled = read(None).await.unwrap();
+    let tag = settled.headers()["etag"].to_str().unwrap().to_owned();
+    assert_eq!(read(Some(tag.clone())).await.unwrap().status(), 304);
+    // The manifest replaced by one of the same length naming the same bytes
+    // under another artifact and URL.
+    let manifest = server._root.path().join("artifacts/manifest.jsonl");
+    let length = std::fs::metadata(&manifest).unwrap().len();
+    std::fs::rename(&manifest, manifest.with_extension("old")).unwrap();
+    native_artifact(
+        &server,
+        "361",
+        "javascript",
+        "https://app.debugger.test/handler2.js",
+        &named,
+        DEBUGGER_SOURCE.as_bytes(),
+    );
+    assert_eq!(std::fs::metadata(&manifest).unwrap().len(), length);
+    let replaced = read(Some(tag)).await.unwrap();
+    assert_eq!(
+        replaced.status(),
+        200,
+        "a replaced manifest is a new answer"
+    );
+    let body: Value = replaced.json().await.unwrap();
+    assert_eq!(
+        (&reason(&body)["artifact_id"], &reason(&body)["url"]),
+        (
+            &json!("361"),
+            &json!("https://app.debugger.test/handler2.js")
+        ),
+        "{body}"
+    );
 }
 
 /// The recourse for `source_limit` is to read the same cursor again. Sent

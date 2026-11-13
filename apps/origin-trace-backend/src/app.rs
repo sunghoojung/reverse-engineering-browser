@@ -1625,9 +1625,11 @@ impl App {
                 Ok(document)
             })
             .await?;
-        // The page's tag after its sites were resolved, so a read of the same
-        // state is unchanged; a page still holding a deferred site gets a tag
-        // no later read matches, since reading it again is its recourse.
+        // The tag of the state before the read: whatever landed while the
+        // page was read makes the next read's tag differ, so it is never
+        // called unchanged. A read that resolved sites costs one more full
+        // answer. A page still holding a deferred site gets a tag no later
+        // read matches, since reading it again is its recourse.
         let deferred = document["events"].as_array().is_some_and(|events| {
             events.iter().any(|event| {
                 event["debugger_observation"]["site"]["resolution"]["status"] == "deferred"
@@ -1636,7 +1638,7 @@ impl App {
         let etag = if deferred {
             tag(&format!(":deferred-{}", unique_token()))
         } else {
-            tag(&self.sites_tag(may_hold_sites))
+            etag
         };
         self.event_state(&mut document, capture);
         let mut response = axum::Json(document).into_response();

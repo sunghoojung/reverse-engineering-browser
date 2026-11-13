@@ -697,7 +697,6 @@ pub fn provenance(
     // cookieStore.get or getAll with no name reads every cookie it can, and
     // a record a full queue dropped may have named this one.
     let mut unnamed_store_reads = 0u64;
-    let records_dropped;
     let mut ordered: Vec<&Value> = events
         .iter()
         .filter(|event| event["session_id"] == session && event["category"] == "network")
@@ -817,7 +816,7 @@ pub fn provenance(
             _ => {}
         }
     }
-    records_dropped = drops.between(oldest, None);
+    let records_dropped = drops.between(oldest, None);
     // A sent value equal to a script write's value names that write.
     for item in &mut sent_with {
         let written: Vec<Value> = scripts

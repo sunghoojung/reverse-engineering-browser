@@ -312,6 +312,9 @@ pub struct Simulation {
     /// Work units spent, including the loop-write prescan.
     pub work: u64,
     pub omissions: Vec<String>,
+    /// Header joins of loops still open where the simulation stopped: their
+    /// back edges after the stop were never read, so they are incomplete.
+    pub open_joins: HashSet<u32>,
 }
 
 impl Simulation {
@@ -790,8 +793,16 @@ pub fn simulate_with(
             if sim.instructions.len() >= sim.limits.max_instructions
                 || sim.work > sim.limits.max_work
             {
+                let what = if sim.instructions.len() >= sim.limits.max_instructions {
+                    format!(
+                        "Simulation instruction cap of {}",
+                        sim.limits.max_instructions
+                    )
+                } else {
+                    "Simulation work budget".to_owned()
+                };
                 sim.omissions.push(format!(
-                    "Simulation work budget reached at byte {position}; value flow after it is not computed."
+                    "{what} reached at byte {position}; value flow after it is not computed."
                 ));
                 stopped_at = Some(position);
                 break;
@@ -846,6 +857,24 @@ pub fn simulate_with(
             }
         }
     }
+    let mut open_joins = HashSet::new();
+    if let Some(stop) = stopped_at {
+        for frame in sim
+            .frames
+            .iter()
+            .filter(|frame| frame.kind == FrameKind::Loop)
+        {
+            let phis = frame
+                .loop_param_phis
+                .iter()
+                .chain(frame.loop_local_phis.iter().map(|(_, phi)| phi));
+            open_joins.extend(phis.copied());
+            sim.omissions.push(format!(
+                "The loop at byte {} was still open where simulation stopped at byte {stop}; values read in it may also arrive by back edges after the stop, and its header joins are incomplete.",
+                frame.offset
+            ));
+        }
+    }
     Ok(Simulation {
         nodes: sim.nodes,
         edges: sim.edges,
@@ -861,6 +890,7 @@ pub fn simulate_with(
         stopped_at,
         work: sim.work,
         omissions: sim.omissions,
+        open_joins,
     })
 }
 
@@ -876,13 +906,11 @@ impl Sim<'_, '_> {
         let mut loops: Vec<usize> = Vec::new();
         let mut index = 0u32;
         while !reader.eof() {
+            // The pass reads the whole body even past the instruction cap: it
+            // costs one step per instruction, and a loop the main loop leaves
+            // open at the cap then still has its header joins, marked
+            // incomplete, instead of none.
             let position = reader.original_position() as u32;
-            if index as usize >= self.limits.max_instructions {
-                self.omissions.push(format!(
-                    "Simulation work budget reached at byte {position}; value flow is not computed."
-                ));
-                return Ok(Some(position));
-            }
             if index & 255 == 0 && Instant::now() > deadline {
                 self.omissions.push(format!(
                     "Simulation deadline reached at byte {position}; value flow is not computed."
@@ -924,6 +952,17 @@ impl Sim<'_, '_> {
                 _ => {}
             }
             index += 1;
+        }
+        while let Some(frame) = open.pop() {
+            if let Some((start, set)) = frame {
+                loops.pop();
+                if let Some(Some((_, outer))) = loops.last().map(|at| &mut open[*at]) {
+                    outer.extend(set.iter().copied());
+                }
+                let mut locals: Vec<u32> = set.into_iter().collect();
+                locals.sort_unstable();
+                self.loop_writes.insert(start, locals);
+            }
         }
         if let Some(reason) = self.exhausted.take() {
             let position = reader.original_position() as u32;
@@ -1082,6 +1121,7 @@ impl Sim<'_, '_> {
     }
 
     fn record(&mut self, index: u32, values: &[Value]) {
+        self.spend(values.len() as u64);
         for value in values {
             let value = self.materialize(*value);
             self.inputs.push(value);
@@ -1400,11 +1440,21 @@ impl Sim<'_, '_> {
         self.open_tries.retain(|open| *open != frame);
     }
 
-    fn exception_values(&mut self, offset: u32, index: u32, tag: u32, count: u32) -> Vec<Value> {
+    /// `live` is whether a throw can reach the handler: for a `try_table`
+    /// clause that is the body's reachability at entry, not at its `end`
+    /// (a compiled body usually ends in `br`, `return` or a throw).
+    fn exception_values(
+        &mut self,
+        offset: u32,
+        index: u32,
+        tag: u32,
+        count: u32,
+        live: bool,
+    ) -> Vec<Value> {
         if count == 0 {
             return Vec::new();
         }
-        if !self.reachable {
+        if !live {
             let unknown = self.unknown_value();
             return vec![unknown; count as usize];
         }
@@ -1520,7 +1570,11 @@ impl Sim<'_, '_> {
             ));
             incoming.values.resize(results as usize, unknown);
         }
+        self.spend(results as u64 * incomings.len() as u64);
         for slot in 0..results as usize {
+            if self.exhausted.is_some() {
+                break;
+            }
             let first = incomings[0].values[slot];
             if incomings
                 .iter()
@@ -1586,6 +1640,10 @@ impl Sim<'_, '_> {
     }
 
     fn top_at(&mut self, height: usize, count: u32) -> Vec<Value> {
+        // Copies of carried values are kept per branch, so they count against
+        // the budget like any other retained entry: a block with many results
+        // and many branches to it is bounded in time and memory.
+        self.spend(count as u64);
         let available = self.stack.len().saturating_sub(height);
         let count = count as usize;
         if available < count {
@@ -1628,7 +1686,7 @@ impl Sim<'_, '_> {
         let saved = self.frames[position].saved.clone();
         let _ = (offset, index);
         for (target, tag, count) in catches {
-            let values = self.exception_values(entry_offset, instruction, tag, count);
+            let values = self.exception_values(entry_offset, instruction, tag, count, true);
             let local_value = |local: u32, current: Value| -> Value {
                 if let Ok(found) = phis.binary_search_by_key(&local, |(l, _)| *l) {
                     Value::of(phis[found].1)
@@ -2033,7 +2091,8 @@ impl Sim<'_, '_> {
                     ),
                     _ => (NONE, 0),
                 };
-                let values = self.exception_values(offset, index, tag, count);
+                let live = self.reachable;
+                let values = self.exception_values(offset, index, tag, count, live);
                 self.stack.extend(values);
                 self.frames[position].kind = FrameKind::Catch;
             }

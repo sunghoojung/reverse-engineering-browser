@@ -1098,9 +1098,16 @@ pub(crate) fn value_flow_with(
                 .map(|(position, _)| position as u32)
                 .collect();
             if defs.is_empty() {
-                omissions.push(format!(
-                    "Local {local} is never read or written in the simulated instructions."
-                ));
+                // Nothing simulated says nothing about the local.
+                omissions.push(match sim.stopped_at {
+                    Some(stopped) if sim.instructions.is_empty() => format!(
+                        "Simulation stopped at byte {stopped} before any instruction, so local {local} was not traced."
+                    ),
+                    Some(stopped) => format!(
+                        "Local {local} is not read or written before simulation stopped at byte {stopped}."
+                    ),
+                    None => format!("Local {local} is never read or written in this function."),
+                });
             }
             for def in &defs {
                 if let Some(id) = slicer.seed(*def) {
@@ -3337,5 +3344,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(node(&document, "const")[0]["text"], "f32.const 1e-40");
+    }
+
+    #[test]
+    fn a_prescan_stop_does_not_claim_a_local_is_unused() {
+        let bytes = nested_loops(400, 400);
+        let limits = wasm_def_use::Limits {
+            max_instructions: wasm_def_use::MAX_INSTRUCTIONS,
+            max_work: 1_000,
+        };
+        let document = limited(&bytes, "function=0&local=1", limits).unwrap();
+        let omissions = document["omissions"].to_string();
+        assert!(!omissions.contains("never read or written"), "{omissions}");
+        assert!(omissions.contains("was not traced"), "{omissions}");
     }
 }

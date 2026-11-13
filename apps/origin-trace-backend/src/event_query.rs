@@ -131,6 +131,10 @@ impl Coverage {
     pub fn complete(&self) -> bool {
         self.complete
     }
+    /// The record boundary the read stopped at: a forward read resumes here.
+    pub fn scan_end(&self) -> u64 {
+        self.scan_end
+    }
     pub fn to_json(self) -> Value {
         json!({
             "scope": self.scope,

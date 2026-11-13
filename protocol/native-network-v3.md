@@ -1945,7 +1945,12 @@ list but no received one, `received_missing`: `in_progress`, `failed` (before
 a response), `no_raw_response`, since the received list comes with the
 response headers and what was sent was reported, or `record_dropped` in its
 place under the rule above. The backend reads the session's gap records of
-every category beside the request's own.
+every category beside the request's own, from a tally it keeps per store: the
+first read scans the newest 64 MiB for gaps, a later one only the bytes
+appended since and none while the store is unchanged, and a store that shrank,
+was replaced or was cleared and written again (the bytes before the last
+boundary changed, as the request index checks) is scanned again. So a Headers,
+Cookies or provenance read costs its own records, not a 64 MiB scan.
 Origin Trace's Headers tab adds the reason to "Provisional headers are shown",
 and the Cookies tab lists each such hop with it.
 

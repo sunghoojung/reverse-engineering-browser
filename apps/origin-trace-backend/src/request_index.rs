@@ -633,7 +633,7 @@ fn text(value: &Value) -> String {
 fn number(value: &Value) -> i64 {
     value.as_i64().unwrap_or(0)
 }
-fn identity_of(metadata: &std::fs::Metadata) -> String {
+pub(crate) fn identity_of(metadata: &std::fs::Metadata) -> String {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;

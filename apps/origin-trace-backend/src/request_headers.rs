@@ -216,6 +216,12 @@ pub(crate) const DROP_REPORT_SLACK_NS: u64 = 1_000_000_000;
 pub(crate) struct Drops(Vec<(u64, u64)>);
 
 impl Drops {
+    /// From (gap time, records dropped) pairs of one session.
+    pub(crate) fn new(mut drops: Vec<(u64, u64)>) -> Self {
+        drops.sort_unstable();
+        Self(drops)
+    }
+    #[cfg(test)]
     pub(crate) fn of(gaps: &[Value], session: &str) -> Self {
         let mut drops: Vec<(u64, u64)> = gaps
             .iter()
@@ -569,11 +575,11 @@ pub(crate) fn lifecycle_of(
     lifecycle
 }
 
-/// Header blocks of `request_id` in `session_id`, grouped by hop. `gaps` are
-/// the session's gap records, which say whether a block may have been lost.
+/// Header blocks of `request_id` in `session_id`, grouped by hop. `drops` are
+/// the session's, which say whether a block may have been lost.
 pub fn build(
     events: &[Value],
-    gaps: &[Value],
+    drops: &Drops,
     artifacts: &[Value],
     root: &Path,
     session: &str,
@@ -653,7 +659,7 @@ pub fn build(
     }
     let lifecycle = lifecycle_of(events, session, request, browser_process);
     let dropped = span_of(events, session, request, browser_process)
-        .is_some_and(|(first, last)| Drops::of(gaps, session).during(first, last, lifecycle.ended));
+        .is_some_and(|(first, last)| drops.during(first, last, lifecycle.ended));
     let last = sources.keys().next_back().copied();
     let hops: Vec<Value> = hops
         .into_iter()
@@ -757,7 +763,7 @@ mod tests {
             record("request_headers", 23, 9, payload(2, 3, 0, b"", 0, 0), "0"),
             record("request_headers", 24, 20, payload(1, 1, 0, sent, 1, 0), "5"),
         ];
-        let result = build(&events, &[], &artifacts, &root, "7", "17");
+        let result = build(&events, &Drops::default(), &artifacts, &root, "7", "17");
         assert_eq!(result["unattached_records"], 1);
         assert_eq!(result["malformed_records"], json!(["24"]));
         let hop0 = &result["hops"][0];
@@ -793,7 +799,7 @@ mod tests {
             json!({"session_id":"7","request_id":"17","category":"network",
             "type":"request_failed","process_id":43,"sequence_number":"32","flags":0}),
         );
-        let cached = build(&ended, &[], &artifacts, &root, "7", "17");
+        let cached = build(&ended, &Drops::default(), &artifacts, &root, "7", "17");
         assert_eq!(cached["hops"][1]["network_block_missing"], "from_cache");
         assert_eq!(cached["hops"][0]["network_block_missing"], "not_reported");
         let lifecycle = |kinds: &[(&str, u64)], loader: u64| {
@@ -841,7 +847,7 @@ mod tests {
             payload(2, 3, 0, b"", 1, 0),
             "0",
         ));
-        let reported = build(&redirected, &[], &artifacts, &root, "7", "17");
+        let reported = build(&redirected, &Drops::default(), &artifacts, &root, "7", "17");
         assert_eq!(
             reported["hops"][0]["network_block_missing"],
             "redirect_not_sent"
@@ -858,7 +864,7 @@ mod tests {
         };
         let lossy = build(
             &redirected,
-            &[gap(1, "canvas")],
+            &Drops::of(&[gap(1, "canvas")], "7"),
             &artifacts,
             &root,
             "7",
@@ -867,7 +873,7 @@ mod tests {
         assert_eq!(lossy["hops"][0]["network_block_missing"], "record_dropped");
         let cached_lossy = build(
             &ended,
-            &[gap(500_000_001, "network")],
+            &Drops::of(&[gap(500_000_001, "network")], "7"),
             &artifacts,
             &root,
             "7",
@@ -883,7 +889,7 @@ mod tests {
         );
         let late = build(
             &ended,
-            &[gap(2_000_000_001, "network")],
+            &Drops::of(&[gap(2_000_000_001, "network")], "7"),
             &artifacts,
             &root,
             "7",

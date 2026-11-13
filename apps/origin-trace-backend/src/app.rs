@@ -178,6 +178,8 @@ pub struct App {
     analysis: Mutex<Option<VmDocumentsCache>>,
     /// Cursors of the current cross-reference selection; one entry only.
     xrefs: Arc<crate::xrefs::Cursors>,
+    /// The store's drop gaps, extended only over appended bytes.
+    gaps: Arc<crate::gap_tally::GapTally>,
     /// The last flow graph and the store snapshot it describes.
     flow_graph: Arc<crate::flow_graph::Cache>,
     events: Arc<Mutex<event_window::EventWindowCache>>,
@@ -287,6 +289,7 @@ impl App {
             package_io: Arc::new(Semaphore::new(2)),
             analysis: Mutex::new(None),
             xrefs: Arc::default(),
+            gaps: Arc::default(),
             flow_graph: Arc::default(),
             events: Arc::new(Mutex::new(event_window::EventWindowCache::default())),
             artifact_lookup: Arc::new(Mutex::new(ArtifactLookupCache::default())),
@@ -1124,6 +1127,7 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
+                let gaps = self.gaps.clone();
                 let requests = self.requests.clone();
                 self.blocking(move || {
                     let range =
@@ -1134,10 +1138,10 @@ impl App {
                         event_query::read_request_records(&options.store, range, 1024, &filter)?;
                     let artifacts =
                         evidence::artifacts_named(&options.artifacts, &detail.records, |_| false)?;
-                    let gaps = session_gaps(&options.store, &session)?;
+                    let drops = gaps.drops(&options.store, &session)?;
                     let mut document = request_headers::build(
                         &detail.records,
-                        &gaps,
+                        &drops,
                         &artifacts,
                         &options.artifacts,
                         &session,
@@ -1168,6 +1172,7 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
+                let gaps = self.gaps.clone();
                 let requests = self.requests.clone();
                 self.blocking(move || {
                     let range =
@@ -1178,10 +1183,10 @@ impl App {
                         event_query::read_request_records(&options.store, range, 1024, &filter)?;
                     let artifacts =
                         evidence::artifacts_named(&options.artifacts, &detail.records, |_| false)?;
-                    let gaps = session_gaps(&options.store, &session)?;
+                    let drops = gaps.drops(&options.store, &session)?;
                     let mut document = request_cookies::build(
                         &detail.records,
-                        &gaps,
+                        &drops,
                         &artifacts,
                         &options.artifacts,
                         &session,
@@ -1215,6 +1220,7 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
+                let gaps = self.gaps.clone();
                 let requests = self.requests.clone();
                 self.blocking(move || {
                     // A cookie spans the session, so no one request's bytes bound it.
@@ -1244,10 +1250,10 @@ impl App {
                                 )
                             })
                     };
-                    let gaps = session_gaps(&options.store, &session)?;
+                    let drops = gaps.drops(&options.store, &session)?;
                     let mut document = request_cookies::provenance(
                         &detail.records,
-                        &gaps,
+                        &drops,
                         &artifacts,
                         &options.artifacts,
                         &session,
@@ -1936,8 +1942,10 @@ impl App {
                 self.options.signal_store.clone(),
             ];
             let mut index = self.requests.clone().lock_owned().await;
+            let gaps = self.gaps.clone();
             self.blocking(move || {
                 index.discard()?;
+                gaps.reset();
                 evidence::clear_stores(&paths)
             })
             .await?;
@@ -2344,14 +2352,6 @@ fn analysis_input_signature(path: &Path) -> String {
     let identity = String::new();
     evidence::resource_etag(path, &identity)
 }
-/// The session's gap records in the newest 64 MiB of events, of every
-/// category: a renderer's drop gap takes the category of the last record it
-/// drained, so a lost network record can hide behind a canvas gap.
-fn session_gaps(store: &Path, session: &str) -> Result<Vec<Value>> {
-    let filter = event_query::event_filter(&Query::new(&format!("session_id={session}&type=gap")))?;
-    Ok(event_query::read_request_records(store, None, 5000, &filter)?.records)
-}
-
 fn matches_etag(headers: &HeaderMap, etag: Option<&str>) -> bool {
     etag.is_some_and(|tag| headers.get("if-none-match").and_then(|v| v.to_str().ok()) == Some(tag))
 }

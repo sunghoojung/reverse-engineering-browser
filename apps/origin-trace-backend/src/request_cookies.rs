@@ -372,11 +372,11 @@ fn parent_key(event: &Value) -> (u64, String) {
     )
 }
 
-/// Cookie lists of `request_id` in `session_id`, grouped by hop. `gaps` are
-/// the session's gap records, which say whether a list may have been lost.
+/// Cookie lists of `request_id` in `session_id`, grouped by hop. `drops` are
+/// the session's, which say whether a list may have been lost.
 pub fn build(
     events: &[Value],
-    gaps: &[Value],
+    drops: &Drops,
     artifacts: &[Value],
     root: &Path,
     session: &str,
@@ -418,7 +418,7 @@ pub fn build(
     let (provisional, process) = provisional_hops(events, session, request);
     let lifecycle = lifecycle_of(events, session, request, process);
     let dropped = span_of(events, session, request, process)
-        .is_some_and(|(first, last)| Drops::of(gaps, session).during(first, last, lifecycle.ended));
+        .is_some_and(|(first, last)| drops.during(first, last, lifecycle.ended));
     let last = provisional.iter().next_back().copied();
     for hop in &provisional {
         hops.entry(*hop).or_default();
@@ -649,7 +649,7 @@ pub type IndexedIdentities = (
 /// Everything in `events` that touched cookie `name` in `session_id`.
 pub fn provenance(
     events: &[Value],
-    gaps: &[Value],
+    drops: &Drops,
     artifacts: &[Value],
     root: &Path,
     session: &str,
@@ -817,7 +817,7 @@ pub fn provenance(
             _ => {}
         }
     }
-    records_dropped = Drops::of(gaps, session).between(oldest, None);
+    records_dropped = drops.between(oldest, None);
     // A sent value equal to a script write's value names that write.
     for item in &mut sent_with {
         let written: Vec<Value> = scripts
@@ -1033,7 +1033,7 @@ mod tests {
             ),
         ];
         events[1]["frame_id"] = json!("99");
-        let result = build(&events, &[], &artifacts, &root, "7", "17");
+        let result = build(&events, &Drops::default(), &artifacts, &root, "7", "17");
         assert_eq!(result["unattached_records"], 1);
         assert_eq!(result["malformed_records"], json!(["15"]));
         let hop = &result["hops"][0];
@@ -1078,7 +1078,7 @@ mod tests {
         hops.push(record("request_headers", 22, 11, &provisional, "0"));
         hops.push(json!({"session_id":"7","request_id":"17","category":"network",
             "type":"request_failed","process_id":42,"sequence_number":"23","monotonic_time_ns":"23","flags":0}));
-        let missing = build(&hops, &[], &artifacts, &root, "7", "17");
+        let missing = build(&hops, &Drops::default(), &artifacts, &root, "7", "17");
         assert_eq!(missing["hops"][1]["hop"], 1);
         assert_eq!(missing["hops"][1]["sent_missing"], "failed");
         assert_eq!(missing["hops"][1]["received_missing"], Value::Null);
@@ -1097,19 +1097,34 @@ mod tests {
             &list_payload(true, 3, b"", 0, 0, 1),
             "0",
         ));
-        let received = build(&sent_only, &[], &artifacts, &root, "7", "17");
+        let received = build(&sent_only, &Drops::default(), &artifacts, &root, "7", "17");
         assert_eq!(received["hops"][0]["received_missing"], "no_raw_response");
         // A drop while it ran makes the absent response list unsure.
         let gap = json!({"session_id":"7","type":"gap","category":"canvas","process_id":42,
             "sequence_number":"40","monotonic_time_ns":"12","payload":hex::encode("1"),
             "payload_truncated":false});
-        let lossy = build(&sent_only, &[gap], &artifacts, &root, "7", "17");
+        let lossy = build(
+            &sent_only,
+            &Drops::of(&[gap], "7"),
+            &artifacts,
+            &root,
+            "7",
+            "17",
+        );
         assert_eq!(lossy["hops"][0]["received_missing"], "record_dropped");
         assert_eq!(lossy["hops"][1]["received_missing"], "failed");
         assert_eq!(received["hops"][1]["sent_missing"], Value::Null);
         assert_eq!(received["hops"][1]["received_missing"], "failed");
 
-        let origin = provenance(&events, &[], &artifacts, &root, "7", "_abck", &no_index);
+        let origin = provenance(
+            &events,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "_abck",
+            &no_index,
+        );
         assert_eq!(
             origin["set_by"][0]["exclusion_reasons"],
             json!(["samesite_none_insecure"])
@@ -1125,7 +1140,15 @@ mod tests {
         );
         assert_eq!(origin["lists_read"], 2);
         assert!(!origin.to_string().contains("token-"));
-        let none = provenance(&events, &[], &artifacts, &root, "7", "pref", &no_index);
+        let none = provenance(
+            &events,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "pref",
+            &no_index,
+        );
         assert_eq!(none["sent_with"][0]["blocked"], true);
         assert_eq!(none["script"], json!([]));
         let _ = std::fs::remove_dir_all(&root);
@@ -1190,7 +1213,15 @@ mod tests {
                 "0",
             ),
         ];
-        let origin = provenance(&events, &[], &[], &root, "7", "_abck", &no_index);
+        let origin = provenance(
+            &events,
+            &Drops::default(),
+            &[],
+            &root,
+            "7",
+            "_abck",
+            &no_index,
+        );
         assert_eq!(origin["malformed_records"], json!([]));
         assert_eq!(origin["script"].as_array().unwrap().len(), 1);
         let read = &origin["script"][0];
@@ -1205,7 +1236,15 @@ mod tests {
                 "unrecorded_names": 3, "unnamed_store_reads": 0, "records_dropped": 0})
         );
         // Only reads that named every cookie leave the coverage complete.
-        let named = provenance(&events[..2], &[], &[], &root, "7", "_abck", &no_index);
+        let named = provenance(
+            &events[..2],
+            &Drops::default(),
+            &[],
+            &root,
+            "7",
+            "_abck",
+            &no_index,
+        );
         assert_eq!(named["read_coverage"]["complete"], true);
         // cookieStore.getAll() and get({url}) name no cookie, so they may have
         // read this one; a dropped record may have named it.
@@ -1216,13 +1255,21 @@ mod tests {
         store[16..24].fill(0);
         store[72..104].fill(0);
         unnamed.push(record("script_cookie", 10, 0, &store, "0"));
-        let coverage = provenance(&unnamed, &[], &[], &root, "7", "_abck", &no_index);
+        let coverage = provenance(
+            &unnamed,
+            &Drops::default(),
+            &[],
+            &root,
+            "7",
+            "_abck",
+            &no_index,
+        );
         assert_eq!(coverage["malformed_records"], json!([]));
         assert_eq!(coverage["read_coverage"]["unnamed_store_reads"], 3);
         assert_eq!(coverage["read_coverage"]["complete"], false);
         assert_eq!(coverage["script"].as_array().unwrap().len(), 1);
         // ...and the empty name still lists it, as its own read.
-        let empty = provenance(&unnamed, &[], &[], &root, "7", "", &no_index);
+        let empty = provenance(&unnamed, &Drops::default(), &[], &root, "7", "", &no_index);
         assert_eq!(empty["script"].as_array().unwrap().len(), 1);
         // A full queue may have dropped a record that named it, in a gap of any
         // category: a renderer's gap takes the category of the last record it
@@ -1239,7 +1286,7 @@ mod tests {
         let window = &events[..2];
         let lost = provenance(
             window,
-            &[gap(11, "6", "canvas", "2")],
+            &Drops::of(&[gap(11, "6", "canvas", "2")], "7"),
             &[],
             &root,
             "7",
@@ -1250,7 +1297,7 @@ mod tests {
         assert_eq!(lost["read_coverage"]["complete"], false);
         let older = provenance(
             window,
-            &[gap(11, "4", "canvas", "2")],
+            &Drops::of(&[gap(11, "4", "canvas", "2")], "7"),
             &[],
             &root,
             "7",
@@ -1259,11 +1306,27 @@ mod tests {
         );
         assert_eq!(older["read_coverage"]["complete"], true);
         let reason = gap(11, "6", "network", "service_worker_end_lost");
-        let kept = provenance(window, &[reason], &[], &root, "7", "_abck", &no_index);
+        let kept = provenance(
+            window,
+            &Drops::of(&[reason], "7"),
+            &[],
+            &root,
+            "7",
+            "_abck",
+            &no_index,
+        );
         assert_eq!(kept["read_coverage"]["complete"], true);
         let mut other = gap(11, "6", "canvas", "2");
         other["session_id"] = json!("8");
-        let elsewhere = provenance(window, &[other], &[], &root, "7", "_abck", &no_index);
+        let elsewhere = provenance(
+            window,
+            &Drops::of(&[other], "7"),
+            &[],
+            &root,
+            "7",
+            "_abck",
+            &no_index,
+        );
         assert_eq!(elsewhere["read_coverage"]["complete"], true);
         // Unrecorded names add up across read records.
         let mut twice = events[..2].to_vec();
@@ -1281,7 +1344,15 @@ mod tests {
             &read_payload(3, b"", true, 1, 2),
             "0",
         ));
-        let summed = provenance(&twice, &[], &[], &root, "7", "_abck", &no_index);
+        let summed = provenance(
+            &twice,
+            &Drops::default(),
+            &[],
+            &root,
+            "7",
+            "_abck",
+            &no_index,
+        );
         assert_eq!(summed["read_coverage"]["reads_with_unrecorded_names"], 2);
         assert_eq!(summed["read_coverage"]["unrecorded_names"], 5);
         // A read record has no name, and a name read is never recorded alone.
@@ -1354,7 +1425,15 @@ mod tests {
             record("script_identity", 6, 5, &identity, "0"),
         ];
         events[1]["request_id"] = json!("0");
-        let origin = provenance(&events, &[], &artifacts, &root, "7", "sid", &no_index);
+        let origin = provenance(
+            &events,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "sid",
+            &no_index,
+        );
         let stack = &origin["script"][0]["stack"];
         let digest = hex::encode(Sha256::digest(&walked));
         assert_eq!(
@@ -1384,7 +1463,15 @@ mod tests {
             },
             "0",
         );
-        let origin = provenance(&events, &[], &artifacts, &root, "7", "sid", &no_index);
+        let origin = provenance(
+            &events,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "sid",
+            &no_index,
+        );
         let stack = &origin["script"][0]["stack"];
         assert_eq!(
             (stack["digest"].clone(), stack["frames_retained"].clone()),
@@ -1406,18 +1493,40 @@ mod tests {
                 false,
             )
         };
-        let found = provenance(&without, &[], &artifacts, &root, "7", "sid", &from_index);
+        let found = provenance(
+            &without,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "sid",
+            &from_index,
+        );
         assert_eq!(resolution_of(&found)["status"], "resolved");
         // An index that cannot answer for every identity leaves it unknown.
-        let unknown = provenance(&without, &[], &artifacts, &root, "7", "sid", &|_| {
-            (HashMap::new(), false)
-        });
+        let unknown = provenance(
+            &without,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "sid",
+            &|_| (HashMap::new(), false),
+        );
         assert_eq!(
             resolution_of(&unknown)["reason"],
             "script_identity_outside_scan"
         );
         // Only a whole-store answer can say it is missing.
-        let missing = provenance(&without, &[], &artifacts, &root, "7", "sid", &no_index);
+        let missing = provenance(
+            &without,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "sid",
+            &no_index,
+        );
         assert_eq!(resolution_of(&missing)["reason"], "script_identity_missing");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1467,7 +1576,15 @@ mod tests {
             record("script_identity", 7, 0, &identity(worker, 4, 0x5157), "0"),
         ];
         events[0]["frame_id"] = json!(0x5157u64.to_string());
-        let origin = provenance(&events, &[], &artifacts, &root, "7", "sid", &no_index);
+        let origin = provenance(
+            &events,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "sid",
+            &no_index,
+        );
         let script = &origin["script"][0];
         assert_eq!(script["thread"], "service_worker");
         let resolution = &script["stack"]["frames"][0]["resolution"];

@@ -982,6 +982,21 @@ selectedTraffic = {...selectedTraffic, status: 404};
 trafficUI.renderTrafficDetails(details, selectedTraffic);
 assert.equal(details.querySelector(".traffic-general"), generalSection, "Status updates reuse the General view");
 assert.match(details.textContent, /404/);
+{
+  // Before a request index answer holds the row, the window's Pending says so;
+  // End lost, once the index names it, needs no qualifier.
+  const status = () => details.querySelector(".traffic-general").querySelectorAll(".traffic-general-value")[3].textContent;
+  const waiting = {...selectedTraffic, status: "pending", origin: "live"};
+  trafficUI.renderTrafficDetails(details, waiting, "", null, true);
+  assert.equal(status(), "Pending · not yet checked against the request index");
+  trafficUI.renderTrafficDetails(details, {...waiting, provisionalStatus: 200}, "", null, true);
+  assert.equal(status(), "Pending · provisional HTTP 200 · not yet checked against the request index");
+  trafficUI.renderTrafficDetails(details, waiting, "", null, false);
+  assert.equal(status(), "Pending", "A row the index answered for reads Pending alone");
+  trafficUI.renderTrafficDetails(details, {...waiting, endLost: true, status: "incomplete"}, "", null, true);
+  assert.equal(status(), "End lost");
+  trafficUI.renderTrafficDetails(details, selectedTraffic);
+}
 const legacy = uiRequest("legacy", {exchange: {response: {state: "available", text: "legacy-body-needle", headers: [["x-legacy", "needle"]]}}});
 assert.equal(trafficUI.trafficSearchRequests([legacy], "legacy-body-needle").matches.size, 0, "Search ignores CDP-era exchange bodies");
 assert.equal(trafficUI.trafficSearchRequests([legacy], "/legacy").matches.size, 1);

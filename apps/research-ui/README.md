@@ -1507,7 +1507,14 @@ Protocol is available from the header menu.
   Pending has no response yet, and No loader means only the renderer recorded
   the request. End lost means the request's service worker ended it but the
   renderer had reused the slot holding its start, so its outcome is unknown
-  (a `service_worker_end_lost` gap). Finished is a memory-cache reuse whose
+  (a `service_worker_end_lost` gap). That gap names its row without a request
+  ID and the network window keeps no gap records, so only the request index
+  knows End lost, as it alone knows a store copy's tabs and every row's body
+  answer. Each index answer, first or later, copies those facts onto the rows
+  kept for selection, and the strip and inspector follow it as the table does.
+  A row selected before any index answer has held it reads `Pending · not yet
+  checked against the request index` on General, with the same note as the
+  strip's tooltip, until one does. Finished is a memory-cache reuse whose
   resource carried no HTTP status, such as an MHTML archive resource; it
   completed. Once `response_started` arrives the row
   shows that HTTP code, and until a terminal record follows, Time reads a dash

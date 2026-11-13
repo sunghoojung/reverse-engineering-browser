@@ -697,7 +697,9 @@ function trafficOriginLabel(request) {
 }
 
 // Make capture coverage explicit instead of rendering panes that stay empty.
-function renderTrafficDetails(container, request, notice = '', targetView = null) {
+// `unchecked`: no request index answer has held this row yet. The newest
+// window keeps no gap records, so its Pending cannot yet rule out End lost.
+function renderTrafficDetails(container, request, notice = '', targetView = null, unchecked = false) {
   const key = JSON.stringify([request?.origin, request?.id, notice]);
   if (container.dataset.selection !== key) {
     container.dataset.selection = key;
@@ -721,7 +723,8 @@ function renderTrafficDetails(container, request, notice = '', targetView = null
     request.documentUrl ?? 'Not captured', request.method, request.failed ? 'Failed' : request.endLost ? 'End lost'
       : request.status === 'finished' ? `Finished · no HTTP status${request.staticData ? ' (archive resource)' : ''}`
       : request.status === 'pending'
-      ? (Number.isInteger(request.provisionalStatus) ? `Pending · provisional HTTP ${request.provisionalStatus}` : 'Pending')
+      ? `${Number.isInteger(request.provisionalStatus) ? `Pending · provisional HTTP ${request.provisionalStatus}` : 'Pending'}${
+        unchecked ? ' · not yet checked against the request index' : ''}`
       : request.status, trafficOriginLabel(request), request.id,
     trafficTabText(request),
     `${request.endLost ? 'A service worker ended this request without a response, but the renderer had already reused the slot that held its start, so its outcome was not recorded. ' : ''}${request.raceNetwork ? 'This request took a service worker race route, so the worker and the network both handled it: the status is what the page received, which the worker or the network may have answered (the records do not say which), and the browser records are the network attempt, whose status and timing may differ. ' : ''}${request.memoryCache ? `${request.staticData

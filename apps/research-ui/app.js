@@ -1475,8 +1475,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.sessionContent.hidden = !live || !retained.length;
         // The launch turned these on; a browser built before them ignores the
         // switch, so each row and body still says what was actually captured.
-        // The limits the launcher wrote into the address, so the session's
-        // budgets stay visible after the start panel closes.
+        // The limits from the session context (capture_options.content_limits),
+        // so the session's budgets stay visible after the start panel closes.
         const limits = state.requestContentCaptureEnabled ? state.sessionContentLimits : null;
         const mib = value => `${value.toLocaleString('en-US')} MiB`;
         const budgets = limits?.request_content_budget_mib && limits?.response_body_budget_mib

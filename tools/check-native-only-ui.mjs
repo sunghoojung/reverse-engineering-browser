@@ -333,7 +333,12 @@ shell('live', true, true);
 assert.equal(contentLabel.hidden, false);
 assert.equal(contentLabel.textContent, 'Content capture');
 assert.match(contentLabel.getAttribute('title'), /request paths, queries and bodies, and response bodies, up to 16 MiB each, request and response headers, cookies and Canvas images/);
-assert.doesNotMatch(contentLabel.getAttribute('title'), /Budgets:/, 'an address without limits names no budget');
+assert.doesNotMatch(contentLabel.getAttribute('title'), /Budgets:/, 'a session context that names no limits names no budget');
+// The session context is the only source of a budget's size; the workspace
+// address carries none, and nothing says it does.
+for (const [file, source] of sources.filter(([file]) => ['app.js', 'app_state.js', 'traffic_view.js'].includes(file))) {
+  assert.doesNotMatch(source, /budget_mib=|address\b[^\n]*(?:budget|limit)|(?:budget|limit)[^\n]*\baddress\b/i, `${file} takes no budget from the address`);
+}
 runInContext(`state.sessionContentLimits = {request_content_budget_mib: 1024, response_body_budget_mib: 2048, response_media: true}`, context);
 shell('live', true, true);
 assert.match(contentLabel.getAttribute('title'), /kept locally\. Budgets: 1,024 MiB of request content and 2,048 MiB of response bodies; media and fonts kept\. Each Traffic row/);

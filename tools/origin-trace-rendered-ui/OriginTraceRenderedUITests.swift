@@ -2760,6 +2760,56 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // Run offline: the dialog names the local sandbox above every field, sends
+  // nothing before the confirmation, and shows a stubbed import's trap, then a
+  // return, with captured export names kept as text.
+  @MainActor
+  func test42RunOfflineInSources() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem]", containing: "offline-runner.wasm")
+      try await ui.waitUntil("document.querySelector('#source-run-offline')?.hidden === false", "Run offline is offered for a captured WASM artifact")
+      try await ui.click("#source-more > summary")
+      try await ui.click("#source-run-offline")
+      try await ui.waitUntil("document.querySelector('.wasm-run-dialog')?.open === true && document.querySelectorAll('.wasm-run-dialog option').length === 2", "the dialog lists the module's two functions")
+      let opened = try await ui.json("""
+        (() => { const d = document.querySelector('.wasm-run-dialog'), run = [...d.querySelectorAll('button')].find(b => b.textContent === 'Run');
+          return {banner: d.querySelector('.wasm-run-banner').textContent, first: d.querySelector('.wasm-run-banner') === d.querySelector('form').children[1],
+            options: [...d.querySelectorAll('option')].map(o => o.textContent), runDisabled: run.disabled}; })()
+        """)
+      XCTAssertTrue((opened["banner"] as? String ?? "").contains("local sandbox"), "\(size.name): the sandbox is named: \(opened)")
+      XCTAssertEqual(opened["first"] as? Bool, true, "\(size.name): the banner sits above every field")
+      XCTAssertEqual(opened["options"] as? [String], ["add (func 1)", "stamp<b> (func 2)"], "\(size.name): export names stay text")
+      XCTAssertEqual(opened["runDisabled"] as? Bool, true, "\(size.name): Run waits for the confirmation")
+      try await assertLayout(ui, ".wasm-run-dialog", "\(size.name) run offline dialog")
+      try await ui.screenshot("run-offline-dialog-\(size.name)")
+      _ = try await ui.value("""
+        (() => { const d = document.querySelector('.wasm-run-dialog'); d.querySelector('select').value = '2';
+          const args = [...d.querySelectorAll('.wasm-run-field')].find(f => f.querySelector('.wasm-run-label').textContent === 'Arguments').querySelector('input');
+          args.value = 'i32 1, i32 2'; return true; })()
+        """)
+      try await ui.click(".wasm-run-confirm input")
+      try await ui.click(".wasm-run-actions button", containing: "Run")
+      try await ui.waitUntil("(document.querySelector('.wasm-run-outcome')?.textContent ?? '').includes('Import trapped')", timeout: 30, "an unstubbed import traps")
+      let trapped = try await ui.value("document.querySelector('.wasm-run-output').textContent") as? String ?? ""
+      XCTAssertTrue(trapped.contains("env.now (func 0)") && trapped.contains("trapped (no stub value)"), "\(size.name): the import call is recorded: \(trapped)")
+      _ = try await ui.value("""
+        (() => { const d = document.querySelector('.wasm-run-dialog');
+          d.querySelector('textarea').value = '[{"module":"env","field":"now","results":[{"type":"f64","value":"1000"}]}]'; return true; })()
+        """)
+      try await ui.click(".wasm-run-actions button", containing: "Run")
+      try await ui.waitUntil("(document.querySelector('.wasm-run-outcome')?.textContent ?? '').startsWith('Returned')", timeout: 30, "the stubbed run returns")
+      let returned = try await ui.value("document.querySelector('.wasm-run-output').textContent") as? String ?? ""
+      XCTAssertTrue(returned.contains("i32 1001"), "\(size.name): the result is shown: \(returned)")
+      try await assertLayout(ui, ".wasm-run-dialog", "\(size.name) run offline result")
+      try await assertInert(ui, "\(size.name) run offline result")
+      try await ui.screenshot("run-offline-result-\(size.name)")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.querySelector('.wasm-run-dialog')?.open === false", "Escape closes the dialog")
+    }
+  }
+
   // One resident-size sample from `ps`: the app, its web content process, the
   // backend and the agent's tool server. Values are KiB.
   @MainActor

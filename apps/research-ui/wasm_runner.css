@@ -1,0 +1,37 @@
+/* Run offline dialog (wasm_runner.js). The sandbox banner stays above every
+   field so the researcher reads what runs before choosing what to run. */
+.wasm-run-dialog { width: min(640px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 0; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 16px 48px var(--shadow); overflow: hidden; }
+.wasm-run-dialog[open] { display: flex; flex-direction: column; }
+.wasm-run-dialog::backdrop { background: color-mix(in srgb, var(--bg) 70%, transparent); }
+.wasm-run-dialog :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.wasm-run-form { min-height: 0; overflow: auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 16px 20px; font-size: 12px; }
+.wasm-run-form h2 { margin: 0; font-size: 16px; font-weight: 500; }
+.wasm-run-form h3 { margin: 6px 0 0; font-size: 12px; font-weight: 600; }
+.wasm-run-banner { margin: 0; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--amber) 55%, var(--line)); border-radius: 6px; background: color-mix(in srgb, var(--amber) 12%, var(--panel)); line-height: 1.45; }
+.wasm-run-module { margin: 0; color: var(--muted); font: 11px var(--mono); overflow-wrap: anywhere; }
+.wasm-run-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.wasm-run-label { color: var(--muted); font-size: 11px; }
+.wasm-run-hint { color: var(--faint); font-size: 11px; line-height: 1.4; }
+.wasm-run-field input, .wasm-run-field select, .wasm-run-field textarea { width: 100%; min-width: 0; max-width: 100%; min-height: 30px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); background: var(--panel-2); font: 11px var(--mono); }
+.wasm-run-field textarea { resize: vertical; }
+.wasm-run-limits { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.wasm-run-check { display: flex; align-items: flex-start; gap: 8px; line-height: 1.4; }
+.wasm-run-check input { flex: none; margin: 2px 0 0; }
+.wasm-run-confirm { font-weight: 600; }
+.wasm-run-error { margin: 0; color: var(--red); overflow-wrap: anywhere; }
+.wasm-run-error[hidden], .wasm-run-output[hidden] { display: none; }
+.wasm-run-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.wasm-run-output { display: grid; gap: 6px; min-width: 0; padding-top: 10px; border-top: 1px solid var(--line-soft); }
+.wasm-run-outcome { margin: 0; font-weight: 600; }
+.wasm-run-outcome[data-status="returned"] { color: var(--green); }
+.wasm-run-outcome:not([data-status="returned"]) { color: var(--amber); }
+.wasm-run-message { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.wasm-run-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 12px; margin: 0; }
+.wasm-run-facts dt { color: var(--muted); }
+.wasm-run-facts dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
+.wasm-run-calls { width: 100%; border-collapse: collapse; table-layout: fixed; font: 11px var(--mono); }
+.wasm-run-calls th { color: var(--muted); font: 500 11px var(--sans); text-align: left; }
+.wasm-run-calls th, .wasm-run-calls td { padding: 3px 6px; border-bottom: 1px solid var(--line-soft); overflow-wrap: anywhere; vertical-align: top; }
+.wasm-run-calls th:first-child, .wasm-run-calls td:first-child { width: 3em; }
+.wasm-run-reads { margin: 0; padding-left: 16px; font: 11px var(--mono); overflow-wrap: anywhere; }
+@media (max-width: 520px) { .wasm-run-limits { grid-template-columns: repeat(2, minmax(0, 1fr)); } .wasm-run-form { padding: 14px; } }

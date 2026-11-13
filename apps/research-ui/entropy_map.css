@@ -17,20 +17,21 @@
   --map-kind-unknown: #393552;
 }
 :root[data-theme="light"] {
-  --map-entropy-0: #f1f3f4;
-  --map-entropy-1: #d2e3fc;
-  --map-entropy-2: #8ab4f8;
-  --map-entropy-3: #4285f4;
-  --map-entropy-4: #1a73e8;
-  --map-high-low: #e37400;
-  --map-high-top: #d93025;
-  --map-kind-code: #1a73e8;
-  --map-kind-data: #b06000;
-  --map-kind-string: #a31515;
-  --map-kind-structure: #80868b;
-  --map-kind-custom: #7b1fa2;
-  --map-kind-undecoded: #d93025;
-  --map-kind-unknown: #e8eaed;
+  /* Rosé Pine Dawn: overlay to iris for the ramp, Dawn accents for kinds. */
+  --map-entropy-0: #f2e9e1;
+  --map-entropy-1: #ddd0e0;
+  --map-entropy-2: #bba8cc;
+  --map-entropy-3: #977fb2;
+  --map-entropy-4: #765e92;
+  --map-high-low: #ea9d34;
+  --map-high-top: #b4637a;
+  --map-kind-code: #56949f;
+  --map-kind-data: #ea9d34;
+  --map-kind-string: #d7827e;
+  --map-kind-structure: #9893a5;
+  --map-kind-custom: #907aa9;
+  --map-kind-undecoded: #b4637a;
+  --map-kind-unknown: #dfdad9;
 }
 
 /* The view is the size container, so its grid and square follow the editor pane

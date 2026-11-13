@@ -424,6 +424,8 @@ function createSourceTree(options) {
     const kind = file ? options.kindLabel(node.source) : null;
     icon.className = file ? 'source-file-icon' : 'source-tree-icon';
     icon.dataset.icon = node.icon;
+    // eval and new Function code takes the dynamic color, like its group.
+    if (file) icon.dataset.origin = node.source.capture_origin ?? ''; else delete icon.dataset.origin;
     icon.textContent = file ? kind?.[0] ?? '?' : '';
     icon.title = file ? kind?.[1] ?? node.source.kind : '';
     const count = nav.counts?.get(node.key) ?? node.count;

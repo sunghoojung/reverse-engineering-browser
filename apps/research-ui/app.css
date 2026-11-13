@@ -4,7 +4,9 @@
         --bg: #232136;
         --chrome: #232136;
         --panel: #2a273f;
-        --panel-2: #2a283e;
+        /* Planes step base, surface, raised, overlay, as Binary Ninja's theme
+           guide asks: lists sit on surface, hover and zebra one step up. */
+        --panel-2: #2e2b45;
         --panel-3: #393552;
         --line: #44415a;
         --line-soft: #393552;
@@ -12,12 +14,80 @@
         --muted: #b0abc7;
         --faint: #908caa;
         --accent: #c4a7e7;
-        --accent-soft: #44415a;
+        /* Iris over surface, apart from --line so a selected chip keeps its edge. */
+        --accent-soft: #403957;
         --cyan: #9ccfd8;
         --green: #9ccfd8;
         --amber: #f6c177;
         --red: #eb6f92;
         --blue: #9ccfd8;
+        /* The six accents by name. Pine is 3.9:1 on --panel, so text that
+           means pine uses --rp-pine-ink, the Increase Contrast keyword color. */
+        --rp-love: #eb6f92;
+        --rp-gold: #f6c177;
+        --rp-rose: #ea9a97;
+        --rp-pine: #3e8fb0;
+        --rp-pine-ink: #4fa0c1;
+        --rp-foam: #9ccfd8;
+        --rp-iris: #c4a7e7;
+        /* Fills for markers, bars and dots. In Moon they are the accents; the
+           light theme gives them lighter Dawn hues that still reach 3:1. */
+        --rp-love-fill: var(--rp-love);
+        --rp-gold-fill: var(--rp-gold);
+        --rp-rose-fill: var(--rp-rose);
+        --rp-pine-fill: var(--rp-pine-ink);
+        --rp-foam-fill: var(--rp-foam);
+        --rp-iris-fill: var(--rp-iris);
+        /* One meaning per color across every workspace, following the Flow
+           graph's kinds: scripts foam, WebAssembly iris, dynamic code gold,
+           requests rose. Documents take pine; a socket is a request. Styles,
+           images, fonts and media stay quiet so the evidence kinds stand out. */
+        --kind-document: var(--rp-pine-ink);
+        --kind-script: var(--rp-foam);
+        --kind-wasm: var(--rp-iris);
+        --kind-dynamic: var(--rp-gold);
+        --kind-request: var(--rp-rose);
+        --kind-quiet: var(--faint);
+        --kind-document-fill: var(--rp-pine-fill);
+        --kind-script-fill: var(--rp-foam-fill);
+        --kind-wasm-fill: var(--rp-iris-fill);
+        --kind-dynamic-fill: var(--rp-gold-fill);
+        --kind-request-fill: var(--rp-rose-fill);
+        /* Requests that carry a body or change state read gold, DELETE love;
+           GET, HEAD and OPTIONS stay neutral. */
+        --method-safe: var(--muted);
+        --method-mutating: var(--rp-gold);
+        --method-delete: var(--rp-love);
+        /* Status color marks exceptions only: 2xx is plain text. */
+        --status-success: var(--text);
+        --status-redirect: var(--rp-iris);
+        --status-client-error: var(--rp-gold);
+        --status-server-error: var(--rp-love);
+        /* Connection, availability and notice state. */
+        --state-ok: var(--rp-foam);
+        --state-warn: var(--rp-gold);
+        --state-danger: var(--rp-love);
+        --state-idle: var(--faint);
+        /* Fingerprint surface families, drawn only as small markers so they
+           tell families apart without competing with the kind colors. */
+        --family-canvas: var(--rp-rose-fill);
+        --family-webgl: var(--rp-iris-fill);
+        --family-web-audio: var(--rp-gold-fill);
+        --family-navigator: var(--rp-foam-fill);
+        --family-storage: var(--rp-pine-fill);
+        --family-webrtc: var(--rp-love-fill);
+        --family-permissions: var(--faint);
+        --family-runtime: var(--line);
+        /* Analyzer evidence classes read by strength: an observed claim is
+           the ok color, weaker classes step down in brightness, and only
+           unknown and contradicted, which need attention, take a hue. */
+        --evidence-observed: var(--rp-foam);
+        --evidence-inferred: var(--text);
+        --evidence-correlated: var(--muted);
+        --evidence-heuristic: var(--muted);
+        --evidence-unknown: var(--rp-gold);
+        --evidence-contradicted: var(--rp-love);
+        --vm-opcode-ink: var(--syntax-number);
         /* Code: rose-pine/vscode 2.15.2 themes/rose-pine-moon-color-theme.json (MIT). */
         --code-font: Menlo, Monaco, "Courier New", monospace;
         --code-bg: #232136;
@@ -50,24 +120,44 @@
       }
 
       :root[data-theme="light"] {
+        /* Rosé Pine Dawn: the same planes as the code view, so the editor
+           and the shell read as one surface. Dawn's accents are 2-4:1 on
+           its base, too faint for text, so each accent here is its Dawn hue
+           darkened to at least 4.6:1 on --panel-3. */
         color-scheme: light;
-        --bg: #ffffff;
-        --chrome: #f1f3f4;
-        --panel: #ffffff;
-        --panel-2: #f8f9fa;
-        --panel-3: #e8eaed;
-        --line: #c4c7c5;
-        --line-soft: #e0e0e0;
-        --text: #202124;
-        --muted: #5f6368;
-        --faint: #80868b;
-        --accent: #1a73e8;
-        --accent-soft: #d2e3fc;
-        --cyan: #1a73e8;
-        --green: #188038;
-        --amber: #b06000;
-        --red: #d93025;
-        --blue: #1a73e8;
+        --bg: #faf4ed;
+        --chrome: #faf4ed;
+        --panel: #fffaf3;
+        --panel-2: #f4ede8;
+        --panel-3: #f2e9e1;
+        --line: #cecacd;
+        --line-soft: #dfdad9;
+        --text: #575279;
+        --muted: #66627e;
+        --faint: #6a6682;
+        --accent: #765e92;
+        --accent-soft: #ebe4ee;
+        --cyan: #416f77;
+        --green: #416f77;
+        --amber: #945c0f;
+        --red: #a14d65;
+        --blue: #286983;
+        --rp-love: #a14d65;
+        --rp-gold: #945c0f;
+        /* Rose leans terracotta and love raspberry, so a request never reads
+           as a failure. Fills are Dawn hues at 3:1 for markers and bars. */
+        --rp-rose: #985544;
+        --rp-pine: #286983;
+        --rp-pine-ink: #286983;
+        --rp-foam: #416f77;
+        --rp-iris: #765e92;
+        --rp-love-fill: #b4637a;
+        --rp-gold-fill: #b77213;
+        --rp-rose-fill: #c9655f;
+        --rp-pine-fill: #286983;
+        --rp-foam-fill: #518b95;
+        --rp-iris-fill: #8f78a8;
+        --vm-opcode-ink: var(--rp-rose);
         /* Code: themes/rose-pine-dawn-color-theme.json. */
         --code-bg: #faf4ed;
         --code-text: #575279;
@@ -91,9 +181,9 @@
         --syntax-bracket-4: #56949f80;
         --syntax-bracket-5: #d7827e80;
         --syntax-bracket-6: #907aa980;
-        --selection: #0964d5;
-        --stripe: #f4f5f6;
-        --shadow: rgba(24, 31, 42, 0.15);
+        --selection: #dfdad9;
+        --stripe: #f4ede8;
+        --shadow: rgba(87, 82, 121, 0.16);
       }
 
       * { box-sizing: border-box; }
@@ -109,7 +199,7 @@
       button { cursor: pointer; }
 
       :focus-visible {
-        outline: 2px solid var(--cyan);
+        outline: 2px solid var(--accent);
         outline-offset: -2px;
       }
       [hidden] { display: none !important; }
@@ -2374,7 +2464,7 @@ var(--panel);
       .traffic-headers-section > summary { cursor: pointer; font: 600 12px/20px var(--sans); }
       .traffic-headers-section > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
       .traffic-headers-count { margin-left: 6px; color: var(--muted); font-weight: 400; }
-      .traffic-headers-note { margin: 6px 0 0; color: var(--muted); font: 12px/1.5 var(--sans); }
+      .traffic-headers-note { margin: 8px 12px 0; color: var(--muted); font: 12px/1.5 var(--sans); }
       /* A hop the network reported no cookie list for, with why. */
       .traffic-cookie-missing { padding: 8px 12px; border-bottom: 1px solid var(--line); }
       .traffic-cookie-missing > h3 { margin: 0; font: 600 12px/20px var(--sans); }
@@ -3591,12 +3681,12 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   --vm-focus: #c4a7e7; --vm-disabled-bg: #232136; --vm-disabled-fg: #908caa;
 }
 :root[data-theme="light"] #screen-vm {
-  --vm-action-bg: #1967d2; --vm-action-fg: #ffffff;
-  --vm-control-bg: #ffffff; --vm-control-fg: #202124; --vm-control-line: #c4c7c5;
-  --vm-selected-bg: #d2e3fc; --vm-selected-fg: #202124; --vm-selected-line: #1967d2;
-  --vm-change-bg: #fef7e0; --vm-change-fg: #8a4b00;
-  --vm-stop-bg: #fce8e6; --vm-stop-fg: #c5221f;
-  --vm-focus: #1967d2; --vm-disabled-bg: #f1f3f4; --vm-disabled-fg: #5f6368;
+  --vm-action-bg: #765e92; --vm-action-fg: #fffaf3;
+  --vm-control-bg: #fffaf3; --vm-control-fg: #575279; --vm-control-line: #cecacd;
+  --vm-selected-bg: #ebe4ee; --vm-selected-fg: #575279; --vm-selected-line: #765e92;
+  --vm-change-bg: #f8eddb; --vm-change-fg: #945c0f;
+  --vm-stop-bg: #f6e4e6; --vm-stop-fg: #a14d65;
+  --vm-focus: #765e92; --vm-disabled-bg: #f2e9e1; --vm-disabled-fg: #66627e;
 }
 #screen-vm :where(.vm-workspace-switch button, .vm-step-controls button, .vm-listing-pager button,
   .vm-panel-controls button, .vm-context-header button, .vm-execution-navigation > button,
@@ -4889,7 +4979,7 @@ input[type="file"]:hover::file-selector-button { background: var(--panel-3); }
 details.decoder-card > header p { margin-top: 0; }
 .tool-disclosure > summary { font-weight: 500; }
 .tool-disclosure[open] > summary, .tool-disclosure > summary:hover, .tool-detail-disclosure[open] > summary { color: var(--text); }
-.decoder-view-tabs button[aria-pressed="true"] { border-color: var(--line); background: var(--panel-3); color: var(--text); }
+.decoder-view-tabs button[aria-pressed="true"] { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: var(--accent-soft); color: var(--text); }
 .decoder-field-origin { border: 1px solid var(--line-soft); border-radius: 6px; background: var(--panel-2); }
 
 /* JWT trust state is meta text; only the signature state carries a dot. */
@@ -5235,3 +5325,129 @@ details.decoder-card > header p { margin-top: 0; }
 .request-stack-open { all: unset; cursor: pointer; color: var(--accent); overflow-wrap: anywhere; }
 .request-stack-open:hover { text-decoration: underline; }
 .request-stack-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+/* Color system. Every color keeps one meaning on every screen; the tokens are
+   defined with the palette at the top of this file. Kind colors follow the
+   Flow graph (scripts foam, WebAssembly and VM iris, dynamic code gold,
+   requests rose, documents pine); state colors say ready, caution or
+   failure; evidence classes step down in brightness. Rows that need no
+   attention stay neutral, so color marks what a researcher should notice,
+   as HTTP Toolkit's row markers and a disassembler's branch colors do. */
+
+/* Traffic ledger: a kind marker leads each name, Type and the verb take their
+   color, and the waterfall bar is drawn in the row's kind. */
+.request-row { --row-kind: var(--kind-quiet); --row-fill: var(--line); }
+.request-row[data-type="doc"] { --row-kind: var(--kind-document); --row-fill: var(--kind-document-fill); }
+.request-row[data-type="js"] { --row-kind: var(--kind-script); --row-fill: var(--kind-script-fill); }
+.request-row[data-type="wasm"] { --row-kind: var(--kind-wasm); --row-fill: var(--kind-wasm-fill); }
+.request-row:is([data-type="xhr"], [data-type="socket"]) { --row-kind: var(--kind-request); --row-fill: var(--kind-request-fill); }
+/* The marker is a bar on the row's left edge, inside the name cell's own
+   padding, so the name and host keep their width and consecutive rows form
+   one kind column. It covers the selection bar; selection shows in the fill. */
+.request-row > .request-name { position: relative; }
+.request-row > .request-name::before { content: ""; position: absolute; left: 0; top: 3px; bottom: 3px; width: 3px; border-radius: 0 2px 2px 0; background: var(--row-fill); }
+.request-row[data-type] > .request-type { --cell-ink: var(--row-kind); }
+.request-row:is([data-type="css"], [data-type="font"], [data-type="img"], [data-type="media"], [data-type="other"]) > .request-type { --cell-ink: var(--muted); }
+.request-row[data-method] > .request-method { --cell-ink: var(--method-safe); }
+.request-row[data-method="mutating"] > .request-method { --cell-ink: var(--method-mutating); font-weight: 600; }
+.request-row[data-method="delete"] > .request-method { --cell-ink: var(--method-delete); font-weight: 600; }
+.request-row > span.status-redirect { --cell-ink: var(--status-redirect); }
+.request-row > span.status-client { --cell-ink: var(--status-client-error); }
+.request-row > span:is(.status-server, .status-error) { --cell-ink: var(--status-server-error); }
+.request-row > span:is(.request-type, .request-method, .status-redirect, .status-client, .status-server, .status-error) { color: var(--cell-ink); }
+/* Hover and selection raise the row's surface; colored text moves 40% toward
+   the text color there, and meta text one step up, which keeps every kind,
+   status and host above 4.5:1. */
+.request-row:is(:hover, [aria-selected="true"]) > span:is(.request-type, .request-method, .status-redirect, .status-client, .status-server, .status-error) { color: color-mix(in srgb, var(--cell-ink) 60%, var(--text)); }
+.request-row[aria-selected="true"] .request-host { color: var(--muted); }
+.request-row > .request-waterfall .waterfall-bar:not(.is-pending) { background: var(--row-fill); }
+.request-row > .request-waterfall .waterfall-bar:not(.is-pending) .waterfall-wait { background: color-mix(in srgb, var(--panel) 60%, var(--row-fill)); }
+.request-row:focus-visible { outline: 1px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: -1px; }
+/* The overview counts every kind, so its bars stay neutral. */
+.overview-bar { background: color-mix(in srgb, var(--muted) 55%, transparent); }
+/* The selected request's verb and status read as they do in its row. */
+.method-pill[data-method="mutating"] { color: var(--method-mutating); }
+.method-pill[data-method="delete"] { color: var(--method-delete); }
+.status-pill.status-redirect { color: var(--status-redirect); }
+.status-pill.status-client { color: var(--status-client-error); }
+.status-pill.status-server { color: var(--status-server-error); }
+
+/* Sources file icons use the same kinds at low strength; eval and new
+   Function code takes the dynamic color of its group. */
+.source-file-icon[data-icon="js"] { --source-icon-tint: color-mix(in srgb, var(--kind-script-fill) 70%, var(--faint)); }
+.source-file-icon[data-icon="js"][data-origin="dynamic_javascript"] { --source-icon-tint: color-mix(in srgb, var(--kind-dynamic-fill) 70%, var(--faint)); }
+.source-file-icon[data-icon="wasm"] { --source-icon-tint: color-mix(in srgb, var(--kind-wasm-fill) 70%, var(--faint)); }
+.source-file-icon[data-icon="json"] { --source-icon-tint: color-mix(in srgb, var(--kind-request-fill) 70%, var(--faint)); }
+.source-file-icon[data-icon="html"] { --source-icon-tint: color-mix(in srgb, var(--kind-document-fill) 70%, var(--faint)); }
+.source-file-icon[data-icon="map"] { --source-icon-tint: var(--faint); }
+#screen-sources .source-tree-icon[data-icon="dynamic"] { --source-icon-tint: color-mix(in srgb, var(--kind-dynamic-fill) 70%, var(--faint)); }
+#screen-sources .source-tree-icon[data-icon="wasm-group"] { --source-icon-tint: color-mix(in srgb, var(--kind-wasm-fill) 70%, var(--faint)); }
+
+/* Fingerprinting: each surface family keeps one marker color across its
+   Overview card, its Activity filter and every operation row. Text, borders
+   and counts stay neutral; the marker alone tells families apart. */
+:is(.signal-surface-card[data-category="canvas"], .signal-event-row[data-category="canvas"], .signal-filters [data-signal-filter="canvas"]) { --family: var(--family-canvas); }
+:is(.signal-surface-card[data-category="webgl"], .signal-event-row[data-category="webgl"], .signal-filters [data-signal-filter="webgl"]) { --family: var(--family-webgl); }
+:is(.signal-surface-card[data-category="web_audio"], .signal-event-row[data-category="web_audio"], .signal-filters [data-signal-filter="web_audio"]) { --family: var(--family-web-audio); }
+:is(.signal-surface-card[data-category="navigator"], .signal-event-row[data-category="navigator"], .signal-filters [data-signal-filter="navigator"]) { --family: var(--family-navigator); }
+:is(.signal-surface-card[data-category="permissions"], .signal-event-row[data-category="permissions"], .signal-filters [data-signal-filter="permissions"]) { --family: var(--family-permissions); }
+:is(.signal-surface-card[data-category="storage"], .signal-event-row[data-category="storage"], .signal-filters [data-signal-filter="storage"]) { --family: var(--family-storage); }
+:is(.signal-surface-card[data-category="webrtc"], .signal-event-row[data-category="webrtc"], .signal-filters [data-signal-filter="webrtc"]) { --family: var(--family-webrtc); }
+:is(.signal-surface-card[data-category="runtime"], .signal-event-row[data-category="runtime"], .signal-filters [data-signal-filter="runtime"]) { --family: var(--family-runtime); }
+.signal-surface-card[data-category]::before { content: ""; flex: none; width: 8px; height: 8px; margin-right: -6px; border-radius: 2px; background: var(--family); }
+.signal-surface-card[data-category][data-present="false"]::before { background: var(--line-soft); box-shadow: inset 0 0 0 1px var(--line); }
+.signal-filters [data-signal-filter]:not([data-signal-filter="all"]) { display: inline-flex; align-items: center; gap: 6px; }
+.signal-filters [data-signal-filter]:not([data-signal-filter="all"])::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 2px; background: var(--family); }
+.signal-filters [data-signal-filter][data-empty="true"]::before { background: var(--line-soft); box-shadow: inset 0 0 0 1px var(--line); }
+.signal-event-row[data-category] .signal-category-badge { display: inline-flex; align-items: center; gap: 6px; }
+.signal-event-row[data-category] .signal-category-badge::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 2px; background: var(--family); }
+
+/* VM listings read like a disassembly: a quiet address column, opcode bytes
+   in the number color, the handler name as text and the evidence class by
+   strength, so an observed claim stands out from an inferred one. */
+#screen-vm .vm-handler-source { color: var(--faint); }
+#screen-vm .vm-handler-opcode { color: var(--vm-opcode-ink); }
+#screen-vm .vm-symbol-row::before { color: var(--kind-wasm); }
+#screen-vm .vm-handler-state[data-state="observed"] { color: var(--evidence-observed); }
+#screen-vm .vm-handler-state[data-state="inferred"] { color: var(--evidence-inferred); }
+#screen-vm .vm-handler-state[data-state="correlated"] { color: var(--evidence-correlated); }
+#screen-vm .vm-handler-state[data-state="heuristic"] { color: var(--evidence-heuristic); font-style: italic; }
+#screen-vm .vm-handler-state[data-state="unknown"] { color: var(--evidence-unknown); }
+#screen-vm .vm-handler-state[data-state="contradicted"] { color: var(--evidence-contradicted); }
+
+/* State: ready keeps the ok color, idle is neutral, busy is a caution and an
+   unavailable engine or runner reads as a failure, dot and text alike. */
+.capture-state.idle, .broker-status.idle { color: var(--state-idle); }
+.memory-readonly[data-kind="busy"] { color: var(--state-warn); }
+.memory-readonly[data-kind="offline"] { color: var(--state-danger); }
+
+/* Notices carry their severity in a faint wash as well as their dot, so a
+   capture gap or a disconnected broker is visible before it is read. Setup
+   guidance, such as the Console's, stays unwashed. */
+:is(.network-notice[data-kind="gap"], .signal-notice[data-kind="partial"], .signal-notice[data-kind="stopped"], .vm-notice[data-kind="gap"],
+  .analyst-notice[data-kind="conflict"], .collection-notice[data-kind="conflict"], .notebook-notice[data-kind="warning"]) {
+  background: color-mix(in srgb, var(--state-warn) 7%, var(--panel));
+}
+:is(.network-notice:is([data-kind="disconnected"], [data-kind="malformed"]), .signal-notice:is([data-kind="disconnected"], [data-kind="error"]),
+  .vm-notice:is([data-kind="disconnected"], [data-kind="malformed"]), .vm-workspace-notice:is([data-kind="malformed"], [data-kind="unavailable"]),
+  .tools-notice[data-kind="error"], .analyst-notice[data-kind="error"], .collection-notice[data-kind="error"],
+  .package-notice:is([data-kind="error"], [data-kind="invalid"])) {
+  background: color-mix(in srgb, var(--state-danger) 7%, var(--panel));
+}
+
+/* Status bar: each gap clause carries its own state. */
+#gap-status > [data-kind="loss"] { color: var(--state-danger); }
+#gap-status > [data-kind="limit"] { color: var(--state-warn); }
+
+/* Evidence observations name their category in the kind colors: network
+   records rose, Wasm and VM records iris, everything else neutral. */
+.evidence-observation[data-category] { --category: var(--faint); --category-fill: var(--line); }
+.evidence-observation[data-category="network"] { --category: var(--kind-request); --category-fill: var(--kind-request-fill); }
+.evidence-observation:is([data-category="wasm"], [data-category="vm"]) { --category: var(--kind-wasm); --category-fill: var(--kind-wasm-fill); }
+.evidence-observation[data-category] .evidence-observation-meta > span:first-child { display: inline-flex; align-items: center; gap: 6px; color: var(--category); }
+.evidence-observation[data-category] .evidence-observation-meta > span:first-child::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 2px; background: var(--category-fill); }
+.evidence-observation[aria-current="true"] .evidence-observation-meta > span:first-child { color: color-mix(in srgb, var(--category) 60%, var(--text)); }
+
+/* Planes: Sources' navigator and debugger sit on the panel surface beside the
+   editor's code ground, so tree and code read as separate panes. */
+#screen-sources :is(.sources-navigator, .sources-debugger) { background: var(--panel); }

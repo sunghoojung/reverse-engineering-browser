@@ -211,6 +211,13 @@ function trafficTypeLabel(type) {
   return Object.hasOwn(TRAFFIC_TYPE_LABELS, type) ? TRAFFIC_TYPE_LABELS[type] : 'Other';
 }
 
+// The verb's color class: requests that carry a body or change state stand
+// out from the reads around them.
+function trafficMethodClass(method) {
+  const verb = String(method ?? '').toUpperCase();
+  return verb === 'DELETE' ? 'delete' : ['POST', 'PUT', 'PATCH'].includes(verb) ? 'mutating' : 'safe';
+}
+
 // Keep table labels compact; filters and tooltips retain the full type names.
 const TRAFFIC_TABLE_TYPE_LABELS = Object.freeze({xhr: 'XHR/F', doc: 'Doc', css: 'CSS', js: 'JS',
   font: 'Font', img: 'Img', media: 'Media', socket: 'WS', wasm: 'Wasm'});
@@ -546,6 +553,9 @@ function renderTrafficRows(container, requests, options) {
       row.dataset.origin = request.origin;
       row.dataset.targetKind = request.targetKind ?? 'unknown';
       row.dataset.pending = String(request.status === 'pending' && !request.failed);
+      // Resource kind and verb select the row's colors; the cells keep their text.
+      row.dataset.type = Object.hasOwn(TRAFFIC_TYPE_LABELS, request.type) ? request.type : 'other';
+      row.dataset.method = trafficMethodClass(request.method);
       const target = trafficTargetParts(request);
       const cell = (column, className, text, title) => {
         const node = trafficNode('span', className, text);

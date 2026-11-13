@@ -3957,11 +3957,21 @@ final class OriginTraceRenderedUITests: XCTestCase {
           (document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '').includes('block')
         """, timeout: 30, "\(size.name): the Graph did not move to func 2")
       try await ui.click("#source-graph-host .block-graph-canvas")
+      // Where focus sits when F2 is pressed, so a failure names the element
+      // that took the key.
+      let focusAtF2 = try await ui.json("""
+        (() => { const a = document.activeElement, box = document.querySelector('#source-graph-host .block-graph-canvas').getBoundingClientRect();
+          const at = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+          const name = e => e ? `${e.tagName.toLowerCase()}#${e.id}.${String(e.className)}` : null;
+          return {active: name(a), label: a?.getAttribute?.('aria-label') ?? null, function: a?.dataset?.wasmFunction ?? null,
+            rects: a?.getClientRects?.().length ?? 0, insideHidden: Boolean(a?.closest?.('[hidden]')), atClickPoint: name(at),
+            graphFunction: document.querySelector('#source-graph-host').dataset.wasmFunction ?? null}; })()
+        """)
       try await ui.key(120, "\u{F705}", modifiers: [.function])
       try await ui.waitUntil("""
         document.querySelector('#source-name-host input')?.getAttribute('aria-label') === 'Researcher name for run (func 2)' &&
           document.querySelector('#source-name-host input')?.value === ''
-        """, "\(size.name): F2 did not open the editor for the Graph's function")
+        """, "\(size.name): F2 did not open the editor for the Graph's function; focus at F2: \(focusAtF2)")
       try await ui.key(53, "\u{1b}")
       try await ui.waitUntil("document.querySelector('#source-name-host form') === null", "\(size.name): Escape did not close the editor")
       try await assertLayout(ui, "#screen-sources", "\(size.name) Wasm names in the Graph")

@@ -2626,6 +2626,7 @@ impl RequestIndex {
         self.refresh()?;
         let state = self.state.as_ref().expect("index state");
         let mut cases = BTreeMap::<&str, u64>::new();
+        let mut earlier = BTreeMap::<&str, u64>::new();
         let mut withheld = 0u64;
         for row in &state.rows {
             let (case, body) = body_case(row);
@@ -2634,14 +2635,31 @@ impl RequestIndex {
                 body.and_then(|body| body.record.as_ref())
                     .is_some_and(|record| record.flags & 0x80 != 0),
             );
+            // A refused or malformed newest record whose row names an
+            // earlier snapshot, as body_document's earlier_snapshot does.
+            if body.is_some_and(|body| {
+                body.snapshot.is_some()
+                    && body
+                        .record
+                        .as_ref()
+                        .is_none_or(|record| record.artifact == "0")
+            }) {
+                *earlier.entry(case).or_default() += 1;
+            }
         }
+        let counts = |counts: BTreeMap<&str, u64>| {
+            counts
+                .into_iter()
+                .map(|(case, count)| (case.to_owned(), json!(count.to_string())))
+                .collect::<serde_json::Map<_, _>>()
+        };
         Ok(json!({
             "complete": self.caught_up(state.indexed_to),
             "requests": state.rows.len().to_string(),
             "unindexed_records": state.unindexed.to_string(),
             "snapshots_withheld": withheld.to_string(),
-            "cases": cases.into_iter().map(|(case, count)| (case.to_owned(), json!(count.to_string())))
-                .collect::<serde_json::Map<_, _>>(),
+            "cases": counts(cases),
+            "earlier_snapshots": counts(earlier),
         }))
     }
 
@@ -4698,6 +4716,10 @@ mod tests {
             false
         );
         assert_eq!(counts["snapshots_withheld"], "1");
+        assert_eq!(
+            counts["earlier_snapshots"],
+            json!({"not_captured_session_budget": "1"})
+        );
         // A redirect then a failure, a cancel or no end is never redirected.
         for (id, case) in [
             ("S1:R62:9", "failed_before_response"),

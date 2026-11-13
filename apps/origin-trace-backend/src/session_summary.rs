@@ -980,7 +980,7 @@ pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Valu
         Err(reason) => {
             summary["response_bodies"] = json!({"available": false, "reason": reason,
                 "complete": false, "requests": "0", "unindexed_records": "0",
-                "snapshots_withheld": "0", "cases": []});
+                "snapshots_withheld": "0", "earlier_snapshots": "0", "cases": []});
             return;
         }
     };
@@ -990,15 +990,33 @@ pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Valu
             .and_then(|count| count.parse::<u64>().ok())
             .unwrap_or(0)
     };
+    // A refused or malformed body may still name an earlier snapshot the
+    // receiver holds, which Traffic opens; each case says how many do.
+    let earlier = |case: &str| {
+        counts["earlier_snapshots"][case]
+            .as_str()
+            .and_then(|count| count.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
     let cases = counts["cases"]
         .as_object()
         .map(|cases| {
             cases
                 .iter()
-                .map(|(case, value)| json!({"case": case, "count": value, "meaning": body_case_meaning(case)}))
+                .map(|(case, value)| json!({"case": case, "count": value,
+                    "earlier_snapshots": earlier(case).to_string(), "meaning": body_case_meaning(case)}))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let earlier_total = counts["earlier_snapshots"]
+        .as_object()
+        .map(|cases| {
+            cases
+                .values()
+                .filter_map(|count| count.as_str()?.parse::<u64>().ok())
+                .sum::<u64>()
+        })
+        .unwrap_or(0);
     let (worker, reused, local) = (
         count("service_worker"),
         count("memory_cache"),
@@ -1008,7 +1026,8 @@ pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Valu
         "available": true, "reason": null,
         "complete": counts["complete"], "requests": counts["requests"],
         "unindexed_records": counts["unindexed_records"],
-        "snapshots_withheld": counts["snapshots_withheld"].as_str().unwrap_or("0"), "cases": cases,
+        "snapshots_withheld": counts["snapshots_withheld"].as_str().unwrap_or("0"),
+        "earlier_snapshots": earlier_total.to_string(), "cases": cases,
     });
     let withheld = counts["snapshots_withheld"]
         .as_str()
@@ -1053,8 +1072,10 @@ mod tests {
         add_response_bodies(
             &mut summary,
             Ok(
-                json!({"complete": true, "requests": "6", "unindexed_records": "0", "snapshots_withheld": "3",
-                "cases": {"captured": "2", "memory_cache": "1", "service_worker": "2", "renderer_answered": "1"}}),
+                json!({"complete": true, "requests": "8", "unindexed_records": "0", "snapshots_withheld": "3",
+                "cases": {"captured": "2", "memory_cache": "1", "service_worker": "2", "renderer_answered": "1",
+                    "not_captured_session_budget": "2"},
+                "earlier_snapshots": {"not_captured_session_budget": "1"}}),
             ),
         );
         assert_eq!(summary["response_bodies"]["available"], true);
@@ -1067,7 +1088,15 @@ mod tests {
             .unwrap();
         assert_eq!(withheld["count"], "3");
         let cases = summary["response_bodies"]["cases"].as_array().unwrap();
-        assert_eq!(cases.len(), 4);
+        assert_eq!(cases.len(), 5);
+        // A refused body that keeps an earlier snapshot is counted as such.
+        assert_eq!(summary["response_bodies"]["earlier_snapshots"], "1");
+        let refused = cases
+            .iter()
+            .find(|case| case["case"] == "not_captured_session_budget")
+            .unwrap();
+        assert_eq!(refused["earlier_snapshots"], "1");
+        assert_eq!(cases[0]["earlier_snapshots"], "0");
         let worker = cases
             .iter()
             .find(|case| case["case"] == "service_worker")

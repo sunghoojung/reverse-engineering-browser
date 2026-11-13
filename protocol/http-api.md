@@ -609,6 +609,9 @@ with its `count` and `meaning`, such as `captured`, `partial`, `not_modified`,
 `redirected`, `aborted`, `cancelled`, `empty`, `service_worker`, `memory_cache`,
 `failed_before_response` and `cancelled_before_response`
 ([native network v3](native-network-v3.md#bodies-the-proxy-never-sees)).
+A refused or malformed body can still name an earlier snapshot of the same
+response that the receiver holds; each case's `earlier_snapshots`, and the
+total beside `cases`, count those rows, which Traffic opens.
 `complete` is false while the index is still reading the store, and the
 route's ETag follows the index's progress, so a revalidating client sees the
 counts complete. When the index cannot answer, `available` is false with a

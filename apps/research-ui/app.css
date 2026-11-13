@@ -4,7 +4,9 @@
         --bg: #232136;
         --chrome: #232136;
         --panel: #2a273f;
-        --panel-2: #2a283e;
+        /* Planes step base, surface, raised, overlay, as Binary Ninja's theme
+           guide asks: lists sit on surface, hover and zebra one step up. */
+        --panel-2: #2e2b45;
         --panel-3: #393552;
         --line: #44415a;
         --line-soft: #393552;
@@ -12,12 +14,80 @@
         --muted: #b0abc7;
         --faint: #908caa;
         --accent: #c4a7e7;
-        --accent-soft: #44415a;
+        /* Iris over surface, apart from --line so a selected chip keeps its edge. */
+        --accent-soft: #403957;
         --cyan: #9ccfd8;
         --green: #9ccfd8;
         --amber: #f6c177;
         --red: #eb6f92;
         --blue: #9ccfd8;
+        /* The six accents by name. Pine is 3.9:1 on --panel, so text that
+           means pine uses --rp-pine-ink, the Increase Contrast keyword color. */
+        --rp-love: #eb6f92;
+        --rp-gold: #f6c177;
+        --rp-rose: #ea9a97;
+        --rp-pine: #3e8fb0;
+        --rp-pine-ink: #4fa0c1;
+        --rp-foam: #9ccfd8;
+        --rp-iris: #c4a7e7;
+        /* Fills for markers, bars and dots. In Moon they are the accents; the
+           light theme gives them lighter Dawn hues that still reach 3:1. */
+        --rp-love-fill: var(--rp-love);
+        --rp-gold-fill: var(--rp-gold);
+        --rp-rose-fill: var(--rp-rose);
+        --rp-pine-fill: var(--rp-pine-ink);
+        --rp-foam-fill: var(--rp-foam);
+        --rp-iris-fill: var(--rp-iris);
+        /* One meaning per color across every workspace, following the Flow
+           graph's kinds: scripts foam, WebAssembly iris, dynamic code gold,
+           requests rose. Documents take pine; a socket is a request. Styles,
+           images, fonts and media stay quiet so the evidence kinds stand out. */
+        --kind-document: var(--rp-pine-ink);
+        --kind-script: var(--rp-foam);
+        --kind-wasm: var(--rp-iris);
+        --kind-dynamic: var(--rp-gold);
+        --kind-request: var(--rp-rose);
+        --kind-quiet: var(--faint);
+        --kind-document-fill: var(--rp-pine-fill);
+        --kind-script-fill: var(--rp-foam-fill);
+        --kind-wasm-fill: var(--rp-iris-fill);
+        --kind-dynamic-fill: var(--rp-gold-fill);
+        --kind-request-fill: var(--rp-rose-fill);
+        /* Requests that carry a body or change state read gold, DELETE love;
+           GET, HEAD and OPTIONS stay neutral. */
+        --method-safe: var(--muted);
+        --method-mutating: var(--rp-gold);
+        --method-delete: var(--rp-love);
+        /* Status color marks exceptions only: 2xx is plain text. */
+        --status-success: var(--text);
+        --status-redirect: var(--rp-iris);
+        --status-client-error: var(--rp-gold);
+        --status-server-error: var(--rp-love);
+        /* Connection, availability and notice state. */
+        --state-ok: var(--rp-foam);
+        --state-warn: var(--rp-gold);
+        --state-danger: var(--rp-love);
+        --state-idle: var(--faint);
+        /* Fingerprint surface families, drawn only as small markers so they
+           tell families apart without competing with the kind colors. */
+        --family-canvas: var(--rp-rose-fill);
+        --family-webgl: var(--rp-iris-fill);
+        --family-web-audio: var(--rp-gold-fill);
+        --family-navigator: var(--rp-foam-fill);
+        --family-storage: var(--rp-pine-fill);
+        --family-webrtc: var(--rp-love-fill);
+        --family-permissions: var(--faint);
+        --family-runtime: var(--line);
+        /* Analyzer evidence classes read by strength: an observed claim is
+           the ok color, weaker classes step down in brightness, and only
+           unknown and contradicted, which need attention, take a hue. */
+        --evidence-observed: var(--rp-foam);
+        --evidence-inferred: var(--text);
+        --evidence-correlated: var(--muted);
+        --evidence-heuristic: var(--muted);
+        --evidence-unknown: var(--rp-gold);
+        --evidence-contradicted: var(--rp-love);
+        --vm-opcode-ink: var(--syntax-number);
         /* Code: rose-pine/vscode 2.15.2 themes/rose-pine-moon-color-theme.json (MIT). */
         --code-font: Menlo, Monaco, "Courier New", monospace;
         --code-bg: #232136;
@@ -50,24 +120,44 @@
       }
 
       :root[data-theme="light"] {
+        /* Rosé Pine Dawn: the same planes as the code view, so the editor
+           and the shell read as one surface. Dawn's accents are 2-4:1 on
+           its base, too faint for text, so each accent here is its Dawn hue
+           darkened to at least 4.6:1 on --panel-3. */
         color-scheme: light;
-        --bg: #ffffff;
-        --chrome: #f1f3f4;
-        --panel: #ffffff;
-        --panel-2: #f8f9fa;
-        --panel-3: #e8eaed;
-        --line: #c4c7c5;
-        --line-soft: #e0e0e0;
-        --text: #202124;
-        --muted: #5f6368;
-        --faint: #80868b;
-        --accent: #1a73e8;
-        --accent-soft: #d2e3fc;
-        --cyan: #1a73e8;
-        --green: #188038;
-        --amber: #b06000;
-        --red: #d93025;
-        --blue: #1a73e8;
+        --bg: #faf4ed;
+        --chrome: #faf4ed;
+        --panel: #fffaf3;
+        --panel-2: #f4ede8;
+        --panel-3: #f2e9e1;
+        --line: #cecacd;
+        --line-soft: #dfdad9;
+        --text: #575279;
+        --muted: #66627e;
+        --faint: #6a6682;
+        --accent: #765e92;
+        --accent-soft: #ebe4ee;
+        --cyan: #416f77;
+        --green: #416f77;
+        --amber: #945c0f;
+        --red: #a14d65;
+        --blue: #286983;
+        --rp-love: #a14d65;
+        --rp-gold: #945c0f;
+        /* Rose leans terracotta and love raspberry, so a request never reads
+           as a failure. Fills are Dawn hues at 3:1 for markers and bars. */
+        --rp-rose: #985544;
+        --rp-pine: #286983;
+        --rp-pine-ink: #286983;
+        --rp-foam: #416f77;
+        --rp-iris: #765e92;
+        --rp-love-fill: #b4637a;
+        --rp-gold-fill: #b77213;
+        --rp-rose-fill: #c9655f;
+        --rp-pine-fill: #286983;
+        --rp-foam-fill: #518b95;
+        --rp-iris-fill: #8f78a8;
+        --vm-opcode-ink: var(--rp-rose);
         /* Code: themes/rose-pine-dawn-color-theme.json. */
         --code-bg: #faf4ed;
         --code-text: #575279;
@@ -91,9 +181,9 @@
         --syntax-bracket-4: #56949f80;
         --syntax-bracket-5: #d7827e80;
         --syntax-bracket-6: #907aa980;
-        --selection: #0964d5;
-        --stripe: #f4f5f6;
-        --shadow: rgba(24, 31, 42, 0.15);
+        --selection: #dfdad9;
+        --stripe: #f4ede8;
+        --shadow: rgba(87, 82, 121, 0.16);
       }
 
       * { box-sizing: border-box; }
@@ -3591,12 +3681,12 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   --vm-focus: #c4a7e7; --vm-disabled-bg: #232136; --vm-disabled-fg: #908caa;
 }
 :root[data-theme="light"] #screen-vm {
-  --vm-action-bg: #1967d2; --vm-action-fg: #ffffff;
-  --vm-control-bg: #ffffff; --vm-control-fg: #202124; --vm-control-line: #c4c7c5;
-  --vm-selected-bg: #d2e3fc; --vm-selected-fg: #202124; --vm-selected-line: #1967d2;
-  --vm-change-bg: #fef7e0; --vm-change-fg: #8a4b00;
-  --vm-stop-bg: #fce8e6; --vm-stop-fg: #c5221f;
-  --vm-focus: #1967d2; --vm-disabled-bg: #f1f3f4; --vm-disabled-fg: #5f6368;
+  --vm-action-bg: #765e92; --vm-action-fg: #fffaf3;
+  --vm-control-bg: #fffaf3; --vm-control-fg: #575279; --vm-control-line: #cecacd;
+  --vm-selected-bg: #ebe4ee; --vm-selected-fg: #575279; --vm-selected-line: #765e92;
+  --vm-change-bg: #f8eddb; --vm-change-fg: #945c0f;
+  --vm-stop-bg: #f6e4e6; --vm-stop-fg: #a14d65;
+  --vm-focus: #765e92; --vm-disabled-bg: #f2e9e1; --vm-disabled-fg: #66627e;
 }
 #screen-vm :where(.vm-workspace-switch button, .vm-step-controls button, .vm-listing-pager button,
   .vm-panel-controls button, .vm-context-header button, .vm-execution-navigation > button,

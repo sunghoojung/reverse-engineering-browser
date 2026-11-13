@@ -357,6 +357,17 @@ bounded by byte budgets; a partial status names what was cut. See
 graph is declared static flow for one function at a time. Edge kinds are never
 inferred from execution, and `complete` is always false.
 
+## Offline WASM function runs
+
+`run_wasm_function` projects `POST /api/wasm/runs`: one confirmed run of one
+function of a captured module in the backend's `wasmi` interpreter, with every
+import stubbed. It is effectful (`code-execution`, `filesystem-write`), so MCP
+lists it only with `--allow-effects`, and the server refuses a body without
+`confirm_offline_execution: true` before reading the artifact. `get_wasm_runs`
+projects `GET /api/wasm/runs`, a read of the stored derived records. Below Full
+access the `value` and `hex` fields of both are omitted. See
+[WASM run v1](wasm-run-v1.md).
+
 ## Compact session context
 
 `GET /api/session/context` (`get_session_context`) is the compact first read for

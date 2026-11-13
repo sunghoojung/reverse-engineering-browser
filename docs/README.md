@@ -78,6 +78,7 @@ current product path.
 ## Versioned feature designs
 
 - [WASM captured module inspection v1](./product/wasm-inspection-v1.md)
+- [WASM offline function runs v1](./product/wasm-offline-runner-v1.md)
 
 - [Action Scope Policy v1](./product/action-scope-policy-v1.md)
 - [Analysis catalog v1](./product/analysis-catalog-v1.md)

@@ -106,6 +106,8 @@ Every option is off unless the start names it, and none is inherited.
 | Inspect (Wasm disassembly) | `inspect_wasm` with `row_offset`, `row_limit`, `sections` | R (structure), F (instruction text) | Added row windows; below Full access row text is omitted |
 | Graph (basic-block graph) | `get_wasm_functions`, `get_wasm_function_graph` | R | Covered |
 | Wasm function names (Inspect, Graph, Flow) | Read: `analyst_name` and `analyst_names` in `inspect_wasm`, `get_wasm_functions`, `get_wasm_function_graph`, `get_xrefs`, `get_flow_graph`, `get_request_stack`. Write: `analyst_action` `set_wasm_function_name` | R to read, A to write | Added; names are joined at every level and the write needs no other Analyst file |
+| Run offline… (one function in the stubbed local interpreter) | `run_wasm_function` | A (outcome, counts, digests, expectation matches), F (results, import arguments, memory bytes) | Added |
+| Stored offline runs | `get_wasm_runs` | R (structure), F (values and bytes) | Added |
 | Map (entropy and kind map) | `get_artifact_map` | R | Covered |
 | Facts | `get_source_facts` | A | Covered |
 | Track calls (saved invocation sites) | `get_js_invocation_sites`, `resolve_js_invocation_site`, `js_invocation_site_action` | R to read, A to change | Covered |
@@ -188,7 +190,7 @@ Every option is off unless the start names it, and none is inherited.
 
 ## Totals
 
-The tables have 106 rows.
+The tables have 108 rows.
 
 - **Before the change that added this page**, 76 rows were covered for a
   client started with `--allow-effects --allow-session-start`. The in-app agent had nine fixed
@@ -197,11 +199,12 @@ The tables have 106 rows.
   `get_analysis_catalog`, `get_js_invocation_sites`, `inspect_wasm`) plus,
   with actions on, every effectful operation. It could not read content or
   start sessions, and every action needed Allow once.
-- **Now** 91 rows are covered: 79 marked Covered (the 76, plus three rows
-  later changes added as covered) and 12 marked Added (request and response
+- **Now** 93 rows are covered: 79 marked Covered (the 76, plus three rows
+  later changes added as covered) and 14 marked Added (request and response
   bodies, source text, search across files and within one, Wasm row windows,
   guest bytecode, the two response options, the session flow graph, graph
-  layout and Wasm function names), and the in-app agent can use
+  layout, Wasm function names, offline Wasm function runs and their stored
+  records), and the in-app agent can use
   all of them at the level each row names, including session control at Full
   access.
 - **3 rows are partial**: Decode value and Decode range need the value read

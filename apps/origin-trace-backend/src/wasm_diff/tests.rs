@@ -1382,3 +1382,5 @@ fn equal_bytes_that_mean_something_else_are_changed_not_identical() {
         vec![row("changed", Some("normalized"), Some(0), Some(0))]
     );
 }
+
+mod fuzz;

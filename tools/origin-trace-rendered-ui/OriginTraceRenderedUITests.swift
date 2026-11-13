@@ -4029,6 +4029,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
           return !document.querySelector('#screen-sources').hidden && !document.querySelector('#debugger-sidebar').hidden &&
             chosen?.dataset.key.endsWith(':\(expected.debuggerProcess):\(sequence)') && document.activeElement?.id === 'debugger-observations'; })()
         """, "\(size.name): Show in debugger did not choose the observation with focus on its list")
+      // WebKit draws focus a script moved only after the next key press; the
+      // arrow keeps the one Requests row active and must show the list's focus.
+      try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
       let shown = try await ui.json("""
         (() => { const detail = document.querySelector('#debugger-sidebar .debugger-detail'), box = detail.getBoundingClientRect();
           const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections').getBoundingClientRect();
@@ -4040,7 +4043,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertEqual(shown["kind"] as? String, "request_watch_match", "\(size.name): the Requests kind is listed: \(shown)")
       XCTAssertEqual(shown["inView"] as? Bool, true, "\(size.name): its details are in view: \(shown)")
       XCTAssertTrue((shown["detail"] as? String ?? "").contains("request 5100"), "\(size.name): \(shown)")
-      XCTAssertNotEqual((shown["focus"] as? [String: Any])?["indicator"] as? String, "none", "\(size.name): the list shows its focus: \(shown)")
+      let focus = shown["focus"] as? [String: Any] ?? [:]
+      XCTAssertEqual(focus["id"] as? String, "debugger-observations", "\(size.name): focus stays on the list: \(shown)")
+      XCTAssertEqual(focus["focusVisible"] as? Bool, true, "\(size.name): the list shows its focus once a key is pressed: \(shown)")
+      let active = try await ui.value("document.querySelector('#debugger-observations .debugger-list-row[data-active=\"true\"]')?.dataset.key ?? ''") as? String ?? ""
+      XCTAssertTrue(active.hasSuffix(":\(expected.debuggerProcess):\(sequence)"), "\(size.name): the chosen record is the active row: \(active)")
       try await assertLayout(ui, "#debugger-sidebar", "\(size.name) shown observation")
       try await ui.screenshot("debugger-shown-observation-\(size.name)")
       try await lightScreenshot(ui, "debugger-shown-observation", size.name)

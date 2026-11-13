@@ -4447,7 +4447,7 @@
       "post": {
         "operationId": "analyst_action",
         "summary": "analyst action",
-        "description": "Existing local research UI operation. set_wasm_function_name sets, replaces or clears one researcher Wasm function name in the evidence-names file without the caller reading or resending the other Analyst files.",
+        "description": "Local Analyst library actions: replace_local_analyst_workspace replaces the whole library, run_local_analyst_script and cancel_local_analyst_script run a saved script, and set_wasm_function_name sets, replaces or clears one researcher Wasm function name in the evidence-names file without the caller reading or resending the other Analyst files.",
         "tags": [
           "local-analyst"
         ],

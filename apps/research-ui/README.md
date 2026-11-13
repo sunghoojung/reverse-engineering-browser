@@ -2491,7 +2491,12 @@ that is both ends of the slice (a call whose result returns to its own
 argument around a loop) reads **source · sink**, and a loop join left open by
 a simulation stop says it is incomplete. The header always names the trace
 shown; choosing another row, or revealing one from the list, names that row on
-the button instead (**Trace 0x7e**) until it is traced.
+the button instead (**Trace 0x7e**) until it is traced. The panel's controls
+stay on one row at every width: in a narrow panel the field names and then the
+title give way, and the selects keep their accessible names. Beside the
+identification summary and its Details at the minimum window, the listing
+keeps six rows when there is room and otherwise what is left above the
+panel's header, down to two; with less room the Inspect area scrolls.
 `tools/check-value-flow-ui.mjs` checks the panel in a DOM model.
 
 ## Flow workspace

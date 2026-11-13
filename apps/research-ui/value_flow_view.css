@@ -1,13 +1,23 @@
-/* Trace value panel under the Wasm Inspect listing (value_flow_view.js). It is
-   the last row of the Sources view split, an auto track, so its cap must be
-   definite (a percentage of an auto track is none); the listing keeps the
-   rest of the editor at the minimum window. */
-/* Only outside Graph mode: there the split's rows belong to the graph and the
-   listing, and the panel is hidden (value_flow_view.js). */
-#screen-sources .sources-editor:not([data-graph]) .source-view-split:has(> .value-flow:not([hidden])):not([style*="grid-template-rows"]) { grid-template-rows: minmax(0, 1fr) auto; }
+/* Trace value panel under the Wasm Inspect listing (value_flow_view.js), the
+   last row of the Sources view split. Its header is one 34 px row at every
+   width (the field names and then the title give way first), and its track
+   never goes below that row, so the panel's controls stay whole and
+   hit-testable. The listing's track keeps 120 px (six rows) when the split
+   has room, and otherwise what is left above the header, down to two rows;
+   below that the split scrolls rather than letting the listing run over the
+   status bar. Other strips above the split (the identification summary and
+   its Details) take height at the minimum window.
+   The panel's cap must be definite; a percentage of an auto track is none.
+   Only outside Graph mode: there the split's rows belong to the graph and the
+   listing, and the panel is hidden. */
+#screen-sources .sources-editor:not([data-graph]) .source-view-split:has(> .value-flow:not([hidden])):not([style*="grid-template-rows"]) {
+  grid-template-rows: minmax(min(120px, max(40px, calc(100% - 35px))), 1fr) minmax(35px, max-content);
+  overflow-y: auto;
+}
 #screen-sources .sources-editor[data-graph] .source-view-split > .value-flow { display: none; }
 #screen-sources .source-view-split > .value-flow { min-height: 0; }
 .value-flow {
+  container-type: inline-size;
   max-height: min(280px, 36vh);
   min-width: 0;
   display: flex;
@@ -17,7 +27,7 @@
   background: var(--panel);
 }
 .value-flow[hidden] { display: none; }
-.value-flow-head { flex: none; display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 34px; padding: 3px 8px 3px 12px; }
+.value-flow-head { flex: none; display: flex; align-items: center; gap: 8px; min-width: 0; height: 34px; padding: 3px 8px 3px 12px; }
 .value-flow-title { flex: none; color: var(--text); font: 600 12px var(--sans); }
 .value-flow-target { flex: 1 1 auto; min-width: 4ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 12px var(--mono); }
 .value-flow-field { flex: none; display: flex; align-items: center; gap: 4px; color: var(--muted); font: 11px var(--sans); }
@@ -49,9 +59,13 @@
 .value-flow-text { flex: 1 1 0; font: 400 12px var(--mono); color: var(--code-text); }
 .value-flow-join { padding: 0 6px 4px calc(20ch + 28px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 12px var(--mono); }
 @media (max-width: 900px) {
-  .value-flow-head { flex-wrap: wrap; }
   .value-flow-kind { flex-basis: 24ch; }
 }
+/* The header stays one row: the selects keep their accessible names when
+   their visible names give way, and the panel keeps its "Trace value" name
+   when the title does. */
+@container (max-width: 600px) { .value-flow-field-name { display: none; } }
+@container (max-width: 440px) { .value-flow-title { display: none; } }
 /* Slice rows in the Inspect listing: a tint and a left rule by role, drawn
    over the gutter; the row text is never changed. Role is not a state, so
    only the seed takes the accent and the ends of the slice are bright

@@ -23,8 +23,8 @@
   panel.innerHTML = `<div class="value-flow-head">
       <strong class="value-flow-title">Trace value</strong>
       <span id="value-flow-target" class="value-flow-target">Select an instruction row</span>
-      <label class="value-flow-field">Operand <select id="value-flow-operand" aria-label="Operand to trace"><option value="">Whole instruction</option></select></label>
-      <label class="value-flow-field">Direction <select id="value-flow-direction" aria-label="Trace direction"><option value="both">Both</option><option value="backward">Backward</option><option value="forward">Forward</option></select></label>
+      <label class="value-flow-field"><span class="value-flow-field-name">Operand</span> <select id="value-flow-operand" aria-label="Operand to trace"><option value="">Whole instruction</option></select></label>
+      <label class="value-flow-field"><span class="value-flow-field-name">Direction</span> <select id="value-flow-direction" aria-label="Trace direction"><option value="both">Both</option><option value="backward">Backward</option><option value="forward">Forward</option></select></label>
       <button id="value-flow-run" class="source-tool" type="button" disabled>Trace value</button>
       <button id="value-flow-clear" class="value-flow-clear" type="button" aria-label="Clear trace" title="Clear trace" hidden>×</button>
     </div>

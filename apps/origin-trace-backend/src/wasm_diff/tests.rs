@@ -977,6 +977,84 @@ fn the_fixture_comparison_is_the_same_every_run() {
     }
 }
 
+/// `n` imported functions named `e.f<i>` and nothing else.
+fn many_imports(n: usize) -> Vec<u8> {
+    let entries = (0..n)
+        .map(|i| {
+            let mut entry = bin::uleb(1);
+            entry.push(b'e');
+            let name = format!("f{i}");
+            entry.extend(bin::uleb(name.len() as u64));
+            entry.extend(name.as_bytes());
+            entry.extend([0x00, 0x00]);
+            entry
+        })
+        .collect::<Vec<_>>();
+    let mut out = b"\0asm\x01\0\0\0".to_vec();
+    out.extend(bin::section(1, bin::vec(&[bin::VOID.to_vec()])));
+    out.extend(bin::section(2, bin::vec(&entries)));
+    out
+}
+
+#[test]
+fn section_parsing_polls_the_budget() {
+    // Millions of imports used to be parsed and kept in full past the
+    // deadline. Stopping at the first parsing check proves it is polled.
+    let module = many_imports(10_000);
+    let limits = Limits {
+        stop_in: Some((PARSING, 0)),
+        ..Limits::DEFAULT
+    };
+    let report = compare_with(
+        &module,
+        &module,
+        json!({}),
+        json!({}),
+        limits,
+        Instant::now(),
+    )
+    .unwrap();
+    assert!(!report.complete);
+    assert!(
+        report
+            .omissions
+            .iter()
+            .any(|o| o.contains("parsing stopped before the end")),
+        "{:?}",
+        report.omissions
+    );
+    assert!(report.rows.iter().all(|row| row.status == UNCLASSIFIED));
+}
+
+#[test]
+fn imports_past_the_function_limit_are_counted_not_kept() {
+    let module = many_imports(100);
+    let limits = Limits {
+        max_functions: 10,
+        ..Limits::DEFAULT
+    };
+    let report = compare_with(
+        &module,
+        &module,
+        json!({}),
+        json!({}),
+        limits,
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(report.a["imported_functions"], 100);
+    assert_eq!(report.a["analyzed_functions"], 10);
+    assert_eq!(report.a_sides.len(), 10);
+    assert!(
+        report
+            .omissions
+            .iter()
+            .any(|o| o.contains("10 of its 100 functions")),
+        "{:?}",
+        report.omissions
+    );
+}
+
 /// Two callees of one shape under an exported root that changed, so its
 /// body does not normalize equally. `order` is the order B calls them in.
 fn equal_callees(order: [u32; 2]) -> (String, String) {
@@ -1015,4 +1093,21 @@ fn call_position_counts_only_under_a_parent_that_normalizes_equally() {
         found.iter().filter(|row| row.0 == "ambiguous").count() == 4,
         "{found:?}"
     );
+}
+
+#[test]
+fn a_comparison_with_a_module_of_no_functions_is_complete() {
+    let empty = "(module)";
+    let one = "(module (func))";
+    let report = report(empty, one);
+    assert!(report.complete, "{:?}", report.omissions);
+    assert!(
+        report
+            .omissions
+            .iter()
+            .any(|o| o.contains("declares no functions"))
+    );
+    assert_eq!(rows(&report), vec![row("added", None, None, Some(0))]);
+    let page = render(&report, &Page::new(0, 10, None).unwrap()).unwrap();
+    assert_eq!(page["status"], "complete");
 }

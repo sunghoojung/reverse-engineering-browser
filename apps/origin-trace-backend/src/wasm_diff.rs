@@ -130,6 +130,7 @@ const FINGERPRINTING: &str = "fingerprinting";
 const EXACT: &str = "exact matching";
 const PROPAGATION: &str = "call-graph propagation";
 const STRUCTURAL: &str = "structural matching";
+const PARSING: &str = "section parsing";
 
 fn bad(error: wasmparser::BinaryReaderError) -> Error {
     Error::protocol(format!("WASM decoding failed: {error}"))
@@ -866,7 +867,24 @@ fn analyze(
     let mut bodies = Vec::new();
     let mut segments = Vec::new();
     let mut declared = 0u32;
-    for payload in Parser::new(0).parse_all(bytes) {
+    // Imported functions past the function limit are counted, not kept.
+    let mut imported = 0u32;
+    let limit = budget.limits.max_functions;
+    // Every section entry counts toward the next budget check, so a module
+    // of millions of imports, exports, names or segments cannot outrun the
+    // deadline while it is parsed.
+    let mut entries = 0u64;
+    let mut parsing_stopped = false;
+    macro_rules! poll {
+        ($label:lifetime) => {
+            entries += 1;
+            if entries.is_multiple_of(4096) && budget.late(PARSING) {
+                parsing_stopped = true;
+                break $label;
+            }
+        };
+    }
+    'module: for payload in Parser::new(0).parse_all(bytes) {
         match payload.map_err(bad)? {
             Payload::Version {
                 num: 1,
@@ -880,6 +898,7 @@ fn analyze(
             }
             Payload::TypeSection(reader) => {
                 for group in reader {
+                    poll!('module);
                     let group = group.map_err(bad)?;
                     for ty in group.types() {
                         match &ty.composite_type.inner {
@@ -900,11 +919,19 @@ fn analyze(
             }
             Payload::ImportSection(reader) => {
                 for entry in reader.into_iter_with_offsets() {
+                    poll!('module);
                     let (offset, import) = entry.map_err(bad)?;
                     match import.ty {
                         TypeRef::Func(ty) => {
                             func_types.push(ty);
-                            imports.push((offset, bounded(import.module), bounded(import.name)));
+                            imported += 1;
+                            if imports.len() < limit {
+                                imports.push((
+                                    offset,
+                                    bounded(import.module),
+                                    bounded(import.name),
+                                ));
+                            }
                         }
                         TypeRef::Global(global) => {
                             globals.push(global_tag(global.content_type, global.mutable))
@@ -916,17 +943,20 @@ fn analyze(
             Payload::FunctionSection(reader) => {
                 declared = reader.count();
                 for ty in reader {
+                    poll!('module);
                     func_types.push(ty.map_err(bad)?);
                 }
             }
             Payload::GlobalSection(reader) => {
                 for global in reader {
+                    poll!('module);
                     let global = global.map_err(bad)?;
                     globals.push(global_tag(global.ty.content_type, global.ty.mutable));
                 }
             }
             Payload::ExportSection(reader) => {
                 for export in reader {
+                    poll!('module);
                     let export = export.map_err(bad)?;
                     if export.kind == ExternalKind::Func {
                         exports
@@ -940,9 +970,13 @@ fn analyze(
                     return Err(Error::protocol("WASM function and code counts disagree"));
                 }
             }
-            Payload::CodeSectionEntry(body) => bodies.push(body),
+            Payload::CodeSectionEntry(body) => {
+                poll!('module);
+                bodies.push(body);
+            }
             Payload::DataSection(reader) => {
                 for data in reader {
+                    poll!('module);
                     let data = data.map_err(bad)?;
                     if let DataKind::Active {
                         memory_index: 0,
@@ -967,6 +1001,7 @@ fn analyze(
                         // fails a comparison built from the code section.
                         if let Ok(Name::Function(map)) = subsection {
                             for naming in map.into_iter().flatten() {
+                                poll!('module);
                                 names
                                     .entry(naming.index)
                                     .or_insert_with(|| bounded(naming.name));
@@ -978,7 +1013,7 @@ fn analyze(
             _ => {}
         }
     }
-    if bodies.len() as u32 != declared {
+    if !parsing_stopped && bodies.len() as u32 != declared {
         return Err(Error::protocol("WASM function bodies are missing"));
     }
     segments.sort_unstable();
@@ -987,7 +1022,6 @@ fn analyze(
             (low.min(*start), high.max(*end))
         }))
     });
-    let imported = imports.len() as u32;
     let context = Context {
         bytes,
         func_types: &func_types,
@@ -997,9 +1031,8 @@ fn analyze(
         span,
         segments: &segments,
     };
-    let total = imports.len() + bodies.len();
-    let limit = budget.limits.max_functions;
-    let mut truncated = total > limit;
+    let total = imported as usize + declared as usize;
+    let mut truncated = parsing_stopped || total > limit;
     let mut funcs = Vec::with_capacity(total.min(limit));
     let mut same_signature = HashMap::<(String, String, u64), u32>::new();
     let mut same_name = HashMap::<(String, String), u32>::new();
@@ -1078,7 +1111,12 @@ fn analyze(
             callees,
         });
     }
-    if truncated {
+    if parsing_stopped {
+        omissions.push(format!(
+            "Module {label}: parsing stopped before the end of the module, so its function count is unknown; {} functions were fingerprinted.",
+            funcs.len()
+        ));
+    } else if truncated {
         omissions.push(format!(
             "Module {label}: {} of its {total} functions were fingerprinted; the others were not compared.",
             funcs.len()
@@ -2139,7 +2177,12 @@ fn compare_with(
         "comparisons": budget.comparisons,
         "elapsed_ms": budget.started.elapsed().as_millis() as u64,
     });
-    let complete = omissions.is_empty();
+    // Complete means nothing was left uncompared. A note such as "this
+    // module declares no functions" describes a complete answer.
+    let complete = budget.stopped.is_none()
+        && !structural_incomplete
+        && !module_a.truncated
+        && !module_b.truncated;
     let (a_sides, a_types) = sides(module_a);
     let (b_sides, b_types) = sides(module_b);
     Ok(Report {

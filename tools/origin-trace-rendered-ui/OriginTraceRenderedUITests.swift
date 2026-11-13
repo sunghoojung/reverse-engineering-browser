@@ -2887,14 +2887,19 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.screenshot("wasm-identification-light-\(size.name)")
       _ = try await ui.value("(document.documentElement.dataset.theme = 'dark', 1)")
       try await ui.click("#source-graph")
-      try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '').includes('blocks')", timeout: 30, "the block graph did not finish laying out")
+      // The largest function in this module is one block: "1 block".
+      try await ui.waitUntil("/\\d+ blocks?\\b/.test(document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '')", timeout: 30, "the block graph did not finish laying out")
       let hidden = try await ui.value("getComputedStyle(document.querySelector('#wasm-identification')).display") as? String
       XCTAssertEqual(hidden, "none", "\(size.name): the graph keeps the height")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) wasm identification graph")
       try await ui.click("#source-graph-host .block-graph-tool", containing: "Functions")
       try await ui.waitUntil("document.querySelector('.block-graph-fn-badge') !== null", "the Functions menu shows no identification badge")
       let badges = try await ui.value("[...document.querySelectorAll('.block-graph-fn-row')].map(row => row.innerText).join(' | ')") as? String ?? ""
       XCTAssertTrue(badges.contains("alloc"), "\(size.name): the allocator export carries a badge: \(badges)")
-      try await assertLayout(ui, "#screen-sources", "\(size.name) wasm identification badges")
+      // The menu is a popup over the graph by design, so its own layout is
+      // checked: rows, badges and sizes whole and inside the window.
+      try await assertLayout(ui, ".block-graph-fn-menu", "\(size.name) wasm identification badges")
+      try await assertFullyVisible(ui, ".block-graph-fn-menu", "\(size.name) functions menu")
       try await ui.screenshot("wasm-identification-badges-\(size.name)")
       try await ui.key(53, "\u{1B}")
       try await ui.click("#source-graph")

@@ -1060,15 +1060,17 @@ few bytes every 15 to 30 s. In a one-hour session with the default budget:
 | Stream | Snapshots | Copied | Newest snapshot at most |
 | --- | ---: | ---: | --- |
 | 60 KB/s | 33 | 58 MiB | 82 s old, then sealed after 279 s |
-| 3.6 KB/s | 93 | 57 MiB | 807 s old |
-| 10 KB/s for 60 s | 50 | 12 MiB | 1 s old |
-| a heartbeat every 15 s | 84 | 0 MiB | 105 s old |
+| 3.6 KB/s | 97 | 62 MiB | 888 s old |
+| 10 KB/s for 60 s | 51 | 13 MiB | 1 s old |
+| a heartbeat every 15 s | 95 | 0 MiB | 110 s old |
 
 Snapshots count `partial` records, the seal included; copied counts the
 receiver checkpoints, so not the seal. `make native-artifact-capture-check`
 replays these streams through the capture itself (chunks every 250 ms for the
-fast and chat streams, every 500 ms for the medium one, posted timers run as
-the clock passes them) and fails when this table differs from the replay.
+fast and chat streams, every 500 ms for the medium one, each posted timer run
+at its due time) and fails when this table differs from the replay. The newest
+snapshot's age is sampled just before each chunk and just before each timer
+runs, where it peaks.
 
 A larger budget (`REB_RESPONSE_BODY_BUDGET_MIB`) keeps a medium stream
 fresher, because its allowance grows with it; the 1 MiB minimum budget leaves

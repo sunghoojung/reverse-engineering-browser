@@ -108,11 +108,13 @@ a match; a key shared by more is a tie and is left for later passes.
 3. `normalized`: defined functions by normalized body hash.
 4. `export_name`, then `name`: defined functions by first export name, then by
    name-section name.
-5. `call_graph`: a worklist starting from every matched pair. For each pair:
+5. `call_graph`: rounds starting from every matched pair. For each pair in a
+   round:
    - when the two bodies normalize equally and have the same number of call
      sites, the k-th call sites sit at corresponding places, so their callees
-     are proposed, but only when neither callee has another open callee of
-     the pair that looks more like it;
+     are proposed, each distinct pair of targets once however many call sites
+     repeat it, but only when neither callee has another open callee of the
+     pair that looks more like it;
    - the open callees, and separately the open callers, of the pair are
      compared with each other, and a pair that is each other's best
      same-signature candidate by at least 0.01 is proposed;
@@ -121,7 +123,13 @@ a match; a key shared by more is a tie and is left for later passes.
      nothing from that set, so one function called from everywhere cannot make
      the work quadratic.
 
-   A new pair queues itself and the matched pairs next to it.
+   Scores come from one matrix per pair and set, used by both checks, and
+   each is computed once per comparison. After every pair in the round has
+   proposed, a function proposed for exactly one partner, by every proposer,
+   is paired; one proposed for two or more partners forms a `call_graph` tie
+   with them. Which pair was visited first never decides a contested
+   function. A round the budget stops accepts nothing. The next round looks
+   at the new pairs and the matched pairs next to them.
 
 Passes 1 to 5 repeat while propagation adds matches, at most four rounds.
 Then:
@@ -138,7 +146,8 @@ Then:
    function. Then:
    - every tie is joined into a group first: a function with more than one such
      candidate, a candidate that more than one function ranks best within
-     0.01, and a contesting B function join that group;
+     0.01, and a contesting B function together with the contested function
+     and its own best candidates join that group;
    - a pair is then accepted only when its score is at least 0.75, neither side
      is in a group, and the B candidate's best claimant beats every other
      claimant by at least 0.01;
@@ -147,7 +156,9 @@ Then:
 
 Passes 1 to 5 run once more from the structural matches. Finally, functions
 still tied by body hash or normalized hash form groups. A tie is never
-resolved by index order or any other forced pick.
+resolved by index order or any other forced pick, and every step iterates in
+a fixed order, so the same pair of modules gives the same table every time,
+page after page.
 
 ## Document
 
@@ -208,15 +219,19 @@ import and export names are returned as in `get_wasm_functions`.
 
 - Maximum module input: 64 MiB each, the block graph's limit.
 - Maximum functions per module: 262,144, imports included. A larger module is
-  compared on that prefix and named in `omissions`.
+  compared on that prefix and named in `omissions`; imports past it are
+  counted, not kept.
 - A body over 7,654,321 bytes or a function with more than 50,000 locals is
   rejected as malformed, since web engines reject both.
 - Similarity scores: 4,000,000 in all, across propagation and the structural
   pass, and at most 64 per function in the structural pass.
-- One four-second deadline covers fingerprinting and matching, below the
-  native helper's five-second process limit. It is checked before each body,
+- One four-second deadline covers the request, below the native helper's
+  five-second process limit. It counts from when the request arrived, before
+  it waited for a reader, so reading and verifying both modules count too. It
+  is checked every 4,096 section entries while parsing, before each body,
   every 4,096 instructions inside one, before each exact pass, at each
-  propagation step and before each structural candidate set. Global and local
+  propagation step and before each structural candidate set. A parse it
+  stops says the module's function count is unknown. Global and local
   first-use numbering use tables indexed by number, so no body costs more
   than linear work between two checks.
 - When a limit or the deadline stops a step:
@@ -226,9 +241,10 @@ import and export names are returned as in `get_wasm_functions`.
   - every function left unmatched is `unclassified` instead of `added`,
     `removed` or `ambiguous`;
   - matches made before the stop stand.
-- The loopback backend keeps the two most recent reports in memory, keyed by
-  both artifact IDs and SHA-256 digests, so paging a pair does not repeat the
-  comparison. The native `reb://` route starts a new helper process for each
+- The loopback backend keeps the two most recent complete reports in memory,
+  keyed by the store and both artifact IDs and SHA-256 digests, so paging a
+  pair does not repeat the comparison. A partial report is not kept, so a
+  retry makes a fresh attempt. The native `reb://` route starts a new helper process for each
   page and filter, so each of its pages repeats the comparison inside the
   same bound.
 
@@ -242,7 +258,9 @@ Errors use the shared `Error` body:
 | 500 | an integrity failure |
 
 A module that declares no functions is valid: its other side is entirely
-added or removed, and `omissions` says so.
+added or removed, and `omissions` says so. That note does not make the
+report partial: `status` is `partial` only when something was left
+uncompared.
 
 ## Library signatures
 

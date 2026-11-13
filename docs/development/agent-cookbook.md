@@ -722,11 +722,13 @@ then read what changed before what stayed.
 
 ```text
 get_artifacts {"kind": "wasm", "limit": 20}
-get_wasm_module_diff {"artifact_id": "9", "compare_artifact_id": "14", "status": "changed,added,removed,ambiguous"}
-get_wasm_module_diff {"artifact_id": "9", "compare_artifact_id": "14", "status": "changed,added,removed,ambiguous", "row_offset": <row_window.next_offset>}
+get_wasm_module_diff {"artifact_id": "9", "compare_artifact_id": "14", "status": "changed,added,removed,ambiguous,unclassified"}
+get_wasm_module_diff {"artifact_id": "9", "compare_artifact_id": "14", "status": "changed,added,removed,ambiguous,unclassified", "row_offset": <row_window.next_offset>}
 ```
 
-Good: `status: "complete"`, `summary.statuses` with every count, and rows
+The filter keeps `unclassified`: those are the rows a `partial` report
+leaves when a limit stopped a step. Good: `status: "complete"`,
+`summary.statuses` with every count, and rows
 whose `a` and `b` sides name a `function` index. Page with the previous
 page's `row_window.next_offset`, never a fixed step: a page stops early when
 its rows are long.

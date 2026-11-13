@@ -2378,7 +2378,9 @@ choosing another module drops any slower read still running, so a late answer
 never lands over the chosen pair. The summary counts
 every status; the filter chips (All, Changed, Added, Removed, Ambiguous,
 Unchanged, and Unclassified when a limit stopped matching) narrow the rows,
-and **Show more rows** reads the next page of 200. Each row shows its status,
+and **Show more rows** reads the next page of 200. A newly chosen module or
+filter starts the table at the top; Show more keeps the place. Rows scrolled
+into view, by a click target or by Tab, stop below the sticky header. Each row shows its status,
 each side's function as `name · func N` (the index alone when unnamed), the
 method and the score. Each member of a tie is its own ambiguous row, and its
 empty side names the tie and how many functions of the other module are in it

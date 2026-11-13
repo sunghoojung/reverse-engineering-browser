@@ -683,7 +683,7 @@ get_wasm_identification {"artifact_id": "9", "row_offset": 1024}
 
 Good: `summary.toolchains` and `toolchain.conclusions[].evidence` (each with
 `record` and `byte_offset`); `functions.suggestions` rows
-`[function_index, label, category, library, confidence, record, byte_offset]`,
+`[function_index, label, category, library, confidence, source, byte_offset]`,
 paged until `suggestion_window.next_offset` is null (a page stops at 1024 rows or
 the page byte budget, so every page fits the inline limit); `constants.matches` with
 `match`, `matched`/`total` and, for a data table, `referenced_by`. Functions with

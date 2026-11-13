@@ -1590,9 +1590,6 @@ struct Part {
     address: Option<u64>,
 }
 
-/// Runs kept per match; a 256-element table of 4-element runs has 64.
-const MAX_PARTS: usize = 64;
-
 /// One reported constant match.
 struct Match {
     set: usize,
@@ -1611,9 +1608,10 @@ struct Match {
     segments: Vec<u32>,
     encoding: Option<Encoding>,
     runs: usize,
-    /// The runs, up to `MAX_PARTS`; `parts_cut` when more were joined.
+    /// The runs. They cover disjoint, increasing element ranges of one set,
+    /// each at least the set's minimum run, so a match holds at most
+    /// `total / data_min_run` of them: 32 for the 256-element tables.
     parts: Vec<Part>,
-    parts_cut: bool,
     /// The memory address of `byte_offset` and of the match's end, when the
     /// segments' offsets are constants.
     address: Option<u64>,
@@ -1630,13 +1628,6 @@ struct Match {
 }
 
 impl Match {
-    fn add_part(&mut self, part: Part) {
-        if self.parts.len() < MAX_PARTS {
-            self.parts.push(part);
-        } else {
-            self.parts_cut = true;
-        }
-    }
     fn matched(&self) -> usize {
         self.covered
             .iter()
@@ -1707,7 +1698,6 @@ fn data_match(run: &Run, segment: &Segment<'_>) -> Match {
                 .address
                 .map(|base| base.wrapping_add(run.start as u64)),
         }],
-        parts_cut: false,
         address: segment
             .address
             .map(|base| base.wrapping_add(run.start as u64)),
@@ -1772,7 +1762,7 @@ fn cluster(mut runs: Vec<Run>, segment: &Segment<'_>, deadline: Instant, out: &m
                 .map(|base| base.wrapping_add(run.end as u64));
             open.end_index = run.end_index;
             open.cover(run.first, run.end_index);
-            open.add_part(Part {
+            open.parts.push(Part {
                 start: segment.data_offset + run.start,
                 end: segment.data_offset + run.end,
                 address: segment
@@ -1829,10 +1819,7 @@ fn merge_segments(mut matches: Vec<Match>) -> (Vec<Match>, usize) {
                 previous.address_end = entry.address_end;
                 previous.runs += entry.runs;
                 previous.segments.extend(entry.segments);
-                previous.parts_cut |= entry.parts_cut;
-                for part in entry.parts {
-                    previous.add_part(part);
-                }
+                previous.parts.extend(entry.parts);
                 continue;
             }
         }
@@ -1869,7 +1856,6 @@ fn suppress_data(matches: Vec<Match>, deadline: Instant, expired: &mut bool) -> 
     let mut runs = matches
         .iter()
         .enumerate()
-        .filter(|(_, entry)| !entry.parts_cut)
         .flat_map(|(owner, entry)| {
             entry
                 .parts
@@ -2257,7 +2243,6 @@ fn scan_functions(
                 encoding: None,
                 runs: 0,
                 parts: Vec::new(),
-                parts_cut: false,
                 address: None,
                 address_end: None,
                 references: Vec::new(),
@@ -3542,7 +3527,6 @@ mod tests {
                     address: None,
                 })
                 .collect(),
-            parts_cut: false,
             address: None,
             address_end: None,
             references: Vec::new(),
@@ -3757,6 +3741,41 @@ mod tests {
     fn a_nested_qualified_path_takes_its_top_level_trait() {
         let name = "<<alloc::vec::Vec<u8> as core::ops::Deref>::Target as alloc::Foo>::bar";
         assert_eq!(rust_crate(name), (Some("alloc"), false));
+    }
+
+    #[test]
+    fn a_match_holds_at_most_32_runs() {
+        // Runs of one match cover disjoint, increasing element ranges of at
+        // least the set's minimum run, which bounds their number without a cap.
+        let most = wasm_constants::catalog()
+            .iter()
+            .filter(|set| set.data_min_run > 0)
+            .map(|set| set.total() / set.data_min_run)
+            .max()
+            .unwrap();
+        assert_eq!(most, 32);
+        // A CRC-32 table in 32 runs of 8, each broken from the next by one
+        // inserted word, is one match of 32 runs.
+        let mut words = wasm_constants::crc_table(0xedb8_8320, true);
+        for run in 1..32 {
+            words.insert(run * 9 - 1, 0);
+        }
+        let report = identify(
+            &raw::module(&[raw::memory(1), raw::data(&[(1024, raw::words(&words))])]),
+            0,
+            16,
+        )
+        .unwrap();
+        let crc = constant(&report, "crc32_table");
+        assert_eq!(
+            (
+                crc.len(),
+                crc[0]["runs"].as_u64(),
+                crc[0]["matched"].as_u64()
+            ),
+            (1, Some(32), Some(256)),
+            "{report:#}"
+        );
     }
 
     #[test]

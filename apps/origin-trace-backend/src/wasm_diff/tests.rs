@@ -1412,3 +1412,28 @@ fn equal_bytes_naming_a_global_or_type_of_another_type_are_changed() {
         vec![row("changed", Some("export_name"), Some(0), Some(0))]
     );
 }
+
+#[test]
+fn equal_bytes_of_another_signature_are_not_paired() {
+    // `local.get 0` is the same bytes over an i32 and an i64.
+    let found = report(
+        r#"(module (func (param i32) (result i32) local.get 0) (func (export "x") nop nop))"#,
+        r#"(module (func (param i64) (result i64) local.get 0) (func (export "x") nop nop))"#,
+    );
+    assert_eq!(
+        rows(&found),
+        vec![
+            row("added", None, None, Some(0)),
+            row("removed", None, Some(0), None),
+            row("identical", Some("identical"), Some(1), Some(1)),
+        ]
+    );
+    // Twins of two signatures are two ties, not one.
+    let twins = report(
+        r#"(module (func (param i32) (result i32) local.get 0) (func (param i32) (result i32) local.get 0)
+            (func (param i64) (result i64) local.get 0) (func (param i64) (result i64) local.get 0))"#,
+        r#"(module (func (param i32) (result i32) local.get 0) (func (param i32) (result i32) local.get 0)
+            (func (param i64) (result i64) local.get 0) (func (param i64) (result i64) local.get 0))"#,
+    );
+    assert_eq!(twins.groups, vec![(2, 2), (2, 2)]);
+}

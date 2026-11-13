@@ -437,6 +437,11 @@ struct Func {
     callees: Vec<u32>,
 }
 
+/// The bytes-pass key: a defined, index-free body and its signature.
+fn bytes_key(f: &Func) -> Option<(u64, [u8; 16])> {
+    (f.import.is_none() && f.pure).then_some((f.signature, f.body))
+}
+
 struct Module {
     imported: u32,
     defined: u32,
@@ -1419,12 +1424,10 @@ impl<'m> Matcher<'m> {
         );
         // Equal bytes mean an equal function only when nothing in the body
         // names another item by index: a thunk's `call 1` names a different
-        // function in a build with one function inserted before it.
-        self.exact(
-            BY_BYTES,
-            |f| (defined(f) && f.pure).then_some(f.body),
-            &mut made,
-        );
+        // function in a build with one function inserted before it. The
+        // signature is part of the key because the body bytes do not carry
+        // it: `local.get 0` is the same bytes over an i32 and an i64.
+        self.exact(BY_BYTES, bytes_key, &mut made);
         // The normalized hash with the data each address points at, before
         // the normalized hash alone: moved readers of different offsets pair
         // with the reader of the same offset.
@@ -1719,7 +1722,7 @@ impl<'m> Matcher<'m> {
     fn exact_ties(&self) -> Vec<(u8, Vec<u32>, Vec<u32>)> {
         let defined = |f: &Func| f.import.is_none();
         let mut ties = Vec::new();
-        for (_, (a, b)) in self.groups_by(|f| (defined(f) && f.pure).then_some(f.body)) {
+        for (_, (a, b)) in self.groups_by(bytes_key) {
             ties.push((BY_BYTES, a, b));
         }
         let mut seen_a = vec![false; self.a.funcs.len()];

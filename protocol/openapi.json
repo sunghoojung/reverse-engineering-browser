@@ -100,6 +100,19 @@
       ],
       "description": "The native debugger reads values out of a page while it is paused. Those values and the page-derived names they are keyed by are omitted below --allow-content, which --permission full implies: a property name or a paused function name can carry a secret as well as its value. The gate is content admission itself, not the --omit-content flag, so the raw-flag path (--allow-effects alone, which sets neither flag) omits them too. Identifiers, counts, origins and URLs are returned at every level, as elsewhere."
     },
+    "run_values": {
+      "flag": "--allow-content",
+      "operations": [
+        "run_wasm_function",
+        "get_wasm_runs"
+      ],
+      "keys": [
+        "value",
+        "hex",
+        "sha256"
+      ],
+      "description": "Results, stub values and import arguments (value), memory bytes (hex) and memory read digests (sha256) of an offline Wasm run are computed by captured code. Below --allow-content (--permission full) every value under these keys is replaced by {\"omitted\":\"content\"} with no length or digest, because the length of a short return value, or the digest of a few memory bytes, is enough to recover it. Outcomes, trap kinds, counts, import names and expectation matches remain. The gate is content admission itself, so --allow-effects alone omits them too."
+    },
     "content_reads": {
       "flag": "--allow-content",
       "conflicts": "--omit-content",
@@ -4828,7 +4841,7 @@
       "get": {
         "operationId": "get_wasm_runs",
         "summary": "Read stored offline runs of captured Wasm functions",
-        "description": "Lists derived run records written by run_wasm_function, newest first, optionally for one artifact. Reads the local run store only: nothing executes. Records are derived experiments, never captured evidence. Memory bytes (hex) and values (value) are content and are omitted below Full access; outcomes, trap kinds, import call counts, digests and expectation matches remain.",
+        "description": "Lists derived run records written by run_wasm_function, newest first, optionally for one artifact. Reads the local run store only: nothing executes. Records are derived experiments, never captured evidence. Memory bytes (hex), their digests (sha256) and values (value) are content and are omitted below Full access; outcomes, trap kinds, import call counts, digests and expectation matches remain.",
         "tags": [
           "artifacts"
         ],
@@ -4917,7 +4930,7 @@
       "post": {
         "operationId": "run_wasm_function",
         "summary": "Run one function of a captured Wasm module offline",
-        "description": "Explicit, confirmed offline execution of one exported or indexed function of a hash-verified captured core Wasm module in wasmi 2.0.0, a pure-Rust interpreter with fuel metering and no JIT, inside the local backend. Every import is a stub: a function import returns the results the request supplies (results, or one sequence entry per call) and otherwise traps with outcome import_trap; imported memories and tables are fresh and empty, imported globals are zero. No filesystem, network, clock, randomness, browser or page is reachable, so supply every nondeterministic import. Data and element segments initialize as usual; the start function runs only with run_start. memory_writes apply after instantiation (and the start function) and before the call; memory_reads are taken after it, whatever the outcome. Every limit (fuel, memory_pages, table_elements, call_depth, deadline_ms) and every trap is a named outcome.status, with outcome.phase and outcome.trap_kind; wasmi does not report trap byte offsets. Every import call is recorded (first 256). expect compares results and reads exactly and reports matches without needing the values. The result carries module_sha256, inputs_digest, the interpreter and the limits, and is stored as a derived experiment record, never captured evidence. Results, import arguments and memory bytes are content: below Full access value and hex fields are omitted. Requires confirm_offline_execution true; nothing runs without it.",
+        "description": "Explicit, confirmed offline execution of one exported or indexed function of a hash-verified captured core Wasm module in wasmi 2.0.0, a pure-Rust interpreter with fuel metering and no JIT, inside the local backend. Every import is a stub: a function import returns the results the request supplies (results, or one sequence entry per call) and otherwise traps with outcome import_trap; imported memories and tables are fresh and empty, imported globals are zero. No filesystem, network, clock, randomness, browser or page is reachable, so supply every nondeterministic import. Data and element segments initialize as usual; the start function runs only with run_start. memory_writes apply after instantiation (and the start function) and before the call; memory_reads are taken after it, whatever the outcome. Every limit (fuel, memory_pages, table_elements, call_depth, deadline_ms) and every trap is a named outcome.status, with outcome.phase and outcome.trap_kind; wasmi does not report trap byte offsets. Every import call is recorded (first 256, with up to 16 arguments and 16 results each). The memory and table limits are totals across every memory and table of the run. expect compares results and reads exactly and reports matches without needing the values. The result carries module_sha256, inputs_digest, the interpreter and the limits, and is stored as a derived experiment record, never captured evidence. Results, import arguments, memory bytes and memory read digests are content: below Full access the value, hex and sha256 fields are omitted with no length. Requires confirm_offline_execution true; nothing runs without it.",
         "tags": [
           "artifacts"
         ],
@@ -22645,7 +22658,8 @@
                 "args",
                 "args_truncated",
                 "outcome",
-                "results"
+                "results",
+                "results_truncated"
               ]
             }
           },

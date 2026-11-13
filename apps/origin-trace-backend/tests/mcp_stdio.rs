@@ -292,6 +292,124 @@ fn retained_artifact(server: &Server, id: &str, kind: &str, body: &[u8]) -> Valu
     artifact
 }
 
+#[test]
+fn wasm_run_values_digests_and_errors_never_reach_an_ask_level_client() {
+    // The module returns 1234567, leaves the byte 0x5a in memory and returns
+    // 1e300 from a second export. At --permission ask none of them, their
+    // lengths or a digest of the byte may reach the model, on success or on any
+    // error path.
+    let server = Server::start();
+    let bytes = wat::parse_str(
+        r#"(module (memory (export "m") 1) (data (i32.const 0) "\5a")
+            (func (export "run") (result i32) i32.const 1234567)
+            (func (export "big") (result f64) f64.const 1e300))"#,
+    )
+    .unwrap();
+    let hash = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(&bytes))
+    };
+    let artifact = json!({"protocol_version": 1, "artifact_id": "1", "session_id": "1",
+        "navigation_id": "1", "frame_id": "1", "parent_artifact_id": "0", "creator_event_id": "0",
+        "kind": "wasm", "url": "https://owned.test/run.wasm", "mime_type": "application/wasm",
+        "byte_size": bytes.len(), "sha256": hash, "sensitive": false,
+        "content_path": format!("blobs/{hash}.bin")});
+    let artifacts = server._root.path().join("artifacts");
+    std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
+    std::fs::write(artifacts.join(format!("blobs/{hash}.bin")), &bytes).unwrap();
+    std::fs::write(artifacts.join("manifest.jsonl"), format!("{artifact}\n")).unwrap();
+    let mut mcp = Mcp::start_with(vec![
+        "mcp".into(),
+        "--base-url".into(),
+        server.url.clone(),
+        "--permission".into(),
+        "ask".into(),
+    ]);
+    let names = tool_names(&mcp.request("tools/list", json!({})));
+    assert!(names.iter().any(|name| name == "run_wasm_function"));
+    let call = |mcp: &mut Mcp, arguments: Value| {
+        mcp.request(
+            "tools/call",
+            json!({"name": "run_wasm_function", "arguments": {"body": arguments}}),
+        )
+    };
+    let base = json!({"artifact_id": "1", "sha256": artifact["sha256"], "confirm_offline_execution": true});
+    let mut run = base.clone();
+    run["export"] = json!("run");
+    run["memory_reads"] = json!([{"offset": 0, "length": 1}]);
+    let answer = call(&mut mcp, run);
+    assert_eq!(answer["result"]["isError"], false, "{answer}");
+    let text = tool_text(&answer).to_owned();
+    assert!(text.contains("returned"), "{text}");
+    let digest = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest([0x5a]))
+    };
+    for needle in ["1234567", "\"5a\"", &digest] {
+        assert!(
+            !text.contains(needle),
+            "{needle} reached the client: {text}"
+        );
+    }
+    let record: Value = serde_json::from_str(&text).unwrap();
+    let marker = json!({"omitted": "content"});
+    assert_eq!(record["outcome"]["status"], "returned");
+    assert_eq!(
+        record["results"][0]["value"], marker,
+        "no length of the result"
+    );
+    assert_eq!(record["memory_reads"][0]["hex"], marker);
+    assert_eq!(
+        record["memory_reads"][0]["sha256"], marker,
+        "no digest of one byte"
+    );
+    assert_eq!(record["memory_reads"][0]["status"], "read");
+    let mut big = base.clone();
+    big["export"] = json!("big");
+    let answer = call(&mut mcp, big);
+    assert_eq!(answer["result"]["isError"], false, "{answer}");
+    // The long decimal form is how the value once leaked through a 500.
+    let long_form = "100000000000000005250476";
+    assert!(
+        !tool_text(&answer).contains("1e300") && !tool_text(&answer).contains(long_form),
+        "{answer}"
+    );
+    // Error paths: a missing confirmation, an argument mismatch and a bad hash.
+    let mut unconfirmed = base.clone();
+    unconfirmed["export"] = json!("run");
+    unconfirmed
+        .as_object_mut()
+        .unwrap()
+        .remove("confirm_offline_execution");
+    let mut mismatch = base.clone();
+    mismatch["export"] = json!("run");
+    mismatch["args"] = json!([{"type": "i32", "value": "7"}]);
+    let mut stale = base.clone();
+    stale["export"] = json!("run");
+    stale["sha256"] = json!("0".repeat(64));
+    for arguments in [unconfirmed, mismatch, stale] {
+        let answer = call(&mut mcp, arguments);
+        let text = tool_text(&answer);
+        for needle in ["1234567", "1e300", long_form, &digest] {
+            assert!(
+                !text.contains(needle),
+                "{needle} reached the client: {text}"
+            );
+        }
+    }
+    let listed = mcp.request(
+        "tools/call",
+        json!({"name": "get_wasm_runs", "arguments": {}}),
+    );
+    let text = tool_text(&listed);
+    for needle in ["1234567", "1e300", long_form, &digest] {
+        assert!(
+            !text.contains(needle),
+            "{needle} reached the client from stored runs: {text}"
+        );
+    }
+}
+
 fn float32_artifact_request(artifact: &Value) -> Value {
     let frames = artifact["byte_size"].as_u64().unwrap() / 4;
     json!({"body": {"protocol_version": 1, "reference": null,

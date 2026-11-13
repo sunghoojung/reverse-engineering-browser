@@ -865,7 +865,13 @@ fn omit_content_fields(
 
 /// The page-content keys `name` declares, empty for every other operation.
 fn paused_value_keys(spec: &Value, name: &str) -> Vec<String> {
-    let policy = &spec["x-reb-mcp"]["paused_values"];
+    policy_keys(spec, "paused_values", name)
+}
+
+/// The keys an `x-reb-mcp` policy gated on `--allow-content` declares for
+/// operation `name`, empty for every other operation.
+fn policy_keys(spec: &Value, policy: &str, name: &str) -> Vec<String> {
+    let policy = &spec["x-reb-mcp"][policy];
     if policy["flag"] != "--allow-content"
         || !policy["operations"]
             .as_array()
@@ -879,6 +885,31 @@ fn paused_value_keys(spec: &Value, name: &str) -> Vec<String> {
         .flatten()
         .filter_map(|key| key.as_str().map(str::to_owned))
         .collect()
+}
+
+/// Replaces every value under one of `keys` with a bare content marker. Unlike
+/// a string omission it keeps no length: the length of a short return value,
+/// or the digest of a few memory bytes, is enough to recover it.
+fn drop_keys(value: &Value, keys: &[String]) -> Value {
+    match value {
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|item| drop_keys(item, keys)).collect())
+        }
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(name, child)| {
+                    let kept = if keys.iter().any(|key| key == name) {
+                        json!({"omitted": "content"})
+                    } else {
+                        drop_keys(child, keys)
+                    };
+                    (name.clone(), kept)
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 fn structural_summary(bytes: &[u8], limit: usize, string_chars: usize, value: &Value) -> Value {
@@ -1259,6 +1290,18 @@ async fn call_tool(
             omit_content,
         );
         completed.bytes = serde_json::to_vec(&omitted).expect("omitted content JSON");
+    }
+    // Values a captured module computed, and digests of its memory, are
+    // admitted with content itself, like paused values above.
+    let run_keys = policy_keys(spec, "run_values", name);
+    if !allow_content
+        && !run_keys.is_empty()
+        && completed.status == 200
+        && !completed.unreadable
+        && let Ok(value) = serde_json::from_slice::<Value>(&completed.bytes)
+    {
+        completed.bytes =
+            serde_json::to_vec(&drop_keys(&value, &run_keys)).expect("run values JSON");
     }
     project_completed(
         spec,
@@ -2491,6 +2534,54 @@ mod tests {
         assert_eq!(result["expectation"]["all_match"], true);
         assert_eq!(result["provenance"]["module_sha256"], "cd".repeat(32));
         assert!(!result.to_string().contains("SECRET") && !result.to_string().contains("5ec7e700"));
+    }
+
+    #[test]
+    fn run_values_drop_digests_and_lengths_below_content_admission() {
+        // A 1-byte read's sha256, or the length of a short result, recovers the
+        // value, so below --allow-content these keys keep no trace at all.
+        let spec = specification().unwrap();
+        let keys = super::policy_keys(&spec, "run_values", "run_wasm_function");
+        assert_eq!(keys, ["value", "hex", "sha256"]);
+        assert_eq!(
+            super::policy_keys(&spec, "run_values", "get_wasm_runs"),
+            keys
+        );
+        assert!(super::policy_keys(&spec, "run_values", "inspect_wasm").is_empty());
+        let record = json!({
+            "outcome": {"status": "returned"},
+            "results": [{"type": "i32", "value": "1234567"}],
+            "memory_reads": [{"offset": 0, "length": 1, "status": "read",
+                "sha256": "5a".repeat(32), "hex": "5a"}],
+            "expectation": {"all_match": true},
+            "provenance": {"module_sha256": "cd".repeat(32)}
+        });
+        let omitted = super::omit_content_fields(&record, None, 160, &[], true);
+        let dropped = super::drop_keys(&omitted, &keys);
+        assert_eq!(
+            dropped["results"][0]["value"],
+            json!({"omitted": "content"})
+        );
+        assert_eq!(
+            dropped["memory_reads"][0]["sha256"],
+            json!({"omitted": "content"})
+        );
+        assert_eq!(
+            dropped["memory_reads"][0]["hex"],
+            json!({"omitted": "content"})
+        );
+        assert_eq!(dropped["memory_reads"][0]["length"], 1);
+        assert_eq!(dropped["outcome"]["status"], "returned");
+        assert_eq!(dropped["expectation"]["all_match"], true);
+        assert_eq!(dropped["provenance"]["module_sha256"], "cd".repeat(32));
+        let text = dropped.to_string();
+        assert!(
+            !text.contains("chars")
+                && !text.contains("bytes")
+                && !text.contains("1234567")
+                && !text.contains("5a5a"),
+            "{text}"
+        );
     }
 
     #[test]

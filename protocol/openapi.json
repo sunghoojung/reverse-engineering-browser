@@ -22048,7 +22048,7 @@
                     },
                     "evidence": {
                       "type": "array",
-                      "maxItems": 16,
+                      "maxItems": 8,
                       "items": {
                         "type": "object",
                         "additionalProperties": false,
@@ -22099,7 +22099,7 @@
               },
               "producers": {
                 "type": "array",
-                "maxItems": 32,
+                "maxItems": 16,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -22131,7 +22131,7 @@
               },
               "target_features": {
                 "type": "array",
-                "maxItems": 64,
+                "maxItems": 32,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -22205,7 +22205,7 @@
               },
               "custom_sections": {
                 "type": "array",
-                "maxItems": 64,
+                "maxItems": 32,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -22390,7 +22390,7 @@
             "properties": {
               "matches": {
                 "type": "array",
-                "maxItems": 128,
+                "maxItems": 64,
                 "items": {
                   "type": "object",
                   "required": [
@@ -22479,7 +22479,7 @@
                     },
                     "referenced_by": {
                       "type": "array",
-                      "maxItems": 16,
+                      "maxItems": 4,
                       "items": {
                         "type": "object",
                         "additionalProperties": false,
@@ -22524,7 +22524,7 @@
                     },
                     "sites": {
                       "type": "array",
-                      "maxItems": 8,
+                      "maxItems": 4,
                       "items": {
                         "type": "object",
                         "additionalProperties": false,

@@ -4794,10 +4794,47 @@ async fn wasm_identification_route_matches_its_contract_and_the_cli() {
     };
     let mut malformed = bytes.clone();
     malformed.truncate(40);
+    // Four producers sections of 16 values and four target_features sections
+    // of 32 features: every list is capped across sections, as the schema says.
+    let leb = |value: usize| {
+        let mut out = Vec::new();
+        let mut value = value;
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                return out;
+            }
+            out.push(byte | 0x80);
+        }
+    };
+    let name = |text: &str| [leb(text.len()), text.as_bytes().to_vec()].concat();
+    let custom = |section: &str, payload: Vec<u8>| {
+        let body = [name(section), payload].concat();
+        [vec![0], leb(body.len()), body].concat()
+    };
+    let mut features = leb(32);
+    for index in 0..32 {
+        features.extend([vec![b'+'], name(&format!("f{index:02}"))].concat());
+    }
+    let mut values = leb(16);
+    for index in 0..16 {
+        values.extend([name(&format!("tool{index}")), name("1")].concat());
+    }
+    let producers = [leb(1), name("processed-by"), values].concat();
+    let mut declared = b"\0asm\x01\0\0\0".to_vec();
+    for _ in 0..4 {
+        declared.extend(custom("target_features", features.clone()));
+    }
+    for _ in 0..4 {
+        declared.extend(custom("producers", producers.clone()));
+    }
     let manifest = [
         store("1", "wasm", &bytes),
         store("2", "javascript", b"let a = 1;"),
         store("3", "wasm", &malformed),
+        store("4", "wasm", &declared),
     ];
     server.file(
         "artifacts/manifest.jsonl",
@@ -4808,6 +4845,26 @@ async fn wasm_identification_route_matches_its_contract_and_the_cli() {
             .as_bytes(),
     );
     let route = "/api/wasm/identification";
+    let body = assert_contract_response(
+        server.get(&format!("{route}?artifact_id=4")).await,
+        "get",
+        route,
+        200,
+    )
+    .await;
+    let capped: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        capped["toolchain"]["producers"].as_array().unwrap().len(),
+        16
+    );
+    assert_eq!(
+        capped["toolchain"]["target_features"]
+            .as_array()
+            .unwrap()
+            .len(),
+        32
+    );
+    assert_eq!(capped["status"], "partial", "{capped:#}");
     let body = assert_contract_response(
         server.get(&format!("{route}?artifact_id=1")).await,
         "get",

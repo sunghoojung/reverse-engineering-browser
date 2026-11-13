@@ -191,8 +191,28 @@
     return next;
   }
   const strictParse = (source, maximum) => RebInvestigationNotebook.strictParse(source, maximum);
+  // Every number in a names document is an integer written as one. JSON.parse
+  // would read 1.0 or 2e0 as an integer, which the backend's strict parser
+  // refuses, so such a document is refused here too and both sides agree.
+  function integerLiterals(source) {
+    let inString = false;
+    for (let at = 0; at < source.length; at++) {
+      const character = source[at];
+      if (inString) {
+        if (character === '\\') at++;
+        else if (character === '"') inString = false;
+      } else if (character === '"') inString = true;
+      else if (character === '-' || (character >= '0' && character <= '9')) {
+        let end = at;
+        while (end < source.length && /[0-9.eE+-]/.test(source[end])) end++;
+        if (/[.eE]/.test(source.slice(at, end))) return false;
+        at = end - 1;
+      }
+    }
+    return true;
+  }
   function readDocument(file) {
-    if (file?.kind !== 'scratchpad' || file.language !== 'json') return null;
+    if (file?.kind !== 'scratchpad' || file.language !== 'json' || typeof file.content !== 'string' || !integerLiterals(file.content)) return null;
     try {const doc = strictParse(file.content, LIMITS.bytes * 4); return validate(doc) ? doc : null;} catch {return null;}
   }
   // A suffix only makes a malformed document discoverable; ordinary JSON files

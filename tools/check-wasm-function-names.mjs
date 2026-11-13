@@ -81,6 +81,14 @@ async function checkDocument() {
   const file = content => ({id: 1, folder_id: 1, name: 'Evidence names.reb-names.json', kind: 'scratchpad', language: 'json', content});
   assert.equal(api.locate({files: [file(JSON.stringify(named))]}).status, 'ready');
   assert.equal(api.locate({files: [file('{"document_kind":"reb-evidence-names","contract_version":9}')]}).status, 'malformed');
+  // Shared with wasm_names.rs `numbers_are_integers_written_as_integers`:
+  // a fraction or exponent is refused even where it equals an integer.
+  const text = JSON.stringify(named);
+  for (const [from, to] of [['"function":5', '"function":5.0'], ['"contract_version":2', '"contract_version":2.0'], ['"function":5', '"function":5e0']]) {
+    assert.equal(api.readDocument(file(text.replace(from, to))), null, to);
+    assert.equal(api.locate({files: [file(text.replace(from, to))]}).status, 'malformed', to);
+  }
+  assert(api.readDocument(file(text.replace('"name":"encode_payload"', '"name":"1.5e3 is text"'))), 'Digits inside strings are text');
   assert(validateLibrary(library()));
   console.log('PASS Wasm names document: sha256 + full-index key, version 2 only while a Wasm name exists, closed groups, shared 500-name bound, malformed refused');
 }

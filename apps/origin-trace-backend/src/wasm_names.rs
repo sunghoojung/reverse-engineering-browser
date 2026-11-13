@@ -946,6 +946,34 @@ mod tests {
         assert_eq!(names_of(&two).status, Status::Ambiguous);
     }
 
+    // Shared with tools/check-wasm-function-names.mjs: a fraction or exponent
+    // is refused even where it equals an integer, as the UI refuses it.
+    #[test]
+    fn numbers_are_integers_written_as_integers() {
+        let text =
+            doc(json!([{"sha256":SHA,"functions":[{"function":5,"name":"encode_payload"}]}]))
+                .to_string();
+        assert_eq!(names_of(&library(&text)).status, Status::Ready);
+        for (from, to) in [
+            ("\"function\":5", "\"function\":5.0"),
+            ("\"contract_version\":2", "\"contract_version\":2.0"),
+            ("\"function\":5", "\"function\":5e0"),
+        ] {
+            assert!(text.contains(from), "{from}");
+            assert_eq!(
+                names_of(&library(&text.replace(from, to))).status,
+                Status::Malformed,
+                "{to}"
+            );
+        }
+        let digits = text.replace("encode_payload", "1.5e3 is text");
+        assert_eq!(
+            names_of(&library(&digits)).status,
+            Status::Ready,
+            "Digits inside strings are text"
+        );
+    }
+
     #[test]
     fn the_count_and_byte_bounds_are_exact() {
         let functions: Vec<Value> = (0..500).map(|i| json!({"function":i,"name":"n"})).collect();

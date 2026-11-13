@@ -202,8 +202,9 @@ session context (64 and 128 MiB), the footer, the Request URL row and the
 Payload tab name those sizes, and the Response tab names the control, all
 without an environment variable. At the narrow size with the request open the
 footer must show a one-line button instead of the line, fully visible, which
-Return opens to the whole sentence and Escape closes with focus kept. Both
-themes, nothing clipped.
+Return or Space opens to the whole sentence and Escape closes with focus kept;
+focus leaving it, a press elsewhere and closing the request close it too, and a
+request opened again starts with it closed. Both themes, nothing clipped.
 
 `testLaunchStartsWithoutStartPanel` runs alone in a second launch pass. That
 pass starts the copied app without `--ui-url` or an evidence-store argument,

@@ -3663,6 +3663,30 @@ final class OriginTraceRenderedUITests: XCTestCase {
           "\(size.name): Escape did not close the sentence")
         let closed = try await traffic.value("document.activeElement?.id") as? String
         XCTAssertEqual(closed, "request-budget-toggle", "\(size.name): Escape keeps focus on the button")
+        let expanded = "document.querySelector('#request-budget-toggle').getAttribute('aria-expanded')"
+        // Space opens it too; focus leaving the notice closes it.
+        try await traffic.key(49, " ")
+        try await traffic.waitUntil("\(expanded) === 'true'", "\(size.name): Space did not open the sentence")
+        try await assertFullyVisible(traffic, "#request-budget-text", "\(size.name) budget sentence after Space")
+        try await traffic.tab()
+        try await traffic.waitUntil("\(expanded) === 'false'", "\(size.name): focus leaving did not close the sentence")
+        // A press anywhere else closes it.
+        _ = try await traffic.value("(document.querySelector('#request-budget-toggle').focus(), true)")
+        try await traffic.key(36, "\r")
+        try await traffic.waitUntil("\(expanded) === 'true'", "\(size.name): Return did not open the sentence again")
+        try await traffic.click("#request-window-status")
+        try await traffic.waitUntil("\(expanded) === 'false'", "\(size.name): a press elsewhere did not close the sentence")
+        // Closing the request closes it, and a request opened again starts closed.
+        _ = try await traffic.value("(document.querySelector('#request-budget-toggle').focus(), true)")
+        try await traffic.key(36, "\r")
+        try await traffic.waitUntil("\(expanded) === 'true'", "\(size.name): Return did not open the sentence a third time")
+        try await traffic.click("#request-detail-close")
+        try await traffic.waitUntil("document.querySelector('#screen-traffic .detail-pane').hidden", "\(size.name): the request did not close")
+        try await traffic.click("#screen-traffic .request-row", containing: expected.budgetHost)
+        try await traffic.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "\(size.name): the request did not reopen")
+        let reopened = try await traffic.json("({expanded: \(expanded), text: getComputedStyle(\(line)).display})")
+        XCTAssertEqual(reopened["expanded"] as? String, "false", "\(size.name): the sentence does not reappear unasked: \(reopened)")
+        XCTAssertEqual(reopened["text"] as? String, "none", "\(size.name): \(reopened)")
       }
       _ = try await traffic.value("""
         (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null; document.documentElement.dataset.theme = 'light';

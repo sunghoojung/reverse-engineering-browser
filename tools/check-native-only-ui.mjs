@@ -334,6 +334,36 @@ assert.equal(contentLabel.hidden, false);
 assert.equal(contentLabel.textContent, 'Content capture');
 assert.match(contentLabel.getAttribute('title'), /request paths, queries and bodies, and response bodies, up to 16 MiB each, request and response headers, cookies and Canvas images/);
 assert.doesNotMatch(contentLabel.getAttribute('title'), /Budgets:/, 'a session context that names no limits names no budget');
+// The stacked footer's budget sentence closes when focus leaves it, on a press
+// anywhere else and when the request detail closes or changes, so it never
+// stays over the ledger's rows unasked.
+{
+  const notice = document.getElementById('request-budget');
+  const toggle = document.getElementById('request-budget-toggle');
+  const open = () => { runInContext('toggleTrafficBudget(true)', context); assert.equal(notice.dataset.expanded, 'true'); };
+  open();
+  const leave = new window.Event('focusout');
+  leave.relatedTarget = document.getElementById('request-order');
+  notice.dispatchEvent(leave);
+  assert.equal(notice.dataset.expanded, 'false', 'focus leaving the notice closes the sentence');
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  open();
+  const inside = new window.Event('focusout');
+  inside.relatedTarget = document.getElementById('request-budget-text');
+  notice.dispatchEvent(inside);
+  assert.equal(notice.dataset.expanded, 'true', 'focus moving inside the notice keeps it open');
+  document.getElementById('request-rows').dispatchEvent(new window.Event('pointerdown', {bubbles: true}));
+  assert.equal(notice.dataset.expanded, 'false', 'a press elsewhere closes the sentence');
+  open();
+  document.getElementById('request-budget-text').dispatchEvent(new window.Event('pointerdown', {bubbles: true}));
+  assert.equal(notice.dataset.expanded, 'true', 'a press on the sentence keeps it open');
+  runInContext(`state.trafficDetailOpen = true; renderInspector();`, context);
+  open();
+  runInContext(`state.trafficDetailOpen = false; renderInspector();`, context);
+  assert.equal(notice.dataset.expanded, 'false', 'closing the request closes the sentence');
+  runInContext(`state.trafficDetailOpen = true; renderInspector();`, context);
+  assert.equal(notice.dataset.expanded, 'false', 'a request opened again starts with it closed');
+}
 // The session context is the only source of a budget's size; the workspace
 // address carries none, and nothing says it does.
 for (const [file, source] of sources.filter(([file]) => ['app.js', 'app_state.js', 'traffic_view.js'].includes(file))) {

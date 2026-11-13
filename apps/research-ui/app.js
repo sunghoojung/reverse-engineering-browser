@@ -4216,7 +4216,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         updateSelectionSummary(request);
 
-        document.querySelector('.traffic-grid').dataset.detailOpen = String(state.trafficDetailOpen);
+        const trafficGrid = document.querySelector('.traffic-grid');
+        // The stacked footer's budget sentence never outlives the request it
+        // was opened beside, so a request opened later starts with it closed.
+        if (trafficGrid.dataset.detailOpen !== String(state.trafficDetailOpen) && typeof toggleTrafficBudget === 'function') {
+          toggleTrafficBudget(false);
+        }
+        trafficGrid.dataset.detailOpen = String(state.trafficDetailOpen);
         document.querySelector('.detail-pane').hidden = !state.trafficDetailOpen;
         exchangeInspector.hidden = !showingGeneral;
         exchangeInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
@@ -9448,16 +9454,25 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.requestDomain = 'all';
         renderRequests();
       });
-      // The stacked layout's one-line budget button opens the whole sentence;
-      // Escape closes it and keeps focus on the button.
+      // The stacked layout's one-line budget button opens the whole sentence
+      // over the ledger's rows. Escape closes it and keeps focus on the button;
+      // focus leaving it or a press anywhere else closes it too, so it never
+      // stays over rows that the researcher is reaching for.
+      const trafficBudget = document.querySelector('#request-budget');
       document.querySelector('#request-budget-toggle').addEventListener('click', () => toggleTrafficBudget());
-      document.querySelector('#request-budget').addEventListener('keydown', event => {
-        if (event.key !== 'Escape' || document.querySelector('#request-budget').dataset.expanded !== 'true') return;
+      trafficBudget.addEventListener('keydown', event => {
+        if (event.key !== 'Escape' || trafficBudget.dataset.expanded !== 'true') return;
         event.preventDefault();
         event.stopPropagation();
         toggleTrafficBudget(false);
         document.querySelector('#request-budget-toggle').focus();
       });
+      trafficBudget.addEventListener('focusout', event => {
+        if (trafficBudget.dataset.expanded === 'true' && !trafficBudget.contains(event.relatedTarget)) toggleTrafficBudget(false);
+      });
+      document.addEventListener('pointerdown', event => {
+        if (trafficBudget.dataset.expanded === 'true' && !trafficBudget.contains(event.target)) toggleTrafficBudget(false);
+      }, true);
       elements.requestDomain.addEventListener('change', () => {
         state.requestDomain = elements.requestDomain.value;
         state.requestType = 'all';

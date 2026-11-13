@@ -1571,7 +1571,9 @@ response bodies not kept · Raise it in New Live Session… for the next session
 - In the short stacked layout (at most 1,100 by 650 px) with a request open, the
   line becomes a one-line **Budgets used** button (or the one budget's name)
   beside the footer's own, so the ledger keeps its rows. Return or Space opens
-  the whole sentence above the footer, and Escape closes it.
+  the whole sentence above the footer; Escape, focus leaving it, a press
+  anywhere else or closing the request closes it, so it never stays over the
+  rows unasked.
 
 The filter box matches the method, URL or host and status as literal,
 case-insensitive text. `-text` excludes rows that contain it. `domain:` (with

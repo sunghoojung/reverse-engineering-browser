@@ -37,6 +37,11 @@ never changed. Three rules hold everywhere:
   whose constant offset falls inside the table, not an observed load. Any
   other immediate inside a table's range is not counted: Emscripten's data
   starts at 1024, so loop bounds and sizes land inside tables all the time.
+  An empty `referenced_by` is not evidence that a table is unused: an address
+  computed at run time from a base and an index, a segment whose base is not a
+  constant (`memory_address` null, as position-independent code has), and a
+  load inside a fifth or later overlapping range all leave no static
+  reference.
 
 ## Document
 
@@ -46,7 +51,7 @@ never changed. Three rules hold everywhere:
   count, the suggestion count and the constant match counts.
 - `toolchain.conclusions`: `id`, `label`, `kind` (`language`, `compiler`,
   `linker`, `runtime`, `bindings`, `system_interface`, `optimizer`),
-  `confidence`, `evidence_count`, `evidence_truncated` and up to 16 `evidence`
+  `confidence`, `evidence_count`, `evidence_truncated` and up to 8 `evidence`
   items. Each item is `record` (`producers`, `custom_section`, `import`,
   `export`, `name`), `byte_offset`, a bounded `detail`, `function_index` when the
   record names a function, and its own `confidence`.
@@ -100,13 +105,21 @@ little-endian halves, high half first. A run starts only at a distinctive
 element and needs a set-specific minimum length; runs of one set that continue
 the table form one match. Immediates are `i32.const`, `i64.const` (also against
 32-bit sets, since Go keeps 32-bit values in i64), and `f32.const`, `f64.const`
-and `v128.const` lanes by their bits. Two adjacent `i32.const` values, high or
+and `v128.const` lanes by their bits. Two consecutive value constants, high or
 low half first, that spell one 64-bit element count for the 64-bit set, so a
-32-bit SHA-512 implementation is SHA-512 rather than a partial SHA-256. A
+32-bit SHA-512 implementation is SHA-512 rather than a partial SHA-256. A value
+constant is an `i32.const` the next instruction consumes; one followed by
+another constant is an operand such as a store address, so `i32.const addr;
+i32.const lo; i32.store; i32.const addr; i32.const hi; i32.store` pairs `lo`
+with `hi`. A
 function matches a set when it holds a set-specific number of distinct
 elements. A table split across segments whose memory addresses touch, as
-Binaryen's memory packing leaves it, is one match when the second part
-continues the table where the first stopped. A match another match fully explains
+Binaryen's memory packing leaves it, is one match when the second part is the
+next segment in the file and continues the table where the first stopped. Parts
+in another file order, or with an unrelated segment between them, stay separate
+matches, and a merged match is never the container that explains another. Past
+8 segments the rest becomes a separate match and an omission says so. A match
+another match fully explains
 is dropped: four MD5 words inside a five-word SHA-1 state, the alphanumeric
 alphabet inside a complete Base64 alphabet.
 
@@ -123,17 +136,22 @@ alphabet inside a complete Base64 alphabet.
   function counts stay exact for what was read. At most 8,192 data runs and
   512 candidate matches are kept before merging; the rest are counted. Merging
   and suppression are each one pass over sorted matches.
-- At most 32 conclusions of 8 evidence items, 16 producers, 32 target
-  features, 32 custom sections, 4 suggestions per function (each label once),
+- At most 32 conclusions of 8 evidence items (strongest first), and 16
+  producers, 32 target features and 32 custom sections across the whole
+  module however many sections declare them; a target_features section past
+  the cap is not read, and producers are still read for conclusions. Also 4
+  suggestions per function (each label once),
   16,384 suggestions, 64 constant matches (complete and larger first), and 4
   references and 4 sites per match. Every cap reports a count and an omission
-  or `*_truncated` flag.
+  or `*_truncated` flag. Each kind of omission appears once; a repeated one
+  ends with how often it happened, as in `(65536 times)`. Custom sections are
+  read under the same deadline.
 - One page pretty-printed is at most 126,000 bytes, inside the 131,072-byte
   MCP inline limit, which reb-api mcp applies to both the compact and the
   pretty-printed text. Everything but the suggestions is held to 96,000 bytes,
-  with
-  fewer evidence items, listed sections and references when it would not fit
-  (an omission says so); suggestion rows fill the rest of the page.
+  with fewer evidence items, listed sections, references and matches when it
+  would not fit (omissions say so, with the real count of matches left out);
+  suggestion rows fill the rest of the page.
 - Captured text in labels and details is escaped, single-line and at most 96
   bytes, so a read-only MCP result, which omits strings over 160 characters,
   keeps every label. URLs are at most 512 bytes.
@@ -146,8 +164,14 @@ alphabet inside a complete Base64 alphabet.
   named reason. A malformed name, producers or target_features section is
   advisory: the report stays usable and `omissions` names it.
 - A legacy-mangled name counts as Rust only when it ends at its `E` with a
-  `17h<hash>` segment. An Itanium C++ name such as `_ZN4core6Engine4stepEv`
-  carries parameter types after the `E` and names no Rust crate.
+  `17h<hash>` segment, with or without LLVM's `.llvm.<n>` suffix. An Itanium
+  C++ name such as `_ZN4core6Engine4stepEv` carries parameter types after the
+  `E` and names no Rust crate. A v0 name (`_RNv...`) is Rust, and its crate is
+  read from its first crate root. A demangled name without a `::h<hash>` tail
+  that has a parameter list, a `const` qualifier or a destructor
+  (`std::terminate()`, `std::exception::~exception()`) is C++ as wasm-ld writes
+  it, and when the producers declare C or C++, an unhashed path such as
+  `core::fmt::write` names no Rust crate either.
 
 ## Content and permission levels
 
@@ -164,7 +188,9 @@ matches and the labeled-function count. Each chip reveals its evidence byte in
 the listing or hex view. **Details** lists every conclusion's evidence, each
 match's referencing functions and the first 200 suggestions. The Graph's
 **Functions** menu badges each suggested function with its category, and its
-filter matches the labels; badges come from a map built once per report. The UI
+filter matches the labels; badges come from a map built once per report, from
+the report's first page of suggestions, and the menu says so when that page is
+not all of them. The UI
 requests a report only when Inspect or Graph is opened, verifies its identity
 against the selected bytes, renders inert text, keeps the last report on a
 failed retry, and caches at most four reports; returning to an evicted one reads

@@ -1656,6 +1656,7 @@ capture, fetch anything or change a row.
 | --- | --- |
 | `index.html`, `app.css` | Document structure and visual layout |
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
+| `wasm_identification.js`, `wasm_identification.css` | The Inspect identification summary, its Details list and the Functions menu badges, all read from `get_wasm_identification` |
 | `entropy_map.js`, `entropy_map.css` | Sources Map: the fixed-size canvas view, its segmented modes, summary and states; the only color tokens the map uses |
 | `invocation_sites.js` | Track calls: the saved invocation site pane, byte offsets of Sources positions and the titlebar tracking chip |
 | `session_panel.js`, `session_panel.css` | The live session start panel: start choices, startup, failure with Retry; the decision itself is native (`macos/SessionPanel.swift`) |
@@ -2969,6 +2970,23 @@ results, fuel used, every recorded import call with its arguments, and the
 memory reads. Captured names, values and bytes are text, never markup. Each run
 is stored as a derived experiment record, not evidence. The stored-evidence
 window cannot run code and says so. See [WASM run v1](../../protocol/wasm-run-v1.md).
+
+**Inspect** also shows a library identification summary above the listing: a
+**Toolchain** line (for example Rust, wasm-bindgen, Emscripten or WASI, each with
+its confidence), **Constants** (known SHA, MD5, AES, CRC, ChaCha, Base64 and hash
+tables or magic values, each with matched and total elements; a partial match
+has a dashed outline) and the count of labeled functions. Every chip reveals the
+byte its evidence rests on. **Details** lists each conclusion's evidence, the
+functions that name a matched table, and the first 200 function label
+suggestions with their category badges. A constant with no listed reference
+says so without concluding the table is unused. The summary steps aside while
+**Graph** is open; the Graph's **Functions** menu badges labeled functions from
+the report's first page of suggestions (the menu's count says when that page is
+not all of them) and its filter matches their labels. Reports are requested only when Inspect or Graph opens,
+cached for four modules, and shown as inert text; a failed read offers **Retry
+identification** and keeps any earlier report. Labels are suggestions, never
+captured or researcher names, and nothing is concluded from absence. See
+[WASM Identification v1](../../protocol/wasm-identification-v1.md).
 
 **Map** in the Sources toolbar shows one picture of the whole selected artifact:
 a captured script, a Wasm module or a VM bytecode image. **Open map** on a VM

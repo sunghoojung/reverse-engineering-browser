@@ -949,6 +949,11 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const offlineRunner = await artifact(artifacts, {artifact_id: RUN_OFFLINE_ARTIFACT_ID, session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'network_response', kind: 'wasm', mime_type: 'application/wasm', url: 'https://fixture.invalid/offline-runner.wasm'},
   offlineRunnerWasm());
+  // A synthetic Rust and wasm-bindgen shaped module for library
+  // identification (test38), built from its checked-in .wat source.
+  const identified = await artifact(artifacts, {artifact_id: '410', session_id: '1', navigation_id: '100', frame_id: '200',
+    capture_origin: 'network_response', kind: 'wasm', mime_type: 'application/wasm', url: 'https://fixture.invalid/identified-module.wasm'},
+  await readFile(new URL('../fixtures/wasm-identification/rust-wasm-bindgen.wasm', import.meta.url)));
   const guest = await goldenEvidence(artifacts, guestStore);
   const physical = await goldenEvidence(artifacts, dispatchStore);
   assert(guest.events.some(event => event.type === 'wasm_guest_dispatch'), 'guest golden store holds a guest sample');
@@ -958,7 +963,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
   const debuggerRecords = await debuggerObservations(network, artifacts);
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, namedWasm, offlineRunner, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, namedWasm, offlineRunner, identified, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   for (const process of WORKER_STACK_PROCESSES) {
     assert.equal(retained.filter(event => event.process_id === process).length,

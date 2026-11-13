@@ -10,7 +10,7 @@ struct Options {
     #[arg(long)]
     artifact_id: String,
     /// Comma separated section names to decode. Omit for the whole module.
-    #[arg(long, conflicts_with_all = ["artifact_map", "functions", "graph_function"])]
+    #[arg(long, conflicts_with_all = ["artifact_map", "functions", "graph_function", "identification"])]
     sections: Option<String>,
     /// Print the whole-artifact entropy and kind map instead of inspecting.
     #[arg(long, conflicts_with_all = ["functions", "graph_function"])]
@@ -19,8 +19,17 @@ struct Options {
     #[arg(long, conflicts_with = "graph_function")]
     functions: bool,
     /// Print basic blocks for one function as `wasm-block-graph-v1` instead.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "identification")]
     graph_function: Option<u32>,
+    /// Print the `wasm-identification-v1` report instead.
+    #[arg(long, conflicts_with_all = ["artifact_map", "functions"])]
+    identification: bool,
+    /// The first suggestion row of an identification report.
+    #[arg(long, requires = "identification", default_value_t = 0)]
+    row_offset: usize,
+    /// Suggestion rows in an identification report, at most 1024.
+    #[arg(long, requires = "identification", default_value_t = origin_trace_backend::wasm_identification::SUGGESTION_PAGE)]
+    row_limit: usize,
 }
 fn main() {
     let options = Options::parse();
@@ -28,6 +37,22 @@ fn main() {
         let result =
             origin_trace_backend::artifact_map::load(&options.artifacts, &options.artifact_id)
                 .unwrap_or_else(|e| json!({"error":e.message,"status":e.status}));
+        println!("{result}");
+        return;
+    }
+    if options.identification {
+        let result =
+            if options.row_limit > origin_trace_backend::wasm_identification::SUGGESTION_PAGE {
+                json!({"error":"row_limit is at most 1024","status":400})
+            } else {
+                origin_trace_backend::wasm_identification::load(
+                    &options.artifacts,
+                    &options.artifact_id,
+                    options.row_offset,
+                    options.row_limit,
+                )
+                .unwrap_or_else(|e| json!({"error":e.message,"status":e.status}))
+            };
         println!("{result}");
         return;
     }

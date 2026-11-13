@@ -2506,6 +2506,29 @@ mod tests {
         assert!(!text.contains("SENTINEL_VALUE_9f3a"), "{text}");
     }
 
+    /// An identification report is structure: below Full access only the
+    /// matched bytes of a data table are dropped.
+    #[test]
+    fn omit_content_keeps_identification_structure_and_drops_matched_bytes() {
+        let report = json!({
+            "schema": "wasm-identification-v1",
+            "toolchain": {"conclusions": [{"id": "rust", "confidence": "high",
+                "evidence": [{"record": "producers", "byte_offset": 12, "detail": "language: Rust"}]}]},
+            "functions": {"suggestions": [[0, "JS glue: fetch", "js_glue", "wasm-bindgen", "high", "import", 38]]},
+            "constants": {"matches": [{"id": "sha256_k", "match": "complete", "matched": 64, "total": 64,
+                "byte_offset": 400, "byte_end": 656, "hex": "982f8a42"}]}
+        });
+        let result = super::omit_content_fields(&report, None, 160, &[], true);
+        assert_eq!(result["toolchain"], report["toolchain"]);
+        assert_eq!(result["functions"], report["functions"]);
+        assert_eq!(result["constants"]["matches"][0]["matched"], 64);
+        assert_eq!(
+            result["constants"]["matches"][0]["hex"]["omitted"],
+            "string"
+        );
+        assert!(!result.to_string().contains("982f8a42"));
+    }
+
     #[test]
     fn omit_content_drops_wasm_run_values_and_bytes_but_keeps_the_outcome() {
         // A wasm-run-v1 record: results, import arguments and memory bytes

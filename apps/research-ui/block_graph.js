@@ -772,16 +772,23 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
         row.append(name);
         const analyst = analystName(index);
         if (analyst) row.append(researcher().nameNode(analyst, 'block-graph-fn-analyst'));
+        // An identification suggestion for this function, when one was read (wasm_identification.js).
+        const badge = typeof wasmIdentificationBadge === 'function' ? wasmIdentificationBadge(source, index) : null;
+        if (badge) { const tag = document.createElement('span'); tag.className = 'block-graph-fn-badge'; tag.textContent = badge.text; tag.title = badge.title; row.append(tag); }
         row.append(size); row.addEventListener('click', () => choose(index));
         // F2 on the highlighted row renames that function.
         researcher()?.mark(row, source?.sha256, index, displayName(index));
         list.append(row);
       }
-      count.textContent = `${filtered.length.toLocaleString()} of ${functions.index.length.toLocaleString()}${functions.status === 'partial' ? ' · list partial' : ''}`;
+      // Badges come from the identification report's first page of suggestions.
+      const coverage = typeof wasmIdentificationBadgeCoverage === 'function' ? wasmIdentificationBadgeCoverage(source) : null;
+      const badgeNote = coverage && coverage.rows < coverage.total ? ` · badges from the first ${coverage.rows.toLocaleString()} of ${coverage.total.toLocaleString()} suggestions` : '';
+      count.textContent = `${filtered.length.toLocaleString()} of ${functions.index.length.toLocaleString()}${functions.status === 'partial' ? ' · list partial' : ''}${badgeNote}`;
     };
     const applyFilter = () => {
       const query = input.value.trim().toLowerCase();
-      filtered = query ? functions.index.filter(index => `${index} ${names.get(index) ?? ''} ${analystName(index) ?? ''} ${functions.size.get(index) ?? 0}`.toLowerCase().includes(query)) : functions.index.slice();
+      const badgeText = index => (typeof wasmIdentificationBadge === 'function' ? wasmIdentificationBadge(source, index)?.search ?? '' : '');
+      filtered = query ? functions.index.filter(index => `${index} ${names.get(index) ?? ''} ${analystName(index) ?? ''} ${functions.size.get(index) ?? 0} ${badgeText(index)}`.toLowerCase().includes(query)) : functions.index.slice();
       cursor = 0; scroll = 0; list.scrollTop = 0; paint();
     };
     const choose = index => { closeMenu(opener); opener.focus(); loadFunction(index); };
@@ -819,6 +826,8 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
     const current = claim();
     view.setState('loading', 'Listing functions from immutable module bytes…'); indexStatus = 'loading';
     try {
+      // The Functions menu badges come from the identification report.
+      if (typeof wasmIdentificationLoad === 'function') wasmIdentificationLoad(source);
       const index = await readWasmFunctionIndex(source.artifact_id, abort.signal);
       if (!current()) return;
       names = index.names;

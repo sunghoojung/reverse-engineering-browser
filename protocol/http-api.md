@@ -371,6 +371,16 @@ needs `--allow-effects` too, and the server refuses a body without
 `confirm_offline_execution: true` before reading the artifact. See
 [WASM run v1](wasm-run-v1.md).
 
+## WASM identification
+
+`get_wasm_identification` projects `GET /api/wasm/identification`: toolchain
+conclusions with evidence offsets, function label suggestions paged by
+`row_offset` and `row_limit` (at most 1024 rows, and a page always fits the
+131,072-byte MCP inline limit), and constant matches. It is
+read-only and bounded by a 3.5-second deadline and listed caps; a partial
+status names what was cut. Only `hex` on a data match is captured content. See
+[WASM identification](wasm-identification-v1.md).
+
 ## Compact session context
 
 `GET /api/session/context` (`get_session_context`) is the compact first read for

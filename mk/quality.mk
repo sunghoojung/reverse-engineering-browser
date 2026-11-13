@@ -67,6 +67,13 @@ dispatch-shape-check:
 dispatch-shape-fixtures:
 	$(call ignored-rust-test,--lib,vm::dispatch_shape_tests::write_dispatch_shape_fixtures,)
 
+# Wasm identification fixtures (tools/fixtures/wasm-identification): the
+# backend tests fail when a checked-in .wasm differs from its .wat source, and
+# this target rebuilds them with the same pinned assembler.
+.PHONY: wasm-identification-fixtures
+wasm-identification-fixtures:
+	$(call ignored-rust-test,--lib,wasm_identification::tests::write_identification_fixtures,)
+
 # The actual C++ native Wasm encoders feed the Rust workspace builder, the
 # shipped viewer and the Python validator. The Rust tests also export the exact
 # evidence stores they built; make rendered-ui-check renders those stores
@@ -147,6 +154,7 @@ native-only-check: $(UI_STARTUP_DEPS)
 	node tools/check-source-search.mjs
 	node tools/check-invocation-sites-ui.mjs
 	node tools/check-wasm-runner-ui.mjs
+	node tools/check-wasm-identification-ui.mjs
 	node tools/check-debugger-pause-ui.mjs
 	node tools/check-native-only-startup.cjs
 	node tools/check-native-only-launch.mjs

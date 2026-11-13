@@ -19,7 +19,7 @@ use crate::{
     request_cookies, request_headers,
     request_index::{self, RequestIndex},
     session_context, session_summary, source_facts, source_format, validation, vm, wasm,
-    wasm_graph,
+    wasm_graph, wasm_identification,
     workspace::{Kind, Store},
 };
 use axum::{
@@ -39,7 +39,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 74] = [
+const UI_ASSETS: [&str; 76] = [
     "index.html",
     "block_graph.css",
     "block_graph.js",
@@ -54,6 +54,8 @@ const UI_ASSETS: [&str; 74] = [
     "app.css",
     "entropy_map.css",
     "entropy_map.js",
+    "wasm_identification.css",
+    "wasm_identification.js",
     "agent_panel.css",
     "agent_panel.js",
     "session_panel.css",
@@ -651,6 +653,26 @@ impl App {
                     Ok(document)
                 })
                 .await?
+            }
+            "/api/wasm/identification" => {
+                if q.0
+                    .keys()
+                    .any(|key| !["artifact_id", "row_offset", "row_limit"].contains(&key.as_str()))
+                {
+                    return Err(Error::bad(
+                        "WASM identification takes artifact_id with optional row_offset and row_limit",
+                    ));
+                }
+                let id = q.required("artifact_id")?.to_owned();
+                let offset = q.number("row_offset", Some("0"), 32, false)? as usize;
+                let default = wasm_identification::SUGGESTION_PAGE.to_string();
+                let limit = q.number("row_limit", Some(&default), 32, true)? as usize;
+                if limit > wasm_identification::SUGGESTION_PAGE {
+                    return Err(Error::bad("row_limit is at most 1024"));
+                }
+                let root = self.options.artifacts.clone();
+                self.blocking(move || wasm_identification::load(&root, &id, offset, limit))
+                    .await?
             }
             "/api/artifact-map" => {
                 if q.0.keys().any(|key| key != "artifact_id") {

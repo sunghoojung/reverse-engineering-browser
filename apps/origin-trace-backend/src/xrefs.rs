@@ -2749,20 +2749,31 @@ mod tests {
         for row in &outgoing[1..] {
             assert!(row.get("function_index").is_none(), "{row}");
         }
-        // Selecting the import (function 0) finds no indirect caller at all.
+        // Selecting the import (function 0) by its entry finds no indirect
+        // caller at all: the foreign and null entries record index 0 too.
+        let import_offset = Parser::new(0)
+            .parse_all(&bytes)
+            .find_map(|payload| match payload.unwrap() {
+                Payload::ImportSection(reader) => reader
+                    .into_iter_with_offsets()
+                    .next()
+                    .map(|entry| entry.unwrap().0),
+                _ => None,
+            })
+            .unwrap();
         let import = page(
             &fixture,
             &Cursors::default(),
-            "kind=artifact&session_id=7&artifact_id=11",
+            &format!("kind=artifact&session_id=7&artifact_id=11&byte_offset={import_offset}"),
         );
-        assert!(
-            !import["pages"]["in"]["rows"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|row| row["kind"] == "indirect_call" && row["function_index"] == 0),
-            "{import}"
-        );
+        assert_eq!(import["selection"]["function_index"], 0, "{import}");
+        let callers: Vec<&Value> = import["pages"]["in"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["kind"] == "indirect_call")
+            .collect();
+        assert!(callers.is_empty(), "{callers:?}");
     }
 
     #[test]

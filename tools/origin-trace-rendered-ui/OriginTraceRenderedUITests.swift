@@ -2982,20 +2982,20 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("!document.querySelector('#source-wasm-diff').hidden", "Compare with is offered for a captured WASM artifact")
       try await ui.click("#source-more summary")
       try await ui.click("#source-wasm-diff", containing: "Compare with")
-      try await ui.waitUntil("!document.querySelector('#source-diff-view').hidden && document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 10", timeout: 30, "the module comparison did not load")
+      try await ui.waitUntil("!document.querySelector('#source-diff-view').hidden && document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 13", timeout: 30, "the module comparison did not load")
       let table = try await ui.json("""
         (() => { const view = document.querySelector('#source-diff-view');
           return {picker: view.querySelector('.wasm-diff-picker').selectedOptions[0]?.textContent ?? '',
             summary: view.querySelector('.wasm-diff-summary').textContent,
             statuses: [...view.querySelectorAll('.wasm-diff-row')].map(row => row.dataset.status),
-            ambiguous: view.querySelector('.wasm-diff-row[data-status="ambiguous"]')?.querySelectorAll('.wasm-diff-fn').length ?? 0,
+            ambiguous: [...view.querySelectorAll('.wasm-diff-row[data-status="ambiguous"] .wasm-diff-method')].map(cell => cell.textContent),
             methods: [...view.querySelectorAll('.wasm-diff-method')].map(cell => cell.textContent),
             split: document.querySelector('#source-view-split').hidden}; })()
         """)
       XCTAssertTrue((table["picker"] as? String ?? "").hasPrefix("#431 "), "\(size.name): B is chosen for its similar URL: \(table)")
       XCTAssertEqual(table["statuses"] as? [String] ?? [],
-        ["changed", "changed", "added", "added", "removed", "ambiguous", "renumbered", "renumbered", "identical", "identical"], "\(size.name): \(table)")
-      XCTAssertEqual(table["ambiguous"] as? Int, 4, "\(size.name): the tied stubs list both candidates on each side: \(table)")
+        ["changed", "changed", "added", "added", "removed", "ambiguous", "ambiguous", "ambiguous", "ambiguous", "renumbered", "renumbered", "identical", "identical"], "\(size.name): \(table)")
+      XCTAssertEqual(table["ambiguous"] as? [String] ?? [], Array(repeating: "same bytes · tie 1 (2 × 2)", count: 4), "\(size.name): each tied stub is a row of the one tie: \(table)")
       XCTAssertTrue((table["methods"] as? [String] ?? []).contains("structure"), "\(size.name): \(table)")
       XCTAssertTrue((table["summary"] as? String ?? "").contains("2 changed"), "\(size.name): \(table)")
       XCTAssertEqual(table["split"] as? Bool, true, "\(size.name): the table replaces the code view")
@@ -3006,7 +3006,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#source-diff-view .wasm-diff-filter", containing: "Changed")
       try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 2", "the Changed filter did not narrow the rows")
       try await ui.click("#source-diff-view .wasm-diff-filter", containing: "All")
-      try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 10", "All did not restore the rows")
+      try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 13", "All did not restore the rows")
 
       // A's run export opens in Graph on A; B's digest opens in Graph on B.
       try await ui.click("#source-diff-view .wasm-diff-fn", containing: "run · func 4")
@@ -3015,7 +3015,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertTrue(first.contains("diff-build-a"), "\(size.name): A's function opens on A: \(first)")
       try await ui.click("#source-more summary")
       try await ui.click("#source-wasm-diff", containing: "Compare with")
-      try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 10", timeout: 30, "the comparison did not reopen")
+      try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 13", timeout: 30, "the comparison did not reopen")
       try await ui.click("#source-diff-view .wasm-diff-fn", containing: "digest · func 8")
       try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-title')?.textContent ?? '').includes('digest')", timeout: 30, "B's function did not open in Graph")
       let second = try await ui.value("document.querySelector('#source-location').textContent") as? String ?? ""

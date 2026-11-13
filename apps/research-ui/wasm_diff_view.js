@@ -56,11 +56,18 @@ function wasmDiffCandidates(modules, source) {
     .map(entry => entry.module);
 }
 
+/** A tie group's short label: its number and member counts. */
+function wasmDiffGroupLabel(group) {
+  return `tie ${Number(group.id) + 1} (${group.a} × ${group.b})`;
+}
+
 /** The summary sentence for a page's whole report. */
 function wasmDiffSummaryText(doc) {
   const counts = doc.summary.statuses, parts = [];
   for (const status of ['changed', 'added', 'removed', 'ambiguous', 'unclassified', 'renumbered', 'identical']) {
-    if (counts[status]) parts.push(`${Number(counts[status]).toLocaleString()} ${WASM_DIFF_STATUS_LABEL[status].toLowerCase()}`);
+    if (!counts[status]) continue;
+    const ties = status === 'ambiguous' && Number(doc.summary.ambiguous_groups) > 0 ? ` in ${Number(doc.summary.ambiguous_groups).toLocaleString()} ${doc.summary.ambiguous_groups === 1 ? 'tie' : 'ties'}` : '';
+    parts.push(`${Number(counts[status]).toLocaleString()} ${WASM_DIFF_STATUS_LABEL[status].toLowerCase()}${ties}`);
   }
   return parts.length ? parts.join(' · ') : 'Neither module has functions to compare.';
 }
@@ -125,9 +132,12 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
   }
   function fillPicker() {
     const modules = wasmDiffCandidates(listModules() ?? [], source);
-    const previous = other?.artifact_id ?? (lastPair && lastPair.a === source?.artifact_id ? lastPair.b : lastPair && lastPair.b === source?.artifact_id ? lastPair.a : null);
+    // Reopening on either module of the last pair selects the other one.
+    const previous = lastPair?.a === source?.artifact_id ? lastPair.b : lastPair?.b === source?.artifact_id ? lastPair.a : other?.artifact_id ?? null;
     picker.replaceChildren();
-    const chosen = modules.find(module => module.artifact_id === previous) ?? modules[0] ?? null;
+    // A re-capture with the same bytes would only compare the module with itself.
+    const chosen = modules.find(module => module.artifact_id === previous) ??
+      modules.find(module => module.sha256 !== source?.sha256) ?? modules[0] ?? null;
     for (const module of modules) {
       const option = el('option', '', moduleLabel(module)); option.value = module.artifact_id;
       if (module === chosen) option.selected = true;
@@ -150,12 +160,6 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
     else jump.addEventListener('click', () => openFunction(artifactId, side.function));
     return jump;
   }
-  function candidateCell(list, artifactId, truncated) {
-    const cell = el('td', 'wasm-diff-side wasm-diff-candidates');
-    for (const side of list ?? []) cell.append(functionButton(side, artifactId));
-    if (truncated) cell.append(el('span', 'wasm-diff-absent', 'more candidates not listed'));
-    return cell;
-  }
   function renderRows(pair) {
     const fragment = document.createDocumentFragment();
     for (const row of rows) {
@@ -164,12 +168,16 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
       const status = el('td', 'wasm-diff-status');
       status.append(el('span', `wasm-diff-pill wasm-diff-pill-${row.status}`, WASM_DIFF_STATUS_LABEL[row.status] ?? row.status));
       tr.append(status);
-      if (row.status === 'ambiguous') {
-        tr.append(candidateCell(row.candidates?.a, pair.a, row.candidates?.truncated), candidateCell(row.candidates?.b, pair.b, false));
-      } else {
-        tr.append(sideButton(row.a, pair.a), sideButton(row.b, pair.b));
+      tr.append(sideButton(row.a, pair.a), sideButton(row.b, pair.b));
+      const method = el('td', 'wasm-diff-method', row.method ? WASM_DIFF_METHOD_LABEL[row.method] ?? row.method : '');
+      // Each member of a tie is its own row; the group says what it tied with.
+      if (row.group) {
+        const label = wasmDiffGroupLabel(row.group);
+        method.textContent = `${method.textContent} · ${label}`;
+        method.title = `Tied by ${method.textContent.split(' · ')[0]}: ${row.group.a} in A and ${row.group.b} in B; no pair was chosen`;
+        if (tr.dataset) tr.dataset.group = String(row.group.id);
       }
-      tr.append(el('td', 'wasm-diff-method', row.method ? WASM_DIFF_METHOD_LABEL[row.method] ?? row.method : ''));
+      tr.append(method);
       tr.append(el('td', 'wasm-diff-score', typeof row.score === 'number' ? row.score.toFixed(3) : ''));
       fragment.append(tr);
     }
@@ -181,6 +189,7 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
     more.hidden = doc?.row_window?.next_offset === null || doc?.row_window?.next_offset === undefined;
   }
   function renderDocument(pair) {
+    shown = pair;
     sideHeads[0].textContent = `A · #${pair.a}`; sideHeads[0].title = `This module: artifact ${pair.a} · ${doc.a.sha256 ?? ''}`;
     sideHeads[1].textContent = `B · #${pair.b}`; sideHeads[1].title = `Compared module: artifact ${pair.b} · ${doc.b.sha256 ?? ''}`;
     summary.textContent = `${wasmDiffSummaryText(doc)}${doc.status === 'partial' ? ' · partial' : ''}`;
@@ -193,6 +202,7 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
     renderRows(pair);
     setState('ready', '');
   }
+  let shown = null;
   function claim() { const owner = ++generation; abort?.abort(); abort = new AbortController(); return () => owner === generation; }
   async function read(pair, offset) {
     const statuses = WASM_DIFF_FILTERS.find(entry => entry.key === filter).statuses;
@@ -213,9 +223,12 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
     if (!isOpen || !source || !other) return;
     const pair = {a: source.artifact_id, aHash: source.sha256, b: other.artifact_id, bHash: other.sha256};
     lastPair = pair;
+    // Claiming first also aborts a slower read for another pair, so it can
+    // never land over the one chosen now.
+    const current = claim();
+    notes.replaceChildren(); notes.hidden = true;
     const key = pairKey(pair), hit = cache.get(key);
     if (hit) { doc = hit.doc; rows = hit.rows; renderDocument(pair); return; }
-    const current = claim();
     setState('loading', 'Matching functions from immutable module bytes…');
     summary.textContent = '';
     try {
@@ -234,8 +247,8 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
     while (cache.size > WASM_DIFF_CACHE) cache.delete(cache.keys().next().value);
   }
   async function loadMore() {
-    if (!doc || doc.row_window.next_offset === null || !lastPair) return;
-    const pair = lastPair, key = pairKey(pair), current = claim();
+    if (!doc || doc.row_window.next_offset === null || !shown) return;
+    const pair = shown, key = pairKey(pair), current = claim();
     more.disabled = true;
     try {
       const next = await read(pair, doc.row_window.next_offset);
@@ -273,13 +286,15 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
     button.setAttribute('aria-pressed', 'false');
   }
   button.addEventListener('click', () => { if (isOpen) closePanel(); else open(); });
-  close.addEventListener('click', () => { closePanel(); button.closest('details')?.querySelector('summary')?.focus(); });
+  close.addEventListener('click', () => closeToMenu());
   retry.addEventListener('click', () => load());
   more.addEventListener('click', () => loadMore());
-  picker.addEventListener('change', () => { other = (listModules() ?? []).find(module => module.artifact_id === picker.value) ?? null; load(); });
+  const pickerValue = () => [...picker.querySelectorAll('option')].find(option => option.selected)?.value ?? picker.value;
+  picker.addEventListener('change', () => { other = (listModules() ?? []).find(module => module.artifact_id === pickerValue()) ?? null; load(); });
   // Graph, Map and Inspect are other views of the same artifact; choosing one closes this.
   for (const trigger of closeOn) trigger?.addEventListener('click', () => { if (isOpen) closePanel(); });
-  root.addEventListener('keydown', event => { if (event.key === 'Escape' && isOpen) { event.stopPropagation(); closePanel(); } });
+  const closeToMenu = () => { closePanel(); button.closest('details')?.querySelector('summary')?.focus(); };
+  root.addEventListener('keydown', event => { if (event.key === 'Escape' && isOpen) { event.stopPropagation(); closeToMenu(); } });
   return {
     /** Called when the selected source may have changed. */
     sync(next) {
@@ -294,4 +309,4 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
   };
 }
 
-if (typeof module !== 'undefined') module.exports = {wasmDiffCandidates, isWasmDiffDocument, wasmDiffFunctionLabel, wasmDiffFunctionDetail, wasmDiffSummaryText, createWasmDiffPanel};
+if (typeof module !== 'undefined') module.exports = {wasmDiffGroupLabel, wasmDiffCandidates, isWasmDiffDocument, wasmDiffFunctionLabel, wasmDiffFunctionDetail, wasmDiffSummaryText, createWasmDiffPanel};

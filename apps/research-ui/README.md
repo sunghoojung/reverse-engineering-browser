@@ -2372,17 +2372,24 @@ Lifted text and names are inserted as text. The contract is
 **Compare with…** in **More**, shown for a captured WebAssembly module,
 replaces the code view with a function match table between this module (A)
 and another captured module (B) chosen in the header, read from
-[`/api/wasm/diff`](../../protocol/wasm-module-diff-v1.md). The summary counts
+[`/api/wasm/diff`](../../protocol/wasm-module-diff-v1.md). B starts as the
+module whose URL is most like A's, skipping a re-capture with A's own bytes;
+choosing another module drops any slower read still running, so a late answer
+never lands over the chosen pair. The summary counts
 every status; the filter chips (All, Changed, Added, Removed, Ambiguous,
 Unchanged, and Unclassified when a limit stopped matching) narrow the rows,
 and **Show more rows** reads the next page of 200. Each row shows its status,
 each side's function as `name · func N` (the index alone when unnamed), the
-method and the score. An ambiguous row lists its tied candidates and pairs
-none. Selecting a function opens **Graph** on that function in its own module
+method and the score. Each member of a tie is its own ambiguous row, and the
+method column names the tie and how many functions of each module are in it
+(`same bytes · tie 1 (2 × 2)`); no pair is chosen. Selecting a function opens **Graph** on that function in its own module
 and records the step, so Back returns. Imports have no body and are not
 links. Omissions from a partial comparison are listed above the table, and
-an error keeps **Retry comparison**. Graph, Map and Inspect close the table;
-reopening it on either module of the last pair selects the other. Captured
+an error keeps **Retry comparison**; omissions of an earlier pair are cleared
+first. Graph, Map and Inspect close the table, and Escape or **Close** returns
+focus to **More**. Reopening it on either module of the last pair selects the
+other. In the stored window (`reb://`) each page runs the comparison again in
+a new helper process, within the same bound. Captured
 names are inserted as text. `wasm_diff_view.js` and `wasm_diff_view.css` own
 the view.
 

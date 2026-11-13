@@ -2747,6 +2747,74 @@ fn an_agent_waits_on_observation_records_and_reads_their_positions() {
     );
 }
 
+/// A filtered read's tag covers what a site depends on besides the store: a
+/// source artifact that lands after its record changes the answer, so a
+/// client holding the old tag is answered again, not with 304.
+#[tokio::test]
+async fn a_landed_source_changes_the_tag_of_a_page_with_sites() {
+    use sha2::{Digest, Sha256};
+    let server = Server::start();
+    let mut store = ObservationStore {
+        path: server._root.path().join("events.jsonl"),
+        sequence: 0,
+    };
+    let mut identity = vec![1, 0, 128, 0, 1, 0x02, 0, 0];
+    for value in [7u32, 0, 0, 0] {
+        identity.extend(value.to_le_bytes());
+    }
+    identity.extend(99u64.to_le_bytes());
+    identity.extend((DEBUGGER_SOURCE.len() as u64).to_le_bytes());
+    identity.extend(Sha256::digest(DEBUGGER_SOURCE));
+    identity.resize(128, 0);
+    let named = store.append("network", "script_identity", json!({}), &identity);
+    let tap = DEBUGGER_SOURCE.find("(event) {").unwrap();
+    let mut tail = vec![0, 1, 1, 0];
+    tail.extend(js_frame(tap, tap));
+    tail.push(5);
+    tail.extend(b"click");
+    store.append(
+        "runtime",
+        "listener_dispatch",
+        json!({}),
+        &stack_summary(None, &tail),
+    );
+    let client = reqwest::Client::new();
+    let url = format!(
+        "{}/api/events?type=listener_dispatch",
+        server.url.trim_end_matches('/')
+    );
+    let read = |tag: Option<String>| {
+        let mut request = client.get(&url);
+        if let Some(tag) = tag {
+            request = request.header("If-None-Match", tag);
+        }
+        request.send()
+    };
+    let first = read(None).await.unwrap();
+    let tag = first.headers()["etag"].to_str().unwrap().to_owned();
+    let body: Value = first.json().await.unwrap();
+    let reason =
+        |body: &Value| body["events"][0]["debugger_observation"]["site"]["resolution"].clone();
+    assert_eq!(
+        reason(&body),
+        json!({"status": "unresolved", "reason": "source_artifact_missing"})
+    );
+    assert_eq!(read(Some(tag.clone())).await.unwrap().status(), 304);
+    // The compiled script's artifact lands; the store does not change.
+    native_artifact(
+        &server,
+        "360",
+        "javascript",
+        "https://app.debugger.test/handlers.js",
+        &named,
+        DEBUGGER_SOURCE.as_bytes(),
+    );
+    let again = read(Some(tag)).await.unwrap();
+    assert_eq!(again.status(), 200, "a landed source is a new answer");
+    let body: Value = again.json().await.unwrap();
+    assert_eq!(reason(&body)["status"], "resolved", "{body}");
+}
+
 /// The pausing debugger through the projection. Every pausing action controls
 /// the browser, so the action tool is hidden without `--allow-effects`, and
 /// the read sends one command to the peer, so it is classified like

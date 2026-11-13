@@ -1568,10 +1568,26 @@ impl App {
         let filter = event_query::event_filter(q)?;
         let cursor = event_query::cursor(q)?;
         let capture = self.capture_view();
+        // An observation's site also depends on the artifacts retained and on
+        // the script identities indexed, which can arrive after its record.
+        let sources = if filter.may_hold_sites() {
+            let (artifacts, requests) = (self.options.artifacts.clone(), self.requests.clone());
+            self.blocking(move || {
+                let manifest = std::fs::metadata(artifacts.join("manifest.jsonl"))
+                    .map_or(0, |metadata| metadata.len());
+                let mut index = requests.blocking_lock();
+                index.refresh()?;
+                let (epoch, at) = index.position().unwrap_or_default();
+                Ok(format!(":sites-{manifest}-{epoch}-{at}"))
+            })
+            .await?
+        } else {
+            String::new()
+        };
         let etag = event_window::etag(
             &self.options.store,
             &format!(
-                "query:{}-{}-{limit}:{cursor:?}:{}",
+                "query:{}-{}-{limit}:{cursor:?}:{}{sources}",
                 capture.mode.as_str(),
                 capture.state.as_str(),
                 filter.echo()

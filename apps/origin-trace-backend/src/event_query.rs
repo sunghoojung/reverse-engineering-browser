@@ -395,6 +395,18 @@ impl EventFilter {
                 .until_ns
                 .is_none_or(|until| time.is_some_and(|time| time < until))
     }
+    /// Whether a page can hold a debugger observation that names its own
+    /// frame (listener, timer callback or throw site), whose resolution
+    /// depends on the artifact manifest and the request index as well.
+    pub fn may_hold_sites(&self) -> bool {
+        self.types.is_empty()
+            || self.types.iter().any(|kind| {
+                matches!(
+                    kind.as_str(),
+                    "listener_dispatch" | "timer_observation" | "exception_observation"
+                )
+            })
+    }
     pub fn echo(&self) -> Value {
         let mut object = Map::new();
         if !self.types.is_empty() {

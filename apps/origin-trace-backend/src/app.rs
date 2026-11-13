@@ -1569,16 +1569,26 @@ impl App {
         let cursor = event_query::cursor(q)?;
         let capture = self.capture_view();
         let may_hold_sites = filter.may_hold_sites();
-        let echo = filter.echo();
+        // The store's tag digests its whole contents, so it is computed once;
+        // what the page's sites depend on is folded into it.
+        let base = event_window::etag(
+            &self.options.store,
+            &format!(
+                "query:{}-{}-{limit}:{cursor:?}:{}",
+                capture.mode.as_str(),
+                capture.state.as_str(),
+                filter.echo()
+            ),
+        );
         let tag = |sources: &str| {
-            event_window::etag(
-                &self.options.store,
-                &format!(
-                    "query:{}-{}-{limit}:{cursor:?}:{echo}{sources}",
-                    capture.mode.as_str(),
-                    capture.state.as_str(),
-                ),
-            )
+            if sources.is_empty() {
+                base.clone()
+            } else {
+                format!(
+                    "\"{}\"",
+                    hex::encode(sha2::Sha256::digest(format!("{base}{sources}")))
+                )
+            }
         };
         let etag = tag(&self.sites_tag(may_hold_sites));
         if matches_etag(headers, Some(&etag)) {

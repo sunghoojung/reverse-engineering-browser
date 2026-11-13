@@ -1750,7 +1750,6 @@ impl<'m> Matcher<'m> {
         // Each open A function's best score and the B candidates within the
         // tie margin of it.
         let mut best = Vec::<(u32, f64, Vec<u32>)>::new();
-        let mut scored_b = vec![false; module_b.funcs.len()];
         for list in buckets_a.values() {
             for a in list {
                 let func = &module_a.funcs[*a as usize];
@@ -1760,27 +1759,23 @@ impl<'m> Matcher<'m> {
                 let Some(scored) = self.window(*a, true, candidates, per) else {
                     return Vec::new();
                 };
-                for (b, _) in &scored {
-                    scored_b[*b as usize] = true;
-                }
                 if let Some(entry) = tied_best(*a, &scored) {
                     best.push(entry);
                 }
             }
         }
-        // A B function no A function scored would otherwise look added only
-        // because it fell outside every window. It scores its own nearest A
-        // candidates, and one that ties an A function's best contests it.
+        // Every open B function also scores its own nearest A candidates. A
+        // function outside an A function's window, even one an unrelated A
+        // function happened to score, would otherwise look added. A B function
+        // that ties an A function's own best, without already being among
+        // that function's best candidates, contests it.
         let best_of = best
             .iter()
-            .map(|(a, score, _)| (*a, *score))
+            .map(|(a, score, tied)| (*a, (*score, tied.as_slice())))
             .collect::<HashMap<_, _>>();
         let mut contests = Vec::new();
         for list in buckets.values() {
             for b in list {
-                if scored_b[*b as usize] {
-                    continue;
-                }
                 let func = &module_b.funcs[*b as usize];
                 let Some(candidates) = buckets_a.get(&func.signature) else {
                     continue;
@@ -1795,7 +1790,10 @@ impl<'m> Matcher<'m> {
                     continue;
                 }
                 for a in tied {
-                    if best_of.get(&a).is_none_or(|own| own - top < TIE_MARGIN) {
+                    let contested = best_of.get(&a).is_none_or(|(own, own_tied)| {
+                        own - top < TIE_MARGIN && !own_tied.contains(b)
+                    });
+                    if contested {
                         contests.push((a, *b));
                     }
                 }

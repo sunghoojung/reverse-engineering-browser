@@ -1213,3 +1213,30 @@ fn rendered_pages_match_the_openapi_schema() {
         assert!(errors.is_empty(), "{label}: {errors:?}");
     }
 }
+
+#[test]
+fn a_twin_another_a_function_scored_still_contests() {
+    // B64 is outside A0's window but inside unrelated A1's, so it was
+    // treated as already scored and never got a window of its own.
+    let twin = |k: i64| format!("(func i32.const {k} drop i32.const {k} drop)");
+    let a = format!("(module {}{})", twin(1), "(func nop nop nop nop nop)");
+    let b = format!(
+        "(module {}{}{})",
+        twin(2),
+        "(func nop nop nop nop)".repeat(63),
+        twin(3)
+    );
+    let report = report_with(&a, &b, untimed());
+    let found = rows(&report);
+    assert!(
+        !found.contains(&row("added", None, None, Some(64))),
+        "{found:?}"
+    );
+    for expected in [
+        row("ambiguous", Some("structural"), Some(0), None),
+        row("ambiguous", Some("structural"), None, Some(0)),
+        row("ambiguous", Some("structural"), None, Some(64)),
+    ] {
+        assert!(found.contains(&expected), "{expected:?} not in {found:?}");
+    }
+}

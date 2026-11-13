@@ -433,6 +433,8 @@ struct Func {
     shape: Shape,
     /// Direct call targets in call-site order.
     calls: Vec<u32>,
+    /// `ref.func` targets in instruction order.
+    refs: Vec<u32>,
     /// The same targets, sorted and distinct.
     callees: Vec<u32>,
 }
@@ -533,6 +535,7 @@ struct Print {
     structure: u64,
     shape: Shape,
     calls: Vec<u32>,
+    refs: Vec<u32>,
 }
 
 /// Both fingerprints and the call list of one body, or `None` when the budget
@@ -599,6 +602,7 @@ fn fingerprint(
     let mut addresses = Sha256::new();
     let mut shape = Shape::default();
     let mut calls = Vec::new();
+    let mut refs = Vec::new();
     let mut reader = body.get_operators_reader().map_err(bad)?;
     let mut stopped = false;
     let mut pure = true;
@@ -632,11 +636,14 @@ fn fingerprint(
                 );
                 calls.push(*function_index);
             }
-            Operator::RefFunc { function_index } => token(
-                &mut normalized,
-                3,
-                &[context.signature_of_function(*function_index)],
-            ),
+            Operator::RefFunc { function_index } => {
+                token(
+                    &mut normalized,
+                    3,
+                    &[context.signature_of_function(*function_index)],
+                );
+                refs.push(*function_index);
+            }
             Operator::CallIndirect {
                 type_index,
                 table_index,
@@ -817,6 +824,7 @@ fn fingerprint(
         structure,
         shape,
         calls,
+        refs,
     }))
 }
 
@@ -1133,6 +1141,7 @@ fn analyze(
             structure: 0,
             shape: Shape::default(),
             calls: Vec::new(),
+            refs: Vec::new(),
             callees: Vec::new(),
         });
     }
@@ -1171,6 +1180,7 @@ fn analyze(
             structure: print.structure,
             shape: print.shape,
             calls: print.calls,
+            refs: print.refs,
             callees,
         });
     }
@@ -2024,15 +2034,17 @@ impl<'m> Matcher<'m> {
         }
         Some(scored)
     }
-    /// Whether each call site of a matched pair calls the matched function on
-    /// the other side.
-    fn calls_correspond(&self, fa: &Func, fb: &Func) -> bool {
-        fa.calls.len() == fb.calls.len()
-            && fa
-                .calls
-                .iter()
-                .zip(&fb.calls)
-                .all(|(x, y)| self.a_to_b.get(*x as usize) == Some(y))
+    /// Whether each call site and each `ref.func` of a matched pair names the
+    /// matched function on the other side.
+    fn targets_correspond(&self, fa: &Func, fb: &Func) -> bool {
+        let same = |x: &[u32], y: &[u32]| {
+            x.len() == y.len()
+                && x
+                    .iter()
+                    .zip(y)
+                    .all(|(x, y)| self.a_to_b.get(*x as usize) == Some(y))
+        };
+        same(&fa.calls, &fb.calls) && same(&fa.refs, &fb.refs)
     }
     fn run(mut self) -> (Vec<Row>, Vec<Group>, Budget, bool) {
         self.settle(Vec::new());
@@ -2105,13 +2117,13 @@ impl<'m> Matcher<'m> {
                 _ if fa.body == fb.body
                     && fa.normalized == fb.normalized
                     && fa.addresses == fb.addresses
-                    && self.calls_correspond(fa, fb) =>
+                    && self.targets_correspond(fa, fb) =>
                 {
                     IDENTICAL
                 }
                 _ if fa.normalized == fb.normalized
                     && fa.addresses == fb.addresses
-                    && self.calls_correspond(fa, fb) =>
+                    && self.targets_correspond(fa, fb) =>
                 {
                     RENUMBERED
                 }

@@ -1437,3 +1437,37 @@ fn equal_bytes_of_another_signature_are_not_paired() {
     );
     assert_eq!(twins.groups, vec![(2, 2), (2, 2)]);
 }
+
+#[test]
+fn a_function_reference_to_another_function_is_changed() {
+    // $p and $q have one signature and differ in body, so the bytes pass
+    // pairs them across B's swap; `ref.func 0` then names $p in A and $q in
+    // B with equal bytes and an equal normalized hash.
+    let a = r#"(module (func $p nop) (func $q nop nop)
+        (func (export "f") ref.func 0 drop) (elem declare func 0 1))"#;
+    let swapped = r#"(module (func $q nop nop) (func $p nop)
+        (func (export "f") ref.func 0 drop) (elem declare func 0 1))"#;
+    let followed = r#"(module (func $q nop nop) (func $p nop)
+        (func (export "f") ref.func 1 drop) (elem declare func 0 1))"#;
+    let found = rows(&report(a, swapped));
+    assert!(
+        found.contains(&row("changed", Some("normalized"), Some(2), Some(2))),
+        "{found:?}"
+    );
+    let found = rows(&report(a, followed));
+    assert!(
+        found.contains(&row("renumbered", Some("normalized"), Some(2), Some(2))),
+        "{found:?}"
+    );
+    // The reviewer's case: the swapped functions differ in signature too.
+    let found = rows(&report(
+        r#"(module (func $p (param i32)) (func $q)
+            (func (export "f") ref.func 0 drop) (elem declare func 0 1))"#,
+        r#"(module (func $q) (func $p (param i32))
+            (func (export "f") ref.func 0 drop) (elem declare func 0 1))"#,
+    ));
+    assert!(
+        found.contains(&row("changed", Some("export_name"), Some(2), Some(2))),
+        "{found:?}"
+    );
+}

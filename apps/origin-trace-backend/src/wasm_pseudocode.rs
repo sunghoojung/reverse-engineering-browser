@@ -3264,6 +3264,253 @@ mod tests {
         )
     }
 
+    /// A typed generator of valid modules: i32 programs with nested block,
+    /// loop, if/else and try_table frames, br, br_if and br_table at any
+    /// depth, return_call, select, tee, memory.grow, a multi-value call and
+    /// throw. It tracks the operand stack height per frame and the arity of
+    /// each label, so every module it writes validates.
+    fn typed(seed: u64) -> String {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Frame {
+            Block,
+            Loop,
+            If,
+            TryTable,
+        }
+        struct Open {
+            kind: Frame,
+            base: u32,
+            results: u32,
+            dead: bool,
+        }
+        let arity = |open: &Open| {
+            if open.kind == Frame::Loop {
+                0
+            } else {
+                open.results
+            }
+        };
+        let mut state = seed ^ 0x9e37_79b9_7f4a_7c15;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % bound
+        };
+        let mut body = String::new();
+        let mut emit = |text: &str, body: &mut String| {
+            body.push(' ');
+            body.push_str(text);
+        };
+        // Frame 0 is the function, with one i32 result.
+        let mut frames = vec![Open {
+            kind: Frame::Block,
+            base: 0,
+            results: 1,
+            dead: false,
+        }];
+        let mut height = 0u32;
+        let close = |frames: &mut Vec<Open>,
+                     height: &mut u32,
+                     body: &mut String,
+                     emit: &mut dyn FnMut(&str, &mut String)| {
+            let open = frames.pop().unwrap();
+            let need = open.base + open.results;
+            if !open.dead {
+                while *height > need {
+                    emit("drop", body);
+                    *height -= 1;
+                }
+                while *height < need {
+                    emit("i32.const 1", body);
+                    *height += 1;
+                }
+            }
+            if open.kind == Frame::If && open.results == 1 {
+                emit("else i32.const 2", body);
+            }
+            emit("end", body);
+            *height = need;
+        };
+        for _ in 0..20 + next(60) {
+            let depth = frames.len();
+            let available = height - frames[depth - 1].base;
+            match next(30) {
+                0 | 1 => {
+                    emit(&format!("i32.const {}", next(9)), &mut body);
+                    height += 1;
+                }
+                2..=4 => {
+                    emit(&format!("local.get {}", next(3)), &mut body);
+                    height += 1;
+                }
+                5 if available >= 1 => {
+                    emit(&format!("local.set {}", next(3)), &mut body);
+                    height -= 1;
+                }
+                6 | 7 if available >= 1 => emit(&format!("local.tee {}", next(3)), &mut body),
+                8 => {
+                    emit("global.get 0", &mut body);
+                    height += 1;
+                }
+                9 if available >= 1 => {
+                    emit("global.set 0", &mut body);
+                    height -= 1;
+                }
+                10 if available >= 1 => emit("call $f", &mut body),
+                11 => {
+                    emit("call $g", &mut body);
+                    height += 1;
+                }
+                12 if available >= 1 => {
+                    emit("call $h", &mut body);
+                    height -= 1;
+                }
+                13 => {
+                    emit("call $two", &mut body);
+                    height += 2;
+                }
+                14 if available >= 1 => emit("i32.load offset=4", &mut body),
+                15 if available >= 2 => {
+                    emit("i32.store", &mut body);
+                    height -= 2;
+                }
+                16 if available >= 2 => {
+                    emit(
+                        if next(2) == 0 { "i32.add" } else { "i32.div_s" },
+                        &mut body,
+                    );
+                    height -= 1;
+                }
+                17 if available >= 3 => {
+                    emit("select", &mut body);
+                    height -= 2;
+                }
+                18 if available >= 1 => emit("memory.grow", &mut body),
+                19 if available >= 1 => {
+                    emit("drop", &mut body);
+                    height -= 1;
+                }
+                20 | 21 if depth < 6 => {
+                    let results = next(2) as u32;
+                    let kind = match next(4) {
+                        1 => Frame::Loop,
+                        2 if available >= 1 => Frame::If,
+                        3 => Frame::TryTable,
+                        _ => Frame::Block,
+                    };
+                    let ty = if results == 1 { " (result i32)" } else { "" };
+                    let opener = match kind {
+                        Frame::Block => "block",
+                        Frame::Loop => "loop",
+                        Frame::If => {
+                            height -= 1;
+                            "if"
+                        }
+                        Frame::TryTable => "try_table",
+                    };
+                    emit(&format!("{opener}{ty}"), &mut body);
+                    frames.push(Open {
+                        kind,
+                        base: height,
+                        results,
+                        dead: false,
+                    });
+                }
+                22 | 23 if available >= 1 => {
+                    let label = next(depth as u64) as usize;
+                    if available > arity(&frames[depth - 1 - label]) {
+                        emit(&format!("br_if {label}"), &mut body);
+                        height -= 1;
+                    }
+                }
+                24 if available >= 1 => {
+                    let first = next(depth as u64) as usize;
+                    let carried = arity(&frames[depth - 1 - first]);
+                    if available > carried {
+                        let mut labels: Vec<String> = (0..depth)
+                            .filter(|label| {
+                                arity(&frames[depth - 1 - label]) == carried && next(2) == 0
+                            })
+                            .map(|label| label.to_string())
+                            .collect();
+                        labels.push(first.to_string());
+                        emit(&format!("br_table {}", labels.join(" ")), &mut body);
+                        frames.last_mut().unwrap().dead = true;
+                    }
+                }
+                25 => {
+                    let label = next(depth as u64) as usize;
+                    if available >= arity(&frames[depth - 1 - label]) {
+                        emit(&format!("br {label}"), &mut body);
+                        frames.last_mut().unwrap().dead = true;
+                    }
+                }
+                26 if available >= 1 => {
+                    emit("return_call $f", &mut body);
+                    frames.last_mut().unwrap().dead = true;
+                }
+                27 if available >= 1 => {
+                    emit("throw $e", &mut body);
+                    frames.last_mut().unwrap().dead = true;
+                }
+                28 | 29 if depth > 1 => close(&mut frames, &mut height, &mut body, &mut emit),
+                _ => {}
+            }
+            if frames.last().unwrap().dead {
+                if frames.len() == 1 {
+                    return typed_module(&body);
+                }
+                // Code after an unconditional transfer: the frame ends here.
+                close(&mut frames, &mut height, &mut body, &mut emit);
+            }
+        }
+        while frames.len() > 1 {
+            close(&mut frames, &mut height, &mut body, &mut emit);
+        }
+        while height > 1 {
+            emit("drop", &mut body);
+            height -= 1;
+        }
+        if height == 0 {
+            emit("i32.const 0", &mut body);
+        }
+        typed_module(&body)
+    }
+    fn typed_module(body: &str) -> String {
+        format!(
+            r#"(module (memory 1) (global (mut i32) (i32.const 0)) (tag $e (param i32))
+              (func $f (param i32) (result i32) local.get 0) (func $g (result i32) i32.const 1)
+              (func $h (param i32)) (func $two (result i32 i32) i32.const 1 i32.const 2)
+              (func (param i32) (result i32) (local i32 i32) {body}))"#
+        )
+    }
+
+    #[test]
+    fn typed_generated_modules_validate_and_keep_effect_order() {
+        for seed in 0..2_000 {
+            let wat = typed(seed);
+            let bytes = wat::parse_str(&wat).unwrap();
+            Validator::new_with_features(WasmFeatures::all())
+                .validate_all(&bytes)
+                .unwrap_or_else(|error| panic!("seed {seed} does not validate: {error}\n{wat}"));
+            let directory = store(&bytes);
+            let document: Value = serde_json::from_str(
+                &pseudocode(directory.path(), "7", 4, 0, MAX_LINE_LIMIT).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(document["status"], "complete", "seed {seed}\n{wat}");
+            assert_eq!(document["unknown_operands"], 0, "seed {seed}\n{wat}");
+            let order = std::panic::catch_unwind(|| assert_effect_order(&bytes, 4));
+            assert!(
+                order.is_ok(),
+                "seed {seed}\n{wat}\n{}",
+                document["text"].as_str().unwrap()
+            );
+            assert_bytes_owned_once(&bytes, 4);
+        }
+    }
+
     #[test]
     fn folding_keeps_effect_order_and_owns_every_byte_once() {
         let mut fixtures = vec![

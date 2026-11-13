@@ -214,6 +214,8 @@ function createBlockGraphView(root, options = {}) {
   root.classList.add('block-graph');
   const head = node('div', 'block-graph-head');
   const title = node('strong', 'block-graph-title', 'No function');
+  // A researcher name sits beside the captured title and never replaces it.
+  const analyst = node('span', 'researcher-name block-graph-analyst-name'); analyst.hidden = true;
   const stats = node('span', 'block-graph-stats', '');
   const tools = node('div', 'block-graph-tools');
   const tool = (label, action, aria) => { const element = node('button', 'source-tool block-graph-tool', label); element.type = 'button'; element.setAttribute('aria-label', aria ?? label); element.addEventListener('click', action); return element; };
@@ -243,7 +245,7 @@ function createBlockGraphView(root, options = {}) {
   foot.addEventListener('focusout', event => { if (!foot.contains(event.relatedTarget)) setKey(false); });
   foot.append(limits, keyToggle, legend);
   const evidence = node('span', 'block-graph-evidence', '');
-  head.append(title, stats, evidence, tools);
+  head.append(title, analyst, stats, evidence, tools);
   root.append(head, stage, foot);
   const legendItems = [['fallthrough', 'fall'], ['taken', 'true'], ['not-taken', 'false'], ['table', 'table'], ['exception', 'catch'], ['unresolved', 'unresolved']];
   for (const [kind, label] of legendItems) {
@@ -600,7 +602,8 @@ function createBlockGraphView(root, options = {}) {
     measurements: () => ({...m}), setResult, setState,
     /** The host's selection: it never reports back through onSelect. */
     select: (block, row = -1) => select(block, row, {silent: true}),
-    focus: () => canvas.focus(), hasGraph: () => Boolean(layout), tools, setTitle(text) { title.textContent = text; stats.textContent = ''; }
+    focus: () => canvas.focus(), hasGraph: () => Boolean(layout), tools, setTitle(text) { title.textContent = text; stats.textContent = ''; },
+    setAnalystName(name) { analyst.textContent = name ?? ''; analyst.hidden = !name; analyst.title = name ? `${name} (researcher name)` : ''; }
   };
 }
 
@@ -685,6 +688,18 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
   const release = () => { cache.clear(); cacheBytes = 0; functions = null; names = new Map(); functionIndex = null; abort?.abort(); abort = null; runner.cancel(); generation += 1; };
   const isWasmSource = candidate => candidate?.kind === 'wasm' && candidate?.source_type === 'artifact';
   function displayName(index) { const name = names.get(index); return name ? `${name} (func ${index})` : `func ${index}`; }
+  // Researcher names (wasm_function_names.js), keyed by module SHA-256 and
+  // function index. The panel works unchanged without that module.
+  const researcher = () => globalThis.RebWasmFunctionNames;
+  const analystName = index => researcher()?.nameOf(source?.sha256, index) ?? null;
+  let renameButton = null, repaintMenu = null;
+  function showAnalystName() {
+    const current = isOpen && source && functionIndex !== null;
+    view.setAnalystName?.(current ? analystName(functionIndex) : null);
+    if (current) researcher()?.mark(host, source.sha256, functionIndex, displayName(functionIndex)); else researcher()?.unmark(host);
+    if (renameButton) renameButton.disabled = !current || !researcher();
+  }
+  researcher()?.subscribe(() => { showAnalystName(); repaintMenu?.(); });
   let toolsBuilt = false, linearChoice = false;
   function renderTools() {
     if (toolsBuilt) return;
@@ -703,6 +718,13 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
     linear.title = 'Show or hide the linear disassembly and hex';
     linear.addEventListener('click', () => { linearChoice = true; const hidden = !editor.hasAttribute('data-graph-linear-hidden'); editor.toggleAttribute('data-graph-linear-hidden', hidden); linear.setAttribute('aria-pressed', String(!hidden)); dispatchEvent(new Event('resize')); });
     view.tools.append(linear);
+    if (researcher()) {
+      renameButton = document.createElement('button'); renameButton.type = 'button'; renameButton.className = 'source-tool block-graph-tool block-graph-rename';
+      renameButton.textContent = 'Rename'; renameButton.setAttribute('aria-label', 'Rename this function'); renameButton.title = 'Rename this function (F2)';
+      renameButton.addEventListener('click', () => researcher()?.beginFrom(host));
+      wrap.append(renameButton);
+    }
+    showAnalystName();
   }
   function stepFunction(direction) {
     if (!functions) return;
@@ -711,7 +733,7 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
     if (target !== undefined) loadFunction(target);
   }
   let menu = null;
-  function closeMenu(opener) { menu?.remove(); menu = null; opener?.setAttribute('aria-expanded', 'false'); }
+  function closeMenu(opener) { menu?.remove(); menu = null; repaintMenu = null; opener?.setAttribute('aria-expanded', 'false'); }
   function toggleMenu(opener, wrap) {
     if (menu) { closeMenu(opener); opener.focus(); return; }
     if (!functions) return;
@@ -733,20 +755,33 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
         row.style.top = `${i * rowH}px`;
         const name = document.createElement('span'); name.className = 'block-graph-fn-name'; name.textContent = displayName(index);
         const size = document.createElement('span'); size.className = 'block-graph-fn-size'; size.textContent = formatBytes(functions.size.get(index) ?? 0);
-        row.append(name, size); row.addEventListener('click', () => choose(index)); list.append(row);
+        row.append(name);
+        const analyst = analystName(index);
+        if (analyst) row.append(researcher().nameNode(analyst, 'block-graph-fn-analyst'));
+        row.append(size); row.addEventListener('click', () => choose(index));
+        // F2 on the highlighted row renames that function.
+        researcher()?.mark(row, source?.sha256, index, displayName(index));
+        list.append(row);
       }
       count.textContent = `${filtered.length.toLocaleString()} of ${functions.index.length.toLocaleString()}${functions.status === 'partial' ? ' · list partial' : ''}`;
     };
     const applyFilter = () => {
       const query = input.value.trim().toLowerCase();
-      filtered = query ? functions.index.filter(index => `${index} ${names.get(index) ?? ''} ${functions.size.get(index) ?? 0}`.toLowerCase().includes(query)) : functions.index.slice();
+      filtered = query ? functions.index.filter(index => `${index} ${names.get(index) ?? ''} ${analystName(index) ?? ''} ${functions.size.get(index) ?? 0}`.toLowerCase().includes(query)) : functions.index.slice();
       cursor = 0; scroll = 0; list.scrollTop = 0; paint();
     };
     const choose = index => { closeMenu(opener); opener.focus(); loadFunction(index); };
     input.addEventListener('input', applyFilter);
     list.addEventListener('scroll', () => { scroll = list.scrollTop; paint(); });
+    repaintMenu = paint;
     const keys = event => {
       if (event.key === 'Escape') { event.stopPropagation(); closeMenu(opener); opener.focus(); return; }
+      if (event.key === 'F2' && filtered[cursor] !== undefined && researcher()) {
+        // The filter field keeps typing; F2 names the highlighted function.
+        const row = [...list.querySelectorAll('.block-graph-fn-row')].find(item => item.getAttribute('aria-selected') === 'true');
+        if (row && researcher().beginFrom(row)) { event.preventDefault(); event.stopPropagation(); }
+        return;
+      }
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'PageDown' || event.key === 'PageUp') {
         event.preventDefault(); const step = event.key.startsWith('Page') ? 10 : 1; cursor = Math.max(0, Math.min(filtered.length - 1, cursor + (event.key.endsWith('Down') ? step : -step)));
         list.scrollTop = scroll = Math.max(0, Math.min(cursor * rowH, Math.max(scroll, (cursor - 12) * rowH))); paint();
@@ -789,7 +824,7 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
     if (!source || !isOpen) return;
     if (index === null) { loadIndex(); return; }
     if (retry && indexStatus !== 'ready') { loadIndex(); return; }
-    functionIndex = index; renderTools();
+    functionIndex = index; renderTools(); showAnalystName();
     // A cached function also replaces a read still in flight.
     const current = claim(), cacheKey = `${key()}:${index}`;
     const hit = cache.get(cacheKey);
@@ -804,9 +839,9 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
       if (current() && error.name !== 'AbortError') view.setState('error', graphReadMessage(error), true);
     }
   }
-  function applyResult(result) { view.setResult(result); renderTools(); }
+  function applyResult(result) { view.setResult(result); renderTools(); showAnalystName(); }
   function open() { isOpen = true; host.hidden = false; editor.setAttribute('data-graph', 'true'); button.setAttribute('aria-pressed', 'true'); if (!linearChoice && innerHeight < 600) { editor.setAttribute('data-graph-linear-hidden', ''); } view.activate(); if (functions) { if (functionIndex !== null) loadFunction(functionIndex); else view.setState('empty', 'Select a function.'); } else loadIndex(); }
-  function close() { isOpen = false; host.hidden = true; editor.removeAttribute('data-graph'); button.setAttribute('aria-pressed', 'false'); closeMenu(); view.release(); release(); }
+  function close() { isOpen = false; showAnalystName(); host.hidden = true; editor.removeAttribute('data-graph'); button.setAttribute('aria-pressed', 'false'); closeMenu(); view.release(); release(); }
   const toggle = () => { if (isOpen) close(); else if (isWasmSource(source)) open(); };
   button.addEventListener('click', toggle);
   closeOn?.addEventListener('click', () => { if (isOpen) close(); });

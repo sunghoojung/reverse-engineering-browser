@@ -83,6 +83,14 @@ function flowGraphContextLabel(context, index) {
   return {title, detail: parts.join(' · '), origin};
 }
 
+/** The researcher name of a Wasm node's function (wasm_function_names.js),
+ * keyed by its module SHA-256 and function index; null for anything else.
+ * It is drawn beside the captured name, never instead of it. */
+function flowGraphAnalystName(node) {
+  if (node?.kind !== 'wasm' || typeof node.sha256 !== 'string') return null;
+  return globalThis.RebWasmFunctionNames?.nameOf(node.sha256, node.function_index) ?? null;
+}
+
 function flowGraphNodeName(node) {
   if (!node) return '';
   if (node.kind === 'chain') return node.name;
@@ -515,6 +523,9 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   const detailsToggle = button('Details', () => setDetails(!detailsOpen), 'Show details', 'flow-graph-tool flow-graph-details-toggle');
   detailsToggle.setAttribute('aria-pressed', 'false');
   status.append(selectionText, requestAgain, summary, engineLabel, limits, keyToggle, legend, detailsToggle);
+  // The rename editor's own slot: Details is rebuilt on every refresh.
+  const nameHost = make('div', 'flow-graph-name-host');
+  stage.append(nameHost);
   host.append(body, status);
 
   const ctx = canvas.getContext?.('2d');
@@ -522,7 +533,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   const tokenNames = {bg: '--graph-canvas', card: '--flow-card', cardLine: '--flow-card-line', cardRule: '--flow-card-rule', shadow: '--flow-card-shadow',
     badgeFill: '--flow-badge-fill', badge: '--flow-badge', tagFill: '--flow-tag-fill', rowFill: '--flow-row-fill', box: '--flow-box', mini: '--flow-minimap',
     text: '--text', muted: '--muted', faint: '--faint', accent: '--accent', soft: '--accent-soft', mono: '--mono', sans: '--sans',
-    site: '--flow-site', note: '--flow-note', mark: '--flow-mark', viewport: '--flow-viewport'};
+    site: '--flow-site', note: '--flow-note', mark: '--flow-mark', viewport: '--flow-viewport', researcher: '--researcher-name'};
   const alphaNames = {head: '--flow-tint-head', tag: '--flow-tint-tag', tagLine: '--flow-tint-tag-line', row: '--flow-tint-row', band: '--flow-tint-band', bandLine: '--flow-tint-band-line', border: '--flow-tint-border'};
   let tokens = {kind: {}, ink: {}, edge: {}, rowInk: {}, realm: [], alpha: {}};
   // Without a 2D context (an offline DOM) cards take the default advances.
@@ -1099,6 +1110,14 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     ctx.fillText(fit.title, x + C.pad, y + 21);
     ctx.font = `11px ${tokens.mono}`; ctx.fillStyle = tokens.site;
     ctx.fillText(fit.location, x + C.pad, y + C.head + 15);
+    // A researcher name follows the location in its own italic colour, in the
+    // room the card already has, so naming never moves the layout.
+    const analyst = flowGraphAnalystName(node);
+    if (analyst) {
+      const used = ctx.measureText(fit.location).width + 10, room = w - C.pad * 2 - used;
+      ctx.font = `italic 500 11px ${tokens.sans}`;
+      if (room > 36) { ctx.fillStyle = dim ? tokens.muted : tokens.researcher || tokens.accent; ctx.fillText(fitText(analyst, room), x + C.pad + used, y + C.head + 15); }
+    }
     // Rows: site, mnemonic, callee, then the note and the count.
     ctx.font = `11.5px ${tokens.mono}`;
     const opX = x + C.pad + (card.siteW ? card.siteW + 12 : 0), targetX = x + fit.targetX;
@@ -1600,8 +1619,14 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   });
 
   // Details -------------------------------------------------------------------
+  // A rename redraws the cards and Details; the layout does not change.
+  globalThis.RebWasmFunctionNames?.subscribe(() => { if (model) { requestDraw(); renderInspector(); } });
   function renderInspector() {
     host.toggleAttribute('data-selected', selected >= 0);
+    // F2 on the graph renames the selected Wasm function.
+    const chosen = selected >= 0 ? display?.nodes[selected] : null;
+    if (chosen?.kind === 'wasm' && chosen.sha256) globalThis.RebWasmFunctionNames?.mark(host, chosen.sha256, chosen.function_index, `${flowGraphNodeName(chosen)} · func ${chosen.function_index}`, nameHost);
+    else globalThis.RebWasmFunctionNames?.unmark(host);
     // Details is built only while it is open; opening it builds it.
     if (!detailsOpen) return;
     inspector.replaceChildren();
@@ -1634,6 +1659,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     }
     fact('Realm', `${context?.label.title ?? ''}\n${context?.label.detail ?? ''}`);
     if (node.kind === 'wasm') fact('Function index', node.function_index);
+    const analyst = flowGraphAnalystName(node);
+    if (analyst) { const value = make('dd'); value.append(globalThis.RebWasmFunctionNames.nameNode(analyst)); facts.append(make('dt', '', 'Researcher name'), value); }
     if (node.script_id !== undefined) fact('Script ID', node.kind === 'eval' ? `${node.script_id} (eval or new Function)` : node.script_id);
     fact('Records', `${node.hits.toLocaleString()} ${FLOW_GRAPH_SINKS.has(node.kind) ? (node.hits === 1 ? 'occurrence' : 'occurrences') : `stack ${node.hits === 1 ? 'record passes' : 'records pass'} through it`}`);
     fact('Distinct stacks', (cards?.[selected]?.stacks ?? 0).toLocaleString());
@@ -1647,6 +1674,12 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     if (canOpen(node)) {
       const openButton = make('button', 'secondary-button', 'Open in Sources'); openButton.type = 'button';
       openButton.addEventListener('click', () => open(node)); actions.append(openButton);
+    }
+    if (node.kind === 'wasm' && node.sha256 && globalThis.RebWasmFunctionNames) {
+      const rename = make('button', 'secondary-button', analyst ? 'Rename' : 'Name function'); rename.type = 'button';
+      rename.title = 'Rename this Wasm function (F2)';
+      rename.addEventListener('click', () => globalThis.RebWasmFunctionNames.beginFrom(host));
+      actions.append(rename);
     }
     if (foldable) {
       const fold = make('button', 'secondary-button', 'Fold chain'); fold.type = 'button';

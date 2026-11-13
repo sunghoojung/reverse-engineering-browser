@@ -7883,6 +7883,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           displayed.append(text);
           if (excerpt.columnEnd < excerpt.fullLength) displayed.append(textElement('span', 'source-excerpt-notice', ` ⟪ columns ${excerpt.columnEnd + 1}–${excerpt.fullLength} omitted; use Find or Go to column ⟫`));
           row.append(gutter, displayed);
+          if (view.wasmRows && typeof RebWasmFunctionNames !== 'undefined') RebWasmFunctionNames.decorateInspectRow(row, view.wasmRows[index], source.sha256);
           return row;
         });
         elements.sourceCode.replaceChildren(...nodes);
@@ -10271,6 +10272,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         renderSourceTree(false);
         renderSourceTabs();
         refreshVmHandlerNames();
+        // Wasm function names (wasm_function_names.js) patch their views in place.
+        if (typeof RebWasmFunctionNames !== 'undefined') RebWasmFunctionNames.changed();
       }
 
       // Names change without a new VM workspace. Patch the listing, Symbol Tree

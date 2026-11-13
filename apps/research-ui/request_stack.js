@@ -221,6 +221,9 @@ function createRequestStackPanel({open, refresh, load = null}) {
     } else {
       item.textContent = text;
     }
+    // A researcher name for a Wasm frame's function, beside the captured one.
+    const analyst = frame.kind === 'wasm' ? globalThis.RebWasmFunctionNames?.nameOf(frame.module_sha256, frame.function_index) : null;
+    if (analyst) item.append(' ', globalThis.RebWasmFunctionNames.nameNode(analyst, 'request-stack-analyst-name'));
     return item;
   }
 

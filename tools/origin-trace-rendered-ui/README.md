@@ -208,6 +208,15 @@ request opened again starts with it closed. Beside `test35`'s **header gaps**
 item, the two must not overlap when both are open, and each Escape must close
 only its own and not the request. Both themes, nothing clipped.
 
+`test39WasmFunctionNames` opens the synthetic module artifact 420 (an import,
+a helper and an exported caller) in Sources Inspect, renames the helper with
+the pencil on its header row and Enter, and requires at both sizes that the
+italic name follows the unchanged captured header and the call row that
+targets it. The Graph's **Functions** list must show the name beside `func 1`,
+choosing that row must put it beside the Graph title, and F2 on the graph must
+open the same editor, which Escape closes. Layout and inertness are checked at
+each step ([Wasm function names v1](../../protocol/wasm-function-names-v1.md)).
+
 `testLaunchStartsWithoutStartPanel` runs alone in a second launch pass. That
 pass starts the copied app without `--ui-url` or an evidence-store argument,
 with automatic live sessions on, `REB_EVENT_STORE` and its siblings naming

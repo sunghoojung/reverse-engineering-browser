@@ -164,6 +164,8 @@
     // module can name.
     const narrowed = view.selection.params?.kind === 'artifact' && view.selection.params.byte_offset !== undefined;
     view.label = (narrowed ? document.selection.label || view.label : view.label || document.selection.label) || '';
+    view.wasmSha = document.selection.wasm_sha256 ?? null;
+    view.wasmFunction = document.selection.function_index ?? null;
     view.counts = document.counts;
     view.gaps = document.gaps;
     for (const direction of directions) view.pages[direction] = new Map([[0, document.pages?.[direction]?.rows ?? []]]);
@@ -306,12 +308,20 @@
       return element;
     }
     const name = node('span', 'xrefs-name', row.name), badge = node('span', 'xrefs-kind', kindLabel(row));
+    // A Wasm row's researcher name follows the captured name inside its cell.
+    const analyst = analystName(row.function_index);
+    if (analyst) name.append(' ', globalThis.RebWasmFunctionNames.nameNode(analyst));
     const detail = node('span', 'xrefs-detail', row.detail), id = node('span', 'xrefs-id', rowId(row));
     name.title = row.name; detail.title = row.detail; id.title = rowId(row);
     element.append(name, badge, detail, id);
     return element;
   }
 
+  // Researcher Wasm names (wasm_function_names.js) for the selected module.
+  function analystName(index) {
+    return view.wasmSha && Number.isInteger(index) ? globalThis.RebWasmFunctionNames?.nameOf(view.wasmSha, index) ?? null : null;
+  }
+  globalThis.RebWasmFunctionNames?.subscribe(() => { if (open) { render(); paint(); } });
   function paint() {
     if (!open) return;
     const visibleGroups = groups();
@@ -388,6 +398,8 @@
     const selection = view.selection;
     elements.target.textContent = view.label || (selection?.params ? 'selection' : 'Nothing selected');
     elements.target.title = elements.target.textContent;
+    const selected = analystName(view.wasmFunction);
+    if (selected) elements.target.append(' ', globalThis.RebWasmFunctionNames.nameNode(selected));
     if (view.status === 'ready' || view.status === 'gone') {
       elements.counts.textContent = `${counted(view.counts.in.matching)} in · ${counted(view.counts.out.matching)} out`;
     } else elements.counts.textContent = '';

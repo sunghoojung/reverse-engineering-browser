@@ -3883,6 +3883,68 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // and Cookies tabs say why, and the Traffic footer counts it with the
   // header block the session budget refused.
   @MainActor
+  // A Wasm function renamed once shows everywhere it appears: the Inspect
+  // header and the call row that targets it, the Graph function list and
+  // title. The captured identity stays visible beside it.
+  func test39WasmFunctionNames() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"420\"]")
+      try await ui.waitUntil("!document.querySelector('#source-wasm').hidden", "\(size.name): Inspect is offered for the module")
+      try await ui.click("#source-wasm")
+      let header = ".source-line[data-wasm-function='1']:not([data-wasm-target])"
+      try await ui.waitUntil("document.querySelector(\"\(header) .wasm-function-rename\") !== null", "\(size.name): the helper's header row has a rename control")
+      try await ui.click("\(header) .wasm-function-rename")
+      try await ui.waitUntil("document.activeElement === document.querySelector('#source-name-host input')", "\(size.name): the editor took focus")
+      // Select-all then type: the name may already exist from the other size.
+      try await ui.key(0, "a", modifiers: [.command])
+      try await ui.type("encode_payload")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("""
+        (document.querySelector("\(header) .wasm-function-name")?.textContent === 'encode_payload') &&
+          document.querySelector('#source-name-host form') === null
+        """, timeout: 15, "\(size.name): the header did not show the saved name")
+      let listing = try await ui.json("""
+        (() => { const call = document.querySelector(".source-line[data-wasm-target][data-wasm-function='1']");
+          const row = document.querySelector("\(header)");
+          return {captured: row.querySelector('.source-text').textContent, call: call?.querySelector('.wasm-function-target')?.textContent ?? null,
+            italic: getComputedStyle(row.querySelector('.wasm-function-name')).fontStyle, focus: document.activeElement?.className ?? ''}; })()
+        """)
+      XCTAssertTrue((listing["captured"] as? String ?? "").contains("func 1"), "\(size.name): the captured header stays: \(listing)")
+      XCTAssertEqual(listing["call"] as? String, "encode_payload", "\(size.name): the call row names its callee: \(listing)")
+      XCTAssertEqual(listing["italic"] as? String, "italic", "\(size.name): a name reads as a researcher name: \(listing)")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) Wasm names in Inspect")
+      try await assertInert(ui, "\(size.name) Wasm names in Inspect")
+      try await ui.screenshot("wasm-names-inspect-\(size.name)")
+      // The Graph opens the largest body (func 2); the list shows both names.
+      try await ui.click("#source-graph")
+      try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '').includes('block')", timeout: 30, "\(size.name): the graph did not lay out")
+      try await ui.click("#source-graph-host .block-graph-fn-wrap button[aria-haspopup]")
+      try await ui.waitUntil("document.querySelectorAll('#source-graph-host .block-graph-fn-row').length === 2", "\(size.name): the function list did not open")
+      let list = try await ui.json("""
+        ({rows: [...document.querySelectorAll('#source-graph-host .block-graph-fn-row')].map(row => ({name: row.querySelector('.block-graph-fn-name').textContent,
+          analyst: row.querySelector('.block-graph-fn-analyst')?.textContent ?? null}))})
+        """)
+      let rows = list["rows"] as? [[String: Any]] ?? []
+      XCTAssertEqual(rows.first?["analyst"] as? String, "encode_payload", "\(size.name): the list shows the name beside func 1: \(rows)")
+      XCTAssertEqual(rows.first?["name"] as? String, "func 1", "\(size.name): the captured identity stays: \(rows)")
+      try await assertLayout(ui, "#source-graph-host", "\(size.name) Wasm names in the function list")
+      try await ui.screenshot("wasm-names-function-list-\(size.name)")
+      try await ui.click("#source-graph-host .block-graph-fn-row", containing: "func 1")
+      try await ui.waitUntil("document.querySelector('#source-graph-host .block-graph-analyst-name')?.textContent === 'encode_payload'", "\(size.name): the Graph title did not show the name")
+      // F2 on the graph opens the same editor; Escape keeps the name.
+      try await ui.click("#source-graph-host .block-graph-canvas")
+      try await ui.key(120, "\u{F705}", modifiers: [.function])
+      try await ui.waitUntil("document.querySelector('#source-name-host input')?.value === 'encode_payload'", "\(size.name): F2 did not open the editor on the graph")
+      try await ui.key(53, "\u{1b}")
+      try await ui.waitUntil("document.querySelector('#source-name-host form') === null", "\(size.name): Escape did not close the editor")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) Wasm names in the Graph")
+      try await ui.screenshot("wasm-names-graph-\(size.name)")
+      try await ui.click("#source-graph")
+    }
+  }
+
   func test35MissingFinalHeaders() async throws {
     let expected = try Expectations.load()
     for size in windowSizes {

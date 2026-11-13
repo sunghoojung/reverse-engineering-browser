@@ -1487,7 +1487,9 @@ can see its response heads:
   instrumentation (`TODO(crbug.com/40188470)` in
   `NavigationRequest::CreateNavigationEarlyHintsManagerParams`) and
   `NavigationEarlyHintsManager::MaybePreloadHintedResource` sets no
-  `devtools_request_id`; only the Brave proxy's `reb-` ID names the request.
+  `devtools_request_id`; the request's only one is the Brave proxy's `reb-`
+  ID, which no agent knows, and without it the observer would never be
+  called.
   The head goes to the throttles and `PreloadURLLoaderClient`, whose
   `OnReceiveResponse` reads `network_accessed` and `was_fetched_via_cache` and
   whose `OnReceiveRedirect` ignores it; the `PreloadedResource` it reports keeps
@@ -1523,10 +1525,13 @@ only the hook (patch 0025, before that lookup) sees the raw notifications. It
 is created on the UI thread only while `reb::NativeNetworkHeadersObserved()`
 holds: a content session is current, its Network category is on and its
 expiry has not passed. Otherwise the factory is built exactly as stock. The
-factory belongs to the navigation's `NavigationEarlyHintsManager`, which lives
-until the navigation commits or ends, and its observer lives as long as the
-factory; a preload still running when the session ends keeps it until the
-preload completes, and the hook then forwards nothing.
+factory belongs to the navigation's `NavigationEarlyHintsManager`;
+`RenderFrameHostImpl` takes the manager at commit
+(`early_hints_manager_ = navigation_request->TakeEarlyHintsManager()`), so the
+factory and its observer live as long as that document, or end with a
+navigation that never commits. Only preloads use the factory, so nothing is
+observed after they complete, and a preload still running when the session
+ends reaches a hook that forwards nothing.
 
 Every request with a provisional block and no `network` block says why on its
 Headers and Cookies tabs and is counted in the session summary (see

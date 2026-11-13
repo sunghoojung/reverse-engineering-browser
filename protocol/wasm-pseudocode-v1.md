@@ -77,18 +77,27 @@ later name source is added there. A name that is not a plain identifier, or
 that looks like a lift variable (`p0`, `l3`, `t9`, `g1`, `L2`, `f4`), is printed
 quoted with control characters escaped. A name longer than 96 bytes keeps its
 start and its end around `...`, because overloads and numbered clones of one
-demangled name differ at the end; only names that differ solely in a long
-middle can print the same, and the callee table's `function_index` still
-tells them apart. Names never come from guesses about what a function does.
+demangled name differ at the end, and is followed by its function index:
+`"std::__2::__function::__func<...>::operator()()"#123`. The index keeps
+names that differ only in a long middle apart. The raw name is cut on whole
+characters and each kept character is escaped as a unit, so a cut never
+splits an escape and nothing inside the quotes can close them early. Names
+never come from guesses about what a function does.
 
 ### What folding guarantees
 
 Read the lines in order, and within a line read an expression's operands
 before the expression itself (left to right, as written). That reading
-evaluates the instructions in an order with these properties, which the test
-`folding_keeps_effect_order_and_owns_every_byte_once` checks on fixtures and
-300 generated programs mixing calls, loads, stores, globals, locals, trapping
-division and `br_if`:
+evaluates the instructions in an order with these properties. The tests check
+them on fixtures and on two generators.
+`folding_keeps_effect_order_and_owns_every_byte_once` runs 5,000 untyped
+programs mixing calls, loads, stores, globals, locals, trapping division and
+`br_if`. `typed_generated_modules_validate_and_keep_effect_order` runs 2,000
+modules that wasmparser validates, with nested `block`, `loop`, `if`/`else`
+and `try_table`, `br`, `br_if` and `br_table` at depth, `return_call`,
+`select`, `local.tee`, `memory.grow`, a multi-value call and `throw`. A third,
+`every_partial_assignment_keeps_the_guarantees`, puts a conflicting value
+below every place that assigns only part of the pending stack.
 
 1. The instructions with an effect (calls, loads, stores and every other
    memory or table operation, global reads and writes, trapping arithmetic,
@@ -102,10 +111,14 @@ Only pure values (constants, local reads, arithmetic that cannot trap) may
 read later than their bytes, and only where nothing above can change them.
 To keep these properties, a pending value is assigned to a temporary `tN` on
 its own line, deepest first, before a line it conflicts with: two effects, or
-a local one writes and the other reads. At a `br_if`, every pending value
-with an effect or a local write is assigned first, because it runs whether
-or not the branch is taken; a pending pure value may wait, since on the taken
-path it is discarded unseen. Values a frame boundary would carry unassigned,
+a local one writes and the other reads. Values are marked from the top of
+the stack down, and each marked value's effects join what later values are
+checked against, so a value below a marked one that conflicts with it is
+assigned before it. At a `br_if`, every pending value with an effect or a
+local write is marked, because it runs whether or not the branch is taken,
+and so is anything below that it conflicts with (a read of the local it
+writes). A pending pure value with no such conflict may wait, since on the
+taken path it is discarded unseen. Values a frame boundary would carry unassigned,
 a value a conditional branch both carries and leaves on the stack, and an
 expression deeper than 12 levels or longer than 200 bytes are assigned too.
 `spill_count` counts these temporaries.
@@ -120,8 +133,11 @@ count instructions owned by no line or by more than one, and `status` is
 equals `instruction_count`. Each line's `ranges` are the
 module byte ranges (exclusive end) of the instructions it owns and those it
 names without owning (a switch's case lines name their `br_table`), merged
-where they touch. The header and `var` lines map to the body header and each
-local declaration group. A value a branch discards is still a line, so no
+where they touch. A line lists at most 64 ranges: past that, its 64th range
+is one span covering every later one, which also covers bytes other lines
+own, and `truncation.merged_ranges` counts such lines in the window. The
+header and `var` lines map to the body header and each local declaration
+group. A value a branch discards is still a line, so no
 instruction disappears.
 
 What the lift does not model stays the instruction's disassembly text
@@ -169,7 +185,8 @@ partial; they are counted and `omissions` says how many there are.
 - `truncation`: `instructions`, `lines` and `deadline` (a limit stopped the
   lift), `clipped_lines` (lines whose text was cut at 2,048 bytes and marked
   `[text limited]`), `window_bytes` (the window stopped early to fit),
-  `frames`.
+  `frames`, and `merged_ranges` (lines whose ranges were merged into a
+  covering span).
 - `omissions`, `limits` and `notice`.
 
 ## Permission levels
@@ -198,8 +215,12 @@ ranges, and the callee table. Callee names are module names, which
 A limit stops the lift at a named byte, sets the matching `truncation` field
 and `status: partial`, and names the byte in `omissions`; later instructions
 are not lifted. The lift is recomputed for each window. An imported or
-undefined function returns 404, a malformed body or unterminated control
-structure 422, a window past `line_count` or a `line_limit` outside 1 to 2,000
+undefined function returns 404. A module whose sections do not validate, or
+a requested function whose body does not validate with wasmparser's
+validator (every feature enabled), returns 422 with a named error rather
+than a listing. The lift reads declared stack effects and assumes a body that
+type checks, so an invalid one would read as plausible junk. A malformed
+body or unterminated control structure also returns 422, a window past `line_count` or a `line_limit` outside 1 to 2,000
 400. The native route runs the packaged helper with the block graph's queue,
 output limit and five-second process deadline.
 

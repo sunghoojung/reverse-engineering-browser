@@ -5236,7 +5236,7 @@
       "get": {
         "operationId": "get_wasm_pseudocode",
         "summary": "Readable lifted listing of one WebAssembly function",
-        "description": "A readable lift of one defined function of a hash-verified core WASM artifact: the operand stack is simulated with declared effects and instructions fold into nested expressions (l3 = i32.load(l1, offset 8) + 1), calls by name, if/else, loops, br_table as a switch and call_indirect with its type and table. Every instruction is owned by exactly one line, checked on each lift, and every line carries the original module byte ranges it covers. Folding keeps calls, memory, globals, traps, branches and local writes in byte order. What the lift does not model stays the raw instruction text on a fallback line, counted by reason in fallbacks. Names come only from the name section, exports and imports. text is captured content and is omitted below --allow-content; line structure, ranges, counts, the nesting summary and callee names are returned at every level. Lines are paged with line_offset and line_limit; window.next_line_offset continues. Never executes the module.",
+        "description": "A readable lift of one defined function of a hash-verified core WASM artifact: the operand stack is simulated with declared effects and instructions fold into nested expressions (l3 = i32.load(l1, offset 8) + 1), calls by name, if/else, loops, br_table as a switch and call_indirect with its type and table. Every instruction is owned by exactly one line, checked on each lift, and every line carries the original module byte ranges it covers. Folding keeps calls, memory, globals, traps, branches and local writes in byte order. What the lift does not model stays the raw instruction text on a fallback line, counted by reason in fallbacks. Names come only from the name section, exports and imports. text is captured content and is omitted below --allow-content; line structure, ranges, counts, the nesting summary and callee names are returned at every level. Lines are paged with line_offset and line_limit; window.next_line_offset continues. A module or function that does not validate gets a named 422 error instead of a listing. Never executes the module.",
         "tags": [
           "artifacts"
         ],
@@ -5298,7 +5298,7 @@
             }
           },
           "400": {
-            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5308,7 +5308,7 @@
             }
           },
           "403": {
-            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5318,7 +5318,7 @@
             }
           },
           "404": {
-            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5328,7 +5328,7 @@
             }
           },
           "422": {
-            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5338,7 +5338,7 @@
             }
           },
           "500": {
-            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
             "content": {
               "application/json": {
                 "schema": {
@@ -23081,7 +23081,7 @@
           "name": {
             "type": "string",
             "maxLength": 160,
-            "description": "Display name: the name section, an export, an import's module.field, then f<index>. A name that is not a plain identifier, or that looks like a lift variable, is quoted."
+            "description": "Display name: the name section, an export, an import's module.field, then f<index>. A name that is not a plain identifier, or that looks like a lift variable, is quoted. A name longer than 96 bytes keeps its start and end around ... and is followed by #<function index>."
           },
           "name_source": {
             "enum": [

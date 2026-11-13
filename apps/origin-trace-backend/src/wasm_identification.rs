@@ -20,8 +20,8 @@ use std::{
     time::{Duration, Instant},
 };
 use wasmparser::{
-    BinaryReader, DataKind, Encoding as BinaryEncoding, ExternalKind, FunctionBody, KnownCustom,
-    Name, Operator, Parser, Payload, TypeRef,
+    BinaryReader, DataKind, Encoding as BinaryEncoding, ExternalKind, KnownCustom, Name, Operator,
+    Parser, Payload, TypeRef,
 };
 
 /// The block graph's input budget: real modules are tens of MiB.
@@ -30,21 +30,35 @@ pub const MAX_BYTES: usize = wasm_graph::MAX_BYTES;
 /// report still reaches the app.
 const DEADLINE: Duration = Duration::from_secs(4);
 const MAX_CONCLUSIONS: usize = 32;
-const MAX_EVIDENCE: usize = 16;
-const MAX_PRODUCERS: usize = 32;
-const MAX_FEATURES: usize = 64;
-const MAX_CUSTOM_SECTIONS: usize = 64;
+const MAX_EVIDENCE: usize = 8;
+const MAX_PRODUCERS: usize = 16;
+const MAX_FEATURES: usize = 32;
+const MAX_CUSTOM_SECTIONS: usize = 32;
 const MAX_SUGGESTIONS_PER_FUNCTION: usize = 4;
-/// Suggestions kept in one report. Each is one compact row, so the whole set
-/// stays a few hundred KiB at most and a page fits an MCP result.
+/// Suggestions kept in one report. Each is one compact row; pages of them
+/// are cut to the page byte budget.
 const MAX_SUGGESTIONS: usize = 16_384;
 pub const SUGGESTION_PAGE: usize = 1024;
-const MAX_MATCHES: usize = 128;
-const MAX_REFERENCES: usize = 16;
-const MAX_SITES: usize = 8;
+/// Records read and kept from one module: the rest are counted. A module
+/// can declare millions of names; labeling stops at the deadline anyway.
+const MAX_STORED_RECORDS: usize = 65_536;
+/// Data runs and candidate matches kept before merging and suppression.
+/// A table repeated across a whole segment costs a count past these.
+const MAX_RUNS: usize = 8192;
+const MAX_CANDIDATES: usize = 512;
+const MAX_MATCHES: usize = 64;
+const MAX_REFERENCES: usize = 4;
+const MAX_SITES: usize = 4;
+const MAX_MATCH_SEGMENTS: usize = 8;
 /// Bytes of a data match returned as `hex`. They are captured content, which
 /// `--omit-content` drops; the match identity is the offsets and counts.
 const MATCH_PREVIEW_BYTES: usize = 64;
+/// One page of the report, serialized, stays inside the 131,072-byte MCP
+/// inline limit with room for the artifact identity. Everything but the
+/// suggestions is held to `FIXED_BYTES`, trimmed further when it would not
+/// fit, and suggestion rows fill the rest.
+const PAGE_BYTES: usize = 126_000;
+const FIXED_BYTES: usize = 96_000;
 /// Captured text inside a label stays short enough that a read-only result,
 /// which omits strings over 160 characters, keeps the whole label.
 const LABEL_TEXT_BYTES: usize = 96;
@@ -208,16 +222,36 @@ struct Module<'a> {
     imports: Vec<Import<'a>>,
     exports: Vec<Export<'a>>,
     names: Vec<(u32, &'a str, usize)>,
+    /// Every record read, including the ones past `MAX_STORED_RECORDS`.
+    import_count: usize,
+    export_count: usize,
+    name_count: usize,
     module_name: Option<(&'a str, usize)>,
     name_section: Option<usize>,
     customs: Vec<Custom<'a>>,
-    bodies: Vec<FunctionBody<'a>>,
+    defined_functions: usize,
     imported_functions: u32,
     segments: Vec<Segment<'a>>,
+    segment_count: usize,
+    /// The deadline passed while sections were still being read.
+    stopped: bool,
     omissions: Vec<String>,
 }
 
-fn read_module(bytes: &[u8]) -> Result<Module<'_>> {
+/// Records past the storage limit are counted; storing stops. The first
+/// time a kind reaches it, the omission says so.
+fn keep<T>(list: &mut Vec<T>, count: &mut usize, item: T, kind: &str, omissions: &mut Vec<String>) {
+    *count += 1;
+    if list.len() < MAX_STORED_RECORDS {
+        list.push(item);
+    } else if list.len() == MAX_STORED_RECORDS && *count == MAX_STORED_RECORDS + 1 {
+        omissions.push(format!(
+            "{kind} limit of {MAX_STORED_RECORDS} reached; later ones are counted, not read."
+        ));
+    }
+}
+
+fn read_module(bytes: &[u8], deadline: Instant) -> Result<Module<'_>> {
     if bytes.is_empty() {
         return Err(Error::protocol("The WASM module is empty"));
     }
@@ -225,16 +259,28 @@ fn read_module(bytes: &[u8]) -> Result<Module<'_>> {
         imports: Vec::new(),
         exports: Vec::new(),
         names: Vec::new(),
+        import_count: 0,
+        export_count: 0,
+        name_count: 0,
         module_name: None,
         name_section: None,
         customs: Vec::new(),
-        bodies: Vec::new(),
+        defined_functions: 0,
         imported_functions: 0,
         segments: Vec::new(),
+        segment_count: 0,
+        stopped: false,
         omissions: Vec::new(),
     };
     let mut ended = false;
-    for payload in Parser::new(0).parse_all(bytes) {
+    let mut read = 0usize;
+    // Polled every 4096 records of any kind, so a million tiny records
+    // cannot outlast the report's one deadline.
+    let mut expired = || {
+        read += 1;
+        read.is_multiple_of(4096) && Instant::now() > deadline
+    };
+    'payloads: for payload in Parser::new(0).parse_all(bytes) {
         match payload.map_err(bad)? {
             Payload::Version {
                 num: 1,
@@ -248,6 +294,10 @@ fn read_module(bytes: &[u8]) -> Result<Module<'_>> {
             }
             Payload::ImportSection(reader) => {
                 for entry in reader.into_iter_with_offsets() {
+                    if expired() {
+                        module.stopped = true;
+                        break 'payloads;
+                    }
                     let (offset, import) = entry.map_err(bad)?;
                     let function = if matches!(import.ty, TypeRef::Func(_)) {
                         let index = module.imported_functions;
@@ -256,28 +306,57 @@ fn read_module(bytes: &[u8]) -> Result<Module<'_>> {
                     } else {
                         None
                     };
-                    module.imports.push(Import {
+                    let item = Import {
                         module: import.module,
                         name: import.name,
                         offset,
                         function,
-                    });
+                    };
+                    keep(
+                        &mut module.imports,
+                        &mut module.import_count,
+                        item,
+                        "Import",
+                        &mut module.omissions,
+                    );
                 }
             }
             Payload::ExportSection(reader) => {
                 for entry in reader.into_iter_with_offsets() {
+                    if expired() {
+                        module.stopped = true;
+                        break 'payloads;
+                    }
                     let (offset, export) = entry.map_err(bad)?;
-                    module.exports.push(Export {
+                    let item = Export {
                         name: export.name,
                         kind: export.kind,
                         index: export.index,
                         offset,
-                    });
+                    };
+                    keep(
+                        &mut module.exports,
+                        &mut module.export_count,
+                        item,
+                        "Export",
+                        &mut module.omissions,
+                    );
                 }
             }
-            Payload::CodeSectionEntry(body) => module.bodies.push(body),
+            // Bodies are read again by the immediate scan, so none is kept.
+            Payload::CodeSectionEntry(_) => {
+                module.defined_functions += 1;
+                if expired() {
+                    module.stopped = true;
+                    break 'payloads;
+                }
+            }
             Payload::DataSection(reader) => {
                 for entry in reader.into_iter() {
+                    if expired() {
+                        module.stopped = true;
+                        break 'payloads;
+                    }
                     let entry = entry.map_err(bad)?;
                     let address = match &entry.kind {
                         DataKind::Active { offset_expr, .. } => {
@@ -289,12 +368,19 @@ fn read_module(bytes: &[u8]) -> Result<Module<'_>> {
                         }
                         DataKind::Passive => None,
                     };
-                    module.segments.push(Segment {
-                        index: module.segments.len() as u32,
+                    let item = Segment {
+                        index: module.segment_count as u32,
                         data: entry.data,
                         data_offset: entry.range.end - entry.data.len(),
                         address,
-                    });
+                    };
+                    keep(
+                        &mut module.segments,
+                        &mut module.segment_count,
+                        item,
+                        "Data segment",
+                        &mut module.omissions,
+                    );
                 }
             }
             Payload::CustomSection(reader) => {
@@ -308,9 +394,20 @@ fn read_module(bytes: &[u8]) -> Result<Module<'_>> {
                             }
                             Ok(Name::Function(map)) => {
                                 for naming in map.into_iter_with_offsets() {
+                                    if expired() {
+                                        module.stopped = true;
+                                        break 'payloads;
+                                    }
                                     match naming {
                                         Ok((offset, naming)) => {
-                                            module.names.push((naming.index, naming.name, offset));
+                                            let item = (naming.index, naming.name, offset);
+                                            keep(
+                                                &mut module.names,
+                                                &mut module.name_count,
+                                                item,
+                                                "Name",
+                                                &mut module.omissions,
+                                            );
                                         }
                                         Err(_) => {
                                             module.omissions.push(
@@ -333,22 +430,32 @@ fn read_module(bytes: &[u8]) -> Result<Module<'_>> {
                         }
                     }
                 }
-                module.customs.push(Custom {
-                    name: reader.name(),
-                    data: reader.data(),
-                    data_offset: reader.data_offset(),
-                    end: reader.range().end,
-                    known: match known {
-                        KnownCustom::Producers(_) => Some(known),
-                        _ => None,
-                    },
-                });
+                if expired() {
+                    module.stopped = true;
+                    break 'payloads;
+                }
+                if module.customs.len() < MAX_STORED_RECORDS {
+                    module.customs.push(Custom {
+                        name: reader.name(),
+                        data: reader.data(),
+                        data_offset: reader.data_offset(),
+                        end: reader.range().end,
+                        known: match known {
+                            KnownCustom::Producers(_) => Some(known),
+                            _ => None,
+                        },
+                    });
+                }
             }
             Payload::End(_) => ended = true,
             _ => {}
         }
     }
-    if !ended {
+    if module.stopped {
+        module.omissions.push(
+            "Identification deadline reached while reading sections; later records and sections were not read, and counts cover what was read.".into(),
+        );
+    } else if !ended {
         module
             .omissions
             .push("Module traversal stopped before its end.".into());
@@ -425,14 +532,17 @@ const RUST_CRATES: [&str; 18] = [
     "log",
 ];
 
-/// Segments of a legacy-mangled Rust or Itanium name (`_ZN...E`).
+/// Segments of a legacy-mangled name (`_ZN...E`) that ends at its `E`. An
+/// Itanium function name carries parameter types after the `E`
+/// (`_ZN4core6Engine4stepEv`), which no Rust legacy symbol does, so such a
+/// name is not read as one.
 fn mangled_segments(name: &str) -> Option<Vec<&str>> {
     let mut rest = name
         .strip_prefix("_ZN")
         .or_else(|| name.strip_prefix("__ZN"))?;
     let mut segments = Vec::new();
     loop {
-        if rest.starts_with('E') || rest.is_empty() {
+        if rest == "E" {
             return (!segments.is_empty()).then_some(segments);
         }
         let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
@@ -456,16 +566,23 @@ fn rust_hash(segment: &str) -> bool {
 }
 
 /// The crate a Rust symbol belongs to, from its legacy mangling or its
-/// demangled path, and whether the symbol is certainly Rust.
+/// demangled path, and whether the symbol is certainly Rust. A mangled name
+/// counts only with its `17h<hash>` segment: a C++ namespace that happens to
+/// be called `core` or `log` names no crate.
 fn rust_crate(name: &str) -> (Option<&str>, bool) {
     if let Some(segments) = mangled_segments(name) {
-        let certain = segments.last().is_some_and(|last| rust_hash(last));
+        if !segments.last().is_some_and(|last| rust_hash(last)) {
+            return (None, false);
+        }
         let first = segments[0]
             .trim_start_matches('_')
             .trim_start_matches("$LT$");
         let first = first.split("..").next().unwrap_or(first);
         let known = RUST_CRATES.iter().find(|known| **known == first).copied();
-        return (known, certain);
+        return (known, true);
+    }
+    if name.starts_with("_Z") {
+        return (None, false);
     }
     let trimmed = name
         .trim_start_matches(['<', '&'])
@@ -739,8 +856,19 @@ fn text(value: &str) -> String {
 
 struct Labeler<'a> {
     suggestions: Vec<Suggestion>,
-    per_function: HashMap<u32, usize>,
+    /// Hashes of the labels each function already has, so a function that
+    /// is both exported and named under one name gets its label once.
+    per_function: HashMap<u32, Vec<u64>>,
+    /// Suggestions found past `MAX_SUGGESTIONS`, counted and not stored.
+    dropped: usize,
     conclusions: &'a mut Conclusions,
+}
+
+fn label_hash(label: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    label.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl Labeler<'_> {
@@ -748,17 +876,16 @@ impl Labeler<'_> {
         let Some(function) = site.function else {
             return;
         };
-        let count = self.per_function.entry(function).or_insert(0);
-        let repeated = self
-            .suggestions
-            .iter()
-            .rev()
-            .take(MAX_SUGGESTIONS_PER_FUNCTION * 4)
-            .any(|existing| existing.function == function && existing.label == label);
-        if *count >= MAX_SUGGESTIONS_PER_FUNCTION || repeated {
+        let hash = label_hash(&label);
+        let labels = self.per_function.entry(function).or_default();
+        if labels.len() >= MAX_SUGGESTIONS_PER_FUNCTION || labels.contains(&hash) {
             return;
         }
-        *count += 1;
+        labels.push(hash);
+        if self.suggestions.len() >= MAX_SUGGESTIONS {
+            self.dropped += 1;
+            return;
+        }
         self.suggestions.push(Suggestion {
             function,
             label,
@@ -1230,47 +1357,73 @@ fn producers(
 struct Match {
     set: usize,
     location: &'static str,
-    matched: usize,
+    /// Element indexes covered; no set has more than 256 elements.
+    covered: [u64; 4],
+    /// Data matches: the lowest element index and one past the last run's
+    /// last element, so a following run can be checked for continuation.
+    first: usize,
+    end_index: usize,
     byte_offset: usize,
     byte_end: usize,
-    /// Data matches.
-    segment: Option<u32>,
+    /// The end of the first segment's part, which bounds the hex preview:
+    /// the bytes after it in a merged match are another segment's header.
+    preview_end: usize,
+    segments: Vec<u32>,
     encoding: Option<Encoding>,
     runs: usize,
+    /// The memory address of `byte_offset` and of the match's end, when the
+    /// segments' offsets are constants.
     address: Option<u64>,
+    address_end: Option<u64>,
     references: Vec<Value>,
     reference_count: usize,
     /// Immediate matches.
     function: Option<u32>,
     sites: Vec<Value>,
     site_count: usize,
+    /// Values matched, and for a 64-bit set also their 32-bit halves, so an
+    /// i32 hit on a half is explained by the 64-bit match.
     values: BTreeSet<u64>,
 }
 
 impl Match {
-    fn complete(&self) -> bool {
-        self.matched == wasm_constants::catalog()[self.set].total()
+    fn matched(&self) -> usize {
+        self.covered
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum()
     }
-    fn json(&self, bytes: &[u8]) -> Value {
+    fn complete(&self) -> bool {
+        self.matched() == wasm_constants::catalog()[self.set].total()
+    }
+    fn cover(&mut self, from: usize, to: usize) {
+        for index in from..to {
+            self.covered[index / 64] |= 1 << (index % 64);
+        }
+    }
+    fn json(&self, bytes: &[u8], references: usize, sites: usize) -> Value {
         let set: &ConstantSet = &wasm_constants::catalog()[self.set];
         let mut value = json!({"id":set.id,"label":set.label,"family":set.family,"location":self.location,
-            "match":if self.complete() {"complete"} else {"partial"},"matched":self.matched,"total":set.total(),
+            "match":if self.complete() {"complete"} else {"partial"},"matched":self.matched(),"total":set.total(),
             "byte_offset":self.byte_offset,"byte_end":self.byte_end});
         if self.location == "data" {
-            let end = self.byte_end.min(self.byte_offset + MATCH_PREVIEW_BYTES);
-            value["data_segment"] = json!(self.segment);
+            let end = self.preview_end.min(self.byte_offset + MATCH_PREVIEW_BYTES);
+            let kept = &self.references[..self.references.len().min(references)];
+            value["data_segment"] = json!(self.segments[0]);
+            value["data_segments"] = json!(self.segments);
             value["encoding"] = json!(self.encoding.map(Encoding::name));
             value["runs"] = json!(self.runs);
             value["memory_address"] = json!(self.address);
-            value["referenced_by"] = json!(self.references);
+            value["referenced_by"] = json!(kept);
             value["reference_count"] = json!(self.reference_count);
-            value["references_truncated"] = json!(self.reference_count > self.references.len());
+            value["references_truncated"] = json!(self.reference_count > kept.len());
             value["hex"] = json!(hex::encode(&bytes[self.byte_offset..end]));
         } else {
+            let kept = &self.sites[..self.sites.len().min(sites)];
             value["function_index"] = json!(self.function);
-            value["sites"] = json!(self.sites);
+            value["sites"] = json!(kept);
             value["site_count"] = json!(self.site_count);
-            value["sites_truncated"] = json!(self.site_count > self.sites.len());
+            value["sites_truncated"] = json!(self.site_count > kept.len());
         }
         value
     }
@@ -1284,84 +1437,196 @@ fn element_width(set: &ConstantSet) -> usize {
     }
 }
 
-/// Runs of one set, encoding and segment become one match when each run
-/// continues the table where the previous one stopped.
-fn cluster(runs: Vec<Run>, segment: &Segment<'_>) -> Vec<Match> {
-    let catalog = wasm_constants::catalog();
-    let mut runs = runs;
-    runs.sort_by_key(|run| (run.set, run.encoding as u8, run.start));
-    let mut out: Vec<(Match, Vec<bool>, usize)> = Vec::new();
-    for run in runs {
-        let set = &catalog[run.set];
-        let span = set.total() * element_width(set);
-        let continues = out.last().is_some_and(|(current, _, last_index)| {
-            current.set == run.set
-                && current.encoding == Some(run.encoding)
-                && run.start + segment.data_offset <= current.byte_end + span
-                && run.first >= *last_index
-        });
-        if !continues {
-            out.push((
-                Match {
-                    set: run.set,
-                    location: "data",
-                    matched: 0,
-                    byte_offset: segment.data_offset + run.start,
-                    byte_end: segment.data_offset + run.end,
-                    segment: Some(segment.index),
-                    encoding: Some(run.encoding),
-                    runs: 0,
-                    address: segment
-                        .address
-                        .map(|base| base.wrapping_add(run.start as u64)),
-                    references: Vec::new(),
-                    reference_count: 0,
-                    function: None,
-                    sites: Vec::new(),
-                    site_count: 0,
-                    values: BTreeSet::new(),
-                },
-                vec![false; set.total()],
-                0,
-            ));
-        }
-        let (current, covered, last_index) = out.last_mut().expect("a cluster");
-        current.runs += 1;
-        current.byte_end = current.byte_end.max(segment.data_offset + run.end);
-        for flag in &mut covered[run.first..run.end_index] {
-            *flag = true;
-        }
-        *last_index = run.end_index;
-    }
-    out.into_iter()
-        .map(|(mut current, covered, _)| {
-            current.matched = covered.iter().filter(|flag| **flag).count();
-            current
-        })
-        .collect()
+fn data_match(run: &Run, segment: &Segment<'_>) -> Match {
+    let mut entry = Match {
+        set: run.set,
+        location: "data",
+        covered: [0; 4],
+        first: run.first,
+        end_index: run.end_index,
+        byte_offset: segment.data_offset + run.start,
+        byte_end: segment.data_offset + run.end,
+        preview_end: segment.data_offset + run.end,
+        segments: vec![segment.index],
+        encoding: Some(run.encoding),
+        runs: 1,
+        address: segment
+            .address
+            .map(|base| base.wrapping_add(run.start as u64)),
+        address_end: segment
+            .address
+            .map(|base| base.wrapping_add(run.end as u64)),
+        references: Vec::new(),
+        reference_count: 0,
+        function: None,
+        sites: Vec::new(),
+        site_count: 0,
+        values: BTreeSet::new(),
+    };
+    entry.cover(run.first, run.end_index);
+    entry
 }
 
-/// Drops a match another match fully explains: MD5's four words inside a
-/// SHA-1 state, the Base62 alphabet inside a Base64 one.
-fn suppress(matches: Vec<Match>) -> Vec<Match> {
-    let explains = |a: &Match, b: &Match| {
-        if a.location != b.location || a.segment != b.segment || a.function != b.function {
-            return false;
+/// Candidate matches kept so far, the ones counted past `MAX_CANDIDATES`,
+/// and whether the deadline stopped the work.
+#[derive(Default)]
+struct Candidates {
+    kept: Vec<Match>,
+    dropped: usize,
+    expired: bool,
+}
+
+impl Candidates {
+    fn push(&mut self, entry: Match) {
+        if self.kept.len() < MAX_CANDIDATES {
+            self.kept.push(entry);
+        } else {
+            self.dropped += 1;
         }
-        let inside = if a.location == "data" {
-            a.byte_offset >= b.byte_offset && a.byte_end <= b.byte_end
-        } else {
-            a.values.is_subset(&b.values)
-        };
-        let (a_size, b_size) = if a.location == "data" {
-            (a.byte_end - a.byte_offset, b.byte_end - b.byte_offset)
-        } else {
-            (a.values.len(), b.values.len())
-        };
-        inside && (b_size > a_size || (b_size == a_size && b.complete() && !a.complete()))
-    };
+    }
+}
+
+/// Runs of one set and encoding in one segment become one match when each
+/// run continues the table where the previous one stopped. One pass over the
+/// runs sorted by position; the deadline is polled every 1024 runs.
+fn cluster(mut runs: Vec<Run>, segment: &Segment<'_>, deadline: Instant, out: &mut Candidates) {
+    let catalog = wasm_constants::catalog();
+    runs.sort_unstable_by_key(|run| (run.set, run.encoding as u8, run.start));
+    let mut current: Option<Match> = None;
+    for (position, run) in runs.iter().enumerate() {
+        if position.is_multiple_of(1024) && Instant::now() > deadline {
+            out.expired = true;
+            return;
+        }
+        let set = &catalog[run.set];
+        let span = set.total() * element_width(set);
+        if let Some(open) = current.as_mut()
+            && open.set == run.set
+            && open.encoding == Some(run.encoding)
+            && segment.data_offset + run.start <= open.byte_end + span
+            && run.first >= open.end_index
+        {
+            open.runs += 1;
+            open.byte_end = open.byte_end.max(segment.data_offset + run.end);
+            open.preview_end = open.byte_end;
+            open.address_end = segment
+                .address
+                .map(|base| base.wrapping_add(run.end as u64));
+            open.end_index = run.end_index;
+            open.cover(run.first, run.end_index);
+            continue;
+        }
+        if let Some(done) = current.replace(data_match(run, segment)) {
+            out.push(done);
+        }
+    }
+    if let Some(done) = current {
+        out.push(done);
+    }
+}
+
+/// A table split across segments whose memory addresses touch, as Binaryen's
+/// memory packing leaves it, is one match: the next segment's part continues
+/// at the address and the element where the previous part stopped.
+fn merge_segments(mut matches: Vec<Match>) -> Vec<Match> {
+    matches.sort_unstable_by_key(|entry| {
+        (
+            entry.set,
+            entry.encoding.map(|e| e as u8),
+            entry.address.unwrap_or(u64::MAX),
+            entry.byte_offset,
+        )
+    });
+    let mut out: Vec<Match> = Vec::with_capacity(matches.len());
+    for entry in matches {
+        if let Some(previous) = out.last_mut()
+            && previous.set == entry.set
+            && previous.encoding == entry.encoding
+            && previous.address_end.is_some()
+            && previous.address_end == entry.address
+            && entry.first >= previous.end_index
+            && previous.segments.len() < MAX_MATCH_SEGMENTS
+            && !previous.segments.contains(&entry.segments[0])
+        {
+            for (word, other) in previous.covered.iter_mut().zip(entry.covered) {
+                *word |= other;
+            }
+            previous.end_index = entry.end_index;
+            previous.byte_end = entry.byte_end;
+            previous.address_end = entry.address_end;
+            previous.runs += entry.runs;
+            previous.segments.extend(entry.segments);
+            continue;
+        }
+        out.push(entry);
+    }
+    out
+}
+
+/// Whether `container`, whose byte range holds `entry`'s, fully explains it:
+/// it is larger, or as large and complete where `entry` is partial.
+fn explains(entry_size: usize, entry: &Match, container_size: usize, container: &Match) -> bool {
+    container_size > entry_size
+        || (container_size == entry_size && container.complete() && !entry.complete())
+}
+
+/// Drops a data match another match fully explains: MD5's four words inside
+/// a SHA-1 state, the Base62 alphabet inside a Base64 one. One pass over the
+/// matches sorted by start, widest first: the widest range seen so far is
+/// the only container a later match needs to be compared with.
+fn suppress_data(mut matches: Vec<Match>, deadline: Instant, expired: &mut bool) -> Vec<Match> {
+    matches.sort_unstable_by_key(|entry| {
+        (
+            entry.byte_offset,
+            std::cmp::Reverse(entry.byte_end),
+            !entry.complete(),
+        )
+    });
+    let mut kept: Vec<Match> = Vec::with_capacity(matches.len());
+    let mut widest: Option<usize> = None;
+    for (position, entry) in matches.into_iter().enumerate() {
+        if position.is_multiple_of(1024) && Instant::now() > deadline {
+            *expired = true;
+            break;
+        }
+        let size = entry.byte_end - entry.byte_offset;
+        if let Some(index) = widest {
+            let container = &kept[index];
+            if container.byte_end >= entry.byte_end
+                && explains(
+                    size,
+                    &entry,
+                    container.byte_end - container.byte_offset,
+                    container,
+                )
+            {
+                continue;
+            }
+        }
+        if widest.is_none_or(|index| entry.byte_end > kept[index].byte_end) {
+            widest = Some(kept.len());
+        }
+        kept.push(entry);
+    }
+    kept
+}
+
+/// The same rule for one function's immediate matches, by value sets. A
+/// function holds at most one match per set, so this stays small.
+fn suppress_immediates(matches: Vec<Match>) -> Vec<Match> {
     let keep = (0..matches.len())
-        .map(|a| !(0..matches.len()).any(|b| b != a && explains(&matches[a], &matches[b])))
+        .map(|a| {
+            !(0..matches.len()).any(|b| {
+                b != a
+                    && matches[a].values.is_subset(&matches[b].values)
+                    && explains(
+                        matches[a].values.len(),
+                        &matches[a],
+                        matches[b].values.len(),
+                        &matches[b],
+                    )
+            })
+        })
         .collect::<Vec<_>>();
     matches
         .into_iter()
@@ -1401,51 +1666,84 @@ fn memarg_offset(op: &Operator<'_>) -> Option<u64> {
 }
 
 struct Scan {
-    matches: Vec<Match>,
     functions_scanned: usize,
     immediates: usize,
     stopped: bool,
 }
 
+/// Where data matches sit in memory: an exact start address, which a
+/// function's `i32.const` or `i64.const` names when it takes the table's
+/// address, and the whole range, which a load's constant offset falls into
+/// when it reads the table at a fixed index. Any other immediate inside a
+/// range is not a reference: Emscripten's data starts at 1024, so loop
+/// bounds and sizes land inside tables all the time.
+struct Targets {
+    starts: HashMap<u64, Vec<usize>>,
+    ranges: Vec<(u64, u64, usize)>,
+}
+
+impl Targets {
+    fn new(matches: &[Match]) -> Self {
+        let mut starts: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut ranges = Vec::new();
+        for (index, entry) in matches.iter().enumerate() {
+            if let (Some(start), Some(end)) = (entry.address, entry.address_end) {
+                starts.entry(start).or_default().push(index);
+                ranges.push((start, end, index));
+            }
+        }
+        ranges.sort_unstable();
+        Self { starts, ranges }
+    }
+}
+
+fn reference(entry: &mut Match, function: u32, offset: usize, via: &'static str) {
+    entry.reference_count += 1;
+    if entry.references.len() < MAX_REFERENCES {
+        entry
+            .references
+            .push(json!({"function_index":function,"byte_offset":offset,"via":via}));
+    }
+}
+
 /// Walks every body once: constant immediates against the immediate table,
-/// and integer immediates and load offsets against the addresses of data
-/// matches. An address hit is a declared static reference, not a load.
+/// and integer immediates and load offsets against the data matches. The
+/// bodies are read from the module again rather than kept, so a module of
+/// millions of tiny functions costs no stored list.
 fn scan_functions(
-    module: &Module<'_>,
+    bytes: &[u8],
+    imported_functions: u32,
     data_matches: &mut [Match],
     deadline: Instant,
+    out: &mut Candidates,
 ) -> Result<Scan> {
     let table = wasm_constants::immediates();
     let catalog = wasm_constants::catalog();
-    let mut targets = data_matches
-        .iter()
-        .enumerate()
-        .filter_map(|(index, entry)| {
-            entry.address.map(|start| {
-                (
-                    start,
-                    start.saturating_add((entry.byte_end - entry.byte_offset) as u64),
-                    index,
-                )
-            })
-        })
-        .collect::<Vec<_>>();
-    targets.sort_unstable();
+    let targets = Targets::new(data_matches);
     let mut scan = Scan {
-        matches: Vec::new(),
         functions_scanned: 0,
         immediates: 0,
         stopped: false,
     };
-    for (position, body) in module.bodies.iter().enumerate() {
+    let mut position = 0u32;
+    for payload in Parser::new(0).parse_all(bytes) {
+        let body = match payload.map_err(bad)? {
+            Payload::CodeSectionEntry(body) => body,
+            Payload::DataSection(_) | Payload::End(_) => break,
+            _ => continue,
+        };
         if Instant::now() > deadline {
             scan.stopped = true;
             break;
         }
-        let function = module.imported_functions + position as u32;
+        let function = imported_functions + position;
+        position += 1;
         let mut hits: BTreeMap<u16, Hit> = BTreeMap::new();
         let mut reader = body.get_operators_reader().map_err(bad)?;
         let mut count = 0usize;
+        // The last i32.const not yet paired: two adjacent halves can spell
+        // one 64-bit element, high or low half first.
+        let mut previous: Option<(u32, usize)> = None;
         let record = |hits: &mut BTreeMap<u16, Hit>,
                       entries: Option<&Vec<(u16, u32)>>,
                       offset: usize,
@@ -1463,20 +1761,38 @@ fn scan_functions(
                 }
             }
         };
-        let address = |value: u64, offset: usize, via: &'static str, data_matches: &mut [Match]| {
+        let pair = |hits: &mut BTreeMap<u16, Hit>, high: u32, low: u32, offset: usize| {
+            let wide = (u64::from(high) << 32) | u64::from(low);
+            let entries = table.high.get(&high).map(|list| {
+                list.iter()
+                    .filter(|(set, index)| catalog[*set as usize].values[*index as usize] == wide)
+                    .copied()
+                    .collect::<Vec<_>>()
+            });
+            let found = entries.as_ref().is_some_and(|list| !list.is_empty());
+            record(hits, entries.as_ref(), offset, "i32.const pair");
+            found
+        };
+        let address = |value: u64, offset: usize, data_matches: &mut [Match]| {
+            for index in targets.starts.get(&value).into_iter().flatten() {
+                reference(
+                    &mut data_matches[*index],
+                    function,
+                    offset,
+                    "address_immediate",
+                );
+            }
+        };
+        let load = |value: u64, offset: usize, data_matches: &mut [Match]| {
             if value == 0 {
                 return;
             }
-            let end = targets.partition_point(|(start, ..)| *start <= value);
-            for (start, stop, index) in targets[..end].iter().rev().take(4) {
+            let end = targets
+                .ranges
+                .partition_point(|(start, ..)| *start <= value);
+            for (start, stop, index) in targets.ranges[..end].iter().rev().take(4) {
                 if value >= *start && value < *stop {
-                    let entry = &mut data_matches[*index];
-                    entry.reference_count += 1;
-                    if entry.references.len() < MAX_REFERENCES {
-                        entry.references.push(
-                            json!({"function_index":function,"byte_offset":offset,"via":via}),
-                        );
-                    }
+                    reference(&mut data_matches[*index], function, offset, "load_offset");
                 }
             }
         };
@@ -1492,7 +1808,16 @@ fn scan_functions(
                     scan.immediates += 1;
                     let value = value as u32;
                     record(&mut hits, table.four.get(&value), offset, "i32.const");
-                    address(u64::from(value), offset, "address_immediate", data_matches);
+                    address(u64::from(value), offset, data_matches);
+                    previous = match previous {
+                        Some((first, at))
+                            if pair(&mut hits, first, value, at)
+                                || pair(&mut hits, value, first, at) =>
+                        {
+                            None
+                        }
+                        _ => Some((value, offset)),
+                    };
                 }
                 Operator::I64Const { value } => {
                     scan.immediates += 1;
@@ -1502,7 +1827,7 @@ fn scan_functions(
                     if let Ok(narrow) = u32::try_from(value) {
                         record(&mut hits, table.four.get(&narrow), offset, "i64.const");
                     }
-                    address(value, offset, "address_immediate", data_matches);
+                    address(value, offset, data_matches);
                 }
                 // A float immediate is matched by its bits: an optimizer can
                 // move an integer constant through a float store.
@@ -1538,7 +1863,7 @@ fn scan_functions(
                 }
                 ref other => {
                     if let Some(memory_offset) = memarg_offset(other) {
-                        address(memory_offset, offset, "load_offset", data_matches);
+                        load(memory_offset, offset, data_matches);
                     }
                 }
             }
@@ -1553,29 +1878,44 @@ fn scan_functions(
             if hit.indexes.len() < set.immediate_min {
                 continue;
             }
-            found.push(Match {
+            let mut values = BTreeSet::new();
+            for index in &hit.indexes {
+                let value = set.values[*index as usize];
+                values.insert(value);
+                if set.width == Width::Word64 {
+                    values.insert(value >> 32);
+                    values.insert(value & 0xffff_ffff);
+                }
+            }
+            let mut entry = Match {
                 set: set_number as usize,
                 location: "immediate",
-                matched: hit.indexes.len(),
+                covered: [0; 4],
+                first: 0,
+                end_index: 0,
                 byte_offset: hit.first,
                 byte_end: hit.first,
-                segment: None,
+                preview_end: hit.first,
+                segments: Vec::new(),
                 encoding: None,
                 runs: 0,
                 address: None,
+                address_end: None,
                 references: Vec::new(),
                 reference_count: 0,
                 function: Some(function),
                 sites: hit.sites,
                 site_count: hit.site_count,
-                values: hit
-                    .indexes
-                    .iter()
-                    .map(|index| set.values[*index as usize])
-                    .collect(),
-            });
+                values,
+            };
+            for index in &hit.indexes {
+                entry.cover(*index as usize, *index as usize + 1);
+            }
+            found.push(entry);
         }
-        scan.matches.extend(suppress(found));
+        for entry in suppress_immediates(found) {
+            out.push(entry);
+        }
     }
     Ok(scan)
 }
@@ -1589,15 +1929,26 @@ pub fn load(root: &Path, id: &str, offset: usize, limit: usize) -> Result<Value>
     Ok(document)
 }
 
+fn serialized(value: &Value) -> usize {
+    serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
+}
+
 /// Builds the report. `offset` and `limit` page the suggestion rows only;
-/// every other part is whole on every page.
+/// every other part is whole on every page, held to `FIXED_BYTES`.
 pub fn identify(bytes: &[u8], offset: usize, limit: usize) -> Result<Value> {
+    identify_within(bytes, offset, limit, DEADLINE)
+}
+
+/// `identify` with its time budget named, so the deadline paths are tested
+/// without a module large enough to reach the real one.
+fn identify_within(bytes: &[u8], offset: usize, limit: usize, budget: Duration) -> Result<Value> {
     if bytes.len() > MAX_BYTES {
         return Err(Error::bad("WASM identification input exceeds 64 MiB"));
     }
-    let started = Instant::now();
-    let deadline = started + DEADLINE;
-    let module = read_module(bytes)?;
+    // One deadline for the whole report: reading, labeling, both scans and
+    // the merge all poll it, and each says where it stopped.
+    let deadline = Instant::now() + budget;
+    let module = read_module(bytes, deadline)?;
     let mut omissions = module.omissions.clone();
     let mut conclusions = Conclusions::default();
 
@@ -1624,42 +1975,52 @@ pub fn identify(bytes: &[u8], offset: usize, limit: usize) -> Result<Value> {
         if custom_rows.len() < MAX_CUSTOM_SECTIONS {
             custom_rows.push(json!({"name":bounded(custom.name, LABEL_TEXT_BYTES),"byte_offset":custom.data_offset,
                 "byte_end":custom.end,"bytes":custom.data.len()}));
-        } else if custom_rows.len() == MAX_CUSTOM_SECTIONS {
-            omissions
-                .push("Custom section limit reached; later custom sections are not listed.".into());
-            custom_rows.push(Value::Null);
         }
     }
-    custom_rows.retain(|row| !row.is_null());
+    if module.customs.len() > MAX_CUSTOM_SECTIONS {
+        omissions
+            .push("Custom section limit reached; later custom sections are not listed.".into());
+    }
 
     let mut labeler = Labeler {
         suggestions: Vec::new(),
         per_function: HashMap::new(),
+        dropped: 0,
         conclusions: &mut conclusions,
     };
-    for import in &module.imports {
-        labeler.import(import);
+    let mut labeled = 0usize;
+    let mut labeling_stopped = false;
+    let records = module.imports.len() + module.exports.len() + module.names.len();
+    for position in 0..records {
+        if position.is_multiple_of(4096) && Instant::now() > deadline {
+            labeling_stopped = true;
+            break;
+        }
+        labeled += 1;
+        if let Some(import) = module.imports.get(position) {
+            labeler.import(import);
+        } else if let Some(export) = module.exports.get(position - module.imports.len()) {
+            let function = (export.kind == ExternalKind::Func).then_some(export.index);
+            labeler.symbol(export.name, function, "export", export.offset);
+        } else {
+            let (index, name, offset) =
+                module.names[position - module.imports.len() - module.exports.len()];
+            labeler.symbol(name, Some(index), "name", offset);
+        }
     }
-    for export in &module.exports {
-        let function = (export.kind == ExternalKind::Func).then_some(export.index);
-        labeler.symbol(export.name, function, "export", export.offset);
+    if labeling_stopped {
+        omissions.push(format!(
+            "Identification deadline reached while labeling; {labeled} of {records} imports, exports and names were read."
+        ));
     }
-    for (index, name, offset) in &module.names {
-        labeler.symbol(name, Some(*index), "name", *offset);
-    }
+    let dropped_suggestions = labeler.dropped;
+    let labeled_functions = labeler.per_function.len();
     let mut suggestions = labeler.suggestions;
     suggestions.sort_by_key(|entry| entry.function);
-    let labeled_functions = suggestions
-        .iter()
-        .map(|entry| entry.function)
-        .collect::<BTreeSet<_>>()
-        .len();
-    let suggestion_total = suggestions.len();
-    if suggestions.len() > MAX_SUGGESTIONS {
-        suggestions.truncate(MAX_SUGGESTIONS);
+    let suggestion_total = suggestions.len() + dropped_suggestions;
+    if dropped_suggestions > 0 {
         omissions.push(format!(
-            "Suggestion limit reached; {} later suggestions are counted, not listed.",
-            suggestion_total - MAX_SUGGESTIONS
+            "Suggestion limit reached; {dropped_suggestions} later suggestions are counted, not listed."
         ));
     }
     if offset > suggestions.len() {
@@ -1667,20 +2028,23 @@ pub fn identify(bytes: &[u8], offset: usize, limit: usize) -> Result<Value> {
     }
 
     // Data first: immediates look for references to the tables it finds.
-    let mut data_matches = Vec::new();
+    let mut candidates = Candidates::default();
     let data_bytes: usize = module
         .segments
         .iter()
         .map(|segment| segment.data.len())
         .sum();
     let mut data_scanned = 0usize;
-    let mut data_stopped = false;
+    let mut data_stopped = module.stopped;
+    let mut room = MAX_RUNS;
+    let mut runs_dropped = 0usize;
     for segment in &module.segments {
         let mut expired = || Instant::now() > deadline;
-        let (runs, scanned, stop) = wasm_constants::scan_data(segment.data, &mut expired);
-        data_scanned += scanned;
-        data_matches.extend(suppress(cluster(runs, segment)));
-        if stop.is_some() {
+        let scan = wasm_constants::scan_data(segment.data, &mut expired, &mut room);
+        data_scanned += scan.scanned;
+        runs_dropped += scan.dropped;
+        cluster(scan.runs, segment, deadline, &mut candidates);
+        if scan.stop.is_some() || candidates.expired {
             data_stopped = true;
             omissions.push(format!(
                 "Identification deadline reached in data segment {}; {} of {data_bytes} data bytes were scanned.",
@@ -1689,93 +2053,182 @@ pub fn identify(bytes: &[u8], offset: usize, limit: usize) -> Result<Value> {
             break;
         }
     }
-    let scan = scan_functions(&module, &mut data_matches, deadline)?;
-    if scan.stopped {
+    if runs_dropped > 0 {
+        omissions.push(format!(
+            "Data run limit of {MAX_RUNS} reached; {runs_dropped} later runs of known tables are counted, not matched."
+        ));
+    }
+    let data_dropped = std::mem::take(&mut candidates.dropped);
+    let mut suppress_stopped = false;
+    let mut data_matches = suppress_data(
+        merge_segments(std::mem::take(&mut candidates.kept)),
+        deadline,
+        &mut suppress_stopped,
+    );
+    if suppress_stopped {
+        omissions.push("Identification deadline reached while merging data matches; later candidates were dropped.".into());
+    }
+    // A module the deadline stopped reading is not read again for bodies.
+    let scan = if module.stopped {
+        Scan {
+            functions_scanned: 0,
+            immediates: 0,
+            stopped: true,
+        }
+    } else {
+        scan_functions(
+            bytes,
+            module.imported_functions,
+            &mut data_matches,
+            deadline,
+            &mut candidates,
+        )?
+    };
+    if scan.stopped || (module.stopped && scan.functions_scanned < module.defined_functions) {
         omissions.push(format!(
             "Identification deadline reached; constant immediates of {} of {} function bodies were scanned.",
-            scan.functions_scanned,
-            module.bodies.len()
+            scan.functions_scanned, module.defined_functions
+        ));
+    }
+    let candidates_dropped = data_dropped + candidates.dropped;
+    if candidates_dropped > 0 {
+        omissions.push(format!(
+            "Constant candidate limit of {MAX_CANDIDATES} reached; {candidates_dropped} later candidates are counted, not merged or listed."
         ));
     }
     let mut matches = data_matches;
-    matches.extend(scan.matches);
-    let match_total = matches.len();
+    matches.extend(candidates.kept);
+    // Complete and larger matches first, so a cut keeps the strongest.
+    matches.sort_by_key(|entry| {
+        (
+            !entry.complete(),
+            std::cmp::Reverse(entry.matched()),
+            entry.location != "data",
+            entry.byte_offset,
+        )
+    });
+    let match_total = matches.len() + candidates_dropped;
     if matches.len() > MAX_MATCHES {
-        matches.truncate(MAX_MATCHES);
         omissions.push(format!(
             "Constant match limit reached; {} later matches are counted, not listed.",
-            match_total - MAX_MATCHES
+            matches.len() - MAX_MATCHES
         ));
+        matches.truncate(MAX_MATCHES);
     }
+    let complete_matches = matches.iter().filter(|entry| entry.complete()).count();
 
-    let mut conclusion_rows = Vec::new();
     let mut ordered = conclusions.by_id.into_iter().collect::<Vec<_>>();
     ordered.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(b.1.2.cmp(&a.1.2)));
-    for (id, (confidence, evidence, count)) in ordered.into_iter().take(MAX_CONCLUSIONS) {
-        let toolchain = TOOLCHAINS
+    ordered.truncate(MAX_CONCLUSIONS);
+    let toolchain_labels = ordered
+        .iter()
+        .filter(|(_, (confidence, ..))| *confidence != Confidence::Low)
+        .map(|(id, _)| tool_label(id))
+        .collect::<Vec<_>>();
+
+    // The fixed part at decreasing detail until it fits its budget: evidence
+    // per conclusion, listed sections and the references and sites per match.
+    let levels = [
+        (MAX_EVIDENCE, usize::MAX, MAX_REFERENCES),
+        (2, 8, 2),
+        (1, 2, 1),
+    ];
+    let mut document = Value::Null;
+    for (level, (evidence_limit, list_limit, detail_limit)) in levels.into_iter().enumerate() {
+        let conclusion_rows = ordered
             .iter()
-            .find(|tool| tool.id == id)
-            .expect("known toolchain");
-        conclusion_rows.push(json!({"id":id,"label":toolchain.label,"kind":toolchain.kind,
-            "confidence":confidence.name(),"evidence_count":count,"evidence_truncated":count > evidence.len(),
-            "evidence":evidence.iter().map(|(strength, item)| {
-                let mut row = item.json();
-                row["confidence"] = json!(strength.name());
-                row
-            }).collect::<Vec<_>>()}));
+            .map(|(id, (confidence, evidence, count))| {
+                let toolchain = TOOLCHAINS.iter().find(|tool| tool.id == *id).expect("known toolchain");
+                let kept = &evidence[..evidence.len().min(evidence_limit)];
+                json!({"id":id,"label":toolchain.label,"kind":toolchain.kind,
+                    "confidence":confidence.name(),"evidence_count":count,"evidence_truncated":*count > kept.len(),
+                    "evidence":kept.iter().map(|(strength, item)| {
+                        let mut row = item.json();
+                        row["confidence"] = json!(strength.name());
+                        row
+                    }).collect::<Vec<_>>()})
+            })
+            .collect::<Vec<_>>();
+        let list = |rows: &[Value]| rows[..rows.len().min(list_limit)].to_vec();
+        let mut level_omissions = omissions.clone();
+        if level > 0 {
+            level_omissions.push(format!(
+                "Report trimmed to fit one page: at most {evidence_limit} evidence items per conclusion, {list_limit} listed producers, features and custom sections, and {detail_limit} references or sites per match."
+            ));
+        }
+        let match_limit = if level == 0 {
+            MAX_MATCHES
+        } else {
+            MAX_MATCHES >> level
+        };
+        document = json!({
+            "schema":"wasm-identification-v1","artifact_id":null,"sha256":null,"byte_size":bytes.len(),
+            "status":if level_omissions.is_empty() {"complete"} else {"partial"},
+            "evidence":"static_identification",
+            "summary":{"toolchains":toolchain_labels,"labeled_functions":labeled_functions,
+                "suggestions":suggestion_total,"constant_matches":match_total,"complete_constant_matches":complete_matches},
+            "toolchain":{"conclusions":conclusion_rows,"producers":list(&producer_rows),"target_features":list(&feature_rows),
+                "source_mapping_url":source_map,"external_debug_info":debug_info,"custom_sections":list(&custom_rows),
+                "name_section":{"present":module.name_section.is_some(),"byte_offset":module.name_section,
+                    "module_name":module.module_name.map(|(name, _)| bounded(name, LABEL_TEXT_BYTES)),
+                    "function_names":module.name_count}},
+            "functions":{"imported_functions":module.imported_functions,"defined_functions":module.defined_functions,
+                "labeled_functions":labeled_functions,
+                "suggestion_fields":["function_index","label","category","library","confidence","source","byte_offset"],
+                "suggestions":[],
+                "suggestion_window":{"offset":offset,"rows":0,"total_rows":suggestions.len(),"next_offset":null}},
+            "constants":{"matches":matches.iter().take(match_limit)
+                .map(|entry| entry.json(bytes, detail_limit, detail_limit)).collect::<Vec<_>>()},
+            "coverage":{"data_segments":module.segment_count,"data_bytes":data_bytes,"data_bytes_scanned":data_scanned,
+                "data_scan_complete":!data_stopped,"functions_scanned":scan.functions_scanned,
+                "immediates_scanned":scan.immediates},
+            "omissions":level_omissions,
+            "limits":{"max_input_bytes":MAX_BYTES,"deadline_ms":DEADLINE.as_millis() as u64,"max_conclusions":MAX_CONCLUSIONS,
+                "max_evidence_per_conclusion":MAX_EVIDENCE,"max_suggestions":MAX_SUGGESTIONS,"suggestion_page":SUGGESTION_PAGE,
+                "max_suggestions_per_function":MAX_SUGGESTIONS_PER_FUNCTION,"max_constant_matches":MAX_MATCHES,
+                "max_references_per_match":MAX_REFERENCES,"max_sites_per_match":MAX_SITES,"match_preview_bytes":MATCH_PREVIEW_BYTES,
+                "max_label_text_bytes":LABEL_TEXT_BYTES,"max_stored_records":MAX_STORED_RECORDS,
+                "page_bytes":PAGE_BYTES,"fixed_bytes":FIXED_BYTES},
+            "notice":"Static identification only. Labels and toolchain conclusions are analyzer suggestions from the cited bytes, never captured or analyst names; a constant match shows the values are present, not that an algorithm runs; an address reference is an immediate naming a matched table's start or a load offset inside it, not an observed load. Nothing is concluded from absence."
+        });
+        if serialized(&document) <= FIXED_BYTES {
+            break;
+        }
     }
-    let window = suggestions
-        .iter()
-        .skip(offset)
-        .take(limit)
-        .map(|entry| {
-            json!([
-                entry.function,
-                entry.label,
-                entry.category,
-                entry.library,
-                entry.confidence.name(),
-                entry.source,
-                entry.byte_offset
-            ])
-        })
-        .collect::<Vec<_>>();
+
+    // Suggestion rows fill what the page budget leaves; at least one row is
+    // returned so paging always advances.
+    let mut room = PAGE_BYTES.saturating_sub(serialized(&document));
+    let mut window = Vec::new();
+    for entry in suggestions.iter().skip(offset).take(limit) {
+        let row = json!([
+            entry.function,
+            entry.label,
+            entry.category,
+            entry.library,
+            entry.confidence.name(),
+            entry.source,
+            entry.byte_offset
+        ]);
+        let size = serialized(&row) + 1;
+        if !window.is_empty() && size > room {
+            break;
+        }
+        room = room.saturating_sub(size);
+        window.push(row);
+    }
     let next = offset + window.len();
-    let toolchain_labels = conclusion_rows
+    document["functions"]["suggestion_window"] = json!({"offset":offset,"rows":window.len(),
+        "total_rows":suggestions.len(),"next_offset":if next < suggestions.len() {json!(next)} else {Value::Null}});
+    document["functions"]["suggestions"] = Value::Array(window);
+    Ok(document)
+}
+
+fn tool_label(id: &str) -> &'static str {
+    TOOLCHAINS
         .iter()
-        .filter(|row| row["confidence"] != "low")
-        .map(|row| row["label"].clone())
-        .collect::<Vec<_>>();
-    let complete_matches = matches.iter().filter(|entry| entry.complete()).count();
-    Ok(json!({
-        "schema":"wasm-identification-v1","artifact_id":null,"sha256":null,"byte_size":bytes.len(),
-        "status":if omissions.is_empty() {"complete"} else {"partial"},
-        "evidence":"static_identification",
-        "summary":{"toolchains":toolchain_labels,"labeled_functions":labeled_functions,
-            "suggestions":suggestion_total,"constant_matches":match_total,"complete_constant_matches":complete_matches},
-        "toolchain":{"conclusions":conclusion_rows,"producers":producer_rows,"target_features":feature_rows,
-            "source_mapping_url":source_map,"external_debug_info":debug_info,"custom_sections":custom_rows,
-            "name_section":{"present":module.name_section.is_some(),"byte_offset":module.name_section,
-                "module_name":module.module_name.map(|(name, _)| bounded(name, LABEL_TEXT_BYTES)),
-                "function_names":module.names.len()}},
-        "functions":{"imported_functions":module.imported_functions,"defined_functions":module.bodies.len(),
-            "labeled_functions":labeled_functions,
-            "suggestion_fields":["function_index","label","category","library","confidence","source","byte_offset"],
-            "suggestions":window,
-            "suggestion_window":{"offset":offset,"rows":window.len(),"total_rows":suggestions.len(),
-                "next_offset":if next < suggestions.len() {json!(next)} else {Value::Null}}},
-        "constants":{"matches":matches.iter().map(|entry| entry.json(bytes)).collect::<Vec<_>>()},
-        "coverage":{"data_segments":module.segments.len(),"data_bytes":data_bytes,"data_bytes_scanned":data_scanned,
-            "data_scan_complete":!data_stopped,"functions_scanned":scan.functions_scanned,
-            "immediates_scanned":scan.immediates},
-        "omissions":omissions,
-        "limits":{"max_input_bytes":MAX_BYTES,"deadline_ms":DEADLINE.as_millis() as u64,"max_conclusions":MAX_CONCLUSIONS,
-            "max_evidence_per_conclusion":MAX_EVIDENCE,"max_suggestions":MAX_SUGGESTIONS,"suggestion_page":SUGGESTION_PAGE,
-            "max_suggestions_per_function":MAX_SUGGESTIONS_PER_FUNCTION,"max_constant_matches":MAX_MATCHES,
-            "max_references_per_match":MAX_REFERENCES,"max_sites_per_match":MAX_SITES,"match_preview_bytes":MATCH_PREVIEW_BYTES,
-            "max_label_text_bytes":LABEL_TEXT_BYTES},
-        "notice":"Static identification only. Labels and toolchain conclusions are analyzer suggestions from the cited bytes, never captured or analyst names; a constant match shows the values are present, not that an algorithm runs; an address reference is an immediate inside a matched table, not an observed load. Nothing is concluded from absence."
-    }))
+        .find(|tool| tool.id == id)
+        .map_or("", |tool| tool.label)
 }
 
 #[cfg(test)]
@@ -2095,8 +2548,413 @@ mod tests {
     fn an_expired_data_scan_stops_and_says_so() {
         let data = vec![0u8; 200_000];
         let mut expired = || true;
-        let (runs, scanned, stop) = wasm_constants::scan_data(&data, &mut expired);
-        assert!(runs.is_empty() && scanned == 0 && stop.is_some());
+        let mut room = 8;
+        let scan = wasm_constants::scan_data(&data, &mut expired, &mut room);
+        assert!(scan.runs.is_empty() && scan.scanned == 0 && scan.stop.is_some());
+    }
+
+    /// Raw module builders, as the review's generators wrote them: some
+    /// adversarial shapes are too large or too irregular for a .wat source.
+    mod raw {
+        pub fn leb(mut n: u64) -> Vec<u8> {
+            let mut out = Vec::new();
+            loop {
+                let byte = (n & 0x7f) as u8;
+                n >>= 7;
+                if n == 0 {
+                    out.push(byte);
+                    return out;
+                }
+                out.push(byte | 0x80);
+            }
+        }
+        pub fn sleb(mut n: i64) -> Vec<u8> {
+            let mut out = Vec::new();
+            loop {
+                let byte = (n & 0x7f) as u8;
+                n >>= 7;
+                if (n == 0 && byte & 0x40 == 0) || (n == -1 && byte & 0x40 != 0) {
+                    out.push(byte);
+                    return out;
+                }
+                out.push(byte | 0x80);
+            }
+        }
+        pub fn section(id: u8, payload: &[u8]) -> Vec<u8> {
+            let mut out = vec![id];
+            out.extend(leb(payload.len() as u64));
+            out.extend(payload);
+            out
+        }
+        pub fn name(text: &str) -> Vec<u8> {
+            let mut out = leb(text.len() as u64);
+            out.extend(text.as_bytes());
+            out
+        }
+        pub fn vector(items: &[Vec<u8>]) -> Vec<u8> {
+            let mut out = leb(items.len() as u64);
+            for item in items {
+                out.extend(item);
+            }
+            out
+        }
+        pub fn module(sections: &[Vec<u8>]) -> Vec<u8> {
+            let mut out = b"\0asm\x01\0\0\0".to_vec();
+            for section in sections {
+                out.extend(section);
+            }
+            out
+        }
+        /// One memory, then active segments at constant addresses.
+        pub fn memory(pages: u64) -> Vec<u8> {
+            let mut payload = vec![1, 0];
+            payload.extend(leb(pages));
+            section(5, &payload)
+        }
+        pub fn data(segments: &[(u32, Vec<u8>)]) -> Vec<u8> {
+            let items = segments
+                .iter()
+                .map(|(address, bytes)| {
+                    let mut item = vec![0, 0x41];
+                    item.extend(sleb(i64::from(*address as i32)));
+                    item.push(0x0b);
+                    item.extend(leb(bytes.len() as u64));
+                    item.extend(bytes);
+                    item
+                })
+                .collect::<Vec<_>>();
+            section(11, &vector(&items))
+        }
+        /// `count` functions of type () -> (), each with this body's
+        /// instructions (an `end` is appended).
+        pub fn functions(count: usize, instructions: &[u8]) -> Vec<Vec<u8>> {
+            let mut body = vec![0];
+            body.extend(instructions);
+            body.push(0x0b);
+            let mut sized = leb(body.len() as u64);
+            sized.extend(&body);
+            vec![
+                section(1, &[1, 0x60, 0, 0]),
+                section(3, &vector(&vec![vec![0]; count])),
+                section(10, &vector(&vec![sized; count])),
+            ]
+        }
+        pub fn i32_const(value: u32) -> Vec<u8> {
+            let mut out = vec![0x41];
+            out.extend(sleb(i64::from(value as i32)));
+            out.push(0x1a);
+            out
+        }
+        pub fn names(names: &[(u32, String)]) -> Vec<u8> {
+            let map = vector(
+                &names
+                    .iter()
+                    .map(|(index, text)| {
+                        let mut item = leb(u64::from(*index));
+                        item.extend(name(text));
+                        item
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let mut payload = name("name");
+            payload.push(1);
+            payload.extend(leb(map.len() as u64));
+            payload.extend(map);
+            section(0, &payload)
+        }
+        pub fn words(values: &[u32]) -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        }
+    }
+
+    fn crc_bytes() -> Vec<u8> {
+        raw::words(&wasm_constants::crc_table(0xedb8_8320, true))
+    }
+
+    #[test]
+    fn a_table_repeated_across_a_segment_is_counted_not_merged_pairwise() {
+        let quarter = raw::words(&wasm_constants::SHA256_K[..4]);
+        let segment = quarter.repeat(32_000);
+        let bytes = raw::module(&[raw::memory(8), raw::data(&[(1024, segment)])]);
+        let started = Instant::now();
+        let report = identify(&bytes, 0, 16).unwrap();
+        // Pairwise merging of these runs took 28 s in a release build.
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(report["status"], "partial");
+        assert!(report["constants"]["matches"].as_array().unwrap().len() <= MAX_MATCHES);
+        let omissions = report["omissions"].to_string();
+        assert!(omissions.contains("Data run limit"), "{omissions}");
+        assert!(omissions.contains("candidate limit"), "{omissions}");
+    }
+
+    #[test]
+    fn merging_and_suppression_stop_at_the_deadline_and_say_so() {
+        let quarter = raw::words(&wasm_constants::SHA256_K[..4]);
+        let segment_bytes = quarter.repeat(4096);
+        let segment = Segment {
+            index: 0,
+            data: &segment_bytes,
+            data_offset: 0,
+            address: Some(1024),
+        };
+        let mut room = MAX_RUNS;
+        let scan = wasm_constants::scan_data(&segment_bytes, &mut || false, &mut room);
+        assert_eq!(scan.runs.len(), 4096);
+        let past = Instant::now() - Duration::from_millis(1);
+        let mut late = Candidates::default();
+        cluster(scan.runs.clone(), &segment, past, &mut late);
+        assert!(late.expired && late.kept.is_empty());
+        let mut timely = Candidates::default();
+        cluster(scan.runs, &segment, Instant::now() + DEADLINE, &mut timely);
+        assert_eq!(
+            (timely.kept.len(), timely.dropped),
+            (MAX_CANDIDATES, 4096 - MAX_CANDIDATES)
+        );
+        let mut expired = false;
+        let kept = suppress_data(timely.kept, past, &mut expired);
+        assert!(expired && kept.is_empty());
+        // The whole report keeps one deadline: every phase says it stopped.
+        let bytes = raw::module(&[
+            raw::memory(2),
+            raw::data(&[(1024, quarter.repeat(64))]),
+            raw::names(&[(0, "malloc".into())]),
+        ]);
+        let report = identify_within(&bytes, 0, 16, Duration::ZERO).unwrap();
+        let omissions = report["omissions"].to_string();
+        assert!(
+            omissions.contains("deadline reached while labeling"),
+            "{omissions}"
+        );
+        assert!(
+            omissions.contains("deadline reached in data segment 0"),
+            "{omissions}"
+        );
+        assert_eq!(report["coverage"]["data_scan_complete"], false);
+    }
+
+    #[test]
+    fn millions_of_names_are_counted_past_the_stored_limit() {
+        let count = MAX_STORED_RECORDS + 4000;
+        let names = (0..count as u32)
+            .map(|index| (index, format!("core::fmt::f{index}")))
+            .collect::<Vec<_>>();
+        let bytes = raw::module(&[raw::names(&names)]);
+        let report = identify(&bytes, 0, 8).unwrap();
+        assert_eq!(report["toolchain"]["name_section"]["function_names"], count);
+        let omissions = report["omissions"].to_string();
+        assert!(
+            omissions.contains("Name limit of 65536 reached"),
+            "{omissions}"
+        );
+        assert!(
+            omissions.contains("Suggestion limit reached"),
+            "{omissions}"
+        );
+        assert_eq!(report["summary"]["suggestions"], MAX_STORED_RECORDS);
+        assert_eq!(report["functions"]["labeled_functions"], MAX_STORED_RECORDS);
+        assert_eq!(
+            report["functions"]["suggestion_window"]["total_rows"],
+            MAX_SUGGESTIONS
+        );
+    }
+
+    #[test]
+    fn itanium_names_in_a_core_namespace_are_not_rust() {
+        let exports = raw::vector(&[
+            [raw::name("_ZN4core6Engine4stepEv"), vec![0, 0]].concat(),
+            [raw::name("_ZN3log6Logger5writeEv"), vec![0, 1]].concat(),
+        ]);
+        let mut producers = raw::name("producers");
+        producers.extend(raw::vector(&[[
+            raw::name("language"),
+            raw::vector(&[[raw::name("C++14"), raw::name("")].concat()]),
+        ]
+        .concat()]));
+        let mut sections = raw::functions(2, &[]);
+        sections.insert(2, raw::section(7, &exports));
+        sections.push(raw::section(0, &producers));
+        let report = identify(&raw::module(&sections), 0, 16).unwrap();
+        assert!(conclusion(&report, "rust").is_none(), "{report:#}");
+        assert!(conclusion(&report, "c_cpp").is_some());
+        assert!(
+            labels(&report, 0).is_empty() && labels(&report, 1).is_empty(),
+            "{report:#}"
+        );
+        // A hashed legacy symbol still is Rust.
+        assert_eq!(
+            rust_crate("_ZN4core9panicking5panic17h0123456789abcdefE"),
+            (Some("core"), true)
+        );
+        assert_eq!(rust_crate("_ZN4core9panicking5panicE"), (None, false));
+    }
+
+    #[test]
+    fn a_function_exported_and_named_alike_is_labeled_once() {
+        let exports = raw::vector(
+            &(0..40u32)
+                .map(|index| {
+                    [
+                        raw::name(&format!("__wbindgen_x{index}")),
+                        vec![0],
+                        raw::leb(u64::from(index)),
+                    ]
+                    .concat()
+                })
+                .collect::<Vec<_>>(),
+        );
+        let names = (0..40u32)
+            .map(|index| (index, format!("__wbindgen_x{index}")))
+            .collect::<Vec<_>>();
+        let mut sections = raw::functions(40, &[]);
+        sections.insert(2, raw::section(7, &exports));
+        sections.push(raw::names(&names));
+        let report = identify(&raw::module(&sections), 0, SUGGESTION_PAGE).unwrap();
+        assert_eq!(report["summary"]["suggestions"], 40);
+        assert_eq!(labels(&report, 7), ["wasm-bindgen runtime: x7"]);
+    }
+
+    #[test]
+    fn every_page_fits_the_mcp_inline_limit() {
+        // 130 data matches each referenced by 16 functions, 300 functions
+        // holding the golden ratio, and 3000 long labels.
+        let quarter = raw::words(&wasm_constants::SHA256_K[..4]);
+        let mut segment = Vec::new();
+        let mut body = Vec::new();
+        for index in 0..130u32 {
+            segment.extend(&quarter);
+            segment.extend([0u8; 16]);
+            body.extend(raw::i32_const(65_536 + index * 32));
+        }
+        for _ in 0..8 {
+            body.extend(raw::i32_const(0x9e37_79b9));
+        }
+        let mut sections = raw::functions(3000, &body);
+        sections.insert(2, raw::memory(2));
+        sections.push(raw::data(&[(65_536, segment)]));
+        let names = (0..3000u32)
+            .map(|index| (index, format!("emscripten_{}{index}", "x".repeat(90))))
+            .collect::<Vec<_>>();
+        sections.push(raw::names(&names));
+        let bytes = raw::module(&sections);
+        let mut offset = 0;
+        let mut rows = 0;
+        loop {
+            let mut page = identify(&bytes, offset, SUGGESTION_PAGE).unwrap();
+            page["artifact_id"] = json!("18446744073709551615");
+            page["sha256"] = json!("f".repeat(64));
+            let size = serde_json::to_vec(&page).unwrap().len();
+            assert!(size <= 131_072, "page at {offset} is {size} bytes");
+            rows += page["functions"]["suggestion_window"]["rows"]
+                .as_u64()
+                .unwrap();
+            match page["functions"]["suggestion_window"]["next_offset"].as_u64() {
+                Some(next) => offset = next as usize,
+                None => break,
+            }
+        }
+        assert_eq!(rows, 3000);
+        assert!(offset > 0, "the rows took more than one page");
+    }
+
+    #[test]
+    fn only_a_table_start_or_a_load_inside_it_is_a_reference() {
+        let sbox = wasm_constants::aes_sbox().to_vec();
+        let mut body = raw::i32_const(1100);
+        body.extend(raw::i32_const(1024));
+        body.extend([0x41, 0, 0x2d, 0, 0xd0, 0x08, 0x1a]); // i32.load8_u offset=1104
+        let mut sections = raw::functions(1, &body);
+        sections.insert(2, raw::memory(1));
+        sections.push(raw::data(&[(1024, sbox)]));
+        let report = identify(&raw::module(&sections), 0, 16).unwrap();
+        let sbox = &constant(&report, "aes_sbox")[0];
+        let vias = sbox["referenced_by"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["via"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        // 1100 is inside the table but names no start: a loop bound or a size.
+        assert_eq!(vias, ["address_immediate", "load_offset"], "{sbox:#}");
+    }
+
+    #[test]
+    fn a_table_split_across_adjacent_segments_is_one_match() {
+        let table = crc_bytes();
+        let split = raw::module(&[
+            raw::memory(1),
+            raw::data(&[(1024, table[..512].to_vec()), (1536, table[512..].to_vec())]),
+        ]);
+        let report = identify(&split, 0, 16).unwrap();
+        let crc = constant(&report, "crc32_table");
+        assert_eq!(crc.len(), 1, "{report:#}");
+        assert_eq!(
+            (crc[0]["match"].as_str(), crc[0]["matched"].as_u64()),
+            (Some("complete"), Some(256))
+        );
+        assert_eq!(crc[0]["data_segments"], json!([0, 1]));
+        // Not adjacent in memory: two partial matches stay two.
+        let apart = raw::module(&[
+            raw::memory(1),
+            raw::data(&[(1024, table[..512].to_vec()), (4096, table[512..].to_vec())]),
+        ]);
+        assert_eq!(
+            constant(&identify(&apart, 0, 16).unwrap(), "crc32_table").len(),
+            2
+        );
+    }
+
+    #[test]
+    fn sha512_initial_values_as_i32_halves_are_sha512() {
+        let mut body = Vec::new();
+        for value in &wasm_constants::SHA512_H[..4] {
+            body.extend(raw::i32_const((value >> 32) as u32));
+            body.extend(raw::i32_const(*value as u32));
+        }
+        let report = identify(&raw::module(&raw::functions(1, &body)), 0, 16).unwrap();
+        let wide = constant(&report, "sha512_h");
+        assert_eq!(wide.len(), 1, "{report:#}");
+        assert_eq!(
+            (
+                wide[0]["matched"].as_u64(),
+                wide[0]["sites"][0]["operator"].as_str()
+            ),
+            (Some(4), Some("i32.const pair"))
+        );
+        assert!(constant(&report, "sha256_h").is_empty(), "{report:#}");
+    }
+
+    #[test]
+    fn one_missing_element_makes_a_table_partial() {
+        let table = crc_bytes();
+        let full = identify(
+            &raw::module(&[raw::memory(1), raw::data(&[(1024, table.clone())])]),
+            0,
+            16,
+        )
+        .unwrap();
+        assert_eq!(constant(&full, "crc32_table")[0]["match"], "complete");
+        let cut = raw::module(&[
+            raw::memory(1),
+            raw::data(&[(1024, table[..table.len() - 4].to_vec())]),
+        ]);
+        let report = identify(&cut, 0, 16).unwrap();
+        let crc = &constant(&report, "crc32_table")[0];
+        assert_eq!(
+            (
+                crc["match"].as_str(),
+                crc["matched"].as_u64(),
+                crc["total"].as_u64()
+            ),
+            (Some("partial"), Some(255), Some(256))
+        );
+        assert_eq!(report["summary"]["complete_constant_matches"], 0);
     }
 
     /// Every SHA-2 table digests as the sha2 crate does, so a copied table

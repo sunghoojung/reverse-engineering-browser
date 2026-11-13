@@ -700,15 +700,28 @@ pub(crate) enum Stop {
     Deadline,
 }
 
+/// What one data scan found: the runs it kept, how many bytes it read, why
+/// it stopped early if it did, and the runs it found past its budget.
+pub(crate) struct DataScan {
+    pub runs: Vec<Run>,
+    pub scanned: usize,
+    pub stop: Option<Stop>,
+    pub dropped: usize,
+}
+
 /// Finds every run of at least `data_min_run` consecutive elements in
-/// `data`. `expired` is polled every 64 KiB.
+/// `data`. `expired` is polled every 64 KiB. At most `room` runs are kept,
+/// and `room` is reduced by the runs kept: a table repeated a million times
+/// costs a count, not a million stored runs.
 pub(crate) fn scan_data(
     data: &[u8],
     expired: &mut dyn FnMut() -> bool,
-) -> (Vec<Run>, usize, Option<Stop>) {
+    room: &mut usize,
+) -> DataScan {
     let seeds = seeds();
     let catalog = catalog();
     let mut runs = Vec::new();
+    let mut dropped = 0usize;
     // The last run found per set and encoding: a later position inside it at
     // the same phase would only rediscover it.
     let mut last: HashMap<(usize, Encoding), (usize, usize)> = HashMap::new();
@@ -740,6 +753,11 @@ pub(crate) fn scan_data(
         }
         last.insert((set_number, seed.encoding), (start, end));
         if end_index - first >= set.data_min_run {
+            if *room == 0 {
+                dropped += 1;
+                return;
+            }
+            *room -= 1;
             runs.push(Run {
                 set: set_number,
                 encoding: seed.encoding,
@@ -752,7 +770,12 @@ pub(crate) fn scan_data(
     };
     for position in 0..data.len() {
         if position.is_multiple_of(65_536) && expired() {
-            return (runs, position, Some(Stop::Deadline));
+            return DataScan {
+                runs,
+                scanned: position,
+                stop: Some(Stop::Deadline),
+                dropped,
+            };
         }
         if position + 4 <= data.len() {
             let key = u32::from_le_bytes(data[position..position + 4].try_into().expect("4 bytes"));
@@ -775,7 +798,12 @@ pub(crate) fn scan_data(
             }
         }
     }
-    (runs, data.len(), None)
+    DataScan {
+        runs,
+        scanned: data.len(),
+        stop: None,
+        dropped,
+    }
 }
 
 /// Immediate lookup: every element of every set that immediates can match,
@@ -783,6 +811,9 @@ pub(crate) fn scan_data(
 pub(crate) struct Immediates {
     pub four: HashMap<u32, Vec<(u16, u32)>>,
     pub eight: HashMap<u64, Vec<(u16, u32)>>,
+    /// The high 32 bits of every 64-bit element, so two adjacent `i32.const`
+    /// halves can be read as one 64-bit element.
+    pub high: HashMap<u32, Vec<(u16, u32)>>,
 }
 
 pub(crate) fn immediates() -> &'static Immediates {
@@ -791,6 +822,7 @@ pub(crate) fn immediates() -> &'static Immediates {
         let mut table = Immediates {
             four: HashMap::new(),
             eight: HashMap::new(),
+            high: HashMap::new(),
         };
         for (number, set) in catalog().iter().enumerate() {
             if set.immediate_min == 0 {
@@ -800,7 +832,11 @@ pub(crate) fn immediates() -> &'static Immediates {
                 let entry = (number as u16, index as u32);
                 match set.width {
                     Width::Word32 => table.four.entry(*value as u32).or_default().push(entry),
-                    Width::Word64 => table.eight.entry(*value).or_default().push(entry),
+                    Width::Word64 => {
+                        table.eight.entry(*value).or_default().push(entry);
+                        let high = (*value >> 32) as u32;
+                        table.high.entry(high).or_default().push(entry);
+                    }
                     Width::Byte => {}
                 }
             }

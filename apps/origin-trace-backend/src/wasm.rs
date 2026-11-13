@@ -221,7 +221,7 @@ pub(crate) fn mnemonic(op: &Operator<'_>) -> String {
     mnemonic
 }
 
-fn instruction(op: &Operator<'_>) -> String {
+pub(crate) fn instruction(op: &Operator<'_>) -> String {
     let mnemonic = mnemonic(op);
     if let Operator::BrTable { targets } = op {
         // Large branch tables keep exact instruction ranges and a bounded preview.

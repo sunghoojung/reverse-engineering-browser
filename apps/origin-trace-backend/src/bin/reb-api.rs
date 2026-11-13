@@ -1451,6 +1451,7 @@ mod tests {
             "get_wasm_function_graph",
             "get_wasm_runs",
             "get_wasm_identification",
+            "get_wasm_pseudocode",
             "validate_evidence_package",
             "export_evidence_package",
             "compare_evidence_packages",

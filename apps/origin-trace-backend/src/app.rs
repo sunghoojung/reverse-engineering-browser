@@ -19,7 +19,7 @@ use crate::{
     request_cookies, request_headers,
     request_index::{self, RequestIndex},
     session_context, session_summary, source_facts, source_format, validation, vm, wasm,
-    wasm_graph, wasm_identification,
+    wasm_graph, wasm_identification, wasm_pseudocode,
     workspace::{Kind, Store},
 };
 use axum::{
@@ -492,6 +492,31 @@ impl App {
         let (cache, store) = (self.wasm_names.clone(), self.workspace.clone());
         move || cache.get(&store)
     }
+    /// The readable lift is built as text, like the graph documents, and
+    /// recomputed per window so nothing retains a whole function's lines.
+    async fn wasm_pseudocode_route(&self, raw_query: &str) -> Result<Response> {
+        let q = Query::new(raw_query);
+        if q.0.keys().any(|key| {
+            !["artifact_id", "function", "line_offset", "line_limit"].contains(&key.as_str())
+        }) {
+            return Err(Error::bad(
+                "The WASM readable view takes artifact_id and function with optional line_offset and line_limit",
+            ));
+        }
+        let id = q.required("artifact_id")?.to_owned();
+        let function = q
+            .required("function")?
+            .parse::<u32>()
+            .map_err(|_| Error::bad("A WASM function index is an unsigned 32-bit integer"))?;
+        let offset = q.number("line_offset", Some("0"), 32, false)? as usize;
+        let default = wasm_pseudocode::DEFAULT_LINE_LIMIT.to_string();
+        let limit = q.number("line_limit", Some(&default), 32, true)? as usize;
+        let root = self.options.artifacts.clone();
+        let document = self
+            .blocking(move || wasm_pseudocode::pseudocode(&root, &id, function, offset, limit))
+            .await?;
+        Ok(([("content-type", "application/json")], document).into_response())
+    }
     async fn receiver_connected(&self) -> bool {
         socket_connected(self.options.artifact_socket.as_deref()).await
     }
@@ -525,6 +550,9 @@ impl App {
                 .blocking(move || crate::wasm_run::list(&root, artifact.as_deref(), limit as usize))
                 .await?;
             return Ok(axum::Json(value).into_response());
+        }
+        if path == "/api/wasm/pseudocode" {
+            return self.wasm_pseudocode_route(raw_query).await;
         }
         let q = Query::new(raw_query);
         let mut etag = None;

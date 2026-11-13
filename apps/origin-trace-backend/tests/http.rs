@@ -731,7 +731,8 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 63, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 64, "Review route coverage when the API changes");
+    assert!(ids.contains("get_wasm_pseudocode"));
     assert!(ids.contains("get_request_headers"));
     assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
     assert!(ids.contains("get_xrefs"));
@@ -824,7 +825,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 63);
+    assert_eq!(operation_count, 64);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -4923,6 +4924,111 @@ async fn wasm_identification_route_matches_its_contract_and_the_cli() {
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         report
     );
+}
+
+#[tokio::test]
+async fn wasm_pseudocode_route_lifts_one_function_in_windows_and_refuses_bad_input() {
+    let server = Server::start().await;
+    let bytes = wat::parse_str(
+        r#"(module (import "env" "log" (func (param i32))) (memory 1)
+            (func (export "run") (param i32) (result i32) (local i32)
+              local.get 0 i32.load offset=8 i32.const 1 i32.add local.set 1
+              local.get 1 call 0
+              local.get 1))"#,
+    )
+    .unwrap();
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/module.wasm","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+    server.file(&format!("artifacts/blobs/{hash}.bin"), &bytes);
+    let body = assert_contract_response(
+        server
+            .get("/api/wasm/pseudocode?artifact_id=1&function=1")
+            .await,
+        "get",
+        "/api/wasm/pseudocode",
+        200,
+    )
+    .await;
+    let lift: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(lift["schema"], "wasm-pseudocode-v1");
+    assert_eq!(lift["sha256"], hash.as_str());
+    assert_eq!(lift["status"], "complete");
+    assert_eq!(lift["name"], "run");
+    assert_eq!(lift["lifted_instructions"], lift["instruction_count"]);
+    let text = lift["text"].as_str().unwrap();
+    assert!(text.contains("l1 = i32.load(p0, offset 8) + 1"), "{text}");
+    assert!(text.contains("env.log(l1)"), "{text}");
+    assert_eq!(lift["callees"], json!([[0, "env.log", "import"]]));
+    // A window pages the same lines.
+    let page: Value = server
+        .get("/api/wasm/pseudocode?artifact_id=1&function=1&line_offset=1&line_limit=2")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page["window"]["lines"], 2);
+    assert_eq!(page["window"]["next_line_offset"], 3);
+    assert_eq!(page["lines"][0], lift["lines"][1]);
+    for (path, expected) in [
+        ("/api/wasm/pseudocode?artifact_id=1", 400),
+        ("/api/wasm/pseudocode?artifact_id=1&function=abc", 400),
+        ("/api/wasm/pseudocode?artifact_id=1&function=1&extra=1", 400),
+        (
+            "/api/wasm/pseudocode?artifact_id=1&function=1&line_limit=0",
+            400,
+        ),
+        (
+            "/api/wasm/pseudocode?artifact_id=1&function=1&line_limit=2001",
+            400,
+        ),
+        (
+            "/api/wasm/pseudocode?artifact_id=1&function=1&line_offset=999",
+            400,
+        ),
+        ("/api/wasm/pseudocode?artifact_id=1&function=0", 404),
+        ("/api/wasm/pseudocode?artifact_id=1&function=9", 404),
+        ("/api/wasm/pseudocode?artifact_id=2&function=1", 404),
+    ] {
+        let response = server.get(path).await;
+        assert_eq!(response.status().as_u16(), expected, "{path}");
+        let body: Value = response.json().await.unwrap();
+        assert!(body["error"].is_string(), "{path}: {body}");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_origin-trace-wasm"))
+        .arg("--artifacts")
+        .arg(server.root.path().join("artifacts"))
+        .args(["--artifact-id", "1", "--pseudocode-function", "1"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        lift
+    );
+    // A body whose final end became a nop is malformed, and the route says so.
+    let mut bad = bytes.clone();
+    let position = bad.iter().rposition(|byte| *byte == 0x0b).unwrap();
+    bad[position] = 0x01;
+    let hash = hex::encode(Sha256::digest(&bad));
+    let artifact = json!({"protocol_version":1,"artifact_id":"3","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/bad.wasm","mime_type":"application/wasm","byte_size":bad.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+    server.file(&format!("artifacts/blobs/{hash}.bin"), &bad);
+    assert_contract_response(
+        server
+            .get("/api/wasm/pseudocode?artifact_id=3&function=1")
+            .await,
+        "get",
+        "/api/wasm/pseudocode",
+        422,
+    )
+    .await;
 }
 
 #[tokio::test]

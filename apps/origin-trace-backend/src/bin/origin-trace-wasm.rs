@@ -10,19 +10,19 @@ struct Options {
     #[arg(long)]
     artifact_id: String,
     /// Comma separated section names to decode. Omit for the whole module.
-    #[arg(long, conflicts_with_all = ["artifact_map", "functions", "graph_function", "identification"])]
+    #[arg(long, conflicts_with_all = ["artifact_map", "functions", "graph_function", "identification", "pseudocode_function"])]
     sections: Option<String>,
     /// Print the whole-artifact entropy and kind map instead of inspecting.
-    #[arg(long, conflicts_with_all = ["functions", "graph_function"])]
+    #[arg(long, conflicts_with_all = ["functions", "graph_function", "pseudocode_function"])]
     artifact_map: bool,
     /// List the module's functions as `wasm-function-index-v1` instead.
-    #[arg(long, conflicts_with = "graph_function")]
+    #[arg(long, conflicts_with_all = ["graph_function", "pseudocode_function"])]
     functions: bool,
     /// Print basic blocks for one function as `wasm-block-graph-v1` instead.
-    #[arg(long, conflicts_with = "identification")]
+    #[arg(long, conflicts_with_all = ["identification", "pseudocode_function"])]
     graph_function: Option<u32>,
     /// Print the `wasm-identification-v1` report instead.
-    #[arg(long, conflicts_with_all = ["artifact_map", "functions"])]
+    #[arg(long, conflicts_with_all = ["artifact_map", "functions", "pseudocode_function"])]
     identification: bool,
     /// The first suggestion row of an identification report.
     #[arg(long, requires = "identification", default_value_t = 0)]
@@ -30,6 +30,15 @@ struct Options {
     /// Suggestion rows in an identification report, at most 1024.
     #[arg(long, requires = "identification", default_value_t = origin_trace_backend::wasm_identification::SUGGESTION_PAGE)]
     row_limit: usize,
+    /// Print one function's readable lift as `wasm-pseudocode-v1` instead.
+    #[arg(long)]
+    pseudocode_function: Option<u32>,
+    /// First line of the readable lift's window.
+    #[arg(long, requires = "pseudocode_function", default_value_t = 0)]
+    line_offset: usize,
+    /// Lines in the readable lift's window.
+    #[arg(long, requires = "pseudocode_function", default_value_t = origin_trace_backend::wasm_pseudocode::DEFAULT_LINE_LIMIT)]
+    line_limit: usize,
 }
 fn main() {
     let options = Options::parse();
@@ -54,6 +63,19 @@ fn main() {
                 .unwrap_or_else(|e| json!({"error":e.message,"status":e.status}))
             };
         println!("{result}");
+        return;
+    }
+    if let Some(function) = options.pseudocode_function {
+        match origin_trace_backend::wasm_pseudocode::pseudocode(
+            &options.artifacts,
+            &options.artifact_id,
+            function,
+            options.line_offset,
+            options.line_limit,
+        ) {
+            Ok(text) => println!("{text}"),
+            Err(e) => println!("{}", json!({"error":e.message,"status":e.status})),
+        }
         return;
     }
     if options.functions || options.graph_function.is_some() {

@@ -4184,10 +4184,7 @@ async fn wasm_module_diff_matches_two_builds_pages_and_refuses_bad_input() {
         (leaf["status"].as_str(), leaf["method"].as_str()),
         (Some("changed"), Some("call_graph"))
     );
-    assert_eq!(
-        leaf["a"]["byte_end"].as_u64().unwrap() > leaf["a"]["byte_offset"].as_u64().unwrap(),
-        true
-    );
+    assert!(leaf["a"]["byte_end"].as_u64().unwrap() > leaf["a"]["byte_offset"].as_u64().unwrap());
     let twins = diff["rows"]
         .as_array()
         .unwrap()

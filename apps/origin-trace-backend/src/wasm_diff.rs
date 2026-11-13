@@ -854,7 +854,7 @@ fn analyze(
         if funcs.len() >= MAX_FUNCTIONS {
             break;
         }
-        if position % 64 == 0 && started.elapsed() > DEADLINE {
+        if position.is_multiple_of(64) && started.elapsed() > DEADLINE {
             truncated = true;
             omissions.push(format!(
                 "Fingerprinting stopped at the deadline; module {label} functions from index {} on were not compared.",
@@ -1206,7 +1206,7 @@ impl<'m> Matcher<'m> {
             {
                 continue;
             }
-            if self.comparisons % 4096 == 0 && self.late("structural matching") {
+            if self.late("structural matching") {
                 break;
             }
             let Some(list) = buckets.get(&func.signature) else {
@@ -1735,7 +1735,9 @@ mod tests {
         )
         .unwrap()
     }
-    fn rows(report: &Report) -> Vec<(String, Option<String>, Option<u32>, Option<u32>)> {
+    type Found = (String, Option<String>, Option<u32>, Option<u32>);
+
+    fn rows(report: &Report) -> Vec<Found> {
         report
             .rows
             .iter()
@@ -1749,12 +1751,7 @@ mod tests {
             })
             .collect()
     }
-    fn row(
-        status: &str,
-        method: Option<&str>,
-        a: Option<u32>,
-        b: Option<u32>,
-    ) -> (String, Option<String>, Option<u32>, Option<u32>) {
+    fn row(status: &str, method: Option<&str>, a: Option<u32>, b: Option<u32>) -> Found {
         (status.into(), method.map(Into::into), a, b)
     }
 

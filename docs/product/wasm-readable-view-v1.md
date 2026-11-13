@@ -28,7 +28,8 @@ ranges, counts and callee names are available at every permission level; the
 lifted text is captured content and needs Full access.
 
 The lift is a static reading of declared stack effects: nothing runs the
-module, and folding never reorders calls, memory or other effects. Bounds,
+module. Folding keeps calls, memory, globals, traps, branches and local
+writes in their byte order, a property the tests check on generated code. Bounds,
 fallback reasons, names and the document are defined by the
 [versioned contract](../../protocol/wasm-pseudocode-v1.md). Type recovery,
 value provenance and analyst names for functions remain outside this

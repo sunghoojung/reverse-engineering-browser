@@ -5236,7 +5236,7 @@
       "get": {
         "operationId": "get_wasm_pseudocode",
         "summary": "Readable lifted listing of one WebAssembly function",
-        "description": "A readable lift of one defined function of a hash-verified core WASM artifact: the operand stack is simulated with declared effects and instructions fold into nested expressions (l3 = i32.load(l1, offset 8) + 1), calls by name, if/else, loops, br_table as a switch and call_indirect with its type and table. Every instruction is owned by exactly one line and every line carries the original module byte ranges it covers. What the lift does not model stays the raw instruction text on a fallback line, counted by reason in fallbacks. Names come only from the name section, exports and imports. text is captured content and is omitted below --allow-content; line structure, ranges, counts, the nesting summary and callee names are returned at every level. Lines are paged with line_offset and line_limit; window.next_line_offset continues. Never executes the module.",
+        "description": "A readable lift of one defined function of a hash-verified core WASM artifact: the operand stack is simulated with declared effects and instructions fold into nested expressions (l3 = i32.load(l1, offset 8) + 1), calls by name, if/else, loops, br_table as a switch and call_indirect with its type and table. Every instruction is owned by exactly one line, checked on each lift, and every line carries the original module byte ranges it covers. Folding keeps calls, memory, globals, traps, branches and local writes in byte order. What the lift does not model stays the raw instruction text on a fallback line, counted by reason in fallbacks. Names come only from the name section, exports and imports. text is captured content and is omitted below --allow-content; line structure, ranges, counts, the nesting summary and callee names are returned at every level. Lines are paged with line_offset and line_limit; window.next_line_offset continues. Never executes the module.",
         "tags": [
           "artifacts"
         ],
@@ -5277,7 +5277,7 @@
             "name": "line_limit",
             "in": "query",
             "required": false,
-            "description": "Lines in the window, 1 to 2000. The window also stops near 96 KiB of lines, so one page fits a 128 KiB MCP result; window.next_line_offset continues. Default 400.",
+            "description": "Lines in the window, 1 to 2000. The window is cut further until the whole document is at most 120 KiB both compact and pretty-printed, so one page is inlined by reb-api mcp; truncation.window_bytes says it was cut and window.next_line_offset continues. Default 400.",
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -23036,6 +23036,8 @@
           "status",
           "instruction_count",
           "lifted_instructions",
+          "unowned_instructions",
+          "repeated_instructions",
           "line_count",
           "fallback_count",
           "fallbacks",
@@ -23121,7 +23123,7 @@
               "complete",
               "partial"
             ],
-            "description": "complete when every decoded instruction of the body is owned by a line; partial when a limit stopped the lift. Fallback lines do not make a lift partial."
+            "description": "complete when no limit stopped the lift and every decoded instruction of the body is owned by exactly one line, as checked on each lift (unowned_instructions and repeated_instructions are zero); otherwise partial. Fallback lines do not make a lift partial."
           },
           "instruction_count": {
             "type": "integer",
@@ -23131,6 +23133,16 @@
             "type": "integer",
             "minimum": 0,
             "description": "Instructions owned by lines. Equal to instruction_count when status is complete."
+          },
+          "unowned_instructions": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Decoded instructions owned by no line. Nonzero only when a limit stopped the lift or the lift is wrong, and status is then partial."
+          },
+          "repeated_instructions": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Decoded instructions owned by more than one line. Always zero for a correct lift; nonzero makes status partial."
           },
           "line_count": {
             "type": "integer",

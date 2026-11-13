@@ -40,9 +40,13 @@ func run(p0: i32) -> i32 {
 - Labels are `L<n>`, numbered by frame in opening order, and shown only on a
   frame some branch targets. A branch to the function's own frame is `return`.
 - A branch that carries values names the label's temporaries:
-  `br L3 with t5 = l1 + 1`. A frame whose end is reached by more than one path
-  assigns its results to the same temporaries; a `block` whose end is reached
-  only by falling through keeps its result as a pending value instead.
+  `br L3 with t5 = l1 + 1`. A frame's results reach its end in temporaries of
+  their own, assigned before its closing brace: a `loop` has separate ones,
+  because a branch to a loop carries its parameters back to its start. Only a
+  `block` whose end is reached solely by falling through keeps its result as a
+  pending value instead; a `try_table`'s result is always assigned inside it,
+  so a value computed in the protected region never reads as computed after
+  it.
 - Integer division, remainder, comparison and shift operators that depend on
   signedness carry a `u` suffix when unsigned (`/u`, `%u`, `<u`, `>u`, `<=u`,
   `>=u`); `>>` is `shr_s` and `>>>` is `shr_u`. An `i64` constant ends in `L`,
@@ -71,24 +75,49 @@ an import's `module.field`, then `f<index>`. One function, `display_name`,
 chooses every function name the lift prints and the callee table returns, so a
 later name source is added there. A name that is not a plain identifier, or
 that looks like a lift variable (`p0`, `l3`, `t9`, `g1`, `L2`, `f4`), is printed
-quoted with control characters escaped, bounded to 64 bytes. Names never come
-from guesses about what a function does.
+quoted with control characters escaped. A name longer than 96 bytes keeps its
+start and its end around `...`, because overloads and numbered clones of one
+demangled name differ at the end; only names that differ solely in a long
+middle can print the same, and the callee table's `function_index` still
+tells them apart. Names never come from guesses about what a function does.
 
-### Effect order
+### What folding guarantees
 
-Folding never reorders effects. A pending value is assigned to a temporary on
-its own line before a line it could conflict with: two effects that order
-matters for (calls, memory, tables, globals, traps), or a local one writes and
-the other reads. Values a frame boundary would carry unassigned, a value a
-conditional branch both carries and leaves on the stack, and an expression
-deeper than 12 levels or longer than 200 bytes are assigned too. `spill_count`
-counts these temporaries.
+Read the lines in order, and within a line read an expression's operands
+before the expression itself (left to right, as written). That reading
+evaluates the instructions in an order with these properties, which the test
+`folding_keeps_effect_order_and_owns_every_byte_once` checks on fixtures and
+300 generated programs mixing calls, loads, stores, globals, locals, trapping
+division and `br_if`:
+
+1. The instructions with an effect (calls, loads, stores and every other
+   memory or table operation, global reads and writes, trapping arithmetic,
+   throws, `unreachable`) and the branches (`if`, `br`, `br_if`, `br_table`,
+   `return`) keep their byte order.
+2. No read or write of a local moves across a write of that local.
+3. When `status` is `complete`, every decoded instruction, and so every code
+   byte, is owned by exactly one line.
+
+Only pure values (constants, local reads, arithmetic that cannot trap) may
+read later than their bytes, and only where nothing above can change them.
+To keep these properties, a pending value is assigned to a temporary `tN` on
+its own line, deepest first, before a line it conflicts with: two effects, or
+a local one writes and the other reads. At a `br_if`, every pending value
+with an effect or a local write is assigned first, because it runs whether
+or not the branch is taken; a pending pure value may wait, since on the taken
+path it is discarded unseen. Values a frame boundary would carry unassigned,
+a value a conditional branch both carries and leaves on the stack, and an
+expression deeper than 12 levels or longer than 200 bytes are assigned too.
+`spill_count` counts these temporaries.
 
 ## Byte mapping and fallbacks
 
-Every decoded instruction is owned by exactly one line, so the `instructions`
-column of the lines sums to `lifted_instructions`, which equals
-`instruction_count` when `status` is `complete`. Each line's `ranges` are the
+Every decoded instruction is owned by exactly one line. This is checked on
+every lift, not assumed: `unowned_instructions` and `repeated_instructions`
+count instructions owned by no line or by more than one, and `status` is
+`complete` only when both are zero and no limit stopped the lift. The
+`instructions` column of the lines then sums to `lifted_instructions`, which
+equals `instruction_count`. Each line's `ranges` are the
 module byte ranges (exclusive end) of the instructions it owns and those it
 names without owning (a switch's case lines name their `br_table`), merged
 where they touch. The header and `var` lines map to the body header and each
@@ -118,7 +147,8 @@ partial; they are counted and `omissions` says how many there are.
   `name_source` (`name_section`, `export`, `import` or `index`), `byte_offset`
   and `byte_end` of the body, `type_index`, `params`, `results`, `locals`.
 - `evidence` is always `static_lift`. `status` is `complete` or `partial`.
-- Counts: `instruction_count`, `lifted_instructions`, `line_count`,
+- Counts: `instruction_count`, `lifted_instructions`,
+  `unowned_instructions`, `repeated_instructions`, `line_count`,
   `fallback_count`, `fallbacks`, `spill_count`, `unknown_operands`.
 - `nesting`: `max_depth` and counts of `block`, `loop`, `if`, `else`, `try`,
   `try_table` and `br_table`.
@@ -159,11 +189,11 @@ ranges, and the callee table. Callee names are module names, which
 | Input | 64 MiB | The block graph's limit, above the artifact receiver's default 16 MiB. |
 | Function body | 7,654,321 bytes | Web engines reject a longer body, so it cannot have run. |
 | Instructions lifted | 250,000 | Keeps one request's offsets and lines in tens of megabytes. |
-| Lines | 300,000, and 24 MiB of line text | The same, for line storage. |
+| Lines | 300,000, and 24 MiB of line text | The same, for line storage. Checked before each instruction and before each `br_table` case line, so one table with many targets cannot overshoot. |
 | Line text | 2,048 bytes | One line stays readable; `clipped_lines` counts cuts. |
 | Expression depth and text | 12 levels, 200 bytes | Deeper operands become temporaries. |
-| Window | 1 to 2,000 lines (default 400), about 96 KiB | One page fits the 128 KiB MCP inline limit. |
-| Deadline | 3 seconds | Checked every 1,024 instructions. |
+| Window | 1 to 2,000 lines (default 400), cut until the whole document is at most 120 KiB both compact and pretty-printed | `reb-api mcp` inlines a result only when both forms are at most 131,072 bytes; the cut is measured on the serialized document, callees and frames included, and `truncation.window_bytes` says it happened. |
+| Deadline | 3 seconds | Checked every 1,024 instructions and every 65,536 pending values visited while ordering effects, so a deep operand stack cannot run far past it. |
 
 A limit stops the lift at a named byte, sets the matching `truncation` field
 and `status: partial`, and names the byte in `omissions`; later instructions

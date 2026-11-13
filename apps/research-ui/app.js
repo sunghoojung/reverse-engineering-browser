@@ -8849,6 +8849,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // module; Back returns to the comparison's module.
       function openWasmFunction(artifactId, functionIndex) {
         if (investigationScreen() === 'sources') investigationNavigation?.record();
+        // A function of the module already open keeps the selection, so the
+        // table is closed here rather than by the selection change.
+        if (typeof wasmDiffPanel !== 'undefined' && wasmDiffPanel) wasmDiffPanel.close();
         if (selectArtifact(artifactId, null, {passive: true}) === false) return false;
         if (investigationScreen() !== 'sources') showScreen('sources');
         return typeof sourceGraphPanel !== 'undefined' && sourceGraphPanel.openFunction(functionIndex);

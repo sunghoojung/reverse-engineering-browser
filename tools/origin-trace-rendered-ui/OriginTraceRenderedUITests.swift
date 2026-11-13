@@ -2992,7 +2992,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
             methods: [...view.querySelectorAll('.wasm-diff-method')].map(cell => cell.textContent),
             split: document.querySelector('#source-view-split').hidden}; })()
         """)
-      XCTAssertTrue((table["picker"] as? String ?? "").contains("diff-build-b"), "\(size.name): B is chosen for its similar URL: \(table)")
+      XCTAssertTrue((table["picker"] as? String ?? "").hasPrefix("#431 "), "\(size.name): B is chosen for its similar URL: \(table)")
       XCTAssertEqual(table["statuses"] as? [String] ?? [],
         ["changed", "changed", "added", "added", "removed", "ambiguous", "renumbered", "renumbered", "identical", "identical"], "\(size.name): \(table)")
       XCTAssertEqual(table["ambiguous"] as? Int, 4, "\(size.name): the tied stubs list both candidates on each side: \(table)")

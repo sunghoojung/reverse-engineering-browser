@@ -780,7 +780,10 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
         researcher()?.mark(row, source?.sha256, index, displayName(index));
         list.append(row);
       }
-      count.textContent = `${filtered.length.toLocaleString()} of ${functions.index.length.toLocaleString()}${functions.status === 'partial' ? ' · list partial' : ''}`;
+      // Badges come from the identification report's first page of suggestions.
+      const coverage = typeof wasmIdentificationBadgeCoverage === 'function' ? wasmIdentificationBadgeCoverage(source) : null;
+      const badgeNote = coverage && coverage.rows < coverage.total ? ` · badges from the first ${coverage.rows.toLocaleString()} of ${coverage.total.toLocaleString()} suggestions` : '';
+      count.textContent = `${filtered.length.toLocaleString()} of ${functions.index.length.toLocaleString()}${functions.status === 'partial' ? ' · list partial' : ''}${badgeNote}`;
     };
     const applyFilter = () => {
       const query = input.value.trim().toLowerCase();

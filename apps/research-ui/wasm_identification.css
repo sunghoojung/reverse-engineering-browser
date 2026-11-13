@@ -23,3 +23,5 @@
 .wasm-id-fn { flex: 0 0 auto; font: 11px var(--mono); color: var(--muted); }
 .wasm-id-badge, .block-graph-fn-badge { flex: 0 0 auto; padding: 0 4px; border-radius: 3px; background: var(--accent-soft); color: var(--text); font: 10px var(--sans); }
 .wasm-id-notice { margin-top: 4px; }
+/* In the Functions menu the badge sits at the right, beside the size. */
+.block-graph-fn-badge { margin-left: auto; }

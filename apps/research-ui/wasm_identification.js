@@ -57,6 +57,14 @@ function wasmIdentificationBadgeMap(report) {
   return badges;
 }
 
+/** How many suggestion rows the badges come from, of how many: the badges
+ * use the first page of suggestions only, which the Functions menu says. */
+function wasmIdentificationBadgeCoverage(source) {
+  const report = source && wasmIdentificationReports.get(wasmIdentificationKey(source));
+  const window = report?.functions?.suggestion_window;
+  return window ? {rows: window.rows, total: window.total_rows} : null;
+}
+
 /** The badge for one function in the Functions menu, or null: the strongest
  * suggestion's category, then a constant the function names. */
 function wasmIdentificationBadge(source, functionIndex) {
@@ -194,7 +202,7 @@ function createWasmIdentificationPanel({root, getSource, inspecting, reveal}) {
       const refs = match.location === 'immediate' ? [`func ${match.function_index}`]
         : (match.referenced_by ?? []).map(reference => `func ${reference.function_index}`);
       line.append(element('span', 'wasm-id-label', `${match.label} · ${match.matched}/${match.total} ${match.match}`),
-        chip(`${match.location} · byte ${match.byte_offset}`, refs.length ? `Named by ${[...new Set(refs)].join(', ')}` : 'No function names its address', match.byte_offset, source));
+        chip(`${match.location} · byte ${match.byte_offset}`, refs.length ? `Named by ${[...new Set(refs)].join(', ')}` : 'No static reference found. That does not mean the table is unused: a computed address or an unknown segment base leaves none.', match.byte_offset, source));
       if (refs.length) line.append(element('span', 'wasm-id-more', `named by ${[...new Set(refs)].slice(0, 4).join(', ')}`));
       return line;
     }));
@@ -242,4 +250,4 @@ function createWasmIdentificationPanel({root, getSource, inspecting, reveal}) {
 }
 
 // tools/check-wasm-identification-ui.mjs loads this file in a DOM model.
-if (typeof module === 'object' && module?.exports) module.exports = {isWasmIdentification, wasmIdentificationBadge, wasmIdentificationReports, wasmIdentificationRequests, wasmIdentificationLoad, createWasmIdentificationPanel};
+if (typeof module === 'object' && module?.exports) module.exports = {isWasmIdentification, wasmIdentificationBadge, wasmIdentificationReports, wasmIdentificationRequests, wasmIdentificationLoad, wasmIdentificationBadgeCoverage, createWasmIdentificationPanel};

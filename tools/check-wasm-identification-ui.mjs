@@ -106,6 +106,10 @@ assert.equal(badge(selected, 30000).text, 'constant', 'a function holding a cons
 assert.match(badge(selected, 30000).title, /SHA-256 round constants: 64\/64 complete/);
 assert.equal(badge(selected, 25000), null);
 assert.equal(badge(source(99), 1), null, 'no report, no badge');
+// The badges cover the first page of suggestions, which the menu states.
+const coverage = get('wasmIdentificationBadgeCoverage');
+assert.deepEqual({...coverage(source(4))}, {rows: 20000, total: 20000});
+assert.equal(coverage(source(99)), null);
 
 // Eviction: four reports are kept. Returning to the first evicted module
 // reads it again instead of showing a ready state with nothing to show.
@@ -115,6 +119,18 @@ for (const index of [5, 6]) {
   panel.sync();
   await settle();
 }
+// Each fix is checked on its own: eviction drops the request entry, and
+// a ready entry with no report still reads again.
+const requests = get('wasmIdentificationRequests');
+assert.equal(requests.has(`2:${sha(2)}`), false, 'an evicted report takes its request entry with it');
+selected = source(7);
+requests.set(`7:${sha(7)}`, {status: 'ready'});
+answer = () => json(200, report(7));
+const stale = reads.length;
+panel.sync();
+await settle();
+assert.equal(reads.length, stale + 1, 'a ready entry without a report reads again');
+assert.match(text(), /0 of 10 functions labeled/);
 const before = reads.length;
 selected = source(2);
 answer = () => json(200, report(2));
@@ -126,4 +142,4 @@ assert.match(text(), /0 of 10 functions labeled/);
 
 assert.deepEqual(asyncErrors, []);
 release();
-console.log('PASS wasm identification UI: loading, error with Retry, empty, inert captured text, chip reveal, a 20,000-function badge map and a re-read after cache eviction');
+console.log('PASS wasm identification UI: loading, error with Retry, empty, inert captured text, chip reveal, a 20,000-function badge map and its coverage, and a re-read after cache eviction by either path');

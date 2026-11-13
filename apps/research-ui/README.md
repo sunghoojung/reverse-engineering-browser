@@ -2978,9 +2978,11 @@ tables or magic values, each with matched and total elements; a partial match
 has a dashed outline) and the count of labeled functions. Every chip reveals the
 byte its evidence rests on. **Details** lists each conclusion's evidence, the
 functions that name a matched table, and the first 200 function label
-suggestions with their category badges. The summary steps aside while **Graph**
-is open; the Graph's **Functions** menu badges labeled functions and its filter
-matches their labels. Reports are requested only when Inspect or Graph opens,
+suggestions with their category badges. A constant with no listed reference
+says so without concluding the table is unused. The summary steps aside while
+**Graph** is open; the Graph's **Functions** menu badges labeled functions from
+the report's first page of suggestions (the menu's count says when that page is
+not all of them) and its filter matches their labels. Reports are requested only when Inspect or Graph opens,
 cached for four modules, and shown as inert text; a failed read offers **Retry
 identification** and keeps any earlier report. Labels are suggestions, never
 captured or researcher names, and nothing is concluded from absence. See

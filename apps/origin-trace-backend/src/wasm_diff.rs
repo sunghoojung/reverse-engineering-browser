@@ -2,9 +2,9 @@
 //!
 //! Each function gets two fingerprints computed from its declared body: a
 //! normalized body hash that survives renumbering, and a coarser structural
-//! fingerprint. Matching then runs in a fixed order (byte-identical,
-//! normalized-identical, import and export names, call-graph propagation,
-//! structural similarity) and never forces a one-to-one pick between tied
+//! fingerprint. Matching then runs in a fixed order (import names,
+//! byte-identical, normalized-identical, export names, call-graph
+//! propagation, structural similarity) and never forces a one-to-one pick between tied
 //! candidates. Every result is a correspondence hypothesis with its method and
 //! score, keyed by each side's module SHA-256 and function index. Nothing here
 //! executes either module, and no instruction text or constant value leaves
@@ -1458,9 +1458,9 @@ impl<'m> Matcher<'m> {
         // signature is part of the key because the body bytes do not carry
         // it: `local.get 0` is the same bytes over an i32 and an i64.
         self.exact(BY_BYTES, bytes_key, &mut made);
-        // The normalized hash with the data each address points at, before
-        // the normalized hash alone: moved readers of different offsets pair
-        // with the reader of the same offset.
+        // The normalized hash with the address map (each address as segment
+        // and offset), before the normalized hash alone: moved readers of
+        // different offsets pair with the reader of the same offset.
         self.exact(
             BY_NORMALIZED,
             |f| defined(f).then_some((f.normalized, f.addresses)),

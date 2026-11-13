@@ -2486,7 +2486,13 @@ the trace; Hex or another module hides the panel and drops it. While the block
 graph is open the panel and its marks are hidden, since the graph owns that
 pane, and closing the graph brings the same trace back. Graph blocks are not a
 seed. Each row keeps the identifying part of its kind first (the import name,
-the local or the join kind), so it stays readable at the minimum window.
+the local or the join kind), so it stays readable at the minimum window. A node
+that is both ends of the slice (a call whose result returns to its own
+argument around a loop) reads **source · sink**, and a loop join left open by
+a simulation stop says it is incomplete. The header always names the trace
+shown; choosing another row, or revealing one from the list, names that row on
+the button instead (**Trace 0x7e**) until it is traced.
+`tools/check-value-flow-ui.mjs` checks the panel in a DOM model.
 
 ## Flow workspace
 

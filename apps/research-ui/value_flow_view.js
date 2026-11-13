@@ -88,10 +88,16 @@
     paintRows();
   }
 
+  // The header names the trace shown; a row chosen since (by a click or by a
+  // reveal from the list) is named on the button that would trace it.
   function renderTarget() {
+    const shown = trace?.target ?? null;
+    const named = shown ?? selected;
+    const fresh = selected && (!shown || selected.offset !== shown.offset || selected.functionIndex !== shown.functionIndex);
     elements.run.disabled = !selected;
+    elements.run.textContent = shown && fresh ? `Trace ${hex(selected.offset)}` : 'Trace value';
     elements.run.title = selected ? `Trace values at ${hex(selected.offset)} in function ${selected.functionIndex}` : 'Select an instruction row in Inspect first';
-    elements.target.textContent = selected ? `func ${selected.functionIndex} · ${hex(selected.offset)} · ${clip(selected.text)}` : 'Select an instruction row';
+    elements.target.textContent = named ? `func ${named.functionIndex} · ${hex(named.offset)} · ${clip(named.text)}` : 'Select an instruction row';
     elements.target.title = elements.target.textContent;
   }
 
@@ -212,11 +218,11 @@
     const items = [...flow.nodes].sort((a, b) => (order[a.direction] - order[b.direction]) || (a.depth - b.depth) || (a.byte_offset - b.byte_offset));
     marked = new Map();
     for (const item of flow.nodes) {
-      const role = item.role === 'seed' ? 'seed' : item.role === 'source' ? 'source' : item.role === 'sink' ? 'sink' : 'step';
+      const role = item.role === 'seed' ? 'seed' : item.source ? 'source' : item.sink ? 'sink' : 'step';
       if (!marked.has(item.byte_offset) || role === 'seed') marked.set(item.byte_offset, role);
     }
     const rows = items.map(item => {
-      const entry = node('li', `value-flow-row is-${item.role}`);
+      const entry = node('li', `value-flow-row is-${item.role}${item.sink && item.role !== 'sink' ? ' is-sink' : ''}`);
       const button = node('button', 'value-flow-link');
       button.type = 'button';
       const line = rowLine(item.byte_offset);
@@ -227,7 +233,9 @@
       // stays visible at the minimum window, ahead of the instruction text.
       const detail = node('span', 'value-flow-detail');
       detail.append(node('span', 'value-flow-kind', kind), node('span', 'value-flow-text', text));
-      button.append(node('span', 'value-flow-offset', hex(item.byte_offset)), node('span', 'value-flow-role', ROLE_LABELS[item.role] ?? item.role), detail);
+      // Both ends of the slice at once (a call that feeds its own loop value).
+      const ends = item.source && item.sink ? 'source · sink' : ROLE_LABELS[item.role] ?? item.role;
+      button.append(node('span', 'value-flow-offset', hex(item.byte_offset)), node('span', 'value-flow-role', ends), detail);
       button.addEventListener('click', () => reveal(item.byte_offset));
       entry.append(button);
       const join = joins.get(item.id);
@@ -235,7 +243,8 @@
         const listed = join.incoming.map(edge => `${edge.via ?? 'in'} ${hex(edge.from_offset)}`).join(', ');
         const total = Number.isSafeInteger(join.incoming_count) ? join.incoming_count : join.incoming.length;
         const incoming = total > join.incoming.length ? `${listed}, and ${total - join.incoming.length} more` : listed;
-        entry.append(node('span', 'value-flow-join', `${total} incoming: ${clip(incoming)}`));
+        const open = join.incomplete ? ' · incomplete: its loop was still open where simulation stopped' : '';
+        entry.append(node('span', 'value-flow-join', `${total} incoming: ${clip(incoming)}${open}`));
       }
       return entry;
     });

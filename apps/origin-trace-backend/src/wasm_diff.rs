@@ -416,6 +416,11 @@ struct Func {
     export: Option<String>,
     section_name: Option<String>,
     body: [u8; 16],
+    /// Whether the body names nothing by an index that can renumber: no
+    /// call, function reference, global, table, element, data segment, tag,
+    /// type index or static data address. Only such a body's bytes mean the
+    /// same thing in both modules.
+    pure: bool,
     normalized: u64,
     /// Where each static data address points, as data segment and offset in
     /// it, so a relocation can be told from a changed constant.
@@ -513,6 +518,7 @@ fn token(hasher: &mut Sha256, kind: u8, payload: &[u64]) {
 
 struct Print {
     body: [u8; 16],
+    pure: bool,
     normalized: u64,
     addresses: u64,
     structure: u64,
@@ -586,6 +592,7 @@ fn fingerprint(
     let mut calls = Vec::new();
     let mut reader = body.get_operators_reader().map_err(bad)?;
     let mut stopped = false;
+    let mut pure = true;
     while !reader.eof() {
         if shape.instructions.is_multiple_of(CHECK_EVERY) && budget.late(FINGERPRINTING) {
             stopped = true;
@@ -596,6 +603,7 @@ fn fingerprint(
         shape.instructions += 1;
         let name = wasm::operator_name(&op);
         shape.histogram[category(&op, name)] += 1;
+        pure = pure && !names_by_index(&op, name, context);
         let mut address = |value: u64| {
             let (segment, within) = context.located(value);
             addresses.update(segment.to_le_bytes());
@@ -794,12 +802,56 @@ fn fingerprint(
     let structure = structure_fingerprint(signature, &shape);
     Ok(Some(Print {
         body: body_hash,
+        pure,
         normalized: first8(&normalized.finalize()),
         addresses: first8(&addresses.finalize()),
         structure,
         shape,
         calls,
     }))
+}
+
+/// Operator name parts that refer to a table, element or data segment, tag or
+/// GC type by index.
+const INDEXED_PARTS: [&str; 11] = [
+    "table",
+    "elem",
+    "data",
+    "throw",
+    "catch",
+    "delegate",
+    "struct",
+    "array",
+    "ref_",
+    "br_on",
+    "memory_init",
+];
+
+/// Whether `op` names something by an index that can renumber between two
+/// builds, so equal bytes need not mean the same instruction.
+fn names_by_index(op: &Operator<'_>, name: &str, context: &Context<'_>) -> bool {
+    match op {
+        Operator::Call { .. }
+        | Operator::ReturnCall { .. }
+        | Operator::RefFunc { .. }
+        | Operator::CallIndirect { .. }
+        | Operator::ReturnCallIndirect { .. }
+        | Operator::CallRef { .. }
+        | Operator::ReturnCallRef { .. }
+        | Operator::GlobalGet { .. }
+        | Operator::GlobalSet { .. }
+        | Operator::TryTable { .. } => true,
+        Operator::Block { blockty }
+        | Operator::Loop { blockty }
+        | Operator::If { blockty }
+        | Operator::Try { blockty } => matches!(blockty, BlockType::FuncType(_)),
+        Operator::I32Const { value } => context.address(u64::from(*value as u32)),
+        Operator::I64Const { value } => context.address(*value as u64),
+        _ => {
+            memarg_of(op).is_some_and(|memarg| context.address(memarg.offset))
+                || INDEXED_PARTS.iter().any(|part| name.contains(part))
+        }
+    }
 }
 
 fn bucket(count: u32) -> u8 {
@@ -1066,6 +1118,7 @@ fn analyze(
             export: exports.remove(&(index as u32)),
             section_name: names.remove(&(index as u32)),
             body: [0; 16],
+            pure: false,
             normalized: 0,
             addresses: 0,
             structure: 0,
@@ -1103,6 +1156,7 @@ fn analyze(
             export: exports.remove(&index),
             section_name: names.remove(&index),
             body: print.body,
+            pure: print.pure,
             normalized: print.normalized,
             addresses: print.addresses,
             structure: print.structure,
@@ -1359,7 +1413,22 @@ impl<'m> Matcher<'m> {
             },
             &mut made,
         );
-        self.exact(BY_BYTES, |f| defined(f).then_some(f.body), &mut made);
+        // Equal bytes mean an equal function only when nothing in the body
+        // names another item by index: a thunk's `call 1` names a different
+        // function in a build with one function inserted before it.
+        self.exact(
+            BY_BYTES,
+            |f| (defined(f) && f.pure).then_some(f.body),
+            &mut made,
+        );
+        // The normalized hash with the data each address points at, before
+        // the normalized hash alone: moved readers of different offsets pair
+        // with the reader of the same offset.
+        self.exact(
+            BY_NORMALIZED,
+            |f| defined(f).then_some((f.normalized, f.addresses)),
+            &mut made,
+        );
         self.exact(
             BY_NORMALIZED,
             |f| defined(f).then_some(f.normalized),
@@ -1646,7 +1715,7 @@ impl<'m> Matcher<'m> {
     fn exact_ties(&self) -> Vec<(u8, Vec<u32>, Vec<u32>)> {
         let defined = |f: &Func| f.import.is_none();
         let mut ties = Vec::new();
-        for (_, (a, b)) in self.groups_by(|f| defined(f).then_some(f.body)) {
+        for (_, (a, b)) in self.groups_by(|f| (defined(f) && f.pure).then_some(f.body)) {
             ties.push((BY_BYTES, a, b));
         }
         let mut seen_a = vec![false; self.a.funcs.len()];
@@ -2021,7 +2090,12 @@ impl<'m> Matcher<'m> {
                     IDENTICAL
                 }
                 (Some(_), Some(_)) => CHANGED,
-                _ if fa.body == fb.body => IDENTICAL,
+                _ if fa.body == fb.body
+                    && fa.addresses == fb.addresses
+                    && self.calls_correspond(fa, fb) =>
+                {
+                    IDENTICAL
+                }
                 _ if fa.normalized == fb.normalized
                     && fa.addresses == fb.addresses
                     && self.calls_correspond(fa, fb) =>

@@ -731,9 +731,11 @@ fn many_globals_in_one_body_are_numbered_in_linear_work() {
     )
     .unwrap();
     assert!(report.complete, "{:?}", report.omissions);
+    // A body that reads globals pairs by its normalized hash, never by bytes
+    // alone; equal bytes, addresses and calls still make it identical.
     assert_eq!(
         rows(&report),
-        vec![row("identical", Some("identical"), Some(0), Some(0))]
+        vec![row("identical", Some("normalized"), Some(0), Some(0))]
     );
 }
 
@@ -1239,4 +1241,51 @@ fn a_twin_another_a_function_scored_still_contests() {
     ] {
         assert!(found.contains(&expected), "{expected:?} not in {found:?}");
     }
+}
+
+#[test]
+fn thunks_renumbered_by_an_insertion_pair_through_their_callees() {
+    // B inserts a function at index 0, so A's `call 1` thunk has the same
+    // bytes as B's `call 1` thunk, which calls what was A's function 0.
+    let a = r#"(module
+        (func i32.const 1 drop)
+        (func i32.const 2 drop nop)
+        (func (export "t0") call 0)
+        (func (export "t1") call 1))"#;
+    let b = r#"(module
+        (func i32.const 9 drop nop nop nop)
+        (func i32.const 1 drop)
+        (func i32.const 2 drop nop)
+        (func call 1)
+        (func call 2))"#;
+    let found = rows(&report_with(a, b, untimed()));
+    for expected in [
+        row("renumbered", Some("call_graph"), Some(2), Some(3)),
+        row("renumbered", Some("call_graph"), Some(3), Some(4)),
+        row("identical", Some("identical"), Some(0), Some(1)),
+        row("identical", Some("identical"), Some(1), Some(2)),
+        row("added", None, None, Some(0)),
+    ] {
+        assert!(found.contains(&expected), "{expected:?} not in {found:?}");
+    }
+}
+
+#[test]
+fn readers_of_moved_data_pair_by_the_offset_they_read() {
+    // B's segment starts 16 bytes later, so A1's bytes (reading offset 16)
+    // equal B0's (reading offset 0).
+    let a = r#"(module (memory 1) (data (i32.const 4096) "abcdefghijklmnopqrstuvwxyz0123456789")
+        (func i32.const 4096 i32.load drop)
+        (func i32.const 4112 i32.load drop))"#;
+    let b = r#"(module (memory 1) (data (i32.const 4112) "abcdefghijklmnopqrstuvwxyz0123456789")
+        (func i32.const 4112 i32.load drop)
+        (func i32.const 4128 i32.load drop))"#;
+    let found = rows(&report_with(a, b, untimed()));
+    assert_eq!(
+        found,
+        vec![
+            row("renumbered", Some("normalized"), Some(0), Some(0)),
+            row("renumbered", Some("normalized"), Some(1), Some(1)),
+        ]
+    );
 }

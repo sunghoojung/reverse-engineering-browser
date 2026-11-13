@@ -132,13 +132,13 @@ struct Names {
 /// here, so another name source (analyst names) is added in this function.
 fn display_name(names: &Names, index: u32) -> (String, &'static str) {
     if let Some(name) = names.section.get(&index) {
-        return (identifier(name), "name_section");
+        return (identifier(name, index), "name_section");
     }
     if let Some(name) = names.exports.get(&index) {
-        return (identifier(name), "export");
+        return (identifier(name, index), "export");
     }
     if let Some(name) = names.imports.get(&index) {
-        return (identifier(name), "import");
+        return (identifier(name, index), "import");
     }
     (format!("f{index}"), "index")
 }
@@ -147,7 +147,7 @@ fn display_name(names: &Names, index: u32) -> (String, &'static str) {
 /// quoted with control characters escaped, so it stays one inert line. A
 /// name shaped like the lift's own `p0`, `l3`, `t9`, `g1` or `L2` is quoted
 /// so it can never read as a local, temporary, global or label.
-fn identifier(name: &str) -> String {
+fn identifier(name: &str, index: u32) -> String {
     let plain = !name.is_empty()
         && name.len() <= MAX_NAME_BYTES
         && name
@@ -164,7 +164,37 @@ fn identifier(name: &str) -> String {
         return name.to_owned();
     }
     let escaped: String = name.chars().flat_map(char::escape_debug).collect();
-    format!("\"{}\"", head_and_tail(&escaped, MAX_NAME_BYTES))
+    if escaped.len() <= MAX_NAME_BYTES {
+        return format!("\"{escaped}\"");
+    }
+    // The raw name is cut on whole characters and each kept character is
+    // escaped as a unit, so a cut never splits an escape: the printed name
+    // can neither end inside the quotes on a lone backslash nor contain a
+    // bare quote that closes them early and reads as code after it. Names
+    // that differ only in a long middle would still print alike, so a
+    // shortened name carries its function index.
+    let keep = MAX_NAME_BYTES - 3;
+    let head_budget = keep * 3 / 5;
+    let mut head = String::new();
+    for character in name.chars() {
+        let piece: String = character.escape_debug().collect();
+        if head.len() + piece.len() > head_budget {
+            break;
+        }
+        head.push_str(&piece);
+    }
+    let mut tail: Vec<String> = Vec::new();
+    let mut tail_bytes = 0;
+    for character in name.chars().rev() {
+        let piece: String = character.escape_debug().collect();
+        if tail_bytes + piece.len() > keep - head.len() {
+            break;
+        }
+        tail_bytes += piece.len();
+        tail.push(piece);
+    }
+    tail.reverse();
+    format!("\"{head}...{}\"#{index}", tail.concat())
 }
 
 /// Text cut to at most `limit` bytes around a `...`, keeping its start and
@@ -2986,10 +3016,102 @@ mod tests {
             "{calls:?}"
         );
         assert!(
-            calls[0].ends_with("append_1\"()") && calls[1].ends_with("append_2\"()"),
+            calls[0].ends_with("append_1\"#0()") && calls[1].ends_with("append_2\"#1()"),
             "{calls:?}"
         );
-        assert!(calls[0].len() <= MAX_NAME_BYTES + 4, "{}", calls[0].len());
+        assert!(calls[0].len() <= MAX_NAME_BYTES + 8, "{}", calls[0].len());
+    }
+
+    /// A printed name is one quoted string with only whole escapes inside,
+    /// then at most `#index`: nothing in it can close the quotes early.
+    fn well_quoted(text: &str) -> bool {
+        let mut characters = text.chars();
+        if characters.next() != Some('"') {
+            return false;
+        }
+        while let Some(character) = characters.next() {
+            match character {
+                '\\' => match characters.next() {
+                    Some('\\' | '"' | '\'' | 'n' | 'r' | 't' | '0') => {}
+                    Some('u') => {
+                        if characters.next() != Some('{') {
+                            return false;
+                        }
+                        let digits: String =
+                            characters.by_ref().take_while(|c| *c != '}').collect();
+                        if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+                            return false;
+                        }
+                    }
+                    _ => return false,
+                },
+                '"' => {
+                    let rest: String = characters.collect();
+                    return rest.is_empty()
+                        || rest.strip_prefix('#').is_some_and(|digits| {
+                            !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+                        });
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn a_shortened_name_never_cuts_an_escape_and_carries_its_index() {
+        let keep = MAX_NAME_BYTES - 3;
+        let head = keep * 3 / 5;
+        // Cuts that once landed inside an escape: just after a quote's
+        // backslash, at the start of the tail, and on a lone backslash.
+        let mut quote_at_head = "A".repeat(head - 1);
+        quote_at_head.push('"');
+        quote_at_head.push_str(&"B".repeat(200));
+        quote_at_head.push_str("\"); g0 = 1; (\"");
+        let mut quote_in_tail = "C".repeat(200);
+        quote_in_tail.push_str("\"); g0 = 1; x(");
+        quote_in_tail.push_str(&"D".repeat(keep - head - 14));
+        let backslashes = "\\".repeat(300);
+        let controls = "\u{1}\u{2}\n".repeat(80);
+        let multibyte = "\u{e9}".repeat(200);
+        for name in [
+            &quote_at_head,
+            &quote_in_tail,
+            &backslashes,
+            &controls,
+            &multibyte,
+        ] {
+            let shown = identifier(name, 42);
+            assert!(well_quoted(&shown), "{shown}");
+            assert!(shown.ends_with("\"#42"), "{shown}");
+            assert!(
+                shown.len() <= MAX_NAME_BYTES + 8,
+                "{} bytes: {shown}",
+                shown.len()
+            );
+        }
+        // A name that fits is printed whole, without an index.
+        assert_eq!(identifier("a\"b", 7), "\"a\\\"b\"");
+        // Two names that differ only in a long middle no longer collide.
+        let head_text = "std::__2::__function::__func<std::__2::__bind<void (Engine::*)(";
+        let tail_text = "), Engine*>, std::__2::allocator<...>, void ()>::operator()()";
+        let first = identifier(
+            &bounded(&format!(
+                "{head_text}Texture const&, Shader const&{tail_text}"
+            )),
+            11,
+        );
+        let second = identifier(
+            &bounded(&format!(
+                "{head_text}Mesh const&, Material const&{tail_text}"
+            )),
+            12,
+        );
+        assert_ne!(first, second);
+        assert!(
+            first.ends_with("#11") && second.ends_with("#12"),
+            "{first} {second}"
+        );
     }
 
     #[test]

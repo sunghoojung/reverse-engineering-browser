@@ -417,13 +417,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // The same state in the light theme, set the way the theme toggle sets it,
   // without a click that could close an overlaid sidebar.
   @MainActor
-  private func lightScreenshot(_ ui: Harness, _ name: String, _ size: String) async throws {
+  private func lightScreenshot(_ ui: Harness, _ name: String, _ size: String, scope: String = "#debugger-sidebar") async throws {
     _ = try await ui.value("""
       (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null;
         document.documentElement.dataset.theme = 'light';
         await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
       """)
-    try await assertLayout(ui, "#debugger-sidebar", "\(size) \(name) light")
+    try await assertLayout(ui, scope, "\(size) \(name) light")
     try await ui.screenshot("\(name)-light-\(size)")
     _ = try await ui.value("""
       (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
@@ -3878,11 +3878,6 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
-  // "Missing final blocks" in protocol/native-network-v3.md: a content-session
-  // request the HTTP cache answered has only provisional headers. The Headers
-  // and Cookies tabs say why, and the Traffic footer counts it with the
-  // header block the session budget refused.
-  @MainActor
   // A Wasm function renamed once shows everywhere it appears: the Inspect
   // header and the call row that targets it, the Graph function list and
   // title. The captured identity stays visible beside it.
@@ -3914,6 +3909,14 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertTrue((listing["captured"] as? String ?? "").contains("func 1"), "\(size.name): the captured header stays: \(listing)")
       XCTAssertEqual(listing["call"] as? String, "encode_payload", "\(size.name): the call row names its callee: \(listing)")
       XCTAssertEqual(listing["italic"] as? String, "italic", "\(size.name): a name reads as a researcher name: \(listing)")
+      // F2 after a click on the call row names its callee: rows take no
+      // focus, so the code view resolves the row under the cursor.
+      try await ui.click(".source-line[data-wasm-target][data-wasm-function='1'] .source-text")
+      try await ui.key(120, "\u{F705}", modifiers: [.function])
+      try await ui.waitUntil("document.querySelector('#source-name-host input')?.getAttribute('aria-label') === 'Researcher name for func 1'",
+        "\(size.name): F2 on the call row did not open the callee's editor")
+      try await ui.key(53, "\u{1b}")
+      try await ui.waitUntil("document.querySelector('#source-name-host form') === null", "\(size.name): Escape did not close the editor")
       try await assertLayout(ui, "#screen-sources", "\(size.name) Wasm names in Inspect")
       try await assertInert(ui, "\(size.name) Wasm names in Inspect")
       try await ui.screenshot("wasm-names-inspect-\(size.name)")
@@ -3929,22 +3932,43 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let rows = list["rows"] as? [[String: Any]] ?? []
       XCTAssertEqual(rows.first?["analyst"] as? String, "encode_payload", "\(size.name): the list shows the name beside func 1: \(rows)")
       XCTAssertEqual(rows.first?["name"] as? String, "func 1", "\(size.name): the captured identity stays: \(rows)")
-      try await assertLayout(ui, "#source-graph-host", "\(size.name) Wasm names in the function list")
+      // The open popover covers the graph by design, so only the popover
+      // itself is checked while it is open; the host is checked once it closes.
+      try await assertLayout(ui, "#source-graph-host .block-graph-fn-menu", "\(size.name) Wasm names in the function list")
+      let menu = try await ui.json("""
+        (() => { const box = document.querySelector('#source-graph-host .block-graph-fn-menu').getBoundingClientRect();
+          return {inside: box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight}; })()
+        """)
+      XCTAssertEqual(menu["inside"] as? Bool, true, "\(size.name): the function list stays in the window: \(menu)")
       try await ui.screenshot("wasm-names-function-list-\(size.name)")
       try await ui.click("#source-graph-host .block-graph-fn-row", containing: "func 1")
-      try await ui.waitUntil("document.querySelector('#source-graph-host .block-graph-analyst-name')?.textContent === 'encode_payload'", "\(size.name): the Graph title did not show the name")
-      // F2 on the graph opens the same editor; Escape keeps the name.
+      try await ui.waitUntil("""
+        document.querySelector('#source-graph-host .block-graph-analyst-name')?.textContent === 'encode_payload' &&
+          document.querySelector('#source-graph-host .block-graph-fn-menu') === null
+        """, "\(size.name): the Graph title did not show the name")
+      try await assertLayout(ui, "#source-graph-host", "\(size.name) Wasm names in the Graph")
+      // F2 on the graph names the function it draws, wherever the click left
+      // focus inside the editor; Escape keeps the name.
       try await ui.click("#source-graph-host .block-graph-canvas")
       try await ui.key(120, "\u{F705}", modifiers: [.function])
-      try await ui.waitUntil("document.querySelector('#source-name-host input')?.value === 'encode_payload'", "\(size.name): F2 did not open the editor on the graph")
+      try await ui.waitUntil("""
+        document.querySelector('#source-name-host input')?.getAttribute('aria-label') === 'Researcher name for func 1' &&
+          document.querySelector('#source-name-host input')?.value === 'encode_payload'
+        """, "\(size.name): F2 did not open the function's editor on the graph")
       try await ui.key(53, "\u{1b}")
       try await ui.waitUntil("document.querySelector('#source-name-host form') === null", "\(size.name): Escape did not close the editor")
       try await assertLayout(ui, "#screen-sources", "\(size.name) Wasm names in the Graph")
       try await ui.screenshot("wasm-names-graph-\(size.name)")
+      try await lightScreenshot(ui, "wasm-names-graph", size.name, scope: "#screen-sources")
       try await ui.click("#source-graph")
     }
   }
 
+  // "Missing final blocks" in protocol/native-network-v3.md: a content-session
+  // request the HTTP cache answered has only provisional headers. The Headers
+  // and Cookies tabs say why, and the Traffic footer counts it with the
+  // header block the session budget refused.
+  @MainActor
   func test35MissingFinalHeaders() async throws {
     let expected = try Expectations.load()
     for size in windowSizes {

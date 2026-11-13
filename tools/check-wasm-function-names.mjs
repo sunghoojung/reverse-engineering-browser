@@ -80,7 +80,7 @@ async function checkDocument() {
 }
 
 async function checkSurfaces() {
-  const dom = parseHTML('<!doctype html><html><body><div id="source-name-host"></div><div id="code"></div><div id="graph"></div><button id="graph-toggle">Graph</button><div id="editor"></div></body></html>');
+  const dom = parseHTML('<!doctype html><html><body><section id="screen-sources"><div id="source-name-host"></div><div class="source-tree-row" data-artifact-id="9" tabindex="0">module.wasm</div><div id="editor"><div id="source-graph-host" hidden></div><div id="source-code-wrap" tabindex="0"><div id="source-code"></div></div></div><button id="graph-toggle">Graph</button></section></body></html>');
   const {document, window, Event} = dom;
   // LinkeDOM lacks these; the editor and graph call them.
   window.HTMLElement.prototype.select ??= function select() {};
@@ -102,7 +102,7 @@ async function checkSurfaces() {
     const gutter = document.createElement('button'); gutter.className = 'source-gutter';
     const excerpt = document.createElement('span'); excerpt.className = 'source-excerpt';
     const value = document.createElement('span'); value.className = 'source-text'; value.textContent = text; excerpt.append(value);
-    row.append(gutter, excerpt); document.querySelector('#code').append(row); return row;
+    row.append(gutter, excerpt); document.querySelector('#source-code').append(row); return row;
   };
   const header = line('function    func 5 (type 1)'), call = line('func 2      call { function_index: 5 }'), body = line('func 5      i32.const 7');
   wasm.decorateInspectRow(header, {kind: 'function', function_index: 5, text: 'func 5 (type 1)'}, SHA);
@@ -138,9 +138,22 @@ async function checkSurfaces() {
   // F2 inside a marked element renames that function; text fields keep F2.
   // LinkeDOM has no KeyboardEvent; a plain event carries the key.
   const press = target => {const event = new Event('keydown', {bubbles: true, cancelable: true}); Object.defineProperty(event, 'key', {value: 'F2'}); target.dispatchEvent(event); return event.defaultPrevented;};
+  const label = () => input()?.getAttribute('aria-label') ?? null;
+  // Rows are spans and never take focus: a real click leaves it on the code
+  // view. The row the pointer pressed names the function under the cursor.
   controller.close(false);
-  assert(press(call.querySelector('.source-excerpt')), 'F2 on a call row renames its callee');
-  assert.equal(input().value, hostile);
+  const wrap = document.querySelector('#source-code-wrap');
+  call.querySelector('.source-text').dispatchEvent(new Event('pointerdown', {bubbles: true}));
+  assert(press(wrap), 'F2 on the code view after a click on a call row renames its callee');
+  assert.equal(label(), 'Researcher name for func 5'); assert.equal(input().value, hostile);
+  controller.close(false);
+  // A body row names nothing, so the key stays with the Sources handler.
+  body.querySelector('.source-text').dispatchEvent(new Event('pointerdown', {bubbles: true}));
+  assert.equal(press(wrap), false, 'An unmarked row leaves F2 to the file rename');
+  // A tree row always renames the file.
+  header.querySelector('.source-text').dispatchEvent(new Event('pointerdown', {bubbles: true}));
+  assert.equal(press(document.querySelector('.source-tree-row')), false, 'A tree row keeps the file rename');
+  assert(press(wrap), 'The pointed header row renames its function');
   controller.close(false);
   const field = document.createElement('input'); header.append(field);
   assert.equal(press(field), false, 'Text fields keep the key');
@@ -150,7 +163,7 @@ async function checkSurfaces() {
   // shows both, and the panel marks itself for F2.
   global.loadWasmFunctionGraph = async () => { throw Object.assign(new Error('offline'), {name: 'AbortError'}); };
   global.readWasmFunctionIndex = async () => ({index: [4, 5], size: new Map([[4, 10], [5, 20]]), names: new Map([[5, '$helper']]), status: 'decoded', omissions: []});
-  const host = document.querySelector('#graph'), button = document.querySelector('#graph-toggle'), editor = document.querySelector('#editor');
+  const host = document.querySelector('#source-graph-host'), button = document.querySelector('#graph-toggle'), editor = document.querySelector('#editor');
   const panel = createPanel({host, editor, button, closeOn: null, revealOffset: () => {}});
   panel.sync({kind: 'wasm', source_type: 'artifact', artifact_id: '9', sha256: SHA});
   button.click();
@@ -170,6 +183,17 @@ async function checkSurfaces() {
   const filter = host.querySelector('.block-graph-fn-menu input');
   filter.value = 'onerror'; filter.dispatchEvent(new Event('input'));
   assert.equal(host.querySelectorAll('.block-graph-fn-row').length, 1, 'The filter matches researcher names');
+  host.querySelector('.block-graph-fn-menu input').dispatchEvent(Object.defineProperty(new Event('keydown', {bubbles: true, cancelable: true}), 'key', {value: 'Escape'}));
+  // WebKit can leave focus on the body or the code view after a click on the
+  // graph: the open Graph still names the function it draws.
+  controller.close(false);
+  assert(press(document.body), 'F2 with focus on the body renames the open graph function');
+  assert.equal(label(), 'Researcher name for $helper (func 5)');
+  controller.close(false);
+  for (const row of document.querySelectorAll('#source-code .source-line')) row.remove();
+  assert(press(wrap), 'F2 on the code view beside an open graph renames its function');
+  assert.equal(label(), 'Researcher name for $helper (func 5)');
+  controller.close(false);
   console.log('PASS Wasm names surfaces: Inspect headers and call targets, in-place refresh, F2 routing, hostile names as text, Graph title and function list with filter (LinkeDOM; not rendered QA)');
 }
 

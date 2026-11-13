@@ -1911,10 +1911,12 @@ impl RequestIndex {
                                     (None, Some(_)) => true,
                                     _ => false,
                                 };
-                                if !newer_snapshot {
-                                    child.snapshot = held.snapshot.take();
-                                }
+                                // A repeated or older record replaces nothing, so
+                                // it must not take the held snapshot either.
                                 if held.sequence < sequence {
+                                    if !newer_snapshot {
+                                        child.snapshot = held.snapshot.take();
+                                    }
                                     *held = child;
                                 } else if newer_snapshot {
                                     held.snapshot = child.snapshot;
@@ -4723,6 +4725,53 @@ mod tests {
         let retained = rows.iter().find(|row| row["id"] == "S1:R61:20").unwrap();
         assert_eq!(retained["response_body"]["case"], "captured");
         assert!(retained["memory_cache_source"].is_null());
+    }
+
+    #[test]
+    fn a_repeated_or_late_body_record_keeps_the_retained_snapshot() {
+        let context = json!({"tab_id": 3, "initiator_process_id": 64, "initiator_request_id": 1});
+        // A duplicate line, then an older record read after the refusal.
+        for late in [None, Some("3")] {
+            let mut store = Store {
+                events: Vec::new(),
+                sequence: 0,
+            };
+            store.push(
+                7,
+                990,
+                "request_started",
+                b"GET late.example.test",
+                context.clone(),
+            );
+            let response = store.push(
+                7,
+                990,
+                "response_started",
+                b"application/json",
+                merge(context.clone(), json!({"status_code": 200})),
+            );
+            let child = |artifact: &str| {
+                merge(
+                    context.clone(),
+                    json!({"parent_event_id": response, "artifact_id": artifact}),
+                )
+            };
+            store.push(7, 990, "response_body", &body(3, 30, 30, 1), child("85"));
+            store.push(7, 990, "response_body", &body(12, 60, 0, 0), child("0"));
+            let mut repeated = store.events.last().unwrap().clone();
+            if let Some(sequence) = late {
+                repeated["sequence_number"] = json!(sequence);
+            }
+            store.events.push(repeated);
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("events.jsonl");
+            write(&path, &store);
+            let mut index = RequestIndex::new(&path);
+            let document = page(&mut index, "limit=10");
+            let body = &document["requests"][0]["response_body"];
+            assert_eq!(body["case"], "not_captured_session_budget", "{late:?}");
+            assert_eq!(body["earlier_snapshot"]["artifact_id"], "85", "{late:?}");
+        }
     }
 
     /// Golden for tools/check-request-index.mjs.

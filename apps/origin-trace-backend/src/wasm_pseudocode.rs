@@ -3894,6 +3894,369 @@ mod tests {
         )
     }
 
+    /// i32 programs whose callees are imports that log their calls, so a
+    /// listing can be run against a real engine: `f` throws on 13, `thr`
+    /// throws on odd values, `tick` bounds loops. Frames include try_table
+    /// with catch_all to an outer label, loops with parameters, and
+    /// br/br_if/br_table at depth, tail calls and call_indirect.
+    fn value_program(seed: u64) -> String {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Frame {
+            Block,
+            Loop,
+            If,
+            Else,
+            Try,
+        }
+        struct Open {
+            kind: Frame,
+            params: usize,
+            results: usize,
+            base: usize,
+        }
+        let label = |open: &Open| {
+            if open.kind == Frame::Loop {
+                open.params
+            } else {
+                open.results
+            }
+        };
+        let mut state = seed.wrapping_mul(0xd1b5_4a32_d192_ed03) | 1;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % bound
+        };
+        let mut body = String::new();
+        macro_rules! emit {
+            ($($text:tt)*) => {{
+                body.push(' ');
+                let _ = write!(body, $($text)*);
+            }};
+        }
+        let mut height = 0usize;
+        let mut frames = vec![Open {
+            kind: Frame::Block,
+            params: 0,
+            results: 2,
+            base: 0,
+        }];
+        let mut dead = false;
+        for _ in 0..15 + next(80) {
+            let available = height - frames.last().unwrap().base;
+            match next(40) {
+                0..=2 => {
+                    emit!("i32.const {}", next(9) as i64 - 2);
+                    height += 1;
+                }
+                3..=7 => {
+                    emit!("local.get {}", next(4));
+                    height += 1;
+                }
+                8 | 9 if available >= 1 => {
+                    emit!("local.set {}", next(4));
+                    height -= 1;
+                }
+                10..=13 if available >= 1 => emit!("local.tee {}", next(4)),
+                14 => {
+                    emit!("global.get 0");
+                    height += 1;
+                }
+                15 if available >= 1 => {
+                    emit!("global.set 0");
+                    height -= 1;
+                }
+                16 | 17 if available >= 2 => {
+                    let ops = [
+                        "add", "sub", "mul", "div_s", "rem_u", "xor", "lt_s", "shr_u", "eq",
+                    ];
+                    emit!("i32.{}", ops[next(9) as usize]);
+                    height -= 1;
+                }
+                18 if available >= 1 => emit!("i32.eqz"),
+                19 if available >= 1 => emit!("call $f"),
+                20 => {
+                    emit!("call $g");
+                    height += 1;
+                }
+                21 if available >= 1 => {
+                    emit!("call $h");
+                    height -= 1;
+                }
+                22 => {
+                    emit!("call $two");
+                    height += 2;
+                }
+                23 if available >= 1 => {
+                    emit!("call $thr");
+                    height -= 1;
+                }
+                24 if available >= 2 => {
+                    emit!("i32.const 1 i32.and call_indirect (type $t)");
+                    height -= 1;
+                }
+                25 if available >= 1 => emit!("i32.const 255 i32.and i32.load offset=4"),
+                26 if available >= 2 => {
+                    emit!("i32.const 255 i32.and");
+                    emit!("i32.store offset=8");
+                    height -= 2;
+                }
+                27 if available >= 1 => {
+                    if next(2) == 0 {
+                        emit!("i32.const 3 i32.and memory.grow");
+                    } else {
+                        emit!("memory.size");
+                        height += 1;
+                    }
+                }
+                28 if available >= 3 => {
+                    emit!("select");
+                    height -= 2;
+                }
+                29 if available >= 1 => {
+                    emit!("drop");
+                    height -= 1;
+                }
+                30 | 31 if frames.len() < 7 => {
+                    let kind = [
+                        Frame::Block,
+                        Frame::Block,
+                        Frame::Loop,
+                        Frame::If,
+                        Frame::Try,
+                    ][next(5) as usize];
+                    let cond = usize::from(kind == Frame::If);
+                    if available < cond {
+                        continue;
+                    }
+                    let params = (next(3) as usize).min(available - cond);
+                    let results = next(3) as usize;
+                    let mut signature = String::new();
+                    for _ in 0..params {
+                        signature.push_str(" (param i32)");
+                    }
+                    for _ in 0..results {
+                        signature.push_str(" (result i32)");
+                    }
+                    height -= cond;
+                    match kind {
+                        Frame::Block => emit!("block{signature}"),
+                        Frame::Loop => {
+                            emit!("loop{signature}");
+                            emit!("call $tick");
+                        }
+                        Frame::If => emit!("if{signature}"),
+                        Frame::Try => {
+                            // A catch_all to the nearest enclosing label that
+                            // takes no values, other than the function's.
+                            let mut clause = String::new();
+                            for depth in 0..frames.len() - 1 {
+                                let open = &frames[frames.len() - 1 - depth];
+                                if open.kind != Frame::Loop && label(open) == 0 && next(2) == 0 {
+                                    let _ = write!(clause, " (catch_all {depth})");
+                                    break;
+                                }
+                            }
+                            emit!("try_table{signature}{clause}");
+                        }
+                        Frame::Else => unreachable!(),
+                    }
+                    frames.push(Open {
+                        kind,
+                        params,
+                        results,
+                        base: height - params,
+                    });
+                }
+                32 if frames.len() < 6 => {
+                    emit!("block");
+                    frames.push(Open {
+                        kind: Frame::Block,
+                        params: 0,
+                        results: 0,
+                        base: height,
+                    });
+                }
+                33 | 34 if available >= 1 => {
+                    let depth = next(frames.len() as u64) as usize;
+                    if available > label(&frames[frames.len() - 1 - depth]) {
+                        emit!("br_if {depth}");
+                        height -= 1;
+                    }
+                }
+                35 if available >= 1 => {
+                    let first = next(frames.len() as u64) as usize;
+                    let carried = label(&frames[frames.len() - 1 - first]);
+                    if available > carried {
+                        let mut labels: Vec<String> = (0..frames.len())
+                            .filter(|depth| {
+                                label(&frames[frames.len() - 1 - depth]) == carried && next(2) == 0
+                            })
+                            .map(|depth| depth.to_string())
+                            .collect();
+                        labels.push(first.to_string());
+                        emit!("br_table {}", labels.join(" "));
+                        dead = true;
+                    }
+                }
+                36 => {
+                    let depth = next(frames.len() as u64) as usize;
+                    if available >= label(&frames[frames.len() - 1 - depth]) {
+                        emit!("br {depth}");
+                        dead = true;
+                    }
+                }
+                37 if available >= 2 => {
+                    emit!("return");
+                    dead = true;
+                }
+                38 if available >= 1 => {
+                    if next(2) == 0 {
+                        emit!("return_call $mv");
+                    } else {
+                        emit!("i32.const 0 return_call_indirect (type $tmv)");
+                    }
+                    dead = true;
+                }
+                39 if frames.len() > 1 => {
+                    let open = frames.last().unwrap();
+                    let need = open.base + open.results;
+                    while height > need {
+                        emit!("drop");
+                        height -= 1;
+                    }
+                    while height < need {
+                        emit!("i32.const {}", next(5));
+                        height += 1;
+                    }
+                    if open.kind == Frame::If {
+                        height = open.base + open.params;
+                        emit!("else");
+                        frames.last_mut().unwrap().kind = Frame::Else;
+                        continue;
+                    }
+                    emit!("end");
+                    let open = frames.pop().unwrap();
+                    height = open.base + open.results;
+                }
+                _ => {}
+            }
+            if dead {
+                dead = false;
+                if frames.len() == 1 {
+                    return value_module(&body);
+                }
+                let open = frames.last().unwrap();
+                if open.kind == Frame::If {
+                    height = open.base + open.params;
+                    emit!("else");
+                    frames.last_mut().unwrap().kind = Frame::Else;
+                    continue;
+                }
+                emit!("end");
+                let open = frames.pop().unwrap();
+                height = open.base + open.results;
+            }
+        }
+        loop {
+            let open = frames.last().unwrap();
+            let need = open.base + open.results;
+            while height > need {
+                emit!("drop");
+                height -= 1;
+            }
+            while height < need {
+                emit!("i32.const {}", next(5));
+                height += 1;
+            }
+            if frames.len() == 1 {
+                break;
+            }
+            if open.kind == Frame::If {
+                height = open.base + open.params;
+                emit!("else");
+                frames.last_mut().unwrap().kind = Frame::Else;
+                continue;
+            }
+            emit!("end");
+            let open = frames.pop().unwrap();
+            height = open.base + open.results;
+        }
+        value_module(&body)
+    }
+    fn value_module(body: &str) -> String {
+        format!(
+            r#"(module
+  (import "env" "f" (func $f (param i32) (result i32)))
+  (import "env" "g" (func $g (result i32)))
+  (import "env" "h" (func $h (param i32)))
+  (import "env" "two" (func $two (result i32 i32)))
+  (import "env" "tick" (func $tick))
+  (import "env" "thr" (func $thr (param i32)))
+  (import "env" "mv" (func $mv (param i32) (result i32 i32)))
+  (type $t (func (param i32) (result i32))) (type $tmv (func (param i32) (result i32 i32)))
+  (memory (export "mem") 1)
+  (global (export "g0") (mut i32) (i32.const 0))
+  (table 2 funcref) (elem (i32.const 0) func $mv $f)
+  (func (export "run") (param i32 i32) (result i32 i32) (local i32 i32) {body}))"#
+        )
+    }
+
+    /// Writes the corpus `make wasm-readable-values-check` runs in V8 and
+    /// compares with each listing: one JSON line per valid program with its
+    /// module bytes and lifted text. The hand cases are the handler-reads-a-
+    /// local shapes the effect-order checks once missed.
+    #[test]
+    #[ignore = "make wasm-readable-values-check writes the corpus it checks"]
+    fn write_value_corpus() {
+        let path = std::env::var("REB_WASM_READABLE_VALUES_OUTPUT").expect("an output path");
+        let seeds: u64 = std::env::var("REB_WASM_READABLE_VALUES_SEEDS")
+            .ok()
+            .and_then(|count| count.parse().ok())
+            .unwrap_or(3_000);
+        let hand = [
+            "block try_table (catch_all 0) i32.const 5 local.tee 0 i32.const 1 call $thr drop end end local.get 0 local.get 1",
+            "block try_table (catch_all 0) i32.const 13 call $f i32.const 5 local.set 0 drop end end local.get 0 local.get 1",
+            "block try_table (catch_all 0) local.get 0 call $f local.set 1 local.get 1 call $thr end end local.get 0 local.get 1",
+        ];
+        let mut programs: Vec<(String, String)> = hand
+            .iter()
+            .enumerate()
+            .map(|(index, body)| (format!("hand-{index}"), value_module(body)))
+            .collect();
+        programs.extend((0..seeds).map(|seed| (seed.to_string(), value_program(seed))));
+        let mut out = String::new();
+        let mut invalid = 0;
+        for (seed, wat) in programs {
+            let bytes = wat::parse_str(&wat).unwrap();
+            if Validator::new_with_features(WasmFeatures::all())
+                .validate_all(&bytes)
+                .is_err()
+            {
+                invalid += 1;
+                continue;
+            }
+            let directory = store(&bytes);
+            let document: Value = serde_json::from_str(
+                &pseudocode(directory.path(), "7", 7, 0, MAX_LINE_LIMIT).unwrap(),
+            )
+            .unwrap();
+            out.push_str(
+                &json!({"seed": seed, "wasm": hex::encode(&bytes), "body": wat.rsplit_once("(local i32 i32)").map(|(_, body)| body.trim()),
+                    "text": document["text"], "status": document["status"], "fallbacks": document["fallback_count"],
+                    "exception_handlers": document["fallbacks"]["exception_handler"], "next": document["window"]["next_line_offset"]})
+                .to_string(),
+            );
+            out.push('\n');
+        }
+        assert!(
+            invalid * 20 < seeds as usize,
+            "{invalid} of {seeds} programs do not validate"
+        );
+        std::fs::write(path, out).unwrap();
+    }
+
     #[test]
     fn typed_generated_modules_validate_and_keep_effect_order() {
         for seed in 0..2_000 {

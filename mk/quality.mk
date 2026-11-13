@@ -39,7 +39,7 @@ else
 $(error REB_RUST_TEST_RUNNER must be cargo or nextest, not $(REB_RUST_TEST_RUNNER))
 endif
 
-check: native-wasm-golden-check native-js-golden-check network-request-wire-check request-index-check request-stack-wire-check debugger-observation-wire-check network-scope-wire-check tab-link-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-tab-registry-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
+check: native-wasm-golden-check wasm-readable-values-check native-js-golden-check network-request-wire-check request-index-check request-stack-wire-check debugger-observation-wire-check network-scope-wire-check tab-link-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-tab-registry-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
 	$(RUST_SUITE) apps/origin-trace-backend/Cargo.toml
 	$(if $(RUST_DOCTESTS),$(RUST_DOCTESTS) apps/origin-trace-backend/Cargo.toml)
 	$(RUST_SUITE) apps/deobfuscator-worker/Cargo.toml
@@ -62,6 +62,19 @@ dispatch-shape-check:
 		status=$$?; printf '%s\n' "$$output"; test $$status -eq 0 && \
 		printf '%s\n' "$$output" | grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed;' || \
 		{ echo "Dispatch shape fixture tests did not run and pass" >&2; exit 1; }
+
+# Value-level check of the readable Wasm lift: an ignored Rust test writes
+# generated i32 modules with their lifted listings, and V8 runs each module
+# while the script interprets its listing with the same logging, throwing
+# imports. Static order checks cannot see a listing that reads a different
+# value; this catches one in about 15 seconds.
+WASM_READABLE_VALUES := $(abspath $(BUILD_DIR)/wasm-readable-values.jsonl)
+.PHONY: wasm-readable-values-check
+wasm-readable-values-check:
+	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
+	mkdir -p "$(dir $(WASM_READABLE_VALUES))"
+	$(call ignored-rust-test,--lib,wasm_pseudocode::tests::write_value_corpus,REB_WASM_READABLE_VALUES_OUTPUT="$(WASM_READABLE_VALUES)")
+	node tools/check-wasm-readable-values.mjs "$(WASM_READABLE_VALUES)"
 
 # Rebuild the checked-in .wasm fixtures after editing a .wat source.
 dispatch-shape-fixtures:

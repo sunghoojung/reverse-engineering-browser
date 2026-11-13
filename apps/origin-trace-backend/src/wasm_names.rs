@@ -646,6 +646,13 @@ fn projection(file: &Value) -> Value {
 /// Other names, other files and the folders are preserved; a stale library
 /// generation is refused with 409 by `Store::replace`, never retried.
 pub fn set_function_name(store: &Store, request: &Value) -> Result<Value> {
+    set_function_name_with(store, request, || {})
+}
+
+/// `between` runs after the library is read and before it is replaced, where
+/// another writer can land. The replacement carries the generation that was
+/// read, so such a write is refused with 409 instead of being overwritten.
+fn set_function_name_with(store: &Store, request: &Value, between: impl FnOnce()) -> Result<Value> {
     let object = request
         .as_object()
         .ok_or_else(|| Error::bad("Wasm function name request must be an object"))?;
@@ -832,6 +839,7 @@ pub fn set_function_name(store: &Store, request: &Value) -> Result<Value> {
             );
         }
     }
+    between();
     let replacement = json!({"action":"replace_local_analyst_workspace",
         "expected_generation":generation,"folders":library["folders"],"files":files});
     let saved = store.replace(&replacement)?;
@@ -1014,6 +1022,49 @@ mod tests {
         let error = set("other", Some(Value::Null)).unwrap_err();
         assert_eq!(error.status, 409);
         assert!(set("bad\u{0007}", None).is_err());
+        // A UI save landing between the read and the replace is not lost.
+        let before = store.load().unwrap();
+        let racing = set_function_name_with(
+            &store,
+            &json!({"action":"set_wasm_function_name","sha256":SHA,"function":4,"name":"agent"}),
+            || {
+                let library = store.load().unwrap();
+                let mut files: Vec<Value> = library["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(projection)
+                    .collect();
+                files.push(json!({"id":99,"folder_id":1,"name":"ui.md","kind":"scratchpad","language":"markdown","content":"saved by the UI"}));
+                store
+                    .replace(&json!({"action":"replace_local_analyst_workspace",
+                        "expected_generation":library["generation"],"folders":library["folders"],"files":files}))
+                    .unwrap();
+            },
+        );
+        assert_eq!(
+            racing.unwrap_err().status,
+            409,
+            "The stale generation is refused"
+        );
+        let after = store.load().unwrap();
+        assert_eq!(
+            after["generation"],
+            before["generation"].as_u64().unwrap() + 1,
+            "Only the UI save landed"
+        );
+        assert!(
+            after["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["content"] == "saved by the UI")
+        );
+        assert_eq!(
+            names_of(&after).function(SHA, 4),
+            None,
+            "The agent write did not overwrite it"
+        );
         let cleared = set("", Some(json!("encode_payload"))).unwrap();
         assert_eq!(cleared["name"], Value::Null);
         assert_eq!(cleared["previous_name"], "encode_payload");

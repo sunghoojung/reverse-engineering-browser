@@ -4205,22 +4205,48 @@ async fn unchanged_analyst_library_answers_its_etag_without_a_read() {
     let notes = json!({"action":"replace_local_analyst_workspace","expected_generation":0,
         "folders":[{"id":1,"name":"Analyst Workspace","parent_id":null}],
         "files":[{"id":4,"folder_id":1,"name":"notes.md","kind":"scratchpad","language":"markdown","content":"keep"}]});
-    assert_eq!(server.action("/api/local-analyst/actions", notes).await.status().as_u16(), 200);
+    assert_eq!(
+        server
+            .action("/api/local-analyst/actions", notes)
+            .await
+            .status()
+            .as_u16(),
+        200
+    );
     let first = server.get("/api/local-analyst").await;
     let tag = first.headers()["etag"].to_str().unwrap().to_owned();
     let conditional = |tag: String| {
-        server.client.get(format!("{}/api/local-analyst", server.url)).header("if-none-match", tag).send()
+        server
+            .client
+            .get(format!("{}/api/local-analyst", server.url))
+            .header("if-none-match", tag)
+            .send()
     };
     let path = server.root.path().join("analyst.json");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
     let unchanged = conditional(tag.clone()).await.unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    assert_eq!(unchanged.status().as_u16(), 304, "An unchanged library is not read");
+    assert_eq!(
+        unchanged.status().as_u16(),
+        304,
+        "An unchanged library is not read"
+    );
     assert_eq!(unchanged.headers()["etag"].to_str().unwrap(), tag);
     let set = json!({"action":"set_wasm_function_name","sha256":"a".repeat(64),"function":1,"name":"agent_named"});
-    assert_eq!(server.action("/api/local-analyst/actions", set).await.status().as_u16(), 200);
+    assert_eq!(
+        server
+            .action("/api/local-analyst/actions", set)
+            .await
+            .status()
+            .as_u16(),
+        200
+    );
     let changed = conditional(tag.clone()).await.unwrap();
-    assert_eq!(changed.status().as_u16(), 200, "A write is seen on the next poll");
+    assert_eq!(
+        changed.status().as_u16(),
+        200,
+        "A write is seen on the next poll"
+    );
     assert_ne!(changed.headers()["etag"].to_str().unwrap(), tag);
     let library: Value = changed.json().await.unwrap();
     assert_eq!(library["generation"], 2);

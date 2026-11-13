@@ -591,6 +591,19 @@ fn instruction_text(
     Ok(texts)
 }
 
+/// Whether the instruction at `index` opens a `try_table` or a `try`, whose
+/// catch values exist only once the simulation reaches its handlers.
+fn opens_handler(body: &wasmparser::FunctionBody<'_>, index: u32) -> Result<bool> {
+    let mut reader = body.get_operators_reader().map_err(wasm_def_use::bad)?;
+    for _ in 0..index {
+        reader.read().map_err(wasm_def_use::bad)?;
+    }
+    Ok(matches!(
+        reader.read().map_err(wasm_def_use::bad)?,
+        Operator::TryTable { .. } | Operator::Try { .. }
+    ))
+}
+
 /// One instruction as `mnemonic operands`, the same spelling as graph rows.
 /// Exception handlers name their clauses instead of a parser dump.
 fn operator_text(op: &Operator<'_>) -> String {
@@ -993,6 +1006,20 @@ pub(crate) fn value_flow_with(
                 }
                 None => {
                     if node == NONE && inputs.is_empty() {
+                        // A try_table's catch values are made at its end; a
+                        // stop inside its body never reached them.
+                        if let Some(stopped) = sim.stopped_at
+                            && opens_handler(body, instruction)?
+                        {
+                            return Err(Error::new(
+                                400,
+                                format!(
+                                    "Value flow stopped at byte {stopped}, inside the handler at byte {offset}, before its catch values were made: {}",
+                                    sim.omissions.join(" ")
+                                ),
+                            )
+                            .with_code(Code::ResourceLimit));
+                        }
                         return Err(Error::bad(format!(
                             "The instruction at byte {offset} neither produces nor consumes a value"
                         )));
@@ -3251,6 +3278,35 @@ mod tests {
             document["nodes"]
         );
         assert_eq!(document["seed"]["nodes"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_handler_seed_cut_off_by_the_stop_is_a_resource_limit() {
+        let mut text = String::from(
+            "(module (tag $e (param i32)) (func (result i32) block $h (result i32) try_table (catch $e $h)",
+        );
+        text.push_str(&" nop".repeat(50));
+        text.push_str(" end i32.const 0 end))");
+        let bytes = wat::parse_str(text).unwrap();
+        let try_table = offset_of(&bytes, 0, "try_table", 0);
+        let limits = wasm_def_use::Limits {
+            max_instructions: 20,
+            max_work: wasm_def_use::MAX_WORK,
+        };
+        let error = limited(&bytes, &format!("function=0&offset={try_table}"), limits).unwrap_err();
+        assert_eq!(
+            (error.status, error.reason.code),
+            (400, Code::ResourceLimit),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("inside the handler"),
+            "{}",
+            error.message
+        );
+        let complete = flow(&bytes, &format!("function=0&offset={try_table}")).unwrap();
+        assert!(!node(&complete, "exception_value").is_empty());
     }
 
     #[test]

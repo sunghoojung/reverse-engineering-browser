@@ -36,7 +36,9 @@ out-of-range parameters fail with 400 rather than widening the slice. An
 instruction that neither consumes nor produces a value (`block`, `nop`), an
 instruction no declared path reaches, and an `operand` past the instruction's
 operands are 400. A seed at or after the point where the simulation stopped,
-or past the last instruction it simulated, is 400 with code `resource_limit`.
+or past the last instruction it simulated, is 400 with code `resource_limit`;
+so is a whole `try_table` or `try` seed whose body the simulation stopped
+inside, since its catch values were never made.
 
 The seed is the instruction. When it records an operand that no node of its
 own consumes (a block's `end`, a carried value of `br`, `br_if` or

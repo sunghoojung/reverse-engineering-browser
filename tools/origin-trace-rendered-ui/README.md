@@ -216,8 +216,9 @@ targets it, and that F2 after a click on the call row opens the callee's
 editor. The Graph's **Functions** list must show the name beside `func 1`; the
 open popover covers the graph by design, so its layout is checked on its own
 and the Graph's once it closes. Choosing that row must put the name beside the
-Graph title, and F2 after a click on the graph must open the editor for
-`func 1`, which Escape closes. Layout and inertness are checked at each step,
+Graph title. The Graph then moves to `func 2` while the last clicked Inspect
+row is the call into `func 1`, and F2 after a click on the graph must open the
+editor for `func 2`, the function the Graph draws, which Escape closes. Layout and inertness are checked at each step,
 and the Graph is photographed in both themes
 ([Wasm function names v1](../../protocol/wasm-function-names-v1.md)).
 

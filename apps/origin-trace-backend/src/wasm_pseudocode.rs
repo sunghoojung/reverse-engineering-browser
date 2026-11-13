@@ -3052,6 +3052,66 @@ mod tests {
     }
 
     #[test]
+    fn a_br_if_assigns_a_pending_local_write_before_the_branch() {
+        // The tee runs whether or not the branch is taken, so its write
+        // reads before the br_if, not in the drop after it.
+        assert_eq!(
+            exact(
+                "(module (func (param i32) (result i32)
+                    block i32.const 5 local.tee 0 i32.const 1 br_if 0 drop end
+                    local.get 0))",
+                0
+            ),
+            [
+                "func f0(p0: i32) -> i32 {",
+                "block L1 {",
+                "t0 = p0 = 5",
+                "br_if L1 (1)",
+                "drop(t0)",
+                "}",
+                "return p0",
+                "}"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_legacy_catch_arm_inside_an_outer_try_still_orders_writes_and_calls() {
+        // The inner try's catch arm is no longer guarded by the inner try,
+        // but the outer try still catches what the arm's call throws, so
+        // the tee keeps its place before the call.
+        assert_eq!(
+            exact(
+                &throwing(
+                    "try
+                       try i32.const 1 call $thr
+                       catch_all i32.const 5 local.tee 0 i32.const 1 call $thr drop
+                       end
+                     catch_all
+                     end
+                     local.get 0 local.get 1"
+                ),
+                2
+            ),
+            [
+                "func f2(p0: i32, p1: i32) -> (i32, i32) {",
+                "try {",
+                "try {",
+                "thr(1)",
+                "} catch_all {",
+                "t0 = p0 = 5",
+                "thr(1)",
+                "drop(t0)",
+                "}",
+                "} catch_all {",
+                "}",
+                "return p0, p1",
+                "}"
+            ]
+        );
+    }
+
+    #[test]
     fn a_try_table_result_is_assigned_inside_the_protected_region() {
         assert_eq!(
             exact(

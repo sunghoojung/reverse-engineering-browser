@@ -3010,4 +3010,115 @@ mod tests {
             );
         }
     }
+
+    fn results_type(count: usize) -> String {
+        format!("(type $r (func (result{})))", " i32".repeat(count))
+    }
+
+    fn simulate_limited(bytes: &[u8], function: u32, max_work: u64) -> Simulation {
+        let module = Module::read(bytes).unwrap();
+        let body = &module.bodies[(function - module.imported_functions) as usize];
+        let limits = wasm_def_use::Limits {
+            max_instructions: wasm_def_use::MAX_INSTRUCTIONS,
+            max_work,
+        };
+        wasm_def_use::simulate_with(
+            &module,
+            function,
+            body,
+            Instant::now() + Duration::from_secs(60),
+            limits,
+        )
+        .unwrap()
+    }
+
+    /// The stop is named and nothing retained outgrows the budget: a fan-out
+    /// that kept building after the budget ran out allocates per target.
+    fn assert_bounded(sim: &Simulation, max_work: u64, slack: u64) {
+        assert!(sim.stopped_at.is_some(), "{:?}", sim.omissions);
+        assert!(
+            sim.omissions.iter().any(|o| o.contains("work budget")),
+            "{:?}",
+            sim.omissions
+        );
+        assert!(
+            sim.work <= max_work + slack,
+            "work {} past {max_work}",
+            sim.work
+        );
+        assert!(
+            (sim.nodes.len() + sim.edges.len()) as u64 <= max_work + slack,
+            "{} nodes, {} edges",
+            sim.nodes.len(),
+            sim.edges.len()
+        );
+        assert!(
+            sim.stored <= max_work + slack,
+            "{} carried values stored on paths",
+            sim.stored
+        );
+    }
+
+    #[test]
+    fn br_table_fan_out_stops_inside_the_budget() {
+        let (depth, results) = (2_000, 50);
+        let mut text = format!(
+            "(module {} (func (param i32) (result i32)",
+            results_type(results)
+        );
+        text.push_str(&" block (type $r)".repeat(depth));
+        text.push_str(&" i32.const 1".repeat(results));
+        let targets: Vec<String> = (0..depth).map(|d| d.to_string()).collect();
+        text.push_str(&format!(" local.get 0 br_table {} 0", targets.join(" ")));
+        text.push_str(&" end".repeat(depth));
+        text.push_str(&" drop".repeat(results - 1));
+        text.push_str("))");
+        let bytes = wat::parse_str(text).unwrap();
+        let sim = simulate_limited(&bytes, 0, 20_000);
+        assert_bounded(&sim, 20_000, results as u64 + 1);
+    }
+
+    #[test]
+    fn try_table_clause_fan_out_stops_inside_the_budget() {
+        let (clauses, values) = (3_000, 50);
+        let mut text = format!(
+            "(module {} (tag $e (param{})) (import \"env\" \"f\" (func $f)) (func (result i32) block $h (type $r) try_table",
+            results_type(values),
+            " i32".repeat(values)
+        );
+        text.push_str(&" (catch $e $h)".repeat(clauses));
+        text.push_str(" call $f end unreachable end");
+        text.push_str(&" drop".repeat(values - 1));
+        text.push_str("))");
+        let bytes = wat::parse_str(text).unwrap();
+        let sim = simulate_limited(&bytes, 1, 20_000);
+        assert_bounded(&sim, 20_000, values as u64 + 1);
+    }
+
+    #[test]
+    fn every_carried_copy_and_merge_slot_is_charged() {
+        // N br_if carry A values each to one block: per branch the carried
+        // read, its record, the branch's own copy and the stored path, and A
+        // merge slots per incoming path at the end. Dropping any one of these
+        // charges brings the total under the sum.
+        let (results, branches) = (100u64, 50u64);
+        let mut text = format!(
+            "(module {} (func (param i32) (result i32) block (type $r)",
+            results_type(results as usize)
+        );
+        text.push_str(&" i32.const 1".repeat(results as usize));
+        text.push_str(&" local.get 0 br_if 0".repeat(branches as usize));
+        text.push_str(" end");
+        text.push_str(&" drop".repeat(results as usize - 1));
+        text.push_str("))");
+        let bytes = wat::parse_str(text).unwrap();
+        let sim = simulate_limited(&bytes, 0, wasm_def_use::MAX_WORK);
+        assert_eq!(sim.stopped_at, None);
+        let charged = branches * (4 * results) + results * (branches + 1);
+        assert!(
+            sim.work >= charged,
+            "work {} under the {charged} the copies and merge slots cost",
+            sim.work
+        );
+    }
 }

@@ -311,6 +311,9 @@ pub struct Simulation {
     pub stopped_at: Option<u32>,
     /// Work units spent, including the loop-write prescan.
     pub work: u64,
+    /// Values and locals stored on incoming paths for later merges: the
+    /// memory a branch fan-out holds beyond nodes and edges.
+    pub stored: u64,
     pub omissions: Vec<String>,
     /// Header joins of loops still open where the simulation stopped: their
     /// back edges after the stop were never read, so they are incomplete.
@@ -623,6 +626,7 @@ struct Sim<'m, 'a> {
     store: Option<StoreFact>,
     work: u64,
     limits: Limits,
+    stored: u64,
     deadline: Instant,
     /// Set once a budget runs out inside an instruction; the main loop stops
     /// at that instruction.
@@ -777,6 +781,7 @@ pub fn simulate_with(
         store: None,
         work: 0,
         limits,
+        stored: 0,
         deadline,
         exhausted: None,
         omissions: Vec::new(),
@@ -887,6 +892,7 @@ pub fn simulate_with(
         results,
         stopped_at,
         work: sim.work,
+        stored: sim.stored,
         omissions: sim.omissions,
         open_joins,
     })
@@ -1222,6 +1228,7 @@ impl Sim<'_, '_> {
     }
 
     fn returns(&mut self, offset: u32, index: u32, values: &[Value]) -> u32 {
+        self.spend(values.len() as u64);
         let node = self.node(NodeKind::Return, offset, index, NONE, 0);
         for (operand, value) in values.iter().enumerate() {
             self.edge(
@@ -1237,7 +1244,13 @@ impl Sim<'_, '_> {
     }
 
     /// Carries `values` and the current locals to the frame at `target`.
+    /// Each target costs its values again (a return's edges, a loop's
+    /// parameter edges or a stored incoming path), so a `br_table` with many
+    /// targets is charged per target and stops once the budget is spent.
     fn branch_to(&mut self, target: usize, values: Vec<Value>, via: Via, offset: u32, index: u32) {
+        if !self.spend(values.len() as u64) {
+            return;
+        }
         match self.frames[target].kind {
             FrameKind::Function => {
                 let node = self.returns(offset, index, &values);
@@ -1268,12 +1281,13 @@ impl Sim<'_, '_> {
             _ => {
                 let locals = self.snapshot(target);
                 let values = values.into_iter().map(|v| self.materialize(v)).collect();
-                self.frames[target].incoming.push(Incoming {
+                let path = self.stored_path(Incoming {
                     via,
                     via_offset: offset,
                     values,
                     locals,
                 });
+                self.frames[target].incoming.push(path);
             }
         }
     }
@@ -1424,7 +1438,12 @@ impl Sim<'_, '_> {
             self.edge(entry, phi, 0, EdgeKind::Merge, Via::Entry, offset);
             while position < by_local.len() && by_local[position].0 == local {
                 let (_, value, at) = by_local[position];
-                self.spend(1);
+                if !self.spend(1) {
+                    // Ends both loops: the rest of the joins are cut with the
+                    // simulation, which stops after this instruction.
+                    position = by_local.len();
+                    break;
+                }
                 self.edge(value, phi, 0, EdgeKind::Merge, Via::Catch, at);
                 position += 1;
             }
@@ -1684,6 +1703,11 @@ impl Sim<'_, '_> {
         let saved = self.frames[position].saved.clone();
         let _ = (offset, index);
         for (target, tag, count) in catches {
+            // A try_table may name thousands of clauses with tags of up to a
+            // thousand values each: every clause is charged before it is built.
+            if !self.spend(u64::from(count) + 1) {
+                break;
+            }
             let values = self.exception_values(entry_offset, instruction, tag, count, true);
             let local_value = |local: u32, current: Value| -> Value {
                 if let Ok(found) = phis.binary_search_by_key(&local, |(l, _)| *l) {
@@ -1712,6 +1736,9 @@ impl Sim<'_, '_> {
                     }
                     let locals = self.frames[target].loop_local_phis.clone();
                     for (local, phi) in locals {
+                        if !self.spend(1) {
+                            break;
+                        }
                         let value = local_value(local, self.locals[local as usize]);
                         if !self.same(value, Value::of(phi)) {
                             self.edge(value, phi, 0, EdgeKind::Merge, Via::Catch, entry_offset);
@@ -1726,15 +1753,22 @@ impl Sim<'_, '_> {
                         .collect();
                     locals.sort_unstable_by_key(|(local, _)| *local);
                     self.spend(locals.len() as u64);
-                    self.frames[target].incoming.push(Incoming {
+                    let path = self.stored_path(Incoming {
                         via: Via::Catch,
                         via_offset: entry_offset,
                         values,
                         locals,
                     });
+                    self.frames[target].incoming.push(path);
                 }
             }
         }
+    }
+
+    /// Counts what an incoming path keeps until its merge.
+    fn stored_path(&mut self, path: Incoming) -> Incoming {
+        self.stored += (path.values.len() + path.locals.len()) as u64;
+        path
     }
 
     fn clear_store(&mut self) {
@@ -1871,6 +1905,9 @@ impl Sim<'_, '_> {
                 depths.dedup();
                 self.spend(depths.len() as u64);
                 for depth in depths {
+                    if self.exhausted.is_some() {
+                        break;
+                    }
                     self.branch(depth, Via::BrTable, offset, index);
                 }
                 self.unreachable();
@@ -2063,12 +2100,13 @@ impl Sim<'_, '_> {
                     let values = self.top_at(height, results);
                     let values = values.into_iter().map(|v| self.materialize(v)).collect();
                     let locals = self.snapshot(position);
-                    self.frames[position].incoming.push(Incoming {
+                    let path = self.stored_path(Incoming {
                         via: Via::Fallthrough,
                         via_offset: offset,
                         values,
                         locals,
                     });
+                    self.frames[position].incoming.push(path);
                 }
                 self.close_try_body(position);
                 let height = self.frames[position].height;

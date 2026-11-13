@@ -216,12 +216,35 @@ impl Role {
     }
 }
 
+/// One node of the slice. Its ends are flags, not one role: a call can be
+/// where the value comes from and where it goes in the same loop, and the
+/// seed instruction can feed itself around a back edge.
 struct Included {
     node: u32,
-    role: Role,
+    seed: bool,
+    source: bool,
+    sink: bool,
+    frontier: bool,
     backward: bool,
     forward: bool,
     depth: u32,
+}
+
+impl Included {
+    /// The one label a reader sees first: seed, then source, sink, frontier.
+    fn role(&self) -> Role {
+        if self.seed {
+            Role::Seed
+        } else if self.source {
+            Role::Source
+        } else if self.sink {
+            Role::Sink
+        } else if self.frontier {
+            Role::Frontier
+        } else {
+            Role::Interior
+        }
+    }
 }
 
 #[derive(Default)]
@@ -346,7 +369,7 @@ struct Slicer<'s> {
 }
 
 impl Slicer<'_> {
-    fn include(&mut self, node: u32, role: Role, depth: u32, backward: bool) -> Option<u32> {
+    fn include(&mut self, node: u32, depth: u32, backward: bool) -> Option<u32> {
         if let Some(id) = self.id_of.get(&node).copied() {
             let entry = &mut self.included[id as usize];
             if backward {
@@ -363,12 +386,38 @@ impl Slicer<'_> {
         let id = self.included.len() as u32;
         self.included.push(Included {
             node,
-            role,
+            seed: false,
+            source: false,
+            sink: false,
+            frontier: false,
             backward,
             forward: !backward,
             depth,
         });
         self.id_of.insert(node, id);
+        Some(id)
+    }
+
+    fn entry(&mut self, node: u32) -> Option<&mut Included> {
+        let id = *self.id_of.get(&node)?;
+        Some(&mut self.included[id as usize])
+    }
+
+    fn seed(&mut self, node: u32) -> Option<u32> {
+        let id = self.include(node, 0, true)?;
+        self.included[id as usize].seed = true;
+        Some(id)
+    }
+
+    /// The producer of a seed operand that no consuming node records: an
+    /// ordinary node one step from the seed, so the leaf and address rules
+    /// apply to it as to any other producer.
+    fn producer(&mut self, node: u32) -> Option<u32> {
+        let id = self.include(node, 1, true)?;
+        let kind = self.sim.nodes[node as usize].kind;
+        if backward_leaf(kind) || addressed_source(kind) {
+            self.included[id as usize].source = true;
+        }
         Some(id)
     }
 
@@ -384,34 +433,29 @@ impl Slicer<'_> {
         self.edges.push(edge);
     }
 
-    fn set_role(&mut self, node: u32, role: Role) {
-        if let Some(id) = self.id_of.get(&node)
-            && self.included[*id as usize].role != Role::Seed
-        {
-            self.included[*id as usize].role = role;
-        }
-    }
-
-    /// Walks producers from `starts`, each an edge into an already included
-    /// node or a node to expand from depth zero.
-    fn backward(&mut self, expand: &[u32], edges: &[u32]) {
-        let mut queue: VecDeque<(u32, u32)> = VecDeque::new();
+    /// Walks producers from `expand` (nodes and their depth) and from `edges`
+    /// into an included start node. Only a start node at depth zero (the seed
+    /// instruction itself) follows every input; any other node, the seed's
+    /// own value met again around a loop included, follows the leaf and
+    /// address rules.
+    fn backward(&mut self, expand: &[(u32, u32)], edges: &[u32]) {
+        let mut queue: VecDeque<(u32, u32)> = expand.iter().copied().collect();
         let mut expanded: HashSet<u32> = HashSet::new();
-        for node in expand {
-            queue.push_back((*node, 0));
-        }
         let mut pending: Vec<(u32, u32)> = edges.iter().map(|edge| (*edge, 0)).collect();
         let mut steps = 0u32;
         loop {
             for (edge, depth) in pending.drain(..) {
                 let from = self.sim.edges[edge as usize].from;
-                if self
-                    .include(from, Role::Interior, depth + 1, true)
-                    .is_none()
-                {
+                if self.include(from, depth + 1, true).is_none() {
                     continue;
                 }
                 self.keep_edge(edge);
+                let kind = self.sim.nodes[from as usize].kind;
+                if (backward_leaf(kind) || addressed_source(kind))
+                    && let Some(entry) = self.entry(from)
+                {
+                    entry.source = true;
+                }
                 if !expanded.contains(&from) {
                     queue.push_back((from, depth + 1));
                 }
@@ -428,30 +472,24 @@ impl Slicer<'_> {
                 continue;
             }
             let kind = self.sim.nodes[node as usize].kind;
-            let seed = self
-                .id_of
-                .get(&node)
-                .is_some_and(|id| self.included[*id as usize].role == Role::Seed);
-            if !seed {
-                if backward_leaf(kind) {
-                    self.set_role(node, Role::Source);
-                    continue;
-                }
-                if addressed_source(kind) {
-                    self.set_role(node, Role::Source);
-                }
+            let start = depth == 0 && self.entry(node).is_some_and(|entry| entry.seed);
+            if !start && backward_leaf(kind) {
+                continue;
             }
             if depth >= self.max_depth {
                 if !self.adjacency.inputs(node).is_empty() {
                     self.truncated.depth = true;
-                    if !seed && !addressed_source(kind) {
-                        self.set_role(node, Role::Frontier);
+                    if !start
+                        && !addressed_source(kind)
+                        && let Some(entry) = self.entry(node)
+                    {
+                        entry.frontier = true;
                     }
                 }
                 continue;
             }
             for edge in self.adjacency.inputs(node).to_vec() {
-                if !seed
+                if !start
                     && !follows_backward(
                         &self.sim.nodes[node as usize],
                         self.sim.edges[edge as usize].kind,
@@ -465,7 +503,9 @@ impl Slicer<'_> {
         }
     }
 
-    /// Walks uses from `starts`, values whose consumers are followed.
+    /// Walks uses from `starts`, values whose consumers are followed. A
+    /// consumer the value does not flow through is a sink, whatever else it
+    /// is in the slice.
     fn forward(&mut self, starts: &[(Def, u32)]) {
         let mut queue: VecDeque<(Def, u32)> = starts.iter().copied().collect();
         let mut expanded: HashSet<Def> = HashSet::new();
@@ -489,12 +529,10 @@ impl Slicer<'_> {
             if depth >= self.max_depth {
                 if !uses.is_empty() {
                     self.truncated.depth = true;
-                    let seed = self
-                        .id_of
-                        .get(&value.node)
-                        .is_some_and(|id| self.included[*id as usize].role == Role::Seed);
-                    if !seed {
-                        self.set_role(value.node, Role::Frontier);
+                    if let Some(entry) = self.entry(value.node)
+                        && !entry.seed
+                    {
+                        entry.frontier = true;
                     }
                 }
                 continue;
@@ -503,22 +541,13 @@ impl Slicer<'_> {
                 let target = self.sim.edges[edge as usize];
                 let node = &self.sim.nodes[target.to as usize];
                 let continues = forward_continues(node.kind, target.kind);
-                let known = self.id_of.contains_key(&target.to);
-                let role = if continues {
-                    Role::Interior
-                } else {
-                    Role::Sink
-                };
-                if self.include(target.to, role, depth + 1, false).is_none() {
+                if self.include(target.to, depth + 1, false).is_none() {
                     continue;
                 }
                 self.keep_edge(edge);
                 if !continues {
-                    if known {
-                        let id = self.id_of[&target.to] as usize;
-                        if self.included[id].role == Role::Interior {
-                            self.included[id].role = Role::Sink;
-                        }
+                    if let Some(entry) = self.entry(target.to) {
+                        entry.sink = true;
                     }
                     continue;
                 }
@@ -731,52 +760,59 @@ struct CallSites {
     sites: Vec<(u32, u32)>,
     finished: bool,
     referenced: bool,
+    /// Bodies that do not decode; their calls are not listed.
+    undecoded: Vec<u32>,
 }
 
 /// Every direct call site of `callee` in the module, bounded by the deadline
 /// and a site cap.
-fn call_sites(module: &Module<'_>, callee: u32, deadline: Instant) -> Result<CallSites> {
-    let mut sites = Vec::new();
-    let mut referenced = false;
+fn call_sites(module: &Module<'_>, callee: u32, deadline: Instant) -> CallSites {
+    let mut found = CallSites {
+        sites: Vec::new(),
+        finished: true,
+        referenced: false,
+        undecoded: Vec::new(),
+    };
     let mut steps = 0u64;
-    for (position, body) in module.bodies.iter().enumerate() {
+    'bodies: for (position, body) in module.bodies.iter().enumerate() {
         let caller = module.imported_functions + position as u32;
-        let mut reader = body.get_operators_reader().map_err(wasm_def_use::bad)?;
+        // Another function's bytes need not decode; that body is skipped and
+        // named, and the seed's own function is unaffected.
+        let Ok(mut reader) = body.get_operators_reader() else {
+            found.undecoded.push(caller);
+            continue;
+        };
         while !reader.eof() {
             steps += 1;
             if steps & 4095 == 0 && Instant::now() > deadline {
-                return Ok(CallSites {
-                    sites,
-                    finished: false,
-                    referenced,
-                });
+                found.finished = false;
+                break 'bodies;
             }
-            let (op, offset) = reader.read_with_offset().map_err(wasm_def_use::bad)?;
+            let Ok((op, offset)) = reader.read_with_offset() else {
+                found.undecoded.push(caller);
+                continue 'bodies;
+            };
             match op {
                 Operator::Call { function_index } | Operator::ReturnCall { function_index }
                     if function_index == callee =>
                 {
-                    if sites.len() >= MAX_CALL_SITES {
-                        return Ok(CallSites {
-                            sites,
-                            finished: false,
-                            referenced,
-                        });
+                    if found.sites.len() >= MAX_CALL_SITES {
+                        found.finished = false;
+                        break 'bodies;
                     }
-                    sites.push((caller, offset as u32));
+                    found.sites.push((caller, offset as u32));
                 }
                 Operator::RefFunc { function_index } if function_index == callee => {
-                    referenced = true
+                    found.referenced = true
                 }
                 _ => {}
             }
         }
     }
-    Ok(CallSites {
-        sites,
-        finished: true,
-        referenced,
-    })
+    if !found.undecoded.is_empty() {
+        found.finished = false;
+    }
+    found
 }
 
 /// The native helper's entry point: the route's query without its artifact_id.
@@ -793,6 +829,20 @@ pub fn value_flow_query(root: &Path, id: &str, query: &str) -> Result<Value> {
 /// The value-flow document for one request, or a provider error.
 pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
     let artifact = wasm_graph::artifact(root, id)?;
+    value_flow_of(&artifact, request)
+}
+
+/// The document for verified artifact bytes already in memory.
+pub(crate) fn value_flow_of(artifact: &wasm_graph::Artifact, request: &Request) -> Result<Value> {
+    value_flow_with(artifact, request, wasm_def_use::Limits::default())
+}
+
+/// [`value_flow_of`] with explicit simulation budgets, so tests reach each stop.
+pub(crate) fn value_flow_with(
+    artifact: &wasm_graph::Artifact,
+    request: &Request,
+    limits: wasm_def_use::Limits,
+) -> Result<Value> {
     let started = Instant::now();
     let deadline = started + DEADLINE;
     let module = Module::read(&artifact.bytes)?;
@@ -819,7 +869,7 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
             range.len()
         )));
     }
-    let sim = wasm_def_use::simulate(&module, function, body, deadline)?;
+    let sim = wasm_def_use::simulate_with(&module, function, body, deadline, limits)?;
     let adjacency = Adjacency::new(&sim);
     let max_nodes = request.max_nodes;
     let mut slicer = Slicer {
@@ -841,9 +891,12 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
     let (seed_offset, seed_operand, seed_local, operand_count) = match request.seed {
         Seed::Instruction { offset, operand } => {
             let Some(instruction) = sim.instruction_at(offset) else {
+                // Past the last simulated instruction, or no instruction was
+                // simulated at all: the stop, not the offset, is the answer.
+                let simulated_to = sim.instructions.last().copied();
                 if let Some(stopped) = sim.stopped_at
-                    && offset >= stopped
                     && (offset as usize) < range.end
+                    && (offset >= stopped || simulated_to.is_none_or(|last| offset > last))
                 {
                     return Err(Error::new(
                         400,
@@ -885,7 +938,7 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
                     };
                     let mut starts = Vec::new();
                     if node != NONE {
-                        slicer.include(node, Role::Seed, 0, true);
+                        slicer.seed(node);
                         seed_nodes.push(node);
                         if let Some(edge) =
                             slicer.adjacency.inputs(node).iter().copied().find(|edge| {
@@ -899,18 +952,14 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
                             starts.push(edge);
                         }
                     }
-                    if starts.is_empty() {
-                        slicer.include(value.node, Role::Seed, 0, true);
-                        seed_nodes.push(value.node);
+                    // The producer is always listed, one step from the seed,
+                    // so a forward-only slice still shows where it starts.
+                    slicer.producer(value.node);
+                    if let Some(edge) = starts.first() {
+                        slicer.keep_edge(*edge);
                     }
-                    seed_values.push(value);
                     if request.direction.backward() {
-                        let expand = if starts.is_empty() {
-                            vec![value.node]
-                        } else {
-                            Vec::new()
-                        };
-                        slicer.backward(&expand, &starts);
+                        slicer.backward(&[(value.node, 1)], &[]);
                     }
                     if request.direction.forward() {
                         slicer.forward(&[(value, 1)]);
@@ -923,7 +972,7 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
                         )));
                     }
                     if node != NONE {
-                        slicer.include(node, Role::Seed, 0, true);
+                        slicer.seed(node);
                         seed_nodes.push(node);
                         if request.direction.backward() {
                             let edges: Vec<u32> = slicer.adjacency.inputs(node).to_vec();
@@ -937,18 +986,19 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
                             slicer.forward(&starts);
                         }
                     } else {
+                        // A block end or a branch has no node of its own: its
+                        // operands' producers are ordinary nodes one step away.
                         for value in &inputs {
-                            slicer.include(value.node, Role::Seed, 0, true);
-                            seed_nodes.push(value.node);
-                            seed_values.push(*value);
+                            slicer.producer(value.node);
                         }
                         if request.direction.backward() {
-                            let expand: Vec<u32> = inputs.iter().map(|value| value.node).collect();
+                            let expand: Vec<(u32, u32)> =
+                                inputs.iter().map(|value| (value.node, 1)).collect();
                             slicer.backward(&expand, &[]);
                         }
                         if request.direction.forward() {
                             let starts: Vec<(Def, u32)> =
-                                inputs.iter().map(|value| (*value, 0)).collect();
+                                inputs.iter().map(|value| (*value, 1)).collect();
                             slicer.forward(&starts);
                         }
                     }
@@ -986,7 +1036,12 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
                 ));
             }
             for def in &defs {
-                if slicer.include(*def, Role::Seed, 0, true).is_some() {
+                if let Some(id) = slicer.seed(*def) {
+                    // A parameter or a local's zero value is also where the
+                    // local's value comes from.
+                    if backward_leaf(sim.nodes[*def as usize].kind) {
+                        slicer.included[id as usize].source = true;
+                    }
                     seed_nodes.push(*def);
                     seed_values.push(Def {
                         node: *def,
@@ -1045,11 +1100,13 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
         object.insert("id".into(), json!(id));
         object.insert("kind".into(), json!(n.kind.name()));
         object.insert("byte_offset".into(), json!(n.offset));
-        object.insert("role".into(), json!(entry.role.name()));
+        object.insert("role".into(), json!(entry.role().name()));
+        object.insert("source".into(), json!(entry.source));
+        object.insert("sink".into(), json!(entry.sink));
         object.insert(
             "direction".into(),
-            json!(match (entry.role, entry.backward, entry.forward) {
-                (Role::Seed, _, _) => "seed",
+            json!(match (entry.seed, entry.backward, entry.forward) {
+                (true, _, _) => "seed",
                 (_, true, true) => "both",
                 (_, true, false) => "backward",
                 _ => "forward",
@@ -1166,6 +1223,9 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
             object.insert("slot".into(), json!(n.aux));
         }
         object.insert("incoming_count".into(), json!(inputs.len()));
+        if sim.open_joins.contains(&entry.node) {
+            object.insert("incomplete".into(), json!(true));
+        }
         joins.push(JoinRow {
             node: id,
             object,
@@ -1234,9 +1294,12 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
     // sources and sinks, then joins, then the steps between them nearest the
     // seed. Kept nodes are renumbered in walk order.
     let rank = |id: usize| -> u8 {
-        match slicer.included[id].role {
-            Role::Seed => 0,
-            Role::Source | Role::Sink => 1,
+        let entry = &slicer.included[id];
+        match entry.role() {
+            // A block end or branch seed has no node: its operands' producers,
+            // one step away, stand for it.
+            _ if entry.seed || entry.depth <= 1 => 0,
+            _ if entry.source || entry.sink => 1,
             _ if sim.nodes[slicer.included[id].node as usize].kind == NodeKind::Phi => 2,
             _ => 3,
         }
@@ -1300,9 +1363,9 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
                 Some(Value::Object(object))
             })
             .collect();
-        let roles = |role: Role| -> Vec<usize> {
+        let ends = |end: fn(&Included) -> bool| -> Vec<usize> {
             (0..total)
-                .filter(|id| slicer.included[*id].role == role)
+                .filter(|id| end(&slicer.included[*id]))
                 .filter_map(|id| renumber[id])
                 .collect()
         };
@@ -1367,8 +1430,8 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
             "nodes": kept_nodes,
             "edges": kept_edges,
             "joins": kept_joins,
-            "sources": roles(Role::Source),
-            "sinks": roles(Role::Sink),
+            "sources": ends(|entry| entry.source),
+            "sinks": ends(|entry| entry.sink),
             "interprocedural": steps_value,
             "truncated": truncated_value,
             "omissions": notes,
@@ -1456,7 +1519,7 @@ fn interprocedural_steps(
         match n.kind {
             NodeKind::Param => params.push((id, n.index)),
             NodeKind::Return if entry.forward => returns.push(id),
-            NodeKind::Call if matches!(entry.role, Role::Source | Role::Seed) => push(
+            NodeKind::Call if entry.source || entry.seed => push(
                 &mut steps,
                 json!({"kind": "callee_return", "node": id, "function": n.index, "byte_offset": n.offset, "slot": null}),
             ),
@@ -1479,7 +1542,16 @@ fn interprocedural_steps(
             sites,
             finished,
             referenced,
-        } = call_sites(module, function, deadline)?;
+            undecoded,
+        } = call_sites(module, function, deadline);
+        if !undecoded.is_empty() {
+            let listed: Vec<String> = undecoded.iter().take(8).map(u32::to_string).collect();
+            omissions.push(format!(
+                "The direct call site scan could not decode {} function bodies (first: {}); calls in them are not listed.",
+                undecoded.len(),
+                listed.join(", ")
+            ));
+        }
         let indirect = referenced
             || module.exported.contains(&function)
             || module.element_functions.contains(&function)
@@ -2352,10 +2424,13 @@ mod tests {
         .unwrap();
         assert_eq!(whole["seed"]["operand_count"], 2);
         let carried = flow(&bytes, &format!("function=0&offset={br_if}&operand=0")).unwrap();
+        // The branch is the seed; the carried value's producer is an ordinary
+        // node one step away, a source by the leaf rule.
+        assert_eq!(carried["nodes"][0]["kind"], "branch");
         assert!(
             node(&carried, "const")
                 .iter()
-                .any(|n| n["role"] == "seed" && n["text"] == "i32.const 7"),
+                .any(|n| n["role"] == "source" && n["depth"] == 1 && n["text"] == "i32.const 7"),
             "{}",
             carried["nodes"]
         );
@@ -2479,5 +2554,436 @@ mod tests {
             "{}",
             error.message
         );
+    }
+
+    fn artifact_of(bytes: &[u8]) -> wasm_graph::Artifact {
+        wasm_graph::Artifact {
+            bytes: bytes.to_vec(),
+            artifact_id: json!("7"),
+            sha256: json!("0".repeat(64)),
+        }
+    }
+
+    fn limited(bytes: &[u8], query: &str, limits: wasm_def_use::Limits) -> Result<Value> {
+        value_flow_with(&artifact_of(bytes), &parse_query(query).unwrap(), limits)
+    }
+
+    fn source_kinds(document: &Value) -> Vec<String> {
+        let mut kinds: Vec<String> = kinds_of(document, "sources")
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        kinds.sort();
+        kinds
+    }
+
+    #[test]
+    fn producers_of_nodeless_seeds_follow_the_leaf_and_address_rules() {
+        let bytes = wat::parse_str(
+            r#"(module (import "env" "imp" (func $imp (param i32) (result i32)))
+              (memory 1 1 shared)
+              (func (param i32 i32) (result i32)
+                block (result i32) local.get 1 call $imp end)
+              (func (param i32 i32) (result i32)
+                block (result i32) local.get 1 call $imp local.get 0 br_if 0 end)
+              (func (param i32 i32) (result i32)
+                block (result i32) (i32.atomic.rmw.add (local.get 0) (local.get 1)) end))"#,
+        )
+        .unwrap();
+        let block_end = offset_of(&bytes, 1, "end", 0);
+        let function_end = offset_of(&bytes, 1, "end", 1);
+        for offset in [block_end, function_end] {
+            let document = flow(
+                &bytes,
+                &format!("function=1&offset={offset}&operand=0&direction=backward"),
+            )
+            .unwrap();
+            assert_eq!(
+                source_kinds(&document),
+                ["import_call"],
+                "end at {offset}: {}",
+                document["nodes"]
+            );
+        }
+        let br_if = offset_of(&bytes, 2, "br_if", 0);
+        let carried = flow(
+            &bytes,
+            &format!("function=2&offset={br_if}&operand=0&direction=backward"),
+        )
+        .unwrap();
+        assert_eq!(
+            source_kinds(&carried),
+            ["import_call"],
+            "{}",
+            carried["nodes"]
+        );
+        let atomic_end = offset_of(&bytes, 3, "end", 0);
+        let atomic = flow(
+            &bytes,
+            &format!("function=3&offset={atomic_end}&direction=backward"),
+        )
+        .unwrap();
+        assert_eq!(
+            source_kinds(&atomic),
+            ["atomic", "param"],
+            "{}",
+            atomic["nodes"]
+        );
+        assert!(
+            node(&atomic, "param").iter().all(|n| n["local"] == 0),
+            "only the address feeds the old value"
+        );
+    }
+
+    #[test]
+    fn handlers_of_bodies_that_end_in_a_branch_get_exception_values() {
+        let bytes = wat::parse_str(
+            r#"(module (tag $e (param i32))
+              (import "env" "f" (func $f (param i32) (result i32)))
+              (import "env" "send" (func $send (param i32)))
+              (func (param i32) (result i32)
+                block $done (result i32)
+                  block $h (result i32)
+                    try_table (catch $e $h) local.get 0 call $f br $done end
+                    unreachable
+                  end
+                  call $send
+                  i32.const -1
+                end))"#,
+        )
+        .unwrap();
+        let send = offset_of(&bytes, 2, "call", 1);
+        let document = flow(
+            &bytes,
+            &format!("function=2&offset={send}&operand=0&direction=backward"),
+        )
+        .unwrap();
+        assert_eq!(document["status"], "computed", "{}", document["omissions"]);
+        assert_eq!(
+            source_kinds(&document),
+            ["exception_value"],
+            "{}",
+            document["nodes"]
+        );
+    }
+
+    #[test]
+    fn carried_values_count_against_the_work_budget() {
+        let mut text = format!(
+            "(module (type $big (func (result{}))) (func (param i32) (result i32) block (type $big)",
+            " i32".repeat(1000)
+        );
+        text.push_str(&" i32.const 1".repeat(1000));
+        text.push_str(&" local.get 0 br_if 0".repeat(5000));
+        text.push_str(" end");
+        text.push_str(&" drop".repeat(999));
+        text.push_str("))");
+        let bytes = wat::parse_str(text).unwrap();
+        let started = Instant::now();
+        let document = flow(&bytes, "function=0&local=0").unwrap();
+        assert_eq!(
+            document["truncated"]["simulation"], true,
+            "{}",
+            document["omissions"]
+        );
+        assert!(
+            document["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o.as_str().unwrap().contains("work budget")),
+            "{}",
+            document["omissions"]
+        );
+        assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    #[test]
+    fn a_node_can_be_both_a_source_and_a_sink() {
+        let bytes = wat::parse_str(
+            r#"(module (import "env" "imp" (func $imp (param i32) (result i32)))
+              (memory 1)
+              (func (param i32) (result i32) (local i32)
+                loop local.get 1 call $imp local.set 1 local.get 0 br_if 0 end
+                local.get 1)
+              (func (param i32) (result i32)
+                loop local.get 0 i32.load local.set 0 local.get 0 br_if 0 end
+                local.get 0))"#,
+        )
+        .unwrap();
+        for (function, kind) in [(1, "import_call"), (2, "load")] {
+            let get = offset_of(&bytes, function, "local.get", 0);
+            for direction in ["both", "forward"] {
+                let document = flow(
+                    &bytes,
+                    &format!("function={function}&offset={get}&direction={direction}"),
+                )
+                .unwrap();
+                let ends: Vec<&Value> = node(&document, kind);
+                assert_eq!(ends.len(), 1, "{direction}: {}", document["nodes"]);
+                assert_eq!(
+                    ends[0]["sink"], true,
+                    "function {function} {direction}: the {kind} consumes the value"
+                );
+                assert!(
+                    kinds_of(&document, "sinks").contains(&kind),
+                    "{direction}: {}",
+                    document["sinks"]
+                );
+                if direction == "both" {
+                    assert_eq!(
+                        ends[0]["source"], true,
+                        "function {function}: the {kind} also produces it"
+                    );
+                    assert!(kinds_of(&document, "sources").contains(&kind));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn loops_open_at_a_stop_and_capped_bodies_say_so() {
+        let mut text = String::from(
+            "(module (func (param i32) (result i32) (local i32) loop local.get 1 drop",
+        );
+        text.push_str(&" nop".repeat(40));
+        text.push_str(" local.get 0 local.set 1 local.get 0 br_if 0 end i32.const 0))");
+        let bytes = wat::parse_str(text).unwrap();
+        let limits = wasm_def_use::Limits {
+            max_instructions: 20,
+            max_work: wasm_def_use::MAX_WORK,
+        };
+        let get = offset_of(&bytes, 0, "local.get", 0);
+        let document = limited(
+            &bytes,
+            &format!("function=0&offset={get}&direction=backward"),
+            limits,
+        )
+        .unwrap();
+        assert_eq!(document["truncated"]["simulation"], true);
+        let join = joins_of(&document, "loop")[0];
+        assert_eq!(join["incomplete"], true, "{join}");
+        assert!(
+            document["omissions"].as_array().unwrap().iter().any(|o| o
+                .as_str()
+                .unwrap()
+                .contains("still open where simulation stopped")),
+            "{}",
+            document["omissions"]
+        );
+        assert!(
+            document["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o.as_str().unwrap().contains("instruction cap of 20")),
+            "{}",
+            document["omissions"]
+        );
+        let late = offset_of(&bytes, 0, "local.set", 0);
+        let error = limited(&bytes, &format!("function=0&offset={late}"), limits).unwrap_err();
+        assert_eq!(
+            (error.status, error.reason.code),
+            (400, Code::ResourceLimit),
+            "{}",
+            error.message
+        );
+        let complete = flow(
+            &bytes,
+            &format!("function=0&offset={get}&direction=backward"),
+        )
+        .unwrap();
+        assert!(joins_of(&complete, "loop")[0].get("incomplete").is_none());
+    }
+
+    #[test]
+    fn an_undecodable_body_elsewhere_only_narrows_the_call_site_scan() {
+        let mut bytes = wat::parse_str(
+            "(module (func $callee (param i32) (result i32) local.get 0) (func (param i32) (result i32) local.get 0 call $callee) (func nop nop nop))",
+        )
+        .unwrap();
+        let module = Module::read(&bytes).unwrap();
+        let broken = module.bodies[2].range();
+        drop(module);
+        let at = (broken.start..broken.end)
+            .find(|at| bytes[*at] == 0x01)
+            .unwrap();
+        bytes[at] = 0xff;
+        let document = flow(
+            &bytes,
+            "function=0&local=0&direction=backward&interprocedural=true",
+        )
+        .unwrap();
+        assert_eq!(
+            document["interprocedural"]["direct_callers"]["scan_complete"],
+            false
+        );
+        assert!(
+            document["interprocedural"]["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["kind"] == "caller_argument" && s["function"] == 1)
+        );
+        assert!(
+            document["omissions"].as_array().unwrap().iter().any(|o| o
+                .as_str()
+                .unwrap()
+                .contains("could not decode 1 function bodies (first: 2)")),
+            "{}",
+            document["omissions"]
+        );
+    }
+
+    #[test]
+    fn dead_loops_get_no_header_joins() {
+        let bytes = wat::parse_str(
+            "(module (func (param i32) (result i32) (local i32) i32.const 0 return loop local.get 0 local.set 1 br 0 end local.get 1))",
+        )
+        .unwrap();
+        let module = Module::read(&bytes).unwrap();
+        let sim = wasm_def_use::simulate(
+            &module,
+            0,
+            &module.bodies[0],
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap();
+        assert!(
+            sim.nodes.iter().all(|n| n.kind != NodeKind::Phi),
+            "a loop no path reaches has no joins"
+        );
+    }
+
+    /// Every edge, join and role of a document refers to the nodes it names:
+    /// kinds and offsets agree, as they must after the byte cut renumbers.
+    fn assert_consistent(document: &Value) {
+        let nodes = document["nodes"].as_array().unwrap();
+        let target = |kind: &str| -> &[&str] {
+            match kind {
+                "local" => &["local_get"],
+                "merge" => &["phi"],
+                "local_set" => &["local_set", "local_tee"],
+                "argument" => &["call", "import_call", "call_indirect", "call_ref", "throw"],
+                "return" => &["return"],
+                "address" => &["load", "store", "atomic"],
+                "stored_value" => &["store", "atomic"],
+                "operand" => &[
+                    "operation",
+                    "select",
+                    "load",
+                    "memory",
+                    "table",
+                    "local_get",
+                ],
+                _ => &[],
+            }
+        };
+        for (id, n) in nodes.iter().enumerate() {
+            assert_eq!(n["id"], id);
+        }
+        for edge in document["edges"].as_array().unwrap() {
+            let (from, to) = (
+                &nodes[edge["from"].as_u64().unwrap() as usize],
+                &nodes[edge["to"].as_u64().unwrap() as usize],
+            );
+            let allowed = target(edge["kind"].as_str().unwrap());
+            if !allowed.is_empty() {
+                assert!(
+                    allowed.contains(&to["kind"].as_str().unwrap()),
+                    "{edge} ends at {to}"
+                );
+            }
+            if edge["kind"] != "merge" {
+                assert!(
+                    from["byte_offset"].as_u64() <= to["byte_offset"].as_u64(),
+                    "{edge}: {from} after {to}"
+                );
+            }
+        }
+        for join in document["joins"].as_array().unwrap() {
+            let n = &nodes[join["node"].as_u64().unwrap() as usize];
+            assert_eq!(
+                (n["kind"].as_str(), &n["byte_offset"]),
+                (Some("phi"), &join["byte_offset"])
+            );
+            for incoming in join["incoming"].as_array().unwrap() {
+                if let Some(from) = incoming["from"].as_u64() {
+                    let f = &nodes[from as usize];
+                    assert_eq!(
+                        (&f["kind"], &f["byte_offset"]),
+                        (&incoming["from_kind"], &incoming["from_offset"]),
+                        "{incoming}"
+                    );
+                }
+            }
+        }
+        for id in document["sources"].as_array().unwrap() {
+            assert_eq!(nodes[id.as_u64().unwrap() as usize]["source"], true);
+        }
+        for id in document["sinks"].as_array().unwrap() {
+            assert_eq!(nodes[id.as_u64().unwrap() as usize]["sink"], true);
+        }
+    }
+
+    #[test]
+    fn a_cut_document_still_names_its_own_nodes() {
+        // Each level adds a load from a constant address: the load and its
+        // address are both sources, kept by the cut far from the seed, with
+        // the edge between them, so their ids must be renumbered.
+        let mut text =
+            String::from("(module (memory 1) (func $chain (param i32) (result i32) local.get 0");
+        text.push_str(&" i32.const 3 i32.load i32.add".repeat(1500));
+        text.push_str("))");
+        let chain = wat::parse_str(text).unwrap();
+        let ret = offset_of(&chain, 0, "end", 0);
+        let document = flow(
+            &chain,
+            &format!("function=0&offset={ret}&direction=backward&max_nodes=4096&max_depth=256"),
+        )
+        .unwrap();
+        assert_eq!(document["truncated"]["bytes"], true);
+        assert_consistent(&document);
+        let address_edges = document["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == "address")
+            .count();
+        assert!(address_edges > 20, "{address_edges} address edges kept");
+
+        let fixture = fixture();
+        let send = offset_of(&fixture, 2, "call", 1);
+        assert_consistent(&flow(&fixture, &format!("function=2&offset={send}")).unwrap());
+    }
+
+    #[test]
+    fn forward_operand_seeds_list_their_producer() {
+        let bytes = wat::parse_str(
+            r#"(module (import "env" "s" (func $s (param i32)))
+              (func (param i32) (result i32) (local i32)
+                local.get 0 local.tee 1 call $s local.get 1 call $s local.get 1))"#,
+        )
+        .unwrap();
+        let call = offset_of(&bytes, 1, "call", 0);
+        let document = flow(
+            &bytes,
+            &format!("function=1&offset={call}&operand=0&direction=forward"),
+        )
+        .unwrap();
+        let tee = node(&document, "local_tee");
+        assert_eq!(tee.len(), 1, "{}", document["nodes"]);
+        let tee_id = tee[0]["id"].clone();
+        let seed = document["seed"]["nodes"][0].clone();
+        assert!(
+            document["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["from"] == tee_id && e["to"] == seed && e["kind"] == "argument"),
+            "{}",
+            document["edges"]
+        );
+        assert_consistent(&document);
     }
 }

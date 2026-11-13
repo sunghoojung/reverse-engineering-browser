@@ -35,8 +35,14 @@ Give exactly one of `offset` and `local`. Unknown, repeated, non-canonical or
 out-of-range parameters fail with 400 rather than widening the slice. An
 instruction that neither consumes nor produces a value (`block`, `nop`), an
 instruction no declared path reaches, and an `operand` past the instruction's
-operands are 400. A seed at or after the point where the simulation stopped is
-400 with code `resource_limit`.
+operands are 400. A seed at or after the point where the simulation stopped,
+or past the last instruction it simulated, is 400 with code `resource_limit`.
+
+The seed is the instruction. When it records an operand that no node of its
+own consumes (a block's `end`, a carried value of `br`, `br_if` or
+`br_table`), that operand's producer is an ordinary node one step from the
+seed, so the leaf and address rules below apply to it as to any producer; an
+operand seed always lists its producer, in a forward slice too.
 
 ## Simulation
 
@@ -61,7 +67,9 @@ Merges follow structured control flow only, so no target is guessed:
   back edge.
 - A `try` or `try_table` handler joins each local the body defined with its
   value at entry and every definition inside the body, since a throw can happen
-  between any two of them.
+  between any two of them. A `try_table` reached at entry gives its catch
+  clauses exception values even when its body ends in `br`, `return` or a
+  throw, as compiled code usually does.
 
 Join incoming `via` values: `entry`, `fallthrough`, `br`, `br_if`, `br_table`,
 `br_on`, `then_end` (an `if` arm reaching `else`), `if_false` (the implicit
@@ -81,8 +89,11 @@ way: a `global.get` is always a source, even right after a `global.set` of the
 same global.
 
 Operators whose stack effect v1 does not model (stack switching) stop the
-simulation with a named omission. The prefix before them is still valid and
-the document is `partial`.
+simulation with a named omission, and so do the instruction cap, the work
+budget and the deadline. The prefix before the stop is valid with one
+exception: a loop still open at the stop is named in an omission, values read
+in it may also arrive by back edges after the stop, and its header joins carry
+`incomplete: true`. The document is `partial`.
 
 Captured bytes need not validate. A reachable instruction that finds fewer
 operands than it needs gets `unknown` values; a path that carries fewer or more
@@ -107,6 +118,11 @@ value side), call arguments, the selector of `call_indirect`, `call_ref`,
 `if`, `br_if`, `br_table` and `select`, `global_set`, `return`, `throw` and
 `drop`. An `import_call` sink is where the value crosses into JavaScript.
 
+A node's ends are independent: a call whose result returns to its own
+argument around a loop, or a load whose address is the value it loaded, is a
+source and a sink in one slice, and the seed instruction is also a source when
+its own value feeds it back. `sources` and `sinks` list every such node.
+
 ## Document
 
 The [OpenAPI schema](openapi.json) defines `WasmValueFlow`.
@@ -119,9 +135,10 @@ The [OpenAPI schema](openapi.json) defines `WasmValueFlow`.
   operator cut it. `truncated` says which, and `omissions` says where.
 - `seed` repeats the request's seed, lists the seed nodes and, for an
   instruction seed, `operand_count`, the operands the instruction consumes.
-- `nodes` carry `id`, `kind`, `byte_offset`, `role` (`seed`, `source`, `sink`,
-  `interior`, or `frontier` for a node at the depth cap whose own inputs or
-  uses were not followed), `direction`, `depth`, `results`, and when they apply
+- `nodes` carry `id`, `kind`, `byte_offset`, `source` and `sink` (the node's
+  ends), `role` (one label, the first that applies of `seed`, `source`,
+  `sink`, `frontier` for a node at the depth cap whose own inputs or uses were
+  not followed, and `interior`), `direction`, `depth`, `results`, and when they apply
   `local`, `global`, `function`, `type`, `table`, `tag`, `slot`, `join` and
   `import` (`module` and `name` of an imported function, escaped and capped
   at 128 bytes).
@@ -143,7 +160,9 @@ The [OpenAPI schema](openapi.json) defines `WasmValueFlow`.
   callee that produced it). `direct_callers` reports how many direct sites were
   found, whether the scan finished, and `also_reachable_indirectly` when the
   function is exported, the start function, in an element segment or named by
-  `ref.func`, so direct sites are not every caller.
+  `ref.func`, so direct sites are not every caller. A body elsewhere in the
+  module that does not decode is skipped with `scan_complete: false` and an
+  omission naming it; it does not fail the request.
 
 ### Structure and content
 
@@ -159,7 +178,10 @@ indices and edges stay readable at every level.
 - Input: 64 MiB, the block graph's limit. One body: 7,654,321 bytes, the size
   engines accept. Locals: 50,000, the count engines accept. Larger is 400.
 - Simulation: 2,000,000 instructions and 4,000,000 work units (instructions,
-  loop-write, snapshot and join entries). The loop-write pass records a write
+  loop-write, snapshot and join entries, and every value an instruction
+  records, a branch copies or carries, or a merge joins, so a block with many
+  results and many branches to it is bounded in time and memory). The
+  loop-write pass reads the whole body and records a write
   in the innermost loop only and passes each loop's set to its enclosing loop
   at `end`, so it is linear in the bytes plus the joins it implies. Loops that
   each write many locals imply nesting depth times locals joins; the budget

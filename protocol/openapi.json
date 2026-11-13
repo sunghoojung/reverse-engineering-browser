@@ -24741,7 +24741,9 @@
                 "direction",
                 "depth",
                 "results",
-                "text"
+                "text",
+                "source",
+                "sink"
               ],
               "properties": {
                 "id": {
@@ -24781,6 +24783,14 @@
                 "byte_offset": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "source": {
+                  "type": "boolean",
+                  "description": "Where the value comes from: a leaf or memory source reached backward. A node can be a source and a sink."
+                },
+                "sink": {
+                  "type": "boolean",
+                  "description": "Where the value goes and stops flowing: reached forward over an edge it does not pass through."
                 },
                 "role": {
                   "enum": [
@@ -24977,6 +24987,10 @@
                 "slot": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "incomplete": {
+                  "const": true,
+                  "description": "Present on a loop header join whose loop was still open where simulation stopped: back edges after the stop are missing."
                 },
                 "incoming_count": {
                   "type": "integer",

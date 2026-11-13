@@ -4073,6 +4073,9 @@ mod tests {
             If,
             Else,
             Try,
+            /// A legacy try body; its catch_all arm is `LegacyArm`.
+            Legacy,
+            LegacyArm,
         }
         struct Open {
             kind: Frame,
@@ -4109,6 +4112,7 @@ mod tests {
             base: 0,
         }];
         let mut dead = false;
+        let legacy = seed % 3 == 0;
         for _ in 0..15 + next(80) {
             let available = height - frames.last().unwrap().base;
             match next(40) {
@@ -4185,18 +4189,22 @@ mod tests {
                     height -= 1;
                 }
                 30 | 31 if frames.len() < 7 => {
-                    let kind = [
-                        Frame::Block,
-                        Frame::Block,
-                        Frame::Loop,
-                        Frame::If,
-                        Frame::Try,
-                    ][next(5) as usize];
+                    // Engines refuse a module that mixes legacy and new exception
+                    // handling, so a program uses one: every third seed legacy.
+                    let catching = if legacy { Frame::Legacy } else { Frame::Try };
+                    let kind = [Frame::Block, Frame::Block, Frame::Loop, Frame::If, catching]
+                        [next(5) as usize];
                     let cond = usize::from(kind == Frame::If);
                     if available < cond {
                         continue;
                     }
-                    let params = (next(3) as usize).min(available - cond);
+                    // A legacy catch arm starts from an empty stack, so its
+                    // try takes no parameters.
+                    let params = if kind == Frame::Legacy {
+                        0
+                    } else {
+                        (next(3) as usize).min(available - cond)
+                    };
                     let results = next(3) as usize;
                     let mut signature = String::new();
                     for _ in 0..params {
@@ -4226,7 +4234,8 @@ mod tests {
                             }
                             emit!("try_table{signature}{clause}");
                         }
-                        Frame::Else => unreachable!(),
+                        Frame::Legacy => emit!("try{signature}"),
+                        Frame::Else | Frame::LegacyArm => unreachable!(),
                     }
                     frames.push(Open {
                         kind,
@@ -4302,6 +4311,12 @@ mod tests {
                         frames.last_mut().unwrap().kind = Frame::Else;
                         continue;
                     }
+                    if open.kind == Frame::Legacy {
+                        height = open.base;
+                        emit!("catch_all");
+                        frames.last_mut().unwrap().kind = Frame::LegacyArm;
+                        continue;
+                    }
                     emit!("end");
                     let open = frames.pop().unwrap();
                     height = open.base + open.results;
@@ -4318,6 +4333,12 @@ mod tests {
                     height = open.base + open.params;
                     emit!("else");
                     frames.last_mut().unwrap().kind = Frame::Else;
+                    continue;
+                }
+                if open.kind == Frame::Legacy {
+                    height = open.base;
+                    emit!("catch_all");
+                    frames.last_mut().unwrap().kind = Frame::LegacyArm;
                     continue;
                 }
                 emit!("end");
@@ -4343,6 +4364,12 @@ mod tests {
                 height = open.base + open.params;
                 emit!("else");
                 frames.last_mut().unwrap().kind = Frame::Else;
+                continue;
+            }
+            if open.kind == Frame::Legacy {
+                height = open.base;
+                emit!("catch_all");
+                frames.last_mut().unwrap().kind = Frame::LegacyArm;
                 continue;
             }
             emit!("end");
@@ -4388,6 +4415,10 @@ mod tests {
             // A tail callee that throws: the exception escapes the handler.
             "block try_table (catch_all 0) i32.const 13 return_call $mv end end local.get 0 local.get 1",
             "block try_table (catch_all 0) local.get 0 return_call $mv end end local.get 0 local.get 1",
+            // Legacy try: a write before a call its catch arm can observe,
+            // and a catch arm whose call an outer try catches.
+            "try i32.const 5 local.tee 0 i32.const 1 call $thr drop catch_all end local.get 0 local.get 1",
+            "try try i32.const 1 call $thr catch_all i32.const 5 local.tee 0 i32.const 1 call $thr drop end catch_all end local.get 0 local.get 1",
         ];
         let mut programs: Vec<(String, String)> = hand
             .iter()

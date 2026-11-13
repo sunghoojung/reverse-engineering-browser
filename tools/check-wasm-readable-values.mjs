@@ -149,7 +149,7 @@ function parseListing(text) {
     const items = [];
     while (pos < lines.length) {
       const line = lines[pos];
-      if (line === '}' || line.startsWith('} else')) return items;
+      if (line === '}' || line.startsWith('} else') || line.startsWith('} catch') || line.startsWith('} delegate')) return items;
       pos++;
       if (line.startsWith('var ')) continue;
       let m;
@@ -159,7 +159,7 @@ function parseListing(text) {
         const node = nest(n, first);
         items.push(node); continue;
       }
-      if (/^(block|loop|try_table|if \(|switch \()/.test(line) && line.endsWith('{')) {
+      if (/^(block|loop|try_table|try |if \(|switch \()/.test(line) && line.endsWith('{')) {
         items.push(frame(line)); continue;
       }
       items.push({k: 'stmt', line});
@@ -183,6 +183,20 @@ function parseListing(text) {
   }
   function frame(line) {
     let m;
+    // A legacy try: its body, then catch_all arms. A tagged catch or a
+    // delegate is outside this corpus, so it reads as unsupported.
+    if ((m = /^try( L\d+)? \{$/.exec(line))) {
+      const label = m[1]?.trim() ?? null;
+      const body = block();
+      const arms = [];
+      for (;;) {
+        const close = lines[pos++];
+        if (close === '}') break;
+        if (close === '} catch_all {') { arms.push(block()); continue; }
+        return {k: 'unsupported', line: close};
+      }
+      return {k: 'ltry', label, body, arms};
+    }
     if (line.startsWith('switch (')) {
       const p = new P(line.slice(0, -1).trim()); p.id(); p.eat('('); const sel = p.expr(); p.eat(')');
       const cases = [];
@@ -367,6 +381,20 @@ function interpret(listing, a, b, tagless) {
           }
           break;
         }
+        case 'ltry': {
+          let caught = false;
+          try { exec(it.body); }
+          catch (e) {
+            if (e instanceof Br && e.label === it.label) break;
+            if (!it.arms.length || !catchable(e)) throw e;
+            caught = true;
+          }
+          if (caught) {
+            try { exec(it.arms[0]); }
+            catch (e) { if (!(e instanceof Br && e.label === it.label)) throw e; }
+          }
+          break;
+        }
         case 'switch': {
           const s = u(ev(it.sel));
           const c = it.cases.find(c => !c.def && c.set.has(s)) ?? it.cases.find(c => c.def);
@@ -397,7 +425,7 @@ function interpret(listing, a, b, tagless) {
 }
 
 function check(mutate) {
-  let compared = 0, mismatched = 0, skipped = 0, parseErrors = 0;
+  let compared = 0, mismatched = 0, skipped = 0, parseErrors = 0, executed = 0;
   const firstMismatches = [];
   for (const source of rows.slice(0, limit)) {
     const row = {...source};
@@ -408,6 +436,7 @@ function check(mutate) {
     try { listing = parseListing(row.text); }
     catch (e) { parseErrors++; if (!mutate && parseErrors <= 3) console.log(`PARSE seed ${row.seed}: ${e.message}\n${row.text}`); continue; }
     const bytes = Buffer.from(row.wasm, 'hex');
+    executed++;
     for (const [a, b] of INPUTS) {
       const want = runEngine(bytes, a, b);
       let got;
@@ -424,7 +453,7 @@ function check(mutate) {
       }
     }
   }
-  return {compared, mismatched, skipped, parseErrors, firstMismatches};
+  return {compared, mismatched, skipped, parseErrors, executed, firstMismatches};
 }
 
 const started = Date.now();

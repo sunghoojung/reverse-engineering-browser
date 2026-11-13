@@ -152,7 +152,7 @@ stands for, and the server applies exactly those:
 | Level | Stands for | Lists |
 | --- | --- | --- |
 | `read-only` | `--omit-content` | The read-only projection, content omitted |
-| `ask` | `--allow-effects --omit-content` | Also every effectful operation |
+| `ask` | `--allow-effects --omit-content` | Also every effectful operation except `run_wasm_function`, which is a content read (`full` only) |
 | `auto` | `--allow-effects --omit-content` | The same as `ask`; whether a person approves each call is the client's setting |
 | `full` | `--allow-effects --allow-session-start --allow-content` | Also `start_live_session`, `session_action` and the content reads, with content in results |
 

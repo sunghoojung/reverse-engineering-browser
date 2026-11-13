@@ -1084,6 +1084,27 @@ fn mcp_help_names_explicit_endpoint_sources_and_effects_flag() {
     ] {
         assert!(stdout.contains(text), "{text}\n{stdout}");
     }
+    // The --allow-content help names every content read the spec lists, and
+    // the HTTP guide's ask row says which effectful operations it leaves out.
+    // Both still named only the two text reads after the Wasm runs joined.
+    let spec = specification();
+    let flat = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+    for operation in spec["x-reb-mcp"]["content_reads"]["operations"]
+        .as_array()
+        .unwrap()
+    {
+        let name = operation.as_str().unwrap();
+        assert!(
+            flat.contains(name),
+            "--allow-content help omits {name}\n{stdout}"
+        );
+    }
+    let guide = std::fs::read_to_string(repo_path("protocol/http-api.md")).unwrap();
+    let ask = guide
+        .lines()
+        .find(|line| line.starts_with("| `ask` |"))
+        .expect("the permission table has an ask row");
+    assert!(ask.contains("run_wasm_function"), "{ask}");
 }
 
 #[test]

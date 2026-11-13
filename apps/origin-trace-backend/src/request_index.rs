@@ -1372,21 +1372,25 @@ fn body_case(row: &Row) -> (&'static str, Option<&BodyChild>) {
 /// the session can name another renderer's request: the source must have the
 /// reuse's web host (a 120-byte reuse host is a prefix) and have started first.
 fn source_mismatch(reuse: &Row, source: &Row) -> Option<&'static str> {
-    let web = |class: u8| (1..=4).contains(&class);
-    let (host, other) = (
-        reuse.path.to_ascii_lowercase(),
-        source.path.to_ascii_lowercase(),
-    );
+    if reuse_host_differs(reuse.scheme_class, &reuse.path, &source.path) {
+        return Some("host_differs");
+    }
+    (source.first_ns > reuse.first_ns).then_some("started_after")
+}
+/// Whether a web reuse's host and its named source's host are known and
+/// differ; a 120-byte reuse host is a prefix. `get_xrefs` applies the same rule.
+pub(crate) fn reuse_host_differs(scheme_class: u8, reuse: &str, source: &str) -> bool {
+    let (host, other) = (reuse.to_ascii_lowercase(), source.to_ascii_lowercase());
     let known = |name: &str| !name.is_empty() && name != UNIDENTIFIED.to_ascii_lowercase();
-    if web(reuse.scheme_class)
+    (1..=4).contains(&scheme_class)
         && known(&host)
         && known(&other)
         && host != other
         && !(host.len() == 120 && other.starts_with(&host))
-    {
-        return Some("host_differs");
-    }
-    (source.first_ns > reuse.first_ns).then_some("started_after")
+}
+/// The host a valid `memory_cache_reuse` record names, else None.
+pub(crate) fn reuse_host(event: &Value) -> Option<String> {
+    memory_cache(event).map(|reuse| reuse.host)
 }
 /// The `response_body` answer of a row: its case and, for a record, what it names.
 fn body_document(row: &Row) -> Value {

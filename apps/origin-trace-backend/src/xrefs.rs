@@ -1103,6 +1103,9 @@ struct PassFacts {
     initiator_found: bool,
     /// A memory-cache reuse's named source request was found.
     source_found: bool,
+    /// Why a request of the named ID is not the reuse's load, as the request
+    /// index's `memory_cache_source.reason` says.
+    source_mismatch: Option<&'static str>,
     parent_found: bool,
     link_parents: HashSet<(u64, u64)>,
     scanned_end: u64,
@@ -1164,6 +1167,36 @@ fn classify_event(
                 // request whose response Blink reused, not an initiator
                 // (protocol/native-network-v3.md).
                 if root["type"] == "memory_cache_reuse" {
+                    // A renderer request ID names a request only within its
+                    // process, which can be reused within the session: the
+                    // source must have the reuse's host and have started first.
+                    let source_host = hex::decode(event["payload"].as_str().unwrap_or(""))
+                        .ok()
+                        .and_then(|bytes| {
+                            crate::request_index::network_target(
+                                &crate::request_index::payload_text(&bytes),
+                                "request_initiated",
+                            )
+                        })
+                        .map(|(_, host)| host)
+                        .unwrap_or_default();
+                    let reuse_host = crate::request_index::reuse_host(root).unwrap_or_default();
+                    let class = root["scheme_class"].as_u64().unwrap_or(0) as u8;
+                    let mismatch = if crate::request_index::reuse_host_differs(
+                        class,
+                        &reuse_host,
+                        &source_host,
+                    ) {
+                        Some("host_differs")
+                    } else {
+                        (unsigned(&event["monotonic_time_ns"])
+                            > unsigned(&root["monotonic_time_ns"]))
+                        .then_some("started_after")
+                    };
+                    if mismatch.is_some() {
+                        facts.source_mismatch = facts.source_mismatch.or(mismatch);
+                        return;
+                    }
                     facts.source_found = true;
                     let detail = format!(
                         "renderer process {process} · request {initiator_request} · Blink reused its response"
@@ -1746,11 +1779,26 @@ fn gaps_for(plan: &Plan, facts: &PassFacts) -> [Vec<Value>; 2] {
                     "A memory-cache reuse makes no request, so it has no initiator.".to_owned(),
                 ));
                 if unsigned(&root["initiator_process_id"]) != 0 && !facts.source_found {
-                    gaps[0].push(gap(
-                        "reused-source-not-retained",
-                        "Reused request not retained",
-                        "The request whose response Blink reused is not retained.".to_owned(),
-                    ));
+                    let named = unsigned(&root["initiator_request_id"]);
+                    gaps[0].push(match facts.source_mismatch {
+                        Some(reason) => gap(
+                            "reused-source-not-this-load",
+                            "Reused request not identified",
+                            format!(
+                                "Blink names request {named} of this renderer, but the retained request of that ID {}, so it is not this resource's load: the renderer's process ID may have been reused within the session.",
+                                if reason == "host_differs" {
+                                    "was requested from another host"
+                                } else {
+                                    "started after this reuse"
+                                }
+                            ),
+                        ),
+                        None => gap(
+                            "reused-source-not-retained",
+                            "Reused request not retained",
+                            "The request whose response Blink reused is not retained.".to_owned(),
+                        ),
+                    });
                 }
             } else if unsigned(&root["initiator_process_id"]) == 0 && parent == 0 {
                 gaps[0].push(gap(
@@ -2315,6 +2363,64 @@ mod tests {
             reasons(&document),
             ["no-initiator-stack", "reused-source-not-retained"]
         );
+        // As in the request index, the source must have the reuse's host and
+        // have started before it.
+        let hosted = |sequence: u64, host: &[u8]| {
+            let mut payload = vec![0u8; 128];
+            payload[..8].copy_from_slice(&[2, 0, 128, 0, 2, 4, host.len() as u8, 0]);
+            payload[8..8 + host.len()].copy_from_slice(host);
+            let mut event = reuse(sequence, 20);
+            event["flags"] = json!(0);
+            event["scheme_class"] = json!(1);
+            event["payload"] = json!(hex::encode(payload));
+            event
+        };
+        let initiated = |sequence: u64, host: &str| {
+            event(
+                sequence,
+                json!({"process_id":61,"request_id":"20","type":"request_initiated",
+                    "payload":hex::encode(format!("GET {host}"))}),
+            )
+        };
+        let query = |sequence: u64| {
+            format!(
+                "kind=request&session_id=7&process_id=61&sequence_number={sequence}&request_id=21"
+            )
+        };
+        let same = fixture(&[initiated(1, "a.test"), hosted(2, b"a.test")], &[]);
+        let document = page(&same, &Cursors::default(), &query(2));
+        assert_eq!(
+            document["pages"]["in"]["rows"][0]["kind"],
+            "reused_response"
+        );
+        for (events, sequence, words) in [
+            (
+                vec![initiated(1, "b.test"), hosted(2, b"a.test")],
+                2,
+                "was requested from another host",
+            ),
+            (
+                vec![hosted(1, b"a.test"), initiated(2, "a.test")],
+                1,
+                "started after this reuse",
+            ),
+        ] {
+            let store = fixture(&events, &[]);
+            let document = page(&store, &Cursors::default(), &query(sequence));
+            assert_eq!(document["counts"]["in"]["total"], 0, "{words}");
+            assert_eq!(
+                reasons(&document),
+                ["no-initiator-stack", "reused-source-not-this-load"],
+                "{words}"
+            );
+            assert!(
+                document["gaps"]["in"][1]["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains(words),
+                "{words}"
+            );
+        }
     }
 
     #[test]

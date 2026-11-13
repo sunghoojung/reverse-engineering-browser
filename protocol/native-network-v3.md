@@ -361,7 +361,8 @@ record: `initiator_process_id` (the record's own process) and
 consumers never join it to its source by those fields, and they leave them
 out of its legacy browser key. They are never its initiator either: Traffic's
 Initiator tab shows the reuse's own renderer request and names the source as
-"Reused response of", and `get_xrefs` lists it as `reused_response`. A reuse a worker owns is linked to its tabs by the drain
+"Reused response of", and `get_xrefs` lists it as `reused_response`, with the
+same host and start-time guard as the request index's `memory_cache_source`. A reuse a worker owns is linked to its tabs by the drain
 with a `request_tab_link`, as a worker request start is.
 
 ##### `memory_cache_reuse` (type 52)

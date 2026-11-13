@@ -1180,7 +1180,9 @@ than computing one.
 
 Rows are links the stores already hold: the recorded parent event, the renderer
 request named as a request's initiator (for a memory-cache reuse, the request
-whose response Blink reused, as `reused_response`, never as an initiator), its
+whose response Blink reused, as `reused_response`, never as an initiator, and
+only when it has the reuse's host and started before it, as the request index
+decides; otherwise the gap `reused-source-not-this-load` says which), its
 lifecycle events and captured
 response, the host events whose exact parent is a retained dispatch sample of the
 selection, the artifact's creator event, parent and children, and Wasm import,

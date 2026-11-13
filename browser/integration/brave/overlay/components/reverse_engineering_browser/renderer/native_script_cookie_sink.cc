@@ -238,19 +238,26 @@ void NativeScriptCookieSink::RecordDocumentCookieGet(const std::string_view cook
     static_cast<void>(Emit(named, calling_frame, generation));
   });
   // The read itself. A read with names no name record counted is recorded at
-  // once, so a name it held is never only in the renderer: a provenance that
-  // sees no such record can trust that every name was recorded.
+  // once and alone, with count 1, so a name it held is never only in the
+  // renderer and the reads such records count are exactly the reads that had
+  // unrecorded names; earlier reads still waiting for a power of two keep
+  // waiting.
   key.read_record = true;
   key.name_length = 0;
   key.name_prefix = {};
   read.flags |= kNativeScriptCookieReadRecord;
   read.unrecorded_names = unrecorded;
   if (ReadEntry* const entry = FindOrInsert(key)) {
-    if (!CountRead(*entry, read.string_length) && unrecorded == 0) {
+    const bool due = CountRead(*entry, read.string_length);
+    if (unrecorded != 0) {
+      read.count = 1;
+      --entry->unreported;
+    } else if (due) {
+      read.count = entry->unreported;
+      entry->unreported = 0;
+    } else {
       return;
     }
-    read.count = entry->unreported;
-    entry->unreported = 0;
   } else {
     read.flags |= kNativeScriptCookieTableFull;
     read.count = 1;

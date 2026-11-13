@@ -1809,10 +1809,12 @@ script frame, name and read record in a 4,096-key table per configuration:
 one script position reading a jar of 100 cookies uses 101 keys. A key records
 its 1st, 2nd, 4th, 8th and later power-of-two reads, each with the reads since
 the previous record, and its remainder when the configuration ends. A read
-record is also recorded at every read that had unrecorded names, with that
-read's count of them, so a name no record counts never waits in the renderer:
-when no read record counts unrecorded names, every name a read held has its
-name record. A new read record or Cookie
+that had unrecorded names is recorded at once and alone: its read record has
+count 1 and that read's count of them, and earlier reads still waiting for a
+power of two keep waiting. So a name no record counts never waits in the
+renderer, when no read record counts unrecorded names every name a read held
+has its name record, and the counts of read records with unrecorded names are
+exactly the reads that had them. A new read record or Cookie
 Store read while the table is full is recorded alone with bit 3; a new name
 then is counted on its read record instead. The table is open-addressed at
 most half full, so a lookup is a hash and a few probes; it is allocated when a

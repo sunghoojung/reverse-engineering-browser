@@ -401,11 +401,33 @@ void ScriptCookieReadNames() {
   std::tie(names, reads) = read_all();
   // "a" keeps its third read for the configuration end; the read record has none.
   assert(names.size() == 1 && NamePrefix(names[0]) == "a" && names[0].count == 1 && reads.empty());
+
+  // Reads 5 and 6 at one position, only read 6 with an unrecorded name: its
+  // record counts that one read, and read 5 keeps waiting for the
+  // configuration end, so a record with unrecorded names always counts 1.
+  ConfigureCookies(queue, true);
+  for (int read = 0; read < 5; ++read) {
+    cookies.RecordDocumentCookieGet("a=1", document_frame);
+  }
+  std::tie(names, reads) = read_all();
+  assert(reads.size() == 3);  // reads 1, 2 and 4; read 5 waits
+  for (std::uint32_t key = 0; key + 2 < reb::kNativeScriptCookieReadKeys; ++key) {
+    cookies.RecordDocumentCookieGet("", key + 1);
+  }
+  assert(Drain(queue) == reb::kNativeScriptCookieReadKeys - 2);
+  cookies.RecordDocumentCookieGet("a=1; b=2", document_frame);
+  std::tie(names, reads) = read_all();
+  assert(names.empty() && reads.size() == 1 && reads[0].count == 1 && reads[0].value_length == 1);
+  transport.Disable();
+  std::tie(names, reads) = read_all();
+  assert(reads.size() == 1 && reads[0].count == 1 && reads[0].value_length == 0);
+  assert(names.size() == 1 && names[0].count == 2);
   assert(!cookies.IsEnabled());
   std::cout << "PASS native script cookie reads: one record per name split as the page does, "
                "repeated names once per read, the empty jar, positions as keys, the 360-name "
                "bound counted, a table filled mid-read counted, a read with unrecorded names "
-               "recorded at once, configuration-end remainders, allocation-free reads, no table "
+               "recorded at once and alone, configuration-end remainders, allocation-free reads, "
+               "no table "
                "while disabled\n";
 }
 }  // namespace

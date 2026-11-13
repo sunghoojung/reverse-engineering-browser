@@ -1340,3 +1340,20 @@ fn a_partial_report_says_its_pages_are_not_reliable() {
     let whole = compare(&builds[0], &builds[1], json!({}), json!({})).unwrap();
     assert!(!whole.omissions.iter().any(|o| o == PARTIAL_PAGES));
 }
+
+#[test]
+fn union_find_reports_joined_members_whichever_is_the_root() {
+    // The root of a joined set is a member too: inferring "joined" from
+    // whether a node is its own root would call the root unjoined.
+    let mut sets = Sets::new(6);
+    sets.union(5, 0);
+    assert!(
+        sets.joined(0) && sets.joined(5),
+        "both members of a pair are joined"
+    );
+    assert!(!sets.joined(3), "an untouched node is alone");
+    sets.union(3, 5);
+    assert!(sets.joined(3) && sets.find(3) == sets.find(0));
+    let root = sets.find(0);
+    assert_eq!(sets.size[root as usize], 3);
+}

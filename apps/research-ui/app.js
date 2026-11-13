@@ -10439,7 +10439,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         refreshDecoderEngine();
         evidenceNames.load();
 
-        setInterval(refresh, 2000);
+        // The same tick asks whether the names library changed (one stat on
+        // the backend while it has not), so names an agent sets appear.
+        setInterval(() => { refresh(); evidenceNames.poll?.(); }, 2000);
       }
 
       initializeInvestigationNavigation();

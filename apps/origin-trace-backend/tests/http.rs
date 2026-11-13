@@ -4194,6 +4194,38 @@ async fn wasm_graph_routes_are_bounded_read_only_and_refuse_bad_input() {
     assert_eq!(response.status().as_u16(), 422);
 }
 
+// The UI polls the library every 2 s for names an agent saved. An unchanged
+// file answers its last ETag from one stat: here the file is unreadable, so
+// any read would fail with 500. A write answers 200 with the new generation.
+#[cfg(unix)]
+#[tokio::test]
+async fn unchanged_analyst_library_answers_its_etag_without_a_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = Server::start().await;
+    let notes = json!({"action":"replace_local_analyst_workspace","expected_generation":0,
+        "folders":[{"id":1,"name":"Analyst Workspace","parent_id":null}],
+        "files":[{"id":4,"folder_id":1,"name":"notes.md","kind":"scratchpad","language":"markdown","content":"keep"}]});
+    assert_eq!(server.action("/api/local-analyst/actions", notes).await.status().as_u16(), 200);
+    let first = server.get("/api/local-analyst").await;
+    let tag = first.headers()["etag"].to_str().unwrap().to_owned();
+    let conditional = |tag: String| {
+        server.client.get(format!("{}/api/local-analyst", server.url)).header("if-none-match", tag).send()
+    };
+    let path = server.root.path().join("analyst.json");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unchanged = conditional(tag.clone()).await.unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(unchanged.status().as_u16(), 304, "An unchanged library is not read");
+    assert_eq!(unchanged.headers()["etag"].to_str().unwrap(), tag);
+    let set = json!({"action":"set_wasm_function_name","sha256":"a".repeat(64),"function":1,"name":"agent_named"});
+    assert_eq!(server.action("/api/local-analyst/actions", set).await.status().as_u16(), 200);
+    let changed = conditional(tag.clone()).await.unwrap();
+    assert_eq!(changed.status().as_u16(), 200, "A write is seen on the next poll");
+    assert_ne!(changed.headers()["etag"].to_str().unwrap(), tag);
+    let library: Value = changed.json().await.unwrap();
+    assert_eq!(library["generation"], 2);
+}
+
 #[tokio::test]
 async fn wasm_function_names_join_every_wasm_read_and_never_replace_captured_names() {
     let server = Server::start().await;

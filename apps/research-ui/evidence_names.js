@@ -239,7 +239,11 @@
       if (!validateLibrary(value)) throw new Error('The local library response is malformed.');
       return value;
     }
-    const read = signal => fetcher('/api/local-analyst', {cache: 'no-store', signal}).then(response => documentOf(response, signal));
+    // The library ETag lets the 2 s poll ask only whether anything changed;
+    // the backend answers an unchanged file with 304 from one stat.
+    let etag = null, polling = false;
+    const remember = response => {etag = response.ok ? response.headers?.get?.('etag') ?? null : etag; return response;};
+    const read = signal => fetcher('/api/local-analyst', {cache: 'no-store', signal}).then(remember).then(response => documentOf(response, signal));
     async function load() {
       if (model.busy) return false;
       model.busy = true; if (!model.library) model.status = 'loading'; changed();
@@ -300,6 +304,22 @@
           : `The save could not be confirmed. ${error.message} Press Enter to check: the library is reread first and nothing is written twice.`};
       } finally {model.busy = false; changed();}
     }
+    // Names saved elsewhere (an agent's set_wasm_function_name, another
+    // window) appear without a reload: one conditional read per tick, adopted
+    // only when its generation is newer. A poll never blocks or retries a save.
+    async function poll() {
+      if (polling || model.busy || !etag || !model.library) return false;
+      polling = true;
+      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeout);
+      try {
+        const response = await fetcher('/api/local-analyst', {cache: 'no-store', signal: controller.signal, headers: {'If-None-Match': etag}});
+        if (response.status === 304) return false;
+        const library = await documentOf(remember(response), controller.signal);
+        return observe(library);
+      } catch {
+        return false;
+      } finally {clearTimeout(timer); polling = false;}
+    }
     // The Analyst editor admits newer library generations; names follow them
     // without a request. An older or equal generation is ignored.
     function observe(library) {
@@ -309,7 +329,7 @@
     const nameOf = identity => {const key = keyOf(identity); return key ? names.get(key) ?? null : null;};
     const has = type => [...names.keys()].some(key => key.startsWith(`["${type}"`));
     const cancel = () => active?.abort();
-    return {model, load, rename, observe, nameOf, has, cancel, entries: () => [...names]};
+    return {model, load, rename, observe, poll, nameOf, has, cancel, entries: () => [...names]};
   }
 
   // Resolve names for a set of retained records. A record whose identity is
@@ -443,6 +463,7 @@
     globalThis.addEventListener?.('pagehide', () => {close(false); store.cancel();});
     const controller = {
       model: store.model, load: () => supported ? store.load() : Promise.resolve(false), observe: store.observe,
+      poll: () => supported ? store.poll() : Promise.resolve(false),
       nameOf: store.nameOf, has: store.has, identityFor, nameFor, begin, close, editing: () => editor?.target.identity ?? null,
       // Handing the provider to a palette transfers registration to it.
       paletteProvider: () => {registered = true; return provider;}, registerPalette: register

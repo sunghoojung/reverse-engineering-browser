@@ -428,7 +428,7 @@ fn names_of(library: &Value) -> Names {
 
 /// Device, inode, length and modification time. Every library write renames
 /// a new file into place, so a new generation always has a new inode.
-type Fingerprint = Option<(u64, u64, u64, i64, i64)>;
+pub(crate) type Fingerprint = Option<(u64, u64, u64, i64, i64)>;
 
 #[derive(Default)]
 pub struct Cache(Mutex<Option<(Fingerprint, Arc<Names>)>>);
@@ -436,7 +436,7 @@ impl Cache {
     /// The current names, rereading the library only when its file changed.
     /// An unreadable library joins nothing and says so.
     pub fn get(&self, store: &Store) -> Arc<Names> {
-        let fingerprint = fingerprint(store);
+        let fingerprint = fingerprint(&store.path);
         if let Some((cached, names)) = self.0.lock().unwrap().as_ref()
             && *cached == fingerprint
         {
@@ -452,9 +452,9 @@ impl Cache {
 }
 
 #[cfg(unix)]
-fn fingerprint(store: &Store) -> Fingerprint {
+pub(crate) fn fingerprint(path: &std::path::Path) -> Fingerprint {
     use std::os::unix::fs::MetadataExt;
-    std::fs::symlink_metadata(&store.path).ok().map(|meta| {
+    std::fs::symlink_metadata(path).ok().map(|meta| {
         (
             meta.dev(),
             meta.ino(),
@@ -465,7 +465,7 @@ fn fingerprint(store: &Store) -> Fingerprint {
     })
 }
 #[cfg(not(unix))]
-fn fingerprint(_: &Store) -> Fingerprint {
+pub(crate) fn fingerprint(_: &std::path::Path) -> Fingerprint {
     None
 }
 

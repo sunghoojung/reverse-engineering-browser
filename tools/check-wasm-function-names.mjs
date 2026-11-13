@@ -24,9 +24,15 @@ function library() {
   return value;
 }
 function server(initial) {
-  const state = {library: initial, posts: []};
+  const state = {library: initial, posts: [], gets: []};
+  const tag = () => `"local-analyst-${state.library.generation}"`;
   state.fetcher = async (url, options = {}) => {
-    if (options.method !== 'POST') return Response.json(state.library);
+    if (options.method !== 'POST') {
+      const condition = options.headers?.['If-None-Match'] ?? null;
+      state.gets.push(condition);
+      if (condition && condition === tag()) return new Response(null, {status: 304, headers: {etag: tag()}});
+      return Response.json(state.library, {headers: {etag: tag()}});
+    }
     const request = JSON.parse(options.body);
     state.posts.push(request);
     if (request.expected_generation !== state.library.generation) return Response.json({error: 'stale'}, {status: 409});
@@ -253,6 +259,35 @@ async function checkFlow() {
   console.log('PASS Wasm names in Flow: Details Rename, focus back on the redrawn control after a save, mark cleared on session change (LinkeDOM; not rendered QA)');
 }
 
+// Names an agent saves reach an open UI on the 2 s tick: an unchanged
+// library costs one conditional read answered 304; a newer one is adopted.
+async function checkPoll() {
+  const {document, window} = parseHTML('<!doctype html><html><body></body></html>');
+  const {api, validateLibrary, emptyLibrary: empty} = await namesModels(root, {document, window, location: {protocol: 'http:'}, addEventListener: () => {}});
+  emptyLibrary = empty;
+  const store = server(library());
+  let renders = 0;
+  const controller = api.mount({fetcher: store.fetcher, validateLibrary, onChange: () => renders++});
+  assert(await controller.load(), controller.model.message);
+  store.gets.length = 0; renders = 0;
+  assert.equal(await controller.poll(), false, 'Nothing changed');
+  assert.deepEqual(store.gets, ['"local-analyst-1"'], 'One conditional read per tick');
+  assert.equal(renders, 0);
+  // The agent's set_wasm_function_name lands as a new generation.
+  const doc = {document_kind: 'reb-evidence-names', contract_version: 2, scope: 'local-analyst-library', requests: [], artifacts: [], vm_programs: [],
+    wasm_modules: [{sha256: SHA, functions: [{function: 3, name: 'agent_named'}]}]};
+  const content = JSON.stringify(doc);
+  store.library = {...store.library, generation: 2, updated_at_ms: 1001, files: [{id: 1, folder_id: 1, name: 'Evidence names.reb-names.json', kind: 'scratchpad',
+    language: 'json', content, content_bytes: Buffer.byteLength(content), created_at_ms: 1001, updated_at_ms: 1001}]};
+  assert.equal(await controller.poll(), true, 'A newer generation is adopted');
+  assert.equal(controller.nameOf(api.wasmFunctionIdentity(SHA, 3)), 'agent_named');
+  assert(renders > 0, 'The views re-render');
+  store.gets.length = 0;
+  assert.equal(await controller.poll(), false);
+  assert.deepEqual(store.gets, ['"local-analyst-2"'], 'The poll follows the new ETag');
+  console.log('PASS Wasm names poll: one conditional read per tick, 304 adopts nothing, an agent-set name appears on the next tick');
+}
+
 async function checkWiring() {
   const html = await read('apps/research-ui/index.html'), app = await read('apps/research-ui/app.js');
   const order = ['evidence_names.js', 'wasm_function_names.js', 'app.js'].map(name => html.indexOf(`src="${name}"`));
@@ -261,6 +296,7 @@ async function checkWiring() {
     assert((await read(path)).includes('wasm_function_names.js'), path);
   assert(app.includes("if (typeof RebWasmFunctionNames !== 'undefined') RebWasmFunctionNames.changed();"));
   assert(app.includes("if (view.wasmRows && typeof RebWasmFunctionNames !== 'undefined') RebWasmFunctionNames.decorateInspectRow("));
+  assert(app.includes('setInterval(() => { refresh(); evidenceNames.poll?.(); }, 2000);'), 'The 2 s tick polls the names library');
   const module = await read('apps/research-ui/wasm_function_names.js');
   assert(!/innerHTML|insertAdjacentHTML|outerHTML/.test(module), 'Names are inserted as text only');
   for (const path of ['apps/research-ui/flow_graph.js', 'apps/research-ui/xrefs_view.js', 'apps/research-ui/request_stack.js']) {
@@ -283,4 +319,5 @@ async function checkWiring() {
 await checkDocument();
 await checkSurfaces();
 await checkFlow();
+await checkPoll();
 await checkWiring();

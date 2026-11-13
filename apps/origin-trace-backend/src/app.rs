@@ -185,6 +185,9 @@ pub struct App {
     flow_graph: Arc<crate::flow_graph::Cache>,
     /// Researcher Wasm function names, reread only when the library changes.
     wasm_names: Arc<crate::wasm_names::Cache>,
+    /// The Analyst library's last ETag and the file state it was computed
+    /// from, so the UI's 2 s names poll costs one `stat` while nothing changed.
+    analyst_etag: Arc<std::sync::Mutex<Option<(crate::wasm_names::Fingerprint, String)>>>,
     events: Arc<Mutex<event_window::EventWindowCache>>,
     requests: Arc<Mutex<RequestIndex>>,
     initiator_frames: Arc<std::sync::Mutex<crate::request_stack::InitiatorFrames>>,
@@ -297,6 +300,7 @@ impl App {
             gaps: Arc::default(),
             flow_graph: Arc::default(),
             wasm_names: Arc::default(),
+            analyst_etag: Arc::default(),
             events: Arc::new(Mutex::new(event_window::EventWindowCache::default())),
             artifact_lookup: Arc::new(Mutex::new(ArtifactLookupCache::default())),
             event_waiters: Arc::new(Semaphore::new(event_query::MAX_WAITERS)),
@@ -638,11 +642,24 @@ impl App {
                     .await?
             }
             "/api/api-collection" | "/api/local-analyst" => {
-                let store = if path.ends_with("api-collection") {
-                    self.collection.clone()
-                } else {
+                let analyst = path.ends_with("local-analyst");
+                let store = if analyst {
                     self.workspace.clone()
+                } else {
+                    self.collection.clone()
                 };
+                // An unchanged library file answers its last ETag without a
+                // read. The state is taken before the read below, so a write
+                // racing that read leaves a stale state and the next poll reads.
+                let before = analyst.then(|| crate::wasm_names::fingerprint(&store.path));
+                if let Some(state) = before
+                    && let Some((cached, tag)) = self.analyst_etag.lock().unwrap().as_ref()
+                    && *cached == state
+                    && state.is_some()
+                    && matches_etag(headers, Some(tag))
+                {
+                    return Ok(not_modified(tag));
+                }
                 // These documents are at most 1–2 MiB. Do not wait behind VM
                 // analysis or Wasm inspection, which hold the shared reader permits.
                 let (value, digest) = tokio::task::spawn_blocking(move || {
@@ -666,6 +683,9 @@ impl App {
                     },
                     value["generation"]
                 ));
+                if let (Some(state), Some(tag)) = (before, etag.as_ref()) {
+                    *self.analyst_etag.lock().unwrap() = Some((state, tag.clone()));
+                }
                 value
             }
             "/api/local-analyst/runner" => self.analyst.state(),

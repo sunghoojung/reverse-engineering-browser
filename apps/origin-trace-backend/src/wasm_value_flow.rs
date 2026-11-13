@@ -759,7 +759,7 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
     let mut omissions = sim.omissions.clone();
     let mut seed_values: Vec<Def> = Vec::new();
     let mut seed_nodes: Vec<u32> = Vec::new();
-    let (seed_offset, seed_operand, seed_local) = match request.seed {
+    let (seed_offset, seed_operand, seed_local, operand_count) = match request.seed {
         Seed::Instruction { offset, operand } => {
             let Some(instruction) = sim.instruction_at(offset) else {
                 if let Some(stopped) = sim.stopped_at
@@ -858,7 +858,7 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
                     }
                 }
             }
-            (Some(offset), operand, None)
+            (Some(offset), operand, None, Some(inputs.len()))
         }
         Seed::Local(local) => {
             if local >= sim.locals {
@@ -909,7 +909,7 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
                 let starts: Vec<(Def, u32)> = seed_values.iter().map(|value| (*value, 0)).collect();
                 slicer.forward(&starts);
             }
-            (None, None, Some(local))
+            (None, None, Some(local), None)
         }
     };
     // Instruction text for included nodes and the inputs of their expressions.
@@ -1135,6 +1135,7 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
             "kind": if seed_local.is_some() { "local" } else { "instruction" },
             "byte_offset": seed_offset,
             "operand": seed_operand,
+            "operand_count": operand_count,
             "local": seed_local,
             "nodes": seed_nodes.iter().filter_map(|node| slicer.id_of.get(node)).collect::<Vec<_>>(),
         },

@@ -100,7 +100,8 @@ The [OpenAPI schema](openapi.json) defines `WasmValueFlow`.
   is derived from the bytes, not observed.
 - `status` is `computed`, or `partial` when any cap, deadline or unmodeled
   operator cut it. `truncated` says which, and `omissions` says where.
-- `seed` repeats the request's seed and lists the seed nodes.
+- `seed` repeats the request's seed, lists the seed nodes and, for an
+  instruction seed, `operand_count`, the operands the instruction consumes.
 - `nodes` carry `id`, `kind`, `byte_offset`, `role` (`seed`, `source`, `sink`,
   `interior`, or `frontier` for a node at the depth cap whose own inputs or
   uses were not followed), `direction`, `depth`, `results`, and when they apply

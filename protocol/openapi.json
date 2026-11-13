@@ -24660,6 +24660,7 @@
               "kind",
               "byte_offset",
               "operand",
+              "operand_count",
               "local",
               "nodes"
             ],
@@ -24683,6 +24684,14 @@
                   "null"
                 ],
                 "minimum": 0
+              },
+              "operand_count": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "description": "Operands the seed instruction consumes; null for a local seed."
               },
               "local": {
                 "type": [

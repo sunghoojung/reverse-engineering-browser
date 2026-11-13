@@ -1712,36 +1712,201 @@ pub(crate) fn observation_reads(event: &Value) -> (Value, Value) {
     (site, read.unwrap_or(Value::Null))
 }
 
-/// What one page's site resolution read: sources walked, manifest scans and
-/// identity reads. A page whose sites are all settled reads none of them.
+/// What one page's site resolution read. A page whose sites are all settled,
+/// or pending with nothing they depend on changed, reads none of it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SiteWork {
+    /// Sources read and walked, one per script.
     pub source_walks: usize,
-    pub manifest_reads: usize,
+    /// Manifest lines parsed: only those appended since the last read.
+    pub manifest_lines: usize,
+    /// Renderers whose script identities were read from the request index.
     pub identity_reads: usize,
 }
 
+/// Which file kept answers were read from: its device and inode and a digest
+/// of its first bytes. A file replaced under the same name, or rewritten in
+/// place, is told from one that only grew.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileMark {
+    device: u64,
+    inode: u64,
+    length: u64,
+    head: usize,
+    digest: [u8; 32],
+}
+
+const MARK_HEAD: usize = 4096;
+
+impl FileMark {
+    /// The file now, and whether it is the same file as `before` grown or not.
+    fn read(path: &Path, before: Option<&FileMark>) -> std::io::Result<(FileMark, bool)> {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        let mut file = match evidence::regular_file(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let empty = FileMark {
+                    device: 0,
+                    inode: 0,
+                    length: 0,
+                    head: 0,
+                    digest: Sha256::digest([]).into(),
+                };
+                let same = before.is_none_or(|before| before.length == 0);
+                return Ok((empty, same));
+            }
+            Err(error) => return Err(error),
+        };
+        let metadata = file.metadata()?;
+        #[cfg(unix)]
+        let (device, inode) = (metadata.dev(), metadata.ino());
+        #[cfg(not(unix))]
+        let (device, inode) = (0, 0);
+        let length = metadata.len();
+        let mut head = vec![0u8; length.min(MARK_HEAD as u64) as usize];
+        file.read_exact(&mut head)?;
+        let same = before.is_none_or(|before| {
+            before.device == device
+                && before.inode == inode
+                && before.length <= length
+                && before.head <= head.len()
+                && <[u8; 32]>::from(Sha256::digest(&head[..before.head])) == before.digest
+        });
+        let mark = FileMark {
+            device,
+            inode,
+            length,
+            head: head.len(),
+            digest: Sha256::digest(&head).into(),
+        };
+        Ok((mark, same))
+    }
+}
+
+/// What a pending site depends on, as it was when the site was read: the
+/// manifest bytes parsed and the request index's epoch and folded offset.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Stamp {
+    manifest: u64,
+    index: Option<(String, u64)>,
+}
+
+struct Kept {
+    site: Value,
+    /// None once settled; else the state a re-read waits for a change from.
+    pending: Option<Stamp>,
+}
+
+/// The manifest's JavaScript and Wasm artifacts by session, kind and digest,
+/// newest last as `newest` reads them, built from the appended lines alone.
+struct ManifestArtifact {
+    id: String,
+    url: Value,
+    size: u64,
+    path: String,
+}
+
+#[derive(Default)]
+struct ManifestDigests {
+    mark: Option<FileMark>,
+    offset: u64,
+    ids: std::collections::HashSet<String>,
+    newest: HashMap<(String, String, String), ManifestArtifact>,
+}
+
+impl ManifestDigests {
+    fn apply(&mut self, records: Vec<Value>) -> Result<()> {
+        for record in records {
+            let id = record["artifact_id"].as_str().unwrap_or("").to_owned();
+            if !self.ids.insert(id.clone()) {
+                return Err(crate::error::Error::new(
+                    500,
+                    "The artifact manifest contains a duplicate artifact ID",
+                ));
+            }
+            let kind = record["kind"].as_str().unwrap_or("");
+            if !matches!(kind, "javascript" | "wasm") {
+                continue;
+            }
+            self.newest.insert(
+                (
+                    record["session_id"].as_str().unwrap_or("").to_owned(),
+                    kind.to_owned(),
+                    record["sha256"].as_str().unwrap_or("").to_owned(),
+                ),
+                ManifestArtifact {
+                    id,
+                    url: record["url"].clone(),
+                    size: record["byte_size"].as_u64().unwrap_or(0),
+                    path: record["content_path"].as_str().unwrap_or("").to_owned(),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn artifact(&self, session: &str, kind: &str, sha: &str) -> Option<Value> {
+        let found = self
+            .newest
+            .get(&(session.to_owned(), kind.to_owned(), sha.to_owned()))?;
+        Some(
+            json!({"artifact_id": found.id, "session_id": session, "kind": kind,
+            "url": found.url, "sha256": sha, "byte_size": found.size, "content_path": found.path}),
+        )
+    }
+}
+
 /// Observation sites resolved once and kept, as `InitiatorFrames` keeps
-/// initiator frames: a site's resolution is a fact of retained bytes, so it is
-/// read again only while it can still change (its identity or source not yet
-/// seen). The kept set belongs to one store: a new index epoch or a manifest
-/// that shrank drops it.
+/// initiator frames. A settled site is a fact of retained bytes. A pending one
+/// (its identity or source not seen yet) is kept with the manifest length and
+/// index position it was read at, and read again only once either moved. The
+/// manifest is read incrementally from where the last read stopped. All of it
+/// belongs to one event store: a store that is not the same file grown drops
+/// everything, before any kept answer is used.
 #[derive(Default)]
 pub struct ObservationSites {
-    kept: HashMap<String, Value>,
-    stamp: Option<(String, u64)>,
+    store: Option<FileMark>,
+    kept: HashMap<String, Kept>,
+    manifest: ManifestDigests,
+    generation: u64,
+}
+
+struct Wanted {
+    key: String,
+    session: String,
+    process: u32,
+    frame: Frame,
+    events: Vec<usize>,
 }
 
 impl ObservationSites {
     const KEPT: usize = 4096;
 
+    /// Changes whenever a kept answer does, so a tag that covers it tells a
+    /// page whose sites resolved since from one that did not.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Drops every kept answer, as clearing the capture drops the stores.
+    pub fn clear(&mut self) {
+        *self = Self {
+            generation: self.generation + 1,
+            ..Self::default()
+        };
+    }
+
     /// Decodes every observation of one page and resolves its sites, newest
-    /// first when `newest_first` (a backward page), so the records an agent
-    /// reads first are the ones resolved. A failed identity or manifest read
-    /// leaves each unsettled site raw with reason `site_read_failed`; it never
-    /// costs the records themselves.
+    /// first when `newest_first` (a backward page). The lock is taken only to
+    /// read and publish kept answers: identities, the manifest and sources
+    /// are read without it. A failed identity or manifest read leaves each
+    /// unsettled site raw with reason `site_read_failed`; it never costs the
+    /// records themselves.
     pub fn annotate(
-        &mut self,
+        sites: &std::sync::Mutex<ObservationSites>,
         store: &Path,
         artifacts_root: &Path,
         requests: &Mutex<RequestIndex>,
@@ -1750,16 +1915,16 @@ impl ObservationSites {
     ) -> SiteWork {
         crate::debugger_observation::annotate(events);
         let mut work = SiteWork::default();
-        if self
-            .resolve(
-                store,
-                artifacts_root,
-                requests,
-                events,
-                newest_first,
-                &mut work,
-            )
-            .is_err()
+        if Self::resolve(
+            sites,
+            store,
+            artifacts_root,
+            requests,
+            events,
+            newest_first,
+            &mut work,
+        )
+        .is_err()
         {
             for event in events.iter_mut() {
                 let site = &mut event["debugger_observation"]["site"];
@@ -1771,8 +1936,14 @@ impl ObservationSites {
         work
     }
 
+    fn lock(sites: &std::sync::Mutex<ObservationSites>) -> std::sync::MutexGuard<'_, Self> {
+        sites
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn resolve(
-        &mut self,
+        sites: &std::sync::Mutex<ObservationSites>,
         store: &Path,
         artifacts_root: &Path,
         requests: &Mutex<RequestIndex>,
@@ -1780,64 +1951,71 @@ impl ObservationSites {
         newest_first: bool,
         work: &mut SiteWork,
     ) -> Result<()> {
-        struct Wanted {
-            key: String,
-            session: String,
-            process: u32,
-            frame: Frame,
-            events: Vec<usize>,
-        }
-        // The kept set belongs to the store it was read from: a manifest that
-        // shrank was replaced. A stat, so a settled page reads nothing else.
-        let manifest = std::fs::metadata(artifacts_root.join("manifest.jsonl"))
-            .map_or(0, |metadata| metadata.len());
-        if self
-            .stamp
-            .as_ref()
-            .is_some_and(|(_, kept)| manifest < *kept)
-        {
-            self.kept.clear();
-            self.stamp = None;
-        }
+        let manifest_path = artifacts_root.join("manifest.jsonl");
+        let manifest_length = std::fs::metadata(&manifest_path).map_or(0, |m| m.len());
+        // The index's position without waiting for it: while it is busy a
+        // pending site is served as it was and read again next time.
+        let index_now = requests.try_lock().ok().and_then(|index| index.position());
         let order: Vec<usize> = if newest_first {
             (0..events.len()).rev().collect()
         } else {
             (0..events.len()).collect()
         };
         let mut wanted: Vec<Wanted> = Vec::new();
-        for at in order {
-            let event = &mut events[at];
-            if event["debugger_observation"]["site"].is_null() {
-                continue;
+        let (store_mark, manifest_mark, manifest_offset) = {
+            let before = Self::lock(sites).store.clone();
+            let (mark, same) = FileMark::read(store, before.as_ref())?;
+            let mut this = Self::lock(sites);
+            if !same {
+                // Not the store these answers came from: none of them holds.
+                this.clear();
             }
-            let kind = event["type"].as_str().unwrap_or("");
-            let Some(site) = payload(event).and_then(|payload| observation_site(kind, &payload))
-            else {
-                continue;
-            };
-            let (session, process) = (
-                event["session_id"].as_str().unwrap_or("").to_owned(),
-                event["process_id"].as_u64().unwrap_or(0) as u32,
-            );
-            let key = format!("{session}:{process}:{}", hex::encode(site));
-            if let Some(kept) = self.kept.get(&key) {
-                event["debugger_observation"]["site"] = kept.clone();
-            } else if let Some(same) = wanted.iter_mut().find(|w| w.key == key) {
-                same.events.push(at);
-            } else {
-                wanted.push(Wanted {
-                    key,
-                    session,
-                    process,
-                    frame: Frame::read(&site),
-                    events: vec![at],
+            this.store = Some(mark.clone());
+            for at in order {
+                let event = &mut events[at];
+                if event["debugger_observation"]["site"].is_null() {
+                    continue;
+                }
+                let kind = event["type"].as_str().unwrap_or("");
+                let Some(site) =
+                    payload(event).and_then(|payload| observation_site(kind, &payload))
+                else {
+                    continue;
+                };
+                let (session, process) = (
+                    event["session_id"].as_str().unwrap_or("").to_owned(),
+                    event["process_id"].as_u64().unwrap_or(0) as u32,
+                );
+                let key = format!("{session}:{process}:{}", hex::encode(site));
+                let reusable = this.kept.get(&key).filter(|kept| match &kept.pending {
+                    None => true,
+                    Some(stamp) => {
+                        stamp.manifest == manifest_length
+                            && (index_now.is_none() || stamp.index == index_now)
+                    }
                 });
+                if let Some(kept) = reusable {
+                    event["debugger_observation"]["site"] = kept.site.clone();
+                } else if let Some(same) = wanted.iter_mut().find(|w| w.key == key) {
+                    same.events.push(at);
+                } else {
+                    wanted.push(Wanted {
+                        key,
+                        session,
+                        process,
+                        frame: Frame::read(&site),
+                        events: vec![at],
+                    });
+                }
             }
-        }
+            (mark, this.manifest.mark.clone(), this.manifest.offset)
+        };
         if wanted.is_empty() {
             return Ok(());
         }
-        // Identities once per renderer; reading them refreshes the index.
+        // Identities once per renderer, from the request index alone: a
+        // 64 MiB store scan per read is not paid for an identity the index
+        // does not hold. Reading them refreshes the index.
         let mut identities = HashMap::new();
         let mut complete: HashMap<(String, u32), bool> = HashMap::new();
         for want in &wanted {
@@ -1846,25 +2024,27 @@ impl ObservationSites {
                 continue;
             }
             work.identity_reads += 1;
-            let (found, known) = stored_identities(
-                store,
-                requests,
-                &json!({"session_id": want.session}),
-                want.process.into(),
-            )?;
-            identities.extend(found);
-            complete.insert(renderer, known);
+            let (indexed, exhaustive) = requests
+                .blocking_lock()
+                .identities(&want.session, want.process)?;
+            identities.extend(decode_indexed_identities(want.process, &indexed));
+            complete.insert(renderer, exhaustive);
         }
-        // A new index epoch is a replaced store: nothing kept from before holds.
-        let epoch = requests
-            .blocking_lock()
-            .position()
-            .map(|(epoch, _)| epoch)
-            .unwrap_or_default();
-        if self.stamp.as_ref().is_some_and(|(kept, _)| *kept != epoch) {
-            self.kept.clear();
-        }
-        self.stamp = Some((epoch, manifest));
+        let index_read = requests.blocking_lock().position();
+        // The manifest lines appended since the last read, read without the lock.
+        let (mark, grown) = FileMark::read(&manifest_path, manifest_mark.as_ref())?;
+        let start = if grown { manifest_offset } else { 0 };
+        // A manifest rewritten past its first bytes no longer has a line
+        // boundary where the last read stopped: read it again from the start.
+        let (from, records, offset) = match evidence::manifest_from(artifacts_root, start) {
+            Ok((records, offset)) => (start, records, offset),
+            Err(_) if start > 0 => {
+                let (records, offset) = evidence::manifest_from(artifacts_root, 0)?;
+                (0, records, offset)
+            }
+            Err(error) => return Err(error),
+        };
+        work.manifest_lines = records.len();
         // The scripts whose sources are read, in the page's order, at most
         // PAGE_SOURCES; a site of a later script stays raw with source_limit.
         let scope = |want: &Wanted| (want.process, Scope::DOCUMENT);
@@ -1882,24 +2062,35 @@ impl ObservationSites {
                 scripts.push(key);
             }
         }
-        let digests: BTreeSet<String> = scripts
-            .iter()
-            .filter_map(|key| identities.get(key)?.sha256.map(hex::encode))
-            .collect();
-        let sessions: BTreeSet<&str> = wanted.iter().map(|want| want.session.as_str()).collect();
-        let artifacts = if digests.is_empty() {
-            Vec::new()
-        } else {
-            work.manifest_reads += 1;
-            evidence::select_artifacts(artifacts_root, |a| {
-                a["session_id"]
-                    .as_str()
-                    .is_some_and(|s| sessions.contains(s))
-                    && matches!(a["kind"].as_str(), Some("javascript" | "wasm"))
-                    && a["sha256"]
-                        .as_str()
-                        .is_some_and(|sha| digests.contains(sha))
-            })?
+        let artifacts: Vec<Value> = {
+            let mut this = Self::lock(sites);
+            if this.store.as_ref() != Some(&store_mark) {
+                return Ok(());
+            }
+            if from == 0 {
+                this.manifest = ManifestDigests::default();
+            }
+            if this.manifest.offset == from {
+                this.manifest.apply(records)?;
+                this.manifest.offset = offset;
+                this.manifest.mark = Some(mark);
+            }
+            let sessions: BTreeSet<&str> =
+                wanted.iter().map(|want| want.session.as_str()).collect();
+            let mut found = Vec::new();
+            for key in &scripts {
+                let Some(identity) = identities.get(key) else {
+                    continue;
+                };
+                let (kind, sha) = (
+                    if identity.wasm { "wasm" } else { "javascript" },
+                    identity.sha256.map(hex::encode).unwrap_or_default(),
+                );
+                for session in &sessions {
+                    found.extend(this.manifest.artifact(session, kind, &sha));
+                }
+            }
+            found
         };
         let walks = std::cell::Cell::new(0usize);
         let read = |artifact: &Value, limit: usize| -> Result<Vec<u8>> {
@@ -1909,25 +2100,27 @@ impl ObservationSites {
         // One pass per session over every site's script: each source is read
         // and walked once, for all of its sites' offsets, as resolve() does for
         // the frames of one stack.
-        for session in sessions {
+        let stamp = Stamp {
+            manifest: offset,
+            index: index_read,
+        };
+        let mut results: Vec<(usize, Value, bool)> = Vec::new();
+        let sessions: BTreeSet<String> = wanted.iter().map(|want| want.session.clone()).collect();
+        for session in &sessions {
             let frames: Vec<(ScriptScope, &Frame)> = wanted
                 .iter()
                 .enumerate()
-                .filter(|(at, want)| want.session == session && !limited.contains(at))
+                .filter(|(at, want)| want.session == *session && !limited.contains(at))
                 .map(|(_, want)| (scope(want), &want.frame))
                 .collect();
             let sources = load_sources(frames.into_iter(), &identities, &artifacts, session, &read);
             for (at, want) in wanted.iter().enumerate() {
-                if want.session != session || limited.contains(&at) {
+                if want.session != *session || limited.contains(&at) {
                     continue;
                 }
                 let mut site =
                     frame_value(0, &want.frame, false, scope(want), &sources, &identities);
-                let reason = site["resolution"]["reason"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_owned();
-                if reason == "script_identity_missing"
+                if site["resolution"]["reason"] == "script_identity_missing"
                     && !complete[&(want.session.clone(), want.process)]
                 {
                     site["resolution"]["reason"] = json!("script_identity_outside_scan");
@@ -1940,18 +2133,40 @@ impl ObservationSites {
                             | "source_artifact_missing"
                     )
                 );
-                if !pending {
-                    if self.kept.len() == Self::KEPT {
-                        self.kept.clear();
-                    }
-                    self.kept.insert(want.key.clone(), site.clone());
-                }
-                for &event in &want.events {
-                    events[event]["debugger_observation"]["site"] = site.clone();
-                }
+                results.push((at, site, pending));
             }
         }
         work.source_walks = walks.get();
+        let mut this = Self::lock(sites);
+        let current = this.store.as_ref() == Some(&store_mark);
+        for (at, site, pending) in results {
+            let want = &wanted[at];
+            for &event in &want.events {
+                events[event]["debugger_observation"]["site"] = site.clone();
+            }
+            // Published only into the kept set of the store it was read from.
+            if !current {
+                continue;
+            }
+            let changed = this
+                .kept
+                .get(&want.key)
+                .is_none_or(|kept| kept.site != site);
+            if this.kept.len() >= Self::KEPT && !this.kept.contains_key(&want.key) {
+                this.kept.clear();
+                this.generation += 1;
+            }
+            this.kept.insert(
+                want.key.clone(),
+                Kept {
+                    site,
+                    pending: pending.then(|| stamp.clone()),
+                },
+            );
+            if changed {
+                this.generation += 1;
+            }
+        }
         Ok(())
     }
 }
@@ -2429,9 +2644,14 @@ pub(crate) mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        let mut sites = ObservationSites::default();
+        let sites = std::sync::Mutex::new(ObservationSites::default());
+        let annotate =
+            |sites: &std::sync::Mutex<ObservationSites>, page: &mut [Value], newest: bool| {
+                ObservationSites::annotate(sites, &store, &artifacts, &index, page, newest)
+            };
+        let fresh = || std::sync::Mutex::new(ObservationSites::default());
         let mut page = raw.clone();
-        let work = sites.annotate(&store, &artifacts, &index, &mut page, false);
+        let work = annotate(&sites, &mut page, false);
         let decoded = &page[1]["debugger_observation"];
         let listed = crate::debugger_observation::decode(&page[1]).unwrap();
         for (key, value) in listed.as_object().unwrap() {
@@ -2475,13 +2695,13 @@ pub(crate) mod tests {
             work,
             SiteWork {
                 source_walks: 1,
-                manifest_reads: 1,
+                manifest_lines: 1,
                 identity_reads: 1
             }
         );
         // A settled site is kept: the same page again reads nothing.
         let mut again = raw.clone();
-        let work = sites.annotate(&store, &artifacts, &index, &mut again, false);
+        let work = annotate(&sites, &mut again, false);
         assert_eq!(
             work,
             SiteWork::default(),
@@ -2504,8 +2724,7 @@ pub(crate) mod tests {
         let mut many: Vec<Value> = (0..200u32)
             .map(|n| record(7, start + n, 1000 + n))
             .collect();
-        let work =
-            ObservationSites::default().annotate(&store, &artifacts, &index, &mut many, false);
+        let work = annotate(&fresh(), &mut many, false);
         assert_eq!(work.source_walks, 1, "{work:?}");
         let status = |event: &Value| event["debugger_observation"]["site"]["resolution"].clone();
         assert_eq!(status(&many[0])["status"], "resolved");
@@ -2525,8 +2744,7 @@ pub(crate) mod tests {
         let mut scripts: Vec<Value> = (20..29u32)
             .map(|script| record(script, 1, 2000 + script))
             .collect();
-        let work =
-            ObservationSites::default().annotate(&store, &artifacts, &index, &mut scripts, true);
+        let work = annotate(&fresh(), &mut scripts, true);
         assert_eq!(work.source_walks, 0, "no source of these is retained");
         let left = PAGE_SOURCES..scripts.len();
         for (at, event) in scripts.iter().rev().enumerate() {
@@ -2548,7 +2766,7 @@ pub(crate) mod tests {
         let mut forward: Vec<Value> = (20..29u32)
             .map(|script| record(script, 1, 2000 + script))
             .collect();
-        ObservationSites::default().annotate(&store, &artifacts, &index, &mut forward, false);
+        annotate(&fresh(), &mut forward, false);
         assert_eq!(status(&forward[0])["reason"], "source_not_retained");
         assert_eq!(status(&forward[8])["reason"], "source_limit");
 
@@ -2556,8 +2774,8 @@ pub(crate) mod tests {
         // unsettled is kept, so the next read tries again.
         std::fs::write(artifacts.join("manifest.jsonl"), "not json\n").unwrap();
         let mut failed = raw[..2].to_vec();
-        let mut fresh = ObservationSites::default();
-        fresh.annotate(&store, &artifacts, &index, &mut failed, false);
+        let failing = fresh();
+        annotate(&failing, &mut failed, false);
         assert_eq!(
             status(&failed[1]),
             json!({"status": "deferred", "reason": "site_read_failed"})
@@ -2566,7 +2784,302 @@ pub(crate) mod tests {
             failed[1]["debugger_observation"]["detail"]["event_type"],
             "click"
         );
-        assert!(fresh.kept.is_empty());
+        assert!(failing.lock().unwrap().kept.is_empty());
+    }
+
+    /// A listener record of renderer 42 naming `script` at `start`.
+    fn listener_record(sequence: u64, script: u32, start: u32) -> Value {
+        let mut payload = vec![1, 0, 128, 0, 2, 0x08, 0, 0];
+        payload.resize(80, 0);
+        payload.extend([0, 1, 1, 0]);
+        payload.extend(frame(1, 0, script, start, start));
+        payload.push(5);
+        payload.extend(b"click");
+        payload.resize(128, 0);
+        store_event(sequence, "runtime", "listener_dispatch", &payload)
+    }
+
+    fn store_event(sequence: u64, category: &str, kind: &str, payload: &[u8]) -> Value {
+        json!({"protocol_version":3,"session_id":"9",
+            "sequence_number":sequence.to_string(),"monotonic_time_ns":sequence.to_string(),
+            "navigation_id":"0","frame_id":"1","artifact_id":"0","parent_event_id":"0",
+            "request_id":"0","process_id":42,"thread_id":1,"tab_id":0,
+            "category":category,"type":kind,"flags":0,"payload_encoding":"hex",
+            "payload":hex::encode(payload),"payload_size":payload.len(),"payload_truncated":false})
+    }
+
+    fn write_store(path: &Path, events: &[Value]) {
+        let text: String = events.iter().map(|event| format!("{event}\n")).collect();
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// A compiled-script artifact line for `source`, its blob written.
+    fn source_artifact(artifacts: &Path, id: &str, url: &str, source: &str) -> String {
+        let sha = hex::encode(Sha256::digest(source));
+        std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
+        std::fs::write(artifacts.join(format!("blobs/{sha}.bin")), source).unwrap();
+        format!(
+            "{}\n",
+            json!({"protocol_version":1,"artifact_id":id,"session_id":"9","navigation_id":"0",
+            "frame_id":"1","parent_artifact_id":"0","creator_event_id":"1","execution_context_id":"99",
+            "capture_origin":"compiled_script","kind":"javascript","url":url,"mime_type":"text/javascript",
+            "byte_size":source.len(),"sha256":sha,"sensitive":false,"content_path":format!("blobs/{sha}.bin")})
+        )
+    }
+
+    fn append(path: &Path, text: &str) {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+    }
+
+    /// Review round 2, A: a site whose source has not landed is kept with
+    /// what it waits for. Read again while nothing moved, it costs nothing;
+    /// an appended manifest costs its new lines only.
+    #[test]
+    fn pending_sites_are_read_again_only_after_the_manifest_or_index_moves() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, artifacts) = (
+            root.path().join("events.jsonl"),
+            root.path().join("artifacts"),
+        );
+        let source = "document.body.onclick = function onTap(event) {\n  return 1;\n};\n";
+        let start = source.find("(event)").unwrap() as u32;
+        write_store(
+            &store,
+            &[
+                store_event(
+                    1,
+                    "network",
+                    "script_identity",
+                    &identity_bytes(1, 0x02, 7, (0, 0), 99, source.as_bytes()),
+                ),
+                listener_record(2, 7, start),
+            ],
+        );
+        let manifest = artifacts.join("manifest.jsonl");
+        for n in 0..50 {
+            append(
+                &manifest,
+                &source_artifact(
+                    &artifacts,
+                    &format!("{}", 500 + n),
+                    "https://cdn.test/other.js",
+                    &format!("// other {n}\n"),
+                ),
+            );
+        }
+        let index = Mutex::new(RequestIndex::new(&store));
+        caught_up(&index);
+        let sites = std::sync::Mutex::new(ObservationSites::default());
+        let read = || {
+            let mut page = vec![listener_record(2, 7, start)];
+            let work =
+                ObservationSites::annotate(&sites, &store, &artifacts, &index, &mut page, true);
+            (
+                work,
+                page[0]["debugger_observation"]["site"]["resolution"].clone(),
+            )
+        };
+        let (work, site) = read();
+        assert_eq!(
+            site,
+            json!({"status": "unresolved", "reason": "source_artifact_missing"})
+        );
+        assert_eq!(
+            work,
+            SiteWork {
+                source_walks: 0,
+                manifest_lines: 50,
+                identity_reads: 1
+            }
+        );
+        for _ in 0..3 {
+            let (work, again) = read();
+            assert_eq!(
+                work,
+                SiteWork::default(),
+                "nothing moved: no manifest parse, no identity read"
+            );
+            assert_eq!(again, site);
+        }
+        // Another artifact lands: only that line is parsed.
+        append(
+            &manifest,
+            &source_artifact(&artifacts, "600", "https://cdn.test/late.js", "// late\n"),
+        );
+        let (work, still) = read();
+        assert_eq!(
+            work,
+            SiteWork {
+                source_walks: 0,
+                manifest_lines: 1,
+                identity_reads: 1
+            }
+        );
+        assert_eq!(still, site);
+        assert_eq!(read().0, SiteWork::default());
+        // The source lands: its line, then its one walk, settles the site.
+        append(
+            &manifest,
+            &source_artifact(&artifacts, "601", "https://app.test/app.js", source),
+        );
+        let (work, resolved) = read();
+        assert_eq!(
+            work,
+            SiteWork {
+                source_walks: 1,
+                manifest_lines: 1,
+                identity_reads: 1
+            }
+        );
+        assert_eq!(
+            (&resolved["status"], &resolved["function_name"]),
+            (&json!("resolved"), &json!("onTap"))
+        );
+        assert_eq!(read().0, SiteWork::default(), "settled");
+    }
+
+    /// Review round 2, A: past the index's identity cap, a site whose identity
+    /// it does not hold is answered from the index alone, never by a 64 MiB
+    /// store scan per read, and kept until the index moves.
+    #[test]
+    fn an_identity_past_the_index_cap_costs_no_store_scan() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, artifacts) = (
+            root.path().join("events.jsonl"),
+            root.path().join("artifacts"),
+        );
+        let mut events: Vec<Value> = (0..16_400u32)
+            .map(|n| {
+                let mut payload = vec![1, 0, 128, 0, 1, 0x08, 0, 0];
+                for value in [1000 + n, 0, 0, 0] {
+                    payload.extend(value.to_le_bytes());
+                }
+                payload.extend(99u64.to_le_bytes());
+                payload.resize(128, 0);
+                store_event(u64::from(n) + 1, "network", "script_identity", &payload)
+            })
+            .collect();
+        events.push(listener_record(20_000, 7, 100));
+        write_store(&store, &events);
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let index = Mutex::new(RequestIndex::new(&store));
+        caught_up(&index);
+        let sites = std::sync::Mutex::new(ObservationSites::default());
+        let read = || {
+            let mut page = vec![listener_record(20_000, 7, 100)];
+            let work =
+                ObservationSites::annotate(&sites, &store, &artifacts, &index, &mut page, true);
+            (
+                work,
+                page[0]["debugger_observation"]["site"]["resolution"].clone(),
+            )
+        };
+        let started = std::time::Instant::now();
+        let (work, site) = read();
+        assert_eq!(
+            site,
+            json!({"status": "unresolved", "reason": "script_identity_outside_scan"})
+        );
+        assert_eq!(
+            work,
+            SiteWork {
+                source_walks: 0,
+                manifest_lines: 0,
+                identity_reads: 1
+            }
+        );
+        assert_eq!(
+            read().0,
+            SiteWork::default(),
+            "kept while the index has not moved"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(60));
+    }
+
+    /// Review round 2, B: a store replaced under the same name (same session,
+    /// renderer and script IDs, other sources) drops every kept site before
+    /// any is used, so a page never presents the old function as resolved.
+    #[test]
+    fn a_replaced_store_drops_kept_sites_before_any_is_used() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, artifacts) = (
+            root.path().join("events.jsonl"),
+            root.path().join("artifacts"),
+        );
+        let manifest = artifacts.join("manifest.jsonl");
+        let version = |name: &str, script: u32| {
+            format!("document.body.onclick = function {name}(event) {{ return {script}; }};\n")
+        };
+        let (a, b) = (version("handlerA", 7), version("renameBB", 7));
+        let start = a.find("(event)").unwrap() as u32;
+        assert_eq!(start, b.find("(event)").unwrap() as u32);
+        let records = |source: &str| {
+            vec![
+                store_event(
+                    1,
+                    "network",
+                    "script_identity",
+                    &identity_bytes(1, 0x02, 7, (0, 0), 99, source.as_bytes()),
+                ),
+                listener_record(2, 7, start),
+                listener_record(3, 7, start + 1),
+            ]
+        };
+        write_store(&store, &records(&a));
+        append(
+            &manifest,
+            &source_artifact(&artifacts, "360", "https://app.test/bundle0.js?v=1", &a),
+        );
+        let index = Mutex::new(RequestIndex::new(&store));
+        caught_up(&index);
+        let sites = std::sync::Mutex::new(ObservationSites::default());
+        let read = |page: &mut Vec<Value>| {
+            ObservationSites::annotate(&sites, &store, &artifacts, &index, page, true);
+            page.iter()
+                .map(|e| e["debugger_observation"]["site"]["resolution"].clone())
+                .collect::<Vec<_>>()
+        };
+        let first = read(&mut vec![listener_record(2, 7, start)]);
+        assert_eq!(
+            (&first[0]["function_name"], &first[0]["artifact_id"]),
+            (&json!("handlerA"), &json!("360"))
+        );
+        // Store B is written over the same file; its source lands as artifact 900.
+        write_store(&store, &records(&b));
+        append(
+            &manifest,
+            &source_artifact(&artifacts, "900", "https://app.test/bundle0.js?v=2", &b),
+        );
+        // A page whose only site is kept, then one with a kept and a new site.
+        for mut page in [
+            vec![listener_record(2, 7, start)],
+            vec![
+                listener_record(2, 7, start),
+                listener_record(3, 7, start + 1),
+            ],
+        ] {
+            let sites = read(&mut page);
+            assert_eq!(sites[0]["function_name"], "renameBB", "{}", sites[0]);
+            for site in sites {
+                assert_eq!(
+                    (&site["artifact_id"], &site["url"]),
+                    (&json!("900"), &json!("https://app.test/bundle0.js?v=2")),
+                    "{site}"
+                );
+            }
+        }
+        let direct = observation_document(&store, &artifacts, &index, Some(9), 42, 2).unwrap();
+        assert_eq!(
+            direct["observation"]["site"]["resolution"]["function_name"],
+            "renameBB"
+        );
     }
 
     #[test]

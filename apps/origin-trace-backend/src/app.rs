@@ -1648,7 +1648,7 @@ impl App {
             event_query::Cursor::After(offset) => Some(offset),
             event_query::Cursor::Tail => None,
         };
-        let _waiter = self
+        let waiter = self
             .event_waiters
             .clone()
             .try_acquire_owned()
@@ -1719,8 +1719,10 @@ impl App {
             scan_start: origin,
             ..last
         };
-        // How long the wait itself took, before any site of what it found is resolved.
+        // How long the wait itself took, before any site of what it found is
+        // resolved; the waiting slot is free from here on.
         let waited = began.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        drop(waiter);
         let cursor = event_query::Cursor::After(origin);
         let mut document = event_query::events_document(&page, &tally, &filter, cursor, limit);
         if !timed_out {
@@ -1997,10 +1999,15 @@ impl App {
                 self.options.signal_store.clone(),
             ];
             let mut index = self.requests.clone().lock_owned().await;
-            let gaps = self.gaps.clone();
+            let (gaps, sites) = (self.gaps.clone(), self.observation_sites.clone());
             self.blocking(move || {
                 index.discard()?;
                 gaps.reset();
+                // Kept observation sites belong to the evidence being cleared.
+                sites
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clear();
                 evidence::clear_stores(&paths)
             })
             .await?;
@@ -2296,10 +2303,14 @@ fn observation_sites(
             .is_some_and(|kind| crate::debugger_observation::TYPES.contains(&kind))
     });
     if observed {
-        sites
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .annotate(store, artifacts, requests, events, newest_first);
+        crate::request_stack::ObservationSites::annotate(
+            sites,
+            store,
+            artifacts,
+            requests,
+            events,
+            newest_first,
+        );
     }
 }
 

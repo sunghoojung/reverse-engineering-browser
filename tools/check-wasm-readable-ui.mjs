@@ -55,8 +55,10 @@ const context = createContext({window, document, console, fetch, Response, Abort
 runInContext(`${await ui('block_graph.js')}\n${await ui('wasm_readable.js')}\nglobalThis.create = createWasmReadablePanel;`, context);
 const host = document.getElementById('host'), button = document.getElementById('readable');
 const revealed = [];
+let focusedList = 0;
 const panel = context.create({host, editor: host.closest('.sources-editor'), button, closeOn: [document.getElementById('graph')],
   revealOffset: offset => revealed.push(offset), initialFunction: () => null});
+host.querySelector('.wasm-readable-lines').focus = () => { focusedList += 1; };
 const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise(resolve => setTimeout(resolve, 0)); };
 panel.sync({kind: 'javascript', source_type: 'artifact', artifact_id: '9', sha256: 'b'});
 assert.equal(button.hidden, true, 'Readable is offered only for a Wasm artifact');
@@ -85,6 +87,7 @@ press('ArrowDown');
 assert.equal(rows()[3].getAttribute('aria-selected'), 'true');
 press('Enter');
 assert.deepEqual(revealed, [104, 106]);
+assert.equal(focusedList, 2, 'the list takes focus back after each reveal');
 press('End');
 assert.equal(rows()[399].getAttribute('aria-selected'), 'true');
 // Past the window's edge the next window is read.

@@ -118,9 +118,13 @@ function createWasmReadablePanel({host, editor, button, closeOn = [], revealOffs
     list.setAttribute('aria-activedescendant', row.id);
     row.scrollIntoView?.({block: 'nearest'});
   }
+  /* Revealing moves the linear view, which takes focus; the list keeps it so
+   * the next arrow key still moves through lines. */
   function reveal() {
     const line = current?.lines[selected];
-    if (line?.ranges.length) revealOffset?.(line.ranges[0][0]);
+    if (!line?.ranges.length) return;
+    revealOffset?.(line.ranges[0][0]);
+    list.focus?.({preventScroll: true});
   }
 
   async function load(index, start = 0, focusLast = false) {

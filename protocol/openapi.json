@@ -22446,6 +22446,16 @@
                       "type": "integer",
                       "minimum": 0
                     },
+                    "data_segments": {
+                      "type": "array",
+                      "minItems": 1,
+                      "maxItems": 8,
+                      "description": "Every segment the match spans: a table split across segments whose memory addresses touch is one match.",
+                      "items": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
                     "encoding": {
                       "enum": [
                         "bytes",
@@ -22533,7 +22543,8 @@
                               "i64.const",
                               "f32.const",
                               "f64.const",
-                              "v128.const"
+                              "v128.const",
+                              "i32.const pair"
                             ]
                           }
                         }

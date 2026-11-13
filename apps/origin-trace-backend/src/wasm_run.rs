@@ -32,9 +32,9 @@ use std::{
 };
 use tokio::sync::Semaphore;
 use wasmi::{
-    Config, Engine, Extern, ExternType, F32, F64, Func, FuncType, Global, Instance, Memory, Module,
-    Mutability, Nullable, Ref, RefType, ResourceLimiter, ResumableCall, Store, Table, TrapCode,
-    V128, Val, ValType, errors::ErrorKind,
+    CompilationMode, Config, Engine, Extern, ExternType, F32, F64, Func, FuncType, Global,
+    Instance, Memory, Module, Mutability, Nullable, Ref, RefType, ResourceLimiter, ResumableCall,
+    Store, Table, TrapCode, V128, Val, ValType, errors::ErrorKind,
 };
 use wasmi_core::LimiterError;
 use wasmparser::{ExternalKind, Parser, Payload, TypeRef};
@@ -55,9 +55,24 @@ pub const MAX_WRITE_BYTES: usize = 256 * 1024;
 pub const MAX_READ_BYTES: usize = 256 * 1024;
 const MAX_RECORDED_CALLS: usize = 256;
 const MAX_RECORDED_ARGS: usize = 16;
+const MAX_RECORDED_RESULTS: usize = 16;
+/// A stored record past this is returned but not stored.
+const MAX_RECORD_BYTES: usize = 4 * 1024 * 1024;
+/// The longest value literal; a float's shortest round-trip form is at most
+/// 24 characters and a v128 34.
+const MAX_LITERAL: usize = 64;
+/// wasmi builds a constant expression as nested closures, one level per
+/// operator, and evaluates and drops it recursively. Real modules use one to
+/// three operators (a constant, a global, extended-const arithmetic); a long
+/// one would overflow the native stack and abort the backend.
+const MAX_CONST_OPERATORS: usize = 64;
+/// Memories and tables a run instantiates, imported and defined together.
+const MAX_MEMORIES: u32 = 16;
+const MAX_TABLES: u32 = 16;
 /// Fuel is granted in slices so the wall-clock deadline is checked between
-/// them; a slice is a few milliseconds of interpretation.
-const FUEL_SLICE: u64 = 1_000_000;
+/// them, and every import call checks it too; a slice is well under a
+/// millisecond of interpretation.
+const FUEL_SLICE: u64 = 100_000;
 const MAX_RUNS: usize = 64;
 const MAX_STORE_BYTES: usize = 16 * 1024 * 1024;
 const PAGE: u64 = 65_536;
@@ -327,6 +342,9 @@ fn value(typed: &Typed) -> Result<Val> {
             typed.ty.chars().take(16).collect::<String>()
         ))
     };
+    if text.len() > MAX_LITERAL {
+        return Err(Error::bad("A value literal is at most 64 characters"));
+    }
     let float_bits = |text: &str| text.strip_prefix("nan:0x").map(|bits| bits.to_owned());
     Ok(match typed.ty.as_str() {
         "i32" => {
@@ -351,8 +369,7 @@ fn value(typed: &Typed) -> Result<Val> {
                 }
                 Val::F32(F32::from_bits(bits))
             }
-            None if text.eq_ignore_ascii_case("nan") => return Err(bad()),
-            None => Val::F32(F32::from(text.parse::<f32>().map_err(|_| bad())?)),
+            None => Val::F32(F32::from(float::<f32>(text).ok_or_else(bad)?)),
         },
         "f64" => match float_bits(text) {
             Some(bits) => {
@@ -362,8 +379,7 @@ fn value(typed: &Typed) -> Result<Val> {
                 }
                 Val::F64(F64::from_bits(bits))
             }
-            None if text.eq_ignore_ascii_case("nan") => return Err(bad()),
-            None => Val::F64(F64::from(text.parse::<f64>().map_err(|_| bad())?)),
+            None => Val::F64(F64::from(float::<f64>(text).ok_or_else(bad)?)),
         },
         "v128" => {
             let digits = text.strip_prefix("0x").unwrap_or(text);
@@ -380,6 +396,34 @@ fn value(typed: &Typed) -> Result<Val> {
     })
 }
 
+/// The contract's float spellings only: `inf`, `-inf`, or an optionally
+/// negative decimal with an optional fraction and exponent. A finite literal
+/// that rounds to infinity is refused rather than silently changed.
+fn float<T: std::str::FromStr + Into<f64> + Copy>(text: &str) -> Option<T> {
+    if text == "inf" || text == "-inf" {
+        return text.parse().ok();
+    }
+    let body = text.strip_prefix('-').unwrap_or(text);
+    let (mantissa, exponent) = match body.find(['e', 'E']) {
+        Some(at) => (&body[..at], Some(&body[at + 1..])),
+        None => (body, None),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
+    if whole.is_empty()
+        || !digits(whole)
+        || !digits(fraction)
+        || exponent.is_some_and(|e| {
+            let e = e.strip_prefix(['+', '-']).unwrap_or(e);
+            e.is_empty() || !digits(e)
+        })
+    {
+        return None;
+    }
+    let parsed: T = text.parse().ok()?;
+    parsed.into().is_finite().then_some(parsed)
+}
+
 fn type_name(ty: &ValType) -> &'static str {
     match ty {
         ValType::I32 => "i32",
@@ -392,11 +436,13 @@ fn type_name(ty: &ValType) -> &'static str {
     }
 }
 
-fn float_text<T: std::fmt::Display>(value: T, nan: bool, bits: String) -> String {
+/// Debug is the shortest form that round-trips, with an exponent for large
+/// and small magnitudes, so `1e300` stays five characters.
+fn float_text<T: std::fmt::Debug>(value: T, nan: bool, bits: String) -> String {
     if nan {
         format!("nan:0x{bits}")
     } else {
-        value.to_string()
+        format!("{value:?}")
     }
 }
 
@@ -501,10 +547,28 @@ struct Scan {
     imported_functions: u32,
     defined_functions: u32,
     memories: u32,
+    tables: u32,
     exports: Vec<(String, ExternalKind, u32)>,
     start: Option<u32>,
     bodies: Vec<Range<usize>>,
     sections: Vec<(u8, Range<usize>, Range<usize>)>,
+}
+
+/// Refuses a constant expression longer than MAX_CONST_OPERATORS before the
+/// interpreter sees it.
+fn constant(expr: &wasmparser::ConstExpr<'_>, label: &str) -> Result<()> {
+    let mut reader = expr.get_operators_reader();
+    let mut operators = 0usize;
+    while !reader.eof() {
+        reader.read().map_err(bad)?;
+        operators += 1;
+        if operators > MAX_CONST_OPERATORS {
+            return Err(Error::protocol(format!(
+                "WASM run module has a {label} constant expression over {MAX_CONST_OPERATORS} operators, which the interpreter would evaluate recursively; nothing ran"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn scan(bytes: &[u8]) -> Result<Scan> {
@@ -535,12 +599,48 @@ fn scan(bytes: &[u8]) -> Result<Scan> {
                     match import.map_err(bad)?.ty {
                         TypeRef::Func(_) => facts.imported_functions += 1,
                         TypeRef::Memory(_) => facts.memories += 1,
+                        TypeRef::Table(_) => facts.tables += 1,
                         _ => {}
                     }
                 }
             }
             Payload::FunctionSection(reader) => facts.defined_functions = reader.count(),
             Payload::MemorySection(reader) => facts.memories += reader.count(),
+            Payload::TableSection(reader) => {
+                facts.tables += reader.count();
+                for table in reader {
+                    if let wasmparser::TableInit::Expr(expr) = table.map_err(bad)?.init {
+                        constant(&expr, "table initializer")?;
+                    }
+                }
+            }
+            Payload::GlobalSection(reader) => {
+                for global in reader {
+                    constant(&global.map_err(bad)?.init_expr, "global initializer")?;
+                }
+            }
+            Payload::ElementSection(reader) => {
+                for element in reader {
+                    let element = element.map_err(bad)?;
+                    if let wasmparser::ElementKind::Active { offset_expr, .. } = &element.kind {
+                        constant(offset_expr, "element offset")?;
+                    }
+                    if let wasmparser::ElementItems::Expressions(_, items) = element.items {
+                        for item in items {
+                            constant(&item.map_err(bad)?, "element item")?;
+                        }
+                    }
+                }
+            }
+            Payload::DataSection(reader) => {
+                for data in reader {
+                    if let wasmparser::DataKind::Active { offset_expr, .. } =
+                        &data.map_err(bad)?.kind
+                    {
+                        constant(offset_expr, "data offset")?;
+                    }
+                }
+            }
             Payload::ExportSection(reader) => {
                 for export in reader {
                     let export = export.map_err(bad)?;
@@ -701,47 +801,94 @@ fn rewrite(bytes: &[u8], facts: &Scan, target: u32, run_start: bool) -> Result<(
     ))
 }
 
+/// The limits are totals across every memory and every table of the run.
 /// Denials are counted, never hidden: a refused `memory.grow` returns -1 to
 /// the module as the specification requires, and the result reports it.
+#[derive(Default)]
 struct Limiter {
     memory_bytes: usize,
     table_elements: usize,
+    memory_total: usize,
+    table_total: usize,
+    /// The growth last admitted, undone if the growth then fails.
+    memory_pending: usize,
+    table_pending: usize,
     memory_denied: u64,
     table_denied: u64,
+}
+/// Admits `current` growing to `desired` when the running total stays within
+/// `limit`, and updates the total.
+fn admit(
+    total: &mut usize,
+    pending: &mut usize,
+    denied: &mut u64,
+    limit: usize,
+    (current, desired, maximum): (usize, usize, Option<usize>),
+) -> bool {
+    let growth = desired.saturating_sub(current);
+    let after = total.saturating_add(growth);
+    if after > limit {
+        *denied += 1;
+        return false;
+    }
+    if maximum.is_some_and(|maximum| desired > maximum) {
+        return false;
+    }
+    *total = after;
+    *pending = growth;
+    true
 }
 impl ResourceLimiter for Limiter {
     fn memory_growing(
         &mut self,
-        _current: usize,
+        current: usize,
         desired: usize,
         maximum: Option<usize>,
     ) -> std::result::Result<bool, LimiterError> {
-        if desired > self.memory_bytes {
-            self.memory_denied += 1;
-            return Ok(false);
-        }
-        Ok(maximum.is_none_or(|maximum| desired <= maximum))
+        Ok(admit(
+            &mut self.memory_total,
+            &mut self.memory_pending,
+            &mut self.memory_denied,
+            self.memory_bytes,
+            (current, desired, maximum),
+        ))
+    }
+    fn memory_grow_failed(
+        &mut self,
+        _error: &wasmi_core::MemoryError,
+    ) -> std::result::Result<(), LimiterError> {
+        self.memory_total -= std::mem::take(&mut self.memory_pending);
+        Ok(())
     }
     fn table_growing(
         &mut self,
-        _current: usize,
+        current: usize,
         desired: usize,
         maximum: Option<usize>,
     ) -> std::result::Result<bool, LimiterError> {
-        if desired > self.table_elements {
-            self.table_denied += 1;
-            return Ok(false);
-        }
-        Ok(maximum.is_none_or(|maximum| desired <= maximum))
+        Ok(admit(
+            &mut self.table_total,
+            &mut self.table_pending,
+            &mut self.table_denied,
+            self.table_elements,
+            (current, desired, maximum),
+        ))
+    }
+    fn table_grow_failed(
+        &mut self,
+        _error: &wasmi_core::TableError,
+    ) -> std::result::Result<(), LimiterError> {
+        self.table_total -= std::mem::take(&mut self.table_pending);
+        Ok(())
     }
     fn instances(&self) -> usize {
         1
     }
     fn tables(&self) -> usize {
-        100
+        MAX_TABLES as usize
     }
     fn memories(&self) -> usize {
-        100
+        MAX_MEMORIES as usize
     }
 }
 
@@ -768,6 +915,10 @@ struct HostState {
     calls: Vec<Value>,
     total_calls: u64,
     trapped: Option<(usize, ImportTrapReason)>,
+    /// Import calls are cheap in fuel but not in time, so each one checks the
+    /// deadline and ends the run once it has passed.
+    deadline: Instant,
+    deadline_hit: bool,
 }
 
 fn stub_call(
@@ -776,6 +927,10 @@ fn stub_call(
     params: &[Val],
     results: &mut [Val],
 ) -> std::result::Result<(), wasmi::Error> {
+    if Instant::now() >= state.deadline {
+        state.deadline_hit = true;
+        return Err(wasmi::Error::new("Origin Trace run deadline reached"));
+    }
     let sequence = state.total_calls;
     state.total_calls += 1;
     let function = &mut state.functions[import];
@@ -803,7 +958,8 @@ fn stub_call(
             "args": args,
             "args_truncated": params.len() > MAX_RECORDED_ARGS,
             "outcome": if reply.is_ok() { "returned" } else { "trapped" },
-            "results": reply.as_ref().ok().map(|values| values.iter().map(encode).collect::<Vec<_>>()),
+            "results": reply.as_ref().ok().map(|values| values.iter().take(MAX_RECORDED_RESULTS).map(encode).collect::<Vec<_>>()),
+            "results_truncated": reply.as_ref().is_ok_and(|values| values.len() > MAX_RECORDED_RESULTS),
         }));
     }
     match reply {
@@ -903,6 +1059,16 @@ fn drive(
         budget.granted += add;
         store.set_fuel(remaining + add).is_ok()
     };
+    let deadline = || {
+        Outcome::new(
+            Status::DeadlineExceeded,
+            phase,
+            "The wall-clock deadline was reached; execution stopped between fuel slices or at an import call",
+        )
+    };
+    if Instant::now() >= budget.deadline {
+        return Some(deadline());
+    }
     if !grant(store, budget, 1) {
         return Some(Outcome::new(
             Status::FuelExhausted,
@@ -916,11 +1082,7 @@ fn drive(
             Ok(ResumableCall::Finished) => return None,
             Ok(ResumableCall::OutOfFuel(call)) => {
                 if Instant::now() >= budget.deadline {
-                    return Some(Outcome::new(
-                        Status::DeadlineExceeded,
-                        phase,
-                        "The wall-clock deadline was reached; execution stopped between fuel slices",
-                    ));
+                    return Some(deadline());
                 }
                 if !grant(store, budget, call.required_fuel()) {
                     return Some(Outcome::new(
@@ -931,6 +1093,7 @@ fn drive(
                 }
                 step = call.resume(&mut *store, outputs);
             }
+            Ok(ResumableCall::HostTrap(_)) if store.data().deadline_hit => return Some(deadline()),
             Ok(ResumableCall::HostTrap(_)) => {
                 let message = match store.data().trapped {
                     Some((index, reason)) => {
@@ -1033,8 +1196,12 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
     let selected = select(request, &facts)?;
     let (executable, aliases) = rewrite(bytes, &facts, selected.index, request.run_start)?;
     let mut config = Config::default();
+    // Eager compilation happens in Module::new, bounded by the module size
+    // cap. Lazy compilation would charge a body's translation against one fuel
+    // slice on its first call, so a large body could never run.
     config
         .consume_fuel(true)
+        .compilation_mode(CompilationMode::Eager)
         .set_max_recursion_depth(limits.call_depth as usize);
     let engine = Engine::new(&config);
     let module = Module::new(&engine, &executable[..]).map_err(|error| {
@@ -1100,31 +1267,60 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
             position
         )));
     }
+    let deadline = started + Duration::from_millis(limits.deadline_ms);
     let mut store = Store::new(
         &engine,
         HostState {
             limiter: Limiter {
                 memory_bytes: (limits.memory_pages * PAGE) as usize,
                 table_elements: limits.table_elements as usize,
-                memory_denied: 0,
-                table_denied: 0,
+                ..Limiter::default()
             },
             functions,
             calls: Vec::new(),
             total_calls: 0,
             trapped: None,
+            deadline,
+            deadline_hit: false,
         },
     );
     store.limiter(|state| &mut state.limiter);
     let mut budget = Budget {
         fuel: limits.fuel,
         granted: 0,
-        deadline: started + Duration::from_millis(limits.deadline_ms),
+        deadline,
     };
     let mut externs = Vec::new();
-    let mut failure = None;
+    // The counts are checked before anything is created, so the outcome names
+    // the limit rather than an interpreter message.
+    let mut failure = if facts.memories > MAX_MEMORIES {
+        Some(Outcome::new(
+            Status::MemoryLimit,
+            Phase::Instantiate,
+            format!(
+                "The module has {} memories; a run instantiates at most {MAX_MEMORIES}",
+                facts.memories
+            ),
+        ))
+    } else if facts.tables > MAX_TABLES {
+        Some(Outcome::new(
+            Status::TableLimit,
+            Phase::Instantiate,
+            format!(
+                "The module has {} tables; a run instantiates at most {MAX_TABLES}",
+                facts.tables
+            ),
+        ))
+    } else {
+        None
+    };
     let mut function_slot = 0usize;
-    for import in module.imports() {
+    let imports = if failure.is_none() {
+        module.imports().collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    for import in imports {
         let label = format!("{}.{}", import.module(), import.name());
         match import.ty().clone() {
             ExternType::Func(ty) => {
@@ -1482,6 +1678,18 @@ fn persist(root: &Path, record: &Value) -> Result<()> {
     }
 }
 
+/// The contract check runs before a record is stored. Its error never carries
+/// the validator's message, which quotes the offending value: a value derived
+/// from captured code would reach a client that may not read content.
+fn checked(record: &Value) -> Result<()> {
+    validation::schema("WasmRun", record, 500).map_err(|_| {
+        Error::new(
+            500,
+            "The run record did not match its contract and was not stored; its values are not reported",
+        )
+    })
+}
+
 pub struct Runs {
     root: PathBuf,
     permit: Arc<Semaphore>,
@@ -1505,7 +1713,15 @@ impl Runs {
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let mut record = run_blocking(&root, &request, limits)?;
-            match persist(&root, &record) {
+            checked(&record)?;
+            let stored = if serde_json::to_vec(&record)?.len() > MAX_RECORD_BYTES {
+                Err(Error::bad(
+                    "The run record exceeds 4 MiB and was not stored",
+                ))
+            } else {
+                persist(&root, &record)
+            };
+            match stored {
                 Ok(()) => {
                     record["stored"] = json!(true);
                     record["store_error"] = Value::Null;
@@ -1515,7 +1731,6 @@ impl Runs {
                     record["store_error"] = json!(error.message);
                 }
             }
-            validation::schema("WasmRun", &record, 500)?;
             Ok(record)
         })
         .await
@@ -1729,7 +1944,7 @@ mod tests {
         assert_eq!(calls[0]["field"], "now");
         assert_eq!(calls[1]["field"], "random");
         assert_eq!(calls[1]["args"][0]["value"], "3");
-        assert_eq!(calls[2]["results"][0]["value"], "1001");
+        assert_eq!(calls[2]["results"][0]["value"], "1001.0");
         let other = supplied["other_imports"].as_array().unwrap();
         assert_eq!(other[0]["kind"], "memory");
         assert_eq!(other[0]["provided"], "fresh_zeroed");
@@ -1861,5 +2076,281 @@ mod tests {
         let facts = scan(&none).unwrap();
         let (rewritten, _) = rewrite(&none, &facts, 1, false).unwrap();
         assert_eq!(scan(&rewritten).unwrap().exports.len(), 1);
+    }
+
+    fn repeated(prefix: &str, unit: &str, count: usize, suffix: &str) -> String {
+        let mut text = String::with_capacity(prefix.len() + unit.len() * count + suffix.len());
+        text.push_str(prefix);
+        for _ in 0..count {
+            text.push_str(unit);
+        }
+        text.push_str(suffix);
+        text
+    }
+
+    #[test]
+    fn a_long_constant_expression_is_refused_before_the_interpreter_sees_it() {
+        // 100,000 nested additions overflowed the native stack in wasmi's
+        // constant-expression closures and aborted the whole backend.
+        let (request, limits) = request(json!({}));
+        let deep = module(&repeated(
+            "(module (global i32 i32.const 0 ",
+            "i32.const 1 i32.add ",
+            100_000,
+            ") (func (export \"run\") (result i32) i32.const 7))",
+        ));
+        let error = execute(&request, limits, &deep, Instant::now()).unwrap_err();
+        assert_eq!(error.status, 422);
+        assert!(
+            error
+                .message
+                .contains("global initializer constant expression"),
+            "{}",
+            error.message
+        );
+        for (label, source) in [
+            (
+                "data offset",
+                repeated(
+                    "(module (memory 1) (data (offset i32.const 0 ",
+                    "i32.const 0 i32.add ",
+                    40,
+                    ") \"x\") (func (export \"run\")))",
+                ),
+            ),
+            (
+                "element offset",
+                repeated(
+                    "(module (table 2 funcref) (elem (offset i32.const 0 ",
+                    "i32.const 0 i32.add ",
+                    40,
+                    ") func $f) (func $f) (func (export \"run\")))",
+                ),
+            ),
+        ] {
+            let error = execute(&request, limits, &module(&source), Instant::now()).unwrap_err();
+            assert!(error.message.contains(label), "{label}: {}", error.message);
+        }
+        // Extended-const arithmetic of ordinary length still runs.
+        let short = run(
+            "(module (global i32 i32.const 40 i32.const 2 i32.add) (func (export \"run\") (result i32) global.get 0))",
+            json!({}),
+        );
+        assert_eq!(short["results"][0]["value"], "42");
+    }
+
+    #[test]
+    fn memory_and_table_limits_are_totals() {
+        // Each memory or table fits the limit alone; together they do not.
+        let memories = run(&fixture("limits.wat"), json!({}));
+        assert_eq!(memories["outcome"]["status"], "memory_limit", "{memories}");
+        assert_eq!(memories["outcome"]["phase"], "instantiate");
+        let fits = run(
+            &fixture("limits.wat"),
+            json!({"limits":{"memory_pages":320}}),
+        );
+        assert_eq!(fits["outcome"]["status"], "returned", "{fits}");
+        let tables = run(&fixture("tables.wat"), json!({}));
+        assert_eq!(tables["outcome"]["status"], "table_limit", "{tables}");
+        let many = run(
+            &repeated("(module ", "(memory 1) ", 17, "(func (export \"run\")))"),
+            json!({}),
+        );
+        assert_eq!(many["outcome"]["status"], "memory_limit");
+        assert!(
+            many["outcome"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("at most 16")
+        );
+        // Growth counts against the same total: 2 + 3 pages fit 5, 2 more do not.
+        let grow = run(
+            "(module (memory $a 2) (memory $b 1) (func (export \"run\") (result i32)
+                (drop (memory.grow $b (i32.const 2))) (memory.grow $a (i32.const 1))))",
+            json!({"limits":{"memory_pages":5}}),
+        );
+        assert_eq!(grow["results"][0]["value"], "-1", "{grow}");
+        assert_eq!(grow["memory_grow_denied"], 1);
+    }
+
+    #[test]
+    fn a_large_function_body_runs_within_an_ordinary_fuel_limit() {
+        // Lazy compilation charged about 7 fuel per body byte against one fuel
+        // slice on the first call, so a body over about 140 KB never ran.
+        let source = repeated(
+            "(module (func (export \"run\") (result i32) i32.const 0 ",
+            "i32.const 1 i32.add ",
+            70_000,
+            "))",
+        );
+        let bytes = module(&source);
+        assert!(bytes.len() > 200_000, "{}", bytes.len());
+        let (request, limits) = request(json!({}));
+        let result = execute(&request, limits, &bytes, Instant::now()).unwrap();
+        assert_eq!(
+            result["outcome"]["status"], "returned",
+            "{}",
+            result["outcome"]
+        );
+        assert_eq!(result["results"][0]["value"], "70000");
+    }
+
+    #[test]
+    fn long_float_results_are_short_literals_and_no_error_quotes_a_value() {
+        let big = run(&fixture("floats.wat"), json!({}));
+        assert_eq!(big["results"][0]["value"], "1e300");
+        let small = run(&fixture("floats.wat"), json!({"export":"small"}));
+        assert_eq!(small["results"][0]["value"], "1.2345678901234566e-50");
+        for record in [&big, &small] {
+            let mut full = record.clone();
+            full["schema"] = json!(SCHEMA);
+            assert!(validation::schema("WasmTypedValue", &full["results"][0], 500).is_ok());
+        }
+        // A forged record whose value breaks the contract is refused without
+        // the validator's message, which quotes the value.
+        let forged =
+            json!({"results":[{"type":"f64","value":format!("SECRET{}", "9".repeat(80))}]});
+        let error = checked(&forged).unwrap_err();
+        assert!(
+            !error.message.contains("SECRET") && !error.message.contains("999"),
+            "{}",
+            error.message
+        );
+        // Every request refusal names the problem, never the value itself.
+        let long = format!("0.{}1", "0".repeat(80));
+        for body in [
+            json!({"args":[{"type":"f64","value":long}]}),
+            json!({"args":[{"type":"f32","value":"1e40"}]}),
+            json!({"args":[{"type":"f64","value":"infinity"}]}),
+        ] {
+            let mut full = json!({"artifact_id":"1","sha256":"0".repeat(64),"export":"echo","confirm_offline_execution":true});
+            full["args"] = body["args"].clone();
+            let error = Request::parse(&serde_json::to_vec(&full).unwrap()).unwrap_err();
+            let quoted = body["args"][0]["value"].as_str().unwrap();
+            assert!(!error.message.contains(quoted), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn float_literals_take_only_the_contract_spellings() {
+        for (ty, text) in [
+            ("f64", "-nan"),
+            ("f64", "+nan"),
+            ("f64", "NaN"),
+            ("f64", "infinity"),
+            ("f64", "+inf"),
+            ("f64", "+1"),
+            ("f64", ".5"),
+            ("f64", "1e"),
+            ("f32", "1e40"),
+            ("f32", "-1e40"),
+            ("f64", "1e400"),
+        ] {
+            assert!(
+                value(&Typed {
+                    ty: ty.into(),
+                    value: text.into()
+                })
+                .is_err(),
+                "{ty} {text}"
+            );
+        }
+        for (ty, text, back) in [
+            ("f64", "1e300", "1e300"),
+            ("f64", "1.5e-3", "0.0015"),
+            ("f32", "-0", "-0.0"),
+            ("f64", "inf", "inf"),
+            ("f32", "-inf", "-inf"),
+            ("f64", "2", "2.0"),
+            ("f64", "1E+2", "100.0"),
+        ] {
+            let parsed = value(&Typed {
+                ty: ty.into(),
+                value: text.into(),
+            })
+            .unwrap();
+            assert_eq!(encode(&parsed).value, back, "{ty} {text}");
+        }
+        assert!(
+            value(&Typed {
+                ty: "i64".into(),
+                value: "1".repeat(65)
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn import_calls_check_the_deadline() {
+        // A loop of import calls is cheap in fuel but slow in time; checking the
+        // deadline only between fuel slices let a 1 s deadline run for 3 s.
+        let started = Instant::now();
+        let result = run(
+            &fixture("hostloop.wat"),
+            json!({
+            "imports":[{"module":"env","field":"tick","results":[{"type":"i32","value":"1"}]}],
+            "limits":{"fuel":10_000_000_000u64,"deadline_ms":300}}),
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(
+            result["outcome"]["status"], "deadline_exceeded",
+            "{}",
+            result["outcome"]
+        );
+        assert!(elapsed < Duration::from_millis(1000), "{elapsed:?}");
+    }
+
+    #[test]
+    fn an_import_call_after_the_deadline_ends_the_run() {
+        // Deterministic half of the check above: once the deadline has passed,
+        // the next import call refuses, whatever fuel is left.
+        let mut state = HostState {
+            limiter: Limiter::default(),
+            functions: vec![ImportFunction {
+                function_index: 0,
+                module: "env".into(),
+                field: "tick".into(),
+                plan: Plan::Results(vec![Val::I32(1)]),
+                calls: 0,
+            }],
+            calls: Vec::new(),
+            total_calls: 0,
+            trapped: None,
+            deadline: Instant::now() - Duration::from_millis(1),
+            deadline_hit: false,
+        };
+        let mut results = [Val::I32(0)];
+        assert!(stub_call(&mut state, 0, &[], &mut results).is_err());
+        assert!(state.deadline_hit);
+        assert_eq!(
+            state.total_calls, 0,
+            "a refused call is not recorded as made"
+        );
+        state.deadline = Instant::now() + Duration::from_secs(60);
+        state.deadline_hit = false;
+        assert!(stub_call(&mut state, 0, &[], &mut results).is_ok());
+        assert!(matches!(results[0], Val::I32(1)));
+    }
+
+    #[test]
+    fn recorded_import_results_are_capped() {
+        let values = (0..40)
+            .map(|_| json!({"type":"i64","value":"9"}))
+            .collect::<Vec<_>>();
+        let result = run(
+            &fixture("wide.wat"),
+            json!({"imports":[{"module":"env","field":"many","results":values}]}),
+        );
+        assert_eq!(
+            result["outcome"]["status"], "returned",
+            "{}",
+            result["outcome"]
+        );
+        let call = &result["import_calls"][0];
+        assert_eq!(
+            call["results"].as_array().unwrap().len(),
+            MAX_RECORDED_RESULTS
+        );
+        assert_eq!(call["results_truncated"], true);
     }
 }

@@ -32,8 +32,11 @@ never changed. Three rules hold everywhere:
   either.
 - **Presence, not execution.** A constant match shows that the values are in the
   bytes, not that an algorithm runs; a table can be dead data and one immediate
-  can coincide with an unrelated value. An address reference is an immediate or
-  load offset inside a matched table's address range, not an observed load.
+  can coincide with an unrelated value. An address reference is an
+  `i32.const` or `i64.const` naming a matched table's start address, or a load
+  whose constant offset falls inside the table, not an observed load. Any
+  other immediate inside a table's range is not counted: Emscripten's data
+  starts at 1024, so loop bounds and sizes land inside tables all the time.
 
 ## Document
 
@@ -56,11 +59,14 @@ never changed. Three rules hold everywhere:
   Function indexes include imported functions.
 - `constants.matches`: `id`, `label`, `family`, `location` (`data` or
   `immediate`), `match` (`complete` or `partial`), `matched` and `total`
-  elements, `byte_offset` and `byte_end`. A data match adds `data_segment`,
-  `encoding`, `runs`, `memory_address` (null when the segment's offset is not a
-  constant), `referenced_by` (`function_index`, `byte_offset`, `via`
-  `address_immediate` or `load_offset`), `reference_count` and `hex`. An
-  immediate match adds `function_index` and `sites` (`byte_offset`, `operator`).
+  elements, `byte_offset` and `byte_end`. A match is complete only when every
+  element matched: 255 of 256 is partial. A data match adds `data_segment` and
+  `data_segments` (every segment it spans), `encoding`, `runs`,
+  `memory_address` (null when the segment's offset is not a constant),
+  `referenced_by` (`function_index`, `byte_offset`, `via` `address_immediate`
+  or `load_offset`), `reference_count` and `hex`. An immediate match adds
+  `function_index` and `sites` (`byte_offset`, `operator`, where
+  `i32.const pair` is two adjacent halves of one 64-bit element).
 - `coverage`: data segments and bytes, bytes scanned, whether the data scan
   finished, function bodies and immediates scanned.
 
@@ -94,8 +100,13 @@ little-endian halves, high half first. A run starts only at a distinctive
 element and needs a set-specific minimum length; runs of one set that continue
 the table form one match. Immediates are `i32.const`, `i64.const` (also against
 32-bit sets, since Go keeps 32-bit values in i64), and `f32.const`, `f64.const`
-and `v128.const` lanes by their bits; a function matches a set when it holds a
-set-specific number of distinct elements. A match another match fully explains
+and `v128.const` lanes by their bits. Two adjacent `i32.const` values, high or
+low half first, that spell one 64-bit element count for the 64-bit set, so a
+32-bit SHA-512 implementation is SHA-512 rather than a partial SHA-256. A
+function matches a set when it holds a set-specific number of distinct
+elements. A table split across segments whose memory addresses touch, as
+Binaryen's memory packing leaves it, is one match when the second part
+continues the table where the first stopped. A match another match fully explains
 is dropped: four MD5 words inside a five-word SHA-1 state, the alphanumeric
 alphabet inside a complete Base64 alphabet.
 
@@ -104,23 +115,37 @@ alphabet inside a complete Base64 alphabet.
 - Maximum input: 64 MiB, the block graph's budget. Larger artifacts fail with
   HTTP 400.
 - One four-second deadline for the whole report, inside the native helper's
-  five-second process deadline. A deadline names the data byte or function body
-  where scanning stopped.
-- At most 32 conclusions of 16 evidence items, 32 producers, 64 target
-  features, 64 custom sections, 4 suggestions per function, 16,384 suggestions,
-  128 constant matches, 16 references and 8 sites per match. Every cap reports a
-  count and an omission or `*_truncated` flag.
+  five-second process deadline. Reading sections, labeling, the data scan,
+  clustering, merging, suppression and the immediate scan all poll it, and
+  `omissions` names the phase and how far it got.
+- Records are kept up to 65,536 of each kind (imports, exports, names, data
+  segments, custom sections) and counted past that; `function_names` and the
+  function counts stay exact for what was read. At most 8,192 data runs and
+  512 candidate matches are kept before merging; the rest are counted. Merging
+  and suppression are each one pass over sorted matches.
+- At most 32 conclusions of 8 evidence items, 16 producers, 32 target
+  features, 32 custom sections, 4 suggestions per function (each label once),
+  16,384 suggestions, 64 constant matches (complete and larger first), and 4
+  references and 4 sites per match. Every cap reports a count and an omission
+  or `*_truncated` flag.
+- One page serializes to at most 126,000 bytes, inside the 131,072-byte MCP
+  inline limit. Everything but the suggestions is held to 96,000 bytes, with
+  fewer evidence items, listed sections and references when it would not fit
+  (an omission says so); suggestion rows fill the rest of the page.
 - Captured text in labels and details is escaped, single-line and at most 96
   bytes, so a read-only MCP result, which omits strings over 160 characters,
   keeps every label. URLs are at most 512 bytes.
 - `row_offset` and `row_limit` page `functions.suggestions` only, at most 1024
-  rows per page; `suggestion_window.next_offset` continues. Toolchain and
-  constants are whole on every page. Another query parameter, an offset past the
-  suggestions or a limit outside 1 to 1024 fails with HTTP 400.
+  rows and the page byte budget; `suggestion_window.next_offset` continues.
+  Toolchain and constants are whole on every page. Another query parameter, an
+  offset past the suggestions or a limit outside 1 to 1024 fails with HTTP 400.
 - A non-Wasm artifact fails with 400, a missing one with 404, an integrity
   failure with 500. An empty, malformed or non-core module fails with 422 and a
   named reason. A malformed name, producers or target_features section is
   advisory: the report stays usable and `omissions` names it.
+- A legacy-mangled name counts as Rust only when it ends at its `E` with a
+  `17h<hash>` segment. An Itanium C++ name such as `_ZN4core6Engine4stepEv`
+  carries parameter types after the `E` and names no Rust crate.
 
 ## Content and permission levels
 
@@ -137,6 +162,8 @@ matches and the labeled-function count. Each chip reveals its evidence byte in
 the listing or hex view. **Details** lists every conclusion's evidence, each
 match's referencing functions and the first 200 suggestions. The Graph's
 **Functions** menu badges each suggested function with its category, and its
-filter matches the labels. The UI requests a report only when Inspect or Graph is
-opened, verifies its identity against the selected bytes, renders inert text,
-keeps the last report on a failed retry, and caches at most four reports.
+filter matches the labels; badges come from a map built once per report. The UI
+requests a report only when Inspect or Graph is opened, verifies its identity
+against the selected bytes, renders inert text, keeps the last report on a
+failed retry, and caches at most four reports; returning to an evicted one reads
+it again. `tools/check-wasm-identification-ui.mjs` checks these states offline.

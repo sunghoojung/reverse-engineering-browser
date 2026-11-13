@@ -665,7 +665,8 @@ and call order, and supply every clock or random source), `fuel_exhausted`,
 function), `memory_limit` or `table_limit` (the limits are totals across every
 memory and table), and `memory_write_out_of_bounds`. Below Full access every
 `value`, `hex` and memory `sha256` is omitted with no length, so compare with
-`expect` rather than reading results. A
+`expect` rather than reading results; there only `expectation.all_match` is
+returned, and each read takes at most one expected entry. A
 match holds for these inputs only. `get_wasm_runs {"artifact_id": "9"}` lists
 earlier runs. Details: [WASM run v1](../../protocol/wasm-run-v1.md).
 

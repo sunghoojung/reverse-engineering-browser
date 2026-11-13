@@ -18,8 +18,10 @@ What runs, and what cannot happen:
   table), call depth and a wall-clock deadline bound each run. Each limit, each trap and an import called without a stub is its
   own named outcome. The start function runs only when asked.
 - Memory can be written before the call and read after it, within 256 KiB each.
-  Expected results and memory bytes are compared exactly, so a caller without
-  content access still learns whether its vectors matched.
+  Expected results and memory bytes are compared exactly, with at most one
+  expectation per read. A caller without content access learns only whether
+  all of its vectors matched, one bit per run, so it can test vectors but not
+  read bytes back.
 - The captured bytes are verified by SHA-256 and never changed. A run is stored
   as a derived experiment record with the module hash, function, inputs digest,
   interpreter version and limits.

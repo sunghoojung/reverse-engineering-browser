@@ -153,7 +153,13 @@ follows the most recent pointer interaction: a press on a marked row of the
 linear listing shown beside the Graph names that row, while a press anywhere in
 the Graph, or the Graph moving to another function, names the Graph's
 function. The text selection is not consulted while the Graph is open, because
-engines differ in whether a click on the graph canvas moves it. A body row (an instruction or locals row) stands
+engines differ in whether a click on the graph canvas moves it. A click or
+Enter on a Graph block shows its offset in the listing but leaves focus on the
+Graph, and a listing row that holds focus beside the open Graph follows the
+same latest-interaction rule. A marked element that is not on screen (inside
+`[hidden]` or laid out with no box) never names a function, even if the
+engine left focus on it, and closing the Functions popover returns focus to
+its trigger. A body row (an instruction or locals row) stands
 for the function that contains it, so F2 on one renames that function. Tree
 rows, tabs and the toolbar keep the file rename.
 

@@ -1165,3 +1165,51 @@ fn the_deadline_counts_from_when_the_request_arrived() {
         late["omissions"]
     );
 }
+
+#[test]
+fn rendered_pages_match_the_openapi_schema() {
+    let spec: Value =
+        serde_json::from_str(include_str!("../../../../protocol/openapi.json")).unwrap();
+    let document = json!({"$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": "#/components/schemas/WasmModuleDiff", "components": spec["components"]});
+    let validator = jsonschema::validator_for(&document).unwrap();
+    let meta = |id: &str| json!({"artifact_id": id, "sha256": "a".repeat(64), "session_id": "1", "byte_size": 8});
+    let builds = fixture_builds();
+    let twin = "(func (result i32) i32.const 42)";
+    let twins = wat::parse_str(format!("(module {})", twin.repeat(3))).unwrap();
+    let stopped = compare_with(
+        &builds[0],
+        &builds[1],
+        meta("1"),
+        meta("2"),
+        stop_in(STRUCTURAL),
+        Instant::now(),
+    )
+    .unwrap();
+    for (label, report) in [
+        (
+            "fixture",
+            compare(&builds[0], &builds[1], meta("1"), meta("2")).unwrap(),
+        ),
+        (
+            "ties",
+            compare(&twins, &twins, meta("1"), meta("2")).unwrap(),
+        ),
+        ("contested", {
+            let (a, b) = (
+                wat::parse_str(CONTESTED_A).unwrap(),
+                wat::parse_str(CONTESTED_B).unwrap(),
+            );
+            compare(&a, &b, meta("1"), meta("2")).unwrap()
+        }),
+        ("partial", stopped),
+    ] {
+        let page = render(&report, &Page::new(0, 200, None).unwrap()).unwrap();
+        let errors = validator
+            .iter_errors(&page)
+            .take(3)
+            .map(|e| format!("{e} at {}", e.instance_path))
+            .collect::<Vec<_>>();
+        assert!(errors.is_empty(), "{label}: {errors:?}");
+    }
+}

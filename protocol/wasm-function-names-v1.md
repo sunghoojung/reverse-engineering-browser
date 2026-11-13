@@ -149,8 +149,11 @@ F2 resolves the function under the cursor from where focus really is.
 Inspect rows take no focus, so with the Graph closed and focus on the code
 view it uses the row under the caret selection, else the row last pointed at,
 else the current line. With the Graph open, F2 from the code view or the body
-uses the Graph's function; only a caret on a marked row of the linear listing
-shown beside it names that row instead. A body row (an instruction or locals row) stands
+follows the most recent pointer interaction: a press on a marked row of the
+linear listing shown beside the Graph names that row, while a press anywhere in
+the Graph, or the Graph moving to another function, names the Graph's
+function. The text selection is not consulted while the Graph is open, because
+engines differ in whether a click on the graph canvas moves it. A body row (an instruction or locals row) stands
 for the function that contains it, so F2 on one renames that function. Tree
 rows, tabs and the toolbar keep the file rename.
 

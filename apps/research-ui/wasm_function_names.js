@@ -42,9 +42,15 @@
   const editorHosts = new WeakMap();
   // Marks an element as standing for one function, so F2 inside it renames
   // that function. `label` is the captured identity the editor names.
+  // A counter orders pointer interactions and Graph function changes, so F2
+  // can tell which happened last without asking the engine where the text
+  // selection went (WebKit keeps it on a row when the canvas is clicked).
+  let interaction = 0;
+  const markedAt = new WeakMap();
   function mark(node, sha256, functionIndex, label, editorHost = null, focusFallback = null) {
     if (!node?.dataset) return;
     if (!hash(sha256) || !index(functionIndex)) {unmark(node); return;}
+    if (node.dataset.wasmSha !== sha256 || node.dataset.wasmFunction !== String(functionIndex)) markedAt.set(node, ++interaction);
     if (editorHost) editorHosts.set(node, editorHost); else editorHosts.delete(node);
     if (focusFallback) editorFallbacks.set(node, focusFallback); else editorFallbacks.delete(node);
     node.dataset.wasmSha = sha256;
@@ -157,27 +163,30 @@
     const host = document.querySelector('#source-graph-host');
     return host && !host.hidden ? isMarked(host) : null;
   }
+  // With the Graph open, the most recent pointer interaction decides: a press
+  // on a marked row of the linear listing shown beside it names that row; a
+  // press anywhere in the Graph, or the Graph moving to another function,
+  // names the Graph's function. The caret alone never outranks the Graph.
+  let pointedAt = 0, graphPointedAt = 0;
+  function besideGraph(graph) {
+    const code = inspectListing(), row = pointedRow?.deref?.() ?? null;
+    const latestGraph = Math.max(graphPointedAt, markedAt.get(graph) ?? 0);
+    const linear = code && !code.closest('[data-graph-linear-hidden]') && row && code.contains(row) ? isMarked(row) : null;
+    return linear && pointedAt > latestGraph ? linear : graph;
+  }
   // Which function F2 names, or null to leave the key to the Sources handler
   // (a tree row, a tab or the toolbar renames the file).
   function f2Target(target) {
     const own = target?.closest?.('[data-wasm-function]');
     if (own) return own;
     if (target?.closest?.('.source-tree-row, .source-editor-tab')) return null;
-    if (target?.closest?.('#source-code-wrap')) {
-      // With the Graph open its function wins, unless the caret sits on a
-      // marked row of the linear listing beside it. A row clicked earlier or
-      // the current line does not outrank the function the Graph draws.
-      const graph = openGraph();
-      if (!graph) return inspectRow();
-      const code = inspectListing();
-      const linear = code && !code.closest('[data-graph-linear-hidden]') ? isMarked(caretRow(code)) : null;
-      return linear ?? graph;
-    }
-    if (!target || target === document.body || target === document.documentElement) {
+    const onBody = !target || target === document.body || target === document.documentElement;
+    if (onBody) {
       const sources = document.querySelector('#screen-sources');
-      return sources && !sources.hidden ? openGraph() ?? inspectRow() : null;
-    }
-    return null;
+      if (!sources || sources.hidden) return null;
+    } else if (!target?.closest?.('#source-code-wrap')) return null;
+    const graph = openGraph();
+    return graph ? besideGraph(graph) : inspectRow();
   }
   // F2 renames the function under the cursor, as in a disassembler. Text
   // fields and modal dialogs keep the key. Handling it first stops the
@@ -185,7 +194,8 @@
   if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
     document.addEventListener('pointerdown', event => {
       const row = event.target?.closest?.('#source-code .source-line');
-      if (row) pointedRow = typeof WeakRef === 'function' ? new WeakRef(row) : {deref: () => row};
+      if (row) {pointedRow = typeof WeakRef === 'function' ? new WeakRef(row) : {deref: () => row}; pointedAt = ++interaction;}
+      if (event.target?.closest?.('#source-graph-host')) graphPointedAt = ++interaction;
     }, true);
     document.addEventListener('keydown', event => {
       if (event.key !== 'F2' || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat || event.defaultPrevented) return;

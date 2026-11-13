@@ -211,24 +211,39 @@ async function checkSurfaces() {
   assert(press(document.body), 'F2 with focus on the body renames the open graph function');
   assert.equal(label(), 'Researcher name for $helper (func 5)');
   controller.close(false);
-  // The rows stay. Another function's header was the last one pointed at,
-  // and the Graph draws func 5: the Graph's function wins on the code view.
+  // The rows stay. With the Graph open, the most recent pointer interaction
+  // decides between a listing row and the Graph; the caret never does.
   const other = line('function    func 4 (type 0)');
   wasm.decorateInspectRow(other, {kind: 'function', function_index: 4, text: 'func 4 (type 0)'}, SHA);
-  other.querySelector('.source-text').dispatchEvent(new Event('pointerdown', {bubbles: true}));
-  assert(press(wrap), 'F2 on the code view beside an open graph renames a function');
-  assert.equal(label(), 'Researcher name for $helper (func 5)', 'A row pointed at earlier does not outrank the Graph');
+  const pointer = node => node.dispatchEvent(new Event('pointerdown', {bubbles: true}));
+  pointer(other.querySelector('.source-text'));
+  assert(press(wrap));
+  assert.equal(label(), 'Researcher name for func 4', 'A row pressed after the Graph names that row');
   controller.close(false);
-  // The caret on a marked row of the visible listing names that row.
+  // WebKit: a canvas click leaves the text selection on the row it was on.
+  // The caret stays on func 4, the Graph is pressed, then F2 on the body or
+  // the code view must name the Graph's function.
   caret = other.querySelector('.source-text').firstChild;
+  pointer(host.querySelector('.block-graph-canvas') ?? host);
+  for (const focus of [document.body, wrap]) {
+    assert(press(focus), 'F2 after a press on the Graph');
+    assert.equal(label(), 'Researcher name for $helper (func 5)', 'A caret left on a row does not outrank a later Graph press');
+    controller.close(false);
+  }
+  // The Graph moving to another function is a Graph interaction too: a row
+  // pressed before Previous function loses to the function now drawn.
+  pointer(header.querySelector('.source-text'));
+  host.querySelector('button[aria-label="Previous function"]').click();
+  for (let i = 0; i < 5; i++) await settle();
+  assert.equal(host.dataset.wasmFunction, '4');
   assert(press(wrap));
-  assert.equal(label(), 'Researcher name for func 4', 'The caret row in the visible listing wins');
+  assert.equal(label(), 'Researcher name for func 4', 'The function the Graph moved to wins over an earlier row press');
   controller.close(false);
-  // With the linear listing hidden beside the Graph, the caret row is not on
-  // screen, so the Graph's function wins again.
+  // A row press beside a hidden linear listing cannot outrank the Graph.
   document.querySelector('#editor').setAttribute('data-graph-linear-hidden', '');
+  pointer(header.querySelector('.source-text'));
   assert(press(wrap));
-  assert.equal(label(), 'Researcher name for $helper (func 5)', 'A hidden listing does not outrank the Graph');
+  assert.equal(label(), 'Researcher name for func 4', 'A hidden listing does not outrank the Graph');
   controller.close(false);
   document.querySelector('#editor').removeAttribute('data-graph-linear-hidden');
   caret = null;

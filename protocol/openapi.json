@@ -125,7 +125,7 @@
         "run_wasm_function",
         "get_wasm_runs"
       ],
-      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, and inspect_wasm with row_offset and row_limit. Binary responses are still refused."
+      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, inspect_wasm with row_offset and row_limit, and get_wasm_pseudocode with line_offset and line_limit. Binary responses are still refused."
     },
     "session_start": {
       "tool": "start_live_session",

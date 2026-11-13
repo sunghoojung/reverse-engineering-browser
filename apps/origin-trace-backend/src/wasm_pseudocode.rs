@@ -1734,8 +1734,12 @@ impl<'m> Lifter<'m> {
     /// results, or the return of a tail call.
     fn push_call(&mut self, call: Expr, pushes: u32, tail: bool) {
         if tail {
+            // A tail call replaces this function's frame before the callee
+            // runs, so no handler of this function catches what it throws,
+            // even inside a try body or a try_table. It reads as
+            // `return_call`, never as a `return` of a call the braces guard.
             self.flush();
-            let text = format!("return {}", call.text);
+            let text = format!("return_call {}", call.text);
             let calls = call.calls.clone();
             self.spill_before(call.effects);
             self.push_line(LineKind::Statement, text, call.instrs, &calls);
@@ -2348,6 +2352,22 @@ pub fn pseudocode(
     line_offset: usize,
     line_limit: usize,
 ) -> Result<String> {
+    pseudocode_named(root, id, function, line_offset, line_limit, None)
+}
+
+/// [`pseudocode`] with researcher names joined, as the loopback route does
+/// (protocol/wasm-function-names-v1.md): the function's own `analyst_name`
+/// and the module's names in `analyst_names`, beside the module-supplied
+/// names, never in place of them. They join inside the window loop, so the
+/// measured page still fits the inline limit with them.
+pub fn pseudocode_named(
+    root: &Path,
+    id: &str,
+    function: u32,
+    line_offset: usize,
+    line_limit: usize,
+    analyst: Option<&crate::wasm_names::Names>,
+) -> Result<String> {
     if line_limit == 0 || line_limit > MAX_LINE_LIMIT {
         return Err(Error::bad(format!(
             "line_limit must be between 1 and {MAX_LINE_LIMIT}"
@@ -2479,6 +2499,12 @@ pub fn pseudocode(
             "limits": limits,
             "notice": "Static lift of declared stack effects; the module was not executed. A complete lift owns every instruction on exactly one line, and folding keeps the order of calls, memory, globals, tables, traps and branches, and of local writes with whatever can throw to a handler in this function. Fallback lines keep the raw instruction text. Names come from the module's name section, exports and imports.",
         });
+        if let (Some(names), Some(sha)) = (analyst, artifact.sha256.as_str()) {
+            if let Some(name) = names.function(sha, function) {
+                document["analyst_name"] = json!(name);
+            }
+            document["analyst_names"] = names.module_member(sha, scan.module.function_count());
+        }
         let mut merged = 0usize;
         let frames_truncated = window_document(
             &mut merged,
@@ -3008,6 +3034,99 @@ mod tests {
                 "func f2(p0: i32, p1: i32) -> (i32, i32) {",
                 "thr(1)",
                 "drop(p0 = 5)",
+                "return p0, p1",
+                "}"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tail_call_reads_as_leaving_every_handler() {
+        // Inside a try_table, a tail call still leaves this function first:
+        // V8 lets an exception from mv escape, so it must not read as a
+        // return the braces protect.
+        assert_eq!(
+            exact(
+                r#"(module (import "env" "mv" (func $mv (param i32) (result i32 i32)))
+                  (type $t (func (param i32) (result i32 i32))) (table 1 funcref)
+                  (func (param i32 i32) (result i32 i32)
+                    block try_table (catch_all 0) local.get 0 return_call $mv end end
+                    block try_table (catch_all 0) local.get 1 i32.const 0 return_call_indirect (type $t) end end
+                    local.get 0 local.get 1))"#,
+                1
+            ),
+            [
+                "func f1(p0: i32, p1: i32) -> (i32, i32) {",
+                "block L1 {",
+                "try_table catch_all -> L1 {",
+                "return_call mv(p0)",
+                "}",
+                "}",
+                "block L3 {",
+                "try_table catch_all -> L3 {",
+                "return_call call_indirect(p1; index 0, type 0, table 0)",
+                "}",
+                "}",
+                "return p0, p1",
+                "}"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_br_if_assigns_a_pending_local_write_before_the_branch() {
+        // The tee runs whether or not the branch is taken, so its write
+        // reads before the br_if, not in the drop after it.
+        assert_eq!(
+            exact(
+                "(module (func (param i32) (result i32)
+                    block i32.const 5 local.tee 0 i32.const 1 br_if 0 drop end
+                    local.get 0))",
+                0
+            ),
+            [
+                "func f0(p0: i32) -> i32 {",
+                "block L1 {",
+                "t0 = p0 = 5",
+                "br_if L1 (1)",
+                "drop(t0)",
+                "}",
+                "return p0",
+                "}"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_legacy_catch_arm_inside_an_outer_try_still_orders_writes_and_calls() {
+        // The inner try's catch arm is no longer guarded by the inner try,
+        // but the outer try still catches what the arm's call throws, so
+        // the tee keeps its place before the call.
+        assert_eq!(
+            exact(
+                &throwing(
+                    "try
+                       try i32.const 1 call $thr
+                       catch_all i32.const 5 local.tee 0 i32.const 1 call $thr drop
+                       end
+                     catch_all
+                     end
+                     local.get 0 local.get 1"
+                ),
+                2
+            ),
+            [
+                "func f2(p0: i32, p1: i32) -> (i32, i32) {",
+                "try {",
+                "try {",
+                "thr(1)",
+                "} catch_all {",
+                "t0 = p0 = 5",
+                "thr(1)",
+                "drop(t0)",
+                "}",
+                "} catch_all {",
+                "}",
                 "return p0, p1",
                 "}"
             ]
@@ -3976,6 +4095,9 @@ mod tests {
             If,
             Else,
             Try,
+            /// A legacy try body; its catch_all arm is `LegacyArm`.
+            Legacy,
+            LegacyArm,
         }
         struct Open {
             kind: Frame,
@@ -4012,9 +4134,10 @@ mod tests {
             base: 0,
         }];
         let mut dead = false;
+        let legacy = seed % 3 == 0;
         for _ in 0..15 + next(80) {
             let available = height - frames.last().unwrap().base;
-            match next(40) {
+            match next(43) {
                 0..=2 => {
                     emit!("i32.const {}", next(9) as i64 - 2);
                     height += 1;
@@ -4088,18 +4211,22 @@ mod tests {
                     height -= 1;
                 }
                 30 | 31 if frames.len() < 7 => {
-                    let kind = [
-                        Frame::Block,
-                        Frame::Block,
-                        Frame::Loop,
-                        Frame::If,
-                        Frame::Try,
-                    ][next(5) as usize];
+                    // Engines refuse a module that mixes legacy and new exception
+                    // handling, so a program uses one: every third seed legacy.
+                    let catching = if legacy { Frame::Legacy } else { Frame::Try };
+                    let kind = [Frame::Block, Frame::Block, Frame::Loop, Frame::If, catching]
+                        [next(5) as usize];
                     let cond = usize::from(kind == Frame::If);
                     if available < cond {
                         continue;
                     }
-                    let params = (next(3) as usize).min(available - cond);
+                    // A legacy catch arm starts from an empty stack, so its
+                    // try takes no parameters.
+                    let params = if kind == Frame::Legacy {
+                        0
+                    } else {
+                        (next(3) as usize).min(available - cond)
+                    };
                     let results = next(3) as usize;
                     let mut signature = String::new();
                     for _ in 0..params {
@@ -4129,7 +4256,8 @@ mod tests {
                             }
                             emit!("try_table{signature}{clause}");
                         }
-                        Frame::Else => unreachable!(),
+                        Frame::Legacy => emit!("try{signature}"),
+                        Frame::Else | Frame::LegacyArm => unreachable!(),
                     }
                     frames.push(Open {
                         kind,
@@ -4205,9 +4333,46 @@ mod tests {
                         frames.last_mut().unwrap().kind = Frame::Else;
                         continue;
                     }
+                    if open.kind == Frame::Legacy {
+                        height = open.base;
+                        emit!("catch_all");
+                        frames.last_mut().unwrap().kind = Frame::LegacyArm;
+                        continue;
+                    }
                     emit!("end");
                     let open = frames.pop().unwrap();
                     height = open.base + open.results;
+                }
+                // A handler in this function that reads a local the protected
+                // code writes around calls that throw for some inputs.
+                40..=42 if frames.len() < 6 => {
+                    let written = next(4);
+                    emit!(
+                        "{}",
+                        if legacy {
+                            "try"
+                        } else {
+                            "block try_table (catch_all 0)"
+                        }
+                    );
+                    for _ in 0..1 + next(4) {
+                        match next(5) {
+                            0 => emit!("i32.const {} local.set {written}", next(9)),
+                            1 => emit!(
+                                "i32.const {} local.tee {written} i32.const 1 call $thr drop",
+                                next(9)
+                            ),
+                            2 => emit!(
+                                "i32.const 13 call $f i32.const {} local.set {written} drop",
+                                next(9)
+                            ),
+                            3 => emit!(
+                                "local.get {written} i32.const 1 i32.add local.set {written} local.get 0 call $thr"
+                            ),
+                            _ => emit!("local.get 1 call $f local.set {written}"),
+                        }
+                    }
+                    emit!("{}", if legacy { "catch_all end" } else { "end end" });
                 }
                 _ => {}
             }
@@ -4221,6 +4386,12 @@ mod tests {
                     height = open.base + open.params;
                     emit!("else");
                     frames.last_mut().unwrap().kind = Frame::Else;
+                    continue;
+                }
+                if open.kind == Frame::Legacy {
+                    height = open.base;
+                    emit!("catch_all");
+                    frames.last_mut().unwrap().kind = Frame::LegacyArm;
                     continue;
                 }
                 emit!("end");
@@ -4248,9 +4419,23 @@ mod tests {
                 frames.last_mut().unwrap().kind = Frame::Else;
                 continue;
             }
+            if open.kind == Frame::Legacy {
+                height = open.base;
+                emit!("catch_all");
+                frames.last_mut().unwrap().kind = Frame::LegacyArm;
+                continue;
+            }
             emit!("end");
             let open = frames.pop().unwrap();
             height = open.base + open.results;
+        }
+        // Every local reaches memory at the end, so a listing that reads a
+        // wrong value into one differs from V8 even when the results do not.
+        for local in 0..4 {
+            emit!(
+                "i32.const 0 local.get {local} i32.store offset={}",
+                16 + 4 * local
+            );
         }
         value_module(&body)
     }
@@ -4288,6 +4473,13 @@ mod tests {
             "block try_table (catch_all 0) i32.const 5 local.tee 0 i32.const 1 call $thr drop end end local.get 0 local.get 1",
             "block try_table (catch_all 0) i32.const 13 call $f i32.const 5 local.set 0 drop end end local.get 0 local.get 1",
             "block try_table (catch_all 0) local.get 0 call $f local.set 1 local.get 1 call $thr end end local.get 0 local.get 1",
+            // A tail callee that throws: the exception escapes the handler.
+            "block try_table (catch_all 0) i32.const 13 return_call $mv end end local.get 0 local.get 1",
+            "block try_table (catch_all 0) local.get 0 return_call $mv end end local.get 0 local.get 1",
+            // Legacy try: a write before a call its catch arm can observe,
+            // and a catch arm whose call an outer try catches.
+            "try i32.const 5 local.tee 0 i32.const 1 call $thr drop catch_all end local.get 0 local.get 1",
+            "try try i32.const 1 call $thr catch_all i32.const 5 local.tee 0 i32.const 1 call $thr drop end catch_all end local.get 0 local.get 1",
         ];
         let mut programs: Vec<(String, String)> = hand
             .iter()
@@ -4710,7 +4902,10 @@ mod tests {
             "{lines:?}"
         );
         assert!(lines.contains(&"throw tag 0(p0)".to_owned()), "{lines:?}");
-        assert!(lines.contains(&"return f2(p0)".to_owned()), "{lines:?}");
+        assert!(
+            lines.contains(&"return_call f2(p0)".to_owned()),
+            "{lines:?}"
+        );
         assert_eq!(document["fallbacks"]["exception_handler"], 1);
         assert_eq!(document["fallbacks"]["gc_branch"], 1);
         assert!(

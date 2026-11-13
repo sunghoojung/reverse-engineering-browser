@@ -23,6 +23,10 @@ class Trap extends Error {}
 class Fuel extends Error {}
 class Br { constructor(label, values) { this.label = label; } }
 class Ret { constructor(values) { this.values = values; } }
+// A tail call leaves the function, and so every handler in it, before the
+// callee runs; the call is made at the top, outside every try.
+class TailCall { constructor(fn, args) { this.fn = fn; this.args = args; } }
+const catchable = e => (e && e.wasmExc !== undefined) || e instanceof Fuel;
 
 function makeEnv(tag, state) {
   const log = state.log;
@@ -33,7 +37,9 @@ function makeEnv(tag, state) {
     two: () => { log.push('two'); return [state.counter + 10, state.counter + 20]; },
     tick: () => { log.push('tick'); state.ticks += 1; if (state.ticks > FUEL) throw new Fuel('fuel'); },
     thr: x => { log.push(`thr(${x})`); if (x & 1) throw state.makeExc(x); },
-    mv: x => { log.push(`mv(${x})`); return [x ^ 5, (x + 100) | 0]; },
+    // mv throws on 13 so a tail call to it from inside a handler shows
+    // whether the listing lets the exception escape, as V8 does.
+    mv: x => { log.push(`mv(${x})`); if (x === 13) throw state.makeExc(x); return [x ^ 5, (x + 100) | 0]; },
   };
 }
 
@@ -143,7 +149,7 @@ function parseListing(text) {
     const items = [];
     while (pos < lines.length) {
       const line = lines[pos];
-      if (line === '}' || line.startsWith('} else')) return items;
+      if (line === '}' || line.startsWith('} else') || line.startsWith('} catch') || line.startsWith('} delegate')) return items;
       pos++;
       if (line.startsWith('var ')) continue;
       let m;
@@ -153,7 +159,7 @@ function parseListing(text) {
         const node = nest(n, first);
         items.push(node); continue;
       }
-      if (/^(block|loop|try_table|if \(|switch \()/.test(line) && line.endsWith('{')) {
+      if (/^(block|loop|try_table|try |if \(|switch \()/.test(line) && line.endsWith('{')) {
         items.push(frame(line)); continue;
       }
       items.push({k: 'stmt', line});
@@ -177,6 +183,20 @@ function parseListing(text) {
   }
   function frame(line) {
     let m;
+    // A legacy try: its body, then catch_all arms. A tagged catch or a
+    // delegate is outside this corpus, so it reads as unsupported.
+    if ((m = /^try( L\d+)? \{$/.exec(line))) {
+      const label = m[1]?.trim() ?? null;
+      const body = block();
+      const arms = [];
+      for (;;) {
+        const close = lines[pos++];
+        if (close === '}') break;
+        if (close === '} catch_all {') { arms.push(block()); continue; }
+        return {k: 'unsupported', line: close};
+      }
+      return {k: 'ltry', label, body, arms};
+    }
     if (line.startsWith('switch (')) {
       const p = new P(line.slice(0, -1).trim()); p.id(); p.eat('('); const sel = p.expr(); p.eat(')');
       const cases = [];
@@ -286,6 +306,21 @@ function interpret(listing, a, b, tagless) {
       if (ev(c) !== 0) throw new Ret(vals.map(ev));
       return;
     }
+    if (line.startsWith('return_call ')) {
+      const call = new P(line.slice('return_call '.length)).expr();
+      if (call.k === 'call') {
+        const args = call.args.map(ev);
+        const fn = names[call.name]; if (!fn) throw Error(`call ${call.name}`);
+        throw new TailCall(fn, args);
+      }
+      if (call.k === 'ci') {
+        const args = call.args.map(ev); const i = ev(call.idx); const fn = table[u(i)];
+        if (!fn) throw new Trap('table');
+        if (fn !== (call.type === 1 ? table[0] : table[1])) throw new Trap('sig');
+        throw new TailCall(fn, args);
+      }
+      throw Error(`tail call ${line}`);
+    }
     if (line.startsWith('return ')) {
       const p = new P(line.slice(7)); const vals = [p.expr()]; while (p.is(',')) { p.i++; vals.push(p.expr()); }
       const out = vals.map(ev);
@@ -337,9 +372,26 @@ function interpret(listing, a, b, tagless) {
           try { exec(it.body); }
           catch (e) {
             if (e instanceof Br && e.label === it.label) break;
-            if (e instanceof Br || e instanceof Ret || e instanceof Trap) throw e;
-            if (it.catches.length) throw new Br(it.catches[0]);
+            // A handler catches a thrown exception, or the Fuel error a JS
+            // import throws (catch_all catches JS exceptions too). Anything
+            // else, an interpreter error included, passes through and fails
+            // the check instead of reading as a caught throw.
+            if (it.catches.length && catchable(e)) throw new Br(it.catches[0]);
             throw e;
+          }
+          break;
+        }
+        case 'ltry': {
+          let caught = false;
+          try { exec(it.body); }
+          catch (e) {
+            if (e instanceof Br && e.label === it.label) break;
+            if (!it.arms.length || !catchable(e)) throw e;
+            caught = true;
+          }
+          if (caught) {
+            try { exec(it.arms[0]); }
+            catch (e) { if (!(e instanceof Br && e.label === it.label)) throw e; }
           }
           break;
         }
@@ -354,7 +406,14 @@ function interpret(listing, a, b, tagless) {
     }
   }
   let outcome;
-  try { exec(listing); throw Error('fell off function'); }
+  try {
+    try { exec(listing); throw Error('fell off function'); }
+    catch (e) {
+      if (!(e instanceof TailCall)) throw e;
+      const r = e.fn(...e.args);
+      throw new Ret(r);
+    }
+  }
   catch (e) {
     if (e instanceof Ret) outcome = `ret ${e.values[0]},${e.values[1]}`;
     else if (e instanceof Trap) outcome = 'trap';
@@ -366,17 +425,24 @@ function interpret(listing, a, b, tagless) {
 }
 
 function check(mutate) {
-  let compared = 0, mismatched = 0, skipped = 0, parseErrors = 0;
+  let compared = 0, mismatched = 0, skipped = 0, parseErrors = 0, executed = 0;
   const firstMismatches = [];
   for (const source of rows.slice(0, limit)) {
     const row = {...source};
     const otherFallbacks = row.fallbacks - (row.exception_handlers ?? 0);
     if (row.status !== 'complete' || otherFallbacks > 0 || row.next !== null) { skipped++; continue; }
-    if (mutate) { const t = row.text.replace(' + ', ' - '); if (t === row.text) { skipped++; continue; } row.text = t; }
+    // The sanity mutation reads every addition as a subtraction, and the
+    // epilogue's first store as storing p1 instead of p0.
+    if (mutate) {
+      const t = row.text.replaceAll(' + ', ' - ').replace('i32.store(0, offset 16) = p0', 'i32.store(0, offset 16) = p1');
+      if (t === row.text) { skipped++; continue; }
+      row.text = t;
+    }
     let listing;
     try { listing = parseListing(row.text); }
     catch (e) { parseErrors++; if (!mutate && parseErrors <= 3) console.log(`PARSE seed ${row.seed}: ${e.message}\n${row.text}`); continue; }
     const bytes = Buffer.from(row.wasm, 'hex');
+    executed++;
     for (const [a, b] of INPUTS) {
       const want = runEngine(bytes, a, b);
       let got;
@@ -393,7 +459,7 @@ function check(mutate) {
       }
     }
   }
-  return {compared, mismatched, skipped, parseErrors, firstMismatches};
+  return {compared, mismatched, skipped, parseErrors, executed, firstMismatches};
 }
 
 const started = Date.now();
@@ -402,9 +468,21 @@ console.log(JSON.stringify({rows: Math.min(limit, rows.length), compared: real.c
 for (const m of real.firstMismatches) console.log(JSON.stringify(m, null, 1));
 const mutated = check(true);
 const failures = [];
+// An interpreter error inside a handler is a failure of the check, never a
+// caught exception.
+let masked = false;
+try {
+  interpret(parseListing('func run(p0: i32, p1: i32) -> (i32, i32) {\n  block L1 {\n    try_table catch_all -> L1 {\n      no_such_import(1)\n    }\n  }\n  return p0, p1\n}\n'), 0, 0);
+  masked = true;
+} catch {}
+if (masked) failures.push('an interpreter error inside a handler was taken for a caught exception');
 if (real.mismatched) failures.push(`${real.mismatched} listings read a different value than V8 ran`);
 if (real.parseErrors) failures.push(`${real.parseErrors} listings could not be read`);
 if (real.compared < 0.8 * INPUTS.length * Math.min(limit, rows.length)) failures.push(`only ${real.compared} runs were compared`);
-if (mutated.mismatched === 0) failures.push('a mutated listing was never caught');
+// The mutated listings must differ from V8 in a minimum share: about a third
+// do (their epilogue or results show it); a much lower share means the check
+// stopped seeing what listings compute.
+const MIN_CAUGHT_SHARE = 0.25;
+if (mutated.mismatched < MIN_CAUGHT_SHARE * mutated.executed) failures.push(`only ${mutated.mismatched} of ${mutated.executed} mutated listings were caught (at least ${MIN_CAUGHT_SHARE * 100}% must be)`);
 if (failures.length) { console.error(`FAIL readable lift values: ${failures.join('; ')}`); process.exit(1); }
-console.log(`PASS readable lift values: ${real.compared} runs of ${Math.min(limit, rows.length)} modules match V8; ${mutated.mismatched} of ${mutated.compared} mutated runs caught (${Date.now() - started} ms)`);
+console.log(`PASS readable lift values: ${real.compared} runs of ${Math.min(limit, rows.length)} modules match V8; ${mutated.mismatched} of ${mutated.executed} mutated listings caught (${Date.now() - started} ms)`);

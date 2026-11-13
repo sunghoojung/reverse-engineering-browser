@@ -23083,6 +23083,15 @@
             "maxLength": 160,
             "description": "Display name: the name section, an export, an import's module.field, then f<index>. A name that is not a plain identifier, or that looks like a lift variable, is quoted. A name longer than 96 bytes keeps its start and end around ... and is followed by #<function index>."
           },
+          "analyst_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "description": "Researcher name of this function from the local Analyst evidence-names document (protocol/wasm-function-names-v1.md), beside the module-supplied name. Interpretation, not evidence; present only when a name exists. The loopback route joins it; the native route and the CLI do not."
+          },
+          "analyst_names": {
+            "$ref": "#/components/schemas/WasmAnalystNames"
+          },
           "name_source": {
             "enum": [
               "name_section",

@@ -57,7 +57,11 @@ func run(p0: i32) -> i32 {
   natural, and a memory index only when it is not zero.
 - Calls read `name(args)`. `call_indirect(args; index i, type 3, table 0)` names
   its callee index, type and table, and `call_ref` names its reference and type.
-  A tail call reads `return f(args)`.
+  A tail call reads `return_call f(args)` (`return_call call_indirect(...)` for
+  an indirect one). It replaces this function's frame before the callee runs,
+  so no handler of this function catches what the callee throws, even when the
+  line sits inside a `try` body or a `try_table`; it never reads as a `return`
+  the braces protect.
 - `br_table` reads as `switch (selector) { case 0-3: br L2 ... default: br L0 }`,
   with cases grouped by target in order of first appearance. A case list longer
   than 240 bytes ends with `... (+N cases)`; the line still covers the whole
@@ -84,6 +88,14 @@ characters and each kept character is escaped as a unit, so a cut never
 splits an escape and nothing inside the quotes can close them early. Names
 never come from guesses about what a function does.
 
+Researcher names ([Wasm function names](wasm-function-names-v1.md)) are
+interpretation and never replace these. The loopback route joins them beside
+the document as `analyst_name` (this function, present only when named) and
+`analyst_names` (the module's names, so a callee index resolves); the listing
+text and the callee table keep the module-supplied names. The native route
+and the CLI do not join them. The members are inside the measured window, so
+a page with them still fits the inline limit.
+
 ### What folding guarantees
 
 Read the lines in order, and within a line read an expression's operands
@@ -103,7 +115,11 @@ static checks, `make wasm-readable-values-check` (part of `make check`) runs
 3,000 generated modules in V8 with imports that log their calls and throw
 into handlers, interprets each listing with the same imports, and requires
 the same results, traps, escaping exceptions, call log, global and memory for
-five inputs.
+five inputs. The generated programs use `try_table` or, in every third one,
+legacy `try`; they write locals around calls that throw for some inputs and
+end by storing every local to memory. A tail call is made after leaving every
+handler. A sanity mutation of the listings must then differ from V8 in at
+least a quarter of them.
 
 1. The instructions with an effect (calls, loads, stores and every other
    memory or table operation, global reads and writes, trapping arithmetic,
@@ -122,7 +138,11 @@ So two kinds of instruction may read at a different place than their bytes.
 A pure value (a constant, a local read, arithmetic that cannot trap) may read
 later, where nothing above can change what it reads. A local write may move
 across a call or a throw where no catching frame of this function is open: a
-throw there leaves the function, and its locals are never read again.
+throw there leaves the function, and its locals are never read again. A local
+write may also move across a trapping or memory operation (a load, a store, a
+division, a table access), even inside a catching frame: a trap is never
+caught, so no code of this function runs after it to read the local, and a
+memory operation cannot read or write a local.
 To keep these properties, a pending value is assigned to a temporary `tN` on
 its own line, deepest first, before a line it conflicts with. Two values
 conflict when both have effects, when one writes a local the other reads or

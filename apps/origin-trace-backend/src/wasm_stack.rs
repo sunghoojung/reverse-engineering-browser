@@ -58,6 +58,10 @@ impl ModuleTypes {
     pub fn imported_functions(&self) -> u32 {
         self.imported_functions
     }
+    /// Functions in the index space, imports included.
+    pub fn function_count(&self) -> u64 {
+        self.functions.len() as u64
+    }
     /// Declared type index of a function, including imported numbering.
     pub fn function_type_index(&self, function: u32) -> Option<u32> {
         self.functions.get(function as usize).copied()

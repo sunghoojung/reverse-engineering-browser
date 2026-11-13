@@ -34,6 +34,8 @@ const MAX_EVIDENCE: usize = 8;
 const MAX_PRODUCERS: usize = 16;
 const MAX_FEATURES: usize = 32;
 const MAX_CUSTOM_SECTIONS: usize = 32;
+/// The longest list a page carries: producers, features and custom sections.
+const MAX_LISTED: usize = 32;
 const MAX_SUGGESTIONS_PER_FUNCTION: usize = 4;
 /// Suggestions kept in one report. Each is one compact row; pages of them
 /// are cut to the page byte budget.
@@ -218,6 +220,33 @@ struct Custom<'a> {
     known: Option<KnownCustom<'a>>,
 }
 
+/// Omissions in first-seen order, each once with how often it happened, so a
+/// module of 65,536 malformed sections yields one line, not 65,536.
+#[derive(Clone, Default)]
+struct Omissions(Vec<(String, usize)>);
+
+impl Omissions {
+    fn push(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        match self.0.iter_mut().find(|(known, _)| *known == text) {
+            Some((_, count)) => *count += 1,
+            None => self.0.push((text, 1)),
+        }
+    }
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    fn render(&self) -> Vec<String> {
+        self.0
+            .iter()
+            .map(|(text, count)| match count {
+                1 => text.clone(),
+                count => format!("{text} ({count} times)"),
+            })
+            .collect()
+    }
+}
+
 struct Module<'a> {
     imports: Vec<Import<'a>>,
     exports: Vec<Export<'a>>,
@@ -235,12 +264,14 @@ struct Module<'a> {
     segment_count: usize,
     /// The deadline passed while sections were still being read.
     stopped: bool,
-    omissions: Vec<String>,
+    /// Custom sections read, including the ones past `MAX_STORED_RECORDS`.
+    custom_count: usize,
+    omissions: Omissions,
 }
 
 /// Records past the storage limit are counted; storing stops. The first
 /// time a kind reaches it, the omission says so.
-fn keep<T>(list: &mut Vec<T>, count: &mut usize, item: T, kind: &str, omissions: &mut Vec<String>) {
+fn keep<T>(list: &mut Vec<T>, count: &mut usize, item: T, kind: &str, omissions: &mut Omissions) {
     *count += 1;
     if list.len() < MAX_STORED_RECORDS {
         list.push(item);
@@ -270,7 +301,8 @@ fn read_module(bytes: &[u8], deadline: Instant) -> Result<Module<'_>> {
         segments: Vec::new(),
         segment_count: 0,
         stopped: false,
-        omissions: Vec::new(),
+        custom_count: 0,
+        omissions: Omissions::default(),
     };
     let mut ended = false;
     let mut read = 0usize;
@@ -411,7 +443,7 @@ fn read_module(bytes: &[u8], deadline: Instant) -> Result<Module<'_>> {
                                         }
                                         Err(_) => {
                                             module.omissions.push(
-                                                "The name section's function names are malformed; later names were not read.".into(),
+                                                "The name section's function names are malformed; later names were not read.",
                                             );
                                             break;
                                         }
@@ -423,7 +455,7 @@ fn read_module(bytes: &[u8], deadline: Instant) -> Result<Module<'_>> {
                             // never fails a report built from the rest.
                             Err(_) => {
                                 module.omissions.push(
-                                    "The name section is malformed; later subsections were not read.".into(),
+                                    "The name section is malformed; later subsections were not read.",
                                 );
                                 break;
                             }
@@ -434,18 +466,23 @@ fn read_module(bytes: &[u8], deadline: Instant) -> Result<Module<'_>> {
                     module.stopped = true;
                     break 'payloads;
                 }
-                if module.customs.len() < MAX_STORED_RECORDS {
-                    module.customs.push(Custom {
-                        name: reader.name(),
-                        data: reader.data(),
-                        data_offset: reader.data_offset(),
-                        end: reader.range().end,
-                        known: match known {
-                            KnownCustom::Producers(_) => Some(known),
-                            _ => None,
-                        },
-                    });
-                }
+                let item = Custom {
+                    name: reader.name(),
+                    data: reader.data(),
+                    data_offset: reader.data_offset(),
+                    end: reader.range().end,
+                    known: match known {
+                        KnownCustom::Producers(_) => Some(known),
+                        _ => None,
+                    },
+                };
+                keep(
+                    &mut module.customs,
+                    &mut module.custom_count,
+                    item,
+                    "Custom section",
+                    &mut module.omissions,
+                );
             }
             Payload::End(_) => ended = true,
             _ => {}
@@ -453,12 +490,12 @@ fn read_module(bytes: &[u8], deadline: Instant) -> Result<Module<'_>> {
     }
     if module.stopped {
         module.omissions.push(
-            "Identification deadline reached while reading sections; later records and sections were not read, and counts cover what was read.".into(),
+            "Identification deadline reached while reading sections; later records and sections were not read, and counts cover what was read.",
         );
     } else if !ended {
         module
             .omissions
-            .push("Module traversal stopped before its end.".into());
+            .push("Module traversal stopped before its end.");
     }
     Ok(module)
 }
@@ -569,7 +606,28 @@ fn rust_hash(segment: &str) -> bool {
 /// demangled path, and whether the symbol is certainly Rust. A mangled name
 /// counts only with its `17h<hash>` segment: a C++ namespace that happens to
 /// be called `core` or `log` names no crate.
+///
+/// A legacy name may carry the `.llvm.<n>` suffix LLVM adds to promoted
+/// local symbols. A v0 name (`_R...`) is always Rust. A demangled name
+/// without its `::h<hash>` tail that has a parameter list, a `const`
+/// qualifier or a destructor is C++ as wasm-ld writes it into the name
+/// section, so it names no crate.
 fn rust_crate(name: &str) -> (Option<&str>, bool) {
+    let name = match name.rfind(".llvm.") {
+        Some(at)
+            if at + 6 < name.len()
+                && name[at + 6..].bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            &name[..at]
+        }
+        _ => name,
+    };
+    if let Some(found) = v0_crate(name) {
+        return (
+            RUST_CRATES.iter().find(|known| **known == found).copied(),
+            true,
+        );
+    }
     if let Some(segments) = mangled_segments(name) {
         if !segments.last().is_some_and(|last| rust_hash(last)) {
             return (None, false);
@@ -589,6 +647,9 @@ fn rust_crate(name: &str) -> (Option<&str>, bool) {
         .trim_start_matches("mut ");
     let crate_name = trimmed.split("::").next().unwrap_or("");
     let certain = name.rsplit("::").next().is_some_and(rust_hash) && name.contains("::");
+    if !certain && (name.contains('(') || name.ends_with(" const") || name.contains('~')) {
+        return (None, false);
+    }
     let known = trimmed
         .contains("::")
         .then(|| {
@@ -599,6 +660,30 @@ fn rust_crate(name: &str) -> (Option<&str>, bool) {
         })
         .flatten();
     (known, certain)
+}
+
+/// The crate of a Rust v0 symbol: the identifier after the first crate root
+/// `C` and its optional `s<base62>_` disambiguator. `_R` must be followed by
+/// a path tag, so a C name such as `_ReadFile` is not read as one.
+fn v0_crate(name: &str) -> Option<&str> {
+    let rest = name
+        .strip_prefix("_R")
+        .or_else(|| name.strip_prefix("__R"))?;
+    if !rest.starts_with(['C', 'N', 'M', 'X', 'Y', 'I', 'B']) {
+        return None;
+    }
+    let mut at = rest.find('C')? + 1;
+    if rest[at..].starts_with('s') {
+        at += rest[at..].find('_')? + 1;
+    }
+    let digits = rest[at..].bytes().take_while(u8::is_ascii_digit).count();
+    let length: usize = rest[at..at + digits].parse().ok()?;
+    at += digits;
+    if rest[at..].starts_with('_') {
+        at += 1;
+    }
+    rest.get(at..at + length)
+        .filter(|crate_name| !crate_name.is_empty())
 }
 
 /// Lowercased alphanumeric tokens, split at punctuation and at a lowercase
@@ -861,6 +946,8 @@ struct Labeler<'a> {
     per_function: HashMap<u32, Vec<u64>>,
     /// Suggestions found past `MAX_SUGGESTIONS`, counted and not stored.
     dropped: usize,
+    /// The producers section declares C or C++.
+    cpp_declared: bool,
     conclusions: &'a mut Conclusions,
 }
 
@@ -1100,7 +1187,7 @@ impl Labeler<'_> {
         }
         // An exactly named symbol already carries its most specific label.
         if exact.is_none() {
-            let rule = Self::symbol_rule(name, source);
+            let rule = Self::symbol_rule(name, source, self.cpp_declared);
             self.apply(&site, rule);
         }
         // The most specific algorithm a name mentions: `sha2::sha256` is SHA-256.
@@ -1115,7 +1202,7 @@ impl Labeler<'_> {
     }
 
     /// Prefix and namespace rules for an export or a name-section name.
-    fn symbol_rule(name: &str, source: &'static str) -> Option<Rule> {
+    fn symbol_rule(name: &str, source: &'static str, cpp_declared: bool) -> Option<Rule> {
         use Confidence::{High, Low, Medium};
         let named = |id, confidence, label: String, kind| Some((tool(id, confidence), label, kind));
         if let Some(rest) = name.strip_prefix("__wbindgen_") {
@@ -1211,6 +1298,11 @@ impl Labeler<'_> {
             named("c_cpp", Medium, label, Kind("std", "libc++", Medium))
         } else {
             let (crate_name, certain) = rust_crate(name);
+            // A module whose producers declare C or C++ explains a namespace
+            // like `std::` or `log::` without a hash as C++.
+            if !certain && cpp_declared {
+                return None;
+            }
             let confidence = if certain { High } else { Medium };
             match crate_name {
                 Some(crate_name) => {
@@ -1276,55 +1368,70 @@ fn custom_string(custom: &Custom<'_>) -> Option<String> {
         .map(|text| bounded(text, URL_BYTES))
 }
 
-fn target_features(custom: &Custom<'_>, omissions: &mut Vec<String>) -> Vec<Value> {
-    let mut reader = BinaryReader::new(custom.data, custom.data_offset);
-    let mut out = Vec::new();
-    let Ok(count) = reader.read_var_u32() else {
-        omissions.push("The target_features section is malformed; it was not read.".into());
-        return out;
-    };
-    for _ in 0..count {
-        let offset = reader.original_position();
-        let (Ok(prefix), Ok(name)) = (reader.read_u8(), reader.read_string()) else {
-            omissions.push(
-                "The target_features section is malformed; later features were not read.".into(),
-            );
-            break;
-        };
-        if out.len() >= MAX_FEATURES {
-            omissions.push("Target feature limit reached; later features are not listed.".into());
-            break;
-        }
-        out.push(json!({"prefix":(prefix as char).to_string(),"name":bounded(name, LABEL_TEXT_BYTES),"byte_offset":offset}));
-    }
-    out
+/// Rows the producers and target_features sections contribute, kept up to
+/// module-wide limits however many sections declare them. Past its limit a
+/// target_features section is not read at all; producers are still read,
+/// because a later entry can still name the toolchain.
+#[derive(Default)]
+struct Declared {
+    producers: Vec<Value>,
+    features: Vec<Value>,
+    producers_cut: bool,
+    features_cut: bool,
+    /// Producer values read, polled against the deadline.
+    values_read: usize,
 }
 
+fn target_features(custom: &Custom<'_>, declared: &mut Declared, omissions: &mut Omissions) {
+    if declared.features.len() >= MAX_FEATURES {
+        declared.features_cut = true;
+        return;
+    }
+    let mut reader = BinaryReader::new(custom.data, custom.data_offset);
+    let Ok(count) = reader.read_var_u32() else {
+        omissions.push("A target_features section is malformed; it was not read.");
+        return;
+    };
+    for _ in 0..count {
+        if declared.features.len() >= MAX_FEATURES {
+            declared.features_cut = true;
+            return;
+        }
+        let offset = reader.original_position();
+        let (Ok(prefix), Ok(name)) = (reader.read_u8(), reader.read_string()) else {
+            omissions
+                .push("A target_features section is malformed; its later features were not read.");
+            return;
+        };
+        declared.features.push(json!({"prefix":(prefix as char).to_string(),"name":bounded(name, LABEL_TEXT_BYTES),"byte_offset":offset}));
+    }
+}
+
+/// Reads one producers section; false when the deadline passed inside it.
 fn producers(
     custom: &Custom<'_>,
     conclusions: &mut Conclusions,
-    omissions: &mut Vec<String>,
-) -> Vec<Value> {
-    let mut out = Vec::new();
+    declared: &mut Declared,
+    omissions: &mut Omissions,
+    deadline: Instant,
+) -> bool {
     let Some(KnownCustom::Producers(reader)) = &custom.known else {
-        return out;
+        return true;
     };
     for field in reader.clone().into_iter_with_offsets() {
         let Ok((_, field)) = field else {
-            omissions
-                .push("The producers section is malformed; later fields were not read.".into());
-            break;
+            omissions.push("A producers section is malformed; its later fields were not read.");
+            return true;
         };
         for value in field.values.into_iter_with_offsets() {
-            let Ok((offset, value)) = value else {
-                omissions
-                    .push("The producers section is malformed; later values were not read.".into());
-                break;
-            };
-            if out.len() >= MAX_PRODUCERS {
-                omissions.push("Producer limit reached; later producers are not listed.".into());
-                return out;
+            declared.values_read += 1;
+            if declared.values_read.is_multiple_of(4096) && Instant::now() > deadline {
+                return false;
             }
+            let Ok((offset, value)) = value else {
+                omissions.push("A producers section is malformed; its later values were not read.");
+                return true;
+            };
             let name = bounded(value.name, LABEL_TEXT_BYTES);
             let version = bounded(value.version, LABEL_TEXT_BYTES);
             if let Some(id) = producer_toolchain(field.name, value.name) {
@@ -1347,10 +1454,14 @@ fn producers(
                     },
                 );
             }
-            out.push(json!({"field":bounded(field.name, 32),"name":name,"version":version,"byte_offset":offset}));
+            if declared.producers.len() < MAX_PRODUCERS {
+                declared.producers.push(json!({"field":bounded(field.name, 32),"name":name,"version":version,"byte_offset":offset}));
+            } else {
+                declared.producers_cut = true;
+            }
         }
     }
-    out
+    true
 }
 
 /// One reported constant match.
@@ -1526,9 +1637,13 @@ fn cluster(mut runs: Vec<Run>, segment: &Segment<'_>, deadline: Instant, out: &m
 }
 
 /// A table split across segments whose memory addresses touch, as Binaryen's
-/// memory packing leaves it, is one match: the next segment's part continues
-/// at the address and the element where the previous part stopped.
-fn merge_segments(mut matches: Vec<Match>) -> Vec<Match> {
+/// memory packing leaves it, is one match: the next segment in the file
+/// continues at the address and the element where the previous part stopped.
+/// Only consecutive segments in file order merge, so a merged match never
+/// spans an unrelated segment and its byte range runs forward. The second
+/// value counts the parts left separate because a match reached
+/// `MAX_MATCH_SEGMENTS`.
+fn merge_segments(mut matches: Vec<Match>) -> (Vec<Match>, usize) {
     matches.sort_unstable_by_key(|entry| {
         (
             entry.set,
@@ -1538,6 +1653,7 @@ fn merge_segments(mut matches: Vec<Match>) -> Vec<Match> {
         )
     });
     let mut out: Vec<Match> = Vec::with_capacity(matches.len());
+    let mut separate = 0usize;
     for entry in matches {
         if let Some(previous) = out.last_mut()
             && previous.set == entry.set
@@ -1545,22 +1661,26 @@ fn merge_segments(mut matches: Vec<Match>) -> Vec<Match> {
             && previous.address_end.is_some()
             && previous.address_end == entry.address
             && entry.first >= previous.end_index
-            && previous.segments.len() < MAX_MATCH_SEGMENTS
-            && !previous.segments.contains(&entry.segments[0])
+            && previous.segments.last().map(|last| last + 1) == entry.segments.first().copied()
+            && entry.byte_offset >= previous.byte_end
         {
-            for (word, other) in previous.covered.iter_mut().zip(entry.covered) {
-                *word |= other;
+            if previous.segments.len() >= MAX_MATCH_SEGMENTS {
+                separate += 1;
+            } else {
+                for (word, other) in previous.covered.iter_mut().zip(entry.covered) {
+                    *word |= other;
+                }
+                previous.end_index = entry.end_index;
+                previous.byte_end = entry.byte_end;
+                previous.address_end = entry.address_end;
+                previous.runs += entry.runs;
+                previous.segments.extend(entry.segments);
+                continue;
             }
-            previous.end_index = entry.end_index;
-            previous.byte_end = entry.byte_end;
-            previous.address_end = entry.address_end;
-            previous.runs += entry.runs;
-            previous.segments.extend(entry.segments);
-            continue;
         }
         out.push(entry);
     }
-    out
+    (out, separate)
 }
 
 /// Whether `container`, whose byte range holds `entry`'s, fully explains it:
@@ -1589,21 +1709,25 @@ fn suppress_data(mut matches: Vec<Match>, deadline: Instant, expired: &mut bool)
             *expired = true;
             break;
         }
-        let size = entry.byte_end - entry.byte_offset;
+        let size = entry.byte_end.saturating_sub(entry.byte_offset);
         if let Some(index) = widest {
             let container = &kept[index];
             if container.byte_end >= entry.byte_end
                 && explains(
                     size,
                     &entry,
-                    container.byte_end - container.byte_offset,
+                    container.byte_end.saturating_sub(container.byte_offset),
                     container,
                 )
             {
                 continue;
             }
         }
-        if widest.is_none_or(|index| entry.byte_end > kept[index].byte_end) {
+        // A match merged across segments spans their headers too, so it is
+        // never the container that explains another match.
+        if entry.segments.len() == 1
+            && widest.is_none_or(|index| entry.byte_end > kept[index].byte_end)
+        {
             widest = Some(kept.len());
         }
         kept.push(entry);
@@ -1741,8 +1865,14 @@ fn scan_functions(
         let mut hits: BTreeMap<u16, Hit> = BTreeMap::new();
         let mut reader = body.get_operators_reader().map_err(bad)?;
         let mut count = 0usize;
-        // The last i32.const not yet paired: two adjacent halves can spell
-        // one 64-bit element, high or low half first.
+        // Two value constants in a row can spell one 64-bit element, high or
+        // low half first. A value constant is one the next instruction
+        // consumes; an i32.const followed by another constant is an operand
+        // such as a store address, so `i32.const addr; i32.const lo;
+        // i32.store; i32.const addr; i32.const hi; i32.store` pairs lo with
+        // hi. `held` waits for the next instruction to classify it, and
+        // `previous` is the last value constant not yet paired.
+        let mut held: Option<(u32, usize)> = None;
         let mut previous: Option<(u32, usize)> = None;
         let record = |hits: &mut BTreeMap<u16, Hit>,
                       entries: Option<&Vec<(u16, u32)>>,
@@ -1803,21 +1933,26 @@ fn scan_functions(
                 break;
             }
             let (op, offset) = reader.read_with_offset().map_err(bad)?;
+            if let Some((value, at)) = held.take()
+                && !matches!(op, Operator::I32Const { .. })
+            {
+                previous = match previous {
+                    Some((first, first_at))
+                        if pair(&mut hits, first, value, first_at)
+                            || pair(&mut hits, value, first, first_at) =>
+                    {
+                        None
+                    }
+                    _ => Some((value, at)),
+                };
+            }
             match op {
                 Operator::I32Const { value } => {
                     scan.immediates += 1;
                     let value = value as u32;
                     record(&mut hits, table.four.get(&value), offset, "i32.const");
                     address(u64::from(value), offset, data_matches);
-                    previous = match previous {
-                        Some((first, at))
-                            if pair(&mut hits, first, value, at)
-                                || pair(&mut hits, value, first, at) =>
-                        {
-                            None
-                        }
-                        _ => Some((value, offset)),
-                    };
+                    held = Some((value, offset));
                 }
                 Operator::I64Const { value } => {
                     scan.immediates += 1;
@@ -1955,18 +2090,38 @@ fn identify_within(bytes: &[u8], offset: usize, limit: usize, budget: Duration) 
     let mut omissions = module.omissions.clone();
     let mut conclusions = Conclusions::default();
 
-    let mut producer_rows = Vec::new();
-    let mut feature_rows = Vec::new();
+    let mut declared = Declared::default();
     let mut source_map = Value::Null;
     let mut debug_info = Value::Null;
     let mut custom_rows = Vec::new();
+    let mut customs_read = 0usize;
     for custom in &module.customs {
+        if Instant::now() > deadline {
+            omissions.push(format!(
+                "Identification deadline reached while reading custom sections; {customs_read} of {} were read.",
+                module.customs.len()
+            ));
+            break;
+        }
+        customs_read += 1;
         custom_conclusions(custom, &mut conclusions);
         match custom.name {
             "producers" => {
-                producer_rows.extend(producers(custom, &mut conclusions, &mut omissions))
+                if !producers(
+                    custom,
+                    &mut conclusions,
+                    &mut declared,
+                    &mut omissions,
+                    deadline,
+                ) {
+                    omissions.push(format!(
+                        "Identification deadline reached while reading custom sections; {customs_read} of {} were read.",
+                        module.customs.len()
+                    ));
+                    break;
+                }
             }
-            "target_features" => feature_rows.extend(target_features(custom, &mut omissions)),
+            "target_features" => target_features(custom, &mut declared, &mut omissions),
             "sourceMappingURL" => {
                 source_map = json!({"url":custom_string(custom),"byte_offset":custom.data_offset});
             }
@@ -1980,15 +2135,34 @@ fn identify_within(bytes: &[u8], offset: usize, limit: usize, budget: Duration) 
                 "byte_end":custom.end,"bytes":custom.data.len()}));
         }
     }
-    if module.customs.len() > MAX_CUSTOM_SECTIONS {
-        omissions
-            .push("Custom section limit reached; later custom sections are not listed.".into());
+    if module.custom_count > MAX_CUSTOM_SECTIONS {
+        omissions.push(format!(
+            "Custom section limit of {MAX_CUSTOM_SECTIONS} reached; {} later custom sections are not listed.",
+            module.custom_count - MAX_CUSTOM_SECTIONS
+        ));
     }
+    if declared.producers_cut {
+        omissions.push(format!(
+            "Producer limit of {MAX_PRODUCERS} reached; later producers are read for conclusions, not listed."
+        ));
+    }
+    if declared.features_cut {
+        omissions.push(format!(
+            "Target feature limit of {MAX_FEATURES} reached; later features are not listed."
+        ));
+    }
+    let producer_rows = declared.producers;
+    let feature_rows = declared.features;
 
+    let cpp_declared = conclusions
+        .by_id
+        .get("c_cpp")
+        .is_some_and(|(confidence, ..)| *confidence == Confidence::High);
     let mut labeler = Labeler {
         suggestions: Vec::new(),
         per_function: HashMap::new(),
         dropped: 0,
+        cpp_declared,
         conclusions: &mut conclusions,
     };
     let mut labeled = 0usize;
@@ -2063,13 +2237,15 @@ fn identify_within(bytes: &[u8], offset: usize, limit: usize, budget: Duration) 
     }
     let data_dropped = std::mem::take(&mut candidates.dropped);
     let mut suppress_stopped = false;
-    let mut data_matches = suppress_data(
-        merge_segments(std::mem::take(&mut candidates.kept)),
-        deadline,
-        &mut suppress_stopped,
-    );
+    let (merged, separate) = merge_segments(std::mem::take(&mut candidates.kept));
+    if separate > 0 {
+        omissions.push(format!(
+            "A table spans more than {MAX_MATCH_SEGMENTS} segments; {separate} later parts are listed as separate matches."
+        ));
+    }
+    let mut data_matches = suppress_data(merged, deadline, &mut suppress_stopped);
     if suppress_stopped {
-        omissions.push("Identification deadline reached while merging data matches; later candidates were dropped.".into());
+        omissions.push("Identification deadline reached while merging data matches; later candidates were dropped.");
     }
     // A module the deadline stopped reading is not read again for bodies.
     let scan = if module.stopped {
@@ -2111,18 +2287,16 @@ fn identify_within(bytes: &[u8], offset: usize, limit: usize, budget: Duration) 
         )
     });
     let match_total = matches.len() + candidates_dropped;
-    if matches.len() > MAX_MATCHES {
-        omissions.push(format!(
-            "Constant match limit reached; {} later matches are counted, not listed.",
-            matches.len() - MAX_MATCHES
-        ));
-        matches.truncate(MAX_MATCHES);
-    }
     let complete_matches = matches.iter().filter(|entry| entry.complete()).count();
 
     let mut ordered = conclusions.by_id.into_iter().collect::<Vec<_>>();
     ordered.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(b.1.2.cmp(&a.1.2)));
     ordered.truncate(MAX_CONCLUSIONS);
+    // Strongest evidence first, so the summary chip and any trimmed list keep
+    // the reason for the confidence a conclusion reports.
+    for (_, (_, evidence, _)) in ordered.iter_mut() {
+        evidence.sort_by_key(|(strength, _)| std::cmp::Reverse(*strength));
+    }
     let toolchain_labels = ordered
         .iter()
         .filter(|(_, (confidence, ..))| *confidence != Confidence::Low)
@@ -2132,7 +2306,7 @@ fn identify_within(bytes: &[u8], offset: usize, limit: usize, budget: Duration) 
     // The fixed part at decreasing detail until it fits its budget: evidence
     // per conclusion, listed sections and the references and sites per match.
     let levels = [
-        (MAX_EVIDENCE, usize::MAX, MAX_REFERENCES),
+        (MAX_EVIDENCE, MAX_LISTED, MAX_REFERENCES),
         (2, 8, 2),
         (1, 2, 1),
     ];
@@ -2164,6 +2338,13 @@ fn identify_within(bytes: &[u8], offset: usize, limit: usize, budget: Duration) 
         } else {
             MAX_MATCHES >> level
         };
+        let listed = matches.len().min(match_limit);
+        if matches.len() > listed {
+            level_omissions.push(format!(
+                "Constant match limit of {listed} reached; {} later matches are counted, not listed.",
+                matches.len() - listed
+            ));
+        }
         document = json!({
             "schema":"wasm-identification-v1","artifact_id":null,"sha256":null,"byte_size":bytes.len(),
             "status":if level_omissions.is_empty() {"complete"} else {"partial"},
@@ -2185,7 +2366,7 @@ fn identify_within(bytes: &[u8], offset: usize, limit: usize, budget: Duration) 
             "coverage":{"data_segments":module.segment_count,"data_bytes":data_bytes,"data_bytes_scanned":data_scanned,
                 "data_scan_complete":!data_stopped,"functions_scanned":scan.functions_scanned,
                 "immediates_scanned":scan.immediates},
-            "omissions":level_omissions,
+            "omissions":level_omissions.render(),
             "limits":{"max_input_bytes":MAX_BYTES,"deadline_ms":DEADLINE.as_millis() as u64,"max_conclusions":MAX_CONCLUSIONS,
                 "max_evidence_per_conclusion":MAX_EVIDENCE,"max_suggestions":MAX_SUGGESTIONS,"suggestion_page":SUGGESTION_PAGE,
                 "max_suggestions_per_function":MAX_SUGGESTIONS_PER_FUNCTION,"max_constant_matches":MAX_MATCHES,
@@ -2695,7 +2876,7 @@ mod tests {
         let segment = quarter.repeat(32_000);
         let bytes = raw::module(&[raw::memory(8), raw::data(&[(1024, segment)])]);
         let started = Instant::now();
-        let report = identify(&bytes, 0, 16).unwrap();
+        let report = identify_within(&bytes, 0, 16, Duration::from_secs(300)).unwrap();
         // Pairwise merging of these runs took 28 s in a release build; the
         // bound leaves room for a debug build on a loaded machine.
         assert!(
@@ -2762,7 +2943,9 @@ mod tests {
             .map(|index| (index, format!("core::fmt::f{index}")))
             .collect::<Vec<_>>();
         let bytes = raw::module(&[raw::names(&names)]);
-        let report = identify(&bytes, 0, 8).unwrap();
+        // Counting is under test, not the deadline: a debug build on a loaded
+        // machine can need more than four seconds to label this many names.
+        let report = identify_within(&bytes, 0, 8, Duration::from_secs(300)).unwrap();
         assert_eq!(report["toolchain"]["name_section"]["function_names"], count);
         let omissions = report["omissions"].to_string();
         assert!(
@@ -2976,6 +3159,418 @@ mod tests {
             (Some("partial"), Some(255), Some(256))
         );
         assert_eq!(report["summary"]["complete_constant_matches"], 0);
+    }
+
+    fn custom(name: &str, payload: &[u8]) -> Vec<u8> {
+        let mut body = raw::name(name);
+        body.extend(payload);
+        raw::section(0, &body)
+    }
+
+    fn features(count: usize) -> Vec<u8> {
+        let items = (0..count)
+            .map(|index| [vec![b'+'], raw::name(&format!("f{index:02}"))].concat())
+            .collect::<Vec<_>>();
+        raw::vector(&items)
+    }
+
+    fn producers_section(field: &str, values: &[&str]) -> Vec<u8> {
+        let values = values
+            .iter()
+            .map(|value| [raw::name(value), raw::name("1")].concat())
+            .collect::<Vec<_>>();
+        custom(
+            "producers",
+            &raw::vector(&[[raw::name(field), raw::vector(&values)].concat()]),
+        )
+    }
+
+    fn omission_lines(report: &Value) -> Vec<String> {
+        report["omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| line.as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn feature_and_producer_caps_hold_across_every_section() {
+        let many_features = (0..3000)
+            .map(|_| custom("target_features", &features(32)))
+            .collect::<Vec<_>>();
+        let report = identify(&raw::module(&many_features), 0, 16).unwrap();
+        assert_eq!(
+            report["toolchain"]["target_features"]
+                .as_array()
+                .unwrap()
+                .len(),
+            MAX_FEATURES
+        );
+        assert_eq!(
+            report["toolchain"]["custom_sections"]
+                .as_array()
+                .unwrap()
+                .len(),
+            MAX_CUSTOM_SECTIONS
+        );
+        let lines = omission_lines(&report);
+        assert_eq!(lines.len(), 2, "{lines:#?}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("Target feature limit of 32"))
+        );
+        assert!(serde_json::to_vec(&report).unwrap().len() < 16_384);
+
+        let values = (0..17)
+            .map(|index| format!("tool{index}"))
+            .collect::<Vec<_>>();
+        let values = values.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut many_producers = (0..2000)
+            .map(|_| producers_section("processed-by", &values))
+            .collect::<Vec<_>>();
+        // A toolchain named only by the last section is still concluded.
+        many_producers.push(producers_section("language", &["Rust"]));
+        let report = identify(&raw::module(&many_producers), 0, 16).unwrap();
+        assert_eq!(
+            report["toolchain"]["producers"].as_array().unwrap().len(),
+            MAX_PRODUCERS
+        );
+        assert_eq!(conclusion(&report, "rust").unwrap()["confidence"], "high");
+        let lines = omission_lines(&report);
+        assert_eq!(lines.len(), 2, "{lines:#?}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("Producer limit of 16"))
+        );
+    }
+
+    #[test]
+    fn target_features_sections_past_the_cap_are_not_read() {
+        // Once 32 features are listed, later sections are skipped unread, so
+        // a malformed one after them is never parsed or reported.
+        let mut sections = vec![custom("target_features", &features(32))];
+        sections.extend((0..100).map(|_| custom("target_features", &[0x80])));
+        let report = identify(&raw::module(&sections), 0, 16).unwrap();
+        let lines = omission_lines(&report);
+        assert!(
+            !lines.iter().any(|line| line.contains("malformed")),
+            "{lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("Target feature limit of 32")),
+            "{lines:#?}"
+        );
+    }
+
+    #[test]
+    fn a_match_merged_across_segments_is_never_a_container() {
+        let catalog = wasm_constants::catalog();
+        let set = |id: &str| catalog.iter().position(|set| set.id == id).unwrap();
+        let entry = |set: usize, start: usize, end: usize, segments: Vec<u32>, elements: usize| {
+            let mut entry = Match {
+                set,
+                location: "data",
+                covered: [0; 4],
+                first: 0,
+                end_index: elements,
+                byte_offset: start,
+                byte_end: end,
+                preview_end: end,
+                segments,
+                encoding: Some(Encoding::U32Le),
+                runs: 1,
+                address: None,
+                address_end: None,
+                references: Vec::new(),
+                reference_count: 0,
+                function: None,
+                sites: Vec::new(),
+                site_count: 0,
+                values: BTreeSet::new(),
+            };
+            entry.cover(0, elements);
+            entry
+        };
+        let merged = entry(set("crc32_table"), 0, 2000, vec![0, 1], 256);
+        let inside = entry(set("md5_h"), 600, 616, vec![1], 4);
+        let mut expired = false;
+        let kept = suppress_data(
+            vec![merged, inside],
+            Instant::now() + DEADLINE,
+            &mut expired,
+        );
+        assert_eq!(
+            kept.len(),
+            2,
+            "the merged span suppressed a match it does not explain"
+        );
+        // A single-segment container still explains what it holds.
+        let container = entry(set("sha1_h"), 600, 620, vec![1], 5);
+        let inside = entry(set("md5_h"), 600, 616, vec![1], 4);
+        let kept = suppress_data(
+            vec![container, inside],
+            Instant::now() + DEADLINE,
+            &mut expired,
+        );
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn many_malformed_sections_make_one_counted_omission() {
+        let sections = (0..70_000)
+            .map(|_| custom("target_features", &[0x80]))
+            .collect::<Vec<_>>();
+        let report = identify(&raw::module(&sections), 0, 16).unwrap();
+        let lines = omission_lines(&report);
+        assert!(lines.len() <= 3, "{lines:#?}");
+        assert!(
+            lines.contains(
+                &"A target_features section is malformed; it was not read. (65536 times)"
+                    .to_owned()
+            ),
+            "{lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("Custom section limit of 65536 reached")),
+            "{lines:#?}"
+        );
+        assert!(serde_json::to_vec(&report).unwrap().len() < 16_384);
+    }
+
+    #[test]
+    fn reading_and_custom_sections_stop_at_the_deadline() {
+        // Enough imports to reach the reader's poll, which runs every 4096 records.
+        let imports = (0..5000)
+            .map(|index| {
+                [
+                    raw::name("env"),
+                    raw::name(&format!("f{index}")),
+                    vec![0, 0],
+                ]
+                .concat()
+            })
+            .collect::<Vec<_>>();
+        let bytes = raw::module(&[
+            raw::section(1, &[1, 0x60, 0, 0]),
+            raw::section(2, &raw::vector(&imports)),
+        ]);
+        let report = identify_within(&bytes, 0, 16, Duration::ZERO).unwrap();
+        let omissions = report["omissions"].to_string();
+        assert!(
+            omissions.contains("deadline reached while reading sections"),
+            "{omissions}"
+        );
+        assert!(report["functions"]["imported_functions"].as_u64().unwrap() < 5000);
+        let sections = (0..4)
+            .map(|_| custom("target_features", &features(2)))
+            .collect::<Vec<_>>();
+        let report = identify_within(&raw::module(&sections), 0, 16, Duration::ZERO).unwrap();
+        let omissions = report["omissions"].to_string();
+        assert!(
+            omissions.contains("deadline reached while reading custom sections; 0 of 4"),
+            "{omissions}"
+        );
+    }
+
+    #[test]
+    fn demangled_cpp_names_are_not_rust_and_rust_symbol_forms_are() {
+        let cpp = [
+            "std::terminate()",
+            "std::exception::~exception()",
+            "log::Logger::write(char const*)",
+            "core::Engine::step()",
+            "std::bad_alloc::what() const",
+        ];
+        let names = cpp
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (index as u32, (*name).to_owned()))
+            .collect::<Vec<_>>();
+        let mut sections = raw::functions(cpp.len(), &[]);
+        sections.push(raw::names(&names));
+        let report = identify(&raw::module(&sections), 0, 16).unwrap();
+        assert!(conclusion(&report, "rust").is_none(), "{report:#}");
+        // A C or C++ producer explains an unhashed `core::` path too.
+        let mut sections = raw::functions(1, &[]);
+        sections.push(raw::names(&[(0, "core::fmt::write".into())]));
+        sections.push(producers_section("language", &["C++14"]));
+        let report = identify(&raw::module(&sections), 0, 16).unwrap();
+        assert!(conclusion(&report, "rust").is_none(), "{report:#}");
+        assert!(labels(&report, 0).is_empty());
+        for (name, crate_name) in [
+            (
+                "_ZN4core3fmt5write17h0123456789abcdefE.llvm.1234567890",
+                "core",
+            ),
+            ("_RNvNtCs1234abcd_4core3fmt5write", "core"),
+            (
+                "_RNvMs_NtCsdpfyVJ4iRU_5alloc7raw_vecINtB4_6RawVecpE7reserve",
+                "alloc",
+            ),
+        ] {
+            assert_eq!(rust_crate(name), (Some(crate_name), true), "{name}");
+        }
+        assert_eq!(rust_crate("_ReadFile"), (None, false));
+    }
+
+    #[test]
+    fn segments_merge_only_forward_and_consecutive() {
+        let table = crc_bytes();
+        // The second half first in the file: two forward parts, no merged span.
+        let reversed = raw::module(&[
+            raw::memory(1),
+            raw::data(&[(1536, table[512..].to_vec()), (1024, table[..512].to_vec())]),
+        ]);
+        let report = identify(&reversed, 0, 16).unwrap();
+        let parts = constant(&report, "crc32_table");
+        assert_eq!(parts.len(), 2, "{report:#}");
+        for part in &parts {
+            assert!(
+                part["byte_offset"].as_u64() < part["byte_end"].as_u64(),
+                "{part}"
+            );
+        }
+        // An unrelated segment between the halves: they stay apart, and the
+        // complete SHA-256 table between them is still reported.
+        let k = raw::words(&wasm_constants::SHA256_K);
+        let sandwich = raw::module(&[
+            raw::memory(1),
+            raw::data(&[
+                (1024, table[..512].to_vec()),
+                (8192, k),
+                (1536, table[512..].to_vec()),
+            ]),
+        ]);
+        let report = identify(&sandwich, 0, 16).unwrap();
+        assert_eq!(constant(&report, "crc32_table").len(), 2, "{report:#}");
+        assert_eq!(
+            constant(&report, "sha256_k")[0]["match"],
+            "complete",
+            "{report:#}"
+        );
+        // Past eight segments the rest is a separate match, and that is said.
+        let parts = (0..10)
+            .map(|part| {
+                (
+                    1024 + part * 104,
+                    table[part as usize * 104..((part as usize + 1) * 104).min(1024)].to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let report = identify(&raw::module(&[raw::memory(1), raw::data(&parts)]), 0, 16).unwrap();
+        assert_eq!(constant(&report, "crc32_table").len(), 2, "{report:#}");
+        assert!(
+            report["omissions"]
+                .to_string()
+                .contains("spans more than 8 segments"),
+            "{report:#}"
+        );
+    }
+
+    #[test]
+    fn sha512_halves_stored_to_static_addresses_are_sha512() {
+        let mut body = Vec::new();
+        for (index, value) in wasm_constants::SHA512_H.iter().enumerate() {
+            let address = 2048 + 8 * index as i64;
+            for (half, offset) in [(*value as u32, 0u8), ((value >> 32) as u32, 4)] {
+                body.push(0x41);
+                body.extend(raw::sleb(address));
+                body.push(0x41);
+                body.extend(raw::sleb(i64::from(half as i32)));
+                body.extend([0x36, 2, offset]);
+            }
+        }
+        let mut sections = raw::functions(1, &body);
+        sections.insert(2, raw::memory(1));
+        let report = identify(&raw::module(&sections), 0, 16).unwrap();
+        let wide = constant(&report, "sha512_h");
+        assert_eq!(
+            (wide.len(), wide[0]["match"].as_str()),
+            (1, Some("complete")),
+            "{report:#}"
+        );
+        assert!(constant(&report, "sha256_h").is_empty(), "{report:#}");
+    }
+
+    #[test]
+    fn the_strongest_evidence_comes_first() {
+        let imports = raw::vector(&[
+            [raw::name("env"), raw::name("invoke_vi"), vec![0, 0]].concat(),
+            [raw::name("env"), raw::name("invoke_ii"), vec![0, 0]].concat(),
+        ]);
+        let exports = raw::vector(&[[raw::name("emscripten_stack_init"), vec![0, 2]].concat()]);
+        let mut sections = raw::functions(1, &[]);
+        sections.insert(1, raw::section(2, &imports));
+        sections.insert(3, raw::section(7, &exports));
+        let report = identify(&raw::module(&sections), 0, 16).unwrap();
+        let emscripten = conclusion(&report, "emscripten").unwrap();
+        assert_eq!(emscripten["confidence"], "high");
+        assert_eq!(
+            emscripten["evidence"][0]["confidence"], "high",
+            "{emscripten:#}"
+        );
+        assert_eq!(emscripten["evidence"][0]["record"], "export");
+    }
+
+    #[test]
+    fn a_trimmed_page_states_how_many_matches_it_left_out() {
+        // Long evidence for many toolchains and 100 referenced matches push
+        // the fixed part past its budget, so the page is trimmed.
+        let quarter = raw::words(&wasm_constants::SHA256_K[..16]);
+        let mut segments = Vec::new();
+        let mut body = Vec::new();
+        for index in 0..100u32 {
+            segments.push((4096 + index * 80, quarter.clone()));
+            body.extend(raw::i32_const(4096 + index * 80));
+        }
+        let mut sections = raw::functions(40, &body);
+        let prefixes = [
+            "emscripten_",
+            "__wbindgen_",
+            "asyncify_",
+            "~lib/",
+            "mono_wasm_",
+            "__wasi_",
+            "runtime.",
+            "dynCall_",
+        ];
+        let names = (0..40u32)
+            .map(|index| {
+                (
+                    index,
+                    format!("{}{}{index}", prefixes[index as usize % 8], "x".repeat(150)),
+                )
+            })
+            .collect::<Vec<_>>();
+        sections.insert(2, raw::memory(4));
+        sections.push(raw::data(&segments));
+        sections.push(raw::names(&names));
+        for index in 0..40 {
+            sections.push(custom(&format!("{}{index}", "c".repeat(120)), &[]));
+        }
+        let report = identify(&raw::module(&sections), 0, 16).unwrap();
+        let lines = omission_lines(&report);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("Report trimmed to fit one page")),
+            "{lines:#?}"
+        );
+        let listed = report["constants"]["matches"].as_array().unwrap().len();
+        let total = report["summary"]["constant_matches"].as_u64().unwrap() as usize;
+        assert!(listed < MAX_MATCHES);
+        let expected = format!(
+            "Constant match limit of {listed} reached; {} later matches are counted, not listed.",
+            total - listed
+        );
+        assert!(lines.contains(&expected), "{expected}\n{lines:#?}");
     }
 
     /// Every SHA-2 table digests as the sha2 crate does, so a copied table

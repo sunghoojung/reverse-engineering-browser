@@ -2059,8 +2059,7 @@ impl<'m> Matcher<'m> {
     fn targets_correspond(&self, fa: &Func, fb: &Func) -> bool {
         let same = |x: &[u32], y: &[u32]| {
             x.len() == y.len()
-                && x
-                    .iter()
+                && x.iter()
                     .zip(y)
                     .all(|(x, y)| self.a_to_b.get(*x as usize) == Some(y))
         };
@@ -2075,12 +2074,16 @@ impl<'m> Matcher<'m> {
         let key = |f: &Func| (f.signature, f.body, f.addresses);
         let mut counts = HashMap::<_, (u32, u32, u32, u32)>::new();
         for index in &a {
-            let entry = counts.entry(key(&self.a.funcs[*index as usize])).or_default();
+            let entry = counts
+                .entry(key(&self.a.funcs[*index as usize]))
+                .or_default();
             entry.0 += 1;
             entry.1 = *index;
         }
         for index in &b {
-            let entry = counts.entry(key(&self.b.funcs[*index as usize])).or_default();
+            let entry = counts
+                .entry(key(&self.b.funcs[*index as usize]))
+                .or_default();
             entry.2 += 1;
             entry.3 = *index;
         }

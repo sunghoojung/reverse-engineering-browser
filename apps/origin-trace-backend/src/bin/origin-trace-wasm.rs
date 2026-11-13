@@ -83,18 +83,17 @@ fn main() {
         let row_limit = options
             .row_limit
             .unwrap_or(origin_trace_backend::wasm_identification::SUGGESTION_PAGE);
-        let result =
-            if row_limit > origin_trace_backend::wasm_identification::SUGGESTION_PAGE {
-                json!({"error":"row_limit is at most 1024","status":400})
-            } else {
-                origin_trace_backend::wasm_identification::load(
-                    &options.artifacts,
-                    &options.artifact_id,
-                    row_offset,
-                    row_limit,
-                )
-                .unwrap_or_else(|e| json!({"error":e.message,"status":e.status}))
-            };
+        let result = if row_limit > origin_trace_backend::wasm_identification::SUGGESTION_PAGE {
+            json!({"error":"row_limit is at most 1024","status":400})
+        } else {
+            origin_trace_backend::wasm_identification::load(
+                &options.artifacts,
+                &options.artifact_id,
+                row_offset,
+                row_limit,
+            )
+            .unwrap_or_else(|e| json!({"error":e.message,"status":e.status}))
+        };
         println!("{result}");
         return;
     }

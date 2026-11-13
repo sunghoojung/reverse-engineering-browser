@@ -37,6 +37,16 @@ const entropyMap = createEntropyMap({
   toolbar: document.querySelector('.source-editor-toolbar'),
   getSource: selectedSource, identityOf: sourceIdentity, reveal: revealSourceByteOffset
 });
+// Library identification for the Wasm module open in Inspect
+// (wasm_identification.js); its chips reveal evidence bytes as the map does.
+const wasmIdentification = typeof createWasmIdentificationPanel === 'function' ? createWasmIdentificationPanel({
+  root: document.querySelector('#wasm-identification'), getSource: selectedSource,
+  inspecting: source => Boolean(state.sourceWasm && source.kind === 'wasm' && source.source_type === 'artifact'),
+  reveal: (source, offset) => {
+    const problem = revealSourceByteOffset(source, offset, () => { if (typeof entropyMap !== 'undefined') entropyMap.close(); });
+    if (problem) elements.sourcePosition.textContent = problem;
+  }
+}) : null;
 // The Flow workspace: Graph, CFG, Lineage and Timeline share one selection
 // and trail. Its Graph pane draws every recorded stack of the session.
 const flowWorkspace = createFlowWorkspace({
@@ -7962,6 +7972,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         syncSourceDisplayControls(source, view);
         renderSourceContent(source, view);
         if (typeof entropyMap !== 'undefined') entropyMap.sync();
+        if (typeof wasmIdentification !== 'undefined' && wasmIdentification) wasmIdentification.sync();
         if (!investigationPassiveSource && state.sourceDeobfuscated && source?.kind === 'javascript' && !document.querySelector('#screen-sources').hidden) loadDeobfuscation(source);
         renderDeobfuscationReport(source);
         const reveal = state.sourceReveal;

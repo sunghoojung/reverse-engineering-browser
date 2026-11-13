@@ -2847,6 +2847,60 @@ final class OriginTraceRenderedUITests: XCTestCase {
       """)
   }
 
+  // Library identification in Inspect: the toolchain line, constant matches
+  // and the labeled count of the synthetic Rust and wasm-bindgen module (410),
+  // Details by keyboard, a constant chip revealing its data segment row, and
+  // the badges in the Graph's Functions menu.
+  @MainActor
+  func test38WasmLibraryIdentification() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem]", containing: "identified-module")
+      try await ui.waitUntil("!document.querySelector('#source-wasm').hidden", "Inspect is offered for the identified module")
+      try await ui.click("#source-wasm")
+      try await ui.waitUntil("(document.querySelector('#wasm-identification')?.innerText ?? '').includes('wasm-bindgen')", timeout: 30, "the identification summary did not load")
+      let summary = try await ui.value("document.querySelector('#wasm-identification').innerText") as? String ?? ""
+      for expected in ["Rust · high", "SHA-256 round constants 64/64", "Base64 alphabet 64/64", "8 of 9 functions labeled"] {
+        XCTAssertTrue(summary.contains(expected), "\(size.name): the summary names \(expected): \(summary)")
+      }
+      let placement = try await ui.json("(() => { const panel = document.querySelector('#wasm-identification').getBoundingClientRect(), code = document.querySelector('#source-code-wrap').getBoundingClientRect(); return {above: panel.bottom <= code.top + 1, height: panel.height, codeHeight: code.height}; })()")
+      XCTAssertEqual(placement["above"] as? Bool, true, "\(size.name): the summary sits above the listing: \(placement)")
+      XCTAssertLessThanOrEqual(placement["height"] as? Double ?? 999, 140, "\(size.name): the summary stays compact: \(placement)")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) wasm identification")
+      try await assertInert(ui, "\(size.name) wasm identification")
+      try await ui.screenshot("wasm-identification-\(size.name)")
+      _ = try await ui.value("(document.querySelector('#wasm-identification .wasm-id-toggle').focus(), 1)")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("document.querySelector('#wasm-identification .wasm-id-details') !== null", "Enter did not open the identification details")
+      let details = try await ui.value("document.querySelector('#wasm-identification .wasm-id-details').innerText") as? String ?? ""
+      XCTAssertTrue(details.contains("JS glue: fetch"), "\(size.name): the fetch glue import is labeled: \(details)")
+      XCTAssertTrue(details.contains("named by func 2"), "\(size.name): the table names the function that reads it: \(details)")
+      let focused = try await ui.value("document.activeElement?.classList.contains('wasm-id-toggle')") as? Bool
+      XCTAssertEqual(focused, true, "\(size.name): focus stays on the Details toggle")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) wasm identification details")
+      try await ui.screenshot("wasm-identification-details-\(size.name)")
+      try await ui.click("#wasm-identification .wasm-id-chip[data-byte-offset=\"332\"]")
+      try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('hex 982f8a42')", "the constant chip did not reveal its data segment")
+      _ = try await ui.value("(document.documentElement.dataset.theme = 'light', 1)")
+      try await Task.sleep(nanoseconds: 600_000_000)
+      try await ui.screenshot("wasm-identification-light-\(size.name)")
+      _ = try await ui.value("(document.documentElement.dataset.theme = 'dark', 1)")
+      try await ui.click("#source-graph")
+      try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '').includes('blocks')", timeout: 30, "the block graph did not finish laying out")
+      let hidden = try await ui.value("getComputedStyle(document.querySelector('#wasm-identification')).display") as? String
+      XCTAssertEqual(hidden, "none", "\(size.name): the graph keeps the height")
+      try await ui.click("#source-graph-host .block-graph-tool", containing: "Functions")
+      try await ui.waitUntil("document.querySelector('.block-graph-fn-badge') !== null", "the Functions menu shows no identification badge")
+      let badges = try await ui.value("[...document.querySelectorAll('.block-graph-fn-row')].map(row => row.innerText).join(' | ')") as? String ?? ""
+      XCTAssertTrue(badges.contains("alloc"), "\(size.name): the allocator export carries a badge: \(badges)")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) wasm identification badges")
+      try await ui.screenshot("wasm-identification-badges-\(size.name)")
+      try await ui.key(53, "\u{1B}")
+      try await ui.click("#source-graph")
+    }
+  }
+
   // One resident-size sample from `ps`: the app, its web content process, the
   // backend and the agent's tool server. Values are KiB.
   @MainActor

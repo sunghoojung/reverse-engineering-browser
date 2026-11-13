@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="xrefs_view.css">
     <link rel="stylesheet" href="wasm_runner.css">
     <link rel="stylesheet" href="entropy_map.css">
+    <link rel="stylesheet" href="wasm_identification.css">
     <link rel="stylesheet" href="block_graph.css">
     <link rel="stylesheet" href="flow_graph.css">
     <link rel="stylesheet" href="flow_workspace.css">
@@ -311,6 +312,7 @@
                 <p id="source-search-status" class="source-search-status" hidden></p>
                 <div id="source-name-host" class="evidence-name-host"></div>
                 <p id="source-limit-notice" class="source-limit-notice" role="status" hidden></p>
+                <section id="wasm-identification" class="wasm-identification" aria-label="Library identification" hidden></section>
               </div>
               <div id="source-view-split" class="source-view-split">
               <div id="source-graph-host" class="block-graph" hidden></div>
@@ -971,6 +973,7 @@
          sidebar; without that registry they add nothing. -->
     <script src="debugger_pause.js"></script>
     <script src="entropy_map.js"></script>
+    <script src="wasm_identification.js"></script>
 
     <script src="app.js"></script>
     <script src="agent_panel.js"></script>

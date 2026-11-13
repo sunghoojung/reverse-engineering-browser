@@ -172,6 +172,17 @@ process named, and the stated end of a task scheduled with no script, then list
 the async callers still not shown, with nothing clipped and captured names
 inert.
 
+`test38WasmLibraryIdentification` opens the synthetic Rust and wasm-bindgen
+module (artifact 410, built from
+[`rust-wasm-bindgen.wat`](../fixtures/wasm-identification/rust-wasm-bindgen.wat))
+in Inspect. At both sizes the
+[identification](../../protocol/wasm-identification-v1.md) summary must name the
+toolchain, the complete SHA-256 and Base64 tables and the labeled count above
+the listing without clipping; Enter on Details must list the fetch glue label
+and the function that reads the SHA-256 table, a constant chip must reveal its
+data segment row, and the Graph's Functions menu must show category badges
+while the summary steps aside for the graph.
+
 `test35MissingFinalHeaders` opens a content-session request the HTTP cache
 answered, which has only a provisional request block that the session budget
 refused ([missing final blocks](../../protocol/native-network-v3.md#missing-final-blocks)).

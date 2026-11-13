@@ -61,6 +61,14 @@ function wasmRunOutcomeText(record) {
   return `${label}${outcome.trap_kind ? ` (${outcome.trap_kind})` : ''} · ${outcome.phase ?? 'unknown'} phase`;
 }
 
+/** What a failed response without a server message means, by status: a 4xx
+ * or 503 was refused before the module ran; a 500 may come after it ran. */
+function wasmRunFailureText(status) {
+  if (status === 503) return 'The runner is unavailable (503). Nothing ran.';
+  if (status >= 400 && status < 500) return `The run was refused (${status}). Nothing ran.`;
+  return `The run failed in the backend (${status}). The function may have run, but no record was returned.`;
+}
+
 function wasmRunTyped(values) {
   return Array.isArray(values) && values.length ? values.map(v => `${v.type} ${v.value}`).join(', ') : 'none';
 }
@@ -190,6 +198,9 @@ function createWasmRunDialog({button, getSource}) {
     }
     output.replaceChildren(...rows);
     output.hidden = false;
+    // The result follows the fields, below the dialog's visible area; bring
+    // its outcome line into view.
+    output.scrollIntoView?.({block: 'start'});
   }
 
   run.addEventListener('click', async () => {
@@ -210,14 +221,14 @@ function createWasmRunDialog({button, getSource}) {
       const response = await fetch('/api/wasm/runs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body), signal: abort.signal, cache: 'no-store'});
       const record = await response.json();
       if (owner !== generation) return;
-      if (!response.ok) throw Error(record?.error || `The run returned ${response.status}. Nothing ran.`);
+      if (!response.ok) throw Error(record?.error || wasmRunFailureText(response.status));
       if (record?.schema !== 'wasm-run-v1' || record.provenance?.module_sha256 !== source.sha256) throw Error('The runner returned an invalid record.');
       renderRecord(record);
     } catch (failure) {
       if (owner !== generation) return;
       // A failed run has no result, so the previous one must not look like its result.
       output.hidden = true; output.replaceChildren();
-      error.textContent = failure.name === 'AbortError' ? 'The run did not answer in time. Its outcome is unknown; Read stored runs before retrying.' : failure instanceof TypeError ? 'The evidence service is unreachable.' : failure.message;
+      error.textContent = failure.name === 'AbortError' ? 'The run did not answer in time, so its outcome is unknown: it may still finish and be stored as a derived run. Wait at least 10 seconds before running it again.' : failure instanceof TypeError ? 'The evidence service is unreachable.' : failure.message;
       error.hidden = false;
     } finally {
       clearTimeout(timer);
@@ -244,4 +255,4 @@ function createWasmRunDialog({button, getSource}) {
   };
 }
 
-if (typeof module === 'object' && module?.exports) module.exports = {wasmRunValues, wasmRunPairs, wasmRunRequest, wasmRunOutcomeText};
+if (typeof module === 'object' && module?.exports) module.exports = {wasmRunValues, wasmRunPairs, wasmRunRequest, wasmRunOutcomeText, wasmRunFailureText};

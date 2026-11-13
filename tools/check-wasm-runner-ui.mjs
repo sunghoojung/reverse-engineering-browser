@@ -13,7 +13,7 @@ import {setImmediate as nextTurn} from 'node:timers/promises';
 const require = createRequire(import.meta.url);
 const {parseHTML} = require('./ui-startup-deps/node_modules/linkedom');
 const source = await readFile(new URL('../apps/research-ui/wasm_runner.js', import.meta.url), 'utf8');
-const {wasmRunValues, wasmRunPairs, wasmRunOutcomeText} = require('../apps/research-ui/wasm_runner.js');
+const {wasmRunValues, wasmRunPairs, wasmRunOutcomeText, wasmRunFailureText} = require('../apps/research-ui/wasm_runner.js');
 
 assert.deepEqual(wasmRunValues('i32 7, f64 -1.5 ,  v128 0x1'), [{type: 'i32', value: '7'}, {type: 'f64', value: '-1.5'}, {type: 'v128', value: '0x1'}]);
 assert.deepEqual(wasmRunValues(''), []);
@@ -28,6 +28,9 @@ const proto = window.HTMLElement.prototype;
 proto.showModal ??= function () { this.open = true; };
 proto.close ??= function () { this.open = false; this.dispatchEvent(new window.Event('close')); };
 proto.focus ??= function () {};
+// Records which elements were scrolled into view, and how.
+const scrolled = [];
+proto.scrollIntoView = function (options) { scrolled.push({element: this, options}); };
 // linkedom has no select.value; a browser returns the selected, else first, option's value.
 if (document.createElement('select').value === undefined) {
   Object.defineProperty(window.HTMLSelectElement.prototype, 'value', {get() {
@@ -107,6 +110,10 @@ assert.match(output.textContent, /Import calls · 1 attempted/);
 assert.match(output.textContent, /trapped \(no stub value\)/);
 assert.match(output.textContent, /0:4 · read · 0a000000/);
 assert.equal(node.querySelector('img'), null, 'Captured values in the record stay text');
+// The result follows the fields, below the dialog's visible area.
+// Compared as a boolean: printing two DOM nodes on failure walks the whole tree.
+assert.ok(scrolled.at(-1)?.element === output, 'The result is scrolled into view');
+assert.equal(scrolled.at(-1)?.options?.block, 'start');
 
 // A refusal is shown as the server words it; nothing is rendered as a result.
 answer = {status: 409, body: {error: 'The artifact’s SHA-256 differs from the request; nothing ran'}};
@@ -123,4 +130,16 @@ runButton.dispatchEvent(new window.Event('click'));
 for (let i = 0; i < 5; i += 1) await nextTurn();
 assert.equal(posts.length, 2);
 assert.match(error.textContent, /Argument 1/);
+// Without a server message, the status decides whether code may have run.
+assert.match(wasmRunFailureText(409), /Nothing ran/);
+assert.match(wasmRunFailureText(503), /Nothing ran/);
+assert.doesNotMatch(wasmRunFailureText(500), /Nothing ran/);
+assert.match(wasmRunFailureText(500), /may have run/);
+byLabel('Arguments').value = 'i32 7, i32 5';
+answer = {status: 500, body: {}};
+runButton.dispatchEvent(new window.Event('click'));
+for (let i = 0; i < 10; i += 1) await nextTurn();
+assert.equal(posts.length, 3);
+assert.match(error.textContent, /may have run/);
+assert.doesNotMatch(error.textContent, /Nothing ran/);
 console.log('Run offline dialog: confirmation gate, request, outcome and inert captured text verified');

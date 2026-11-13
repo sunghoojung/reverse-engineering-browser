@@ -2707,10 +2707,47 @@ mod tests {
         let digest = first["provenance"]["inputs_digest"].as_str().unwrap();
         for record in [&first, &second] {
             let id = record["run_id"].as_str().unwrap();
-            assert!(!id.contains(&digest[..12]), "{id}");
-            assert_eq!(id.rsplit('-').next().unwrap().len(), 24, "{id}");
+            let nonce = id.rsplit('-').next().unwrap();
+            assert_eq!(nonce.len(), 24, "{id}");
+            assert!(
+                shares_no_window(nonce, digest),
+                "{id} carries part of {digest}"
+            );
         }
         assert_ne!(first["run_id"], second["run_id"]);
+    }
+
+    /// Whether no 8-hex-digit window of `nonce` appears anywhere in `digest`.
+    /// Any slice of the digest, not only its prefix, would let a reader test
+    /// guesses at the inputs; a random nonce matches one with odds near 1e-7.
+    pub(super) fn shares_no_window(nonce: &str, digest: &str) -> bool {
+        (0..=nonce.len().saturating_sub(8)).all(|start| !digest.contains(&nonce[start..start + 8]))
+    }
+
+    #[test]
+    fn nonces_differ_within_one_millisecond() {
+        // A run_id is wr-<milliseconds>-<nonce>, so two runs in one millisecond
+        // differ only by the nonce.
+        let started = Instant::now();
+        let nonces = (0..1000)
+            .map(|_| nonce())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            nonces.len(),
+            1000,
+            "a nonce repeated within {:?}",
+            started.elapsed()
+        );
+        assert!(
+            nonces
+                .iter()
+                .all(|nonce| nonce.len() == 24 && nonce.bytes().all(|b| b.is_ascii_hexdigit()))
+        );
+        let digest = "0123456789abcdef".repeat(4);
+        assert!(
+            !shares_no_window(&digest[10..34], &digest),
+            "the window check finds a slice from the middle"
+        );
     }
 
     /// The record run_blocking builds for one artifact in a fresh store.

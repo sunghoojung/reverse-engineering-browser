@@ -523,10 +523,16 @@ fn a_read_only_client_cannot_list_runs_or_rebuild_their_inputs() {
     let run = &stored_runs(&server)["runs"][0];
     let digest = run["provenance"]["inputs_digest"].as_str().unwrap();
     let id = run["run_id"].as_str().unwrap();
-    assert!(
-        !id.contains(&digest[..12]),
-        "run_id {id} carries the inputs digest"
-    );
+    // No 8-hex-digit window of the nonce appears anywhere in the digest: a
+    // slice from its middle would leak as much as its prefix.
+    let nonce = id.rsplit('-').next().unwrap();
+    assert_eq!(nonce.len(), 24, "{id}");
+    for start in 0..=nonce.len() - 8 {
+        assert!(
+            !digest.contains(&nonce[start..start + 8]),
+            "run_id {id} carries part of the inputs digest"
+        );
+    }
 }
 
 #[test]

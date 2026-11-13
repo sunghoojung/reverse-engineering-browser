@@ -662,13 +662,17 @@ impl Texts<'_> {
     }
 }
 
+/// Direct call sites of one callee: (caller, call offset) pairs, whether the
+/// scan reached the module's end, and whether a `ref.func` names the callee.
+struct CallSites {
+    sites: Vec<(u32, u32)>,
+    finished: bool,
+    referenced: bool,
+}
+
 /// Every direct call site of `callee` in the module, bounded by the deadline
-/// and a site cap. Returns the sites and whether the scan finished.
-fn call_sites(
-    module: &Module<'_>,
-    callee: u32,
-    deadline: Instant,
-) -> Result<(Vec<(u32, u32)>, bool, bool)> {
+/// and a site cap.
+fn call_sites(module: &Module<'_>, callee: u32, deadline: Instant) -> Result<CallSites> {
     let mut sites = Vec::new();
     let mut referenced = false;
     let mut steps = 0u64;
@@ -678,7 +682,11 @@ fn call_sites(
         while !reader.eof() {
             steps += 1;
             if steps & 4095 == 0 && Instant::now() > deadline {
-                return Ok((sites, false, referenced));
+                return Ok(CallSites {
+                    sites,
+                    finished: false,
+                    referenced,
+                });
             }
             let (op, offset) = reader.read_with_offset().map_err(wasm_def_use::bad)?;
             match op {
@@ -686,7 +694,11 @@ fn call_sites(
                     if function_index == callee =>
                 {
                     if sites.len() >= MAX_CALL_SITES {
-                        return Ok((sites, false, referenced));
+                        return Ok(CallSites {
+                            sites,
+                            finished: false,
+                            referenced,
+                        });
                     }
                     sites.push((caller, offset as u32));
                 }
@@ -697,7 +709,11 @@ fn call_sites(
             }
         }
     }
-    Ok((sites, true, referenced))
+    Ok(CallSites {
+        sites,
+        finished: true,
+        referenced,
+    })
 }
 
 /// The native helper's entry point: the route's query without its artifact_id.
@@ -1223,7 +1239,11 @@ fn interprocedural_steps(
     }
     let mut direct = Value::Null;
     if !params.is_empty() || !returns.is_empty() {
-        let (sites, finished, referenced) = call_sites(module, function, deadline)?;
+        let CallSites {
+            sites,
+            finished,
+            referenced,
+        } = call_sites(module, function, deadline)?;
         let indirect = referenced
             || module.exported.contains(&function)
             || module.element_functions.contains(&function)

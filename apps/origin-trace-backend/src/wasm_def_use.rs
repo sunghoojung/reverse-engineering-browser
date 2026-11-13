@@ -991,7 +991,6 @@ impl Sim<'_, '_> {
     fn consume(
         &mut self,
         kind: NodeKind,
-        offset: u32,
         index: u32,
         target: u32,
         results: u32,
@@ -999,6 +998,7 @@ impl Sim<'_, '_> {
         kind_of: impl Fn(usize) -> EdgeKind,
     ) -> u32 {
         self.record(index, values);
+        let offset = self.instructions[index as usize];
         let node = self.node(kind, offset, index, target, results);
         for (operand, value) in values.iter().enumerate() {
             self.edge(
@@ -1518,15 +1518,9 @@ impl Sim<'_, '_> {
             Operator::If { blockty } => {
                 self.clear_store();
                 let condition = self.pop(offset);
-                self.consume(
-                    NodeKind::Branch,
-                    offset,
-                    index,
-                    NONE,
-                    0,
-                    &[condition],
-                    |_| EdgeKind::Selector,
-                );
+                self.consume(NodeKind::Branch, index, NONE, 0, &[condition], |_| {
+                    EdgeKind::Selector
+                });
                 self.push_frame(FrameKind::If, Join::If, offset, index, *blockty)?;
             }
             Operator::Else => {
@@ -1588,29 +1582,17 @@ impl Sim<'_, '_> {
             Operator::BrIf { relative_depth } => {
                 self.clear_store();
                 let condition = self.pop(offset);
-                self.consume(
-                    NodeKind::Branch,
-                    offset,
-                    index,
-                    NONE,
-                    0,
-                    &[condition],
-                    |_| EdgeKind::Selector,
-                );
+                self.consume(NodeKind::Branch, index, NONE, 0, &[condition], |_| {
+                    EdgeKind::Selector
+                });
                 self.branch(*relative_depth, Via::BrIf, offset, index);
             }
             Operator::BrTable { targets } => {
                 self.clear_store();
                 let selector = self.pop(offset);
-                self.consume(
-                    NodeKind::Branch,
-                    offset,
-                    index,
-                    NONE,
-                    0,
-                    &[selector],
-                    |_| EdgeKind::Selector,
-                );
+                self.consume(NodeKind::Branch, index, NONE, 0, &[selector], |_| {
+                    EdgeKind::Selector
+                });
                 let mut depths: Vec<u32> = Vec::new();
                 for target in targets.targets() {
                     let depth = target
@@ -1645,15 +1627,9 @@ impl Sim<'_, '_> {
                     )));
                 }
                 let value = self.materialize(self.locals[local as usize]);
-                self.consume(
-                    NodeKind::LocalGet,
-                    offset,
-                    index,
-                    local,
-                    1,
-                    &[value],
-                    |_| EdgeKind::Local,
-                );
+                self.consume(NodeKind::LocalGet, index, local, 1, &[value], |_| {
+                    EdgeKind::Local
+                });
             }
             Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
                 let local = *local_index;
@@ -1669,29 +1645,21 @@ impl Sim<'_, '_> {
                 } else {
                     NodeKind::LocalSet
                 };
-                let node =
-                    self.consume(kind, offset, index, local, u32::from(tee), &[value], |_| {
-                        EdgeKind::LocalSet
-                    });
+                let node = self.consume(kind, index, local, u32::from(tee), &[value], |_| {
+                    EdgeKind::LocalSet
+                });
                 self.nodes[node as usize].results = 1;
                 self.write_local(local, Value::of(node), offset);
             }
             Operator::GlobalGet { global_index } => {
-                self.consume(
-                    NodeKind::GlobalGet,
-                    offset,
-                    index,
-                    *global_index,
-                    1,
-                    &[],
-                    |_| EdgeKind::Operand,
-                );
+                self.consume(NodeKind::GlobalGet, index, *global_index, 1, &[], |_| {
+                    EdgeKind::Operand
+                });
             }
             Operator::GlobalSet { global_index } => {
                 let value = self.pop(offset);
                 self.consume(
                     NodeKind::GlobalSet,
-                    offset,
                     index,
                     *global_index,
                     0,
@@ -1718,9 +1686,8 @@ impl Sim<'_, '_> {
                     NodeKind::Call
                 };
                 let pushed = if tail { 0 } else { results };
-                let node = self.consume(kind, offset, index, function, pushed, &args, |_| {
-                    EdgeKind::Argument
-                });
+                let node =
+                    self.consume(kind, index, function, pushed, &args, |_| EdgeKind::Argument);
                 self.nodes[node as usize].results = results;
                 if tail {
                     self.unreachable();
@@ -1746,7 +1713,6 @@ impl Sim<'_, '_> {
                 let pushed = if tail { 0 } else { results };
                 let node = self.consume(
                     NodeKind::CallIndirect,
-                    offset,
                     index,
                     *type_index,
                     pushed,
@@ -1776,7 +1742,6 @@ impl Sim<'_, '_> {
                 let pushed = if tail { 0 } else { results };
                 let node = self.consume(
                     NodeKind::CallRef,
-                    offset,
                     index,
                     *type_index,
                     pushed,
@@ -1796,7 +1761,7 @@ impl Sim<'_, '_> {
             }
             Operator::Select | Operator::TypedSelect { .. } => {
                 let args = self.pop_n(3, offset);
-                self.consume(NodeKind::Select, offset, index, NONE, 1, &args, |operand| {
+                self.consume(NodeKind::Select, index, NONE, 1, &args, |operand| {
                     if operand == 2 {
                         EdgeKind::Selector
                     } else {
@@ -1806,9 +1771,7 @@ impl Sim<'_, '_> {
             }
             Operator::Drop => {
                 let value = self.pop(offset);
-                self.consume(NodeKind::Drop, offset, index, NONE, 0, &[value], |_| {
-                    EdgeKind::Drop
-                });
+                self.consume(NodeKind::Drop, index, NONE, 0, &[value], |_| EdgeKind::Drop);
             }
             Operator::Try { blockty } => {
                 self.clear_store();
@@ -1910,7 +1873,7 @@ impl Sim<'_, '_> {
                     Stop::Unsupported(format!("A throw of undeclared tag {tag_index}"))
                 })?;
                 let args = self.pop_n(count, offset);
-                self.consume(NodeKind::Throw, offset, index, *tag_index, 0, &args, |_| {
+                self.consume(NodeKind::Throw, index, *tag_index, 0, &args, |_| {
                     EdgeKind::Argument
                 });
                 self.unreachable();
@@ -1918,7 +1881,7 @@ impl Sim<'_, '_> {
             Operator::ThrowRef => {
                 self.clear_store();
                 let value = self.pop(offset);
-                self.consume(NodeKind::Throw, offset, index, NONE, 0, &[value], |_| {
+                self.consume(NodeKind::Throw, index, NONE, 0, &[value], |_| {
                     EdgeKind::Argument
                 });
                 self.unreachable();
@@ -1933,15 +1896,9 @@ impl Sim<'_, '_> {
             | Operator::BrOnCastFail { relative_depth, .. } => {
                 self.clear_store();
                 let reference = self.pop(offset);
-                let node = self.consume(
-                    NodeKind::Operation,
-                    offset,
-                    index,
-                    NONE,
-                    0,
-                    &[reference],
-                    |_| EdgeKind::Operand,
-                );
+                let node = self.consume(NodeKind::Operation, index, NONE, 0, &[reference], |_| {
+                    EdgeKind::Operand
+                });
                 self.nodes[node as usize].results = 1;
                 let derived = Value::of(node);
                 let Some(target) = self.frames.len().checked_sub(*relative_depth as usize + 1)
@@ -1984,7 +1941,7 @@ impl Sim<'_, '_> {
                 let args = self.pop_n(params, offset);
                 let address_first =
                     matches!(kind, NodeKind::Load | NodeKind::Store | NodeKind::Atomic);
-                let node = self.consume(kind, offset, index, NONE, results, &args, |operand| {
+                let node = self.consume(kind, index, NONE, results, &args, |operand| {
                     if address_first && operand == 0 {
                         EdgeKind::Address
                     } else if matches!(kind, NodeKind::Store | NodeKind::Atomic) {
@@ -2034,10 +1991,8 @@ impl Sim<'_, '_> {
                         }
                     }
                     NodeKind::Atomic => self.clear_store(),
-                    NodeKind::Memory => {
-                        if !matches!(other, Operator::MemorySize { .. }) {
-                            self.clear_store();
-                        }
+                    NodeKind::Memory if !matches!(other, Operator::MemorySize { .. }) => {
+                        self.clear_store();
                     }
                     _ => {}
                 }

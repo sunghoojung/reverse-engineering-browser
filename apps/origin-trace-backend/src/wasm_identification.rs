@@ -53,7 +53,7 @@ const MAX_MATCH_SEGMENTS: usize = 8;
 /// Bytes of a data match returned as `hex`. They are captured content, which
 /// `--omit-content` drops; the match identity is the offsets and counts.
 const MATCH_PREVIEW_BYTES: usize = 64;
-/// One page of the report, serialized, stays inside the 131,072-byte MCP
+/// One page of the report, pretty-printed, stays inside the 131,072-byte MCP
 /// inline limit with room for the artifact identity. Everything but the
 /// suggestions is held to `FIXED_BYTES`, trimmed further when it would not
 /// fit, and suggestion rows fill the rest.
@@ -1929,8 +1929,11 @@ pub fn load(root: &Path, id: &str, offset: usize, limit: usize) -> Result<Value>
     Ok(document)
 }
 
+/// The size reb-api mcp checks: it inlines a result only when both its
+/// compact and its pretty-printed text fit the limit, and pretty is never
+/// the smaller.
 fn serialized(value: &Value) -> usize {
-    serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
+    serde_json::to_string_pretty(value).map_or(usize::MAX, |text| text.len())
 }
 
 /// Builds the report. `offset` and `limit` page the suggestion rows only;
@@ -2197,7 +2200,9 @@ fn identify_within(bytes: &[u8], offset: usize, limit: usize, budget: Duration) 
     }
 
     // Suggestion rows fill what the page budget leaves; at least one row is
-    // returned so paging always advances.
+    // returned so paging always advances. A row pretty-prints as nine lines
+    // three levels deep, six spaces more indented than on its own, plus its
+    // separator.
     let mut room = PAGE_BYTES.saturating_sub(serialized(&document));
     let mut window = Vec::new();
     for entry in suggestions.iter().skip(offset).take(limit) {
@@ -2210,17 +2215,27 @@ fn identify_within(bytes: &[u8], offset: usize, limit: usize, budget: Duration) 
             entry.source,
             entry.byte_offset
         ]);
-        let size = serialized(&row) + 1;
+        let size = serialized(&row) + 9 * 6 + 2;
         if !window.is_empty() && size > room {
             break;
         }
         room = room.saturating_sub(size);
         window.push(row);
     }
-    let next = offset + window.len();
-    document["functions"]["suggestion_window"] = json!({"offset":offset,"rows":window.len(),
-        "total_rows":suggestions.len(),"next_offset":if next < suggestions.len() {json!(next)} else {Value::Null}});
-    document["functions"]["suggestions"] = Value::Array(window);
+    let place = |document: &mut Value, window: &[Value]| {
+        let next = offset + window.len();
+        document["functions"]["suggestion_window"] = json!({"offset":offset,"rows":window.len(),
+            "total_rows":suggestions.len(),"next_offset":if next < suggestions.len() {json!(next)} else {Value::Null}});
+        document["functions"]["suggestions"] = Value::Array(window.to_vec());
+    };
+    place(&mut document, &window);
+    // The estimate is checked against the page itself: rows come off the end
+    // until it fits, always leaving one.
+    while window.len() > 1 && serialized(&document) > PAGE_BYTES {
+        let cut = (window.len() / 16).max(1);
+        window.truncate(window.len() - cut);
+        place(&mut document, &window);
+    }
     Ok(document)
 }
 
@@ -2822,8 +2837,8 @@ mod tests {
 
     #[test]
     fn every_page_fits_the_mcp_inline_limit() {
-        // 130 data matches each referenced by 16 functions, 300 functions
-        // holding the golden ratio, and 3000 long labels.
+        // 130 data matches, and 1200 functions that each name all of them,
+        // hold the golden ratio and carry a long label.
         let quarter = raw::words(&wasm_constants::SHA256_K[..4]);
         let mut segment = Vec::new();
         let mut body = Vec::new();
@@ -2835,10 +2850,10 @@ mod tests {
         for _ in 0..8 {
             body.extend(raw::i32_const(0x9e37_79b9));
         }
-        let mut sections = raw::functions(3000, &body);
+        let mut sections = raw::functions(1200, &body);
         sections.insert(2, raw::memory(2));
         sections.push(raw::data(&[(65_536, segment)]));
-        let names = (0..3000u32)
+        let names = (0..1200u32)
             .map(|index| (index, format!("emscripten_{}{index}", "x".repeat(90))))
             .collect::<Vec<_>>();
         sections.push(raw::names(&names));
@@ -2849,8 +2864,13 @@ mod tests {
             let mut page = identify(&bytes, offset, SUGGESTION_PAGE).unwrap();
             page["artifact_id"] = json!("18446744073709551615");
             page["sha256"] = json!("f".repeat(64));
-            let size = serde_json::to_vec(&page).unwrap().len();
-            assert!(size <= 131_072, "page at {offset} is {size} bytes");
+            // reb-api mcp inlines a result only when both forms fit.
+            let compact = serde_json::to_vec(&page).unwrap().len();
+            let pretty = serde_json::to_string_pretty(&page).unwrap().len();
+            assert!(
+                compact <= 131_072 && pretty <= 131_072,
+                "page at {offset}: {compact} compact and {pretty} pretty bytes"
+            );
             rows += page["functions"]["suggestion_window"]["rows"]
                 .as_u64()
                 .unwrap();
@@ -2859,7 +2879,7 @@ mod tests {
                 None => break,
             }
         }
-        assert_eq!(rows, 3000);
+        assert_eq!(rows, 1200);
         assert!(offset > 0, "the rows took more than one page");
     }
 

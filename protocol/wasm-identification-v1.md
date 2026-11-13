@@ -128,8 +128,10 @@ alphabet inside a complete Base64 alphabet.
   16,384 suggestions, 64 constant matches (complete and larger first), and 4
   references and 4 sites per match. Every cap reports a count and an omission
   or `*_truncated` flag.
-- One page serializes to at most 126,000 bytes, inside the 131,072-byte MCP
-  inline limit. Everything but the suggestions is held to 96,000 bytes, with
+- One page pretty-printed is at most 126,000 bytes, inside the 131,072-byte
+  MCP inline limit, which reb-api mcp applies to both the compact and the
+  pretty-printed text. Everything but the suggestions is held to 96,000 bytes,
+  with
   fewer evidence items, listed sections and references when it would not fit
   (an omission says so); suggestion rows fill the rest of the page.
 - Captured text in labels and details is escaped, single-line and at most 96

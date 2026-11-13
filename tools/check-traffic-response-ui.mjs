@@ -537,6 +537,10 @@ const unacknowledged = record({artifact_id: '907', byte_size: 30, sha256: 'd'.re
 await showLinked({...refusedEnd, responseBodyEarlier: unacknowledged, responseBodySnapshots: [unacknowledged]});
 assert.match(panel.textContent, /Snapshot 6: .*Whether the receiver retains it is not known yet\./);
 assert.doesNotMatch(panel.textContent, /retains it, and it is shown below/);
+// An index-decided row keeps the withheld note the index carries.
+await showLinked({...leftWindow, id: 'left-window-withheld', responseBodyIndex: {...indexBody, case: 'partial', partial_index: 2,
+  snapshots_withheld: true}});
+assert.match(panel.textContent, /Snapshots.*A snapshot the schedule allowed was withheld/s, 'the index row keeps its withheld note');
 // A record-backed index answer for a row whose response left the window opens its bytes.
 await showLinked({...leftWindow, id: 'left-window', responseBodyIndex: {...indexBody, artifact_id: jsonArtifact.artifact_id,
   body_length: String(jsonArtifact.byte_size), captured_length: String(jsonArtifact.byte_size), sha256: jsonArtifact.sha256}});

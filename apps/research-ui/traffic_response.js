@@ -37,13 +37,14 @@ function trafficResponseIndexWins(request) {
 }
 
 // An index body answer as the record shape the model decodes. The record's
-// content type and codings are not in the index.
+// content type, codings and other flags are not in the index; its withheld
+// flag is.
 function trafficIndexRecord(body) {
   if (!body || (!TRAFFIC_RESPONSE_STATES.has(body.case) && body.case !== 'malformed')) return null;
   if (body.case === 'malformed') return {malformed: true};
   const started = body.response_started;
   return {state: body.case, shared: body.shared === true, fromCache: false, serviceWorker: false, stillEncoded: false,
-    codingsOmitted: false, completionUnobserved: false, contentType: null, codings: [], bodyLength: body.body_length ?? '0',
+    codingsOmitted: false, completionUnobserved: false, snapshotsWithheld: body.snapshots_withheld === true, contentType: null, codings: [], bodyLength: body.body_length ?? '0',
     capturedLength: body.captured_length ?? '0', partialIndex: body.partial_index ?? 0, sha256: body.sha256 ?? null,
     artifactId: body.artifact_id ?? '0', sequenceNumber: body.record_sequence, parentEventId: started?.sequence_number,
     sessionId: started?.session_id, processId: started?.process_id, monotonicTimeNs: body.record_time_ns, fromIndex: true};
@@ -171,17 +172,18 @@ function trafficResponseCapture(request, contentSession) {
 
 function trafficResponseRows(record) {
   if (!record || record.malformed) return [];
+  // Version 2 bit 7 (protocol/native-network-v3.md "Partial bodies"), which the index carries too.
+  const withheld = record.snapshotsWithheld ? [['Snapshots', 'A snapshot the schedule allowed was withheld: this body\'s snapshot allowance, the session\'s snapshot share or the response body budget was used, so the newest snapshot is older than the schedule would make it.', 'prose']] : [];
   // The index answer carries lengths and the digest, not the record's type or codings.
   if (record.fromIndex) {
     return [['Body length', `${trafficResponseBytes(record.bodyLength)} decoded`, 'value'],
       ['SHA-256', record.sha256 ?? 'No retained bytes', record.sha256 ? 'value' : 'prose'],
-      ['Record', 'Read from the request index: the loaded records lack it, so its content type and codings are not shown.', 'prose']];
+      ['Record', 'Read from the request index: the loaded records lack it, so its content type and codings are not shown.', 'prose'],
+      ...withheld];
   }
   const codings = record.codings.map(coding => TRAFFIC_RESPONSE_CODINGS[coding] ?? coding).join(', ');
   const notes = [record.fromCache && 'served from the HTTP cache', record.serviceWorker && 'served by a service worker',
     record.completionUnobserved && 'the loader reported no completion, so the end is unconfirmed'].filter(Boolean);
-  // Version 2 bit 7 (protocol/native-network-v3.md "Partial bodies").
-  const withheld = record.snapshotsWithheld ? [['Snapshots', 'A snapshot the schedule allowed was withheld: this body\'s snapshot allowance, the session\'s snapshot share or the response body budget was used, so the newest snapshot is older than the schedule would make it.', 'prose']] : [];
   return [
     ['Content type', record.contentType ?? 'Not a bounded media type; not recorded', record.contentType ? 'value' : 'prose'],
     ['Content encoding', codings ? `${codings}${record.codingsOmitted ? ', more not recorded' : ''} · ${record.stillEncoded

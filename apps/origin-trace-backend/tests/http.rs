@@ -4727,6 +4727,61 @@ async fn wasm_runs_need_confirmation_run_offline_and_store_derived_records() {
 }
 
 #[tokio::test]
+async fn wasm_run_reads_are_capped_at_32_kib_in_total() {
+    // The cap was checked only by a unit test against its own constant, so
+    // restoring the old 256 KiB cap passed every test.
+    let server = Server::start().await;
+    let bytes = wat::parse_str(r#"(module (memory 1) (func (export "run")))"#).unwrap();
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/module.wasm","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+    server.file(&format!("artifacts/blobs/{hash}.bin"), &bytes);
+    let run = |length: u64| {
+        json!({"artifact_id":"1","sha256":hash,"export":"run","confirm_offline_execution":true,
+            "memory_reads":[{"offset":0,"length":length},{"offset":length,"length":length}]})
+    };
+    let body = assert_contract_response(
+        server.action("/api/wasm/runs", run(16_385)).await,
+        "post",
+        "/api/wasm/runs",
+        400,
+    )
+    .await;
+    assert!(
+        String::from_utf8_lossy(&body).contains("32 KiB"),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let record: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.action("/api/wasm/runs", run(16_384)).await,
+            "post",
+            "/api/wasm/runs",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    let total: u64 = record["memory_reads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|read| read["length"].as_u64().unwrap())
+        .sum();
+    assert_eq!(total, 32_768);
+    assert!(
+        record["memory_reads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|read| read["status"] == "read")
+    );
+}
+
+#[tokio::test]
 async fn an_unreadable_wasm_run_store_is_an_integrity_error_and_is_moved_aside() {
     // A corrupt store made every later run stored:false and the listing a 400
     // request error, with no way back short of finding the file.

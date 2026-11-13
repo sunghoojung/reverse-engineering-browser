@@ -118,7 +118,7 @@ function createWasmRunDialog({button, getSource}) {
     field('args', 'Arguments', input('i32 7, i32 5'), 'Type and value per parameter, comma separated.'),
     field('imports', 'Import stubs (JSON)', imports, 'A function import without a stub traps when called. Supply every clock or random source.'),
     field('writes', 'Memory writes before the call', input('16:01020304'), 'offset:hex, comma separated; memory 0.'),
-    field('reads', 'Memory reads after the call', input('0:32'), 'offset:length, comma separated; 256 KiB in total.'),
+    field('reads', 'Memory reads after the call', input('0:32'), 'offset:length, comma separated; 32 KiB in total.'),
     limits, startField, confirmField, error, actions, output);
   dialog.append(form);
   document.body.append(dialog);
@@ -168,6 +168,9 @@ function createWasmRunDialog({button, getSource}) {
     fact('Elapsed', `${record.elapsed_ms} ms`);
     if (record.memory_grow_denied) fact('Growth denied', `${record.memory_grow_denied} memory.grow call(s) past the limit returned -1`);
     fact('Record', `${record.run_id}${record.stored === false ? ` · not stored: ${record.store_error}` : ' · stored as a derived run'}`);
+    // What the backend trimmed so the record fits what an agent receives.
+    const trimmed = Array.isArray(record.size_trimmed) ? record.size_trimmed.filter(step => typeof step === 'string') : [];
+    if (trimmed.length) fact('Trimmed for size', trimmed.join('; '));
     rows.push(facts);
     const calls = Array.isArray(record.import_calls) ? record.import_calls : [];
     const callTitle = el('h3', '', `Import calls · ${Number(record.import_calls_total ?? 0).toLocaleString()} attempted${record.import_calls_truncated ? `, first ${calls.length} recorded` : ''}`);
@@ -184,6 +187,8 @@ function createWasmRunDialog({button, getSource}) {
         table.append(row);
       }
       rows.push(table);
+    } else if (record.import_calls_truncated && Number(record.import_calls_total) > 0) {
+      rows.push(el('p', 'wasm-run-hint', 'The import calls were omitted to fit the record; their count is above.'));
     } else rows.push(el('p', 'wasm-run-hint', 'No import was called.'));
     const reads = Array.isArray(record.memory_reads) ? record.memory_reads : [];
     if (reads.length) {

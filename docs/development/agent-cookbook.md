@@ -667,8 +667,10 @@ and call order, and supply every clock or random source), `fuel_exhausted`,
 function), `memory_limit` or `table_limit` (the limits are totals across every
 memory and table), and `memory_write_out_of_bounds`. Each read takes at most
 one expected entry. A
-match holds for these inputs only. `get_wasm_runs {"artifact_id": "9"}` lists
-earlier runs. Details: [WASM run v1](../../protocol/wasm-run-v1.md).
+match holds for these inputs only. Keep reads within 32 KiB in total; a run
+result always inlines, and `size_trimmed` says what was dropped to make it fit.
+`get_wasm_runs {"artifact_id": "9"}` returns the newest run; pass a larger
+`limit` only when the records are small. Details: [WASM run v1](../../protocol/wasm-run-v1.md).
 
 ## 28. Tell library code from custom code in a Wasm module
 

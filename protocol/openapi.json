@@ -4866,12 +4866,12 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Runs to return, 1 to 64. Default 16.",
+            "description": "Runs to return, 1 to 64. Default 1: one record always fits the MCP inline limit, and several large records may come back as a structural summary.",
             "schema": {
               "type": "integer",
               "minimum": 1,
               "maximum": 64,
-              "default": 16
+              "default": 1
             }
           }
         ],
@@ -23793,7 +23793,7 @@
           "memory_reads": {
             "type": "array",
             "maxItems": 16,
-            "description": "Regions of memory 0 read after the call, 256 KiB in total.",
+            "description": "Regions of memory 0 read after the call, 32 KiB in total, so the hex and the rest of the record fit the MCP inline limit.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -23809,7 +23809,7 @@
                 "length": {
                   "type": "integer",
                   "minimum": 1,
-                  "maximum": 262144
+                  "maximum": 32768
                 }
               }
             }
@@ -23926,7 +23926,8 @@
           "executed_module_sha256",
           "provenance",
           "request",
-          "notice"
+          "notice",
+          "size_trimmed"
         ],
         "properties": {
           "schema": {
@@ -24196,12 +24197,22 @@
               "artifact_id",
               "module_sha256",
               "module_byte_size",
+              "run_id_source",
               "inputs_digest",
               "interpreter",
               "limits",
               "host_access",
               "rewrite"
-            ]
+            ],
+            "properties": {
+              "run_id_source": {
+                "enum": [
+                  "os_random",
+                  "hashed_fallback"
+                ],
+                "description": "Where the run_id nonce came from: 96 bits from the operating system, or two keyed hashes of the time and a counter when /dev/urandom cannot be read."
+              }
+            }
           },
           "request": {
             "type": "object",
@@ -24213,6 +24224,13 @@
           "stored": {
             "type": "boolean",
             "description": "Present on the POST result: whether the record reached the run store."
+          },
+          "size_trimmed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Each trimming step that removed something, in order, so the record fits 120 KiB pretty-printed as a one-record get_wasm_runs listing: the request echo, import lists past 32, the function type lists, the import calls past the longest prefix that fits, results past 64, then the import lists to what fits. Empty when nothing was trimmed. The store keeps the trimmed record."
           },
           "store_notice": {
             "type": [

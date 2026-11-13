@@ -115,6 +115,23 @@ assert.equal(node.querySelector('img'), null, 'Captured values in the record sta
 assert.ok(scrolled.at(-1)?.element === output, 'The result is scrolled into view');
 assert.equal(scrolled.at(-1)?.options?.block, 'start');
 
+// A record trimmed for size says so: an emptied call list is not "No import
+// was called", and size_trimmed is shown.
+answer = {status: 200, body: {...answer.body, import_calls: [], import_calls_total: 256, import_calls_truncated: true,
+  size_trimmed: ['import_calls: first 0 of 256 recorded calls', `imports: first 3 of 40 ${markup}`]}};
+runButton.dispatchEvent(new window.Event('click'));
+for (let i = 0; i < 10; i += 1) await nextTurn();
+assert.doesNotMatch(output.textContent, /No import was called/);
+assert.match(output.textContent, /import calls were omitted to fit the record/);
+assert.match(output.textContent, /Trimmed for size.*first 0 of 256 recorded calls; imports: first 3 of 40/s);
+assert.equal(node.querySelector('img'), null, 'A trimming note stays text');
+const untrimmed = {...answer.body, import_calls: [], import_calls_total: 0, import_calls_truncated: false, size_trimmed: []};
+answer = {status: 200, body: untrimmed};
+runButton.dispatchEvent(new window.Event('click'));
+for (let i = 0; i < 10; i += 1) await nextTurn();
+assert.match(output.textContent, /No import was called/);
+assert.doesNotMatch(output.textContent, /Trimmed for size/);
+
 // A refusal is shown as the server words it; nothing is rendered as a result.
 answer = {status: 409, body: {error: 'The artifact’s SHA-256 differs from the request; nothing ran'}};
 runButton.dispatchEvent(new window.Event('click'));
@@ -128,7 +145,7 @@ assert.equal(output.textContent, '', 'A failed run leaves no stale result behind
 byLabel('Arguments').value = 'seven';
 runButton.dispatchEvent(new window.Event('click'));
 for (let i = 0; i < 5; i += 1) await nextTurn();
-assert.equal(posts.length, 2);
+assert.equal(posts.length, 4);
 assert.match(error.textContent, /Argument 1/);
 // Without a server message, the status decides whether code may have run.
 assert.match(wasmRunFailureText(409), /Nothing ran/);
@@ -139,7 +156,7 @@ byLabel('Arguments').value = 'i32 7, i32 5';
 answer = {status: 500, body: {}};
 runButton.dispatchEvent(new window.Event('click'));
 for (let i = 0; i < 10; i += 1) await nextTurn();
-assert.equal(posts.length, 3);
+assert.equal(posts.length, 5);
 assert.match(error.textContent, /may have run/);
 assert.doesNotMatch(error.textContent, /Nothing ran/);
 console.log('Run offline dialog: confirmation gate, request, outcome and inert captured text verified');

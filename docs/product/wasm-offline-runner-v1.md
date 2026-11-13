@@ -17,7 +17,8 @@ What runs, and what cannot happen:
 - Fuel, memory pages and table elements (each a total across every memory or
   table), call depth and a wall-clock deadline bound each run. Each limit, each trap and an import called without a stub is its
   own named outcome. The start function runs only when asked.
-- Memory can be written before the call and read after it, within 256 KiB each.
+- Memory can be written before the call (256 KiB in total) and read after it
+  (32 KiB in total, so a whole result fits what an agent receives inline).
   Expected results and memory bytes are compared exactly, with at most one
   expectation per read.
 - The captured bytes are verified by SHA-256 and never changed. A run is stored

@@ -543,7 +543,7 @@ impl App {
                 }
                 None => None,
             };
-            let limit = q.number("limit", Some("16"), 64, true)?;
+            let limit = q.number("limit", Some("1"), 64, true)?;
             if limit > 64 {
                 return Err(Error::bad("limit must be between 1 and 64"));
             }

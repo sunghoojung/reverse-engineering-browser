@@ -523,10 +523,156 @@ fn a_read_only_client_cannot_list_runs_or_rebuild_their_inputs() {
     let run = &stored_runs(&server)["runs"][0];
     let digest = run["provenance"]["inputs_digest"].as_str().unwrap();
     let id = run["run_id"].as_str().unwrap();
-    assert!(
-        !id.contains(&digest[..12]),
-        "run_id {id} carries the inputs digest"
+    // No 8-hex-digit window of the nonce appears anywhere in the digest: a
+    // slice from its middle would leak as much as its prefix.
+    let nonce = id.rsplit('-').next().unwrap();
+    assert_eq!(nonce.len(), 24, "{id}");
+    for start in 0..=nonce.len() - 8 {
+        assert!(
+            !digest.contains(&nonce[start..start + 8]),
+            "run_id {id} carries part of the inputs digest"
+        );
+    }
+}
+
+#[test]
+fn a_maximal_full_run_and_the_default_listing_inline() {
+    // A run with 64 KiB or more of reads, or a listing of 16 large records,
+    // came back from reb-api mcp as a structural summary without its bytes.
+    let server = Server::start();
+    let sixteen = " i64".repeat(16);
+    let mut source =
+        format!("(module (import \"env\" \"big\" (func $big (param{sixteen}) (result{sixteen})))");
+    for index in 0..200 {
+        source.push_str(&format!(
+            "(import \"{}\" \"f{index}\" (func (param{sixteen})))",
+            "m".repeat(200)
+        ));
+    }
+    source.push_str(&format!(
+        "(memory 8) (func (export \"run\") (param{sixteen}) (result{})",
+        " i64".repeat(100)
+    ));
+    source.push_str("(local $n i32) (local.set $n (i32.const 300)) (block $done (loop $again (br_if $done (i32.eqz (local.get $n)))");
+    for index in 0..16 {
+        source.push_str(&format!("(local.get {index})"));
+    }
+    source.push_str("(call $big)");
+    source.push_str(&"(drop)".repeat(16));
+    source.push_str("(local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $again)))");
+    source.push_str(&"(i64.const -9223372036854775808)".repeat(100));
+    source.push_str("))");
+    let hash = retained_wasm(&server, &wat::parse_str(&source).unwrap());
+    let value = json!({"type": "i64", "value": "-9223372036854775808"});
+    let body = json!({"artifact_id": "1", "sha256": hash, "export": "run",
+        "args": vec![value.clone(); 16],
+        "imports": [{"module": "env", "field": "big", "results": vec![value; 16]}],
+        "memory_writes": (0..16).map(|index| json!({"offset": index * 16384, "hex": "ab".repeat(16384)})).collect::<Vec<_>>(),
+        "memory_reads": (0..16).map(|index| json!({"offset": index * 2048, "length": 2048})).collect::<Vec<_>>(),
+        "limits": {"deadline_ms": 10000},
+        "confirm_offline_execution": true});
+    let mut full = at_level(&server, "full");
+    let inlined = |answer: &Value| {
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+        let record: Value = serde_json::from_str(tool_text(answer)).unwrap();
+        assert!(
+            record.get("mcp_projection").is_none(),
+            "a structural summary came back"
+        );
+        record
+    };
+    for _ in 0..3 {
+        let record = inlined(&run_wasm(&mut full, body.clone()));
+        assert_eq!(record["outcome"]["status"], "returned");
+        for read in record["memory_reads"].as_array().unwrap() {
+            assert_eq!(read["hex"].as_str().unwrap().len(), 4096);
+        }
+    }
+    let listed = full.request(
+        "tools/call",
+        json!({"name": "get_wasm_runs", "arguments": {"limit": 1}}),
     );
+    let listing = inlined(&listed);
+    assert_eq!(listing["total"], 3);
+    assert_eq!(
+        listing["runs"].as_array().unwrap().len(),
+        1,
+        "the default listing is one record"
+    );
+    assert_eq!(
+        listing["runs"][0]["memory_reads"][0]["hex"]
+            .as_str()
+            .unwrap()
+            .len(),
+        4096
+    );
+}
+
+/// One tool answer, inline: not a structural summary and not an error.
+fn inline_record(answer: &Value) -> Value {
+    assert_eq!(answer["result"]["isError"], false, "{answer}");
+    let value: Value = serde_json::from_str(tool_text(answer)).unwrap();
+    assert!(
+        value.get("mcp_projection").is_none(),
+        "a structural summary came back: {}",
+        tool_text(answer).len()
+    );
+    value
+}
+
+#[test]
+fn records_that_overflowed_after_trimming_now_inline() {
+    // Review repros at --permission full. (1) 48 calls of 16 i32 values each
+    // way and a 324-byte read fit alone but not nested in the listing.
+    // (2) 40 function and 40 global imports named with 128 control bytes, 768
+    // bytes each as JSON, stayed over the limit after every trim step.
+    let server = Server::start();
+    let sixteen = " i32".repeat(16);
+    let mut calls = format!(
+        "(module (import \"env\" \"f\" (func $f (param{sixteen}) (result{sixteen}))) (memory 1) (func (export \"run\") (local $n i32) (local.set $n (i32.const 48)) (block $done (loop $again (br_if $done (i32.eqz (local.get $n)))"
+    );
+    calls.push_str(&"(i32.const 1)".repeat(16));
+    calls.push_str("(call $f)");
+    calls.push_str(&"(drop)".repeat(16));
+    calls.push_str("(local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $again)))))");
+    let hash = retained_wasm(&server, &wat::parse_str(&calls).unwrap());
+    let mut full = at_level(&server, "full");
+    let value = json!({"type": "i32", "value": "-2147483648"});
+    inline_record(&run_wasm(
+        &mut full,
+        json!({"artifact_id": "1", "sha256": hash, "export": "run",
+        "imports": [{"module": "env", "field": "f", "results": vec![value; 16]}],
+        "memory_reads": [{"offset": 0, "length": 324}], "confirm_offline_execution": true}),
+    ));
+    let listing = inline_record(&full.request(
+        "tools/call",
+        json!({"name": "get_wasm_runs", "arguments": {}}),
+    ));
+    assert_eq!(listing["runs"][0]["import_calls_total"], 48);
+
+    let name = "\\01".repeat(128);
+    let mut escaped = String::from("(module");
+    for index in 0..40 {
+        escaped.push_str(&format!(
+            "(import \"{name}\" \"f{index}\" (func))(import \"{name}\" \"g{index}\" (global i32))"
+        ));
+    }
+    escaped.push_str("(memory 1) (func (export \"run\")))");
+    let hash = retained_wasm(&server, &wat::parse_str(&escaped).unwrap());
+    let record = inline_record(&run_wasm(
+        &mut full,
+        json!({"artifact_id": "1", "sha256": hash, "export": "run",
+        "memory_reads": (0..16).map(|index| json!({"offset": index * 2048, "length": 2048})).collect::<Vec<_>>(),
+        "confirm_offline_execution": true}),
+    ));
+    assert_eq!(
+        record["memory_reads"][15]["hex"].as_str().unwrap().len(),
+        4096
+    );
+    inline_record(&full.request(
+        "tools/call",
+        json!({"name": "get_wasm_runs", "arguments": {"limit": 1}}),
+    ));
 }
 
 fn float32_artifact_request(artifact: &Value) -> Value {
@@ -1005,6 +1151,27 @@ fn mcp_help_names_explicit_endpoint_sources_and_effects_flag() {
     ] {
         assert!(stdout.contains(text), "{text}\n{stdout}");
     }
+    // The --allow-content help names every content read the spec lists, and
+    // the HTTP guide's ask row says which effectful operations it leaves out.
+    // Both still named only the two text reads after the Wasm runs joined.
+    let spec = specification();
+    let flat = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+    for operation in spec["x-reb-mcp"]["content_reads"]["operations"]
+        .as_array()
+        .unwrap()
+    {
+        let name = operation.as_str().unwrap();
+        assert!(
+            flat.contains(name),
+            "--allow-content help omits {name}\n{stdout}"
+        );
+    }
+    let guide = std::fs::read_to_string(repo_path("protocol/http-api.md")).unwrap();
+    let ask = guide
+        .lines()
+        .find(|line| line.starts_with("| `ask` |"))
+        .expect("the permission table has an ask row");
+    assert!(ask.contains("run_wasm_function"), "{ask}");
 }
 
 #[test]

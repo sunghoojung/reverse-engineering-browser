@@ -100,7 +100,10 @@ async function checkSurfaces() {
   window.HTMLElement.prototype.select ??= function select() {};
   window.HTMLElement.prototype.scrollIntoView ??= function scrollIntoView() {};
   document.hasFocus ??= () => true;
-  const context = {document, window, Event, location: {protocol: 'http:'}, addEventListener: () => {}, requestAnimationFrame: fn => setTimeout(fn, 0),
+  // The caret selection a click would leave; LinkeDOM has none of its own.
+  let caret = null;
+  const context = {document, window, Event, getSelection: () => caret ? {rangeCount: 1, anchorNode: caret} : {rangeCount: 0, anchorNode: null},
+    location: {protocol: 'http:'}, addEventListener: () => {}, requestAnimationFrame: fn => setTimeout(fn, 0),
     cancelAnimationFrame: clearTimeout, getComputedStyle: () => ({getPropertyValue: () => ''}), innerHeight: 800, dispatchEvent: () => true};
   const extra = `${await read('apps/research-ui/wasm_function_names.js')}\n${await read('apps/research-ui/block_graph.js')}`;
   const {api, validateLibrary, global, wasm, panel: createPanel} = await namesModels(root, context, extra, ', wasm: RebWasmFunctionNames, panel: createSourceGraphPanel');
@@ -208,10 +211,27 @@ async function checkSurfaces() {
   assert(press(document.body), 'F2 with focus on the body renames the open graph function');
   assert.equal(label(), 'Researcher name for $helper (func 5)');
   controller.close(false);
-  for (const row of document.querySelectorAll('#source-code .source-line')) row.remove();
-  assert(press(wrap), 'F2 on the code view beside an open graph renames its function');
-  assert.equal(label(), 'Researcher name for $helper (func 5)');
+  // The rows stay. Another function's header was the last one pointed at,
+  // and the Graph draws func 5: the Graph's function wins on the code view.
+  const other = line('function    func 4 (type 0)');
+  wasm.decorateInspectRow(other, {kind: 'function', function_index: 4, text: 'func 4 (type 0)'}, SHA);
+  other.querySelector('.source-text').dispatchEvent(new Event('pointerdown', {bubbles: true}));
+  assert(press(wrap), 'F2 on the code view beside an open graph renames a function');
+  assert.equal(label(), 'Researcher name for $helper (func 5)', 'A row pointed at earlier does not outrank the Graph');
   controller.close(false);
+  // The caret on a marked row of the visible listing names that row.
+  caret = other.querySelector('.source-text').firstChild;
+  assert(press(wrap));
+  assert.equal(label(), 'Researcher name for func 4', 'The caret row in the visible listing wins');
+  controller.close(false);
+  // With the linear listing hidden beside the Graph, the caret row is not on
+  // screen, so the Graph's function wins again.
+  document.querySelector('#editor').setAttribute('data-graph-linear-hidden', '');
+  assert(press(wrap));
+  assert.equal(label(), 'Researcher name for $helper (func 5)', 'A hidden listing does not outrank the Graph');
+  controller.close(false);
+  document.querySelector('#editor').removeAttribute('data-graph-linear-hidden');
+  caret = null;
   console.log('PASS Wasm names surfaces: Inspect headers and call targets, in-place refresh, F2 routing, hostile names as text, Graph title and function list with filter (LinkeDOM; not rendered QA)');
 }
 

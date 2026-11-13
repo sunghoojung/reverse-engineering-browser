@@ -135,12 +135,17 @@
   // in, else the row last pointed at, else the current line names the
   // function under the cursor.
   let pointedRow = null;
-  function inspectRow() {
-    const code = document.querySelector('#source-code');
-    if (!code || code.hidden) return null;
+  const inspectListing = () => {const code = document.querySelector('#source-code'); return code && !code.hidden ? code : null;};
+  // The row holding the caret selection, if the selection is in the listing.
+  function caretRow(code) {
     const selection = globalThis.getSelection?.(), anchor = selection?.rangeCount ? selection.anchorNode : null;
     const element = anchor?.nodeType === 1 ? anchor : anchor?.parentElement;
-    const selected = element && code.contains(element) ? element.closest('.source-line') : null;
+    return element && code.contains(element) ? element.closest('.source-line') : null;
+  }
+  function inspectRow() {
+    const code = inspectListing();
+    if (!code) return null;
+    const selected = caretRow(code);
     if (selected) return isMarked(selected);
     const pointed = pointedRow?.deref?.() ?? null;
     if (pointed && code.contains(pointed)) return isMarked(pointed);
@@ -158,7 +163,16 @@
     const own = target?.closest?.('[data-wasm-function]');
     if (own) return own;
     if (target?.closest?.('.source-tree-row, .source-editor-tab')) return null;
-    if (target?.closest?.('#source-code-wrap')) return inspectRow() ?? openGraph();
+    if (target?.closest?.('#source-code-wrap')) {
+      // With the Graph open its function wins, unless the caret sits on a
+      // marked row of the linear listing beside it. A row clicked earlier or
+      // the current line does not outrank the function the Graph draws.
+      const graph = openGraph();
+      if (!graph) return inspectRow();
+      const code = inspectListing();
+      const linear = code && !code.closest('[data-graph-linear-hidden]') ? isMarked(caretRow(code)) : null;
+      return linear ?? graph;
+    }
     if (!target || target === document.body || target === document.documentElement) {
       const sources = document.querySelector('#screen-sources');
       return sources && !sources.hidden ? openGraph() ?? inspectRow() : null;

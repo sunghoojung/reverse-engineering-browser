@@ -3881,6 +3881,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // A Wasm function renamed once shows everywhere it appears: the Inspect
   // header and the call row that targets it, the Graph function list and
   // title. The captured identity stays visible beside it.
+  @MainActor
   func test39WasmFunctionNames() async throws {
     for size in windowSizes {
       let ui = try await prepare(size)
@@ -3947,14 +3948,20 @@ final class OriginTraceRenderedUITests: XCTestCase {
           document.querySelector('#source-graph-host .block-graph-fn-menu') === null
         """, "\(size.name): the Graph title did not show the name")
       try await assertLayout(ui, "#source-graph-host", "\(size.name) Wasm names in the Graph")
-      // F2 on the graph names the function it draws, wherever the click left
-      // focus inside the editor; Escape keeps the name.
+      // The Graph moves to func 2 while the last clicked Inspect row is the
+      // call into func 1: F2 on the graph names the function it draws,
+      // wherever the click left focus inside the editor; Escape closes it.
+      try await ui.click("#source-graph-host button[aria-label='Next function']")
+      try await ui.waitUntil("""
+        (document.querySelector('#source-graph-host .block-graph-title')?.textContent ?? '') === 'run' &&
+          (document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '').includes('block')
+        """, timeout: 30, "\(size.name): the Graph did not move to func 2")
       try await ui.click("#source-graph-host .block-graph-canvas")
       try await ui.key(120, "\u{F705}", modifiers: [.function])
       try await ui.waitUntil("""
-        document.querySelector('#source-name-host input')?.getAttribute('aria-label') === 'Researcher name for func 1' &&
-          document.querySelector('#source-name-host input')?.value === 'encode_payload'
-        """, "\(size.name): F2 did not open the function's editor on the graph")
+        document.querySelector('#source-name-host input')?.getAttribute('aria-label') === 'Researcher name for run (func 2)' &&
+          document.querySelector('#source-name-host input')?.value === ''
+        """, "\(size.name): F2 did not open the editor for the Graph's function")
       try await ui.key(53, "\u{1b}")
       try await ui.waitUntil("document.querySelector('#source-name-host form') === null", "\(size.name): Escape did not close the editor")
       try await assertLayout(ui, "#screen-sources", "\(size.name) Wasm names in the Graph")

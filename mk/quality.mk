@@ -146,6 +146,7 @@ native-only-check: $(UI_STARTUP_DEPS)
 	node tools/check-debugger-sidebar.mjs
 	node tools/check-traffic-payload-ui.mjs
 	node tools/check-traffic-response-ui.mjs
+	node tools/check-wasm-readable-ui.mjs
 	node tools/check-traffic-headers-ui.mjs
 	node tools/check-traffic-cookies-ui.mjs
 	node tools/check-wasm-function-names.mjs

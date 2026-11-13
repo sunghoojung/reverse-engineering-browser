@@ -12,6 +12,7 @@
     <link rel="stylesheet" href="entropy_map.css">
     <link rel="stylesheet" href="wasm_identification.css">
     <link rel="stylesheet" href="block_graph.css">
+    <link rel="stylesheet" href="wasm_readable.css">
     <link rel="stylesheet" href="flow_graph.css">
     <link rel="stylesheet" href="flow_workspace.css">
     <link rel="stylesheet" href="agent_panel.css">
@@ -287,6 +288,7 @@
                 <input id="source-search" class="source-search" type="search" maxlength="512" placeholder="Find" aria-label="Find in source" aria-keyshortcuts="Meta+F Control+F" aria-describedby="source-search-status" title="Find retained text; Enter for next, Shift+Enter for previous (single-line literal, first 1000 matches)" />
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
                 <button id="source-graph" class="source-tool" type="button" aria-label="Show basic-block graph" aria-pressed="false" hidden>Graph</button>
+                <button id="source-readable" class="source-tool" type="button" aria-label="Show readable lifted function" aria-pressed="false" title="One function as folded expressions, each line mapped to its bytes" hidden>Readable</button>
                 <button id="source-map" class="source-tool" type="button" aria-label="Show artifact map" aria-pressed="false" hidden>Map</button>
                 <button id="source-debugger-toggle" class="source-tool" type="button" aria-controls="debugger-sidebar" aria-expanded="false" aria-pressed="false" title="Threads, watch rules and native observations; never pauses">Debugger</button>
                 <details id="source-more" class="source-more">
@@ -316,6 +318,7 @@
               </div>
               <div id="source-view-split" class="source-view-split">
               <div id="source-graph-host" class="block-graph" hidden></div>
+              <section id="source-readable-host" aria-label="Readable function" hidden></section>
               <div id="source-code-wrap" class="source-code-wrap" tabindex="0">
                 <button id="source-window-previous" class="source-window-edge" type="button" aria-label="Previous source lines" hidden></button>
                 <div id="source-code-empty" class="source-empty">Select a JavaScript file, WASM module, source map, or approved response body.</div>
@@ -949,6 +952,7 @@
     <script src="block_graph_layout.js"></script>
     <script src="block_graph.js"></script>
     <script src="wasm_runner.js"></script>
+    <script src="wasm_readable.js"></script>
     <script src="flow_graph_layout.js"></script>
     <script src="flow_graph.js"></script>
     <script src="flow_timeline.js"></script>

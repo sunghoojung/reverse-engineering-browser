@@ -3,13 +3,23 @@ const sourceGraphPanel = createSourceGraphPanel({
   host: document.querySelector('#source-graph-host'),
   editor: document.querySelector('#source-graph-host').closest('.sources-editor'),
   button: document.querySelector('#source-graph'),
-  // Graph and Map are alternative views of one artifact; opening Map closes Graph.
-  closeOn: document.querySelector('#source-map'),
+  // Graph, Readable and Map are alternative views of one artifact; opening one closes the others.
+  closeOn: [document.querySelector('#source-map'), document.querySelector('#source-readable')],
   revealOffset: offset => revealGraphByteOffset(offset)
 });
 // Run offline (wasm_runner.js): one function, only on an explicit confirmed run.
 const wasmRunDialog = typeof createWasmRunDialog === 'function'
   ? createWasmRunDialog({button: document.querySelector('#source-run-offline'), getSource: () => selectedSource()})
+  : null;
+const sourceReadablePanel = typeof createWasmReadablePanel === 'function' && document.querySelector('#source-readable-host')
+  ? createWasmReadablePanel({
+    host: document.querySelector('#source-readable-host'),
+    editor: document.querySelector('#source-readable-host').closest('.sources-editor'),
+    button: document.querySelector('#source-readable'),
+    closeOn: [document.querySelector('#source-graph'), document.querySelector('#source-map')],
+    revealOffset: offset => revealGraphByteOffset(offset),
+    initialFunction: () => (typeof sourceGraphPanel !== 'undefined' ? sourceGraphPanel.functionIndex?.() : null)
+  })
   : null;
 const sourceFactsPanel = createSourceFactsPanel({
   getSource: selectedSource, onNavigate: revealSourceFactRange,
@@ -108,7 +118,7 @@ if (typeof MutationObserver === 'function' && elements.sourcePosition?.parentEle
 // A wrapped second row is not an option: WebKit does not re-measure the
 // toolbar's auto grid row when a width change alters its line count, so the
 // code view would cover that row. The menu is left alone while it is open.
-const SOURCE_TOOLBAR_OVERFLOW = ['source-wasm', 'source-graph', 'source-map', 'source-debugger-toggle'];
+const SOURCE_TOOLBAR_OVERFLOW = ['source-wasm', 'source-graph', 'source-readable', 'source-map', 'source-debugger-toggle'];
 let sourceToolbarObserver = null;
 function fitSourceToolbar() {
   const row = document.querySelector('#source-editor-controls'), more = elements.sourceMore, first = elements.sourceGoto;
@@ -7956,6 +7966,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const source = selectedSource();
         if (typeof sourceGraphPanel !== 'undefined') sourceGraphPanel.sync(source);
         if (typeof wasmRunDialog !== 'undefined' && wasmRunDialog) wasmRunDialog.sync(source);
+        if (typeof sourceReadablePanel !== 'undefined' && sourceReadablePanel) sourceReadablePanel.sync(source);
         sourceFactsPanel.sync(source);
         syncInvestigationRange(source);
         const view = source?.content !== undefined ? sourceDisplayView(source) : null;
@@ -9012,6 +9023,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       function showScreen(name, trigger = null) {
         if (typeof sourceGraphPanel !== 'undefined') sourceGraphPanel.setScreenVisible(name === 'sources');
+        if (typeof sourceReadablePanel !== 'undefined' && sourceReadablePanel) sourceReadablePanel.setScreenVisible(name === 'sources');
         const screenName = name === 'backtraces' ? 'backtrace' : name;
         if (!document.getElementById(`screen-${screenName}`)) return;
         investigationBeforeScreen(screenName);

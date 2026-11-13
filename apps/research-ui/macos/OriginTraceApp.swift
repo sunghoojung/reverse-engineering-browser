@@ -178,12 +178,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       switch requestURL.path {
       case "", "/", "/index.html":
         response = (try Data(contentsOf: indexURL), "text/html; charset=utf-8", 200, [:])
-      case "/app.css", "/xrefs_view.css", "/wasm_runner.css", "/entropy_map.css", "/wasm_identification.css", "/block_graph.css", "/flow_graph.css", "/flow_workspace.css", "/agent_panel.css", "/session_panel.css", "/debugger_sidebar.css", "/debugger_pause.css":
+      case "/app.css", "/wasm_readable.css", "/xrefs_view.css", "/wasm_runner.css", "/entropy_map.css", "/wasm_identification.css", "/block_graph.css", "/flow_graph.css", "/flow_workspace.css", "/agent_panel.css", "/session_panel.css", "/debugger_sidebar.css", "/debugger_pause.css":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(String(requestURL.path.dropFirst()))),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/block_graph.js", "/block_graph_layout.js", "/graph_layout_client.js", "/flow_graph.js", "/flow_graph_layout.js", "/flow_timeline.js", "/flow_workspace.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/wasm_function_names.js", "/invocation_sites.js", "/entropy_map.js", "/wasm_identification.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/wasm_runner.js", "/native_console_completion.js", "/native_console.js", "/debugger_sidebar.js", "/debugger_pause.js":
+      case "/block_graph.js", "/wasm_readable.js", "/block_graph_layout.js", "/graph_layout_client.js", "/flow_graph.js", "/flow_graph_layout.js", "/flow_timeline.js", "/flow_workspace.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/wasm_function_names.js", "/invocation_sites.js", "/entropy_map.js", "/wasm_identification.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/wasm_runner.js", "/native_console_completion.js", "/native_console.js", "/debugger_sidebar.js", "/debugger_pause.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -237,7 +237,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         }
         handleArtifactMap(requestURL, to: urlSchemeTask)
         return
-      case "/api/wasm/functions", "/api/wasm/graph", "/api/wasm/identification":
+      case "/api/wasm/functions", "/api/wasm/graph", "/api/wasm/identification", "/api/wasm/pseudocode":
         guard urlSchemeTask.request.httpMethod == "GET" else {
           throw LocalHTTPError(status: 405, message: "WASM graph routes require GET")
         }
@@ -1934,7 +1934,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     DispatchQueue.global(qos: .userInitiated).async {
       do {
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let allowed = url.path == "/api/wasm/graph" ? ["artifact_id", "function"]
+        let allowed = url.path == "/api/wasm/pseudocode" ? ["artifact_id", "function", "line_offset", "line_limit"]
+          : url.path == "/api/wasm/graph" ? ["artifact_id", "function"]
           : url.path == "/api/wasm/identification" ? ["artifact_id", "row_offset", "row_limit"] : ["artifact_id"]
         let ids = items.filter { $0.name == "artifact_id" }
         guard items.allSatisfy({ allowed.contains($0.name) }), ids.count == 1, let id = ids.first?.value, UInt64(id) != nil,
@@ -1943,7 +1944,26 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         }
         let arguments: [String]
         let schema: String
-        if url.path == "/api/wasm/graph" {
+        if url.path == "/api/wasm/pseudocode" {
+          let functions = items.filter { $0.name == "function" }
+          guard functions.count == 1, let function = functions.first?.value, UInt32(function) != nil else {
+            throw NativeDecoderError(status: 400, message: "A WASM function index is an unsigned 32-bit integer")
+          }
+          // The helper refuses a window past the line count or the line limit.
+          var window: [String] = []
+          for name in ["line_offset", "line_limit"] {
+            let values = items.filter { $0.name == name }
+            guard values.count <= 1 else { throw NativeDecoderError(status: 400, message: "Specify \(name) only once") }
+            if let value = values.first?.value {
+              guard let number = UInt32(value), name == "line_offset" || number > 0 else {
+                throw NativeDecoderError(status: 400, message: "\(name) is an unsigned 32-bit integer")
+              }
+              window += ["--\(name.replacingOccurrences(of: "_", with: "-"))", String(number)]
+            }
+          }
+          arguments = ["--pseudocode-function", function] + window
+          schema = "wasm-pseudocode-v1"
+        } else if url.path == "/api/wasm/graph" {
           let functions = items.filter { $0.name == "function" }
           guard functions.count == 1, let function = functions.first?.value, UInt32(function) != nil else {
             throw NativeDecoderError(status: 400, message: "A WASM function index is an unsigned 32-bit integer")

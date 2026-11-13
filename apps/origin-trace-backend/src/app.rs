@@ -39,10 +39,12 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 76] = [
+const UI_ASSETS: [&str; 78] = [
     "index.html",
     "block_graph.css",
     "block_graph.js",
+    "wasm_readable.js",
+    "wasm_readable.css",
     "block_graph_layout.js",
     "graph_layout_client.js",
     "flow_graph.css",

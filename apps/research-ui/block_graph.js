@@ -867,7 +867,7 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
   function close() { isOpen = false; showAnalystName(); host.hidden = true; editor.removeAttribute('data-graph'); button.setAttribute('aria-pressed', 'false'); closeMenu(); view.release(); release(); }
   const toggle = () => { if (isOpen) close(); else if (isWasmSource(source)) open(); };
   button.addEventListener('click', toggle);
-  closeOn?.addEventListener('click', () => { if (isOpen) close(); });
+  for (const other of [closeOn].flat()) other?.addEventListener('click', () => { if (isOpen) close(); });
   return {
     /** Called when the selected source may have changed. */
     sync(next) {
@@ -878,7 +878,9 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
       if (isOpen && (!valid || changed)) close();
     },
     setScreenVisible(visible) { if (screenVisible === visible) return; screenVisible = visible; if (!visible && isOpen) close(); },
-    isOpen: () => isOpen
+    isOpen: () => isOpen,
+    /** The function the graph last showed, for a view that follows it. */
+    functionIndex: () => functionIndex
   };
 }
 

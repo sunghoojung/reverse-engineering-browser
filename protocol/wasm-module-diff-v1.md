@@ -66,8 +66,8 @@ Bodies with equal normalized hashes can still differ in three ways it cannot
 see:
 
 - a constant inside the data span, whether or not it is used as an address;
-- which function of the same signature a call reaches, or the order of calls
-  to functions of one signature;
+- which function of the same signature a call or `ref.func` reaches, or the
+  order of calls to functions of one signature;
 - which global of the same type is read or written.
 
 The row status (below) checks the first two. The third is a known limit.
@@ -75,7 +75,13 @@ The row status (below) checks the first two. The third is a known limit.
 **Address map** (internal, used for the status): for each address the
 normalized hash replaced, in order, the data segment it falls in (by start
 order) and its offset in that segment. A relocation that moves segments keeps
-the map; a different constant changes it.
+the map; a different constant changes it. The map compares positions, not the
+bytes stored there: data inserted inside a segment moves every later offset
+in it, so a function reading past the insertion point is `changed` even when
+it reads the same bytes, and a function reading a segment whose bytes changed
+can still be `identical`. Keying on the stored bytes instead would call a
+changed constant into a zero-filled or repeating region relocated, so the map
+errs toward `changed`.
 
 **Structural fingerprint** (`structure`, 16 hex digits): the first 8 bytes of a
 SHA-256 over the signature, a hash of the control skeleton (the sequence of
@@ -104,12 +110,14 @@ a match; a key shared by more is a tie and is left for later passes.
    imports sharing those, then by module, field and position among the imports
    sharing the names, so a changed signature still pairs and an import name
    used twice pairs each use.
-2. `identical`: defined functions by body hash, but only bodies that name
-   nothing by an index that can renumber: no call, function reference,
-   global, table, element, data segment, tag, GC type or type-indexed block,
-   and no static data address. Equal bytes elsewhere can mean a different
-   function: after a function is inserted early, A's `call 1` thunk has the
-   bytes of B's `call 1` thunk, which calls what was A's function 0.
+2. `identical`: defined functions by signature and body hash, but only bodies
+   that name nothing by an index that can renumber: no call, function
+   reference, global, table, element, data segment, tag, GC type or
+   type-indexed block, and no static data address. Equal bytes elsewhere can
+   mean a different function: after a function is inserted early, A's
+   `call 1` thunk has the bytes of B's `call 1` thunk, which calls what was A's
+   function 0. The signature is part of the key because the bytes do not
+   carry it: `local.get 0` is the same bytes over an `i32` and an `i64`.
 3. `normalized`: defined functions by normalized body hash together with the
    address map, then by normalized body hash alone, so readers of moved data
    pair with the reader of the same offset.
@@ -163,8 +171,15 @@ Then:
      mutual best is only meaningful once every candidate was scored.
 
 Passes 1 to 5 run once more from the structural matches. Finally, functions
-still tied by body hash or normalized hash form groups. A tie is never
-resolved by index order or any other forced pick, and every step iterates in
+still tied by body hash or normalized hash form groups. When both modules'
+type, import, function, table, memory, global, element, data, data count and
+tag sections are byte-equal, every index a body names means the same item on
+both sides except call and `ref.func` targets, which the status checks; then
+a tie member whose signature, body hash and address map no other member on
+either side shares is first paired, by the `identical` method, with the one
+member on the other side that has them. So a module compared with itself is
+all `identical` even when many of its functions normalize alike. A tie is
+never resolved by index order or any other forced pick, and every step iterates in
 a fixed order, so the same pair of modules gives the same table every time,
 page after page.
 
@@ -206,8 +221,8 @@ Statuses, in page order:
 | `removed` | Only in A. |
 | `ambiguous` | A member of a tie; no pair was chosen. |
 | `unclassified` | Unmatched when a limit or the deadline stopped the comparison, so it may not really be added, removed or tied. |
-| `renumbered` | Matched; the bytes differ, but the normalized hashes and the address maps are equal, and every call site calls the matched function on the other side. |
-| `identical` | Matched; the body bytes and the address maps are equal and every call site calls the matched function on the other side, or an import's names and signature are equal. |
+| `renumbered` | Matched; the bytes differ, but the normalized hashes and the address maps are equal, and every call site and `ref.func` names the matched function on the other side. |
+| `identical` | Matched; the body bytes, the normalized hashes and the address maps are equal, and every call site and `ref.func` names the matched function on the other side, or an import's names and signature are equal. The normalized hash makes the signature, each global's type and each named type's signature part of the check. Two globals of the same type are still not told apart, and the address map compares positions, not stored bytes. |
 
 Rows are ordered by status, then by tie, then by function index. `status`
 narrows the rows to a comma separated list of these names; an unknown or

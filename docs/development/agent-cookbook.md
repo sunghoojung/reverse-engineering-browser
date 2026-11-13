@@ -735,13 +735,20 @@ its rows are long.
 
 - **Identity**: `a.sha256` and a side's `function` identify a function in A;
   carry what you know about it to the B side of its row.
-- **`identical`**: the body bytes are equal, the data each address points at
-  is the same, and every call reaches the matched function. It cannot tell
-  apart reads of two globals of the same type.
+- **`identical`**: the body bytes and normalized hashes are equal, so the
+  signature and the types of every global and type the body names agree;
+  each static address sits at the same segment and offset; and every call
+  and `ref.func` reaches the matched function. Its limits: it cannot tell
+  apart two globals of the same type, and it compares where an address
+  points, not the bytes stored there, so changed data under an unchanged
+  layout stays `identical`.
 - **`renumbered`**: the bytes differ only in ways the contract can explain as
-  renumbering or relocation, and every call reaches the matched function. It
-  cannot tell apart reads of two globals of the same type, so treat it as
-  strong evidence, not proof.
+  renumbering or relocation, and every call and `ref.func` reaches the
+  matched function. It has the same two limits, so treat it as strong
+  evidence, not proof.
+- **Data inserted inside a segment** moves every later offset in it, so the
+  functions reading past the insertion point are `changed` even when they
+  read the same bytes. Expect a run of `changed` readers after such an edit.
 - **`call_graph`, `structural`, `export_name`, `name`**: hypotheses with a
   `score`. Check them with `get_wasm_function_graph` on both sides.
 - **`ambiguous`**: one row per member of a tie, with `group` saying how many

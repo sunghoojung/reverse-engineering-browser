@@ -24695,7 +24695,7 @@
                               "source_limit",
                               "site_read_failed"
                             ],
-                            "description": "source_limit: the page's sites name more than 4 scripts not yet resolved, and this one was past them; read the same cursor again (resolved sites are kept, so the next scripts are read, and a page holding a deferred site has a tag no later read matches), or with a smaller limit. site_read_failed: the script identities or the artifact manifest could not be read; read again. Neither is answered by get_request_stack for a record older than the newest 64 MiB of the store, which that read covers."
+                            "description": "source_limit: the page's sites name more than 4 scripts not yet resolved, and this one was past them; read the same cursor again (resolved sites are kept, so the next scripts are read, and a page holding a deferred site has a tag no later read matches), or with a smaller limit. site_read_failed: the script identities or the artifact manifest could not be read, or the event store or manifest was replaced during the read; read again. Neither is answered by get_request_stack for a record older than the newest 64 MiB of the store, which that read covers."
                           }
                         }
                       }

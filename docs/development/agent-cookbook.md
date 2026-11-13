@@ -594,7 +594,8 @@ did not try. With `source_limit` the page's sites named more than 4 scripts;
 read the same cursor again (resolved sites are kept, so the next scripts are
 read; that page's tag never matches, so `If-None-Match` does not stop the
 read) or use a smaller `limit`. With `site_read_failed` the identities or the
-artifact manifest could not be read; read again. `source_artifact_missing`
+artifact manifest could not be read, or one of the store and the manifest was
+replaced during the read; read again. `source_artifact_missing`
 means the source has not landed (read again after it does);
 `script_identity_outside_scan` means the request index does not hold the
 script's identity yet, or is full: read again once it moves, or read the

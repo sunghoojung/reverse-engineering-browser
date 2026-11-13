@@ -164,6 +164,9 @@ decode deadline. Anything cut sets `status` to `partial` and is named in
 `omissions`; structure is kept before row text, and an edge leaving the retained
 prefix stays labeled.
 
+`GET /api/wasm/pseudocode` lifts one function into readable lines with the
+same artifact checks; [WASM pseudocode](wasm-pseudocode-v1.md) defines it.
+
 Sources opens captured WASM in Hex. Inspect switches to the derived listing;
 Hex returns to original evidence. Enabled offset buttons reveal the matching
 hex row when that byte was formatted. Hex formatting covers every retained byte

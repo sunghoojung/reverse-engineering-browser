@@ -2076,12 +2076,12 @@ version or intrinsic assumption cannot restore a stale representation window.
 Ordinary evidence refresh leaves Find and the current window in place; explicit
 original-source pivots choose their own retained location.
 
-The editor toolbar is one row: the URL, **Open file**, Find (Cmd+F), **Inspect**
-and **Graph** for a Wasm module, **Map**, **Debugger** and **More**, which holds Go to line,
+The editor toolbar is one row: the URL, **Open file**, Find (Cmd+F), **Inspect**,
+**Graph** and **Readable** for a Wasm module, **Map**, **Debugger** and **More**, which holds Go to line,
 Rename, Decode range, Facts, Track calls, Static cleanup, **Run offline…** (for
 a Wasm module) and Details. The row
 never wraps at any width: the URL shortens first (its tooltip keeps it whole),
-then Find, and when the commands still do not fit, Debugger, Map, Graph and
+then Find, and when the commands still do not fit, Debugger, Map, Readable, Graph and
 Inspect move in that order to the top of More and return once there is room. Find's coverage
 sentence is its tooltip. The status bar shows the
 caret line and column, with the original location in a pretty-printed or derived
@@ -2346,6 +2346,22 @@ server's `--endpoint-file`; see the [HTTP API guide](../../protocol/http-api.md)
 for examples, locality checks, and known gaps. The CLI does not start or control
 an installed native app session, and the native custom-scheme interface is not
 itself an HTTP server.
+
+## Readable function view
+
+**Readable** on a captured WASM artifact shows one function as folded
+expressions above the linear disassembly and hex, in the split Graph uses;
+opening Graph or Map closes it. Each line shows its first byte offset, and its
+tooltip lists every byte range it covers. Choosing a line, or Enter on the
+selected one, reveals that byte in the linear view. Arrow keys, Page Up and
+Page Down, Home and End move the selection, and moving past either end of the
+400-line window reads the neighbouring window; **Earlier lines** and **Later
+lines** do the same. A line the lift did not fold keeps its disassembly text
+and a **raw** chip, and the header counts lines, instructions, raw lines and
+temporaries. The function index field and the previous and next controls
+choose the function; Readable opens on the function Graph last showed, or the
+largest. Lifted text and module names are inserted as text. The contract is
+[WASM pseudocode](../../protocol/wasm-pseudocode-v1.md).
 
 ## Basic-block graphs
 

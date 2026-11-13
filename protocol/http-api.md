@@ -359,6 +359,11 @@ bounded by byte budgets; a partial status names what was cut. See
 graph is declared static flow for one function at a time. Edge kinds are never
 inferred from execution, and `complete` is always false.
 
+`get_wasm_pseudocode` projects `GET /api/wasm/pseudocode`: one function's
+readable lift in line windows (`line_offset`, `line_limit`), every line mapped
+to module byte ranges. It is read-only; its `text` is content and is omitted
+below `--allow-content`. See [WASM pseudocode](wasm-pseudocode-v1.md).
+
 ## Offline WASM function runs
 
 `run_wasm_function` projects `POST /api/wasm/runs`: one confirmed run of one

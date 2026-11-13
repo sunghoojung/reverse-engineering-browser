@@ -140,9 +140,19 @@ await settle();
 assert.equal(panel.hidden, false);
 assert.equal($('value-flow-list').querySelectorAll('.value-flow-row').length, 2, 'the same trace returns');
 assert.notEqual(code.querySelector('[data-value-flow]'), null);
-// Hex drops the panel and the trace.
+// Hex hides the panel and drops the trace: Inspect again starts empty, with
+// no rows, marks or chosen seed left from it.
 state.sourceWasm = false;
 mount();
 await settle();
 assert.equal(panel.hidden, true);
+state.sourceWasm = true;
+mount();
+await settle();
+assert.equal(panel.hidden, false);
+assert.equal($('value-flow-list').querySelectorAll('.value-flow-row').length, 0, 'the trace is gone');
+assert.equal($('value-flow-list').hidden, true);
+assert.equal(code.querySelector('[data-value-flow]'), null, 'no marks remain');
+assert.equal($('value-flow-run').disabled, true, 'no seed is carried over');
+assert.equal($('value-flow-target').textContent, 'Select an instruction row');
 console.log('PASS Trace value Graph and Hex: Graph hides and restores the trace, Hex drops it');

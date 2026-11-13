@@ -640,9 +640,11 @@ means someone renamed it first: read again and pass the current name as
 
 ## 27. Run one Wasm function offline against test vectors
 
-`run_wasm_function` needs `--allow-effects` (Ask, Auto-approve or Full
-access) and runs captured code, so call it only when the researcher asked for
-that test. It runs in a local interpreter with every import stubbed, never in
+Needs Full access (`--permission full`). Running captured code is a content
+read: a run's outcome, fuel, import calls, timing and repeated expectations can
+all disclose values the code computed, so `run_wasm_function` and
+`get_wasm_runs` are not listed at Read only, Ask or Auto-approve. Call it only
+when the researcher asked for that test. It runs in a local interpreter with every import stubbed, never in
 the page. Find the module and the function first:
 
 ```text
@@ -663,10 +665,8 @@ statuses are answers, not failures: `trap` with `trap_kind`, `import_trap` with
 and call order, and supply every clock or random source), `fuel_exhausted`,
 `deadline_exceeded` or `call_depth_exceeded` (raise `limits` or choose another
 function), `memory_limit` or `table_limit` (the limits are totals across every
-memory and table), and `memory_write_out_of_bounds`. Below Full access every
-`value`, `hex` and memory `sha256` is omitted with no length, so compare with
-`expect` rather than reading results; there only `expectation.all_match` is
-returned, and each read takes at most one expected entry. A
+memory and table), and `memory_write_out_of_bounds`. Each read takes at most
+one expected entry. A
 match holds for these inputs only. `get_wasm_runs {"artifact_id": "9"}` lists
 earlier runs. Details: [WASM run v1](../../protocol/wasm-run-v1.md).
 

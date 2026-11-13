@@ -168,7 +168,9 @@ legacy `--allow-session-start` keeps accepting them with
 `confirm_sensitive_capture`. None of these flags is authorization.
 
 `x-reb-mcp.content_reads` names the operations whose purpose is captured
-content, `get_artifact_text` and `search_artifact_text`. They are listed only
+content, `get_artifact_text` and `search_artifact_text`, and the offline Wasm
+runs `run_wasm_function` and `get_wasm_runs`, since running captured code
+discloses what it computes. They are listed only
 with `--allow-content` (which `full` sets, and which conflicts with
 `--omit-content`), and a call without it is refused before any request. With
 it, `get_source_format` also lays out request and response bodies. Content is
@@ -361,12 +363,12 @@ inferred from execution, and `complete` is always false.
 
 `run_wasm_function` projects `POST /api/wasm/runs`: one confirmed run of one
 function of a captured module in the backend's `wasmi` interpreter, with every
-import stubbed. It is effectful (`code-execution`, `filesystem-write`), so MCP
-lists it only with `--allow-effects`, and the server refuses a body without
-`confirm_offline_execution: true` before reading the artifact. `get_wasm_runs`
-projects `GET /api/wasm/runs`, a read of the stored derived records. Below Full
-access (`x-reb-mcp.run_values`) the `value`, `hex` and `sha256` fields of both
-are replaced with a content marker that keeps no length. See
+import stubbed. Running captured code is a content read, so MCP lists it, and
+`get_wasm_runs` (`GET /api/wasm/runs`, the stored derived records), only with
+`--allow-content` (`x-reb-mcp.content_reads`, which only `--permission full`
+sets). Running is also effectful (`code-execution`, `filesystem-write`), so it
+needs `--allow-effects` too, and the server refuses a body without
+`confirm_offline_execution: true` before reading the artifact. See
 [WASM run v1](wasm-run-v1.md).
 
 ## Compact session context

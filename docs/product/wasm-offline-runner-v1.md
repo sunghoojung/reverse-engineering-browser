@@ -19,15 +19,15 @@ What runs, and what cannot happen:
   own named outcome. The start function runs only when asked.
 - Memory can be written before the call and read after it, within 256 KiB each.
   Expected results and memory bytes are compared exactly, with at most one
-  expectation per read. A caller without content access learns only whether
-  all of its vectors matched, one bit per run, so it can test vectors but not
-  read bytes back.
+  expectation per read.
 - The captured bytes are verified by SHA-256 and never changed. A run is stored
   as a derived experiment record with the module hash, function, inputs digest,
   interpreter version and limits.
 
-Return values, import arguments, memory bytes and their digests are content:
-an agent receives them only at Full access, and below it not even their length. The contract, limits and outcomes are in
+Running captured code is a content read: not only the results and memory bytes
+but the outcome, fuel, import calls, timing and repeated expectations of a run
+can disclose values the code computed. So an agent can run captured code, or
+read stored runs, only at Full access. The contract, limits and outcomes are in
 [WASM run v1](../../protocol/wasm-run-v1.md), and the policy in
 [SAFETY](../../SAFETY.md#observation-and-experiments).
 

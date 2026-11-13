@@ -531,7 +531,7 @@ client connected through `scripts/reb-api-mcp.sh` can run at the same level
 | **Read only** (default) | Structural reads | Nothing | Question, pins, structural results |
 | **Ask for actions** | Reads and actions | **Allow once** per action | The same |
 | **Auto-approve actions** | Reads and actions | Nothing; every call and result is in the transcript | The same |
-| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies and every content field of results |
+| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`), offline runs of captured Wasm (`run_wasm_function`, `get_wasm_runs`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies and every content field of results |
 
 Below Full access the tool server omits captured content from every result,
 and reads that return local store paths (`get_health`) or the researcher's own

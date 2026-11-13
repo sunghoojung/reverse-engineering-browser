@@ -71,11 +71,9 @@ they can be copied between `args`, stubs, `results` and `expect`:
 `memory_reads` index with the expected bytes; a second entry for the same read
 is refused with 400. The record's `expectation` reports `results_match`, each
 memory `match`, and `all_match` (which also requires the outcome `returned`).
-Below Full access only `all_match` is returned: the per-entry results are
-omitted, so a run reveals at most one bit about the values and bytes it
-computed. That bit answers "did these test vectors hold"; it cannot read bytes
-back, because several guesses against one read are refused and the per-entry
-results are not returned.
+The one-entry-per-read rule bounds the size of a request and its record. It is
+not a disclosure control: an expectation is answered only to a caller that may
+read the run's values anyway (see below).
 
 ## Limits
 
@@ -182,19 +180,27 @@ deleting it, starts a new store, and names the moved file in its
 
 ## Content and agent access
 
-Return values, stub values, import arguments, memory bytes and digests of
-memory bytes derive from the captured code and are content. Through `reb-api
-mcp`, `run_wasm_function` is effectful (`code-execution`, `filesystem-write`)
-and is listed only with `--allow-effects`; `get_wasm_runs` is a read.
-`x-reb-mcp.run_values` lists both operations: below `--allow-content`
-(`--permission full`), every `value`, `hex` and `sha256` field is replaced by
-`{"omitted":"content"}` with no length or digest, since the length of a short
-result or the digest of a few bytes would recover it. Outcomes, trap kinds,
-counts, module digests, import names and `expectation.all_match` remain;
-`results_match` and each memory `match` are omitted the same way; and no error
-message quotes a value. The
-native stored-evidence window (`reb://`) does not host the interpreter and
-answers 503.
+Running captured code is a content read. A run's results and memory bytes are
+the values the code computed, and every other part of the record can disclose
+them too: the outcome and trap kind, `fuel_consumed`, `import_calls_total` and
+the import call list, memory and table growth, `elapsed_ms`, and the answers to
+repeated expectations. A review recovered an 11-byte secret from the import call
+count and the fuel of 11 runs, and four bytes from 305 runs of one-byte
+expectations, at a level that omitted every value field. No part of a record is
+safe to show to a caller that may not read content.
+
+So, through `reb-api mcp`, both operations are in `x-reb-mcp.content_reads`:
+`run_wasm_function` and `get_wasm_runs` are listed only with `--allow-content`,
+which only `--permission full` sets, and `run_wasm_function` also needs
+`--allow-effects` (it is effectful: `code-execution`, `filesystem-write`) and
+`confirm_offline_execution`. At Read only, Ask for actions and Auto-approve
+actions neither is listed, and a call is refused before any request is sent. The
+in-app agent applies the same rule. `x-reb-mcp.run_values` (every `value`,
+`hex`, `sha256`, `results_match`, `match` and `inputs_digest` replaced by a
+content marker below `--allow-content`) stays as a second line, not as the
+protection. `run_id` ends in a random nonce, so it says nothing about the
+inputs. No error message quotes a value. The native stored-evidence window
+(`reb://`) does not host the interpreter and answers 503.
 
 ## Validation
 
@@ -209,6 +215,8 @@ several memories and tables, a function body over 200 KB, float results such
 as `1e300`, exact float spellings, the deadline at an import call, and capped
 import results. `tests/http.rs` covers the confirmation refusal, hash mismatch,
 contract shapes, storage and listing, and that the captured bytes and manifest
-are unchanged after runs. `tests/mcp_stdio.rs` runs a module through `reb-api
-mcp --permission ask` and checks that no result, memory byte, digest or error
-message carries a value.
+are unchanged after runs. `tests/mcp_stdio.rs` checks that `--permission`
+read-only, ask and auto neither list nor send either operation and that full
+runs, and keeps the review's proofs of concept (repeated expectations, fuel and
+import counts, and a read-only listing of a Full run's inputs digest) as tests
+that those channels are closed below Full access.

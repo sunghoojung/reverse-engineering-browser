@@ -195,9 +195,9 @@ scripts/reb-api-mcp.sh --print-config claude --permission auto
 | Level | Server lists | Client setting that makes it this level |
 | --- | --- | --- |
 | `read-only` | Structural reads; every result has captured content omitted | Any |
-| `ask` | Also every effectful operation, content still omitted | Keep the client asking before each `origin-trace` tool call, as Claude Code does by default for MCP tools |
+| `ask` | Also every effectful operation except running captured Wasm, content still omitted | Keep the client asking before each `origin-trace` tool call, as Claude Code does by default for MCP tools |
 | `auto` | The same tools as `ask` | Let the client run `origin-trace` tools without asking: in Claude Code an allow rule for `mcp__origin-trace`; in other clients their own approval setting for this server |
-| `full` | Also `start_live_session`, `session_action`, `get_artifact_text` and `search_artifact_text`, with content in results | As for `auto`, if the agent should act without asking |
+| `full` | Also `start_live_session`, `session_action`, `get_artifact_text`, `search_artifact_text`, `run_wasm_function` and `get_wasm_runs`, with content in results | As for `auto`, if the agent should act without asking |
 
 The server cannot see whether the client asks, so `ask` and `auto` list the
 same tools; `get_session_context` reports the level in `mcp_admission` so the

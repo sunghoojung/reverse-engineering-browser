@@ -187,7 +187,7 @@ impl Rows {
 
 macro_rules! operator_names {
     ($(@$proposal:ident $op:ident $({ $($field:ident: $ty:ty),* })? => $visit:ident ($($ann:tt)*))*) => {
-        fn operator_name(op: &Operator<'_>) -> &'static str {
+        pub(crate) fn operator_name(op: &Operator<'_>) -> &'static str {
             match op { $(Operator::$op $( { $($field: _),* } )? => stringify!($visit),)* _ => "visit_unknown" }
         }
     };

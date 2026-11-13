@@ -18,7 +18,7 @@ use crate::{
     owned_vm_debugger::OwnedVmDebugger,
     request_cookies, request_headers,
     request_index::{self, RequestIndex},
-    session_context, session_summary, source_facts, source_format, validation, vm, wasm,
+    session_context, session_summary, source_facts, source_format, validation, vm, wasm, wasm_diff,
     wasm_graph, wasm_identification, wasm_pseudocode,
     workspace::{Kind, Store},
 };
@@ -46,6 +46,8 @@ const UI_ASSETS: [&str; 78] = [
     "wasm_readable.js",
     "wasm_readable.css",
     "block_graph_layout.js",
+    "wasm_diff_view.css",
+    "wasm_diff_view.js",
     "graph_layout_client.js",
     "flow_graph.css",
     "flow_graph.js",
@@ -529,6 +531,36 @@ impl App {
             .await?;
         Ok(([("content-type", "application/json")], document).into_response())
     }
+    /// Two artifact IDs and an optional page. A misspelled parameter fails
+    /// instead of returning an unfiltered table the caller reads as filtered.
+    async fn wasm_diff_route(&self, raw_query: &str) -> Result<Response> {
+        let q = Query::new(raw_query);
+        if q.0.keys().any(|key| {
+            ![
+                "artifact_id",
+                "compare_artifact_id",
+                "status",
+                "row_offset",
+                "row_limit",
+            ]
+            .contains(&key.as_str())
+        }) {
+            return Err(Error::bad(
+                "The WASM module diff takes artifact_id and compare_artifact_id with optional status, row_offset and row_limit",
+            ));
+        }
+        let a = q.required("artifact_id")?.to_owned();
+        let b = q.required("compare_artifact_id")?.to_owned();
+        let offset = q.number("row_offset", Some("0"), 32, false)? as usize;
+        let default = wasm_diff::PAGE_DEFAULT_ROWS.to_string();
+        let limit = q.number("row_limit", Some(&default), 32, true)? as usize;
+        let page = wasm_diff::Page::new(offset, limit, q.one("status")?)?;
+        let root = self.options.artifacts.clone();
+        let document = self
+            .blocking(move || wasm_diff::diff(&root, &a, &b, &page))
+            .await?;
+        Ok(axum::Json(document).into_response())
+    }
     async fn receiver_connected(&self) -> bool {
         socket_connected(self.options.artifact_socket.as_deref()).await
     }
@@ -565,6 +597,9 @@ impl App {
         }
         if path == "/api/wasm/pseudocode" {
             return self.wasm_pseudocode_route(raw_query).await;
+        }
+        if path == "/api/wasm/diff" {
+            return self.wasm_diff_route(raw_query).await;
         }
         let q = Query::new(raw_query);
         let mut etag = None;

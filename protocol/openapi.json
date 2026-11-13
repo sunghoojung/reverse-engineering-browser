@@ -4842,6 +4842,165 @@
         }
       }
     },
+    "/api/wasm/diff": {
+      "get": {
+        "operationId": "get_wasm_module_diff",
+        "summary": "Match the functions of two captured WebAssembly modules",
+        "description": "Static function matching between two hash-verified core WASM artifacts (A is artifact_id, B is compare_artifact_id), for example two builds of one site's module. Matching runs in a fixed order: byte-identical bodies, normalized-identical bodies (call targets, renumbered locals, globals and types, and static data addresses ignored), import names, export names, name-section names, call-graph propagation, then structural similarity with a score. Rows report matched functions with method and score as identical, renumbered or changed, plus added, removed and ambiguous candidates; tied candidates stay ambiguous and are never forced into a pair. Each side names its function index, and a.sha256 and b.sha256 with that index identify a function. Structure only: no instruction text, constant value or data byte is returned. Bounded by module size, function count, comparisons and a deadline; partial status and omissions name what was not classified. Page with row_offset and row_limit, and narrow with status. Never executes either module.",
+        "tags": [
+          "artifacts"
+        ],
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": true,
+            "description": "Module A, the version the analyst already knows.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "description": "Canonical nonzero unsigned 64-bit artifact ID"
+            }
+          },
+          {
+            "name": "compare_artifact_id",
+            "in": "query",
+            "required": true,
+            "description": "Module B, compared against A. It must be a different artifact; it may come from another session in this store.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "description": "Canonical nonzero unsigned 64-bit artifact ID"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Optional comma separated row statuses to return: changed, added, removed, ambiguous, unclassified, renumbered, identical. An unknown or repeated name is refused rather than widened. summary always counts every row.",
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(changed|added|removed|ambiguous|unclassified|renumbered|identical)(,(changed|added|removed|ambiguous|unclassified|renumbered|identical))*$"
+            }
+          },
+          {
+            "name": "row_offset",
+            "in": "query",
+            "required": false,
+            "description": "First row of the page. Default 0.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "row_limit",
+            "in": "query",
+            "required": false,
+            "description": "Rows in the page, 1 to 1000. The page also stops at 98,304 bytes of serialized rows, so one page fits a 128 KiB MCP result; row_window.next_offset continues. Default 200.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Versioned module diff page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasmModuleDiff"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, oversized module, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, oversized module, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, oversized module, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, oversized module, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, oversized module, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "stored-wasm-artifacts",
+              "condition": "artifact_id and compare_artifact_id must identify two different captured WebAssembly artifacts that pass content verification and size limits."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads both modules' declared function bodies once per pair and keeps the two most recent reports in memory, so paging does not repeat the comparison. A match is a correspondence hypothesis, not proof of equal behavior; neither module is executed.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/wasm_diff.rs",
+              "symbol": "diff"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/wasm/runs": {
       "get": {
         "operationId": "get_wasm_runs",
@@ -22889,6 +23048,503 @@
           },
           "analyst_names": {
             "$ref": "#/components/schemas/WasmAnalystNames"
+          }
+        }
+      },
+      "WasmModuleDiff": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "fingerprint_version",
+          "artifact_id",
+          "compare_artifact_id",
+          "status",
+          "a",
+          "b",
+          "summary",
+          "requested_statuses",
+          "rows",
+          "row_window",
+          "omissions",
+          "limits",
+          "notice"
+        ],
+        "properties": {
+          "schema": {
+            "const": "wasm-module-diff-v1"
+          },
+          "fingerprint_version": {
+            "const": 1
+          },
+          "artifact_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          },
+          "compare_artifact_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          },
+          "status": {
+            "enum": [
+              "complete",
+              "partial"
+            ]
+          },
+          "a": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "artifact_id",
+              "sha256",
+              "session_id",
+              "byte_size",
+              "imported_functions",
+              "defined_functions",
+              "analyzed_functions"
+            ],
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*$"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "session_id": {
+                "type": "string"
+              },
+              "byte_size": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "imported_functions": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "defined_functions": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "analyzed_functions": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "b": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "artifact_id",
+              "sha256",
+              "session_id",
+              "byte_size",
+              "imported_functions",
+              "defined_functions",
+              "analyzed_functions"
+            ],
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*$"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "session_id": {
+                "type": "string"
+              },
+              "byte_size": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "imported_functions": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "defined_functions": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "analyzed_functions": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "summary": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "matched",
+              "statuses",
+              "methods",
+              "comparisons",
+              "elapsed_ms"
+            ],
+            "properties": {
+              "matched": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "statuses": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "changed",
+                  "added",
+                  "removed",
+                  "ambiguous",
+                  "unclassified",
+                  "renumbered",
+                  "identical"
+                ],
+                "properties": {
+                  "changed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "added": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "removed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "ambiguous": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "unclassified": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "renumbered": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "identical": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              },
+              "methods": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "identical",
+                  "normalized",
+                  "import_name",
+                  "export_name",
+                  "name",
+                  "call_graph",
+                  "structural"
+                ],
+                "properties": {
+                  "identical": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "normalized": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "import_name": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "export_name": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "name": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "call_graph": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "structural": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              },
+              "comparisons": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "elapsed_ms": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "requested_statuses": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "changed",
+                    "added",
+                    "removed",
+                    "ambiguous",
+                    "unclassified",
+                    "renumbered",
+                    "identical"
+                  ]
+                }
+              }
+            ]
+          },
+          "rows": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "$ref": "#/components/schemas/WasmModuleDiffRow"
+            }
+          },
+          "row_window": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "offset",
+              "rows",
+              "total_rows",
+              "next_offset"
+            ],
+            "properties": {
+              "offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "rows": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "total_rows": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "next_offset": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              }
+            }
+          },
+          "omissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          },
+          "notice": {
+            "type": "string"
+          }
+        }
+      },
+      "WasmModuleDiffRow": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "method",
+          "score",
+          "a",
+          "b"
+        ],
+        "properties": {
+          "status": {
+            "enum": [
+              "changed",
+              "added",
+              "removed",
+              "ambiguous",
+              "unclassified",
+              "renumbered",
+              "identical"
+            ]
+          },
+          "method": {
+            "enum": [
+              "identical",
+              "normalized",
+              "import_name",
+              "export_name",
+              "name",
+              "call_graph",
+              "structural",
+              null
+            ]
+          },
+          "score": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1
+          },
+          "a": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WasmModuleDiffFunction"
+              }
+            ]
+          },
+          "b": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WasmModuleDiffFunction"
+              }
+            ]
+          },
+          "candidates": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "a",
+              "b",
+              "truncated"
+            ],
+            "properties": {
+              "a": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "$ref": "#/components/schemas/WasmModuleDiffFunction"
+                }
+              },
+              "b": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "$ref": "#/components/schemas/WasmModuleDiffFunction"
+                }
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      },
+      "WasmModuleDiffFunction": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "function",
+          "byte_offset",
+          "byte_end",
+          "name",
+          "import",
+          "type",
+          "instructions",
+          "normalized",
+          "structure"
+        ],
+        "properties": {
+          "function": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "Function index, including imported function numbering."
+          },
+          "byte_offset": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Body start in the original module, or the import entry for an import."
+          },
+          "byte_end": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Exclusive body end; equal to byte_offset for an import."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512,
+            "description": "Name-section name, else first export name, as escaped single-line text."
+          },
+          "import": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "module",
+                  "name"
+                ],
+                "properties": {
+                  "module": {
+                    "type": "string",
+                    "maxLength": 512
+                  },
+                  "name": {
+                    "type": "string",
+                    "maxLength": 512
+                  }
+                }
+              }
+            ]
+          },
+          "type": {
+            "type": "string",
+            "maxLength": 512,
+            "description": "Declared signature."
+          },
+          "instructions": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "normalized": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[a-f0-9]{16}$",
+            "description": "Normalized body hash; null for an import."
+          },
+          "structure": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[a-f0-9]{16}$",
+            "description": "Structural fingerprint; null for an import."
           }
         }
       },

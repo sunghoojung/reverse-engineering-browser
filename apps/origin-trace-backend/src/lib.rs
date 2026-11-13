@@ -61,6 +61,7 @@ mod vm_reachability;
 mod vm_request_links;
 pub mod wasm;
 mod wasm_constants;
+pub mod wasm_diff;
 pub mod wasm_graph;
 pub mod wasm_identification;
 mod wasm_names;

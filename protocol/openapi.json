@@ -23332,7 +23332,8 @@
           "executed_module_sha256",
           "provenance",
           "request",
-          "notice"
+          "notice",
+          "size_trimmed"
         ],
         "properties": {
           "schema": {
@@ -23602,12 +23603,22 @@
               "artifact_id",
               "module_sha256",
               "module_byte_size",
+              "run_id_source",
               "inputs_digest",
               "interpreter",
               "limits",
               "host_access",
               "rewrite"
-            ]
+            ],
+            "properties": {
+              "run_id_source": {
+                "enum": [
+                  "os_random",
+                  "hashed_fallback"
+                ],
+                "description": "Where the run_id nonce came from: 96 bits from the operating system, or two keyed hashes of the time and a counter when /dev/urandom cannot be read."
+              }
+            }
           },
           "request": {
             "type": "object",

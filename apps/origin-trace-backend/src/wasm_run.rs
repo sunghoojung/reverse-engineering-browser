@@ -3132,6 +3132,35 @@ mod tests {
     }
 
     #[test]
+    fn the_contract_requires_size_trimmed_and_run_id_source() {
+        // Neither field was in the WasmRun contract, so a record without them,
+        // or with an unknown source, passed the check before storage.
+        let record = run_blocking_record(&request(json!({})).0, request(json!({})).1);
+        assert!(checked(&record).is_ok());
+        let mut missing = record.clone();
+        missing.as_object_mut().unwrap().remove("size_trimmed");
+        assert!(
+            checked(&missing).is_err(),
+            "a record without size_trimmed passed"
+        );
+        let mut unsourced = record.clone();
+        unsourced["provenance"]
+            .as_object_mut()
+            .unwrap()
+            .remove("run_id_source");
+        assert!(
+            checked(&unsourced).is_err(),
+            "a record without run_id_source passed"
+        );
+        let mut unknown = record;
+        unknown["provenance"]["run_id_source"] = json!("clock");
+        assert!(
+            checked(&unknown).is_err(),
+            "an unknown run_id_source passed"
+        );
+    }
+
+    #[test]
     fn one_expectation_per_read() {
         let body = |memory: Value| {
             json!({"artifact_id":"1","sha256":"0".repeat(64),"export":"run","confirm_offline_execution":true,

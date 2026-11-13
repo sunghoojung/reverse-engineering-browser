@@ -3105,6 +3105,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         errors.hidden = unresolved === 0;
         errors.textContent = globalThis.RebRequestTabs?.unresolvedNotice(unresolved) ?? '';
         errors.setAttribute('aria-pressed', String(state.requestTabId === 'unresolved'));
+        // Header and cookie gaps are one footer item, with their reasons a click away.
+        if (typeof renderTrafficHeaderGaps === 'function') {
+          renderTrafficHeaderGaps(document.querySelector('#request-header-gaps'),
+            document.querySelector('#request-header-gaps-detail'), state.headerCoverage);
+        }
       }
 
       // The waterfall spans the selected time range, else the timeline of every matching start.
@@ -8896,6 +8901,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.nativeRequests = requestsFromEvents(body.network_events ?? state.events, eventOrigin);
           globalThis.RebRequestTabs?.attachRequestTabs(state.nativeRequests, body.network_events ?? state.events);
           state.captureExclusions = globalThis.RebNetworkScope?.captureExclusionTotals(body.network_events ?? state.events) ?? null;
+          // Header blocks and cookie lists not retained or joined, and requests without final headers.
+          state.headerCoverage = typeof trafficHeaderCoverage === 'function' ? trafficHeaderCoverage(state.nativeRequests) : null;
           rebuildTrafficRequests();
           state.trafficIndex?.invalidate();
           let selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
@@ -9272,6 +9279,25 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         setTimeout(() => { elements.requestCopyUrl.textContent = 'Copy URL'; }, 1800);
       });
+      {
+        const gaps = document.querySelector('#request-header-gaps');
+        const gapsDetail = document.querySelector('#request-header-gaps-detail');
+        gaps?.addEventListener('click', () => {
+          if (typeof setTrafficHeaderGapsOpen === 'function') {
+            setTrafficHeaderGapsOpen(gaps, gapsDetail, gaps.getAttribute('aria-expanded') !== 'true');
+          }
+        });
+        // Escape closes the breakdown and returns focus to its button.
+        for (const node of [gaps, gapsDetail]) {
+          node?.addEventListener('keydown', event => {
+            if (event.key !== 'Escape' || gaps.getAttribute('aria-expanded') !== 'true') return;
+            event.preventDefault();
+            event.stopPropagation();
+            setTrafficHeaderGapsOpen(gaps, gapsDetail, false);
+            gaps.focus();
+          });
+        }
+      }
       document.querySelector('#request-unresolved').addEventListener('click', () => {
         state.requestTabId = state.requestTabId === 'unresolved' ? 'all' : 'unresolved';
         state.requestDomain = 'all';

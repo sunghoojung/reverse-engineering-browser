@@ -330,7 +330,7 @@
       "get": {
         "operationId": "get_session_summary",
         "summary": "Summarize what this capture recorded",
-        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget, Wasm compiled without a stored module, each artifact capture failure reason, or request bodies and full targets a content session did not retain (budget, pool, channel or kind) with counts, counted browser-internal exclusions, requests without a browser tab, and every request's response body case (retained, or why not: served by a service worker, reused from the memory cache, 304, redirected, aborted, cancelled, empty and the rest). Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
+        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget, Wasm compiled without a stored module, each artifact capture failure reason, or request bodies, full targets, header blocks and cookie lists a content session did not retain (budget, block limit, pool, channel, URL or kind) with counts, network header blocks and cookie lists that arrived for requests no longer tracked (network_headers_unattributed), requests that ended with only provisional headers (final_headers_missing, one check per reason: download, service_worker, from_cache, failed, not_reported or record_dropped), counted browser-internal exclusions, requests without a browser tab, and every request's response body case (retained, or why not: served by a service worker, reused from the memory cache, 304, redirected, aborted, cancelled, empty and the rest). Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
         "tags": [
           "health"
         ],
@@ -1611,7 +1611,7 @@
       "get": {
         "operationId": "get_cookie_provenance",
         "summary": "get cookie provenance",
-        "description": "What touched one cookie name in the newest part of a session (\"Cookies\" in protocol/native-network-v3.md): the newest 5000 network records within the last 64 MiB of events and at most 256 distinct retained cookie lists. coverage.complete is false when older records were not read, so an absent entry is unknown: the responses that set it, with attributes and block reasons; the document.cookie and Cookie Store API calls that wrote or read it, with frame, count, script frame and stack digest; and the requests that sent it. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256. A script record keeps 24 name bytes, so a longer name matches by length and prefix.",
+        "description": "What touched one cookie name in the newest part of a session (\"Cookies\" in protocol/native-network-v3.md): the newest 5000 network records within the last 64 MiB of events and at most 256 distinct retained cookie lists. coverage.complete is false when older records were not read, so an absent entry is unknown: the responses that set it, with attributes and block reasons; the document.cookie and Cookie Store API calls that wrote or read it, with frame, count, script frame and stack digest; and the requests that sent it. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256. A script record keeps 24 name bytes, so a longer name matches by length and prefix. A document.cookie read names each cookie it returned, at most 360 per read; read_coverage counts the reads that may hold the name without naming it.",
         "tags": [
           "request-cookies"
         ],
@@ -10663,6 +10663,7 @@
               "required": [
                 "hop",
                 "provisional",
+                "network_block_missing",
                 "request",
                 "response"
               ],
@@ -10675,6 +10676,20 @@
                 "provisional": {
                   "type": "boolean",
                   "description": "Only browser request blocks: headers before the network stack added Cookie, Host and the rest."
+                },
+                "network_block_missing": {
+                  "enum": [
+                    "in_progress",
+                    "download",
+                    "service_worker",
+                    "from_cache",
+                    "failed",
+                    "redirect_not_sent",
+                    "not_reported",
+                    "record_dropped",
+                    null
+                  ],
+                  "description": "Why a hop with a provisional block has no network block, from the request's own browser records (\"Missing final blocks\" in protocol/native-network-v3.md): in_progress (not ended), download (the browser factory has no DevTools observer), service_worker or from_cache (no request reached the network), failed (before the network service reported sent headers), redirect_not_sent (an earlier hop, internal or cached, while a later hop was reported), not_reported (no observer on its factory, or the block arrived for a request no longer tracked; see unattributed_blocks), record_dropped (in place of the last two when a gap record of the session, of any category, reports records a full queue dropped while the request ran or within a second after it ended, so the block may have been lost). Null when the hop has a network block or no provisional one."
                 },
                 "request": {
                   "type": "array",
@@ -10877,7 +10892,9 @@
               "required": [
                 "hop",
                 "sent",
-                "received"
+                "received",
+                "sent_missing",
+                "received_missing"
               ],
               "properties": {
                 "hop": {
@@ -10896,6 +10913,30 @@
                   "items": {
                     "$ref": "#/components/schemas/RequestCookieList"
                   }
+                },
+                "sent_missing": {
+                  "enum": [
+                    "in_progress",
+                    "download",
+                    "service_worker",
+                    "from_cache",
+                    "failed",
+                    "redirect_not_sent",
+                    "not_reported",
+                    "record_dropped",
+                    null
+                  ],
+                  "description": "Why a hop with a provisional header block has no sent cookie list, with the reasons of the headers' network_block_missing; null otherwise."
+                },
+                "received_missing": {
+                  "enum": [
+                    "in_progress",
+                    "failed",
+                    "no_raw_response",
+                    "record_dropped",
+                    null
+                  ],
+                  "description": "Why a hop with a sent list has no received one: in_progress, failed (before a response), no_raw_response (what was sent was reported, but no response headers), or record_dropped (in place of no_raw_response when a full queue dropped records while the request ran); null otherwise."
                 }
               }
             }
@@ -11184,6 +11225,7 @@
           "lists_read",
           "lists_unread",
           "stacks_unresolved",
+          "read_coverage",
           "malformed_records",
           "coverage"
         ],
@@ -11230,6 +11272,50 @@
             "minimum": 0,
             "description": "Script calls not resolved to source because 64 distinct positions already were."
           },
+          "read_coverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "complete",
+              "whole_jar_reads",
+              "reads_with_unrecorded_names",
+              "unrecorded_names",
+              "unnamed_store_reads",
+              "records_dropped"
+            ],
+            "description": "Reads in the records read that may hold this name without naming it, and network records lost to a full queue. An absent read of the name is proof only when complete is true.",
+            "properties": {
+              "complete": {
+                "type": "boolean",
+                "description": "True when every count below is zero."
+              },
+              "whole_jar_reads": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Reads recorded before reads named cookies (script_cookie versions 1 and 2), summed by count."
+              },
+              "reads_with_unrecorded_names": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Version 3 reads whose read record counts unrecorded names, summed by count."
+              },
+              "unrecorded_names": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Names those reads held past the 360-name bound or a full table."
+              },
+              "unnamed_store_reads": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "cookieStore.get or getAll calls with no name, summed by count: each may have read this cookie."
+              },
+              "records_dropped": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Records a full queue dropped, from the drop counts of the session's gap records of any category at or after the oldest record read (a renderer's gap takes the category of the last record it drained, and a named reason is no loss); one may have named this cookie."
+              }
+            }
+          },
           "malformed_records": {
             "type": "array",
             "items": {
@@ -11254,6 +11340,8 @@
           "value_sha256",
           "string_bytes",
           "table_full",
+          "read_record",
+          "unrecorded_names",
           "script_frame",
           "stack_digest",
           "thread",
@@ -11294,7 +11382,7 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 4294967295,
-            "description": "1 for a write; for a read, the reads since this key's previous record."
+            "description": "1 for a write; for a read, the reads since this key's previous record. A document.cookie read is keyed by frame, thread, script position and cookie name."
           },
           "name_prefix_only": {
             "type": "boolean",
@@ -11319,6 +11407,16 @@
           },
           "table_full": {
             "type": "boolean"
+          },
+          "read_record": {
+            "type": "boolean",
+            "description": "A document.cookie read of the whole jar with no name: every version 1 and 2 read and a version 3 read record. A version 3 read of one cookie is a name record and names it."
+          },
+          "unrecorded_names": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "A version 3 read record's names past the 360-name bound or a full table, which no name record counts; 0 otherwise."
           },
           "script_frame": {
             "oneOf": [
@@ -35615,6 +35713,9 @@
                     "wasm_without_artifacts",
                     "artifact_capture_failed",
                     "request_content_not_retained",
+                    "network_headers_unattributed",
+                    "final_headers_missing",
+                    "final_headers_untracked",
                     "queue_drops",
                     "sequence_gaps",
                     "named_gap",
@@ -35647,6 +35748,14 @@
                 },
                 "count": {
                   "$ref": "#/components/schemas/Uint64String"
+                },
+                "blocks": {
+                  "$ref": "#/components/schemas/Uint64String",
+                  "description": "network_headers_unattributed: network header blocks that arrived for a request no longer tracked."
+                },
+                "lists": {
+                  "$ref": "#/components/schemas/Uint64String",
+                  "description": "network_headers_unattributed: cookie lists that arrived for a request no longer tracked."
                 }
               }
             }

@@ -176,8 +176,10 @@ function trafficCookieProvenanceRead(sessionId, name, rerender, storeRevision = 
         const top = call.stack?.frames?.[0]?.resolution;
         if (top?.status === 'resolved') frames.set(`${call.process_id}:${call.sequence_number}`, top);
       }
+      const malformed = answer.malformed_records;
       entry = {status: 'ready', frames, setBy: answer.set_by ?? [], sentWith: answer.sent_with ?? [], script: answer.script ?? [],
-        unread: answer.lists_unread ?? 0, malformed: answer.malformed_records ?? 0, stacksUnresolved: answer.stacks_unresolved ?? 0,
+        unread: answer.lists_unread ?? 0, malformed: Array.isArray(malformed) ? malformed.length : Number(malformed) || 0,
+        stacksUnresolved: answer.stacks_unresolved ?? 0, readCoverage: answer.read_coverage ?? null,
         complete: answer.coverage?.complete === true && !answer.lists_unread, storeRevision, readAt: Date.now()};
     } catch {
       entry = previous ? {...previous, readAt: Date.now()} : {status: 'error', failedAt: Date.now()};
@@ -364,9 +366,11 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
   section.append(heading);
   const bytes = new TextEncoder().encode(name);
   const prefix = Array.from(bytes.slice(0, 24), byte => byte.toString(16).padStart(2, '0')).join('');
-  const scripts = events.map(event => event?.type === 'script_cookie' && typeof decodeScriptCookieRecord === 'function'
-    ? decodeScriptCookieRecord(event) : null)
-    .filter(record => record && record.nameLength === bytes.length && record.namePrefixHex === prefix);
+  const decoded = events.map(event => event?.type === 'script_cookie' && typeof decodeScriptCookieRecord === 'function'
+    ? decodeScriptCookieRecord(event) : null).filter(Boolean);
+  // A read record is the whole jar, never one name, even the empty one.
+  const scripts = decoded.filter(record => !record.readRecord && record.nameLength === bytes.length &&
+    record.namePrefixHex === prefix);
   const setBy = [], sentWith = [];
   const lists = new Set();
   let unread = 0, loading = 0;
@@ -418,6 +422,31 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
     .concat(beyond(read.setBy ?? []).map(item => entry(`${backendWhere(item)}${item.blocked ? ` — ${trafficCookieBlockedText({exclusions: item.exclusion_reasons ?? []}, true)}` : ''}`))),
   unknownAbsence('No retained response set it.'));
   const frames = answered ? read.frames : null;
+  // Reads that may hold this name without naming it: recorded before names
+  // were, with names past the 360-name bound or a full table, or a Cookie
+  // Store get or getAll with no name; and records a full queue dropped.
+  const plural = (count, noun) => `${count} ${noun}${count === 1 ? '' : 's'}`;
+  const loadedCoverage = decoded.reduce((total, record) => ({
+    whole_jar_reads: total.whole_jar_reads + (record.readRecord && record.wholeJar ? record.count : 0),
+    reads_with_unrecorded_names: total.reads_with_unrecorded_names + (record.readRecord && record.unrecordedNames ? record.count : 0),
+    unrecorded_names: total.unrecorded_names + (record.readRecord ? record.unrecordedNames : 0),
+    unnamed_store_reads: total.unnamed_store_reads +
+      (['cookieStore.get', 'cookieStore.getAll'].includes(record.api) && record.nameLength === 0 ? record.count : 0),
+    records_dropped: total.records_dropped}),
+  {whole_jar_reads: 0, reads_with_unrecorded_names: 0, unrecorded_names: 0, unnamed_store_reads: 0,
+    // A drop gap of any category of this session; a renderer's takes the
+    // category of the last record it drained before the drop.
+    records_dropped: events.reduce((sum, event) => sum + (sessionId && event?.session_id !== sessionId
+      ? 0 : trafficDroppedRecords(event)), 0)});
+  const coverage = answered && read.readCoverage ? read.readCoverage : loadedCoverage;
+  const unnamedReads = coverage.whole_jar_reads + coverage.reads_with_unrecorded_names + (coverage.unnamed_store_reads ?? 0);
+  const unnamedNote = [unnamedReads ? `${plural(unnamedReads, 'read')} did not name every cookie ` +
+    `${unnamedReads === 1 ? 'it' : 'they'} returned (${[coverage.whole_jar_reads ? `${plural(coverage.whole_jar_reads, 'document.cookie read')} from before reads named cookies` : '',
+      coverage.reads_with_unrecorded_names ? `${plural(coverage.unrecorded_names, 'name')} past the 360-name bound or a full table` : '',
+      coverage.unnamed_store_reads ? `${plural(coverage.unnamed_store_reads, 'Cookie Store read')} with no name` : '']
+      .filter(Boolean).join('; ')}), so a read of ${name} may have no record.` : '',
+  coverage.records_dropped ? `${plural(coverage.records_dropped, 'record')} ${coverage.records_dropped === 1 ? 'was' : 'were'} lost to a full queue, so a call that named it may be missing.` : '']
+    .filter(Boolean).join(' ');
   group('Script access', scripts.map(record => {
     const resolved = record.frame ? frames?.get(`${record.processId}:${record.sequenceNumber}`) : null;
     const item = entry(`${record.api}${record.count > 1 ? ` × ${record.count}` : ''} ${trafficCookieCallPlace(record.thread, record.frameId)}` +
@@ -433,7 +462,8 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
   }).concat(beyondScripts(read, scripts).map(call => entry(`${call.api}${call.count > 1 ? ` × ${call.count}` : ''} ${trafficCookieCallPlace(call.thread, call.frame_id)}` +
     `${call.script_frame ? `, script ${call.script_frame.script_id} at character ${call.script_frame.position}` : ', no script position'}` +
     `${call.stack_digest ? `, stack ${call.stack_digest.slice(0, 12)}` : ''}${call.name_prefix_only ? ' (name matched by its first 24 bytes)' : ''}`))),
-  unknownAbsence('No recorded document.cookie or Cookie Store call used this name.'));
+  unnamedNote && answered && read.complete ? 'No recorded document.cookie or Cookie Store call named it.'
+    : unknownAbsence('No recorded document.cookie or Cookie Store call used this name.'));
   const writes = new Map(scripts.filter(record => record.write).map(record => [record.valueSha256, record]));
   group('Sent with requests', sentWith.map(({request, list, cookie}) => {
     const write = cookie.valueSha256 ? writes.get(cookie.valueSha256) : null;
@@ -445,11 +475,12 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
     unread ? `${unread} cookie list${unread === 1 ? ' was' : 's were'} not read past the ${TRAFFIC_COOKIE_PROVENANCE_LISTS}-list limit.` : '',
     answered && read.unread ? `The store left ${read.unread} retained cookie list${read.unread === 1 ? '' : 's'} unread past its 256-list limit.` : '',
     answered && read.malformed ? `${read.malformed} malformed record${read.malformed === 1 ? ' was' : 's were'} skipped.` : '',
-    answered && read.stacksUnresolved ? `${read.stacksUnresolved} script call${read.stacksUnresolved === 1 ? ' was' : 's were'} not resolved to source past the 64-position limit.` : '']
+    answered && read.stacksUnresolved ? `${read.stacksUnresolved} script call${read.stacksUnresolved === 1 ? ' was' : 's were'} not resolved to source past the 64-position limit.` : '',
+    unnamedNote]
     .filter(Boolean);
   if (notes.length) section.append(trafficNode('p', 'traffic-headers-note', notes.join(' ')));
   return {section, key: JSON.stringify([name, setBy.length, sentWith.length, scripts.length, loading, unread, frames?.size ?? null, read.status,
-    read.setBy?.length, read.sentWith?.length, read.script?.length, read.complete, read.unread])};
+    read.setBy?.length, read.sentWith?.length, read.script?.length, read.complete, read.unread, unnamedNote])};
 }
 
 // Where a script cookie call ran: a worker's record names the worker by its
@@ -490,6 +521,13 @@ function renderTrafficCookies(container, request, rerender, context = {}) {
     rerender?.();
   };
   const hops = trafficCookieHops(request);
+  // A hop the content session saw (it has a provisional header block) but
+  // the network never reported has no list, and says why.
+  const finals = typeof trafficFinalBlocks === 'function' ? trafficFinalBlocks(request, context.events) : null;
+  for (const [hop, blocks] of finals?.hops ?? []) {
+    if (blocks.provisional && !hops.some(known => known.hop === hop)) hops.push({hop, sent: [], received: []});
+  }
+  hops.sort((left, right) => left.hop - right.hop);
   const parts = [];
   const malformed = (request.cookieLists ?? []).filter(list => list.malformed).length;
   let message = '';
@@ -500,12 +538,33 @@ function renderTrafficCookies(container, request, rerender, context = {}) {
   else if (!hops.length && !malformed) message = request.hostOnly
     ? 'Cookies are recorded only in content capture sessions.' : 'No cookie list was retained for this request.';
   if (malformed) message = `${message} ${malformed} cookie record${malformed === 1 ? ' is' : 's are'} malformed and not shown.`.trim();
+  const missingNote = (hop, title, reason, received) => {
+    const section = trafficNode('section', 'traffic-cookie-missing');
+    section.dataset.reason = reason;
+    section.append(trafficNode('h3', '', `${title}${hops.length > 1 ? ` · hop ${hop}` : ''}`),
+      trafficNode('p', 'traffic-headers-note', received
+        ? `The network stack reported no response cookie list for this hop. ${TRAFFIC_MISSING_RECEIVED_REASONS[reason]}`
+        : `The network stack reported no cookie list for this hop. ${TRAFFIC_MISSING_REASONS[reason]}`));
+    return {section, key: `missing|${title}|${hop}|${reason}`};
+  };
   for (const hop of [...hops].reverse()) {
     const suffix = hops.length > 1 ? ` · hop ${hop.hop}` : '';
+    const counted = finals?.hops.get(hop.hop)?.provisional === true;
+    const last = hop.hop === finals?.last;
     hop.received.forEach((list, index) => parts.push(trafficCookieSection(`received-${hop.hop}-${index}`,
       `Response cookies${suffix}`, list, rerender, {received: true, onProvenance})));
+    if (counted && hop.sent.length && !hop.received.length) {
+      parts.push(missingNote(hop.hop, 'Response cookies',
+        trafficQualifiedReason(trafficMissingReceivedReason(finals.life, last), finals.dropped), true));
+    }
     hop.sent.forEach((list, index) => parts.push(trafficCookieSection(`sent-${hop.hop}-${index}`,
       `Request cookies${suffix}`, list, rerender, {received: false, onProvenance})));
+    // A later hop's sent list shows the factory observes the request.
+    const laterSent = hops.some(other => other.hop > hop.hop && other.sent.length);
+    if (counted && !hop.sent.length) {
+      parts.push(missingNote(hop.hop, 'Request cookies',
+        trafficQualifiedReason(trafficMissingReason(finals.life, last, laterSent), finals.dropped), false));
+    }
   }
   if (trafficCookieOptions.provenance !== null) {
     const sessionId = (request.cookieLists ?? []).find(list => list.sessionId)?.sessionId ?? null;

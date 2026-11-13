@@ -61,6 +61,10 @@ checks:
   scanned range only.
 - `browser_internal_excluded`: `chrome:`, `devtools:` and WebUI pages were
   counted, not recorded. Not a loss; see `exclusions`.
+- `final_headers_missing`: requests that ended with provisional headers only.
+  Its `reason` says why; `from_cache`, `service_worker`, `download` and
+  `failed` are expected, `not_reported` is a capture gap. `get_request_headers`
+  names the reason per hop as `network_block_missing`.
 - `memory_cache_reuse_not_recorded`: a renderer passed its 4,096 memory-cache
   rows for the capture; later reuses were counted, not recorded. Reuses in a
   page that is not ordinary (an SVG image's own document), which no tab owns,

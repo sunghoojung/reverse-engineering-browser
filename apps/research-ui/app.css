@@ -1174,6 +1174,11 @@ var(--panel);
       .source-internal-toggle { margin-left: 6px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--muted); font: inherit; }
       .source-internal-toggle:hover, .source-internal-toggle[aria-pressed="true"] { color: var(--text); }
       .request-window #request-unresolved { color: var(--red); }
+      .request-window #request-header-gaps { color: var(--amber); }
+      .request-window #request-header-gaps[aria-expanded="true"] { text-decoration: underline; }
+      /* The breakdown takes its own full-width line only while it is open. */
+      .request-window > .request-header-gaps-detail { flex: 1 0 100%; }
+      .request-header-gaps-list { margin: 0; padding-left: 16px; font: 10px/1.5 var(--mono); overflow-wrap: anywhere; }
       .request-window #request-unresolved[aria-pressed="true"] { text-decoration: underline; }
       .source-health {
         max-height: 96px;
@@ -2370,6 +2375,9 @@ var(--panel);
       .traffic-headers-section > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
       .traffic-headers-count { margin-left: 6px; color: var(--muted); font-weight: 400; }
       .traffic-headers-note { margin: 6px 0 0; color: var(--muted); font: 12px/1.5 var(--sans); }
+      /* A hop the network reported no cookie list for, with why. */
+      .traffic-cookie-missing { padding: 8px 12px; border-bottom: 1px solid var(--line); }
+      .traffic-cookie-missing > h3 { margin: 0; font: 600 12px/20px var(--sans); }
       .traffic-headers-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
       .traffic-headers-status { color: var(--muted); font: 11px var(--sans); }
       .traffic-header-row { display: grid; grid-template-columns: minmax(80px, 30%) minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 3px 0; border-bottom: 1px solid var(--line-soft); font: 11px/16px var(--mono); }

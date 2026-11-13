@@ -1273,8 +1273,12 @@ answer decides.
 policy), then response and request headers per redirect hop, newest first.
 Each section collapses and has **Raw** and **Copy all**; each header has
 **Copy**. A hop the network stack never reported reads "Provisional headers
-are shown". Blocks load after a size and SHA-256 check and are inserted as
-text. **Cookies** shows each hop's Response cookies (every attribute and the
+are shown" and says why: the request is still in progress, the HTTP cache or
+a service worker answered it, it is a download, it failed first, or the
+network stack reported nothing for it ([missing final blocks](../../protocol/native-network-v3.md#missing-final-blocks)).
+The Cookies tab lists such a hop with the same reason, and a hop with sent
+cookies but no response list with its own. Blocks load after a size and
+SHA-256 check and are inserted as text. **Cookies** shows each hop's Response cookies (every attribute and the
 reason a `Set-Cookie` was blocked) and Request cookies, with **Show filtered out
 request cookies** for excluded ones and their reasons. Columns sort, values
 truncate with the full value as a tooltip, and each row has **Copy**. A name
@@ -1282,7 +1286,11 @@ opens its provenance: the responses that set it, the `document.cookie` and
 Cookie Store calls that used it with their script position (file, line and
 function from `get_cookie_provenance`, with **Show in Sources**, when the
 script's source was retained), and the requests that sent it, linked by value
-digest to the script write. Loaded requests are read first, then the store's
+digest to the script write. A `document.cookie` read is listed under each
+cookie name it returned, with how many reads that script position made; a read
+recorded before reads named cookies, or with names past the 360-name bound or
+a full table, is counted in a note, since it may hold the name without naming
+it. Loaded requests are read first, then the store's
 answer adds what the newest retained records hold beyond them. An empty group
 reads "Not in the scanned range" unless that answer covered the whole session. Traffic has no
 comparison or content-search views; General states the capture coverage.
@@ -1573,7 +1581,15 @@ covers `chrome:`, `devtools:` and other internal schemes
 ([native network v3](../../protocol/native-network-v3.md)), and the footer
 reports what capture excluded, including memory-cache reuses past a renderer's
 budget ("N memory-cache reuses not recorded") and, apart, those in SVG images
-or popups that no tab owns. Sources reads retained artifact bytes only. A failed
+or popups that no tab owns. Header and cookie gaps of the loaded rows are one
+footer button, **N header gaps**, so the footer keeps its size: it opens a
+breakdown below it (Space or Return; Escape closes it and returns focus) of
+header blocks and cookie lists not retained (with each reason: size limit,
+session budget, queue, channel or URL), network blocks that arrived after
+their request ended ("late header records on no row"), and requests that
+ended with only provisional headers, by reason (HTTP cache, service worker,
+download, failed, not reported); `get_session_summary` has the same counts
+over the newest 64 MiB. Sources reads retained artifact bytes only. A failed
 refresh preserves the last valid catalog, and a detached pending load is
 cancelled and cannot restore obsolete source text. Artifact loads have a
 10-second deadline, including body reads; a timed-out load can be retried

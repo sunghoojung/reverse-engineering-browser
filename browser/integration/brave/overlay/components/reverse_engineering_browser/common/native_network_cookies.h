@@ -19,8 +19,9 @@ namespace reb {
 // Producer half of "Cookies" in protocol/native-network-v3.md. The core mirror
 // in include/reb/network_cookies.hpp decodes and validates the same bytes.
 inline constexpr std::uint16_t kNativeCookiePayloadVersion = 1;
-// script_cookie version 2 names the isolate of its frame and stack (byte 6).
-inline constexpr std::uint16_t kNativeScriptCookiePayloadVersion = 2;
+// script_cookie version 2 names the isolate of its frame and stack (byte 6);
+// version 3 records each cookie name a document.cookie read returned.
+inline constexpr std::uint16_t kNativeScriptCookiePayloadVersion = 3;
 // 180 cookies per domain of 4 KiB name and value plus two 1 KiB attributes is
 // about 1.1 MiB; the rest leaves room for excluded and partitioned cookies.
 inline constexpr std::size_t kNativeCookieListLimitBytes = 2U * 1024U * 1024U;
@@ -46,6 +47,9 @@ inline constexpr std::uint8_t kNativeScriptCookieNameTruncated = 1U << 0U;
 inline constexpr std::uint8_t kNativeScriptCookieFrameRecorded = 1U << 1U;
 inline constexpr std::uint8_t kNativeScriptCookieStackRecorded = 1U << 2U;
 inline constexpr std::uint8_t kNativeScriptCookieTableFull = 1U << 3U;
+// Version 3: the record of a document.cookie read itself, with no name. Every
+// other version 3 document.cookie read record names one cookie it returned.
+inline constexpr std::uint8_t kNativeScriptCookieReadRecord = 1U << 4U;
 
 inline constexpr std::uint8_t kNativeCookieParsed = 1U << 0U;
 inline constexpr std::uint8_t kNativeCookieHttpOnly = 1U << 1U;
@@ -83,6 +87,10 @@ struct NativeScriptCookieSummary final {
   std::uint32_t name_length = 0;
   std::uint32_t value_length = 0;
   std::uint32_t string_length = 0;
+  // A document.cookie read record's names that no name record counts: past
+  // the per-read name bound or refused by a full table. Written at offset 16
+  // in place of the value length, which a read does not have.
+  std::uint32_t unrecorded_names = 0;
   NativeScriptFrame frame;
   std::array<std::uint8_t, 32> stack_digest{};
   std::array<std::uint8_t, 32> value_sha256{};
@@ -193,7 +201,10 @@ EncodeNativeScriptCookiePayload(const NativeScriptCookieSummary& value) noexcept
   Put(out, 6, value.thread, 1);
   Put(out, 8, value.count, 4);
   Put(out, 12, value.name_length, 4);
-  Put(out, 16, value.value_length, 4);
+  Put(out, 16,
+      (value.flags & kNativeScriptCookieReadRecord) != 0 ? value.unrecorded_names
+                                                         : value.value_length,
+      4);
   Put(out, 20, value.string_length, 4);
   Put(out, 24, value.frame.kind, 1);
   Put(out, 25, value.frame.flags, 1);

@@ -310,6 +310,174 @@ await settle();
 }
 assert.equal(panel.querySelectorAll('img').length, 0, 'captured markup is still text');
 
+// Version 3 reads: a name record joins its name; a nameless read record never
+// joins one, even the empty name, and reads that did not name every cookie
+// make an absent read unproven.
+{
+  const read = (version, name, readRecord, count, unrecorded, sequence) => {
+    const bytes = Buffer.alloc(128);
+    bytes.writeUInt16LE(version, 0); bytes.writeUInt16LE(128, 2);
+    bytes[4] = 2; bytes[5] = 2 | (readRecord ? 16 : 0); bytes[6] = version >= 2 ? 1 : 0;
+    bytes.writeUInt32LE(count, 8); bytes.writeUInt32LE(Buffer.byteLength(name), 12);
+    bytes.writeUInt32LE(unrecorded, 16); bytes.writeUInt32LE(40, 20);
+    bytes[24] = 1; bytes.writeUInt32LE(77, 28); bytes.writeUInt32LE(99, 32);
+    bytes.write(name, 104, 'latin1');
+    return {...scriptEvent, sequence_number: String(sequence), payload: bytes.toString('hex')};
+  };
+  const readEvents = [read(3, 'token', false, 3, 0, 40), read(3, '', true, 3, 5, 41), read(2, '', false, 1, 0, 42),
+    read(3, '', false, 2, 0, 43)];
+  assert(readEvents.every(event => decodeScriptCookieRecord(event)), 'the fixture read records are valid');
+  const readRequest = {id: 'reads', origin: 'live', method: 'GET', path: 'https://echo.test/r', status: 200,
+    cookieLists: [record('sent', [{strings: ['token', 'v', 'echo.test', '/', '', ''], flags: 1},
+      {strings: ['', 'bare', 'echo.test', '/', '', ''], flags: 1}])]};
+  const readUi = {requests: [readRequest], events: readEvents};
+  const draw = () => api.renderTrafficCookies(panel, readRequest, draw, readUi);
+  provenanceAnswer = null;
+  draw();
+  await settle();
+  [...panel.querySelectorAll('.traffic-cookie-name')].find(node => node.textContent === 'token')
+    .dispatchEvent(new window.Event('click'));
+  await settle();
+  let text = panel.querySelector('.traffic-cookie-provenance').textContent;
+  assert.match(text, /Script access \(1\)document\.cookie get × 3 in frame 31, script 77 at character 99/);
+  assert.match(text, /4 reads did not name every cookie they returned \(1 document\.cookie read from before reads named cookies; 5 names past the 360-name bound or a full table\), so a read of token may have no record/);
+  // The store's answer covers more than the loaded window, so it decides.
+  provenanceAnswer = {set_by: [], sent_with: [], script: [], lists_read: 1, lists_unread: 0, stacks_unresolved: 0,
+    malformed_records: [], coverage: {complete: true},
+    read_coverage: {complete: false, whole_jar_reads: 0, reads_with_unrecorded_names: 6, unrecorded_names: 9}};
+  await new Promise(resolve => setTimeout(resolve, 2100));
+  draw();
+  await settle();
+  text = panel.querySelector('.traffic-cookie-provenance').textContent;
+  assert.match(text, /6 reads did not name every cookie they returned \(9 names past the 360-name bound or a full table\)/);
+  assert.doesNotMatch(text, /malformed record/, 'an empty malformed list is no note');
+  panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
+  await settle();
+  // A Cookie Store get or getAll with no name read every cookie it could, and
+  // a dropped network record may have named this one: neither is proof.
+  {
+    const store = Buffer.alloc(128);
+    store.writeUInt16LE(3, 0); store.writeUInt16LE(128, 2);
+    store[4] = 5; store[6] = 1; store.writeUInt32LE(2, 8);
+    const storeRead = {...scriptEvent, sequence_number: '44', payload: store.toString('hex')};
+    const dropGap = {...scriptEvent, type: 'gap', sequence_number: '45', payload: Buffer.from('3').toString('hex'), payload_size: 1};
+    const reasonGap = {...scriptEvent, type: 'gap', sequence_number: '46',
+      payload: Buffer.from('service_worker_end_lost').toString('hex'), payload_size: 23};
+    assert(decodeScriptCookieRecord(storeRead), 'the fixture store read is valid');
+    const storeRequest = {id: 'store', origin: 'live', method: 'GET', path: 'https://echo.test/s', status: 200,
+      cookieLists: [record('sent', [{strings: ['storeonly', 'v', 'echo.test', '/', '', ''], flags: 1}])]};
+    const unnamedUi = {requests: [storeRequest], events: [storeRead, dropGap, reasonGap]};
+    const redraw = () => api.renderTrafficCookies(panel, storeRequest, redraw, unnamedUi);
+    provenanceAnswer = null;
+    redraw();
+    await settle();
+    panel.querySelector('.traffic-cookie-provenance button')?.dispatchEvent(new window.Event('click'));
+    await settle();
+    [...panel.querySelectorAll('.traffic-cookie-name')].find(node => node.textContent === 'storeonly')
+      .dispatchEvent(new window.Event('click'));
+    await settle();
+    const unnamedText = panel.querySelector('.traffic-cookie-provenance').textContent;
+    assert.match(unnamedText, /2 reads did not name every cookie they returned \(2 Cookie Store reads with no name\), so a read of storeonly may have no record/);
+    assert.match(unnamedText, /3 records were lost to a full queue, so a call that named it may be missing/);
+    panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
+    await settle();
+    // A renderer's drop gap takes the category of the last record it drained,
+    // so a canvas gap counts; a reason of up to 128 characters is a named gap,
+    // as the backend reads it, and a truncated payload is a loss.
+    const drops = async (gaps, cookieName) => {
+      const request = {id: cookieName, origin: 'live', method: 'GET', path: 'https://echo.test/d', status: 200,
+        cookieLists: [record('sent', [{strings: [cookieName, 'v', 'echo.test', '/', '', ''], flags: 1}])]};
+      const ui = {requests: [request], events: gaps};
+      const draw = () => api.renderTrafficCookies(panel, request, draw, ui);
+      draw();
+      await settle();
+      [...panel.querySelectorAll('.traffic-cookie-name')].find(node => node.textContent === cookieName)
+        .dispatchEvent(new window.Event('click'));
+      await settle();
+      const text = panel.querySelector('.traffic-cookie-provenance').textContent;
+      panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
+      await settle();
+      return text;
+    };
+    const canvasGap = {...dropGap, category: 'canvas', payload: Buffer.from('2').toString('hex')};
+    assert.match(await drops([canvasGap], 'canvasdrop'), /2 records were lost to a full queue/);
+    const longReason = {...reasonGap, payload: Buffer.from('r'.repeat(100)).toString('hex'), payload_size: 100};
+    assert.doesNotMatch(await drops([longReason], 'longreason'), /lost to a full queue/);
+    const truncated = {...reasonGap, payload_truncated: true};
+    assert.match(await drops([truncated], 'truncatedgap'), /1 record was lost to a full queue/);
+    // With a complete store answer and no call for the name, absence is
+    // stated about naming only, since unnamed reads may still hold it.
+    const absent = {id: 'absent', origin: 'live', method: 'GET', path: 'https://echo.test/a', status: 200,
+      cookieLists: [record('sent', [{strings: ['quiet', 'v', 'echo.test', '/', '', ''], flags: 1}])]};
+    const absentUi = {requests: [absent], events: []};
+    const drawAbsent = () => api.renderTrafficCookies(panel, absent, drawAbsent, absentUi);
+    provenanceAnswer = {set_by: [], sent_with: [], script: [], lists_read: 1, lists_unread: 0, stacks_unresolved: 0,
+      malformed_records: [], coverage: {complete: true},
+      read_coverage: {complete: false, whole_jar_reads: 0, reads_with_unrecorded_names: 0, unrecorded_names: 0,
+        unnamed_store_reads: 1, records_dropped: 0}};
+    drawAbsent();
+    await settle();
+    [...panel.querySelectorAll('.traffic-cookie-name')].find(node => node.textContent === 'quiet')
+      .dispatchEvent(new window.Event('click'));
+    await settle();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    drawAbsent();
+    await settle();
+    const absentText = panel.querySelector('.traffic-cookie-provenance').textContent;
+    assert.match(absentText, /Script access \(0\)No recorded document\.cookie or Cookie Store call named it\./);
+    assert.doesNotMatch(absentText, /used this name/);
+    panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
+    await settle();
+    draw();
+    await settle();
+  }
+  // The nameless cookie: its name record only, not the jar's read records.
+  [...panel.querySelectorAll('.traffic-cookie-name')].find(node => node.textContent === '')
+    .dispatchEvent(new window.Event('click'));
+  await settle();
+  text = panel.querySelector('.traffic-cookie-provenance').textContent;
+  assert.match(text, /Script access \(1\)document\.cookie get × 2 in frame 31/);
+  panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
+  await settle();
+}
+
+// A hop the content session saw but the network never reported has no list,
+// and says why; so does a sent list without a received one.
+{
+  const browser = (type, extra = {}) => ({category: 'network', type, flags: 0, browser_context_id_high: '5',
+    browser_context_id_low: '6', ...extra});
+  const missingRow = {id: 'missing', origin: 'live', method: 'GET', path: 'https://echo.test/m', status: 'failed',
+    cookieLists: [record('sent', [sentCookies[1]])],
+    headerBlocks: [{kind: 'request', source: 'browser', state: 'captured', hop: 0},
+      {kind: 'request', source: 'network', state: 'captured', hop: 0},
+      {kind: 'request', source: 'browser', state: 'captured', hop: 1}],
+    events: [browser('request_started'), browser('request_redirected'), browser('request_failed')]};
+  const view = document.createElement('div');
+  api.renderTrafficCookies(view, missingRow, () => {}, {});
+  await settle();
+  const notes = [...view.querySelectorAll('.traffic-cookie-missing')].map(node =>
+    [node.querySelector('h3').textContent, node.dataset.reason, node.textContent]);
+  assert.deepEqual(notes.map(([title, reason]) => [title, reason]),
+    [['Request cookies · hop 1', 'failed'], ['Response cookies · hop 0', 'no_raw_response']]);
+  assert.match(notes[0][2], /reported no cookie list for this hop\. It failed before the network stack reported the headers it sent/);
+  // The missing response list never claims nothing was sent: hop 0 sent cookies.
+  assert.match(notes[1][2], /reported no response cookie list for this hop\. The network stack reported what was sent for this hop but no response headers/);
+  assert.doesNotMatch(notes[1][2], /no sent headers/);
+  // A drop while the request ran makes the absent response list unsure; the
+  // failure, a record that is there, stands.
+  Object.assign(missingRow, {firstTimestamp: 10n, lastTimestamp: 20n});
+  missingRow.events.forEach(event => { event.session_id = '7'; });
+  const lossyView = document.createElement('div');
+  api.renderTrafficCookies(lossyView, missingRow, () => {},
+    {events: [{type: 'gap', category: 'canvas', session_id: '7', monotonic_time_ns: '15', payload: Buffer.from('1').toString('hex')}]});
+  await settle();
+  assert.deepEqual([...lossyView.querySelectorAll('.traffic-cookie-missing')].map(node => node.dataset.reason),
+    ['failed', 'record_dropped']);
+  assert.match(lossyView.textContent, /A full queue dropped records while this request ran, so its response cookie list may have been reported and lost/);
+  // A row without header blocks (metadata-only, legacy) adds no hop of its own.
+  assert.equal(panel.querySelectorAll('.traffic-cookie-missing').length, 0);
+}
+
 // Integrity failure, refusal and not-retained states read as sentences.
 const wrong = record('sent', [sentCookies[1]]);
 blobs.set(wrong.artifactId, list('sent', [sentCookies[0]]));
@@ -337,9 +505,10 @@ api.renderTrafficCookies(panel, {id: 'm', origin: 'live', method: 'GET', path: '
 assert.match(panel.textContent, /recorded only in content capture sessions/);
 api.renderTrafficCookies(panel, {id: 'l', origin: 'sample', method: 'GET', path: 'x', status: 200}, () => {});
 assert.match(panel.textContent, /no native cookie record/);
-assert.equal(reads.filter(url => url.startsWith('/api/artifacts/')).length, 5,
+assert.equal(reads.filter(url => url.startsWith('/api/artifacts/')).length, 12,
   'one read per distinct retained list, including the store-refresh block; refused and not-retained lists are not read');
 assert.equal(reads.filter(url => url.startsWith('/api/cookie-provenance?session_id=7&name=sid')).length, 2, 'a failed position read retries once');
 console.log('PASS Traffic Cookies tab: hops newest first, filtered-out request cookies and reasons, every response attribute ' +
   'and block reason, unparsed line, sort, tooltip and copy, provenance to response, script write at its resolved position and later request, ' +
+  'document.cookie reads by name with their read coverage, hops without a list and why, ' +
   'size and SHA-256 checked reads, refusal and not-retained states, metadata-only and legacy rows (DOM model; not rendered QA)');

@@ -167,6 +167,14 @@ assert.equal(write.valueSha256, '5a'.repeat(32));
 const longName = model.decodeScriptCookieRecord(golden('script cookie long name'));
 assert.equal(longName.nameTruncated, true);
 assert.equal(longName.namePrefix, 'n'.repeat(24));
+// Version 3 reads: one nameless read record with its unrecorded names, and a
+// record per cookie name; a version 2 read is the whole jar.
+const readRecord = model.decodeScriptCookieRecord(golden('script cookie read record'));
+assert.deepEqual([readRecord.readRecord, readRecord.unrecordedNames, readRecord.valueLength, readRecord.namePrefix],
+  [true, 7, 0, '']);
+const nameRead = model.decodeScriptCookieRecord(golden('script cookie api 2'));
+assert.deepEqual([nameRead.readRecord, nameRead.namePrefix, nameRead.count], [false, 'sid', 4]);
+assert.equal(model.decodeScriptCookieRecord(golden('script cookie version 2 read')).readRecord, true);
 }
 
 console.log(`PASS network request wire: ${cases.length} C++ golden records agree with Python and the UI decoders; ` +

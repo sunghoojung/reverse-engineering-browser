@@ -22,6 +22,7 @@ pub mod evidence_comparison;
 pub mod evidence_package;
 pub mod float32;
 mod flow_graph;
+mod gap_tally;
 mod graph_layout;
 mod js_invocation;
 mod js_invocation_sites;

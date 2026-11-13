@@ -60,6 +60,8 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | `memory_cache_reuse` payload version 2 | flag bit 2 `source_named` | Request scope and tabs |
 | `response_body` payload version 2 | flag bit 7 `snapshots_withheld` | Response bodies |
 | Chromium patch 0062 | `name-memory-cache-reuse-sources` | Request scope and tabs |
+| Chromium patch 0058 | `observe-early-hints-preload-headers` | Headers and cookies |
+| `script_cookie` version 3, flag bit 4 | a `document.cookie` read named per cookie | Headers and cookies |
 
 Traffic detail tabs, in order: General, Headers, Payload, Preview, Response,
 Cookies, Initiator, Timing, Signals, Evidence.
@@ -533,13 +535,20 @@ neither Shields nor an extension's `webRequest` or `declarativeNetRequest` acts
 on them. While native capture runs for the owned profile it first attaches
 Brave's proxy with a request handler that answers every hook with `net::OK`, so
 no header, referrer, block or redirect decision changes. Capture itself still
-adds four things, none visible to the page or the server beyond timing:
+adds five things, none visible to the page, the server or DevTools beyond
+timing:
 
 - In content sessions the proxy gives a preload without one a `reb-` DevTools
   request ID (Brave patch 0018), so the network service also sends SSL info
   with the response and transfer-size updates. `NavigationEarlyHintsManager`'s
   `PreloadURLLoaderClient` reads only the response head's cache flags and
   records transfer sizes to UMA.
+- In a current content session with the Network category, Chromium patch 0058
+  gives the preload factory an agentless DevTools observer, so the network
+  service reports the preload's raw headers and cookie lists to the capture
+  hook and marks its response head `emitted_extra_info`. Only the throttles
+  and `PreloadURLLoaderClient` see that head, and no DevTools agent sees a
+  preload ([binding](#network-service-binding-at-the-pinned-chromium)).
 - In content sessions the response body is teed for artifact capture, as for
   any request; the manager still drains its own copy.
 - Each preload's messages take an extra hop through the proxy on the UI thread.
@@ -1442,9 +1451,91 @@ ID the ID `reb-<request_id as 16 hex digits>`, and Chromium patch
 `0025-forward-native-network-headers.patch` forwards the two notifications to
 the `network_headers_hook` component before DevTools dispatch. The ID changes
 no request bytes. It does make the network service send SSL info and
-transfer-size updates to the loader client, as with DevTools open. Requests
-whose factory has no observer get no `network` block, and the UI shows their
-provisional headers as such. Unknown IDs, such as CORS preflights, are ignored.
+transfer-size updates to the loader client, as with DevTools open. Unknown IDs,
+such as CORS preflights, are ignored.
+
+A request whose factory has no observer gets no `network` block and no cookie
+list. At the pin these are the factories the proxy sees, and the observer each
+gets:
+
+| Factory | Where Chromium builds its observer | Observer at the pin | With patch 0058 |
+| --- | --- | --- | --- |
+| Navigation | `NavigationRequest` passes `NetworkServiceDevToolsObserver::MakeSelfOwned(frame_tree_node_)` as the request's `TrustedParams::devtools_observer` | Yes | Unchanged |
+| Document subresources, isolated worlds, keepalive and `fetchLater` | `URLLoaderFactoryParamsHelper::CreateForFrame` and `CreateForIsolatedWorld` (the frame tree node); `KeepAliveURLLoaderService` binds the frame's `subresource_proxying_factory_bundle` | Yes | Unchanged |
+| Dedicated worker subresources | `DedicatedWorkerHost` uses `CreateForFrame` of its ancestor frame | Yes | Unchanged |
+| Service worker subresources and imported scripts | `EmbeddedWorkerInstance::CreateFactoryBundle`: `MakeSelfOwned(devtools_worker_token)` | Yes | Unchanged |
+| Speculation-rules prefetch from a live document | `MaybeMakeSelfOwnedNetworkServiceDevToolsObserverForPrefetch`, per request | Yes | Unchanged |
+| Dedicated and shared worker main scripts | `WorkerScriptFetcher::CreateScriptLoader`, only when `RenderFrameDevToolsAgentHost::GetFor` finds a host for the ancestor frame, so only while DevTools is attached to it | No | Not changed (below) |
+| Shared worker subresources | `SharedWorkerHost::CreateNetworkFactoryParamsForSubresources` passes `mojo::NullRemote()` | No | Not changed (below) |
+| Service worker main script and update check | `ServiceWorkerContextWrapper::GetLoaderFactoryForBrowserInitiatedRequest`: `StoragePartitionImpl::CreateURLLoaderFactoryParams` sets none | No | Not changed (below) |
+| Early-hints preloads | `URLLoaderFactoryParamsHelper::CreateForEarlyHintsPreload` passes `mojo::NullRemote()` | No | Agentless observer |
+| Browser-initiated prefetch, or one whose initiating document is gone | `MaybeMakeSelfOwnedNetworkServiceDevToolsObserverForPrefetch` returns `mojo::NullRemote()` | No | Not changed (below) |
+| Downloads | `CreatePendingSharedURLLoaderFactory` wraps the storage partition's browser-process factory, whose params set none | No | Not changed (below) |
+| CORS preflights | The network service's `PreflightController`, with `credentials_mode = kOmit`: it sends no cookie and stores none | Reported through `OnCorsPreflightRequest`, not hooked | No Traffic row |
+
+Capture never changes what a page or a real DevTools session observes, and an
+observer is observable: with any observer and a `devtools_request_id`,
+`URLLoader::DispatchOnRawRequest` sets `emitted_devtools_raw_request_`, the
+response head carries it as `emitted_extra_info`, Blink copies it
+(`WebURLResponse`) and `InspectorNetworkAgent` reports it as `hasExtraInfo` on
+`Network.responseReceived` and redirects. An agentless observer would make
+that `true` with no `*ExtraInfo` event ever following, and a CDP client that
+waits for them would stall. So a factory gets one only where no DevTools agent
+can see its response heads:
+
+- **Early-hints preloads: built.** Content gives preloads no DevTools
+  instrumentation (`TODO(crbug.com/40188470)` in
+  `NavigationRequest::CreateNavigationEarlyHintsManagerParams`) and
+  `NavigationEarlyHintsManager::MaybePreloadHintedResource` sets no
+  `devtools_request_id`; the request's only one is the Brave proxy's `reb-`
+  ID, which no agent knows, and without it the observer would never be
+  called.
+  The head goes to the throttles and `PreloadURLLoaderClient`, whose
+  `OnReceiveResponse` reads `network_accessed` and `was_fetched_via_cache` and
+  whose `OnReceiveRedirect` ignores it; the `PreloadedResource` it reports keeps
+  no head. The page's later use of the cached resource is another request,
+  whose head the network service builds for that loader.
+- **Shared worker subresources: not built.** `WorkerFetchContext` gives a
+  worker request a DevTools ID whenever the worker's network agent is on, and
+  that agent reports `hasExtraInfo` from the head.
+- **Worker main scripts, service worker main scripts and update checks: not
+  built.** DevTools can attach to the worker target alone, without the frame
+  host that gives the main script its observer, and the head reaches the
+  worker's own reporting.
+- **Browser-initiated prefetches: not built.** A prefetch can be served to a
+  navigation, which forwards the head's `emitted_extra_info` to the frame's
+  DevTools.
+- **Downloads: not built.** They load through the storage partition's single
+  browser-process factory, which every browser-internal fetch of every
+  profile shares and which is created once.
+- **A service worker script fetched through a header client** (an extension's
+  `webRequest` with `extraHeaders`, or DevTools' Fetch interception) builds its
+  params inside `NavigationURLLoaderImpl::CreateURLLoaderFactoryWithHeaderClient`.
+
+A request of a kind not built keeps its provisional headers, reads
+`not_reported` and is counted as such.
+`tools/check-header-observer-patch.py` (`make lint`) refuses an agentless
+observer in any other function, or one without the gate.
+
+Chromium patch `0058-observe-early-hints-preload-headers.patch` gives the
+early-hints factory `NetworkServiceDevToolsObserver::MakeSelfOwned(std::string())`.
+Every method of that class resolves its DevTools agent from its ID or frame
+tree node and returns when there is none, and the empty ID names no agent, so
+only the hook (patch 0025, before that lookup) sees the raw notifications. It
+is created on the UI thread only while `reb::NativeNetworkHeadersObserved()`
+holds: a content session is current, its Network category is on and its
+expiry has not passed. Otherwise the factory is built exactly as stock. The
+factory belongs to the navigation's `NavigationEarlyHintsManager`;
+`RenderFrameHostImpl` takes the manager at commit
+(`early_hints_manager_ = navigation_request->TakeEarlyHintsManager()`), so the
+factory and its observer live as long as that document, or end with a
+navigation that never commits. Only preloads use the factory, so nothing is
+observed after they complete, and a preload still running when the session
+ends reaches a hook that forwards nothing.
+
+Every request with a provisional block and no `network` block says why on its
+Headers and Cookies tabs and is counted in the session summary (see
+[missing final blocks](#missing-final-blocks)).
 
 #### Hop attribution
 
@@ -1639,15 +1730,15 @@ its own requests and the isolate key of its [stack scope](#stack-scope).
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `2`; readers also accept `1` |
+| 0 | 2 | payload version, `3`; readers also accept `1` and `2` |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | API: 1 `document.cookie` set, 2 `document.cookie` get, 3 `cookieStore.set`, 4 `cookieStore.get`, 5 `cookieStore.getAll`, 6 `cookieStore.delete` |
 | 5 | 1 | flags |
-| 6 | 1 | version 2: the stack thread of the calling isolate, 1 to 4 as in the [stack scope](#stack-scope), or 0 when the thread was never named; version 1: zero |
+| 6 | 1 | versions 2 and 3: the stack thread of the calling isolate, 1 to 4 as in the [stack scope](#stack-scope), or 0 when the thread was never named; version 1: zero |
 | 7 | 1 | reserved, zero |
 | 8 | 4 | count: 1 for a write; for a read, reads since this key's previous record |
 | 12 | 4 | name length in UTF-8 bytes |
-| 16 | 4 | value length in UTF-8 bytes; 0 for a read |
+| 16 | 4 | value length in UTF-8 bytes; 0 for a read, except a version 3 read record (flag bit 4), where it counts the names those reads returned that no name record counts |
 | 20 | 4 | `document.cookie` string length, set or returned; 0 for the Cookie Store API |
 | 24 | 16 | innermost script frame, in the frame layout of `request_initiator_stack` |
 | 40 | 32 | stack digest, the `request_initiator_stack` digest of this call's stack, or zero |
@@ -1656,19 +1747,24 @@ its own requests and the isolate key of its [stack scope](#stack-scope).
 
 Flags: bit 0 the name is longer than 24 bytes; bit 1 a script frame was
 recorded; bit 2 a stack digest was recorded; bit 3 a read recorded alone
-because the aggregation table was full.
+because the aggregation table was full; bit 4, version 3 only, the read record
+of a `document.cookie` read.
 
 Rules: API 1 to 6; writes (1, 3, 6) have count 1 and a nonzero value digest,
-reads have value length 0 and a zero digest; count is nonzero; bit 0 if and
-only if the name is longer than 24 bytes, and name bytes past the name are
-zero; for API 1 the string length is at least name plus value length, and for
-3 to 6 it is 0; bit 1 if and only if the frame's kind is 1 or 2 with a nonzero
-script ID, its combinator 0 and only frame flag bits 0 and 1, and without bit
-1 the frame is zero; bit 2 if and
+reads have a zero digest and value length 0, except a version 3 read record;
+count is nonzero; bit 0 if and only if the name is longer than 24 bytes, and
+name bytes past the name are zero; for API 1 the string length is at least
+name plus value length, and for 3 to 6 it is 0; bit 1 if and only if the
+frame's kind is 1 or 2 with a nonzero script ID, its combinator 0 and only
+frame flag bits 0 and 1, and without bit 1 the frame is zero; bit 2 if and
 only if the stack digest is nonzero, and only with bit 1; bit 3 only for a
-read; reserved bytes are zero. Version 2: byte 6 is 0 to 4; with 0, bits 1
-and 2 are clear, since no frame could be read in a known isolate; with 2 to 4,
-`frame_id` is nonzero.
+read; reserved bytes are zero. Versions 2 and 3: byte 6 is 0 to 4; with 0,
+bits 1 and 2 are clear, since no frame could be read in a known isolate; with
+2 to 4, `frame_id` is nonzero. Version 3: bit 4 only with API 2 and a name
+length of 0; an API 2 record without bit 4 is a name record, which never has
+bit 3 and whose string length is at least its name length. Versions 1 and 2
+have no bit 4: their API 2 records are whole reads with no name, which is why
+version 3 exists.
 
 The script frame and the stack are read in the isolate byte 6 names, with the
 worker's context ID as its key: script IDs are unique only per isolate, so a
@@ -1693,11 +1789,41 @@ sequence is reserved before the walk, so the stack artifact's
 `creator_event_id` and the new `script_identity` records' parent are the
 `script_cookie` record. Reads stay one-frame.
 
+A `document.cookie` read records each cookie name the returned string holds,
+so a cookie's provenance finds the scripts that read it. The sink splits the
+string as the page would: at `;`, then at the first `=`, whitespace trimmed;
+an entry with no `=` is the empty name, as `CanonicalCookie::BuildCookieLine`
+writes a nameless cookie as its bare value, and an empty entry is no cookie. A
+name the jar holds twice (another path or domain) counts once per read. Each
+read is one read record (bit 4, no name) after one name record per name:
+names only, never a value or a value digest, since a read is frequent and its
+values are already in the request's sent cookie list. A read parses at most
+360 names, the most Chromium returns to one read at the pin: 180 cookies per
+eTLD+1 (`CookieMonster::kDomainMaxCookies`) and 180 partitioned ones
+(`kPerPartitionDomainMaxCookies`). Every name past them, and every name the
+table below cannot hold, is counted at offset 16 of the read record, so an
+absent name record is never silent.
+
 Reads are frequent, so each renderer aggregates them per frame, thread, API,
-script frame and name in a 256-entry table per configuration. A key records its 1st,
-2nd, 4th, 8th and later power-of-two reads, each with the reads since the
-previous record, and its remainder when the configuration ends. A new key
-while the table is full is recorded alone with bit 3.
+script frame, name and read record in a 4,096-key table per configuration:
+one script position reading a jar of 100 cookies uses 101 keys. A key records
+its 1st, 2nd, 4th, 8th and later power-of-two reads, each with the reads since
+the previous record, and its remainder when the configuration ends. A read
+that had unrecorded names is recorded at once and alone: its read record has
+count 1 and that read's count of them, and earlier reads still waiting for a
+power of two keep waiting. So a name no record counts never waits in the
+renderer, when no read record counts unrecorded names every name a read held
+has its name record, and the counts of read records with unrecorded names are
+exactly the reads that had them. A new read record or Cookie
+Store read while the table is full is recorded alone with bit 3; a new name
+then is counted on its read record instead. The table is open-addressed at
+most half full, so a lookup is a hash and a few probes; it is allocated when a
+content-capture configuration starts, on the transport sequence (336 KiB),
+and freed when it ends, so the sink never allocates on a read and a
+metadata-only session holds none. Blink hands the sink the jar through
+`blink::StringUtf8Adaptor` (patch 0028): an 8-bit ASCII jar is read in place,
+and any other jar is converted to UTF-8 once per read, which allocates that
+string while content capture is on.
 
 #### Cookie bounds
 
@@ -1706,9 +1832,14 @@ while the table is full is recorded alone with bit 3.
 - A sent and a received list per hop, at most 2 MiB each, sharing the header
   table and budget.
 - Script cookie records: one per write, at most 2 + log2(reads) per read key,
-  and one per read past the table; each is one 320-byte record, one SHA-256 of
+  one per read past the table, and one read record per read with unrecorded
+  names; each is one 320-byte record, one SHA-256 of
   the value and a one-frame stack capture. With request stacks on, a write
   walks its stack instead, inside the request stack bounds.
+- A `document.cookie` read: one pass over the returned string, at most 360
+  table lookups and at most 361 records (its first read). The configuration
+  end records at most 4,096 remainders into the renderer's 8,192-record ring;
+  a full ring counts them as drops, as for any record.
 
 #### Cookie agent access and UI
 
@@ -1728,7 +1859,23 @@ most 64 distinct positions per answer, the rest counted in
 `stacks_unresolved`.
 Cookie values are withheld as `value_withheld: true` with their byte length
 and SHA-256, like credential headers; a script write links to a sent cookie
-when their value digests are equal.
+when their value digests are equal. A `document.cookie` read joins a name by
+its version 3 name record. `read_coverage` counts the reads that may hold the
+name without naming it: `whole_jar_reads` (version 1 and 2 reads, recorded
+before names were), `reads_with_unrecorded_names` with their
+`unrecorded_names`, and `unnamed_store_reads` (`cookieStore.get` or `getAll`
+with no name, which read every cookie they can); and `records_dropped`, the
+records full queues dropped, since a lost record may have named it. A drop is
+a gap record of the session of any category or process, read at or after the
+oldest record provenance read, whose payload is not a named reason (an
+identifier category of at most 32 bytes and reason of at most 128, payload
+not truncated): it weighs its decimal count, or 1. Any category, because a
+renderer's drop gap takes the category, time and process of the last record
+the host drained before it (`MakeNativeProbeGapEvent`), so a flood of canvas
+records that hides a `script_cookie` record writes a `canvas` gap. `complete`
+is true only when all are zero, so an absent read is proof only then.
+`reads_with_unrecorded_names` counts exactly the reads that had unrecorded
+names, since each such read is its own record of count 1.
 
 Origin Trace's **Cookies** tab shows Request cookies, with "Show filtered out
 request cookies" listing excluded ones and each reason, and Response cookies
@@ -1739,8 +1886,9 @@ provenance. Values are inserted as text after a size and SHA-256 check.
 
 ### Bounds and hot path
 
-- Disabled or metadata-only: unchanged. The proxy adds no ID, and the hook
-  costs one atomic load per DevTools raw notification.
+- Disabled or metadata-only: unchanged. The proxy adds no ID, the hook
+  costs one atomic load per DevTools raw notification, and an early-hints
+  factory costs one atomic load and is built as stock.
 - 320 KiB per block: Chromium's 256 KiB response header bound
   (`HttpStreamParser::kMaxHeaderBufSize`, `kSpdyMaxHeaderListSize`) plus the
   byte `: ` normalization can add to a line of at least 4 bytes. Request blocks
@@ -1772,6 +1920,60 @@ their byte length: like request bodies, they stay in the binary artifact, which
 MCP never inlines. Withholding goes by name, so another value, such as a
 `Location` query, is returned as captured.
 
+### Missing final blocks
+
+A content session records a `browser` request block for every hop, so a hop
+with one and no `network` block is a request the network service did not
+report. Its reason comes from the request's own browser records (those with a
+browser context), decided in this order:
+
+| Reason | When | Meaning |
+| --- | --- | --- |
+| `in_progress` | The final hop, before `request_completed` or `request_failed` | Not an outcome yet; never counted |
+| `download` | `request_started` has loader kind 2 | Downloads use the browser-process factory, which has no observer ([binding](#network-service-binding-at-the-pinned-chromium)) |
+| `service_worker` | The final hop's `response_started` has flag 4 | A service worker answered; nothing reached the network |
+| `from_cache` | The final hop's `response_started` has flag 2 | The HTTP cache answered without sending a request, so there are no sent headers or cookies; DevTools shows provisional headers too |
+| `failed` | The final hop ended with `request_failed` and no response | It failed before the network service reported what it sent |
+| `redirect_not_sent` | An earlier hop, while a later hop of the request has a `network` block | The factory observes and tracks the request, so nothing was sent for this hop: an internal redirect, such as an HSTS upgrade, or one the HTTP cache answered |
+| `not_reported` | Anything else | No observer on its factory, or the block arrived for a request the sink no longer tracked (the unattributed count) |
+| `record_dropped` | In place of `redirect_not_sent`, `not_reported` or `no_raw_response`, when a drop (as for `read_coverage` above) of the session falls between the request's first record and one second after its last, or after its first while it is open | A full queue dropped records while it ran, so the block may have been sent and lost. The second covers the browser writer, which reports drops on its next wake, at most 250 ms later, and then sends its batch. A reason drawn from a record that is there (cache, service worker, download, failure, still open) stands |
+
+`get_request_headers` gives each hop `network_block_missing` and
+`get_request_cookies` gives each hop `sent_missing` (the same reasons, a later
+hop's sent list standing for its network block) and, for a hop with a sent
+list but no received one, `received_missing`: `in_progress`, `failed` (before
+a response), `no_raw_response`, since the received list comes with the
+response headers and what was sent was reported, or `record_dropped` in its
+place under the rule above. The backend reads the session's gap records of
+every category beside the request's own, from a tally it keeps per store: the
+first read scans the newest 64 MiB for gaps, a later one only the bytes
+appended since and none while the store is unchanged, and a store that shrank,
+was replaced or was cleared and written again (the bytes before the last
+boundary changed, as the request index checks) is scanned again. So a Headers,
+Cookies or provenance read costs its own records, not a 64 MiB scan.
+Origin Trace's Headers tab adds the reason to "Provisional headers are shown",
+and the Cookies tab lists each such hop with it.
+
+`get_session_summary` counts, over the newest 64 MiB of events:
+
+- every header block and cookie list in states 4 to 8, as
+  `request_content_not_retained` with category `request_headers`,
+  `response_headers` or `cookie_list` and the state as its reason;
+- the unattributed blocks and lists, the newest count each producer carried,
+  as `network_headers_unattributed`;
+- the requests whose final hop ended without a `network` block, one
+  `final_headers_missing` check per reason: `info` for `download`,
+  `service_worker`, `from_cache` and `failed`, `warning` for `not_reported`
+  and `record_dropped` (a drop of any category while the request ran).
+  It follows at most 131,072 browser requests; header records of later ones
+  are counted as `final_headers_untracked`. A request with no header record
+  (any request of a metadata-only session) has no final block to miss and is
+  never counted there.
+
+The Traffic footer shows the same counts for the loaded rows as one item,
+"N header gaps", whose breakdown lists each count with its reason, so the
+footer stays one item however many reasons there are.
+
 ### Consumers
 
 - The broker accepts types 30 and 31 only when `IsValidEvent` does. The
@@ -1780,8 +1982,9 @@ MCP never inlines. Withholding goes by name, so another value, such as a
 - Origin Trace's **Headers** tab shows General (URL, method, status, remote
   address, referrer policy), Response headers and Request headers per hop. A
   hop with only a `browser` request block reads "Provisional headers are
-  shown". Each section collapses and has a Raw view and copy actions. Values
-  are inserted as text after a size and SHA-256 check.
+  shown" with its [reason](#missing-final-blocks). Each section collapses and
+  has a Raw view and copy actions. Values are inserted as text after a size
+  and SHA-256 check.
 
 ### Validation
 
@@ -1792,9 +1995,21 @@ out-of-order raw notifications, early hints, pseudo-headers, sharing, a
 It also drives sent and received cookie lists with blocked cookies, an
 unparsed `Set-Cookie`, sharing and late lists. `make native-probe-admission-check`
 drives the renderer cookie sink: disabled, metadata-only, writes, read
-aggregation, a full table and the configuration-end remainder.
+aggregation, a full table and the configuration-end remainder, and per-name
+reads: the page's split, a name held twice, the empty jar, the 360-name bound,
+a table that fills during a read, a read with unrecorded names recorded at once
+(also past its powers of two), and that the sink allocates nothing on a read. The capture check also asserts that
+`NativeNetworkHeadersObserved`, the gate of patch 0058, holds only for a
+current content session with the Network category before its expiry.
+`tools/check-header-observer-patch.py` refuses an agentless observer outside
+the early-hints factory or without that gate.
 `make native-tests` and `make network-request-wire-check` compare the C++
-verdicts with the Python validator and the shipped decoders.
+verdicts with the Python validator and the shipped decoders. The backend's
+`request_headers`, `request_cookies` and `session_summary` tests and
+`tools/check-traffic-headers-ui.mjs`, `check-traffic-cookies-ui.mjs` and
+`check-native-only-ui.mjs` check each missing-block reason, the per-name read
+coverage, the refusal counts and the footer. Patch 0058 was replayed on the
+pinned sources; it has not been compiled.
 
 ### Acceptance
 
@@ -1811,6 +2026,12 @@ Still required before declaring this browser-ready:
    SameSite and Secure variants, compare the sent, received and blocked
    cookies with what the server saw, and link the JavaScript write to its
    script position.
+5. On the same fixture, read `document.cookie` from two script positions and
+   confirm each cookie's provenance lists both reads with their counts.
+6. Serve a 103 with a cookie-carrying `Link` preload and confirm the preload
+   has a `network` block and both cookie lists. With DevTools open on the
+   page, and on a shared worker that fetches a subresource, confirm
+   `hasExtraInfo` and the `*ExtraInfo` events match a build without patch 0058.
 
 ## Request initiator stacks
 

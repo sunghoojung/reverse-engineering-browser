@@ -43,7 +43,7 @@ segments that name scheduling stacks no record here describes.
 - **One decode per stack.** Records are grouped by `(process_id, isolate,
   digest)`, the isolate being the record's
   [stack scope](native-network-v3.md#stack-scope) (version 3 request stacks,
-  version 2 `async_task_stack`, version 2 `script_cookie`; earlier versions are
+  version 2 `async_task_stack`, version 2 and 3 `script_cookie`; earlier versions are
   the document's). Each distinct stack is decoded once and weighted by how many
   records named it.
 - **One read per source.** Every offset any frame names is gathered per script

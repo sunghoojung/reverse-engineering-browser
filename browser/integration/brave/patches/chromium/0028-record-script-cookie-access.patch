@@ -9,7 +9,15 @@ diff --git a/third_party/blink/renderer/core/loader/cookie_jar.cc b/third_party/
  #include "mojo/public/cpp/base/shared_memory_version.h"
  #include "services/network/public/mojom/restricted_cookie_manager.mojom-forward.h"
  #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
-@@ -47,6 +48,17 @@ enum class CookieCacheLookupResult {
+@@ -29,6 +30,7 @@
+ #include "third_party/blink/renderer/platform/weborigin/kurl_hash.h"
+ #include "third_party/blink/renderer/platform/wtf/hash_functions.h"
+ #include "third_party/blink/renderer/platform/wtf/text/string_hash.h"
++#include "third_party/blink/renderer/platform/wtf/text/string_utf8_adaptor.h"
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+ 
+ namespace blink {
+@@ -47,6 +49,17 @@ enum class CookieCacheLookupResult {
  constexpr char kFirstCookieRequestHistogram[] =
      "Blink.Experimental.Cookies.FirstCookieRequest";
  
@@ -27,7 +35,7 @@ diff --git a/third_party/blink/renderer/core/loader/cookie_jar.cc b/third_party/
  }  // namespace
  
  // Controls whether we apply an artificial delay to priming the CookieJar access
-@@ -94,6 +106,10 @@ bool CookieJar::SetCookie(const String& value) {
+@@ -94,6 +107,10 @@ bool CookieJar::SetCookie(const String& value) {
        document_->GetExecutionContext()->GetStorageAccessApiStatus(),
        is_ad_tagged, apply_devtools_overrides, value);
    last_operation_was_set_ = true;
@@ -38,13 +46,15 @@ diff --git a/third_party/blink/renderer/core/loader/cookie_jar.cc b/third_party/
  
    base::TimeDelta elapsed = timer.Elapsed();
    base::UmaHistogramTimes("Blink.SetCookieTime", elapsed);
-@@ -215,6 +231,10 @@ String CookieJar::Cookies() {
+@@ -215,6 +232,12 @@ String CookieJar::Cookies() {
    if (is_first_operation_) {
      LogFirstCookieRequest(FirstCookieRequest::kFirstOperationWasGet);
    }
 +  if (::reb::NativeScriptCookieSink::Get().IsEnabled()) [[unlikely]] {
++    // An ASCII jar is read in place; only another one is converted to UTF-8.
++    const StringUtf8Adaptor cookies(last_cookies_);
 +    ::reb::NativeScriptCookieSink::Get().RecordDocumentCookieGet(
-+        last_cookies_.Utf8().size(), NativeScriptCookieFrameId(*document_));
++        cookies.AsStringView(), NativeScriptCookieFrameId(*document_));
 +  }
    return last_cookies_;
  }

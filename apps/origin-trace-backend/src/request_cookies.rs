@@ -10,8 +10,11 @@ use std::path::Path;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::event_window;
 use crate::evidence;
-use crate::request_headers::{STATES, child_payload, le};
+use crate::request_headers::{
+    Drops, STATES, child_payload, le, lifecycle_of, provisional_hops, qualified, span_of,
+};
 use crate::request_stack;
 
 const LIST_LIMIT: usize = 2 * 1024 * 1024;
@@ -269,6 +272,11 @@ fn describe_cookie(cookie: &Cookie) -> Value {
     out
 }
 
+/// A valid cookie list record's state and unattributed count.
+pub(crate) fn list_facts(event: &Value) -> Option<(u8, u32)> {
+    decode_list(event).map(|list| (list.state, list.unattributed))
+}
+
 /// The verified cookies of a retained list, or the reason none are shown.
 fn read_list(
     event: &Value,
@@ -364,9 +372,11 @@ fn parent_key(event: &Value) -> (u64, String) {
     )
 }
 
-/// Cookie lists of `request_id` in `session_id`, grouped by hop.
+/// Cookie lists of `request_id` in `session_id`, grouped by hop. `drops` are
+/// the session's, which say whether a list may have been lost.
 pub fn build(
     events: &[Value],
+    drops: &Drops,
     artifacts: &[Value],
     root: &Path,
     session: &str,
@@ -403,9 +413,47 @@ pub fn build(
             entry.1.push(described);
         }
     }
+    // A content session records a provisional block for every hop; a hop
+    // the network never reported has no list, and says why.
+    let (provisional, process) = provisional_hops(events, session, request);
+    let lifecycle = lifecycle_of(events, session, request, process);
+    let dropped = span_of(events, session, request, process)
+        .is_some_and(|(first, last)| drops.during(first, last, lifecycle.ended));
+    let last = provisional.iter().next_back().copied();
+    for hop in &provisional {
+        hops.entry(*hop).or_default();
+    }
+    // A sent list comes with the raw request, so a later hop's list means the
+    // factory observed and tracked the request.
+    let sent_hops: BTreeSet<u32> = hops
+        .iter()
+        .filter(|(_, (sent, _))| !sent.is_empty())
+        .map(|(hop, _)| *hop)
+        .collect();
     let hops: Vec<Value> = hops
         .into_iter()
-        .map(|(hop, (sent, received))| json!({"hop": hop, "sent": sent, "received": received}))
+        .map(|(hop, (sent, received))| {
+            let counted = provisional.contains(&hop);
+            let later_reported = sent_hops.range(hop + 1..).next().is_some();
+            let sent_missing = if counted && sent.is_empty() {
+                json!(qualified(
+                    lifecycle.missing_reason(Some(hop) == last, later_reported),
+                    dropped
+                ))
+            } else {
+                Value::Null
+            };
+            let received_missing = if counted && !sent.is_empty() && received.is_empty() {
+                json!(qualified(
+                    lifecycle.missing_received_reason(Some(hop) == last),
+                    dropped
+                ))
+            } else {
+                Value::Null
+            };
+            json!({"hop": hop, "sent": sent, "received": received,
+                "sent_missing": sent_missing, "received_missing": received_missing})
+        })
         .collect();
     json!({
         "session_id": session,
@@ -430,6 +478,11 @@ pub(crate) struct Script {
     /// The isolate its frame and stack are read in: version 1 is the
     /// document's; version 2 names it. None when version 2 names no thread.
     pub(crate) scope: Option<request_stack::Scope>,
+    /// A `document.cookie` read of the whole jar, with no name: every version
+    /// 1 and 2 read, and a version 3 read record (flag bit 4).
+    read_record: bool,
+    /// A version 3 read record's names that no name record counts.
+    unrecorded_names: u32,
 }
 
 /// The C++ core's rules for the renderer's script_cookie record.
@@ -462,7 +515,7 @@ pub(crate) fn decode_script(event: &Value) -> Option<Script> {
         return None;
     }
     let version = le(&bytes[0..2]);
-    if !matches!(version, 1 | 2) {
+    if !matches!(version, 1..=3) {
         return None;
     }
     let frame_id = event["frame_id"].as_str()?.parse::<u64>().ok()?;
@@ -479,18 +532,31 @@ pub(crate) fn decode_script(event: &Value) -> Option<Script> {
     } else {
         thread == 0 || scope.is_some()
     };
+    // Version 3: a document.cookie read is a nameless read record (bit 4),
+    // whose offset 16 counts unrecorded names, or one name it returned.
+    let flagged_read = bytes[5] & 16 != 0;
     let script = Script {
         api: bytes[4],
         flags: bytes[5],
         count: le(&bytes[8..12]) as u32,
         name_length: le(&bytes[12..16]) as u32,
-        value_length: le(&bytes[16..20]) as u32,
+        value_length: if flagged_read {
+            0
+        } else {
+            le(&bytes[16..20]) as u32
+        },
         string_length: le(&bytes[20..24]) as u32,
         frame: bytes[24..40].try_into().ok()?,
         stack: bytes[40..72].try_into().ok()?,
         value: bytes[72..104].try_into().ok()?,
         prefix: bytes[104..128].try_into().ok()?,
         scope,
+        read_record: bytes[4] == 2 && (version < 3 || flagged_read),
+        unrecorded_names: if flagged_read {
+            le(&bytes[16..20]) as u32
+        } else {
+            0
+        },
     };
     let zero = |slice: &[u8]| slice.iter().all(|byte| *byte == 0);
     let write = matches!(script.api, 1 | 3 | 6);
@@ -502,8 +568,17 @@ pub(crate) fn decode_script(event: &Value) -> Option<Script> {
         && frame[1] & !3 == 0;
     let recorded = script.flags & 2 != 0;
     let stacked = script.flags & 4 != 0;
+    let flag_mask = if version == 3 { 0x1f } else { 0x0f };
+    let reads_shaped = if flagged_read {
+        script.api == 2 && script.name_length == 0
+    } else {
+        version < 3
+            || script.api != 2
+            || (script.flags & 8 == 0 && script.string_length >= script.name_length)
+    };
     let valid = (1..=6).contains(&script.api)
-        && script.flags & !0x0f == 0
+        && script.flags & !flag_mask == 0
+        && reads_shaped
         && scoped
         && bytes[7] == 0
         && (script.scope.is_some() || !recorded)
@@ -549,6 +624,8 @@ fn describe_script(event: &Value, script: &Script) -> Value {
         "value_sha256": if matches!(script.api, 1 | 3 | 6) { json!(hex::encode(script.value)) } else { Value::Null },
         "string_bytes": script.string_length,
         "table_full": script.flags & 8 != 0,
+        "read_record": script.read_record,
+        "unrecorded_names": script.unrecorded_names,
         "script_frame": if script.flags & 2 != 0 {
             json!({"kind": if frame[0] == 2 { "wasm" } else { "javascript" },
                 "constructor": frame[1] & 1 != 0, "script_id": le(&frame[4..8]),
@@ -572,6 +649,7 @@ pub type IndexedIdentities = (
 /// Everything in `events` that touched cookie `name` in `session_id`.
 pub fn provenance(
     events: &[Value],
+    drops: &Drops,
     artifacts: &[Value],
     root: &Path,
     session: &str,
@@ -611,6 +689,14 @@ pub fn provenance(
     let mut stacks: HashMap<(u64, request_stack::Scope, [u8; 16], [u8; 32]), Value> =
         HashMap::new();
     let mut stacks_unresolved = 0u64;
+    // document.cookie reads that returned the jar without naming each cookie
+    // in it: they may include this name, so `script` is then not complete.
+    let mut whole_jar_reads = 0u64;
+    let mut unrecorded_reads = 0u64;
+    let mut unrecorded_names = 0u64;
+    // cookieStore.get or getAll with no name reads every cookie it can, and
+    // a record a full queue dropped may have named this one.
+    let mut unnamed_store_reads = 0u64;
     let mut ordered: Vec<&Value> = events
         .iter()
         .filter(|event| event["session_id"] == session && event["category"] == "network")
@@ -621,10 +707,34 @@ pub fn provenance(
             .and_then(|text| text.parse::<u64>().ok())
             .unwrap_or(0)
     });
+    // A full queue may have dropped a record that named this cookie: a gap of
+    // any category, since a renderer's gap takes the category of the last
+    // record drained before it, at or after the oldest record read.
+    let oldest = ordered
+        .first()
+        .and_then(|event| event_window::unsigned(&event["monotonic_time_ns"]))
+        .unwrap_or(0);
     for event in ordered {
         match event["type"].as_str() {
             Some("script_cookie") => match decode_script(event) {
-                Some(script) if names_match(&script, wanted) => {
+                Some(script) if script.read_record => {
+                    if script.flags & 16 == 0 {
+                        whole_jar_reads += u64::from(script.count);
+                    } else if script.unrecorded_names != 0 {
+                        unrecorded_reads += u64::from(script.count);
+                        unrecorded_names += u64::from(script.unrecorded_names);
+                    }
+                }
+                Some(script)
+                    if names_match(&script, wanted)
+                        || (matches!(script.api, 4 | 5) && script.name_length == 0) =>
+                {
+                    if matches!(script.api, 4 | 5) && script.name_length == 0 {
+                        unnamed_store_reads += u64::from(script.count);
+                        if !names_match(&script, wanted) {
+                            continue;
+                        }
+                    }
                     let mut item = describe_script(event, &script);
                     if let (true, Some(scope)) = (script.flags & 2 != 0, script.scope) {
                         let process = event["process_id"].as_u64().unwrap_or(0);
@@ -706,6 +816,7 @@ pub fn provenance(
             _ => {}
         }
     }
+    let records_dropped = drops.between(oldest, None);
     // A sent value equal to a script write's value names that write.
     for item in &mut sent_with {
         let written: Vec<Value> = scripts
@@ -724,6 +835,17 @@ pub fn provenance(
         "lists_read": lists.len(),
         "lists_unread": unread.len(),
         "stacks_unresolved": stacks_unresolved,
+        "read_coverage": {
+            "complete": whole_jar_reads == 0
+                && unrecorded_reads == 0
+                && unnamed_store_reads == 0
+                && records_dropped == 0,
+            "whole_jar_reads": whole_jar_reads,
+            "reads_with_unrecorded_names": unrecorded_reads,
+            "unrecorded_names": unrecorded_names,
+            "unnamed_store_reads": unnamed_store_reads,
+            "records_dropped": records_dropped,
+        },
         "malformed_records": malformed,
     })
 }
@@ -910,7 +1032,7 @@ mod tests {
             ),
         ];
         events[1]["frame_id"] = json!("99");
-        let result = build(&events, &artifacts, &root, "7", "17");
+        let result = build(&events, &Drops::default(), &artifacts, &root, "7", "17");
         assert_eq!(result["unattached_records"], 1);
         assert_eq!(result["malformed_records"], json!(["15"]));
         let hop = &result["hops"][0];
@@ -935,8 +1057,73 @@ mod tests {
         );
         assert_eq!(unparsed["line_bytes"], 6);
         assert!(!result.to_string().contains("token-"));
+        assert_eq!(hop["sent_missing"], Value::Null);
+        assert_eq!(hop["received_missing"], Value::Null);
+        // A content session's hop with only a provisional block has no list,
+        // and says why; so does a sent list without a received one.
+        let mut provisional = vec![0u8; 128];
+        provisional[0] = 1;
+        provisional[2] = 128;
+        provisional[4] = 1;
+        provisional[5] = 3;
+        provisional[6] = 4;
+        provisional[16] = 1;
+        provisional[48..80].fill(0x5a);
+        let mut hops = events.clone();
+        hops.push(json!({"session_id":"7","request_id":"17","category":"network",
+            "type":"request_redirected","process_id":42,"sequence_number":"20","monotonic_time_ns":"20"}));
+        hops.push(record("request_headers", 21, 20, &provisional, "0"));
+        provisional[16] = 0;
+        hops.push(record("request_headers", 22, 11, &provisional, "0"));
+        hops.push(json!({"session_id":"7","request_id":"17","category":"network",
+            "type":"request_failed","process_id":42,"sequence_number":"23","monotonic_time_ns":"23","flags":0}));
+        let missing = build(&hops, &Drops::default(), &artifacts, &root, "7", "17");
+        assert_eq!(missing["hops"][1]["hop"], 1);
+        assert_eq!(missing["hops"][1]["sent_missing"], "failed");
+        assert_eq!(missing["hops"][1]["received_missing"], Value::Null);
+        assert_eq!(missing["hops"][0]["sent_missing"], Value::Null);
+        // A sent list without a received one has its own reason, and a hop
+        // before one with a sent list sent nothing.
+        let mut sent_only: Vec<Value> = hops
+            .iter()
+            .filter(|event| event["sequence_number"] != "13")
+            .cloned()
+            .collect();
+        sent_only.push(record(
+            "cookie_list",
+            24,
+            20,
+            &list_payload(true, 3, b"", 0, 0, 1),
+            "0",
+        ));
+        let received = build(&sent_only, &Drops::default(), &artifacts, &root, "7", "17");
+        assert_eq!(received["hops"][0]["received_missing"], "no_raw_response");
+        // A drop while it ran makes the absent response list unsure.
+        let gap = json!({"session_id":"7","type":"gap","category":"canvas","process_id":42,
+            "sequence_number":"40","monotonic_time_ns":"12","payload":hex::encode("1"),
+            "payload_truncated":false});
+        let lossy = build(
+            &sent_only,
+            &Drops::of(&[gap], "7"),
+            &artifacts,
+            &root,
+            "7",
+            "17",
+        );
+        assert_eq!(lossy["hops"][0]["received_missing"], "record_dropped");
+        assert_eq!(lossy["hops"][1]["received_missing"], "failed");
+        assert_eq!(received["hops"][1]["sent_missing"], Value::Null);
+        assert_eq!(received["hops"][1]["received_missing"], "failed");
 
-        let origin = provenance(&events, &artifacts, &root, "7", "_abck", &no_index);
+        let origin = provenance(
+            &events,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "_abck",
+            &no_index,
+        );
         assert_eq!(
             origin["set_by"][0]["exclusion_reasons"],
             json!(["samesite_none_insecure"])
@@ -952,10 +1139,241 @@ mod tests {
         );
         assert_eq!(origin["lists_read"], 2);
         assert!(!origin.to_string().contains("token-"));
-        let none = provenance(&events, &artifacts, &root, "7", "pref", &no_index);
+        let none = provenance(
+            &events,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "pref",
+            &no_index,
+        );
         assert_eq!(none["sent_with"][0]["blocked"], true);
         assert_eq!(none["script"], json!([]));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A `document.cookie` read: version 3 with `name`, else the whole jar.
+    fn read_payload(
+        version: u8,
+        name: &[u8],
+        read_record: bool,
+        count: u32,
+        unrecorded: u32,
+    ) -> Vec<u8> {
+        let mut out = script_payload(2, name, b"");
+        out[0] = version;
+        out[6] = if version >= 2 { 1 } else { 0 };
+        out[5] = 2 | if read_record { 16 } else { 0 };
+        out[8..12].copy_from_slice(&count.to_le_bytes());
+        out[16..20].copy_from_slice(&unrecorded.to_le_bytes());
+        out[20..24].copy_from_slice(&40u32.to_le_bytes());
+        out[72..104].fill(0);
+        out
+    }
+
+    #[test]
+    fn document_cookie_reads_join_provenance_by_name() {
+        let root = std::env::temp_dir().join(format!("reb-cookie-reads-{}", std::process::id()));
+        let events = vec![
+            record(
+                "script_cookie",
+                5,
+                0,
+                &read_payload(3, b"_abck", false, 4, 0),
+                "0",
+            ),
+            record(
+                "script_cookie",
+                6,
+                0,
+                &read_payload(3, b"pref", false, 1, 0),
+                "0",
+            ),
+            record(
+                "script_cookie",
+                7,
+                0,
+                &read_payload(3, b"", true, 2, 3),
+                "0",
+            ),
+            record(
+                "script_cookie",
+                8,
+                0,
+                &read_payload(3, b"", true, 1, 0),
+                "0",
+            ),
+            record(
+                "script_cookie",
+                9,
+                0,
+                &read_payload(2, b"", false, 5, 0),
+                "0",
+            ),
+        ];
+        let origin = provenance(
+            &events,
+            &Drops::default(),
+            &[],
+            &root,
+            "7",
+            "_abck",
+            &no_index,
+        );
+        assert_eq!(origin["malformed_records"], json!([]));
+        assert_eq!(origin["script"].as_array().unwrap().len(), 1);
+        let read = &origin["script"][0];
+        assert_eq!(read["api"], "document.cookie get");
+        assert_eq!(read["count"], 4);
+        assert_eq!(read["read_record"], false);
+        assert_eq!(read["script_frame"]["position"], 1234);
+        assert_eq!(read["value_sha256"], Value::Null);
+        assert_eq!(
+            origin["read_coverage"],
+            json!({"complete": false, "whole_jar_reads": 5, "reads_with_unrecorded_names": 2,
+                "unrecorded_names": 3, "unnamed_store_reads": 0, "records_dropped": 0})
+        );
+        // Only reads that named every cookie leave the coverage complete.
+        let named = provenance(
+            &events[..2],
+            &Drops::default(),
+            &[],
+            &root,
+            "7",
+            "_abck",
+            &no_index,
+        );
+        assert_eq!(named["read_coverage"]["complete"], true);
+        // cookieStore.getAll() and get({url}) name no cookie, so they may have
+        // read this one; a dropped record may have named it.
+        let mut unnamed = events[..2].to_vec();
+        let mut store = script_payload(5, b"", b"");
+        store[5] = 2;
+        store[8..12].copy_from_slice(&3u32.to_le_bytes());
+        store[16..24].fill(0);
+        store[72..104].fill(0);
+        unnamed.push(record("script_cookie", 10, 0, &store, "0"));
+        let coverage = provenance(
+            &unnamed,
+            &Drops::default(),
+            &[],
+            &root,
+            "7",
+            "_abck",
+            &no_index,
+        );
+        assert_eq!(coverage["malformed_records"], json!([]));
+        assert_eq!(coverage["read_coverage"]["unnamed_store_reads"], 3);
+        assert_eq!(coverage["read_coverage"]["complete"], false);
+        assert_eq!(coverage["script"].as_array().unwrap().len(), 1);
+        // ...and the empty name still lists it, as its own read.
+        let empty = provenance(&unnamed, &Drops::default(), &[], &root, "7", "", &no_index);
+        assert_eq!(empty["script"].as_array().unwrap().len(), 1);
+        // A full queue may have dropped a record that named it, in a gap of any
+        // category: a renderer's gap takes the category of the last record it
+        // drained, here a canvas one. A gap before the oldest record read is
+        // outside the window, and a named gap is a reason, not a loss.
+        let gap = |sequence: u64, time: &str, category: &str, payload: &str| {
+            let mut gap = record("gap", sequence, 0, b"", "0");
+            gap["category"] = json!(category);
+            gap["monotonic_time_ns"] = json!(time);
+            gap["payload"] = json!(hex::encode(payload));
+            gap["payload_size"] = json!(payload.len());
+            gap
+        };
+        let window = &events[..2];
+        let lost = provenance(
+            window,
+            &Drops::of(&[gap(11, "6", "canvas", "2")], "7"),
+            &[],
+            &root,
+            "7",
+            "_abck",
+            &no_index,
+        );
+        assert_eq!(lost["read_coverage"]["records_dropped"], 2);
+        assert_eq!(lost["read_coverage"]["complete"], false);
+        let older = provenance(
+            window,
+            &Drops::of(&[gap(11, "4", "canvas", "2")], "7"),
+            &[],
+            &root,
+            "7",
+            "_abck",
+            &no_index,
+        );
+        assert_eq!(older["read_coverage"]["complete"], true);
+        let reason = gap(11, "6", "network", "service_worker_end_lost");
+        let kept = provenance(
+            window,
+            &Drops::of(&[reason], "7"),
+            &[],
+            &root,
+            "7",
+            "_abck",
+            &no_index,
+        );
+        assert_eq!(kept["read_coverage"]["complete"], true);
+        let mut other = gap(11, "6", "canvas", "2");
+        other["session_id"] = json!("8");
+        let elsewhere = provenance(
+            window,
+            &Drops::of(&[other], "7"),
+            &[],
+            &root,
+            "7",
+            "_abck",
+            &no_index,
+        );
+        assert_eq!(elsewhere["read_coverage"]["complete"], true);
+        // Unrecorded names add up across read records.
+        let mut twice = events[..2].to_vec();
+        twice.push(record(
+            "script_cookie",
+            12,
+            0,
+            &read_payload(3, b"", true, 1, 3),
+            "0",
+        ));
+        twice.push(record(
+            "script_cookie",
+            13,
+            0,
+            &read_payload(3, b"", true, 1, 2),
+            "0",
+        ));
+        let summed = provenance(
+            &twice,
+            &Drops::default(),
+            &[],
+            &root,
+            "7",
+            "_abck",
+            &no_index,
+        );
+        assert_eq!(summed["read_coverage"]["reads_with_unrecorded_names"], 2);
+        assert_eq!(summed["read_coverage"]["unrecorded_names"], 5);
+        // A read record has no name, and a name read is never recorded alone.
+        assert!(
+            decode_script(&record(
+                "script_cookie",
+                5,
+                0,
+                &read_payload(3, b"a", true, 1, 0),
+                "0"
+            ))
+            .is_none()
+        );
+        let mut full = read_payload(3, b"a", false, 1, 0);
+        full[5] |= 8;
+        assert!(decode_script(&record("script_cookie", 5, 0, &full, "0")).is_none());
+        let mut unrecorded = read_payload(3, b"a", false, 1, 0);
+        unrecorded[16] = 1;
+        assert!(decode_script(&record("script_cookie", 5, 0, &unrecorded, "0")).is_none());
+        let mut legacy_flag = read_payload(2, b"", true, 1, 0);
+        legacy_flag[16] = 0;
+        assert!(decode_script(&record("script_cookie", 5, 0, &legacy_flag, "0")).is_none());
     }
 
     #[test]
@@ -1006,7 +1424,15 @@ mod tests {
             record("script_identity", 6, 5, &identity, "0"),
         ];
         events[1]["request_id"] = json!("0");
-        let origin = provenance(&events, &artifacts, &root, "7", "sid", &no_index);
+        let origin = provenance(
+            &events,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "sid",
+            &no_index,
+        );
         let stack = &origin["script"][0]["stack"];
         let digest = hex::encode(Sha256::digest(&walked));
         assert_eq!(
@@ -1036,7 +1462,15 @@ mod tests {
             },
             "0",
         );
-        let origin = provenance(&events, &artifacts, &root, "7", "sid", &no_index);
+        let origin = provenance(
+            &events,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "sid",
+            &no_index,
+        );
         let stack = &origin["script"][0]["stack"];
         assert_eq!(
             (stack["digest"].clone(), stack["frames_retained"].clone()),
@@ -1058,18 +1492,40 @@ mod tests {
                 false,
             )
         };
-        let found = provenance(&without, &artifacts, &root, "7", "sid", &from_index);
+        let found = provenance(
+            &without,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "sid",
+            &from_index,
+        );
         assert_eq!(resolution_of(&found)["status"], "resolved");
         // An index that cannot answer for every identity leaves it unknown.
-        let unknown = provenance(&without, &artifacts, &root, "7", "sid", &|_| {
-            (HashMap::new(), false)
-        });
+        let unknown = provenance(
+            &without,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "sid",
+            &|_| (HashMap::new(), false),
+        );
         assert_eq!(
             resolution_of(&unknown)["reason"],
             "script_identity_outside_scan"
         );
         // Only a whole-store answer can say it is missing.
-        let missing = provenance(&without, &artifacts, &root, "7", "sid", &no_index);
+        let missing = provenance(
+            &without,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "sid",
+            &no_index,
+        );
         assert_eq!(resolution_of(&missing)["reason"], "script_identity_missing");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1119,7 +1575,15 @@ mod tests {
             record("script_identity", 7, 0, &identity(worker, 4, 0x5157), "0"),
         ];
         events[0]["frame_id"] = json!(0x5157u64.to_string());
-        let origin = provenance(&events, &artifacts, &root, "7", "sid", &no_index);
+        let origin = provenance(
+            &events,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "sid",
+            &no_index,
+        );
         let script = &origin["script"][0];
         assert_eq!(script["thread"], "service_worker");
         let resolution = &script["stack"]["frames"][0]["resolution"];

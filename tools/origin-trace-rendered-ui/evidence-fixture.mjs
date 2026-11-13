@@ -52,6 +52,9 @@ export const HEX_BODY_HOST = 'blob.hex.test';
 export const HEX_BODY_BYTES = 600 * 1024;
 export const RESPONSE_BODY_MARKER = '<img src=x onerror="window.__rebInjected=9">';
 export const HEADER_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=7">';
+// A content-session request the HTTP cache answered: provisional headers
+// only, with the reason ("Missing final blocks" in native-network-v3.md).
+export const CACHED_HEADERS_HOST = 'cdn.cached.test';
 export const COOKIE_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=8">';
 // A retained glue script for Track calls: the real window.hsw binder, decoys
 // in a string and a comment that must never match, and two definitions of
@@ -217,12 +220,12 @@ function requestBodyPayload({state, content, bytes, contentType = 'application/j
 }
 
 // protocol/native-network-v3.md: one header record per block.
-function headerBlockPayload({source, block, status = 0, policy = 0, hop = 0}) {
+function headerBlockPayload({source, block, status = 0, policy = 0, hop = 0, state = 1}) {
   const payload = Buffer.alloc(128);
   payload.writeUInt16LE(1, 0);
   payload.writeUInt16LE(128, 2);
   payload[4] = source;
-  payload[5] = 1;
+  payload[5] = state;
   payload[6] = policy;
   payload.writeUInt32LE(block.toString().split('\r\n').length - 1, 8);
   payload.writeUInt32LE(block.length, 12);
@@ -386,6 +389,16 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
   row(responding, 'request_completed', hex('completed'), {status_code: 200});
   row({...responding, category: 'artifact'}, 'artifact_captured', hex('accepted'),
     {artifact_id: '325', parent_event_id: responded.sequence_number});
+  // Answered by the HTTP cache: its provisional block, refused by the session
+  // budget, is all there is, and the Headers tab and footer say why.
+  const browserContext = template.browser_context_id_high !== '0' || template.browser_context_id_low !== '0'
+    ? {} : {browser_context_id_high: '5', browser_context_id_low: '6'};
+  const cached = {request_id: '3003', ...browserContext};
+  const cachedStart = row(cached, 'request_started', hex(`GET ${CACHED_HEADERS_HOST}`), {resource_type: 2});
+  row(cached, 'request_headers', headerBlockPayload({source: 1, block: Buffer.from('accept: text/css\r\n'), policy: 2, state: 7}),
+    {parent_event_id: cachedStart.sequence_number});
+  row(cached, 'response_started', hex('text/css'), {status_code: 200, flags: 2});
+  row(cached, 'request_completed', hex('completed'), {status_code: 200});
   const responseArtifact = await artifact(artifactsRoot, {artifact_id: '325', session_id: template.session_id, navigation_id: '0',
     frame_id: template.frame_id, creator_event_id: responded.sequence_number, execution_context_id: '0',
     capture_origin: 'network_response', kind: 'response_body', mime_type: 'application/json', sensitive: true,

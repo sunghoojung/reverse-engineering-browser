@@ -670,7 +670,7 @@ def valid_script_cookie(event: dict, payload: bytes) -> bool:
     """The native-network-v3.md script_cookie renderer record."""
     if not (event["protocol_version"] == 3 and event["category"] == "network"
             and event["flags"] == 0 and not event["payload_truncated"] and len(payload) == 128
-            and payload[0] in (1, 2) and payload[1:4] == bytes((0, 128, 0))
+            and payload[0] in (1, 2, 3) and payload[1:4] == bytes((0, 128, 0))
             and event["session_id"] != "0" and event["sequence_number"] != "0"
             and 1 <= event["process_id"] <= 0xFFFFFFFF
             and all(event[key] == "0" for key in ("parent_event_id", "request_id", "artifact_id",
@@ -687,15 +687,24 @@ def valid_script_cookie(event: dict, payload: bytes) -> bool:
     count, name_length, value_length, string_length = at(8, 4), at(12, 4), at(16, 4), at(20, 4)
     kind, frame_flags, combinator, script_id = payload[24], payload[25], at(26, 2), at(28, 4)
     stack, value_digest, prefix = payload[40:72], payload[72:104], payload[104:128]
-    if not 1 <= api <= 6 or flags & ~0x0F or payload[7] or count == 0:
+    version = payload[0]
+    if not 1 <= api <= 6 or flags & ~(0x1F if version == 3 else 0x0F) or payload[7] or count == 0:
         return False
     # Version 2 byte 6: the isolate's stack thread, 0 when none was named
     # (then no frame or stack), 2 to 4 with the worker's context ID as frame_id.
     thread = payload[6]
-    if payload[0] == 1 and thread != 0:
+    if version == 1 and thread != 0:
         return False
-    if thread > 4 or (thread == 0 and payload[0] == 2 and flags & 6) or (
+    if thread > 4 or (thread == 0 and version >= 2 and flags & 6) or (
             thread >= 2 and event["frame_id"] == "0"):
+        return False
+    # Version 3: a document.cookie read is a nameless read record (bit 4),
+    # whose offset 16 counts unrecorded names, or one name it returned; a
+    # name that did not fit the table is counted, never recorded alone.
+    read_record = bool(flags & 16)
+    if read_record and (api != 2 or name_length != 0):
+        return False
+    if version == 3 and api == 2 and not read_record and (flags & 8 or string_length < name_length):
         return False
     write = api in (1, 3, 6)
     truncated = name_length > 24
@@ -704,7 +713,7 @@ def valid_script_cookie(event: dict, payload: bytes) -> bool:
     if write:
         if count != 1 or not any(value_digest) or flags & 8:
             return False
-    elif value_length != 0 or any(value_digest):
+    elif (value_length != 0 and not read_record) or any(value_digest):
         return False
     if api == 1:
         if string_length < name_length + value_length:

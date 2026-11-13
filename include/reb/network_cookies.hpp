@@ -13,8 +13,9 @@ namespace reb {
 // Cookie records, see "Cookies" in protocol/native-network-v3.md. The overlay's
 // common/native_network_cookies.h is the producer half of this ABI.
 inline constexpr std::uint16_t kCookiePayloadVersion = 1;
-// script_cookie version 2 names the isolate of its frame and stack (byte 6).
-inline constexpr std::uint16_t kScriptCookiePayloadVersion = 2;
+// script_cookie version 2 names the isolate of its frame and stack (byte 6);
+// version 3 records each cookie name a document.cookie read returned.
+inline constexpr std::uint16_t kScriptCookiePayloadVersion = 3;
 inline constexpr std::uint32_t kCookieListLimitBytes = 2U * 1024U * 1024U;
 inline constexpr std::uint32_t kCookieListHeaderBytes = 16;
 inline constexpr std::uint32_t kCookieEntryBytes = 64;
@@ -38,6 +39,10 @@ inline constexpr std::uint8_t kScriptCookieNameTruncated = 1U << 0U;
 inline constexpr std::uint8_t kScriptCookieFrameRecorded = 1U << 1U;
 inline constexpr std::uint8_t kScriptCookieStackRecorded = 1U << 2U;
 inline constexpr std::uint8_t kScriptCookieTableFull = 1U << 3U;
+// Version 3: a document.cookie read's own record, with no name; its offset 16
+// counts the names no name record counts. Every other version 3
+// document.cookie read record names one cookie the read returned.
+inline constexpr std::uint8_t kScriptCookieReadRecord = 1U << 4U;
 
 struct CookieListPayload final {
   std::uint16_t protocol_version = kCookiePayloadVersion;
@@ -87,6 +92,7 @@ struct ScriptCookiePayload final {
   std::uint8_t reserved0 = 0;
   std::uint32_t count = 0;
   std::uint32_t name_length = 0;
+  // A write's value length; a version 3 read record's unrecorded names.
   std::uint32_t value_length = 0;
   std::uint32_t string_length = 0;
   ScriptFrame frame;
@@ -200,15 +206,25 @@ template <class Bytes>
   return true;
 }
 
+// Whether a script_cookie record is a document.cookie read of the whole jar:
+// any version 1 or 2 read, and a version 3 read record.
+[[nodiscard]] inline bool IsScriptCookieReadRecord(const ScriptCookiePayload& value) noexcept {
+  return value.api == static_cast<std::uint8_t>(ScriptCookieApi::kDocumentCookieGet) &&
+         (value.protocol_version < kScriptCookiePayloadVersion ||
+          (value.flags & kScriptCookieReadRecord) != 0);
+}
+
 [[nodiscard]] inline bool IsValidScriptCookiePayload(const ScriptCookiePayload& value) noexcept {
   using cookie_detail::Zero;
-  const bool scoped = value.protocol_version == kScriptCookiePayloadVersion;
-  if ((value.protocol_version != kCookiePayloadVersion && !scoped) || value.payload_size != 128 ||
+  const std::uint16_t version = value.protocol_version;
+  const bool scoped = version >= 2 && version <= kScriptCookiePayloadVersion;
+  const bool named_reads = version == kScriptCookiePayloadVersion;
+  if ((version != kCookiePayloadVersion && !scoped) || value.payload_size != 128 ||
       value.reserved0 != 0 || (scoped ? value.thread > 4 : value.thread != 0) || value.api < 1 ||
-      value.api > 6 || value.count == 0 || (value.flags & ~0x0fU) != 0) {
+      value.api > 6 || value.count == 0 || (value.flags & ~(named_reads ? 0x1fU : 0x0fU)) != 0) {
     return false;
   }
-  // A version 2 record that names no thread records no frame or stack.
+  // A version 2 or 3 record that names no thread records no frame or stack.
   if (scoped && value.thread == 0 &&
       (value.flags & (kScriptCookieFrameRecorded | kScriptCookieStackRecorded)) != 0) {
     return false;
@@ -217,6 +233,15 @@ template <class Bytes>
   const bool write = api == ScriptCookieApi::kDocumentCookieSet ||
                      api == ScriptCookieApi::kCookieStoreSet ||
                      api == ScriptCookieApi::kCookieStoreDelete;
+  const bool read_record = (value.flags & kScriptCookieReadRecord) != 0;
+  // Version 3: a document.cookie read is its own nameless record or one
+  // name; a name that does not fit the table is counted, never recorded alone.
+  if (read_record ? api != ScriptCookieApi::kDocumentCookieGet || value.name_length != 0
+                  : named_reads && api == ScriptCookieApi::kDocumentCookieGet &&
+                        ((value.flags & kScriptCookieTableFull) != 0 ||
+                         value.string_length < value.name_length)) {
+    return false;
+  }
   const bool truncated = value.name_length > kScriptCookieNamePrefixBytes;
   const std::span<const std::uint8_t> prefix(value.name_prefix);
   if (truncated != ((value.flags & kScriptCookieNameTruncated) != 0) ||
@@ -225,7 +250,7 @@ template <class Bytes>
   }
   if (write ? value.count != 1 || Zero(value.value_sha256) ||
                   (value.flags & kScriptCookieTableFull) != 0
-            : value.value_length != 0 || !Zero(value.value_sha256)) {
+            : (!read_record && value.value_length != 0) || !Zero(value.value_sha256)) {
     return false;
   }
   if (api == ScriptCookieApi::kDocumentCookieSet

@@ -246,6 +246,41 @@ assert.equal(cookiesPanel.hidden, false);
 assert.equal(headersPanel.hidden, true);
 assert.match(cookiesPanel.textContent, /This row has no native cookie record/);
 assert.doesNotMatch(cookiesPanel.textContent, /cdp-header-needle/);
+// The Traffic footer names header blocks and cookie lists not retained, late
+// blocks and requests without final headers, each with its reason.
+runInContext(`state.headerCoverage = trafficHeaderCoverage([{headerBlocks: [
+  {kind: 'request', source: 'browser', state: 'captured', hop: 0},
+  {kind: 'response', source: 'browser', state: 'not_captured_session_budget', hop: 0, unattributedBlocks: 1}],
+  events: [{category: 'network', type: 'response_started', flags: 2, browser_context_id_high: '1', browser_context_id_low: '2'},
+    {category: 'network', type: 'request_completed', flags: 0, browser_context_id_high: '1', browser_context_id_low: '2'}]}]);
+  renderTrafficWindowStatus(1, 1, false);`, context);
+// One footer item, whatever the number of reasons: a button whose breakdown
+// opens below it and closes with Escape, returning focus to the button.
+assert.doesNotMatch(document.getElementById('request-window-status').textContent, /not retained|final headers|header gap/);
+const gapsButton = document.getElementById('request-header-gaps');
+const gapsDetail = document.getElementById('request-header-gaps-detail');
+assert.equal(gapsButton.hidden, false);
+assert.equal(gapsButton.textContent, '3 header gaps');
+assert.equal(gapsButton.getAttribute('aria-controls'), 'request-header-gaps-detail');
+assert.equal(gapsButton.getAttribute('aria-expanded'), 'false');
+assert.equal(gapsDetail.hidden, true);
+gapsButton.dispatchEvent(new window.Event('click'));
+assert.equal(gapsButton.getAttribute('aria-expanded'), 'true');
+assert.equal(gapsDetail.hidden, false);
+assert.deepEqual([...gapsDetail.querySelectorAll('li')].map(item => item.textContent),
+  ['1 header block not retained (session budget)', '1 late header record on no row', '1 request without final headers (HTTP cache)']);
+{
+  let focused = null;
+  const focus = window.HTMLElement.prototype.focus;
+  window.HTMLElement.prototype.focus = function focusTracked() { focused = this; };
+  gapsDetail.dispatchEvent(Object.assign(new window.Event('keydown', {bubbles: true}), {key: 'Escape'}));
+  window.HTMLElement.prototype.focus = focus;
+  assert.equal(gapsDetail.hidden, true, 'Escape closes the breakdown');
+  assert.equal(gapsButton.getAttribute('aria-expanded'), 'false');
+  assert.equal(focused, gapsButton, 'Escape returns focus to the button');
+}
+runInContext('state.headerCoverage = null; renderTrafficWindowStatus(1, 1, false);', context);
+assert.equal(gapsButton.hidden, true, 'no gap, no button');
 // Payload reads the native body record and target only, never a CDP exchange.
 runInContext(`state.inspectorTab = 'payload'; renderInspector();`, context);
 const payload = document.getElementById('payload-inspector');
@@ -711,4 +746,4 @@ assert.equal(graphFixture('codeWrap').hidden, false, 'the linear view returns wi
 assert.deepEqual(forbidden, [], 'startup/navigation must not attempt CDP transport');
 assert.deepEqual(asyncErrors, [], 'all asynchronous startup failures must be handled');
 release();
-console.log(`PASS native-only behavior: ${screens.length} screens rendered from shipped scripts without removed state reads or CDP controls; Traffic General plus native Headers, Payload, Preview, Response and Cookies, no exchange/search/compare, one shared code view, mounted Traffic rows bounded by the view, guest bytecode hex (offline DOM model; no rendered layout claimed)`);
+console.log(`PASS native-only behavior: ${screens.length} screens rendered from shipped scripts without removed state reads or CDP controls; Traffic General plus native Headers, Payload, Preview, Response and Cookies, header coverage in the footer, no exchange/search/compare, one shared code view, mounted Traffic rows bounded by the view, guest bytecode hex (offline DOM model; no rendered layout claimed)`);

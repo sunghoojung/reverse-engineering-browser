@@ -1057,7 +1057,7 @@ fn body_case_meaning(case: &str) -> &'static str {
             "redirected, then ended with no other response; Chromium discards redirect bodies"
         }
         "not_captured_type" => {
-            "images, audio, video or fonts that page elements load, kept only with REB_CAPTURE_RESPONSE_MEDIA=1"
+            "images, audio, video or fonts that page elements load, kept only when Capture media and fonts is on in the start panel (New Live Session…), or an agent's start_live_session sets response_media"
         }
         "not_captured_artifact_unavailable" => {
             "no artifact channel: the Artifact category was off or the receiver was disconnected"
@@ -1174,7 +1174,7 @@ pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Valu
             "response_snapshots_withheld",
             "info",
             format!(
-                "{withheld} response bodies had a snapshot withheld while they arrived: their own snapshot allowance, the session's snapshot quarter of the response body budget, or the budget was used, so their newest snapshot is older than the schedule would make it. Raise REB_RESPONSE_BODY_BUDGET_MIB for a new session."
+                "{withheld} response bodies had a snapshot withheld while they arrived: their own snapshot allowance, the session's snapshot quarter of the response body budget, or the budget was used, so their newest snapshot is older than the schedule would make it. Raise Response body budget in the start panel (New Live Session…) for the next session; an agent's start_live_session sets response_body_budget_mib."
             ),
         );
         item["count"] = json!(withheld.to_string());
@@ -1223,6 +1223,17 @@ mod tests {
             .find(|check| check["code"] == "response_snapshots_withheld")
             .unwrap();
         assert_eq!(withheld["count"], "3");
+        // A remedy names the start panel's control, never an environment
+        // variable a person using the packaged app cannot set.
+        let remedy = withheld["message"].as_str().unwrap();
+        assert!(
+            remedy.contains("Raise Response body budget in the start panel"),
+            "{remedy}"
+        );
+        assert!(!remedy.contains("REB_"), "{remedy}");
+        let media = body_case_meaning("not_captured_type");
+        assert!(media.contains("Capture media and fonts"), "{media}");
+        assert!(!media.contains("REB_"), "{media}");
         let cases = summary["response_bodies"]["cases"].as_array().unwrap();
         assert_eq!(cases.len(), 5);
         // A refused body that keeps an earlier snapshot is counted as such.

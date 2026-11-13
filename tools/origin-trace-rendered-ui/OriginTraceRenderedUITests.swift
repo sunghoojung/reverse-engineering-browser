@@ -3986,6 +3986,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
           const a = chip.getBoundingClientRect(), b = name.getBoundingClientRect();
           return {chip: chip.innerText, title: chip.title, label: row.getAttribute('aria-label'),
             inside: a.left >= b.left - 0.5 && a.right <= b.right + 0.5 && a.top >= b.top - 0.5 && a.bottom <= b.bottom + 0.5 && a.width > 0,
+            // The name the chip leads stays on the row's one line, not wrapped out of it.
+            named: (() => { const resource = name.querySelector('.request-resource').getBoundingClientRect();
+              return resource.width > 0 && resource.top < b.bottom && resource.bottom > b.top && Math.abs(resource.top - a.top) < 4; })(),
             clipped: chip.scrollWidth > chip.clientWidth + 1,
             others: [...document.querySelectorAll('#screen-traffic .request-row')].filter(node => node !== row && node.querySelector('.request-watched')).length}; })()
         """)
@@ -3993,6 +3996,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertEqual(row["chip"] as? String, "Watched", "\(size.name): \(row)")
       XCTAssertEqual(row["inside"] as? Bool, true, "\(size.name): the chip sits inside the Name cell: \(row)")
       XCTAssertEqual(row["clipped"] as? Bool, false, "\(size.name): the chip is not clipped: \(row)")
+      XCTAssertEqual(row["named"] as? Bool, true, "\(size.name): the request's name stays visible beside the chip: \(row)")
       XCTAssertEqual(row["others"] as? Int, 0, "\(size.name): only the watched row is marked: \(row)")
       XCTAssertTrue((row["label"] as? String ?? "").contains("Request watch rule 1 matched, method too"), "\(size.name): \(row)")
       XCTAssertTrue((row["title"] as? String ?? "").contains("Request watch rule 1 matched"), "\(size.name): \(row)")
@@ -4017,7 +4021,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) watched request general")
       try await ui.screenshot("traffic-watched-request-\(size.name)")
 
-      try await ui.click(".traffic-watch-open")
+      // Pressed from the keyboard, so the list it moves focus to must show it.
+      _ = try await ui.value("(() => { const open = document.querySelector('.traffic-watch-open'); open.scrollIntoView({block: 'nearest'}); open.focus(); return true; })()")
+      try await ui.key(49, " ")
       try await ui.waitUntil("""
         (() => { const chosen = document.querySelector('#debugger-observations .debugger-list-row[aria-selected="true"]');
           return !document.querySelector('#screen-sources').hidden && !document.querySelector('#debugger-sidebar').hidden &&
@@ -4049,7 +4055,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         "\(size.name): the arming form did not render")
       let limits = try await ui.value("""
         (() => { const note = document.querySelector('#debugger-sidebar .debugger-watch-limits');
-          note.closest('.debugger-watch-form').scrollIntoView({block: 'start'}); return note.innerText; })()
+          note.scrollIntoView({block: 'center'}); return note.innerText; })()
         """) as? String ?? ""
       for said in ["only this document's main thread", "workers, other frames or same-process iframes", "navigation clears the rules",
                    "cannot be armed ahead of a page load"] {

@@ -4884,7 +4884,7 @@
             }
           },
           "400": {
-            "description": "Unknown parameter, invalid identifier or limit, or a malformed run store.",
+            "description": "Unknown parameter, or an invalid identifier or limit.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4895,6 +4895,16 @@
           },
           "403": {
             "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The run store is unreadable (code artifact_integrity). The next run moves it aside; or move analysis/wasm-runs-v1.json aside.",
             "content": {
               "application/json": {
                 "schema": {
@@ -22756,6 +22766,13 @@
           "stored": {
             "type": "boolean",
             "description": "Present on the POST result: whether the record reached the run store."
+          },
+          "store_notice": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present on the POST result: set when an unreadable run store was moved aside, with its new name."
           },
           "store_error": {
             "type": [

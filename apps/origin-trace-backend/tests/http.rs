@@ -4726,6 +4726,60 @@ async fn wasm_runs_need_confirmation_run_offline_and_store_derived_records() {
 }
 
 #[tokio::test]
+async fn an_unreadable_wasm_run_store_is_an_integrity_error_and_is_moved_aside() {
+    // A corrupt store made every later run stored:false and the listing a 400
+    // request error, with no way back short of finding the file.
+    let server = Server::start().await;
+    let bytes =
+        wat::parse_str(r#"(module (func (export "run") (result i32) i32.const 7))"#).unwrap();
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/module.wasm","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+    server.file(&format!("artifacts/blobs/{hash}.bin"), &bytes);
+    server.file("artifacts/analysis/wasm-runs-v1.json", b"{not json");
+    let body = assert_contract_response(
+        server.get("/api/wasm/runs").await,
+        "get",
+        "/api/wasm/runs",
+        500,
+    )
+    .await;
+    let error: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["code"], "artifact_integrity", "{error}");
+    assert!(
+        error["error"].as_str().unwrap().contains("move it aside"),
+        "{error}"
+    );
+    let run =
+        json!({"artifact_id":"1","sha256":hash,"export":"run","confirm_offline_execution":true});
+    let record: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.action("/api/wasm/runs", run).await,
+            "post",
+            "/api/wasm/runs",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(record["stored"], true, "{record}");
+    let notice = record["store_notice"].as_str().unwrap();
+    assert!(notice.contains("wasm-runs-v1.json.unreadable-"), "{notice}");
+    let analysis = server.root.path().join("artifacts/analysis");
+    let moved = std::fs::read_dir(&analysis)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.to_string_lossy().contains(".unreadable-"))
+        .expect("the unreadable store was kept under a new name");
+    assert_eq!(std::fs::read(moved).unwrap(), b"{not json");
+    let listed: Value = server.get("/api/wasm/runs").await.json().await.unwrap();
+    assert_eq!(listed["total"], 1, "{listed}");
+}
+
+#[tokio::test]
 async fn wasm_section_requests_reach_late_tables_and_declare_what_they_left_out() {
     let server = Server::start().await;
     fn leb(mut n: usize) -> Vec<u8> {

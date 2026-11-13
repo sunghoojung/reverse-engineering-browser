@@ -1687,27 +1687,55 @@ fn decode(bytes: Option<Vec<u8>>) -> Result<Document> {
             runs: Vec::new(),
         });
     };
-    let document: Document =
-        serde_json::from_slice(&bytes).map_err(|_| Error::bad("Malformed WASM run store"))?;
+    let document: Document = serde_json::from_slice(&bytes).map_err(|_| unreadable())?;
     if document.schema != STORE_SCHEMA
         || document.runs.len() > MAX_RUNS
         || document.runs.iter().any(|run| run["schema"] != SCHEMA)
     {
-        return Err(Error::bad("Unsupported WASM run store"));
+        return Err(unreadable());
     }
     Ok(document)
 }
 
+/// A store that cannot be read is an integrity failure of this backend's own
+/// derived records, never a fault in the caller's request.
+fn unreadable() -> Error {
+    Error::new(
+        500,
+        "The WASM run store analysis/wasm-runs-v1.json is unreadable. The next run moves it aside as wasm-runs-v1.json.unreadable-<time> and starts a new store; to keep the listing working until then, move it aside yourself",
+    )
+    .with_code(Code::ArtifactIntegrity)
+}
+
 /// Keeps the newest runs. A run is derived, not evidence, so the oldest is
 /// evicted at capacity, and `evicted_runs` counts every eviction.
-fn persist(root: &Path, record: &Value) -> Result<()> {
-    let lease = crate::workspace_lease::Lease::acquire(&store_path(root))?;
-    let mut document = decode(lease.read(MAX_STORE_BYTES)?)?;
+/// Returns a notice when an unreadable store was moved aside. Its bytes are
+/// kept under a new name, never overwritten, and the run that moved it says so.
+fn persist(root: &Path, record: &Value) -> Result<Option<String>> {
+    let path = store_path(root);
+    let lease = crate::workspace_lease::Lease::acquire(&path)?;
+    let (mut document, notice) = match lease.read(MAX_STORE_BYTES).and_then(decode) {
+        Ok(document) => (document, None),
+        Err(_) => {
+            let millis = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let name = format!("wasm-runs-v1.json.unreadable-{millis}");
+            std::fs::rename(&path, path.with_file_name(&name))?;
+            (
+                decode(None)?,
+                Some(format!(
+                    "The unreadable run store was moved to analysis/{name} and a new store was started; the runs it held are not listed"
+                )),
+            )
+        }
+    };
     document.runs.push(record.clone());
     loop {
         let bytes = serde_json::to_vec(&document)?;
         if document.runs.len() <= MAX_RUNS && bytes.len() <= MAX_STORE_BYTES {
-            return lease.write(&bytes);
+            return lease.write(&bytes).map(|()| notice);
         }
         if document.runs.len() == 1 {
             return Err(Error::bad("A WASM run record exceeds the store limit"));
@@ -1753,6 +1781,7 @@ impl Runs {
             let _permit = permit;
             let mut record = run_blocking(&root, &request, limits)?;
             checked(&record)?;
+            record["store_notice"] = Value::Null;
             let stored = if serde_json::to_vec(&record)?.len() > MAX_RECORD_BYTES {
                 Err(Error::bad(
                     "The run record exceeds 4 MiB and was not stored",
@@ -1761,9 +1790,10 @@ impl Runs {
                 persist(&root, &record)
             };
             match stored {
-                Ok(()) => {
+                Ok(notice) => {
                     record["stored"] = json!(true);
                     record["store_error"] = Value::Null;
+                    record["store_notice"] = json!(notice);
                 }
                 Err(error) => {
                     record["stored"] = json!(false);
@@ -1779,10 +1809,10 @@ impl Runs {
 
 /// Stored runs, newest first, optionally for one artifact. Reads only.
 pub fn list(root: &Path, artifact_id: Option<&str>, limit: usize) -> Result<Value> {
-    let document = decode(crate::durable::read_private(
-        &store_path(root),
-        MAX_STORE_BYTES,
-    )?)?;
+    let document = decode(
+        crate::durable::read_private(&store_path(root), MAX_STORE_BYTES)
+            .map_err(|_| unreadable())?,
+    )?;
     let matching = document
         .runs
         .iter()

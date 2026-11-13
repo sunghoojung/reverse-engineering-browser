@@ -172,7 +172,12 @@ the 500 says so without quoting any value. The POST result adds `stored` and
 still returned with `stored: false`.
 
 The store keeps the newest 64 runs; older ones are evicted and counted in
-`evicted_runs`. `GET /api/wasm/runs` takes optional `artifact_id` and `limit`
+`evicted_runs`. An unreadable store is an integrity failure, not a request
+error: `GET /api/wasm/runs` answers 500 with code `artifact_integrity` and says
+how to recover. The next run moves the file aside as
+`analysis/wasm-runs-v1.json.unreadable-<milliseconds>`, never overwriting or
+deleting it, starts a new store, and names the moved file in its
+`store_notice`. `GET /api/wasm/runs` takes optional `artifact_id` and `limit`
 (1 to 64, default 16) and returns runs newest first with the matching `total`.
 
 ## Content and agent access

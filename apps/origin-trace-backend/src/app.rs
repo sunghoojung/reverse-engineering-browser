@@ -1654,8 +1654,9 @@ impl App {
         if !may_hold_sites {
             return String::new();
         }
-        let manifest = std::fs::metadata(self.options.artifacts.join("manifest.jsonl"))
-            .map_or(0, |metadata| metadata.len());
+        // The manifest's identity as well as its length: a replaced manifest
+        // of the same length can name other artifacts for the same scripts.
+        let manifest = crate::request_stack::manifest_tag(&self.options.artifacts);
         let generation = self
             .observation_sites
             .lock()

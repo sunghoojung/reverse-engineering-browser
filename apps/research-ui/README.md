@@ -1381,8 +1381,8 @@ failures. See [API Collection v1](../../docs/product/api-collection-v1.md) for
 the stored template contract.
 
 The dark theme uses [Rosé Pine Moon](https://rosepinetheme.com/palette/), with
-slightly brighter secondary labels for legibility. Appearance switches to the
-existing light theme.
+slightly brighter secondary labels for legibility. Appearance switches to Rosé
+Pine Dawn, the light variant the code views already use.
 
 Fingerprinting starts with an Overview of active surfaces and captured Canvas
 output. **Show inactive surfaces** reveals the rest of the supported families.
@@ -1682,16 +1682,34 @@ browser capture.
 
 ### Interface styling
 
-The shared shell keeps the existing Rosé Pine Moon tokens, thin pane dividers,
-and semantic selection accents; Appearance retains the existing light theme.
+The shared shell uses Rosé Pine Moon, or Rosé Pine Dawn under Appearance, with
+thin pane dividers and semantic selection accents. Dawn's accents are too faint
+for text on its own base, so the light theme darkens each one, keeping its hue,
+to at least 4.6:1 on every panel.
+
+Every color keeps one meaning on every screen. The tokens sit at the top of
+`app.css` and the rules that apply them in its closing color system block:
+
+| Meaning | Colors | Where |
+| --- | --- | --- |
+| Resource and evidence kind | scripts foam, WebAssembly and VM iris, dynamic code gold, requests and network records rose, documents pine, sockets gold; styles, images, fonts and media neutral | Traffic row markers, Type and waterfall bars; Sources file icons; Evidence categories; the Flow graph cards |
+| HTTP verb | POST, PUT and PATCH gold, DELETE love, GET, HEAD and OPTIONS neutral | Traffic Method and the selected request |
+| Status | 2xx plain text, 3xx iris, 4xx gold, 5xx and failures love | Traffic Status and the selected request |
+| State | ready foam, busy or limited gold, failed or unavailable love | session and availability tags, notices (as a faint wash), the status bar's loss and sampling counts |
+| Fingerprint family | Canvas rose, WebGL iris, Web Audio gold, device and layout foam, Storage pine, WebRTC love, Permissions and Runtime neutral | Overview cards, Activity filters and rows, Evidence categories |
+| Evidence class | observed foam, inferred iris, correlated pine, heuristic rose, unknown gold, contradicted love | VM handler listings |
+
+The kind colors follow the Flow graph, so a script is foam wherever it
+appears. Rows that need no attention stay neutral: a successful GET reads as
+plain text, and color marks what to look at.
+
 Traffic uses independently scrolling ledger and inspector panes. Compact
 resource filters stay visible below search and wrap within narrow windows. Selected-field actions sit beside the evidence on wide windows
 and below it on narrow windows. Session
 counts come from loaded requests, and sample evidence stays visibly labeled.
-Keep labels at least 10 px and reserve stronger color for selection, connection
-state, errors, and evidence confidence. Sources file icons are the one chrome
-tint: JavaScript, WebAssembly, JSON, source map and HTML icons take their code
-color at low strength, while folders, origins and frames stay neutral. Code is the exception: Sources and the
+Keep labels at least 10 px. Sources file icons take their kind color at low
+strength (JavaScript foam, WebAssembly iris, JSON rose, HTML pine, the dynamic
+group gold) while folders, origins, frames and source maps stay neutral. Code is the exception: Sources and the
 Native Console color code like the Rosé Pine Moon VS Code theme (Rosé Pine
 Dawn in light mode), with the colors and styles VS Code renders for each token
 (there, `JSON` is an italic variable and `stringify(` a plain function call), its

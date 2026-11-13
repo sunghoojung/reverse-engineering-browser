@@ -29,8 +29,8 @@ use std::{
     time::{Duration, Instant},
 };
 use wasmparser::{
-    BlockType, ExternalKind, FrameKind, FunctionBody, KnownCustom, MemArg, Name, Operator, Parser,
-    Payload, TypeRef,
+    BlockType, ExternalKind, FrameKind, FuncValidatorAllocations, FunctionBody, KnownCustom,
+    MemArg, Name, Operator, Parser, Payload, TypeRef, ValidPayload, Validator, WasmFeatures,
 };
 
 /// A lift keeps per-instruction offsets and per-line text; this many
@@ -1992,8 +1992,31 @@ fn scan(bytes: &[u8], function: u32) -> Result<Scan<'_>> {
         type_index: None,
     };
     let mut defined = 0u32;
+    // The lift reads declared stack effects and assumes the body type
+    // checks; a body that does not would read as plausible junk (a branch
+    // with no value, a read of a temporary never assigned). So the module's
+    // sections and the one function are validated first, and an invalid one
+    // gets a named error instead of a listing. Other bodies are not decoded.
+    let mut validator = Validator::new_with_features(WasmFeatures::all());
     for payload in Parser::new(0).parse_all(bytes) {
-        match payload.map_err(bad)? {
+        let payload = payload.map_err(bad)?;
+        match validator
+            .payload(&payload)
+            .map_err(|error| Error::protocol(format!("WASM module does not validate: {error}")))?
+        {
+            ValidPayload::Func(body_validator, body) if body_validator.index == function => {
+                body_validator
+                    .into_validator(FuncValidatorAllocations::default())
+                    .validate(&body)
+                    .map_err(|error| {
+                        Error::protocol(format!(
+                            "WASM function {function} does not validate: {error}"
+                        ))
+                    })?;
+            }
+            _ => {}
+        }
+        match payload {
             Payload::TypeSection(reader) => {
                 for group in reader {
                     result.module.add_rec_group(group.map_err(bad)?);
@@ -2894,6 +2917,9 @@ mod tests {
         for _ in 0..4_000 {
             wat.push_str(" local.get 0 local.set 1");
         }
+        for _ in 0..100_000 {
+            wat.push_str(" drop");
+        }
         wat.push_str("))");
         let bytes = wat::parse_str(&wat).unwrap();
         let budget = Budget {
@@ -2940,18 +2966,45 @@ mod tests {
     }
 
     #[test]
-    fn an_out_of_range_case_is_a_fallback_line() {
-        let document = lift_of(
-            "(module (func (param i32) block local.get 0 br_table 0 7 0 end))",
-            0,
+    fn an_invalid_body_gets_a_named_error_instead_of_a_listing() {
+        // A label past the open frames, a branch missing its value, and a
+        // read of an undeclared local would each lift as plausible junk.
+        for (wat, expected) in [
+            (
+                "(module (func (param i32) block local.get 0 br_table 0 7 0 end))",
+                "unknown label",
+            ),
+            (
+                "(module (func (result i32) block (result i32) br 0 end))",
+                "type mismatch",
+            ),
+            ("(module (func local.get 3 drop))", "unknown local"),
+        ] {
+            let bytes = wat::parse_str(wat).unwrap();
+            let directory = store(&bytes);
+            let error = pseudocode(directory.path(), "7", 0, 0, 10).unwrap_err();
+            assert_eq!(error.status, 422, "{wat}");
+            assert!(
+                error
+                    .message
+                    .starts_with("WASM function 0 does not validate"),
+                "{}",
+                error.message
+            );
+            assert!(error.message.contains(expected), "{}", error.message);
+        }
+        // A module whose sections do not validate is refused as a module.
+        let bytes =
+            wat::parse_str("(module (func) (export \"a\" (func 0)) (export \"a\" (func 0)))")
+                .unwrap();
+        let directory = store(&bytes);
+        let error = pseudocode(directory.path(), "7", 0, 0, 10).unwrap_err();
+        assert_eq!(error.status, 422);
+        assert!(
+            error.message.starts_with("WASM module does not validate"),
+            "{}",
+            error.message
         );
-        assert_eq!(document["fallbacks"]["label_out_of_range"], 1);
-        let lines = text(&document);
-        let position = lines
-            .iter()
-            .position(|line| line.contains("(out of range)"))
-            .unwrap();
-        assert_eq!(document["lines"][position][1], 6, "{lines:?}");
     }
 
     /// The MCP server inlines a result only when its compact and its pretty

@@ -4185,14 +4185,20 @@ async fn wasm_module_diff_matches_two_builds_pages_and_refuses_bad_input() {
         (Some("changed"), Some("call_graph"))
     );
     assert!(leaf["a"]["byte_end"].as_u64().unwrap() > leaf["a"]["byte_offset"].as_u64().unwrap());
+    // Each member of the stubs' tie is its own row, with the tie's size.
     let twins = diff["rows"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|row| row["status"] == "ambiguous")
-        .unwrap();
-    assert_eq!(twins["candidates"]["a"].as_array().unwrap().len(), 2);
-    assert_eq!(twins["candidates"]["b"].as_array().unwrap().len(), 2);
+        .filter(|row| row["status"] == "ambiguous")
+        .collect::<Vec<_>>();
+    assert_eq!(twins.len(), 4);
+    assert!(
+        twins
+            .iter()
+            .all(|row| row["group"] == json!({"id": 0, "a": 2, "b": 2}))
+    );
+    assert_eq!(diff["summary"]["ambiguous_groups"], 1);
     assert_eq!(diff["summary"]["statuses"]["added"], 1, "the new import");
     // No instruction text or constant value is part of the document.
     let text = diff.to_string();

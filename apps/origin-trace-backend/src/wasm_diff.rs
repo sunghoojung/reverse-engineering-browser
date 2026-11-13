@@ -9,6 +9,11 @@
 //! score, keyed by each side's module SHA-256 and function index. Nothing here
 //! executes either module, and no instruction text or constant value leaves
 //! this module: the report is structure only.
+//!
+//! One budget bounds all of the work: a deadline checked inside every body
+//! and every loop that can grow with the module, and a cap on similarity
+//! scores. A step the budget stops leaves its functions unclassified rather
+//! than guessed.
 use crate::{
     error::{Error, Result},
     evidence, validation, wasm,
@@ -16,7 +21,7 @@ use crate::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::Path,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -39,11 +44,24 @@ const MAX_FUNCTIONS: usize = 262_144;
 const MAX_BODY_BYTES: usize = 7_654_321;
 /// Web engines reject a function with more locals than this.
 const MAX_LOCALS: usize = 50_000;
-/// Similarity scores computed in the structural pass, across all functions.
+/// Similarity scores computed by propagation and the structural pass together.
 const MAX_COMPARISONS: u64 = 4_000_000;
 /// Nearest-size candidates scored for one function in the structural pass.
+/// Fewer are scored when the comparisons left, shared by every open function,
+/// cannot pay for this many, so the pass can still finish.
 const MAX_CANDIDATES: usize = 64;
-const MAX_PROPAGATION_ROUNDS: usize = 16;
+/// Below this many candidates each, a mutual best says too little, and the
+/// pass is not run.
+const MIN_CANDIDATES: usize = 4;
+/// Open callees or callers of a matched pair compared with each other. A hub
+/// called from more places proposes nothing, so one function called from
+/// everywhere cannot make propagation quadratic.
+const MAX_NEIGHBOURHOOD: usize = 64;
+/// Rounds of exact matching between propagation steps: a later round only
+/// resolves ties whose other members propagation matched meanwhile.
+const MAX_EXACT_ROUNDS: usize = 4;
+/// Instructions decoded between two deadline checks inside one body.
+const CHECK_EVERY: u32 = 4096;
 /// Fingerprinting and matching share one deadline. It sits under the native
 /// helper's five-second process limit so a report, partial or not, arrives.
 const DEADLINE: Duration = Duration::from_secs(4);
@@ -56,13 +74,15 @@ const TIE_MARGIN: f64 = 0.01;
 /// data span: small integers are far more often counts and flags than
 /// addresses, and common toolchains place static data at or above 1,024.
 const MIN_ADDRESS: u64 = 1024;
-const MAX_AMBIGUOUS_CANDIDATES: usize = 16;
 const MAX_NAME_BYTES: usize = 128;
 const MAX_TYPE_TEXT: usize = 256;
 pub const PAGE_MAX_ROWS: usize = 1000;
 pub const PAGE_DEFAULT_ROWS: usize = 200;
-/// One page always fits a 128 KiB MCP result, as for inspection row windows.
-const PAGE_BYTES: usize = 98_304;
+/// A page's whole document, pretty-printed as the MCP server measures it,
+/// stays below this, which leaves room under the 131,072-byte inline limit.
+const PAGE_BYTES: usize = 122_880;
+/// The MCP server's inline limit, which a page must stay under.
+const _: () = assert!(PAGE_BYTES < 131_072);
 /// Reports kept so paging a comparison does not repeat it.
 const CACHED_REPORTS: usize = 2;
 const NONE: u32 = u32::MAX;
@@ -105,6 +125,12 @@ const BY_STRUCTURE: u8 = 6;
 /// Opcode classes for the histogram, in the order the contract lists them.
 const CATEGORIES: usize = 17;
 
+/// Steps the budget can stop, named in omissions and in test hooks.
+const FINGERPRINTING: &str = "fingerprinting";
+const EXACT: &str = "exact matching";
+const PROPAGATION: &str = "call-graph propagation";
+const STRUCTURAL: &str = "structural matching";
+
 fn bad(error: wasmparser::BinaryReaderError) -> Error {
     Error::protocol(format!("WASM decoding failed: {error}"))
 }
@@ -137,6 +163,88 @@ fn bounded(name: &str) -> String {
     text
 }
 
+/// The work limits. Production uses [`Limits::DEFAULT`]; tests shrink them,
+/// or name a step whose next check stops, so every truncation path is covered
+/// without depending on how fast the machine is.
+#[derive(Clone, Copy)]
+struct Limits {
+    deadline: Duration,
+    max_comparisons: u64,
+    max_functions: usize,
+    /// Stops `step` at its check after this many of its own checks passed.
+    stop_in: Option<(&'static str, u64)>,
+    /// Stops at the check after this many, wherever it falls.
+    stop_after_checks: Option<u64>,
+}
+
+impl Limits {
+    const DEFAULT: Self = Self {
+        deadline: DEADLINE,
+        max_comparisons: MAX_COMPARISONS,
+        max_functions: MAX_FUNCTIONS,
+        stop_in: None,
+        stop_after_checks: None,
+    };
+}
+
+/// The shared budget. Once a check fails it stays failed, and `stopped` says
+/// which step stopped and why.
+struct Budget {
+    started: Instant,
+    limits: Limits,
+    comparisons: u64,
+    checks: u64,
+    /// Checks made by the step `limits.stop_in` names.
+    step_checks: u64,
+    stopped: Option<(&'static str, &'static str)>,
+}
+
+impl Budget {
+    fn new(limits: Limits, started: Instant) -> Self {
+        Self {
+            started,
+            limits,
+            comparisons: 0,
+            checks: 0,
+            step_checks: 0,
+            stopped: None,
+        }
+    }
+    /// Whether `step` must stop now.
+    fn late(&mut self, step: &'static str) -> bool {
+        self.checks += 1;
+        let named = self.limits.stop_in.filter(|(name, _)| *name == step);
+        if named.is_some() {
+            self.step_checks += 1;
+        }
+        if self.stopped.is_none() {
+            if named.is_some_and(|(_, after)| self.step_checks > after)
+                || self
+                    .limits
+                    .stop_after_checks
+                    .is_some_and(|n| self.checks > n)
+            {
+                self.stopped = Some((step, "test stop"));
+            } else if self.started.elapsed() > self.limits.deadline {
+                self.stopped = Some((step, "deadline"));
+            }
+        }
+        self.stopped.is_some()
+    }
+    /// Takes one similarity score from the cap; false once the cap is spent.
+    fn score(&mut self, step: &'static str) -> bool {
+        if self.stopped.is_some() {
+            return false;
+        }
+        if self.comparisons >= self.limits.max_comparisons {
+            self.stopped = Some((step, "comparison limit"));
+            return false;
+        }
+        self.comparisons += 1;
+        true
+    }
+}
+
 macro_rules! memarg_field {
     (memarg, $value:ident) => {
         return Some(*$value)
@@ -157,7 +265,23 @@ macro_rules! memarg_of {
 }
 wasmparser::for_each_operator!(memarg_of);
 
-/// The histogram class of one operator (see `CATEGORIES`).
+/// Spellings that make a mnemonic a comparison: as its end (`i32_eq`) or
+/// followed by a signedness suffix (`i32_lt_s`).
+const COMPARE_ENDS: [&str; 7] = ["eqz", "_eq", "_ne", "_lt", "_gt", "_le", "_ge"];
+const COMPARE_INFIXES: [&str; 7] = ["eqz_", "_eq_", "_ne_", "_lt_", "_gt_", "_le_", "_ge_"];
+const CONVERSIONS: [&str; 7] = [
+    "convert",
+    "trunc",
+    "extend",
+    "wrap",
+    "demote",
+    "promote",
+    "reinterpret",
+];
+const SIMD_PREFIXES: [&str; 7] = ["v128", "i8x16", "i16x8", "i32x4", "i64x2", "f32x4", "f64x2"];
+
+/// The histogram class of one operator (see `CATEGORIES`). It allocates
+/// nothing: it runs once per instruction.
 fn category(op: &Operator<'_>, name: &str) -> usize {
     match op {
         Operator::Block { .. }
@@ -197,14 +321,7 @@ fn category(op: &Operator<'_>, name: &str) -> usize {
             let name = name.trim_start_matches("visit_");
             if name.contains("atomic") {
                 14
-            } else if name.starts_with("v128")
-                || name.starts_with("i8x16")
-                || name.starts_with("i16x8")
-                || name.starts_with("i32x4")
-                || name.starts_with("i64x2")
-                || name.starts_with("f32x4")
-                || name.starts_with("f64x2")
-            {
+            } else if SIMD_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
                 13
             } else if name.contains("load") {
                 6
@@ -212,18 +329,10 @@ fn category(op: &Operator<'_>, name: &str) -> usize {
                 7
             } else if name.starts_with("br_on") {
                 1
-            } else if name.contains("convert")
-                || name.contains("trunc")
-                || name.contains("extend")
-                || name.contains("wrap")
-                || name.contains("demote")
-                || name.contains("promote")
-                || name.contains("reinterpret")
-            {
+            } else if CONVERSIONS.iter().any(|part| name.contains(part)) {
                 12
-            } else if ["eqz", "_eq", "_ne", "_lt", "_gt", "_le", "_ge"]
-                .iter()
-                .any(|suffix| name.ends_with(suffix) || name.contains(&format!("{suffix}_")))
+            } else if COMPARE_ENDS.iter().any(|end| name.ends_with(end))
+                || COMPARE_INFIXES.iter().any(|infix| name.contains(infix))
             {
                 11
             } else if name.starts_with("i32") || name.starts_with("i64") {
@@ -284,9 +393,21 @@ fn similarity(x: &Shape, y: &Shape) -> f64 {
         + 0.1 * skeleton
 }
 
+/// An import's identity: its names, and its position among the imports that
+/// share them, so a module that imports `env.f` twice still pairs each one.
+#[derive(Clone)]
+struct Import {
+    module: String,
+    name: String,
+    /// Position among imports with the same names and signature.
+    same_signature: u32,
+    /// Position among imports with the same names.
+    same_name: u32,
+}
+
 struct Func {
     index: u32,
-    import: Option<(String, String)>,
+    import: Option<Import>,
     start: usize,
     end: usize,
     ty: u32,
@@ -295,9 +416,15 @@ struct Func {
     section_name: Option<String>,
     body: [u8; 16],
     normalized: u64,
+    /// Where each static data address points, as data segment and offset in
+    /// it, so a relocation can be told from a changed constant.
+    addresses: u64,
     structure: u64,
     shape: Shape,
+    /// Direct call targets in call-site order.
     calls: Vec<u32>,
+    /// The same targets, sorted and distinct.
+    callees: Vec<u32>,
 }
 
 struct Module {
@@ -310,6 +437,12 @@ struct Module {
     truncated: bool,
 }
 
+impl Module {
+    fn declared(&self) -> usize {
+        self.imported as usize + self.defined as usize
+    }
+}
+
 struct Context<'a> {
     bytes: &'a [u8],
     func_types: &'a [u32],
@@ -317,6 +450,8 @@ struct Context<'a> {
     params: &'a [Vec<ValType>],
     globals: &'a [u64],
     span: Option<(u64, u64)>,
+    /// Active data segments of memory 0 with a constant offset, by start.
+    segments: &'a [(u64, u64)],
 }
 impl Context<'_> {
     fn signature_of_type(&self, ty: u32) -> u64 {
@@ -333,6 +468,19 @@ impl Context<'_> {
                 .span
                 .is_some_and(|(low, high)| value >= low && value < high)
     }
+    /// The segment ordinal and offset of an address, or the offset from the
+    /// span start, marked, when it falls between segments.
+    fn located(&self, value: u64) -> (u64, u64) {
+        let after = self.segments.partition_point(|(start, _)| *start <= value);
+        if after > 0 {
+            let (start, end) = self.segments[after - 1];
+            if value < end {
+                return ((after - 1) as u64, value - start);
+            }
+        }
+        let low = self.span.map_or(0, |(low, _)| low);
+        (u64::MAX, value - low)
+    }
     fn block(&self, ty: BlockType) -> u64 {
         match ty {
             BlockType::Empty => 0,
@@ -343,13 +491,16 @@ impl Context<'_> {
 }
 
 /// Scratch buffers reused across functions so a body costs no allocation per
-/// instruction.
+/// instruction. The id tables are sized to the module's locals and globals
+/// and reset only where a body touched them.
 #[derive(Default)]
 struct Scratch {
     local_ids: Vec<u32>,
-    touched: Vec<u32>,
+    local_touched: Vec<u32>,
     local_types: Vec<u64>,
-    globals: Vec<(u32, u32)>,
+    global_ids: Vec<u32>,
+    global_touched: Vec<u32>,
+    skeleton: Vec<u8>,
 }
 
 fn token(hasher: &mut Sha256, kind: u8, payload: &[u64]) {
@@ -362,20 +513,23 @@ fn token(hasher: &mut Sha256, kind: u8, payload: &[u64]) {
 struct Print {
     body: [u8; 16],
     normalized: u64,
+    addresses: u64,
     structure: u64,
     shape: Shape,
     calls: Vec<u32>,
 }
 
-/// Both fingerprints and the call list of one body. The normalized hash takes
-/// each instruction's original bytes, except that it rewrites the immediates
-/// that only renumber or relocate (see the contract for the exact list).
+/// Both fingerprints and the call list of one body, or `None` when the budget
+/// stopped inside it. The normalized hash takes each instruction's original
+/// bytes, except that it rewrites the immediates that only renumber or
+/// relocate (see the contract for the exact list).
 fn fingerprint(
     body: &FunctionBody<'_>,
     ty: u32,
     context: &Context<'_>,
     scratch: &mut Scratch,
-) -> Result<Print> {
+    budget: &mut Budget,
+) -> Result<Option<Print>> {
     let range = body.range();
     if range.len() > MAX_BODY_BYTES {
         return Err(Error::protocol(
@@ -414,40 +568,37 @@ fn fingerprint(
     if scratch.local_ids.len() < total {
         scratch.local_ids.resize(total, NONE);
     }
-    scratch.touched.clear();
-    scratch.globals.clear();
+    if scratch.global_ids.len() < context.globals.len() {
+        scratch.global_ids.resize(context.globals.len(), NONE);
+    }
+    scratch.skeleton.clear();
     let mut next_local = parameters;
+    let mut next_global = 0u32;
     let mut normalized = Sha256::new();
     normalized.update(signature.to_le_bytes());
     for (tag, count) in &declared {
         normalized.update(tag.to_le_bytes());
         normalized.update(count.to_le_bytes());
     }
+    let mut addresses = Sha256::new();
     let mut shape = Shape::default();
-    let mut skeleton = Vec::new();
     let mut calls = Vec::new();
     let mut reader = body.get_operators_reader().map_err(bad)?;
+    let mut stopped = false;
     while !reader.eof() {
+        if shape.instructions.is_multiple_of(CHECK_EVERY) && budget.late(FINGERPRINTING) {
+            stopped = true;
+            break;
+        }
         let (op, offset) = reader.read_with_offset().map_err(bad)?;
         let end = reader.original_position();
         shape.instructions += 1;
         let name = wasm::operator_name(&op);
         shape.histogram[category(&op, name)] += 1;
-        let mut local = |index: u32| -> u64 {
-            if index < parameters {
-                u64::from(index)
-            } else if (index as usize) < total {
-                let slot = &mut scratch.local_ids[index as usize];
-                if *slot == NONE {
-                    *slot = next_local;
-                    next_local += 1;
-                    scratch.touched.push(index);
-                }
-                u64::from(*slot)
-            } else {
-                // Past the declared locals: invalid, kept verbatim and marked.
-                u64::from(index) | 1 << 40
-            }
+        let mut address = |value: u64| {
+            let (segment, within) = context.located(value);
+            addresses.update(segment.to_le_bytes());
+            addresses.update(within.to_le_bytes());
         };
         match &op {
             Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
@@ -508,10 +659,24 @@ fn fingerprint(
                     Operator::LocalSet { .. } => 9,
                     _ => 10,
                 };
-                let id = local(*local_index);
+                let index = *local_index;
+                let id = if index < parameters {
+                    u64::from(index)
+                } else if (index as usize) < total {
+                    let slot = &mut scratch.local_ids[index as usize];
+                    if *slot == NONE {
+                        *slot = next_local;
+                        next_local += 1;
+                        scratch.local_touched.push(index);
+                    }
+                    u64::from(*slot)
+                } else {
+                    // Past the declared locals: invalid, kept verbatim and marked.
+                    u64::from(index) | 1 << 40
+                };
                 let tag = scratch
                     .local_types
-                    .get(*local_index as usize)
+                    .get(index as usize)
                     .copied()
                     .unwrap_or(0);
                 token(&mut normalized, kind, &[id, tag]);
@@ -522,20 +687,20 @@ fn fingerprint(
                 } else {
                     12
                 };
-                let id = match scratch.globals.iter().find(|(g, _)| g == global_index) {
-                    Some((_, id)) => *id,
-                    None => {
-                        let id = scratch.globals.len() as u32;
-                        scratch.globals.push((*global_index, id));
-                        id
+                let index = *global_index;
+                let id = match scratch.global_ids.get_mut(index as usize) {
+                    Some(slot) => {
+                        if *slot == NONE {
+                            *slot = next_global;
+                            next_global += 1;
+                            scratch.global_touched.push(index);
+                        }
+                        u64::from(*slot)
                     }
+                    None => u64::from(index) | 1 << 40,
                 };
-                let tag = context
-                    .globals
-                    .get(*global_index as usize)
-                    .copied()
-                    .unwrap_or(0);
-                token(&mut normalized, kind, &[u64::from(id), tag]);
+                let tag = context.globals.get(index as usize).copied().unwrap_or(0);
+                token(&mut normalized, kind, &[id, tag]);
             }
             Operator::Block { blockty } => token(&mut normalized, 13, &[context.block(*blockty)]),
             Operator::Loop { blockty } => token(&mut normalized, 14, &[context.block(*blockty)]),
@@ -549,6 +714,7 @@ fn fingerprint(
                 let value = u64::from(*value as u32);
                 if context.address(value) {
                     token(&mut normalized, 18, &[]);
+                    address(value);
                 } else {
                     normalized.update([0]);
                     normalized.update(&context.bytes[offset..end]);
@@ -557,6 +723,7 @@ fn fingerprint(
             Operator::I64Const { value } => {
                 if context.address(*value as u64) {
                     token(&mut normalized, 19, &[]);
+                    address(*value as u64);
                 } else {
                     normalized.update([0]);
                     normalized.update(&context.bytes[offset..end]);
@@ -573,6 +740,7 @@ fn fingerprint(
                             u64::from(memarg.memory),
                         ],
                     );
+                    address(memarg.offset);
                 }
                 None => {
                     normalized.update([0]);
@@ -597,7 +765,7 @@ fn fingerprint(
             _ => None,
         };
         if let Some(mark) = control {
-            skeleton.push(mark);
+            scratch.skeleton.push(mark);
             match mark {
                 b'B' | b'I' | b'T' => shape.blocks += 1,
                 b'L' => shape.loops += 1,
@@ -606,24 +774,31 @@ fn fingerprint(
             }
         }
     }
-    reader.finish().map_err(bad)?;
-    for index in scratch.touched.drain(..) {
+    for index in scratch.local_touched.drain(..) {
         scratch.local_ids[index as usize] = NONE;
     }
-    shape.skeleton = fnv(&skeleton);
+    for index in scratch.global_touched.drain(..) {
+        scratch.global_ids[index as usize] = NONE;
+    }
+    if stopped {
+        return Ok(None);
+    }
+    reader.finish().map_err(bad)?;
+    shape.skeleton = fnv(&scratch.skeleton);
     shape.calls = calls.len() as u32;
     let mut distinct = calls.clone();
     distinct.sort_unstable();
     distinct.dedup();
     shape.callees = distinct.len() as u32;
     let structure = structure_fingerprint(signature, &shape);
-    Ok(Print {
+    Ok(Some(Print {
         body: body_hash,
         normalized: first8(&normalized.finalize()),
+        addresses: first8(&addresses.finalize()),
         structure,
         shape,
         calls,
-    })
+    }))
 }
 
 fn bucket(count: u32) -> u8 {
@@ -665,11 +840,16 @@ fn clip(mut text: String, limit: usize) -> String {
     text
 }
 
-/// Decodes one module's function tables and fingerprints every body.
+fn global_tag(content: ValType, mutable: bool) -> u64 {
+    fnv(format!("{content} {mutable}").as_bytes())
+}
+
+/// Decodes one module's function tables and fingerprints every body the
+/// budget allows.
 fn analyze(
     bytes: &[u8],
     label: &str,
-    started: Instant,
+    budget: &mut Budget,
     omissions: &mut Vec<String>,
 ) -> Result<Module> {
     if bytes.is_empty() {
@@ -684,7 +864,7 @@ fn analyze(
     let mut exports = HashMap::<u32, String>::new();
     let mut names = HashMap::<u32, String>::new();
     let mut bodies = Vec::new();
-    let mut span: Option<(u64, u64)> = None;
+    let mut segments = Vec::new();
     let mut declared = 0u32;
     for payload in Parser::new(0).parse_all(bytes) {
         match payload.map_err(bad)? {
@@ -727,9 +907,7 @@ fn analyze(
                             imports.push((offset, bounded(import.module), bounded(import.name)));
                         }
                         TypeRef::Global(global) => {
-                            globals
-                                .push(fnv(format!("{} {}", global.content_type, global.mutable)
-                                    .as_bytes()))
+                            globals.push(global_tag(global.content_type, global.mutable))
                         }
                         _ => {}
                     }
@@ -744,11 +922,7 @@ fn analyze(
             Payload::GlobalSection(reader) => {
                 for global in reader {
                     let global = global.map_err(bad)?;
-                    globals.push(fnv(format!(
-                        "{} {}",
-                        global.ty.content_type, global.ty.mutable
-                    )
-                    .as_bytes()));
+                    globals.push(global_tag(global.ty.content_type, global.ty.mutable));
                 }
             }
             Payload::ExportSection(reader) => {
@@ -781,10 +955,7 @@ fn analyze(
                             _ => None,
                         };
                         if let Some(start) = start {
-                            let end = start.saturating_add(data.data.len() as u64);
-                            span = Some(span.map_or((start, end), |(low, high)| {
-                                (low.min(start), high.max(end))
-                            }));
+                            segments.push((start, start.saturating_add(data.data.len() as u64)));
                         }
                     }
                 }
@@ -810,6 +981,12 @@ fn analyze(
     if bodies.len() as u32 != declared {
         return Err(Error::protocol("WASM function bodies are missing"));
     }
+    segments.sort_unstable();
+    let span = segments.iter().fold(None, |span, (start, end)| {
+        Some(span.map_or((*start, *end), |(low, high): (u64, u64)| {
+            (low.min(*start), high.max(*end))
+        }))
+    });
     let imported = imports.len() as u32;
     let context = Context {
         bytes,
@@ -818,54 +995,71 @@ fn analyze(
         params: &params,
         globals: &globals,
         span,
+        segments: &segments,
     };
     let total = imports.len() + bodies.len();
-    let mut truncated = false;
-    if total > MAX_FUNCTIONS {
-        truncated = true;
-        omissions.push(format!(
-            "Module {label} has {total} functions; only the first {MAX_FUNCTIONS} were compared."
-        ));
-    }
-    let mut funcs = Vec::with_capacity(total.min(MAX_FUNCTIONS));
+    let limit = budget.limits.max_functions;
+    let mut truncated = total > limit;
+    let mut funcs = Vec::with_capacity(total.min(limit));
+    let mut same_signature = HashMap::<(String, String, u64), u32>::new();
+    let mut same_name = HashMap::<(String, String), u32>::new();
     for (index, (offset, module, field)) in imports.into_iter().enumerate() {
-        if funcs.len() >= MAX_FUNCTIONS {
+        if funcs.len() >= limit {
             break;
         }
         let ty = func_types[index];
+        let signature = context.signature_of_type(ty);
+        let by_signature = same_signature
+            .entry((module.clone(), field.clone(), signature))
+            .or_default();
+        let by_name = same_name
+            .entry((module.clone(), field.clone()))
+            .or_default();
+        let import = Import {
+            module,
+            name: field,
+            same_signature: *by_signature,
+            same_name: *by_name,
+        };
+        *by_signature += 1;
+        *by_name += 1;
         funcs.push(Func {
             index: index as u32,
-            import: Some((module, field)),
+            import: Some(import),
             start: offset,
             end: offset,
             ty,
-            signature: context.signature_of_type(ty),
+            signature,
             export: exports.remove(&(index as u32)),
             section_name: names.remove(&(index as u32)),
             body: [0; 16],
             normalized: 0,
+            addresses: 0,
             structure: 0,
             shape: Shape::default(),
             calls: Vec::new(),
+            callees: Vec::new(),
         });
     }
     let mut scratch = Scratch::default();
     for (position, body) in bodies.iter().enumerate() {
-        if funcs.len() >= MAX_FUNCTIONS {
+        if funcs.len() >= limit {
             break;
         }
-        if position.is_multiple_of(64) && started.elapsed() > DEADLINE {
+        if budget.late(FINGERPRINTING) {
             truncated = true;
-            omissions.push(format!(
-                "Fingerprinting stopped at the deadline; module {label} functions from index {} on were not compared.",
-                imported as usize + position
-            ));
             break;
         }
         let index = imported + position as u32;
         let ty = func_types[index as usize];
-        let print = fingerprint(body, ty, &context, &mut scratch)?;
+        let Some(print) = fingerprint(body, ty, &context, &mut scratch, budget)? else {
+            truncated = true;
+            break;
+        };
         let range = body.range();
+        let mut callees = print.calls.clone();
+        callees.sort_unstable();
+        callees.dedup();
         funcs.push(Func {
             index,
             import: None,
@@ -877,24 +1071,26 @@ fn analyze(
             section_name: names.remove(&index),
             body: print.body,
             normalized: print.normalized,
+            addresses: print.addresses,
             structure: print.structure,
             shape: print.shape,
             calls: print.calls,
+            callees,
         });
+    }
+    if truncated {
+        omissions.push(format!(
+            "Module {label}: {} of its {total} functions were fingerprinted; the others were not compared.",
+            funcs.len()
+        ));
     }
     let mut callers = vec![Vec::new(); funcs.len()];
     for func in &funcs {
-        for target in &func.calls {
-            if let Some(list) = callers.get_mut(*target as usize)
-                && list.last() != Some(&func.index)
-            {
+        for target in &func.callees {
+            if let Some(list) = callers.get_mut(*target as usize) {
                 list.push(func.index);
             }
         }
-    }
-    for list in &mut callers {
-        list.sort_unstable();
-        list.dedup();
     }
     Ok(Module {
         imported,
@@ -906,6 +1102,15 @@ fn analyze(
     })
 }
 
+/// One ambiguous group: functions on both sides that tie, with the method
+/// that tied them. Every member is its own row, so paging reaches them all.
+struct Group {
+    method: u8,
+    score: f64,
+    a: Vec<u32>,
+    b: Vec<u32>,
+}
+
 #[derive(Clone)]
 struct Row {
     status: u8,
@@ -913,9 +1118,50 @@ struct Row {
     score: f64,
     a: Option<u32>,
     b: Option<u32>,
-    candidates_a: Vec<u32>,
-    candidates_b: Vec<u32>,
-    candidates_truncated: bool,
+    group: Option<u32>,
+}
+
+/// The best score among `scored` and the candidates within the tie margin
+/// of it, sorted, for function `x`.
+fn tied_best(x: u32, scored: &[(u32, f64)]) -> Option<(u32, f64, Vec<u32>)> {
+    let top = scored.iter().map(|s| s.1).reduce(f64::max)?;
+    let mut tied = scored
+        .iter()
+        .filter(|s| top - s.1 < TIE_MARGIN)
+        .map(|s| s.0)
+        .collect::<Vec<_>>();
+    tied.sort_unstable();
+    Some((x, top, tied))
+}
+
+fn single(status: u8, a: Option<u32>, b: Option<u32>) -> Row {
+    Row {
+        status,
+        method: None,
+        score: 0.0,
+        a,
+        b,
+        group: None,
+    }
+}
+
+/// Union-find over A functions (0..na) then B functions (na..na+nb).
+struct Sets(Vec<u32>);
+impl Sets {
+    fn find(&mut self, mut x: u32) -> u32 {
+        while self.0[x as usize] != x {
+            let parent = self.0[x as usize];
+            self.0[x as usize] = self.0[parent as usize];
+            x = parent;
+        }
+        x
+    }
+    fn union(&mut self, x: u32, y: u32) {
+        let (x, y) = (self.find(x), self.find(y));
+        if x != y {
+            self.0[x.max(y) as usize] = x.min(y);
+        }
+    }
 }
 
 struct Matcher<'m> {
@@ -926,14 +1172,15 @@ struct Matcher<'m> {
     method: Vec<(u8, f64)>,
     grouped_a: Vec<bool>,
     grouped_b: Vec<bool>,
-    groups: Vec<Row>,
-    started: Instant,
-    comparisons: u64,
-    stopped: Option<String>,
+    groups: Vec<Group>,
+    budget: Budget,
+    /// A matched pair whose positional proposals were already made.
+    positional_done: Vec<bool>,
+    structural_incomplete: bool,
 }
 
 impl<'m> Matcher<'m> {
-    fn new(a: &'m Module, b: &'m Module, started: Instant) -> Self {
+    fn new(a: &'m Module, b: &'m Module, budget: Budget) -> Self {
         Self {
             a,
             b,
@@ -943,9 +1190,9 @@ impl<'m> Matcher<'m> {
             grouped_a: vec![false; a.funcs.len()],
             grouped_b: vec![false; b.funcs.len()],
             groups: Vec::new(),
-            started,
-            comparisons: 0,
-            stopped: None,
+            budget,
+            positional_done: vec![false; a.funcs.len()],
+            structural_incomplete: false,
         }
     }
     fn open_a(&self, index: u32) -> bool {
@@ -963,19 +1210,17 @@ impl<'m> Matcher<'m> {
         self.b_to_a[b as usize] = a;
         self.method[a as usize] = (method, score);
     }
-    fn late(&mut self, phase: &str) -> bool {
-        if self.stopped.is_none() && self.started.elapsed() > DEADLINE {
-            self.stopped = Some(format!(
-                "Matching stopped at the deadline during {phase}; unmatched functions are unclassified."
-            ));
-        }
-        self.stopped.is_some()
+    fn same_signature(&self, a: u32, b: u32) -> bool {
+        self.a.funcs[a as usize].signature == self.b.funcs[b as usize].signature
     }
-    fn score(&self, a: u32, b: u32) -> f64 {
-        similarity(
-            &self.a.funcs[a as usize].shape,
-            &self.b.funcs[b as usize].shape,
-        )
+    /// A similarity score taken from the budget; `None` once it is spent.
+    fn score(&mut self, step: &'static str, a: u32, b: u32) -> Option<f64> {
+        self.budget.score(step).then(|| {
+            similarity(
+                &self.a.funcs[a as usize].shape,
+                &self.b.funcs[b as usize].shape,
+            )
+        })
     }
     /// Groups the open functions of both sides by `key`. A key held by exactly
     /// one function on each side is a match; any other shared key is a tie
@@ -1009,119 +1254,258 @@ impl<'m> Matcher<'m> {
         &mut self,
         method: u8,
         key: impl Fn(&Func) -> Option<K>,
-    ) -> usize {
-        let mut made = 0;
+        made: &mut Vec<u32>,
+    ) {
+        if self.budget.late(EXACT) {
+            return;
+        }
         for (_, (a, b)) in self.groups_by(key) {
             if a.len() == 1 && b.len() == 1 {
                 let score = match method {
                     BY_BYTES | BY_NORMALIZED => 1.0,
-                    _ => self.score(a[0], b[0]),
+                    _ => similarity(
+                        &self.a.funcs[a[0] as usize].shape,
+                        &self.b.funcs[b[0] as usize].shape,
+                    ),
                 };
                 self.pair(a[0], b[0], method, score);
-                made += 1;
+                made.push(a[0]);
             }
         }
-        made
     }
-    fn exact_passes(&mut self) -> usize {
+    /// Every exact key in contract order; returns the A functions it matched.
+    fn exact_passes(&mut self) -> Vec<u32> {
         let defined = |f: &Func| f.import.is_none();
-        let mut made = self.exact(BY_IMPORT, |f| f.import.clone());
-        made += self.exact(BY_BYTES, |f| defined(f).then_some(f.body));
-        made += self.exact(BY_NORMALIZED, |f| defined(f).then_some(f.normalized));
-        made += self.exact(BY_EXPORT, |f| {
-            defined(f).then(|| f.export.clone()).flatten()
-        });
-        made += self.exact(BY_NAME, |f| {
-            defined(f).then(|| f.section_name.clone()).flatten()
-        });
+        let mut made = Vec::new();
+        self.exact(
+            BY_IMPORT,
+            |f| {
+                f.import.as_ref().map(|i| {
+                    (
+                        i.module.clone(),
+                        i.name.clone(),
+                        f.signature,
+                        i.same_signature,
+                    )
+                })
+            },
+            &mut made,
+        );
+        self.exact(
+            BY_IMPORT,
+            |f| {
+                f.import
+                    .as_ref()
+                    .map(|i| (i.module.clone(), i.name.clone(), i.same_name))
+            },
+            &mut made,
+        );
+        self.exact(BY_BYTES, |f| defined(f).then_some(f.body), &mut made);
+        self.exact(
+            BY_NORMALIZED,
+            |f| defined(f).then_some(f.normalized),
+            &mut made,
+        );
+        self.exact(
+            BY_EXPORT,
+            |f| defined(f).then(|| f.export.clone()).flatten(),
+            &mut made,
+        );
+        self.exact(
+            BY_NAME,
+            |f| defined(f).then(|| f.section_name.clone()).flatten(),
+            &mut made,
+        );
         made
     }
-    /// Carries matches along the call graph. A matched pair with the same
-    /// number of call sites proposes its k-th callee pairs; a matched pair
-    /// with exactly one open callee, or one open caller, on each side
-    /// proposes that pair. A function proposed for two partners is left open.
-    fn propagate(&mut self) -> usize {
-        let mut made = 0;
-        for _ in 0..MAX_PROPAGATION_ROUNDS {
-            if self.late("call-graph propagation") {
-                break;
+    fn open_neighbours(&self, list: &[u32], side_a: bool) -> Vec<u32> {
+        list.iter()
+            .copied()
+            .filter(|index| {
+                if side_a {
+                    self.open_a(*index)
+                } else {
+                    self.open_b(*index)
+                }
+            })
+            .collect()
+    }
+    /// Pairs between two neighbour sets that are each other's best scoring
+    /// same-signature candidate by at least the tie margin, at or above the
+    /// propagation floor. `None` when the budget ran out.
+    fn mutual_best(&mut self, xs: &[u32], ys: &[u32]) -> Option<Vec<(u32, u32, f64)>> {
+        let mut scores = vec![f64::NEG_INFINITY; xs.len() * ys.len()];
+        for (i, x) in xs.iter().enumerate() {
+            for (j, y) in ys.iter().enumerate() {
+                if self.same_signature(*x, *y) {
+                    scores[i * ys.len() + j] = self.score(PROPAGATION, *x, *y)?;
+                }
             }
-            let mut by_a = HashMap::<u32, u32>::new();
-            let mut by_b = HashMap::<u32, u32>::new();
-            let mut conflicted_a = std::collections::HashSet::new();
-            let mut conflicted_b = std::collections::HashSet::new();
-            let mut propose = |x: u32, y: u32, this: &Self| {
-                if !this.open_a(x)
-                    || !this.open_b(y)
-                    || this.a.funcs[x as usize].signature != this.b.funcs[y as usize].signature
-                {
-                    return;
+        }
+        let best = |values: &mut dyn Iterator<Item = (usize, f64)>| {
+            let mut first = (usize::MAX, f64::NEG_INFINITY);
+            let mut second = f64::NEG_INFINITY;
+            for (at, value) in values {
+                if value > first.1 {
+                    second = first.1;
+                    first = (at, value);
+                } else if value > second {
+                    second = value;
                 }
-                if *by_a.entry(x).or_insert(y) != y {
-                    conflicted_a.insert(x);
-                }
-                if *by_b.entry(y).or_insert(x) != x {
-                    conflicted_b.insert(y);
-                }
+            }
+            (first.1 - second >= TIE_MARGIN).then_some(first)
+        };
+        let mut pairs = Vec::new();
+        for i in 0..xs.len() {
+            let Some((j, value)) = best(&mut (0..ys.len()).map(|j| (j, scores[i * ys.len() + j])))
+            else {
+                continue;
             };
-            for (a, b) in self.a_to_b.iter().enumerate() {
-                if *b == NONE {
-                    continue;
-                }
-                let (fa, fb) = (&self.a.funcs[a], &self.b.funcs[*b as usize]);
-                if fa.calls.len() == fb.calls.len() {
-                    for (x, y) in fa.calls.iter().zip(&fb.calls) {
-                        propose(*x, *y, self);
-                    }
-                }
-                let lone = |list: &[u32], open: &dyn Fn(u32) -> bool| {
-                    let mut found = None;
-                    for index in list {
-                        if open(*index) {
-                            if found.is_some_and(|f| f != *index) {
-                                return None;
-                            }
-                            found = Some(*index);
-                        }
-                    }
-                    found
-                };
-                let open_a = |i: u32| self.open_a(i);
-                let open_b = |i: u32| self.open_b(i);
-                if let (Some(x), Some(y)) = (lone(&fa.calls, &open_a), lone(&fb.calls, &open_b)) {
-                    propose(x, y, self);
-                }
-                if let (Some(x), Some(y)) = (
-                    lone(&self.a.callers[a], &open_a),
-                    lone(&self.b.callers[*b as usize], &open_b),
-                ) {
-                    propose(x, y, self);
-                }
+            if value < PROPAGATION_FLOOR {
+                continue;
             }
-            let mut accepted = Vec::new();
-            for (x, y) in &by_a {
-                if conflicted_a.contains(x) || conflicted_b.contains(y) || by_b.get(y) != Some(x) {
-                    continue;
-                }
-                let score = self.score(*x, *y);
-                if score >= PROPAGATION_FLOOR {
-                    accepted.push((*x, *y, score));
-                }
+            if best(&mut (0..xs.len()).map(|k| (k, scores[k * ys.len() + j])))
+                .is_some_and(|(k, _)| k == i)
+            {
+                pairs.push((xs[i], ys[j], value));
             }
-            if accepted.is_empty() {
+        }
+        Some(pairs)
+    }
+    /// The best score of `x` against any same-signature member of `ys`.
+    fn best_against(&mut self, x: u32, ys: &[u32], x_on_a: bool) -> Option<f64> {
+        let mut best = f64::NEG_INFINITY;
+        for y in ys {
+            let (a, b) = if x_on_a { (x, *y) } else { (*y, x) };
+            if self.same_signature(a, b) {
+                best = best.max(self.score(PROPAGATION, a, b)?);
+            }
+        }
+        Some(best)
+    }
+    /// Carries matches along the call graph from the `seeds` (matched A
+    /// functions) with a worklist: a newly matched pair queues itself and the
+    /// matched pairs next to it, so each step looks only at what changed.
+    ///
+    /// A pair whose bodies normalize equally proposes its k-th callees, which
+    /// sit at corresponding places in both bodies, but only when no other open
+    /// callee looks more like either one. Any matched pair proposes the open
+    /// callees, and separately the open callers, that are each other's best
+    /// candidate by similarity. A proposal never overrides a better-shaped
+    /// candidate, so a reordered call sequence cannot carry a wrong pair.
+    fn propagate(&mut self, seeds: &[u32]) -> Vec<u32> {
+        let (module_a, module_b) = (self.a, self.b);
+        let mut made = Vec::new();
+        let mut queued = vec![false; module_a.funcs.len()];
+        let mut queue = VecDeque::new();
+        for seed in seeds {
+            if !queued[*seed as usize] {
+                queued[*seed as usize] = true;
+                queue.push_back(*seed);
+            }
+        }
+        while let Some(a) = queue.pop_front() {
+            queued[a as usize] = false;
+            if self.budget.late(PROPAGATION) {
                 break;
+            }
+            let b = self.a_to_b[a as usize];
+            if b == NONE {
+                continue;
+            }
+            let (fa, fb) = (&module_a.funcs[a as usize], &module_b.funcs[b as usize]);
+            let callees_a = self.open_neighbours(&fa.callees, true);
+            let callees_b = self.open_neighbours(&fb.callees, false);
+            let mut accepted = Vec::new();
+            let small =
+                callees_a.len() <= MAX_NEIGHBOURHOOD && callees_b.len() <= MAX_NEIGHBOURHOOD;
+            if small
+                && !self.positional_done[a as usize]
+                && fa.import.is_none()
+                && fa.normalized == fb.normalized
+                && fa.calls.len() == fb.calls.len()
+            {
+                self.positional_done[a as usize] = true;
+                for (x, y) in fa.calls.iter().zip(&fb.calls) {
+                    let (x, y) = (*x, *y);
+                    if !self.open_a(x) || !self.open_b(y) || !self.same_signature(x, y) {
+                        continue;
+                    }
+                    let Some(score) = self.score(PROPAGATION, x, y) else {
+                        break;
+                    };
+                    let (Some(best_x), Some(best_y)) = (
+                        self.best_against(x, &callees_b, true),
+                        self.best_against(y, &callees_a, false),
+                    ) else {
+                        break;
+                    };
+                    if score >= PROPAGATION_FLOOR && score >= best_x && score >= best_y {
+                        accepted.push((x, y, score));
+                    }
+                }
+            }
+            for (xs, ys) in [
+                (callees_a, callees_b),
+                (
+                    self.open_neighbours(&module_a.callers[a as usize], true),
+                    self.open_neighbours(&module_b.callers[b as usize], false),
+                ),
+            ] {
+                if xs.is_empty()
+                    || ys.is_empty()
+                    || xs.len() > MAX_NEIGHBOURHOOD
+                    || ys.len() > MAX_NEIGHBOURHOOD
+                {
+                    continue;
+                }
+                let Some(pairs) = self.mutual_best(&xs, &ys) else {
+                    break;
+                };
+                accepted.extend(pairs);
             }
             for (x, y, score) in accepted {
+                if !self.open_a(x) || !self.open_b(y) {
+                    continue;
+                }
                 self.pair(x, y, BY_CALL_GRAPH, score);
-                made += 1;
+                made.push(x);
+                // The new pair, and the matched pairs beside it whose open
+                // neighbourhoods just shrank, are worth another look.
+                let fx = &module_a.funcs[x as usize];
+                let fy = &module_b.funcs[y as usize];
+                let near_a = fx.callees.iter().chain(&module_a.callers[x as usize]);
+                let near_b = fy
+                    .callees
+                    .iter()
+                    .chain(&module_b.callers[y as usize])
+                    .map(|n| self.b_to_a[*n as usize]);
+                for next in std::iter::once(x)
+                    .chain(near_a.copied().filter(|n| self.a_to_b[*n as usize] != NONE))
+                    .chain(near_b.filter(|n| *n != NONE))
+                    .collect::<Vec<_>>()
+                {
+                    if !queued[next as usize] {
+                        queued[next as usize] = true;
+                        queue.push_back(next);
+                    }
+                }
             }
         }
         made
     }
-    fn fixpoint(&mut self) {
-        loop {
-            let made = self.exact_passes() + self.propagate();
-            if made == 0 || self.late("exact matching") {
+    /// Exact passes and propagation until neither adds a match, at most
+    /// `MAX_EXACT_ROUNDS` times.
+    fn settle(&mut self, mut seeds: Vec<u32>) {
+        for _ in 0..MAX_EXACT_ROUNDS {
+            seeds.extend(self.exact_passes());
+            if seeds.is_empty() || self.budget.stopped.is_some() {
+                break;
+            }
+            let carried = self.propagate(&seeds);
+            seeds = carried;
+            if seeds.is_empty() {
+                // Propagation added nothing, so no exact tie can have opened.
                 break;
             }
         }
@@ -1156,28 +1540,24 @@ impl<'m> Matcher<'m> {
         for index in &b {
             self.grouped_b[*index as usize] = true;
         }
-        let truncated = a.len() > MAX_AMBIGUOUS_CANDIDATES || b.len() > MAX_AMBIGUOUS_CANDIDATES;
-        a.truncate(MAX_AMBIGUOUS_CANDIDATES);
-        b.truncate(MAX_AMBIGUOUS_CANDIDATES);
-        self.groups.push(Row {
-            status: AMBIGUOUS,
-            method: Some(method),
+        self.groups.push(Group {
+            method,
             score,
-            a: None,
-            b: None,
-            candidates_a: a,
-            candidates_b: b,
-            candidates_truncated: truncated,
+            a,
+            b,
         });
     }
     /// Scores open functions of the same signature against the nearest-size
     /// candidates on the other side. Only a mutual best with a margin over
-    /// every runner-up becomes a match; a tie becomes an ambiguous group.
-    fn structural(&mut self) {
+    /// every runner-up becomes a match, and ties become ambiguous groups.
+    ///
+    /// The decision needs every candidate's score, so a pass the budget stops
+    /// accepts nothing: its functions stay open and end up unclassified.
+    fn structural(&mut self) -> Vec<u32> {
         let (module_a, module_b) = (self.a, self.b);
         let ties = self.exact_ties();
-        let mut excluded_a = vec![false; self.a.funcs.len()];
-        let mut excluded_b = vec![false; self.b.funcs.len()];
+        let mut excluded_a = vec![false; module_a.funcs.len()];
+        let mut excluded_b = vec![false; module_b.funcs.len()];
         for (_, a, b) in &ties {
             for index in a {
                 excluded_a[*index as usize] = true;
@@ -1196,142 +1576,263 @@ impl<'m> Matcher<'m> {
         for list in buckets.values_mut() {
             list.sort_by_key(|index| (module_b.funcs[*index as usize].shape.instructions, *index));
         }
-        // For each open A function: its best B, the B candidates tied with
-        // it, and the runner-up score.
-        let mut best_a: Vec<(u32, f64, f64, Vec<u32>)> = Vec::new();
-        // For each B function: the best A claimant and the runner-up score.
-        let mut claims = HashMap::<u32, (u32, f64, f64, Vec<u32>)>::new();
-        'functions: for func in &module_a.funcs {
-            if func.import.is_some() || !self.open_a(func.index) || excluded_a[func.index as usize]
+        let mut buckets_a = HashMap::<u64, Vec<u32>>::new();
+        for func in &module_a.funcs {
+            if func.import.is_none() && self.open_a(func.index) && !excluded_a[func.index as usize]
             {
-                continue;
+                buckets_a
+                    .entry(func.signature)
+                    .or_default()
+                    .push(func.index);
             }
-            if self.late("structural matching") {
-                break;
-            }
-            let Some(list) = buckets.get(&func.signature) else {
-                continue;
-            };
-            let size = func.shape.instructions;
-            let size_of = |index: u32| module_b.funcs[index as usize].shape.instructions;
-            let mid = list.partition_point(|index| size_of(*index) < size);
-            let (mut low, mut high) = (mid, mid);
-            let mut chosen = Vec::with_capacity(MAX_CANDIDATES);
-            while chosen.len() < MAX_CANDIDATES && (low > 0 || high < list.len()) {
-                let below = (low > 0).then(|| size - size_of(list[low - 1]).min(size));
-                let above = (high < list.len()).then(|| size_of(list[high]).saturating_sub(size));
-                match (below, above) {
-                    (Some(d), Some(u)) if d <= u => {
-                        low -= 1;
-                        chosen.push(list[low]);
-                    }
-                    (Some(_), None) => {
-                        low -= 1;
-                        chosen.push(list[low]);
-                    }
-                    (_, Some(_)) => {
-                        chosen.push(list[high]);
-                        high += 1;
-                    }
-                    (None, None) => break,
-                }
-            }
-            let mut scored = Vec::with_capacity(chosen.len());
-            for candidate in chosen {
-                if self.comparisons >= MAX_COMPARISONS {
-                    self.stopped = Some(format!(
-                        "The structural pass reached its {MAX_COMPARISONS} comparison limit; unmatched functions are unclassified."
-                    ));
-                    break 'functions;
-                }
-                self.comparisons += 1;
-                scored.push((candidate, self.score(func.index, candidate)));
-            }
-            scored.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
-            let Some(&(_, score)) = scored.first() else {
-                continue;
-            };
-            let runner = scored.get(1).map_or(0.0, |s| s.1);
-            let tied = scored
+        }
+        for list in buckets_a.values_mut() {
+            list.sort_by_key(|index| (module_a.funcs[*index as usize].shape.instructions, *index));
+        }
+        // Functions with someone of their signature on the other side. Both
+        // directions may be scored, so the comparisons left are shared by all.
+        let paired = |buckets: &HashMap<u64, Vec<u32>>, other: &HashMap<u64, Vec<u32>>| {
+            buckets
                 .iter()
-                .filter(|s| score - s.1 < TIE_MARGIN)
-                .map(|s| s.0)
-                .collect::<Vec<_>>();
-            for (candidate, value) in &scored {
-                let entry =
-                    claims
-                        .entry(*candidate)
-                        .or_insert((func.index, *value, 0.0, Vec::new()));
-                if entry.0 == func.index {
+                .filter(|(signature, _)| other.contains_key(*signature))
+                .map(|(_, list)| list.len())
+                .sum::<usize>()
+        };
+        let open = (paired(&buckets_a, &buckets) + paired(&buckets, &buckets_a)).max(1);
+        let left = self
+            .budget
+            .limits
+            .max_comparisons
+            .saturating_sub(self.budget.comparisons);
+        let per = usize::try_from(left / open as u64)
+            .unwrap_or(usize::MAX)
+            .min(MAX_CANDIDATES);
+        if per < MIN_CANDIDATES {
+            self.structural_incomplete = true;
+            self.budget
+                .stopped
+                .get_or_insert((STRUCTURAL, "comparison limit"));
+            return Vec::new();
+        }
+        // Each open A function's best score and the B candidates within the
+        // tie margin of it.
+        let mut best = Vec::<(u32, f64, Vec<u32>)>::new();
+        let mut scored_b = vec![false; module_b.funcs.len()];
+        for list in buckets_a.values() {
+            for a in list {
+                let func = &module_a.funcs[*a as usize];
+                let Some(candidates) = buckets.get(&func.signature) else {
+                    continue;
+                };
+                let Some(scored) = self.window(*a, true, candidates, per) else {
+                    return Vec::new();
+                };
+                for (b, _) in &scored {
+                    scored_b[*b as usize] = true;
+                }
+                if let Some(entry) = tied_best(*a, &scored) {
+                    best.push(entry);
+                }
+            }
+        }
+        // A B function no A function scored would otherwise look added only
+        // because it fell outside every window. It scores its own nearest A
+        // candidates, and one that ties an A function's best contests it.
+        let best_of = best
+            .iter()
+            .map(|(a, score, _)| (*a, *score))
+            .collect::<HashMap<_, _>>();
+        let mut contests = Vec::new();
+        for list in buckets.values() {
+            for b in list {
+                if scored_b[*b as usize] {
                     continue;
                 }
-                if *value > entry.1 {
-                    entry.2 = entry.1;
-                    entry.0 = func.index;
-                    entry.1 = *value;
-                } else if *value > entry.2 {
-                    entry.2 = *value;
+                let func = &module_b.funcs[*b as usize];
+                let Some(candidates) = buckets_a.get(&func.signature) else {
+                    continue;
+                };
+                let Some(scored) = self.window(*b, false, candidates, per) else {
+                    return Vec::new();
+                };
+                let Some((_, top, tied)) = tied_best(*b, &scored) else {
+                    continue;
+                };
+                if top < SIMILARITY_THRESHOLD {
+                    continue;
+                }
+                for a in tied {
+                    if best_of.get(&a).is_none_or(|own| own - top < TIE_MARGIN) {
+                        contests.push((a, *b));
+                    }
                 }
             }
-            best_a.push((func.index, score, runner, tied));
         }
-        // Claimants tied for one B function, collected for its group.
-        let mut b_ties = HashMap::<u32, Vec<u32>>::new();
-        for (a, score, _, tied) in &best_a {
-            for b in tied {
-                if let Some(claim) = claims.get(b)
-                    && claim.1 - score < TIE_MARGIN
-                {
-                    b_ties.entry(*b).or_default().push(*a);
+        // Claims on each B function from the A functions that rank it best.
+        let mut claims = HashMap::<u32, Vec<(u32, f64)>>::new();
+        for (a, score, tied) in &best {
+            if *score >= SIMILARITY_THRESHOLD {
+                for b in tied {
+                    claims.entry(*b).or_default().push((*a, *score));
                 }
             }
         }
-        let mut accepted = Vec::new();
-        let mut ambiguous = Vec::new();
-        for (a, score, runner, tied) in best_a {
-            if score < SIMILARITY_THRESHOLD {
+        let na = module_a.funcs.len() as u32;
+        let mut sets = Sets((0..na + module_b.funcs.len() as u32).collect());
+        // Every tie is joined before any pair is accepted, so whether a pair
+        // stands does not depend on the order functions were scored in.
+        for (a, score, tied) in &best {
+            if *score >= SIMILARITY_THRESHOLD && tied.len() > 1 {
+                for b in tied {
+                    sets.union(*a, na + b);
+                }
+            }
+        }
+        for (a, b) in &contests {
+            sets.union(*a, na + b);
+        }
+        for (b, list) in &claims {
+            let top = list.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+            let rivals = list
+                .iter()
+                .filter(|c| top - c.1 < TIE_MARGIN)
+                .collect::<Vec<_>>();
+            if rivals.len() > 1 {
+                for (a, _) in rivals {
+                    sets.union(*a, na + b);
+                }
+            }
+        }
+        let mut made = Vec::new();
+        let mut members = BTreeMap::<u32, (Vec<u32>, Vec<u32>, f64)>::new();
+        for (a, score, tied) in &best {
+            if *score < SIMILARITY_THRESHOLD {
                 continue;
             }
             let b = tied[0];
-            let claim = &claims[&b];
-            let alone_a = score - runner >= TIE_MARGIN;
-            let alone_b = claim.0 == a && claim.1 - claim.2 >= TIE_MARGIN;
-            if alone_a && alone_b {
-                accepted.push((a, b, score));
-            } else if claim.0 == a || tied.len() > 1 {
-                let mut others = b_ties.get(&b).cloned().unwrap_or_default();
-                if !others.contains(&a) {
-                    others.push(a);
-                }
-                ambiguous.push((score, others, tied));
+            // A function another claimant beats by the margin simply loses
+            // this candidate; one that ties was joined into a group above.
+            let alone = tied.len() == 1
+                && sets.find(*a) == *a
+                && sets.find(na + b) == na + b
+                && claims[&b]
+                    .iter()
+                    .all(|(claimant, value)| *claimant == *a || *score - *value >= TIE_MARGIN);
+            if alone {
+                self.pair(*a, b, BY_STRUCTURE, *score);
+                made.push(*a);
             }
         }
-        for (a, b, score) in accepted {
-            self.pair(a, b, BY_STRUCTURE, score);
+        for (a, score, _) in &best {
+            if *score < SIMILARITY_THRESHOLD || !self.open_a(*a) {
+                continue;
+            }
+            // A function that lost its candidate outright is alone in its set
+            // and, with no B member, forms no group: it stays open.
+            let root = sets.find(*a);
+            let entry = members.entry(root).or_default();
+            entry.0.push(*a);
+            entry.2 = entry.2.max(*score);
         }
-        for (score, a, b) in ambiguous {
-            let a = a
-                .into_iter()
-                .filter(|i| self.open_a(*i))
-                .collect::<Vec<_>>();
-            let b = b
-                .into_iter()
-                .filter(|i| self.open_b(*i))
-                .collect::<Vec<_>>();
+        let mut listed = vec![false; module_b.funcs.len()];
+        for b in claims.keys().chain(contests.iter().map(|(_, b)| b)) {
+            if !self.open_b(*b) || std::mem::replace(&mut listed[*b as usize], true) {
+                continue;
+            }
+            let root = sets.find(na + b);
+            if let Some(entry) = members.get_mut(&root) {
+                entry.1.push(*b);
+            }
+        }
+        for (_, (a, b, score)) in members {
             if !a.is_empty() && !b.is_empty() {
                 self.group(BY_STRUCTURE, score, a, b);
             }
         }
+        made
     }
-    fn run(mut self) -> (Vec<Row>, Option<String>, u64) {
-        self.fixpoint();
-        if self.stopped.is_none() {
-            self.structural();
+    /// Scores `x` against up to `per` members of `candidates` (one signature,
+    /// sorted by size) nearest to it in instruction count. `None` when the
+    /// budget stopped, which leaves the whole pass incomplete.
+    fn window(
+        &mut self,
+        x: u32,
+        x_on_a: bool,
+        candidates: &[u32],
+        per: usize,
+    ) -> Option<Vec<(u32, f64)>> {
+        if self.budget.late(STRUCTURAL) {
+            self.structural_incomplete = true;
+            return None;
         }
-        if self.stopped.is_none() {
-            self.fixpoint();
+        let (own, other) = if x_on_a {
+            (self.a, self.b)
+        } else {
+            (self.b, self.a)
+        };
+        let size_of = |index: u32| other.funcs[index as usize].shape.instructions;
+        let size = own.funcs[x as usize].shape.instructions;
+        let mid = candidates.partition_point(|index| size_of(*index) < size);
+        let (mut low, mut high) = (mid, mid);
+        let mut scored = Vec::with_capacity(per);
+        while scored.len() < per && (low > 0 || high < candidates.len()) {
+            let below = (low > 0).then(|| size - size_of(candidates[low - 1]).min(size));
+            let above =
+                (high < candidates.len()).then(|| size_of(candidates[high]).saturating_sub(size));
+            let candidate = match (below, above) {
+                (Some(d), Some(u)) if d <= u => {
+                    low -= 1;
+                    candidates[low]
+                }
+                (Some(_), None) => {
+                    low -= 1;
+                    candidates[low]
+                }
+                (_, Some(_)) => {
+                    high += 1;
+                    candidates[high - 1]
+                }
+                (None, None) => break,
+            };
+            let (a, b) = if x_on_a {
+                (x, candidate)
+            } else {
+                (candidate, x)
+            };
+            let Some(score) = self.score(STRUCTURAL, a, b) else {
+                self.structural_incomplete = true;
+                return None;
+            };
+            scored.push((candidate, score));
         }
-        for (method, a, b) in self.exact_ties() {
+        Some(scored)
+    }
+    /// Whether each call site of a matched pair calls the matched function on
+    /// the other side.
+    fn calls_correspond(&self, fa: &Func, fb: &Func) -> bool {
+        fa.calls.len() == fb.calls.len()
+            && fa
+                .calls
+                .iter()
+                .zip(&fb.calls)
+                .all(|(x, y)| self.a_to_b.get(*x as usize) == Some(y))
+    }
+    fn run(mut self) -> (Vec<Row>, Vec<Group>, Budget, bool) {
+        self.settle(Vec::new());
+        if self.budget.stopped.is_none() {
+            let made = self.structural();
+            if self.budget.stopped.is_none() && !made.is_empty() {
+                self.settle(made);
+            }
+        }
+        // A stopped run never resolved its ties, so it reports them as
+        // unclassified rather than as settled ambiguity.
+        let ties = if self.budget.stopped.is_none() {
+            self.exact_ties()
+        } else {
+            Vec::new()
+        };
+        for (method, a, b) in ties {
             let a = a
                 .into_iter()
                 .filter(|i| self.open_a(*i))
@@ -1344,8 +1845,20 @@ impl<'m> Matcher<'m> {
                 self.group(method, 1.0, a, b);
             }
         }
-        let unknown = self.stopped.is_some() || self.a.truncated || self.b.truncated;
-        let mut rows = std::mem::take(&mut self.groups);
+        let unknown = self.budget.stopped.is_some() || self.a.truncated || self.b.truncated;
+        let mut rows = Vec::new();
+        for (id, group) in self.groups.iter().enumerate() {
+            let member = |a: Option<u32>, b: Option<u32>| Row {
+                status: AMBIGUOUS,
+                method: Some(group.method),
+                score: group.score,
+                a,
+                b,
+                group: Some(id as u32),
+            };
+            rows.extend(group.a.iter().map(|a| member(Some(*a), None)));
+            rows.extend(group.b.iter().map(|b| member(None, Some(*b))));
+        }
         for (a, b) in self.a_to_b.iter().enumerate() {
             let fa = &self.a.funcs[a];
             if *b == NONE {
@@ -1361,10 +1874,19 @@ impl<'m> Matcher<'m> {
             let fb = &self.b.funcs[*b as usize];
             let (method, score) = self.method[a];
             let status = match (&fa.import, &fb.import) {
-                (Some(_), Some(_)) if fa.signature == fb.signature => IDENTICAL,
+                (Some(x), Some(y))
+                    if fa.signature == fb.signature && x.module == y.module && x.name == y.name =>
+                {
+                    IDENTICAL
+                }
                 (Some(_), Some(_)) => CHANGED,
                 _ if fa.body == fb.body => IDENTICAL,
-                _ if fa.normalized == fb.normalized => RENUMBERED,
+                _ if fa.normalized == fb.normalized
+                    && fa.addresses == fb.addresses
+                    && self.calls_correspond(fa, fb) =>
+                {
+                    RENUMBERED
+                }
                 _ => CHANGED,
             };
             rows.push(Row {
@@ -1373,9 +1895,7 @@ impl<'m> Matcher<'m> {
                 score,
                 a: Some(fa.index),
                 b: Some(fb.index),
-                candidates_a: Vec::new(),
-                candidates_b: Vec::new(),
-                candidates_truncated: false,
+                group: None,
             });
         }
         for (b, a) in self.b_to_a.iter().enumerate() {
@@ -1390,24 +1910,13 @@ impl<'m> Matcher<'m> {
         rows.sort_by_key(|row| {
             (
                 row.status,
-                row.a.or(row.candidates_a.first().copied()).unwrap_or(NONE),
-                row.b.or(row.candidates_b.first().copied()).unwrap_or(NONE),
+                row.group.unwrap_or(0),
+                row.a.unwrap_or(NONE),
+                row.b.unwrap_or(NONE),
             )
         });
-        (rows, self.stopped, self.comparisons)
-    }
-}
-
-fn single(status: u8, a: Option<u32>, b: Option<u32>) -> Row {
-    Row {
-        status,
-        method: None,
-        score: 0.0,
-        a,
-        b,
-        candidates_a: Vec::new(),
-        candidates_b: Vec::new(),
-        candidates_truncated: false,
+        let incomplete = self.structural_incomplete;
+        (rows, self.groups, self.budget, incomplete)
     }
 }
 
@@ -1432,6 +1941,8 @@ struct Report {
     a_types: Vec<String>,
     b_types: Vec<String>,
     rows: Vec<Row>,
+    /// Member counts of each ambiguous group, by group id.
+    groups: Vec<(usize, usize)>,
     summary: Value,
     omissions: Vec<String>,
     complete: bool,
@@ -1446,7 +1957,7 @@ fn sides(module: Module) -> (Vec<Side>, Vec<String>) {
             start: f.start,
             end: f.end,
             name: f.section_name.or(f.export),
-            import: f.import,
+            import: f.import.map(|i| (i.module, i.name)),
             ty: f.ty,
             instructions: f.shape.instructions,
             normalized: f.normalized,
@@ -1456,19 +1967,33 @@ fn sides(module: Module) -> (Vec<Side>, Vec<String>) {
     (sides, module.type_text)
 }
 
+#[cfg(test)]
 fn compare(a_bytes: &[u8], b_bytes: &[u8], a: Value, b: Value) -> Result<Report> {
-    let started = Instant::now();
+    compare_with(a_bytes, b_bytes, a, b, Limits::DEFAULT, Instant::now())
+}
+
+/// `started` is when the request began, so reading and verifying both
+/// modules counts against the deadline too.
+fn compare_with(
+    a_bytes: &[u8],
+    b_bytes: &[u8],
+    a: Value,
+    b: Value,
+    limits: Limits,
+    started: Instant,
+) -> Result<Report> {
+    let mut budget = Budget::new(limits, started);
     let mut omissions = Vec::new();
-    let module_a = analyze(a_bytes, "A", started, &mut omissions)?;
-    let module_b = analyze(b_bytes, "B", started, &mut omissions)?;
-    if module_a.funcs.is_empty() || module_b.funcs.is_empty() {
+    let module_a = analyze(a_bytes, "A", &mut budget, &mut omissions)?;
+    let module_b = analyze(b_bytes, "B", &mut budget, &mut omissions)?;
+    if module_a.declared() == 0 || module_b.declared() == 0 {
         omissions.push(
             "A module declares no functions, so every function of the other is added or removed."
                 .into(),
         );
     }
-    let (rows, stopped, comparisons) = Matcher::new(&module_a, &module_b, started).run();
-    omissions.extend(stopped);
+    let (rows, groups, budget, structural_incomplete) =
+        Matcher::new(&module_a, &module_b, budget).run();
     let mut counts = [0u64; 7];
     let mut methods = [0u64; 7];
     for row in &rows {
@@ -1479,6 +2004,18 @@ fn compare(a_bytes: &[u8], b_bytes: &[u8], a: Value, b: Value) -> Result<Report>
         {
             methods[method as usize] += 1;
         }
+    }
+    if let Some((step, reason)) = budget.stopped {
+        omissions.push(format!(
+            "The {step} step stopped at the {reason}; {} unmatched functions are unclassified, not added or removed.",
+            counts[UNCLASSIFIED as usize]
+        ));
+    }
+    if structural_incomplete {
+        omissions.push(
+            "The structural pass did not score every candidate, so none of its pairs or ties were kept."
+                .into(),
+        );
     }
     let side_meta = |mut meta: Value, module: &Module| {
         meta["imported_functions"] = json!(module.imported);
@@ -1493,8 +2030,9 @@ fn compare(a_bytes: &[u8], b_bytes: &[u8], a: Value, b: Value) -> Result<Report>
         "matched": matched,
         "statuses": STATUSES.iter().zip(counts).map(|(name, count)| (name.to_string(), json!(count))).collect::<serde_json::Map<_, _>>(),
         "methods": METHODS.iter().zip(methods).map(|(name, count)| (name.to_string(), json!(count))).collect::<serde_json::Map<_, _>>(),
-        "comparisons": comparisons,
-        "elapsed_ms": started.elapsed().as_millis() as u64,
+        "ambiguous_groups": groups.len(),
+        "comparisons": budget.comparisons,
+        "elapsed_ms": budget.started.elapsed().as_millis() as u64,
     });
     let complete = omissions.is_empty();
     let (a_sides, a_types) = sides(module_a);
@@ -1507,6 +2045,7 @@ fn compare(a_bytes: &[u8], b_bytes: &[u8], a: Value, b: Value) -> Result<Report>
         a_types,
         b_types,
         rows,
+        groups: groups.iter().map(|g| (g.a.len(), g.b.len())).collect(),
         summary,
         omissions,
         complete,
@@ -1583,14 +2122,19 @@ fn row_json(report: &Report, row: &Row) -> Value {
         "a": row.a.map(a),
         "b": row.b.map(b),
     });
-    if row.status == AMBIGUOUS {
-        value["candidates"] = json!({
-            "a": row.candidates_a.iter().map(|i| a(*i)).collect::<Vec<_>>(),
-            "b": row.candidates_b.iter().map(|i| b(*i)).collect::<Vec<_>>(),
-            "truncated": row.candidates_truncated,
-        });
+    if let Some(id) = row.group {
+        let (in_a, in_b) = report.groups[id as usize];
+        value["group"] = json!({"id": id, "a": in_a, "b": in_b});
     }
     value
+}
+
+/// Bytes `value` adds to a pretty-printed document as an element of the
+/// top-level `rows` array: its own pretty text, indented four more spaces on
+/// every line, and a separator.
+fn pretty_row_bytes(value: &Value) -> usize {
+    let text = serde_json::to_string_pretty(value).unwrap_or_default();
+    text.len() + 4 * (text.matches('\n').count() + 1) + 2
 }
 
 fn render(report: &Report, page: &Page) -> Result<Value> {
@@ -1605,8 +2149,47 @@ fn render(report: &Report, page: &Page) -> Result<Value> {
     if page.offset > total {
         return Err(Error::bad("row_offset exceeds the row count"));
     }
+    let document = |rows: Vec<Value>| {
+        let next = page.offset + rows.len();
+        json!({
+            "schema": "wasm-module-diff-v1",
+            "fingerprint_version": FINGERPRINT_VERSION,
+            "artifact_id": report.a["artifact_id"],
+            "compare_artifact_id": report.b["artifact_id"],
+            "status": if report.complete { "complete" } else { "partial" },
+            "a": report.a,
+            "b": report.b,
+            "summary": report.summary,
+            "requested_statuses": page.statuses,
+            "row_window": {
+                "offset": page.offset,
+                "rows": rows.len(),
+                "total_rows": total,
+                "next_offset": if next < total { json!(next) } else { Value::Null },
+            },
+            "rows": rows,
+            "omissions": report.omissions,
+            "limits": {
+                "max_module_bytes": MAX_BYTES,
+                "max_functions": MAX_FUNCTIONS,
+                "max_body_bytes": MAX_BODY_BYTES,
+                "max_comparisons": MAX_COMPARISONS,
+                "max_candidates_per_function": MAX_CANDIDATES,
+                "max_neighbourhood": MAX_NEIGHBOURHOOD,
+                "deadline_ms": DEADLINE.as_millis() as u64,
+                "max_page_rows": PAGE_MAX_ROWS,
+                "page_bytes": PAGE_BYTES,
+                "similarity_threshold": SIMILARITY_THRESHOLD,
+                "tie_margin": TIE_MARGIN,
+                "min_address": MIN_ADDRESS,
+            },
+            "notice": "Static comparison of declared function bodies. A match is a correspondence hypothesis with its method and score, not proof of equal behavior. Neither module was executed.",
+        })
+    };
+    let pretty =
+        |value: &Value| serde_json::to_string_pretty(value).map_or(usize::MAX, |t| t.len());
+    let mut budget = PAGE_BYTES.saturating_sub(pretty(&document(Vec::new())));
     let mut kept = Vec::new();
-    let mut bytes = 0usize;
     for row in report
         .rows
         .iter()
@@ -1615,48 +2198,21 @@ fn render(report: &Report, page: &Page) -> Result<Value> {
         .take(page.limit)
     {
         let value = row_json(report, row);
-        let size = serde_json::to_vec(&value).map_or(usize::MAX, |encoded| encoded.len() + 1);
-        if !kept.is_empty() && bytes + size > PAGE_BYTES {
+        let size = pretty_row_bytes(&value);
+        if !kept.is_empty() && size > budget {
             break;
         }
-        bytes += size;
+        budget = budget.saturating_sub(size);
         kept.push(value);
     }
-    let next = page.offset + kept.len();
-    Ok(json!({
-        "schema": "wasm-module-diff-v1",
-        "fingerprint_version": FINGERPRINT_VERSION,
-        "artifact_id": report.a["artifact_id"],
-        "compare_artifact_id": report.b["artifact_id"],
-        "status": if report.complete { "complete" } else { "partial" },
-        "a": report.a,
-        "b": report.b,
-        "summary": report.summary,
-        "requested_statuses": page.statuses,
-        "rows": kept,
-        "row_window": {
-            "offset": page.offset,
-            "rows": next - page.offset,
-            "total_rows": total,
-            "next_offset": if next < total { json!(next) } else { Value::Null },
-        },
-        "omissions": report.omissions,
-        "limits": {
-            "max_module_bytes": MAX_BYTES,
-            "max_functions": MAX_FUNCTIONS,
-            "max_body_bytes": MAX_BODY_BYTES,
-            "max_comparisons": MAX_COMPARISONS,
-            "max_candidates_per_function": MAX_CANDIDATES,
-            "max_ambiguous_candidates": MAX_AMBIGUOUS_CANDIDATES,
-            "deadline_ms": DEADLINE.as_millis() as u64,
-            "max_page_rows": PAGE_MAX_ROWS,
-            "page_bytes": PAGE_BYTES,
-            "similarity_threshold": SIMILARITY_THRESHOLD,
-            "tie_margin": TIE_MARGIN,
-            "min_address": MIN_ADDRESS,
-        },
-        "notice": "Static comparison of declared function bodies. A match is a correspondence hypothesis with its method and score, not proof of equal behavior. Neither module was executed.",
-    }))
+    // The estimate is exact for rows; this only guards the window numbers,
+    // which grow by a digit or two with the row count.
+    let mut built = document(kept.clone());
+    while kept.len() > 1 && pretty(&built) > PAGE_BYTES {
+        kept.pop();
+        built = document(kept.clone());
+    }
+    Ok(built)
 }
 
 static REPORTS: Mutex<Vec<(String, Arc<Report>)>> = Mutex::new(Vec::new());
@@ -1676,9 +2232,11 @@ fn record(artifacts: &[Value], id: &str) -> Result<Value> {
 
 /// Compares two captured modules and returns one page of the match table.
 ///
-/// A report is cached by both artifact IDs and SHA-256 digests, so paging the
-/// same pair does not repeat the comparison.
+/// A report is cached in this process by both artifact IDs and SHA-256
+/// digests, so paging the same pair does not repeat the comparison. The
+/// native helper is a new process per page, so it has no such cache.
 pub fn diff(root: &Path, a_id: &str, b_id: &str, page: &Page) -> Result<Value> {
+    let started = Instant::now();
     if a_id == b_id {
         return Err(Error::bad("Compare two different artifacts"));
     }
@@ -1701,11 +2259,13 @@ pub fn diff(root: &Path, a_id: &str, b_id: &str, page: &Page) -> Result<Value> {
                 json!({"artifact_id": record["artifact_id"], "sha256": record["sha256"],
                     "session_id": record["session_id"], "byte_size": bytes.len()})
             };
-            let report = Arc::new(compare(
+            let report = Arc::new(compare_with(
                 &a_bytes,
                 &b_bytes,
                 meta(&a, &a_bytes),
                 meta(&b, &b_bytes),
+                Limits::DEFAULT,
+                started,
             )?);
             if let Ok(mut reports) = REPORTS.lock() {
                 reports.retain(|(k, _)| *k != key);
@@ -1721,257 +2281,4 @@ pub fn diff(root: &Path, a_id: &str, b_id: &str, page: &Page) -> Result<Value> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn report(a: &str, b: &str) -> Report {
-        let a = wat::parse_str(a).unwrap();
-        let b = wat::parse_str(b).unwrap();
-        compare(
-            &a,
-            &b,
-            json!({"artifact_id":"1"}),
-            json!({"artifact_id":"2"}),
-        )
-        .unwrap()
-    }
-    type Found = (String, Option<String>, Option<u32>, Option<u32>);
-
-    fn rows(report: &Report) -> Vec<Found> {
-        report
-            .rows
-            .iter()
-            .map(|row| {
-                (
-                    STATUSES[row.status as usize].to_owned(),
-                    row.method.map(|m| METHODS[m as usize].to_owned()),
-                    row.a,
-                    row.b,
-                )
-            })
-            .collect()
-    }
-    fn row(status: &str, method: Option<&str>, a: Option<u32>, b: Option<u32>) -> Found {
-        (status.into(), method.map(Into::into), a, b)
-    }
-
-    #[test]
-    fn renumbered_calls_locals_and_data_addresses_normalize_to_the_same_hash() {
-        // B inserts an import and a helper, so every call index shifts, and
-        // moves its static data, so the address constant changes.
-        let a = r#"(module (memory 1) (data (i32.const 2048) "hello")
-            (func $leaf (param i32) (result i32) local.get 0 i32.const 3 i32.mul)
-            (func $root (export "root") (param i32) (result i32) (local i32 i64)
-              local.get 0 call $leaf local.set 1 i32.const 2048 i32.load local.get 1 i32.add))"#;
-        let b = r#"(module (import "env" "log" (func $log (param i32))) (memory 1)
-            (data (i32.const 4096) "hello")
-            (func $extra (param f64) (result f64) local.get 0)
-            (func $leaf (param i32) (result i32) local.get 0 i32.const 3 i32.mul)
-            (func $root (export "root") (param i32) (result i32) (local i64 i32)
-              local.get 0 call $leaf local.set 2 i32.const 4096 i32.load local.get 2 i32.add))"#;
-        let report = report(a, b);
-        let found = rows(&report);
-        assert!(
-            found.contains(&row("identical", Some("identical"), Some(0), Some(2))),
-            "{found:?}"
-        );
-        assert!(
-            found.contains(&row("renumbered", Some("normalized"), Some(1), Some(3))),
-            "{found:?}"
-        );
-        assert!(
-            found.contains(&row("added", None, None, Some(0))),
-            "{found:?}"
-        );
-        assert!(
-            found.contains(&row("added", None, None, Some(1))),
-            "{found:?}"
-        );
-        assert!(report.complete);
-    }
-
-    #[test]
-    fn changed_bodies_match_by_export_call_graph_and_structure() {
-        // Unnamed functions: wat would otherwise emit a name section.
-        let a = r#"(module
-            (func (param i32) (result i32) local.get 0 i32.const 3 i32.mul)
-            (func (param i32) (result i32) local.get 0 call 0 i32.const 1 i32.add)
-            (func (export "run") (param i32) (result i32) local.get 0 call 1 i32.const 7 i32.xor))"#;
-        let b = r#"(module
-            (func (param i32) (result i32) local.get 0 i32.const 5 i32.mul)
-            (func (param i32) (result i32) local.get 0 call 0 i32.const 2 i32.add)
-            (func (export "run") (param i32) (result i32) local.get 0 call 1 i32.const 9 i32.xor))"#;
-        let found = rows(&report(a, b));
-        assert!(
-            found.contains(&row("changed", Some("export_name"), Some(2), Some(2))),
-            "{found:?}"
-        );
-        assert!(
-            found.contains(&row("changed", Some("call_graph"), Some(1), Some(1))),
-            "{found:?}"
-        );
-        assert!(
-            found.contains(&row("changed", Some("call_graph"), Some(0), Some(0))),
-            "{found:?}"
-        );
-    }
-
-    #[test]
-    fn name_section_names_match_changed_functions() {
-        let a = r#"(module (func $parse (result i32) i32.const 1) (func $emit (param i32)))"#;
-        let b = r#"(module (func $emit (param i32)) (func $parse (result i32) i32.const 2))"#;
-        let found = rows(&report(a, b));
-        assert!(
-            found.contains(&row("changed", Some("name"), Some(0), Some(1))),
-            "{found:?}"
-        );
-        assert!(
-            found.contains(&row("identical", Some("identical"), Some(1), Some(0))),
-            "{found:?}"
-        );
-    }
-
-    #[test]
-    fn identical_twins_stay_ambiguous_instead_of_a_forced_pick() {
-        let twin = "(func (result i32) i32.const 42)";
-        let a = format!("(module {twin} {twin})");
-        let b = format!("(module {twin} {twin} {twin})");
-        let report = report(&a, &b);
-        assert_eq!(report.rows.len(), 1, "{:?}", rows(&report));
-        let group = &report.rows[0];
-        assert_eq!(group.status, AMBIGUOUS);
-        assert_eq!(group.method, Some(BY_BYTES));
-        assert_eq!(group.candidates_a, vec![0, 1]);
-        assert_eq!(group.candidates_b, vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn imports_match_by_name_and_report_a_signature_change() {
-        let a = r#"(module (import "env" "f" (func (param i32))) (import "env" "g" (func)))"#;
-        let b = r#"(module (import "env" "g" (func)) (import "env" "f" (func (param i64))))"#;
-        let found = rows(&report(a, b));
-        assert!(
-            found.contains(&row("changed", Some("import_name"), Some(0), Some(1))),
-            "{found:?}"
-        );
-        assert!(
-            found.contains(&row("identical", Some("import_name"), Some(1), Some(0))),
-            "{found:?}"
-        );
-    }
-
-    fn fixtures() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tools/fixtures/wasm-module-diff")
-    }
-
-    /// The checked-in builds are exactly what the pinned assembler makes from
-    /// their sources, and they keep the rows their README lists. Run
-    /// `make wasm-diff-fixtures` after editing a `.wat`.
-    #[test]
-    fn checked_in_builds_match_their_sources_and_expected_rows() {
-        let mut bytes = Vec::new();
-        for name in ["build-a", "build-b"] {
-            let built = wat::parse_file(fixtures().join(format!("{name}.wat"))).unwrap();
-            wasmparser::Validator::new().validate_all(&built).unwrap();
-            let checked_in = std::fs::read(fixtures().join(format!("{name}.wasm")))
-                .unwrap_or_else(|_| panic!("{name}.wasm is missing; run make wasm-diff-fixtures"));
-            assert!(
-                built == checked_in,
-                "{name}.wasm drifted; run make wasm-diff-fixtures"
-            );
-            bytes.push(checked_in);
-        }
-        let report = compare(&bytes[0], &bytes[1], json!({}), json!({})).unwrap();
-        assert!(report.complete, "{:?}", report.omissions);
-        let found = rows(&report);
-        for expected in [
-            row("identical", Some("import_name"), Some(0), Some(0)),
-            row("added", None, None, Some(1)),
-            row("identical", Some("identical"), Some(1), Some(2)),
-            row("renumbered", Some("normalized"), Some(2), Some(3)),
-            row("changed", Some("call_graph"), Some(3), Some(4)),
-            row("renumbered", Some("normalized"), Some(4), Some(5)),
-            row("removed", None, Some(5), None),
-            row("changed", Some("structural"), Some(8), Some(8)),
-            row("added", None, None, Some(9)),
-        ] {
-            assert!(found.contains(&expected), "{expected:?} not in {found:?}");
-        }
-        let ambiguous = report
-            .rows
-            .iter()
-            .filter(|r| r.status == AMBIGUOUS)
-            .collect::<Vec<_>>();
-        assert_eq!(ambiguous.len(), 1);
-        assert_eq!(
-            (
-                ambiguous[0].candidates_a.as_slice(),
-                ambiguous[0].candidates_b.as_slice()
-            ),
-            (&[6, 7][..], &[6, 7][..])
-        );
-        assert_eq!(report.rows.len(), 10, "{found:?}");
-    }
-
-    #[test]
-    #[ignore = "writes fixtures; run through make wasm-diff-fixtures"]
-    fn write_wasm_diff_fixtures() {
-        for name in ["build-a", "build-b"] {
-            let built = wat::parse_file(fixtures().join(format!("{name}.wat"))).unwrap();
-            std::fs::write(fixtures().join(format!("{name}.wasm")), built).unwrap();
-        }
-    }
-
-    #[test]
-    fn malformed_and_empty_modules_are_named_errors() {
-        let error = compare(&[], b"\0asm\x01\0\0\0", json!({}), json!({}))
-            .err()
-            .unwrap();
-        assert_eq!(error.status, 422);
-        assert!(error.message.contains("module A is empty"));
-        let error = compare(
-            b"\0asm\x01\0\0\0\x0a\x05",
-            b"\0asm\x01\0\0\0",
-            json!({}),
-            json!({}),
-        )
-        .err()
-        .unwrap();
-        assert_eq!(error.status, 422);
-    }
-
-    #[test]
-    fn pages_filter_by_status_and_stop_at_the_window() {
-        let report = report(
-            r#"(module (func (export "x") (result i32) i32.const 1) (func (result i32) i32.const 2))"#,
-            r#"(module (func (export "x") (result i32) i32.const 5) (func (param i32)))"#,
-        );
-        let page = render(
-            &report,
-            &Page {
-                offset: 0,
-                limit: 1,
-                statuses: Some(vec!["changed".into()]),
-            },
-        )
-        .unwrap();
-        assert_eq!(page["rows"].as_array().unwrap().len(), 1);
-        assert_eq!(page["rows"][0]["status"], "changed");
-        assert_eq!(page["row_window"]["total_rows"], 1);
-        assert!(page["row_window"]["next_offset"].is_null());
-        let error = render(
-            &report,
-            &Page {
-                offset: 9,
-                limit: 1,
-                statuses: None,
-            },
-        )
-        .err()
-        .unwrap();
-        assert_eq!(error.status, 400);
-        assert!(requested_statuses("changed,bogus").is_err());
-        assert!(requested_statuses("changed,changed").is_err());
-    }
-}
+mod tests;

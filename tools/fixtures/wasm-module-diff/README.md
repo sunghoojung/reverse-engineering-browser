@@ -15,7 +15,7 @@ keeps two identical stubs. No third-party module is used.
 | 3 step | 4 | changed, `call_graph` |
 | 4 `run` | 5 | renumbered, `normalized` |
 | 5 shift | none | removed |
-| 6, 7 stubs | 6, 7 | one ambiguous row, `identical` |
+| 6, 7 stubs | 6, 7 | four ambiguous rows, one per stub, in one tie by `identical` |
 | 8 `checksum` | 8 `digest` | changed, `structural` |
 | none | 9 square | added |
 

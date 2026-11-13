@@ -51,9 +51,26 @@ pub const MAX_LOCALS: u64 = 50_000;
 /// Instructions simulated per body. A body at the engine size limit holds a
 /// few million instructions; past this the prefix is returned as partial.
 pub const MAX_INSTRUCTIONS: usize = 2_000_000;
-/// Instructions plus snapshot and join entries; bounds branch-heavy bodies
-/// with many live locals.
-pub const MAX_WORK: u64 = 32_000_000;
+/// Instructions plus loop-write, snapshot and join entries. Loop joins grow
+/// with nesting depth times the locals written, so this is what bounds time
+/// and memory on deeply nested bodies; it is checked inside every such loop.
+pub const MAX_WORK: u64 = 4_000_000;
+
+/// The simulation's budgets. Tests lower them to reach each stop.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    pub max_instructions: usize,
+    pub max_work: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_instructions: MAX_INSTRUCTIONS,
+            max_work: MAX_WORK,
+        }
+    }
+}
 const MAX_IMPORT_NAME_BYTES: usize = 128;
 
 pub(crate) fn bad(error: wasmparser::BinaryReaderError) -> Error {
@@ -281,6 +298,9 @@ pub struct Simulation {
     pub instructions: Vec<u32>,
     /// The node an instruction created, `NONE` when it created none.
     pub instruction_nodes: Vec<u32>,
+    /// Whether declared control flow reaches each instruction. Unreachable
+    /// instructions create no node, so dead code never feeds a slice.
+    pub instruction_live: Vec<bool>,
     input_start: Vec<u32>,
     inputs: Vec<Value>,
     pub type_index: u32,
@@ -289,6 +309,8 @@ pub struct Simulation {
     pub results: u32,
     /// Byte offset where simulation stopped early, with the omissions naming why.
     pub stopped_at: Option<u32>,
+    /// Work units spent, including the loop-write prescan.
+    pub work: u64,
     pub omissions: Vec<String>,
 }
 
@@ -580,6 +602,7 @@ struct Sim<'m, 'a> {
     edges: Vec<Edge>,
     instructions: Vec<u32>,
     instruction_nodes: Vec<u32>,
+    instruction_live: Vec<bool>,
     input_start: Vec<u32>,
     inputs: Vec<Value>,
     stack: Vec<Value>,
@@ -596,6 +619,11 @@ struct Sim<'m, 'a> {
     /// The latest full-width store to a constant address in this block.
     store: Option<StoreFact>,
     work: u64,
+    limits: Limits,
+    deadline: Instant,
+    /// Set once a budget runs out inside an instruction; the main loop stops
+    /// at that instruction.
+    exhausted: Option<&'static str>,
     omissions: Vec<String>,
     underflow_noted: bool,
 }
@@ -671,6 +699,17 @@ pub fn simulate(
     body: &FunctionBody<'_>,
     deadline: Instant,
 ) -> Result<Simulation> {
+    simulate_with(module, function, body, deadline, Limits::default())
+}
+
+/// [`simulate`] with explicit budgets.
+pub fn simulate_with(
+    module: &Module<'_>,
+    function: u32,
+    body: &FunctionBody<'_>,
+    deadline: Instant,
+    limits: Limits,
+) -> Result<Simulation> {
     let type_index = *module
         .func_types
         .get(function as usize)
@@ -702,6 +741,7 @@ pub fn simulate(
         edges: Vec::new(),
         instructions: Vec::new(),
         instruction_nodes: Vec::new(),
+        instruction_live: Vec::new(),
         input_start: Vec::new(),
         inputs: Vec::new(),
         stack: Vec::new(),
@@ -735,6 +775,9 @@ pub fn simulate(
         loop_writes: HashMap::new(),
         store: None,
         work: 0,
+        limits,
+        deadline,
+        exhausted: None,
         omissions: Vec::new(),
         underflow_noted: false,
     };
@@ -744,7 +787,9 @@ pub fn simulate(
         let mut ended = false;
         while !reader.eof() {
             let position = reader.original_position() as u32;
-            if sim.instructions.len() >= MAX_INSTRUCTIONS || sim.work > MAX_WORK {
+            if sim.instructions.len() >= sim.limits.max_instructions
+                || sim.work > sim.limits.max_work
+            {
                 sim.omissions.push(format!(
                     "Simulation work budget reached at byte {position}; value flow after it is not computed."
                 ));
@@ -767,9 +812,21 @@ pub fn simulate(
             let index = sim.instructions.len() as u32;
             sim.instructions.push(offset as u32);
             sim.instruction_nodes.push(NONE);
+            sim.instruction_live.push(sim.reachable);
             sim.input_start.push(sim.inputs.len() as u32);
             sim.work += 1;
-            match sim.step(&op, offset as u32, index) {
+            let step = sim.step(&op, offset as u32, index);
+            if sim.reachable {
+                sim.instruction_live[index as usize] = true;
+            }
+            if let Some(reason) = sim.exhausted.take() {
+                sim.omissions.push(format!(
+                    "{reason} at byte {offset}; value flow from this instruction on is not computed."
+                ));
+                stopped_at = Some(offset as u32);
+                break;
+            }
+            match step {
                 Ok(done) => ended = done,
                 Err(Stop::Unsupported(what)) => {
                     sim.omissions.push(format!(
@@ -794,6 +851,7 @@ pub fn simulate(
         edges: sim.edges,
         instructions: sim.instructions,
         instruction_nodes: sim.instruction_nodes,
+        instruction_live: sim.instruction_live,
         input_start: sim.input_start,
         inputs: sim.inputs,
         type_index,
@@ -801,27 +859,31 @@ pub fn simulate(
         locals: local_count,
         results,
         stopped_at,
+        work: sim.work,
         omissions: sim.omissions,
     })
 }
 
 impl Sim<'_, '_> {
     /// Records which locals each loop writes, so its header joins exist before
-    /// the back edges that feed them are read.
+    /// the back edges that feed them are read. A write lands in the innermost
+    /// open loop only; a loop's set joins its enclosing loop's set at `end`, so
+    /// the pass costs one unit per write plus one per local a loop passes on.
     fn prescan(&mut self, body: &FunctionBody<'_>, deadline: Instant) -> Result<Option<u32>> {
         let mut reader = body.get_operators_reader().map_err(bad)?;
-        let mut open: Vec<(bool, u32)> = Vec::new();
-        let mut sets: HashMap<u32, HashSet<u32>> = HashMap::new();
+        // Every open frame; a loop carries its instruction index and its set.
+        let mut open: Vec<Option<(u32, HashSet<u32>)>> = Vec::new();
+        let mut loops: Vec<usize> = Vec::new();
         let mut index = 0u32;
         while !reader.eof() {
             let position = reader.original_position() as u32;
-            if index as usize >= MAX_INSTRUCTIONS {
+            if index as usize >= self.limits.max_instructions {
                 self.omissions.push(format!(
                     "Simulation work budget reached at byte {position}; value flow is not computed."
                 ));
                 return Ok(Some(position));
             }
-            if index & 1023 == 0 && Instant::now() > deadline {
+            if index & 255 == 0 && Instant::now() > deadline {
                 self.omissions.push(format!(
                     "Simulation deadline reached at byte {position}; value flow is not computed."
                 ));
@@ -829,21 +891,32 @@ impl Sim<'_, '_> {
             }
             let op = reader.read().map_err(bad)?;
             match op {
-                Operator::Loop { .. } => open.push((true, index)),
+                Operator::Loop { .. } => {
+                    loops.push(open.len());
+                    open.push(Some((index, HashSet::new())));
+                }
                 Operator::Block { .. }
                 | Operator::If { .. }
                 | Operator::Try { .. }
-                | Operator::TryTable { .. } => open.push((false, index)),
+                | Operator::TryTable { .. } => open.push(None),
                 Operator::End | Operator::Delegate { .. } => {
-                    open.pop();
+                    if let Some(Some((start, set))) = open.pop() {
+                        loops.pop();
+                        if !self.spend(set.len() as u64) {
+                            break;
+                        }
+                        if let Some(Some((_, outer))) = loops.last().map(|at| &mut open[*at]) {
+                            outer.extend(set.iter().copied());
+                        }
+                        let mut locals: Vec<u32> = set.into_iter().collect();
+                        locals.sort_unstable();
+                        self.loop_writes.insert(start, locals);
+                    }
                 }
                 Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
-                    for (is_loop, start) in open.iter().rev() {
-                        if !is_loop {
-                            continue;
-                        }
-                        self.work += 1;
-                        if !sets.entry(*start).or_default().insert(local_index) {
+                    if let Some(Some((_, set))) = loops.last().map(|at| &mut open[*at]) {
+                        set.insert(local_index);
+                        if !self.spend(1) {
                             break;
                         }
                     }
@@ -852,12 +925,33 @@ impl Sim<'_, '_> {
             }
             index += 1;
         }
-        for (start, set) in sets {
-            let mut locals: Vec<u32> = set.into_iter().collect();
-            locals.sort_unstable();
-            self.loop_writes.insert(start, locals);
+        if let Some(reason) = self.exhausted.take() {
+            let position = reader.original_position() as u32;
+            self.omissions.push(format!(
+                "{reason} while recording loop writes at byte {position}; value flow is not computed."
+            ));
+            return Ok(Some(position));
         }
         Ok(None)
+    }
+
+    /// Charges `units` of work. False, with the reason kept for the main loop,
+    /// once the work budget or the deadline is exhausted.
+    fn spend(&mut self, units: u64) -> bool {
+        if self.exhausted.is_some() {
+            return false;
+        }
+        let before = self.work;
+        self.work += units;
+        if self.work > self.limits.max_work {
+            self.exhausted = Some("Simulation work budget reached");
+            return false;
+        }
+        if before >> 12 != self.work >> 12 && Instant::now() > self.deadline {
+            self.exhausted = Some("Simulation deadline reached");
+            return false;
+        }
+        true
     }
 
     fn node(
@@ -968,15 +1062,23 @@ impl Sim<'_, '_> {
     /// The top `count` values without popping, padded with unknown values.
     fn top(&mut self, count: u32) -> Vec<Value> {
         let height = self.frames.last().map_or(0, |frame| frame.height);
-        let available = self.stack.len().saturating_sub(height);
-        let count = count as usize;
-        let mut values = Vec::with_capacity(count);
-        for _ in available..count {
-            values.push(self.unknown_value());
+        self.top_at(height, count)
+    }
+
+    /// A reachable instruction found fewer operands than it carries: noted
+    /// once per body, since such a body does not validate.
+    fn note_short(&mut self, wanted: usize, available: usize) {
+        if self.reachable && !self.underflow_noted {
+            self.underflow_noted = true;
+            let offset = self
+                .instructions
+                .last()
+                .copied()
+                .unwrap_or(self.body_offset);
+            self.omissions.push(format!(
+                "The instruction at byte {offset} carries {wanted} values but the operand stack holds {available}; the module may not validate, and the missing values are unknown."
+            ));
         }
-        let take = count.min(available);
-        values.extend_from_slice(&self.stack[self.stack.len() - take..]);
-        values
     }
 
     fn record(&mut self, index: u32, values: &[Value]) {
@@ -1017,19 +1119,53 @@ impl Sim<'_, '_> {
         node
     }
 
+    /// The values a branch to `depth` carries, read without popping.
+    fn carried(&mut self, depth: u32) -> Vec<Value> {
+        match self.frames.len().checked_sub(depth as usize + 1) {
+            Some(target) => {
+                let arity = self.frames[target].label_arity();
+                self.top(arity)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// A branch node for `if`, `br_if` or `br_table`. Its operands, in text
+    /// order, are the carried values and then the selector; only the selector
+    /// is consumed here, since the carried values flow to the branch target.
+    fn selector(&mut self, index: u32, carried: &[Value], selector: Value) {
+        self.record(index, carried);
+        self.record(index, &[selector]);
+        let offset = self.instructions[index as usize];
+        let node = self.node(NodeKind::Branch, offset, index, NONE, 0);
+        self.edge(
+            selector,
+            node,
+            carried.len() as u32,
+            EdgeKind::Selector,
+            Via::None,
+            NONE,
+        );
+        self.instruction_nodes[index as usize] = node;
+    }
+
     fn write_local(&mut self, local: u32, value: Value, offset: u32) {
         let old = self.locals[local as usize];
+        let mut walked = 0u64;
         for frame in self.frames.iter_mut().rev() {
             if frame.saved.contains_key(&local) {
                 break;
             }
-            self.work += 1;
+            walked += 1;
             frame.saved.insert(local, old);
         }
+        self.spend(walked);
         if self.reachable {
             for position in 0..self.open_tries.len() {
+                if !self.spend(1) {
+                    break;
+                }
                 let frame = self.open_tries[position];
-                self.work += 1;
                 self.frames[frame].try_writes.push((local, value, offset));
             }
         }
@@ -1043,7 +1179,7 @@ impl Sim<'_, '_> {
             .map(|local| (*local, self.locals[*local as usize]))
             .collect();
         locals.sort_unstable_by_key(|(local, _)| *local);
-        self.work += locals.len() as u64;
+        self.spend(locals.len() as u64);
         locals
     }
 
@@ -1082,8 +1218,10 @@ impl Sim<'_, '_> {
                 }
                 let locals = self.frames[target].loop_local_phis.clone();
                 for (local, phi) in locals {
+                    if !self.spend(1) {
+                        break;
+                    }
                     let value = self.locals[local as usize];
-                    self.work += 1;
                     if !self.same(value, Value::of(phi)) {
                         self.edge(value, phi, 0, EdgeKind::Merge, via, offset);
                     }
@@ -1167,6 +1305,10 @@ impl Sim<'_, '_> {
     }
 
     fn enter_loop(&mut self, offset: u32, index: u32) {
+        // A loop no path reaches has no header joins: nothing can enter it.
+        if !self.reachable {
+            return;
+        }
         let frame = self.frames.len() - 1;
         let params = self.frames[frame].param_values.clone();
         let height = self.frames[frame].height;
@@ -1194,7 +1336,9 @@ impl Sim<'_, '_> {
             if local as usize >= self.locals.len() {
                 continue;
             }
-            self.work += 1;
+            if !self.spend(1) {
+                break;
+            }
             let phi = self.node(NodeKind::Phi, offset, index, local, 1);
             self.nodes[phi as usize].join = Join::Loop;
             let value = self.locals[local as usize];
@@ -1211,7 +1355,7 @@ impl Sim<'_, '_> {
             .iter()
             .map(|(local, value)| (*local, *value))
             .collect();
-        self.work += saved.len() as u64;
+        self.spend(saved.len() as u64);
         for (local, value) in saved {
             self.locals[local as usize] = value;
         }
@@ -1242,7 +1386,7 @@ impl Sim<'_, '_> {
             self.edge(entry, phi, 0, EdgeKind::Merge, Via::Entry, offset);
             while position < by_local.len() && by_local[position].0 == local {
                 let (_, value, at) = by_local[position];
-                self.work += 1;
+                self.spend(1);
                 self.edge(value, phi, 0, EdgeKind::Merge, Via::Catch, at);
                 position += 1;
             }
@@ -1260,6 +1404,10 @@ impl Sim<'_, '_> {
         if count == 0 {
             return Vec::new();
         }
+        if !self.reachable {
+            let unknown = self.unknown_value();
+            return vec![unknown; count as usize];
+        }
         let node = self.node(NodeKind::ExceptionValue, offset, index, tag, count);
         if self.instruction_nodes[index as usize] == NONE {
             self.instruction_nodes[index as usize] = node;
@@ -1268,8 +1416,20 @@ impl Sim<'_, '_> {
     }
 
     /// Closes the innermost frame at its `end` (or `delegate`), merging every
-    /// path that reaches the instruction after it.
+    /// path that reaches the instruction after it. The block's results, merged
+    /// or passed through, are recorded as the `end`'s operands so the `end`
+    /// itself can be traced.
     fn close(&mut self, offset: u32, index: u32) {
+        let height = self.frames.last().map_or(0, |frame| frame.height);
+        self.merge(offset, index);
+        let results = self.stack.len().saturating_sub(height);
+        if self.reachable && results > 0 {
+            let values: Vec<Value> = self.stack[self.stack.len() - results..].to_vec();
+            self.record(index, &values);
+        }
+    }
+
+    fn merge(&mut self, offset: u32, index: u32) {
         let position = self.frames.len() - 1;
         if matches!(
             self.frames[position].kind,
@@ -1303,6 +1463,7 @@ impl Sim<'_, '_> {
         }
         if self.reachable {
             let height = self.frames[position].height;
+            self.note_leftover(height, results, offset);
             let values = self.top_at(height, results);
             let values = values.into_iter().map(|v| self.materialize(v)).collect();
             let locals = self.snapshot(position);
@@ -1344,6 +1505,21 @@ impl Sim<'_, '_> {
             return;
         }
         self.reachable = true;
+        // Every path must carry the block's result count. A body that does not
+        // validate can carry fewer or more; the merge pads with unknown values
+        // or drops the extra ones, and says so.
+        let unknown = self.unknown_value();
+        for incoming in incomings.iter_mut() {
+            let carried = incoming.values.len();
+            if carried == results as usize {
+                continue;
+            }
+            let from = incoming.via_offset;
+            self.omissions.push(format!(
+                "At byte {offset} a path from byte {from} carries {carried} values where the block declares {results}; the module may not validate, and missing values are unknown."
+            ));
+            incoming.values.resize(results as usize, unknown);
+        }
         for slot in 0..results as usize {
             let first = incomings[0].values[slot];
             if incomings
@@ -1375,7 +1551,9 @@ impl Sim<'_, '_> {
             .collect();
         written.sort_unstable_by_key(|(local, _)| *local);
         for (local, entry) in written {
-            self.work += incomings.len() as u64;
+            if !self.spend(incomings.len() as u64) {
+                break;
+            }
             let value_in = |incoming: &Incoming| {
                 incoming
                     .locals
@@ -1410,6 +1588,9 @@ impl Sim<'_, '_> {
     fn top_at(&mut self, height: usize, count: u32) -> Vec<Value> {
         let available = self.stack.len().saturating_sub(height);
         let count = count as usize;
+        if available < count {
+            self.note_short(count, available);
+        }
         let mut values = Vec::with_capacity(count);
         for _ in available..count {
             values.push(self.unknown_value());
@@ -1417,6 +1598,17 @@ impl Sim<'_, '_> {
         let take = count.min(available);
         values.extend_from_slice(&self.stack[self.stack.len() - take..]);
         values
+    }
+
+    /// Values left above a block's results at its end flow nowhere; a body
+    /// that leaves them does not validate.
+    fn note_leftover(&mut self, height: usize, results: u32, offset: u32) {
+        let extra = self.stack.len().saturating_sub(height + results as usize);
+        if extra > 0 {
+            self.omissions.push(format!(
+                "{extra} values are left on the operand stack at the end at byte {offset}; the module may not validate, and they flow nowhere."
+            ));
+        }
     }
 
     /// A `try_table` catch clause branches to its label from anywhere in the
@@ -1477,7 +1669,7 @@ impl Sim<'_, '_> {
                         .map(|local| (*local, local_value(*local, self.locals[*local as usize])))
                         .collect();
                     locals.sort_unstable_by_key(|(local, _)| *local);
-                    self.work += locals.len() as u64;
+                    self.spend(locals.len() as u64);
                     self.frames[target].incoming.push(Incoming {
                         via: Via::Catch,
                         via_offset: entry_offset,
@@ -1500,6 +1692,26 @@ impl Sim<'_, '_> {
         offset: u32,
         index: u32,
     ) -> std::result::Result<bool, Stop> {
+        // Code no declared path reaches creates no node: its values cannot
+        // feed a slice and its calls cannot be reported as sinks. Structure
+        // is still tracked so the frames stay aligned with the bytes.
+        if !self.reachable
+            && !matches!(
+                op,
+                Operator::Block { .. }
+                    | Operator::Loop { .. }
+                    | Operator::If { .. }
+                    | Operator::Else
+                    | Operator::End
+                    | Operator::Try { .. }
+                    | Operator::Catch { .. }
+                    | Operator::CatchAll
+                    | Operator::Delegate { .. }
+                    | Operator::TryTable { .. }
+            )
+        {
+            return Ok(false);
+        }
         match op {
             Operator::Nop => {}
             Operator::Unreachable => {
@@ -1517,10 +1729,10 @@ impl Sim<'_, '_> {
             }
             Operator::If { blockty } => {
                 self.clear_store();
-                let condition = self.pop(offset);
-                self.consume(NodeKind::Branch, index, NONE, 0, &[condition], |_| {
-                    EdgeKind::Selector
-                });
+                if self.reachable {
+                    let condition = self.pop(offset);
+                    self.selector(index, &[], condition);
+                }
                 self.push_frame(FrameKind::If, Join::If, offset, index, *blockty)?;
             }
             Operator::Else => {
@@ -1556,6 +1768,7 @@ impl Sim<'_, '_> {
                     let results = self.frames[0].results;
                     let mut node = NONE;
                     if self.reachable {
+                        self.note_leftover(0, results, offset);
                         let values = self.top_at(0, results);
                         self.record(index, &values);
                         node = self.returns(offset, index, &values);
@@ -1582,17 +1795,15 @@ impl Sim<'_, '_> {
             Operator::BrIf { relative_depth } => {
                 self.clear_store();
                 let condition = self.pop(offset);
-                self.consume(NodeKind::Branch, index, NONE, 0, &[condition], |_| {
-                    EdgeKind::Selector
-                });
+                let carried = self.carried(*relative_depth);
+                self.selector(index, &carried, condition);
                 self.branch(*relative_depth, Via::BrIf, offset, index);
             }
             Operator::BrTable { targets } => {
                 self.clear_store();
                 let selector = self.pop(offset);
-                self.consume(NodeKind::Branch, index, NONE, 0, &[selector], |_| {
-                    EdgeKind::Selector
-                });
+                let carried = self.carried(targets.default());
+                self.selector(index, &carried, selector);
                 let mut depths: Vec<u32> = Vec::new();
                 for target in targets.targets() {
                     let depth = target
@@ -1602,7 +1813,7 @@ impl Sim<'_, '_> {
                 depths.push(targets.default());
                 depths.sort_unstable();
                 depths.dedup();
-                self.work += depths.len() as u64;
+                self.spend(depths.len() as u64);
                 for depth in depths {
                     self.branch(depth, Via::BrTable, offset, index);
                 }
@@ -1828,6 +2039,9 @@ impl Sim<'_, '_> {
             }
             Operator::Delegate { .. } => {
                 self.clear_store();
+                if self.frames.last().map(|frame| frame.kind) != Some(FrameKind::Try) {
+                    return Err(Stop::Unsupported("A delegate without its try".to_owned()));
+                }
                 self.close(offset, index);
             }
             Operator::TryTable { try_table } => {

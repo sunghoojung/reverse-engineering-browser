@@ -439,6 +439,11 @@ struct Func {
     callees: Vec<u32>,
 }
 
+/// The sections that give meaning to the indices a body names: types,
+/// imports, function types, tables, memories, globals, elements, data, the
+/// data count and tags. The code section is not one of them.
+const INDEX_SECTIONS: [u8; 10] = [1, 2, 3, 4, 5, 6, 9, 11, 12, 13];
+
 /// The bytes-pass key: a defined, index-free body and its signature.
 fn bytes_key(f: &Func) -> Option<(u64, [u8; 16])> {
     (f.import.is_none() && f.pure).then_some((f.signature, f.body))
@@ -452,6 +457,8 @@ struct Module {
     type_text: Vec<String>,
     /// Functions past a limit or the deadline that were never fingerprinted.
     truncated: bool,
+    /// Each `INDEX_SECTIONS` section's id and byte range, in module order.
+    index_sections: Vec<(u8, std::ops::Range<usize>)>,
 }
 
 impl Module {
@@ -953,8 +960,15 @@ fn analyze(
             }
         };
     }
+    let mut index_sections = Vec::new();
     'module: for payload in Parser::new(0).parse_all(bytes) {
-        match payload.map_err(bad)? {
+        let payload = payload.map_err(bad)?;
+        if let Some((id, range)) = payload.as_section()
+            && INDEX_SECTIONS.contains(&id)
+        {
+            index_sections.push((id, range));
+        }
+        match payload {
             Payload::Version {
                 num: 1,
                 encoding: Encoding::Module,
@@ -1210,6 +1224,7 @@ fn analyze(
         callers,
         type_text: type_text_list,
         truncated,
+        index_sections,
     })
 }
 
@@ -1308,6 +1323,10 @@ struct Matcher<'m> {
     /// Similarity scores already paid for during propagation.
     scores: HashMap<(u32, u32), f64>,
     structural_incomplete: bool,
+    /// Whether both modules' `INDEX_SECTIONS` are byte-equal, so every
+    /// global, type, table, element, data or tag index means the same item
+    /// in both.
+    same_index_space: bool,
 }
 
 impl<'m> Matcher<'m> {
@@ -1323,6 +1342,7 @@ impl<'m> Matcher<'m> {
             groups: Vec::new(),
             budget,
             positional_done: vec![false; a.funcs.len()],
+            same_index_space: false,
             scores: HashMap::new(),
             structural_incomplete: false,
         }
@@ -2046,6 +2066,33 @@ impl<'m> Matcher<'m> {
         };
         same(&fa.calls, &fb.calls) && same(&fa.refs, &fb.refs)
     }
+    /// Inside one exact tie, pairs the members whose bytes, signature and
+    /// address map no other member on either side shares, and returns the
+    /// rest. Only sound when the index space is the same: every index the
+    /// bytes name then names the same item, except call and `ref.func`
+    /// targets, which the status still checks through the match.
+    fn pair_equal_bytes(&mut self, a: Vec<u32>, b: Vec<u32>) -> (Vec<u32>, Vec<u32>) {
+        let key = |f: &Func| (f.signature, f.body, f.addresses);
+        let mut counts = HashMap::<_, (u32, u32, u32, u32)>::new();
+        for index in &a {
+            let entry = counts.entry(key(&self.a.funcs[*index as usize])).or_default();
+            entry.0 += 1;
+            entry.1 = *index;
+        }
+        for index in &b {
+            let entry = counts.entry(key(&self.b.funcs[*index as usize])).or_default();
+            entry.2 += 1;
+            entry.3 = *index;
+        }
+        for (count_a, x, count_b, y) in counts.into_values() {
+            if count_a == 1 && count_b == 1 {
+                self.pair(x, y, BY_BYTES, 1.0);
+            }
+        }
+        let a = a.into_iter().filter(|i| self.open_a(*i)).collect();
+        let b = b.into_iter().filter(|i| self.open_b(*i)).collect();
+        (a, b)
+    }
     fn run(mut self) -> (Vec<Row>, Vec<Group>, Budget, bool) {
         self.settle(Vec::new());
         if self.budget.stopped.is_none() {
@@ -2070,6 +2117,11 @@ impl<'m> Matcher<'m> {
                 .into_iter()
                 .filter(|i| self.open_b(*i))
                 .collect::<Vec<_>>();
+            let (a, b) = if self.same_index_space {
+                self.pair_equal_bytes(a, b)
+            } else {
+                (a, b)
+            };
             if !a.is_empty() && !b.is_empty() {
                 self.group(method, 1.0, a, b);
             }
@@ -2232,8 +2284,14 @@ fn compare_with(
                 .into(),
         );
     }
-    let (rows, groups, budget, structural_incomplete) =
-        Matcher::new(&module_a, &module_b, budget).run();
+    let mut matcher = Matcher::new(&module_a, &module_b, budget);
+    matcher.same_index_space = module_a.index_sections.len() == module_b.index_sections.len()
+        && module_a
+            .index_sections
+            .iter()
+            .zip(&module_b.index_sections)
+            .all(|((x, xr), (y, yr))| x == y && a_bytes[xr.clone()] == b_bytes[yr.clone()]);
+    let (rows, groups, budget, structural_incomplete) = matcher.run();
     let mut counts = [0u64; 7];
     let mut methods = [0u64; 7];
     for row in &rows {

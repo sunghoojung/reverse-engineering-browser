@@ -1471,3 +1471,44 @@ fn a_function_reference_to_another_function_is_changed() {
         "{found:?}"
     );
 }
+
+/// `n` uncalled getters, each reading its own i32 global, after `extra`
+/// leading globals the getters skip.
+fn getters(n: usize, extra: usize) -> String {
+    let globals = (0..n + extra)
+        .map(|k| format!(" (global (mut i32) (i32.const {k}))"))
+        .collect::<String>();
+    let funcs = (0..n)
+        .map(|k| format!(" (func (result i32) global.get {})", k + extra))
+        .collect::<String>();
+    format!("(module{globals}{funcs})")
+}
+
+#[test]
+fn a_module_compared_with_itself_is_all_identical() {
+    // Every getter normalizes to the same hash, so they form one exact tie;
+    // with the same globals, types and tables on both sides each getter's
+    // bytes name the same global, and only its twin on the other side has
+    // them.
+    let module = getters(3_000, 0);
+    let found = report(&module, &module);
+    assert!(found.groups.is_empty(), "{:?}", found.groups);
+    assert_eq!(found.rows.len(), 3_000);
+    assert!(
+        found
+            .rows
+            .iter()
+            .all(|row| row.status == IDENTICAL && row.a == row.b),
+        "{:?}",
+        &rows(&found)[..3]
+    );
+    // One global inserted before them renumbers every getter, and equal
+    // bytes no longer name the same global: the tie stays a tie.
+    let found = report(&getters(30, 0), &getters(30, 1));
+    assert_eq!(found.groups, vec![(30, 30)]);
+    // So does a global section of the same length with other bytes: global
+    // k starts at -k.
+    let reversed = getters(30, 0).replace("(i32.const ", "(i32.const -");
+    let found = report(&getters(30, 0), &reversed);
+    assert_eq!(found.groups, vec![(30, 30)]);
+}

@@ -1669,7 +1669,8 @@ fn run_blocking(root: &Path, request: &Request, limits: Limits) -> Result<Value>
     record["schema"] = json!(SCHEMA);
     // A random nonce: an identifier derived from the inputs would let anyone
     // who sees it test guesses at those inputs.
-    record["run_id"] = json!(format!("wr-{}-{}", created.as_millis(), nonce()));
+    let (nonce, nonce_source) = nonce();
+    record["run_id"] = json!(format!("wr-{}-{nonce}", created.as_millis()));
     record["record_class"] = json!("derived_experiment");
     record["created_at_ms"] = json!(created.as_millis() as u64);
     record["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
@@ -1678,6 +1679,7 @@ fn run_blocking(root: &Path, request: &Request, limits: Limits) -> Result<Value>
         "module_sha256": request.sha256,
         "module_byte_size": bytes.len(),
         "inputs_digest": inputs_digest,
+        "run_id_source": nonce_source,
         "interpreter": {
             "name": INTERPRETER,
             "version": INTERPRETER_VERSION,
@@ -1806,31 +1808,45 @@ fn unreadable() -> Error {
     .with_code(Code::ArtifactIntegrity)
 }
 
-/// Keeps the newest runs. A run is derived, not evidence, so the oldest is
-/// evicted at capacity, and `evicted_runs` counts every eviction.
-/// 96 random bits from the operating system, as hex. If that source is
-/// unreadable, a randomly keyed hash of the time and a counter stands in: it is
-/// still unrelated to the run's inputs.
-fn nonce() -> String {
+/// Where a run's nonce came from, recorded in its provenance.
+const NONCE_OS: &str = "os_random";
+const NONCE_FALLBACK: &str = "hashed_fallback";
+
+/// 24 hex digits for a run_id. 96 random bits from the operating system, or, if
+/// /dev/urandom cannot be read, two randomly keyed hashes of the time and a
+/// counter: still 24 digits and unrelated to the run's inputs, though not
+/// cryptographic. The source is returned so the record can say which.
+fn nonce() -> (String, &'static str) {
     use std::io::Read as _;
     let mut bytes = [0u8; 12];
-    if std::fs::File::open("/dev/urandom")
+    let read = std::fs::File::open("/dev/urandom")
         .and_then(|mut source| source.read_exact(&mut bytes))
-        .is_ok()
-    {
-        return hex::encode(bytes);
+        .is_ok();
+    nonce_from(read.then_some(bytes))
+}
+
+fn nonce_from(os: Option<[u8; 12]>) -> (String, &'static str) {
+    if let Some(bytes) = os {
+        return (hex::encode(bytes), NONCE_OS);
     }
     use std::hash::{BuildHasher, Hasher};
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    hasher.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos(),
-    );
-    hasher.write_u64(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-    format!("{:016x}", hasher.finish())
+    let state = std::collections::hash_map::RandomState::new();
+    let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let half = |salt: u8| {
+        let mut hasher = state.build_hasher();
+        hasher.write_u8(salt);
+        hasher.write_u128(nanos);
+        hasher.write_u64(count);
+        hasher.finish()
+    };
+    eprintln!("WASM run: /dev/urandom was unreadable; this run_id uses the hashed fallback");
+    let digits = format!("{:016x}{:016x}", half(0), half(1));
+    (digits[..24].to_owned(), NONCE_FALLBACK)
 }
 
 /// Renames `from` to `to` only if `to` does not exist, atomically where the
@@ -1898,8 +1914,10 @@ fn move_aside(path: &Path, millis: u128) -> Result<String> {
     .with_code(Code::ArtifactIntegrity))
 }
 
-/// Returns a notice when an unreadable store was moved aside. Its bytes are
-/// kept under a new name, never overwritten, and the run that moved it says so.
+/// Keeps the newest runs. A run is derived, not evidence, so the oldest is
+/// evicted at capacity, and `evicted_runs` counts every eviction. Returns a
+/// notice when an unreadable store was moved aside. Its bytes are kept under a
+/// new name, never overwritten, and the run that moved it says so.
 fn persist(root: &Path, record: &Value) -> Result<Option<String>> {
     let path = store_path(root);
     let lease = crate::workspace_lease::Lease::acquire(&path)?;
@@ -2730,7 +2748,7 @@ mod tests {
         // differ only by the nonce.
         let started = Instant::now();
         let nonces = (0..1000)
-            .map(|_| nonce())
+            .map(|_| nonce().0)
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             nonces.len(),
@@ -2748,6 +2766,20 @@ mod tests {
             !shares_no_window(&digest[10..34], &digest),
             "the window check finds a slice from the middle"
         );
+    }
+
+    #[test]
+    fn the_fallback_nonce_is_24_digits_and_says_so() {
+        // The fallback gave 16 digits where 24 are documented, and nothing
+        // recorded that it was used.
+        let (first, source) = nonce_from(None);
+        assert_eq!(source, NONCE_FALLBACK);
+        assert_eq!(first.len(), 24);
+        assert!(first.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_ne!(nonce_from(None).0, first);
+        assert_eq!(nonce_from(Some([7; 12])), ("07".repeat(12), NONCE_OS));
+        let record = run_blocking_record(&request(json!({})).0, request(json!({})).1);
+        assert_eq!(record["provenance"]["run_id_source"], NONCE_OS);
     }
 
     /// The record run_blocking builds for one artifact in a fresh store.

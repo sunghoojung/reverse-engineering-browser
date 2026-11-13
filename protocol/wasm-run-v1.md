@@ -175,7 +175,7 @@ attempted call in order: `sequence`, `function_index`, `module`, `field`,
 `import_calls_truncated`, `memory_pages_after`, `memory_reads` (status `read`,
 `out_of_bounds` or `no_memory`, with `sha256` and `hex`), `expectation`, the
 `request` as run (without its confirmation) and `provenance`: `artifact_id`,
-`module_sha256`, `module_byte_size`, `inputs_digest` (SHA-256 of the request
+`module_sha256`, `module_byte_size`, `run_id_source`, `inputs_digest` (SHA-256 of the request
 without its confirmation), the interpreter and its version, the effective
 limits, and the rewrite. The record is checked against the `WasmRun` contract
 before it is stored; a record that fails is neither stored nor returned, and
@@ -215,8 +215,11 @@ actions neither is listed, and a call is refused before any request is sent. The
 in-app agent applies the same rule. `x-reb-mcp.run_values` (every `value`,
 `hex`, `sha256`, `results_match`, `match` and `inputs_digest` replaced by a
 content marker below `--allow-content`) stays as a second line, not as the
-protection. `run_id` ends in a random nonce, so it says nothing about the
-inputs. No error message quotes a value. The native stored-evidence window
+protection. `run_id` ends in 24 hex digits of a random nonce, so it says
+nothing about the inputs: 96 bits from the operating system, or, if
+`/dev/urandom` cannot be read, two randomly keyed hashes of the time and a
+counter. `provenance.run_id_source` says which (`os_random` or
+`hashed_fallback`), and the backend logs the fallback. No error message quotes a value. The native stored-evidence window
 (`reb://`) does not host the interpreter and answers 503.
 
 ## Validation

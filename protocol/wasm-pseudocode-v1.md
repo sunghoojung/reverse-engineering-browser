@@ -88,6 +88,14 @@ characters and each kept character is escaped as a unit, so a cut never
 splits an escape and nothing inside the quotes can close them early. Names
 never come from guesses about what a function does.
 
+Researcher names ([Wasm function names](wasm-function-names-v1.md)) are
+interpretation and never replace these. The loopback route joins them beside
+the document as `analyst_name` (this function, present only when named) and
+`analyst_names` (the module's names, so a callee index resolves); the listing
+text and the callee table keep the module-supplied names. The native route
+and the CLI do not join them. The members are inside the measured window, so
+a page with them still fits the inline limit.
+
 ### What folding guarantees
 
 Read the lines in order, and within a line read an expression's operands

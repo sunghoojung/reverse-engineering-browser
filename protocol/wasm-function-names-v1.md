@@ -87,6 +87,7 @@ and one `analyst_names` status member. No captured field changes.
 | `inspect_wasm` | `analyst_name` on `function`, `import`, `declaration` and `start` rows (by `function_index`); `target_analyst_name` on `call`, `return_call` and `ref.func` rows beside their new structural `target_function_index`; the module's names in `analyst_names.functions` |
 | `get_wasm_functions` | `analyst_names.functions` as `[index, name]` pairs, beside the name-section `names` |
 | `get_wasm_function_graph` | `analyst_name` for the function; the module's names in `analyst_names.functions`, so a `call N` row resolves |
+| `get_wasm_pseudocode` | `analyst_name` for the function; the module's names in `analyst_names.functions`, so a callee row resolves. The listing text and the callee table keep the module-supplied names |
 | `get_xrefs` | `selection.wasm_sha256` and `selection.function_index` identify the selection; rows that name a Wasm function carry `function_index` and `analyst_name`. A `call_indirect` row names a callee only when its table entry resolved in this instance; a null, out-of-bounds, foreign or unresolved entry is labeled by its resolution and carries no `function_index` |
 | `get_flow_graph` | Wasm nodes carry `sha256` and `analyst_name` |
 | `get_request_stack` | Wasm frames carry `module_sha256` and `analyst_name`, in the stack and every task segment |

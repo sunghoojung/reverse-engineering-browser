@@ -708,7 +708,10 @@ by its text: `inspect_wasm` rows at those offsets are the evidence. A line of
 kind `fallback` is the raw instruction, and `fallbacks` says why it was not
 folded. Below Full access `text` is omitted, but `lines`, `frames`, `nesting`
 and `callees` still show the shape: where the loops and switches are and what
-the function calls. Names in the text come only from the module.
+the function calls. Names in the text come only from the module; a
+researcher's name is `analyst_name`, and `analyst_names.functions` resolves
+callee indexes (recipe 26). A line reading `return_call f(args)` is a tail
+call: what `f` throws is not caught by a handler of this function.
 
 ## Response shapes at a glance
 

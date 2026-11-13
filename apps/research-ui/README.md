@@ -2360,7 +2360,9 @@ lines** do the same. A line the lift did not fold keeps its disassembly text
 and a **raw** chip, and the header counts lines, instructions, raw lines and
 temporaries. The function index field and the previous and next controls
 choose the function; Readable opens on the function Graph last showed, or the
-largest. Lifted text and module names are inserted as text. The contract is
+largest. A researcher's name for the function shows beside the title, from
+the same names as Inspect and Graph; the listing keeps the module's names.
+Lifted text and names are inserted as text. The contract is
 [WASM pseudocode](../../protocol/wasm-pseudocode-v1.md).
 
 ## Basic-block graphs

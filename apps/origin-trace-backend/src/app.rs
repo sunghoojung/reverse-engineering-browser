@@ -1568,31 +1568,19 @@ impl App {
         let filter = event_query::event_filter(q)?;
         let cursor = event_query::cursor(q)?;
         let capture = self.capture_view();
-        // An observation's site also depends on the artifacts retained and on
-        // the script identities indexed, which can arrive after its record.
-        let sources = if filter.may_hold_sites() {
-            let (artifacts, requests) = (self.options.artifacts.clone(), self.requests.clone());
-            self.blocking(move || {
-                let manifest = std::fs::metadata(artifacts.join("manifest.jsonl"))
-                    .map_or(0, |metadata| metadata.len());
-                let mut index = requests.blocking_lock();
-                index.refresh()?;
-                let (epoch, at) = index.position().unwrap_or_default();
-                Ok(format!(":sites-{manifest}-{epoch}-{at}"))
-            })
-            .await?
-        } else {
-            String::new()
+        let may_hold_sites = filter.may_hold_sites();
+        let echo = filter.echo();
+        let tag = |sources: &str| {
+            event_window::etag(
+                &self.options.store,
+                &format!(
+                    "query:{}-{}-{limit}:{cursor:?}:{echo}{sources}",
+                    capture.mode.as_str(),
+                    capture.state.as_str(),
+                ),
+            )
         };
-        let etag = event_window::etag(
-            &self.options.store,
-            &format!(
-                "query:{}-{}-{limit}:{cursor:?}:{}{sources}",
-                capture.mode.as_str(),
-                capture.state.as_str(),
-                filter.echo()
-            ),
-        );
+        let etag = tag(&self.sites_tag(may_hold_sites));
         if matches_etag(headers, Some(&etag)) {
             return Ok(not_modified(&etag));
         }
@@ -1627,12 +1615,49 @@ impl App {
                 Ok(document)
             })
             .await?;
+        // The page's tag after its sites were resolved, so a read of the same
+        // state is unchanged; a page still holding a deferred site gets a tag
+        // no later read matches, since reading it again is its recourse.
+        let deferred = document["events"].as_array().is_some_and(|events| {
+            events.iter().any(|event| {
+                event["debugger_observation"]["site"]["resolution"]["status"] == "deferred"
+            })
+        });
+        let etag = if deferred {
+            tag(&format!(":deferred-{}", unique_token()))
+        } else {
+            tag(&self.sites_tag(may_hold_sites))
+        };
         self.event_state(&mut document, capture);
         let mut response = axum::Json(document).into_response();
         response
             .headers_mut()
             .insert("etag", HeaderValue::from_str(&etag).unwrap());
         Ok(response)
+    }
+    /// What a page's sites depend on besides the store, for its tag: the
+    /// artifacts retained, the script identities indexed and what was resolved
+    /// since. The index's position is read without waiting or refreshing;
+    /// while the index is busy the tag is one no client holds, so the page is
+    /// read again rather than called unchanged.
+    fn sites_tag(&self, may_hold_sites: bool) -> String {
+        if !may_hold_sites {
+            return String::new();
+        }
+        let manifest = std::fs::metadata(self.options.artifacts.join("manifest.jsonl"))
+            .map_or(0, |metadata| metadata.len());
+        let generation = self
+            .observation_sites
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .generation();
+        let index = match self.requests.try_lock() {
+            Ok(index) => index
+                .position()
+                .map_or_else(|| "none".to_owned(), |(epoch, at)| format!("{epoch}-{at}")),
+            Err(_) => format!("busy-{}", unique_token()),
+        };
+        format!(":sites-{manifest}-{index}-{generation}")
     }
     /// Returns as soon as a record after the cursor matches, or when the
     /// timeout passes. Without `after`, only records written after the call
@@ -2283,6 +2308,13 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
     );
     response
 }
+/// A token no earlier tag contains.
+fn unique_token() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_nanos())
+}
+
 /// Decodes the debugger observations of a filtered or waiting event page and
 /// resolves their own frames (protocol/native-debugger-observation-v1.md),
 /// newest first on a backward page. A page without one reads nothing more.

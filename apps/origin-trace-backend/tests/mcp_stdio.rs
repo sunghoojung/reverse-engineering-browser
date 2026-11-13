@@ -2815,6 +2815,99 @@ async fn a_landed_source_changes_the_tag_of_a_page_with_sites() {
     assert_eq!(reason(&body)["status"], "resolved", "{body}");
 }
 
+/// The recourse for `source_limit` is to read the same cursor again. Sent
+/// with the page's tag, that read must not be answered 304: the tag covers
+/// what was resolved since, so the next scripts are read.
+#[tokio::test]
+async fn reading_a_deferred_page_again_with_its_tag_resolves_the_next_scripts() {
+    use sha2::{Digest, Sha256};
+    let server = Server::start();
+    let mut store = ObservationStore {
+        path: server._root.path().join("events.jsonl"),
+        sequence: 0,
+    };
+    // Five scripts, one listener each: one page reads at most four sources.
+    let mut records = Vec::new();
+    for script in 0..5u32 {
+        let source = format!(
+            "document.body.onclick = function tap{script}(event) {{ return {script}; }};\n"
+        );
+        let mut identity = vec![1, 0, 128, 0, 1, 0x02, 0, 0];
+        for value in [7 + script, 0, 0, 0] {
+            identity.extend(value.to_le_bytes());
+        }
+        identity.extend(99u64.to_le_bytes());
+        identity.extend((source.len() as u64).to_le_bytes());
+        identity.extend(Sha256::digest(&source));
+        identity.resize(128, 0);
+        let named = store.append("network", "script_identity", json!({}), &identity);
+        native_artifact(
+            &server,
+            &(370 + script).to_string(),
+            "javascript",
+            &format!("https://app.debugger.test/tap{script}.js"),
+            &named,
+            source.as_bytes(),
+        );
+        let start = source.find("(event)").unwrap();
+        let mut frame = vec![1, 0, 0, 0];
+        for value in [7 + script, start as u32, start as u32] {
+            frame.extend(value.to_le_bytes());
+        }
+        records.push(frame);
+    }
+    for frame in &records {
+        let mut tail = vec![0, 1, 1, 0];
+        tail.extend(frame);
+        tail.push(5);
+        tail.extend(b"click");
+        store.append(
+            "runtime",
+            "listener_dispatch",
+            json!({}),
+            &stack_summary(None, &tail),
+        );
+    }
+    let client = reqwest::Client::new();
+    let url = format!(
+        "{}/api/events?type=listener_dispatch&limit=10",
+        server.url.trim_end_matches('/')
+    );
+    let statuses = |body: &Value| {
+        body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| {
+                event["debugger_observation"]["site"]["resolution"]["reason"]
+                    .as_str()
+                    .unwrap_or("resolved")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = client.get(&url).send().await.unwrap();
+    let tag = first.headers()["etag"].to_str().unwrap().to_owned();
+    let body: Value = first.json().await.unwrap();
+    let deferred = statuses(&body)
+        .iter()
+        .filter(|reason| *reason == "source_limit")
+        .count();
+    assert_eq!(deferred, 1, "{body}");
+    let again = client
+        .get(&url)
+        .header("If-None-Match", &tag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.status(), 200, "the recourse is answered, not 304");
+    let body: Value = again.json().await.unwrap();
+    assert!(
+        statuses(&body).iter().all(|reason| reason == "resolved"),
+        "{body}"
+    );
+}
+
 /// The pausing debugger through the projection. Every pausing action controls
 /// the browser, so the action tool is hidden without `--allow-effects`, and
 /// the read sends one command to the peer, so it is classified like

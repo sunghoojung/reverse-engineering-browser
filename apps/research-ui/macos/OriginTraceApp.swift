@@ -178,12 +178,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       switch requestURL.path {
       case "", "/", "/index.html":
         response = (try Data(contentsOf: indexURL), "text/html; charset=utf-8", 200, [:])
-      case "/app.css", "/wasm_readable.css", "/xrefs_view.css", "/wasm_runner.css", "/entropy_map.css", "/wasm_identification.css", "/block_graph.css", "/wasm_diff_view.css", "/flow_graph.css", "/flow_workspace.css", "/agent_panel.css", "/session_panel.css", "/debugger_sidebar.css", "/debugger_pause.css":
+      case "/app.css", "/wasm_readable.css", "/xrefs_view.css", "/wasm_runner.css", "/entropy_map.css", "/wasm_identification.css", "/block_graph.css", "/wasm_diff_view.css", "/value_flow_view.css", "/flow_graph.css", "/flow_workspace.css", "/agent_panel.css", "/session_panel.css", "/debugger_sidebar.css", "/debugger_pause.css":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(String(requestURL.path.dropFirst()))),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/block_graph.js", "/wasm_readable.js", "/block_graph_layout.js", "/wasm_diff_view.js", "/graph_layout_client.js", "/flow_graph.js", "/flow_graph_layout.js", "/flow_timeline.js", "/flow_workspace.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/wasm_function_names.js", "/invocation_sites.js", "/entropy_map.js", "/wasm_identification.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/wasm_runner.js", "/native_console_completion.js", "/native_console.js", "/debugger_sidebar.js", "/debugger_pause.js":
+      case "/block_graph.js", "/wasm_readable.js", "/block_graph_layout.js", "/wasm_diff_view.js", "/graph_layout_client.js", "/flow_graph.js", "/flow_graph_layout.js", "/flow_timeline.js", "/flow_workspace.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/wasm_function_names.js", "/invocation_sites.js", "/entropy_map.js", "/wasm_identification.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/value_flow_view.js", "/wasm_runner.js", "/native_console_completion.js", "/native_console.js", "/debugger_sidebar.js", "/debugger_pause.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -237,7 +237,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         }
         handleArtifactMap(requestURL, to: urlSchemeTask)
         return
-      case "/api/wasm/functions", "/api/wasm/graph", "/api/wasm/identification", "/api/wasm/pseudocode":
+      case "/api/wasm/functions", "/api/wasm/graph", "/api/wasm/identification", "/api/wasm/pseudocode", "/api/wasm/value-flow":
         guard urlSchemeTask.request.httpMethod == "GET" else {
           throw LocalHTTPError(status: 405, message: "WASM graph routes require GET")
         }
@@ -1940,9 +1940,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     DispatchQueue.global(qos: .userInitiated).async {
       do {
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let valueFlow = ["function", "offset", "operand", "local", "direction", "max_nodes", "max_depth", "interprocedural"]
         let allowed = url.path == "/api/wasm/pseudocode" ? ["artifact_id", "function", "line_offset", "line_limit"]
           : url.path == "/api/wasm/graph" ? ["artifact_id", "function"]
-          : url.path == "/api/wasm/identification" ? ["artifact_id", "row_offset", "row_limit"] : ["artifact_id"]
+          : url.path == "/api/wasm/identification" ? ["artifact_id", "row_offset", "row_limit"]
+          : url.path == "/api/wasm/value-flow" ? ["artifact_id"] + valueFlow : ["artifact_id"]
         let ids = items.filter { $0.name == "artifact_id" }
         guard items.allSatisfy({ allowed.contains($0.name) }), ids.count == 1, let id = ids.first?.value, UInt64(id) != nil,
           id.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil else {
@@ -1969,6 +1971,16 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           }
           arguments = ["--pseudocode-function", function] + window
           schema = "wasm-pseudocode-v1"
+        } else if url.path == "/api/wasm/value-flow" {
+          // The Rust provider validates every parameter; values are ASCII
+          // digits or words, so the query passes through as it came.
+          let names = items.map(\.name)
+          guard Set(names).count == names.count, items.allSatisfy({ ($0.value ?? "").range(of: #"^[a-z0-9]{1,16}$"#, options: .regularExpression) != nil }) else {
+            throw NativeDecoderError(status: 400, message: "WASM value flow takes each parameter once, as a number or a word")
+          }
+          let query = items.filter { $0.name != "artifact_id" }.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")
+          arguments = ["--value-flow", query]
+          schema = "wasm-value-flow-v1"
         } else if url.path == "/api/wasm/graph" {
           let functions = items.filter { $0.name == "function" }
           guard functions.count == 1, let function = functions.first?.value, UInt32(function) != nil else {

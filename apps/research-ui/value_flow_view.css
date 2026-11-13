@@ -1,0 +1,58 @@
+/* Trace value panel under the Wasm Inspect listing (value_flow_view.js). It is
+   the last row of the Sources view split, an auto track, so its cap must be
+   definite (a percentage of an auto track is none); the listing keeps the
+   rest of the editor at the minimum window. */
+#screen-sources .source-view-split:has(> .value-flow:not([hidden])):not([style*="grid-template-rows"]) { grid-template-rows: minmax(0, 1fr) auto; }
+#screen-sources .source-view-split > .value-flow { min-height: 0; }
+.value-flow {
+  max-height: min(280px, 36vh);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+.value-flow[hidden] { display: none; }
+.value-flow-head { flex: none; display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 34px; padding: 3px 8px 3px 12px; }
+.value-flow-title { flex: none; color: var(--text); font: 600 12px var(--sans); }
+.value-flow-target { flex: 1 1 auto; min-width: 4ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 12px var(--mono); }
+.value-flow-field { flex: none; display: flex; align-items: center; gap: 4px; color: var(--muted); font: 11px var(--sans); }
+.value-flow-field select { height: 24px; max-width: 16ch; padding: 0 4px; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--bg); color: var(--text); font: 12px var(--sans); }
+.value-flow-head .source-tool { flex: none; }
+.value-flow-clear { flex: none; width: 24px; height: 24px; display: grid; place-items: center; padding: 0; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--muted); font-size: 14px; line-height: 1; }
+.value-flow-clear:hover { background: var(--panel-3, var(--panel)); color: var(--text); }
+.value-flow-clear[hidden] { display: none; }
+.value-flow :is(button, select):focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.value-flow-status { flex: none; margin: 0; padding: 0 12px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 11px var(--sans); }
+.value-flow-status[data-kind="error"] { color: var(--red); }
+.value-flow-status[data-kind="partial"] { color: var(--amber); }
+.value-flow-list { flex: 1 1 auto; min-height: 0; margin: 0; padding: 0 0 6px; overflow: auto; list-style: none; }
+.value-flow-list[hidden] { display: none; }
+.value-flow-row { display: grid; grid-template-columns: minmax(0, 1fr); padding: 0 6px; }
+.value-flow-link { min-width: 0; display: grid; grid-template-columns: 8ch 9ch 26ch minmax(0, 1fr); align-items: center; gap: 8px; height: 24px; padding: 0 6px; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--text); font: 12px var(--mono); text-align: left; }
+.value-flow-link:not(:disabled):hover { background: var(--accent-soft); }
+.value-flow-link:disabled { color: var(--muted); }
+.value-flow-link > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.value-flow-offset { color: var(--code-line-number-active); font-variant-numeric: tabular-nums; }
+.value-flow-role { color: var(--muted); font: 11px var(--sans); }
+.value-flow-row.is-seed .value-flow-role { color: var(--accent); }
+.value-flow-row.is-source .value-flow-role { color: var(--green); }
+.value-flow-row.is-sink .value-flow-role { color: var(--amber); }
+.value-flow-row.is-frontier .value-flow-role { color: var(--red); }
+.value-flow-kind { color: var(--muted); font: 11px var(--sans); }
+.value-flow-text { font: 400 12px var(--mono); color: var(--code-text); }
+.value-flow-join { padding: 0 6px 4px calc(17ch + 28px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 12px var(--mono); }
+@media (max-width: 900px) {
+  .value-flow-head { flex-wrap: wrap; }
+  .value-flow-link { grid-template-columns: 8ch 9ch minmax(0, 1fr); }
+  .value-flow-link > .value-flow-kind { display: none; }
+}
+/* Slice rows in the Inspect listing: a tint and a left rule by role, drawn
+   over the gutter; the row text is never changed. */
+.source-line[data-value-flow] { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.source-line[data-value-flow]::after { content: ""; position: absolute; z-index: 1; left: 0; top: 0; bottom: 0; width: 3px; background: var(--muted); pointer-events: none; }
+.source-line[data-value-flow="seed"] { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.source-line[data-value-flow="seed"]::after { background: var(--accent); }
+.source-line[data-value-flow="source"]::after { background: var(--green); }
+.source-line[data-value-flow="sink"]::after { background: var(--amber); }

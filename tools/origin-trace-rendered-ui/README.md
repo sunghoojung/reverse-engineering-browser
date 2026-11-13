@@ -150,6 +150,16 @@ be a form control with `disabled` set, and nothing that cannot be disabled, a
 link, a `summary`, a `role`, a `tabindex` or an editable region, may appear.
 It photographs them in both themes.
 
+`test41TraceValueInInspect` opens the repository-owned value-flow module
+(artifact 440, from `tools/fixtures/wasm-value-flow`) in Inspect at both window
+sizes, picks the import call row with the pointer and traces it. The slice must
+name the JavaScript crossing as its seed, list at least five sources and the
+three joins with their incoming edges, and mark the seed row and other slice
+rows in the listing, while the listing keeps at least 90 px above the panel.
+Arrow keys must reach the load row and Enter must reveal and focus it in
+Inspect, marked as a source. It photographs both themes, then Clear must remove
+the marks and Hex must hide the panel.
+
 `test27StartPanelStartRetryAndKeyboard` takes the start panel through a whole
 decision at both window sizes. The driver names a `REB_BRAVE_BINARY` that does
 not exist, so Start fails at once and no browser launches on any machine. The

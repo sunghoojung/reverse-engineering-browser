@@ -452,7 +452,7 @@ const pendingWindow = t => {
   // where none came (the stored-evidence window's own window), the index row
   // names it, on every path that rebuilds the row.
   const watch = {session_id: '1', process_id: 7, sequence_number: '3', frame_id: '9', rule: 2, method_matched: true};
-  const shownWatch = {sessionId: '1', processId: 7, sequenceNumber: '3', frameId: '9', rule: 2, methodMatched: true};
+  const shownWatch = {sessionId: '1', processId: 7, sequenceNumber: '3', frameId: '9', rule: 2, methodMatched: true, ruleRead: true};
   const read = indexFixture({windowCount: 1});
   read.setIndexRows([{...read.row(5, 2), watch}]);
   read.api.renderRequests(); await quiet();
@@ -488,6 +488,16 @@ const pendingWindow = t => {
   assert.equal(located.state.trafficIndex.row('request-9'), null, 'the index answer does not hold the row');
   assert.equal(JSON.stringify(located.state.requests.find(request => request.id === 'request-9')?.watch), JSON.stringify(shownWatch),
     'a located row read from the store is marked watched');
+  // A window row carries no decode: its match names no rule read here, and the
+  // index row's rule replaces it; a record the core refused (read, no rule) stays.
+  t.state.nativeRequests = t.state.nativeRequests.map(request => ({...request,
+    watch: request.id === whole.id ? {...shownWatch, rule: null, methodMatched: null, ruleRead: false} : null}));
+  t.api.rebuildTrafficRequests();
+  assert.equal(shown().watch.rule, 2, 'an unread rule takes the index row\'s');
+  t.state.nativeRequests = t.state.nativeRequests.map(request => ({...request,
+    watch: request.id === whole.id ? {...shownWatch, rule: null, methodMatched: null, ruleRead: true} : null}));
+  t.api.rebuildTrafficRequests();
+  assert.equal(shown().watch.rule, null, 'a record read and refused keeps no rule');
   // A rule the record's own decode names is never replaced.
   const decoded = {...shownWatch, rule: 4};
   t.state.nativeRequests = t.state.nativeRequests.map(request => ({...request, watch: request.id === whole.id ? decoded : null}));

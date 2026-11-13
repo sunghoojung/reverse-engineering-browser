@@ -13,7 +13,7 @@ const {requestsFromEvents} = load(['apps/research-ui/evidence_models.js'], 'requ
 const view = load(['apps/research-ui/request_stack.js', 'apps/research-ui/traffic_view.js', 'apps/research-ui/traffic_filter.js',
   'apps/research-ui/traffic_response.js'], `trafficSortedRequests, trafficSearchRequests,
   trafficRequestDomain, trafficIndexRequest, trafficParseFilter, trafficApplyFilter, trafficBrowserInternal, trafficSizeCell, trafficWaterfall,
-  trafficInitiatorFrame, trafficStatusCell, responseBodyCase`);
+  trafficInitiatorFrame, trafficStatusCell, responseBodyCase, trafficWatchText`);
 
 const model = requestsFromEvents(golden.events, 'live');
 // Tabs and the unresolved reason come from tab sets and links, as Traffic attaches them.
@@ -82,7 +82,9 @@ assert(watched.length === 1 && watched[0].watch.rule === 3 && watched[0].watch.m
 // named, with no rule; Traffic then takes the rule from the index row.
 const bare = requestsFromEvents(golden.events.map(({debugger_observation, ...event}) => event), 'live')
   .find(row => row.id === watched[0].id);
-assert.deepEqual({...bare.watch}, {...watched[0].watch, rule: null, methodMatched: null}, 'an undecoded match names the same record');
+assert.deepEqual({...bare.watch}, {...watched[0].watch, rule: null, methodMatched: null, ruleRead: false}, 'an undecoded match names the same record');
+assert.match(view.trafficWatchText(bare.watch), /not read here/, 'an undecoded rule reads as not read here');
+assert.match(view.trafficWatchText({...bare.watch, ruleRead: true}), /names no rule it could decode/, 'a refused record names no rule');
 // An MHTML archive reuse has no HTTP status, yet it finished: never No loader.
 const archive = shownRows.find(row => row.memoryCache && row.status === 'finished');
 const archiveCell = archive && view.trafficStatusCell(archive);

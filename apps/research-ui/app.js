@@ -1448,7 +1448,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (indexed.endLost) markTrafficEndLost(request);
         // A watch match's rule, where no decode came with the record (the
         // stored-evidence window's own event window carries none).
-        if (indexed.watch && (!request.watch || request.watch.rule === null)) request.watch = indexed.watch;
+        if (indexed.watch && (!request.watch || request.watch.ruleRead === false)) request.watch = indexed.watch;
         if (indexed.memoryCacheSourceRow) request.memoryCacheSourceRow = indexed.memoryCacheSourceRow;
         if (indexed.responseBodyIndex) request.responseBodyIndex = indexed.responseBodyIndex;
         // Tab sets and links have no request ID, so a store read lacks them;

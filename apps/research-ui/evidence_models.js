@@ -901,16 +901,18 @@
 
       // The first request_watch_match of a request (protocol/native-debugger-observation-v1.md),
       // as the request index's watch names it. The rule is the backend decoder's
-      // debugger_observation beside the record; a record without one, or one the
-      // core refuses, names no rule.
+      // debugger_observation beside the record; one the core refuses names no rule.
       function requestWatchMatch(details) {
         const match = details.filter(event => event.type === 'request_watch_match')
           .reduce((first, event) => !first || BigInt(event.sequence_number) < BigInt(first.sequence_number) ? event : first, null);
         if (!match) return null;
+        // ruleRead: a decode came with the record (a store read); the polling
+        // window carries none, so its rule is then not read here, not absent.
         const decoded = match.debugger_observation?.status === 'decoded' ? match.debugger_observation.detail : null;
         return {sessionId: match.session_id, processId: match.process_id, sequenceNumber: match.sequence_number, frameId: match.frame_id,
           rule: Number.isInteger(decoded?.rule) ? decoded.rule : null,
-          methodMatched: typeof decoded?.method_matched === 'boolean' ? decoded.method_matched : null};
+          methodMatched: typeof decoded?.method_matched === 'boolean' ? decoded.method_matched : null,
+          ruleRead: match.debugger_observation !== undefined};
       }
 
       function attachRequestDetails(requests, events, browserRequestKeys) {

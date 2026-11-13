@@ -453,8 +453,11 @@ function trafficBlockStart(container, total, start) {
 // What a request watch match says, in the debugger sidebar's own words.
 function trafficWatchText(watch) {
   if (!watch) return '';
-  return watch.rule === null ? 'A request watch rule matched (the record names no rule it could decode)'
-    : `Request watch rule ${watch.rule + 1} matched${watch.methodMatched ? ', method too' : ''}`;
+  if (watch.rule !== null) return `Request watch rule ${watch.rule + 1} matched${watch.methodMatched ? ', method too' : ''}`;
+  // Without a decode (the polling window carries none, and the index row did
+  // not answer) the rule is unknown here, which is not the record lacking one.
+  return watch.ruleRead === false ? 'A request watch rule matched (which one is not read here: the request index has not answered for this row)'
+    : 'A request watch rule matched (the record names no rule it could decode)';
 }
 
 // The request watch rule that matched a row (protocol/request-index-v1.md), in
@@ -462,7 +465,8 @@ function trafficWatchText(watch) {
 function trafficIndexWatch(watch) {
   if (!watch || typeof watch !== 'object') return null;
   return {sessionId: watch.session_id, processId: watch.process_id, sequenceNumber: watch.sequence_number, frameId: watch.frame_id,
-    rule: Number.isInteger(watch.rule) ? watch.rule : null, methodMatched: typeof watch.method_matched === 'boolean' ? watch.method_matched : null};
+    rule: Number.isInteger(watch.rule) ? watch.rule : null, methodMatched: typeof watch.method_matched === 'boolean' ? watch.method_matched : null,
+    ruleRead: true};
 }
 
 // A request index row (protocol/request-index-v1.md) in the Traffic row shape.

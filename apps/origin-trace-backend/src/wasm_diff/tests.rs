@@ -1319,3 +1319,24 @@ fn several_structural_ties_come_out_the_same_every_run() {
         );
     }
 }
+
+#[test]
+fn a_partial_report_says_its_pages_are_not_reliable() {
+    let builds = fixture_builds();
+    let stopped = compare_with(
+        &builds[0],
+        &builds[1],
+        json!({}),
+        json!({}),
+        stop_in(STRUCTURAL),
+        Instant::now(),
+    )
+    .unwrap();
+    assert!(
+        stopped.omissions.iter().any(|o| o == PARTIAL_PAGES),
+        "{:?}",
+        stopped.omissions
+    );
+    let whole = compare(&builds[0], &builds[1], json!({}), json!({})).unwrap();
+    assert!(!whole.omissions.iter().any(|o| o == PARTIAL_PAGES));
+}

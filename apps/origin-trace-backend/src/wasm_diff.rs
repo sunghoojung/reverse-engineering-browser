@@ -83,6 +83,10 @@ pub const PAGE_DEFAULT_ROWS: usize = 200;
 const PAGE_BYTES: usize = 122_880;
 /// The MCP server's inline limit, which a page must stay under.
 const _: () = assert!(PAGE_BYTES < 131_072);
+/// What a partial report says about paging. It is not cached, so each page
+/// is a new comparison that can stop at a different point, and rows are
+/// ordered by status: a later page can repeat or skip rows of an earlier one.
+const PARTIAL_PAGES: &str = "This report is partial and is not kept, so each page is compared again and can stop at a different point: pages of a partial report can repeat or skip rows. Retry for a complete report before paging.";
 /// Reports kept so paging a comparison does not repeat it.
 const CACHED_REPORTS: usize = 2;
 const NONE: u32 = u32::MAX;
@@ -2255,6 +2259,9 @@ fn compare_with(
         && !structural_incomplete
         && !module_a.truncated
         && !module_b.truncated;
+    if !complete {
+        omissions.push(PARTIAL_PAGES.into());
+    }
     let (a_sides, a_types) = sides(module_a);
     let (b_sides, b_types) = sides(module_b);
     Ok(Report {

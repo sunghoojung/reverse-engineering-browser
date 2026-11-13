@@ -309,12 +309,13 @@
         return source?.kind === 'wasm' || source?.kind === 'bytecode_buffer';
       }
 
-      function formatWasmHex(buffer) {
+      // `base` is the offset of the first byte, for a window into a longer body.
+      function formatWasmHex(buffer, base = 0) {
         const bytes = new Uint8Array(buffer);
         const rows = [];
         for (let offset = 0; offset < bytes.length; offset += 16) {
           const chunk = bytes.slice(offset, offset + 16);
-          const address = offset.toString(16).padStart(8, '0');
+          const address = (base + offset).toString(16).padStart(8, '0');
           const hex = [...chunk].map(byte => byte.toString(16).padStart(2, '0')).join(' ').padEnd(47, ' ');
           const printable = [...chunk].map(byte => byte >= 32 && byte < 127 ? String.fromCharCode(byte) : '.').join('');
           rows.push(`${address}  ${hex}  |${printable}|`);

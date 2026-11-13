@@ -443,6 +443,9 @@ function trafficIndexRequest(row, origin) {
     transferSize: row.transfer_size, resourceSize: row.resource_size, fromCache: row.from_cache,
     fromServiceWorker: row.from_service_worker, memoryCache: row.memory_cache === true, staticData: row.static_data === true,
     raceNetwork: row.race_network === true, endLost: row.end_lost === true,
+    // Index-only facts: every row's body case, and the row a reuse names with its body.
+    responseBodyIndex: row.response_body ?? null, memoryCacheSource: row.memory_cache_source?.id ?? null,
+    memoryCacheSourceRow: row.memory_cache_source ?? null,
     mimeType: row.mime_type, protocol: row.protocol,
     responseTimestamp: row.response_time_ns === null ? null : BigInt(row.response_time_ns), errorCode: row.error_code,
     loaderObserved: row.loader_observed, initiator: row.initiator, mainFrame: row.main_frame, browserInternal: row.browser_internal,

@@ -2356,9 +2356,16 @@ void NativeProbeSink::RecordMemoryCacheReuse(const NativeMemoryCacheAdmission& a
   event.header.status_code = std::max(reuse.status_code, 0);
   event.header.decoded_body_length = std::max<std::int64_t>(reuse.decoded_body_length, 0);
   event.header.scheme_class = static_cast<std::uint8_t>(scheme_class);
+  // The loaded resource names the request that filled it. Static data had
+  // none, and ID 0 is also what a response no request set carries.
+  const bool source_named = !reuse.static_data && reuse.source_request_id > 0;
+  if (source_named) {
+    event.header.initiator_process_id = event.header.process_id;
+    event.header.initiator_request_id = static_cast<std::uint32_t>(reuse.source_request_id);
+  }
   event.header.payload_size = kNativeMemoryCacheReusePayloadSize;
-  event.inline_payload =
-      EncodeNativeMemoryCacheReusePayload(reuse.resource_type, reuse.static_data, reuse.host);
+  event.inline_payload = EncodeNativeMemoryCacheReusePayload(reuse.resource_type, reuse.static_data,
+                                                             reuse.host, source_named);
   if (emitter(event, config_generation) != NativeProbeEmitStatus::kAdmitted ||
       !admission.capture_request_content) {
     return;

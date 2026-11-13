@@ -24,7 +24,7 @@ use std::{
 pub const SIDECAR_SUFFIX: &str = ".requests-v1";
 const FORMAT: &str = "reb-request-index-v1";
 /// Sidecar row layout; a sidecar of another layout is rebuilt from byte 0.
-const LAYOUT: u32 = 9;
+const LAYOUT: u32 = 10;
 /// Bounds one call; a larger store reports partial coverage and continues next call.
 const SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const RECORD_BYTES: usize = 4096;
@@ -152,6 +152,32 @@ struct Target {
     length: u32,
     text: String,
 }
+/// A `response_body` child (protocol/native-network-v3.md), decoded as
+/// `decodeResponseBodyRecord` does.
+#[derive(Clone, Serialize, Deserialize)]
+struct BodyRecord {
+    state: u8,
+    flags: u8,
+    body_length: u64,
+    captured: u64,
+    partial_index: u16,
+    artifact: String,
+    sha256: Option<String>,
+}
+/// The newest `response_body` child of one lifecycle record: its parent, its
+/// own sequence and time, and the record (`None` is malformed).
+#[derive(Clone, Serialize, Deserialize)]
+struct BodyChild {
+    parent: (String, u32, u64),
+    sequence: u64,
+    time: u64,
+    record: Option<BodyRecord>,
+    /// The newest partial record of the same parent that names retained
+    /// bytes: its sequence, time and record. A later refusal does not remove
+    /// the snapshot the receiver holds.
+    #[serde(default)]
+    snapshot: Option<(u64, u64, BodyRecord)>,
+}
 /// First `request_target` child of a lifecycle record; `None` is malformed.
 #[derive(Clone, Serialize, Deserialize)]
 struct Child {
@@ -193,6 +219,14 @@ struct Row {
     /// static-data flag.
     memory_cache: bool,
     static_data: bool,
+    /// The row a version 2 reuse names as the request whose response Blink reused.
+    memory_cache_source: Option<String>,
+    /// The newest `response_started`: its session, process and sequence.
+    response: Option<(String, u32, u64)>,
+    /// `response_body` children, the newest of each parent, at most `MAX_TARGETS`.
+    bodies: Vec<BodyChild>,
+    /// The row has a `request_redirected` record.
+    redirected: bool,
     /// The target names only a scheme (`data:`); its child then gives the URL.
     scheme_only: bool,
     /// A renderer completion with from_service_worker: what the page received,
@@ -684,9 +718,18 @@ fn scheme_name(class: u8) -> Option<&'static str> {
         _ => return None,
     })
 }
-/// A `memory_cache_reuse` payload: Blink resource type, static data and host.
-/// Port of `decodeMemoryCacheReuse`; the C++ core and Python share its rules.
-fn memory_cache(event: &Value) -> Option<(u8, bool, String)> {
+/// A decoded `memory_cache_reuse` payload.
+struct Reuse {
+    blink_type: u8,
+    static_data: bool,
+    host: String,
+    /// Version 2: the row of the renderer request whose response was reused.
+    source: Option<String>,
+}
+/// A `memory_cache_reuse` payload: Blink resource type, static data, host and
+/// the source it names. Port of `decodeMemoryCacheReuse`; the C++ core and
+/// Python share its rules.
+fn memory_cache(event: &Value) -> Option<Reuse> {
     // Every lifecycle record comes here; only a reuse pays for decoding.
     if event["type"] != "memory_cache_reuse" {
         return None;
@@ -694,23 +737,36 @@ fn memory_cache(event: &Value) -> Option<(u8, bool, String)> {
     let bytes = hex::decode(event["payload"].as_str()?).ok()?;
     let (kind, flags, length) = (*bytes.get(4)?, *bytes.get(5)?, usize::from(*bytes.get(6)?));
     let host = bytes.get(8..8 + length)?;
+    let version = *bytes.first()?;
+    let named = flags & 4 != 0;
+    let (process, initiator, request) = (
+        number(&event["process_id"]),
+        number(&event["initiator_process_id"]),
+        number(&event["initiator_request_id"]),
+    );
     (event["protocol_version"] == 3
         && event["flags"] == 0
         && bytes.len() == 128
-        && bytes[..4] == [1, 0, 128, 0]
+        && (version == 1 || version == 2)
+        && bytes[1..4] == [0, 128, 0]
         && (1..=15).contains(&kind)
-        && flags & !3 == 0
+        && flags & !(if version == 2 { 7 } else { 3 }) == 0
+        && !(named && flags & 1 != 0)
+        && if named {
+            initiator == process && request > 0
+        } else {
+            initiator == 0 && request == 0
+        }
         && length <= 120
         && bytes[7] == 0
         && (flags & 2 == 0 || length == 120)
         && host.iter().all(|b| (0x21..=0x7e).contains(b))
         && bytes[8 + length..].iter().all(|b| *b == 0))
-    .then(|| {
-        (
-            kind,
-            flags & 1 != 0,
-            String::from_utf8_lossy(host).into_owned(),
-        )
+    .then(|| Reuse {
+        blink_type: kind,
+        static_data: flags & 1 != 0,
+        host: String::from_utf8_lossy(host).into_owned(),
+        source: named.then(|| correlated_identity(event)),
     })
 }
 type RowTarget = (Option<String>, String);
@@ -1053,7 +1109,12 @@ fn legacy_key(event: &Value) -> Option<String> {
     if request == "0" {
         return None;
     }
-    let initiator = number(&event["initiator_process_id"]);
+    // A reuse's initiator fields name its source row, not a loader of its own.
+    let initiator = if event["type"] == "memory_cache_reuse" {
+        0
+    } else {
+        number(&event["initiator_process_id"])
+    };
     Some(if initiator > 0 {
         format!("S{session}:R{initiator}:B{request}")
     } else {
@@ -1142,6 +1203,220 @@ fn canonical(value: &Value, nonzero: bool) -> Option<u64> {
         .and_then(|_| crate::validation::canonical(value, 64, nonzero, "").ok())
 }
 /// Port of `decodeRequestTargetRecord`.
+/// Port of `decodeResponseBodyRecord`; the C++ core and the Python validator
+/// share its rules (protocol/native-network-v3.md `response_body`).
+fn decode_response_body(event: &Value) -> Option<BodyRecord> {
+    const CAPTURE_BYTES: u64 = 16 * 1024 * 1024;
+    let payload = event["payload"].as_str()?;
+    let (sequence, parent) = (
+        canonical(&event["sequence_number"], true)?,
+        canonical(&event["parent_event_id"], true)?,
+    );
+    let process = event["process_id"].as_u64()?;
+    let artifact = canonical(&event["artifact_id"], false)?;
+    if event["protocol_version"] != 3
+        || event["flags"] != 0
+        || event["payload_truncated"] != false
+        || event["payload_size"] != 128
+        || payload.len() != 256
+        || canonical(&event["session_id"], true).is_none()
+        || parent >= sequence
+        || !(1..=u64::from(u32::MAX)).contains(&process)
+        || event["navigation_id"] != "0"
+        || event["status_code"] != 0
+        || event["error_code"] != 0
+        || event["encoded_data_length"] != "0"
+        || event["decoded_body_length"] != "0"
+        || event["resource_type"] != 0
+    {
+        return None;
+    }
+    let bytes = hex::decode(payload).ok()?;
+    let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+    let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+    let (state, flags, type_length, coding_count) = (bytes[4], bytes[5], bytes[6], bytes[7]);
+    let (body, captured, partial) = (u64_at(8), u64_at(16), u16_at(28));
+    let digest = &bytes[32..64];
+    let content_type = &bytes[64..64 + usize::from(type_length.min(64))];
+    let token = |part: &[u8]| {
+        !part.is_empty()
+            && part.iter().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || b"!#$%&'*+.^_`|~-".contains(byte)
+            })
+    };
+    let typed = flags & 0x40 != 0;
+    let mut halves = content_type.splitn(2, |byte| *byte == b'/');
+    let well_typed = !typed
+        || matches!((halves.next(), halves.next()), (Some(kind), Some(sub)) if token(kind) && token(sub));
+    // Version 2 adds bit 7, snapshots withheld by a byte bound.
+    let version = u16_at(0);
+    if !(version == 1 || version == 2)
+        || u16_at(2) != 128
+        || u16_at(30) != 0
+        || !(1..=12).contains(&state)
+        || flags & !(if version == 2 { 0xff } else { 0x7f }) != 0
+        || type_length > 64
+        || typed != (type_length != 0)
+        || bytes[64 + usize::from(type_length.min(64))..]
+            .iter()
+            .any(|byte| *byte != 0)
+        || !well_typed
+        || coding_count > 4
+        || (flags & 0x10 != 0 && coding_count != 4)
+        || bytes[24..28].iter().enumerate().any(|(index, coding)| {
+            if index < usize::from(coding_count) {
+                !matches!(coding, 1..=7 | 15)
+            } else {
+                *coding != 0
+            }
+        })
+    {
+        return None;
+    }
+    let retained = captured != 0;
+    let whole = body.min(CAPTURE_BYTES);
+    if captured > body
+        || (artifact != 0) != retained
+        || digest.iter().any(|byte| *byte != 0) != retained
+        || (flags & 1 != 0 && !retained)
+        || (partial != 0) != (state == 3)
+        || (flags & 0x20 != 0 && !matches!(state, 1 | 2 | 6))
+    {
+        return None;
+    }
+    let valid = match state {
+        1 => body != 0 && captured == body,
+        2 => body > CAPTURE_BYTES && captured == CAPTURE_BYTES,
+        3 => body != 0 && captured == whole,
+        4 | 5 => !retained || captured == whole,
+        6..=9 => body == 0,
+        _ => !retained,
+    };
+    valid.then(|| BodyRecord {
+        state,
+        flags,
+        body_length: body,
+        captured,
+        partial_index: partial,
+        artifact: artifact.to_string(),
+        sha256: retained.then(|| hex::encode(digest)),
+    })
+}
+const BODY_STATES: [&str; 12] = [
+    "captured",
+    "captured_truncated",
+    "partial",
+    "aborted",
+    "cancelled",
+    "empty",
+    "not_modified",
+    "redirected",
+    "not_captured_type",
+    "not_captured_artifact_unavailable",
+    "not_captured_transfer_refused",
+    "not_captured_session_budget",
+];
+/// Why a row's response body is or is not retained: its final response's
+/// newest `response_body` record, else why there is none. Port of
+/// `responseBodyCase` (protocol/native-network-v3.md "Bodies the proxy never
+/// sees"); `request-index-check` holds the two equal.
+fn body_case(row: &Row) -> (&'static str, Option<&BodyChild>) {
+    let (failed, interrupted, _, error) = outcome(row);
+    let body = row
+        .response
+        .as_ref()
+        .and_then(|response| row.bodies.iter().find(|body| body.parent == *response));
+    if let Some(body) = body {
+        let case = body.record.as_ref().map_or("malformed", |record| {
+            BODY_STATES[usize::from(record.state) - 1]
+        });
+        return (case, Some(body));
+    }
+    let case = if row.response.is_some() {
+        if matches!(row.resource.as_str(), "js" | "wasm") {
+            "source_artifact"
+        } else {
+            "no_record"
+        }
+    } else if row.memory_cache {
+        "memory_cache"
+    } else if row.worker_served && !failed && !interrupted && row.rank >= 5 {
+        "service_worker"
+    // A failure, an ended observation or an open request after a redirect is
+    // that, not a redirect whose body was discarded.
+    } else if failed {
+        if error == -3 {
+            "cancelled_before_response"
+        } else {
+            "failed_before_response"
+        }
+    } else if interrupted {
+        "interrupted"
+    } else if row.end_lost {
+        "end_lost"
+    } else if row.rank < 5 {
+        "pending"
+    } else if row.redirected {
+        "redirected"
+    } else if !row.browser {
+        "renderer_answered"
+    } else {
+        "no_response"
+    };
+    (case, None)
+}
+/// Why a reuse's named source row is not its load. A renderer request ID names
+/// a row only within its process and session, so a process ID reused within
+/// the session can name another renderer's request: the source must have the
+/// reuse's web host (a 120-byte reuse host is a prefix) and have started first.
+fn source_mismatch(reuse: &Row, source: &Row) -> Option<&'static str> {
+    let web = |class: u8| (1..=4).contains(&class);
+    let (host, other) = (
+        reuse.path.to_ascii_lowercase(),
+        source.path.to_ascii_lowercase(),
+    );
+    let known = |name: &str| !name.is_empty() && name != UNIDENTIFIED.to_ascii_lowercase();
+    if web(reuse.scheme_class)
+        && known(&host)
+        && known(&other)
+        && host != other
+        && !(host.len() == 120 && other.starts_with(&host))
+    {
+        return Some("host_differs");
+    }
+    (source.first_ns > reuse.first_ns).then_some("started_after")
+}
+/// The `response_body` answer of a row: its case and, for a record, what it names.
+fn body_document(row: &Row) -> Value {
+    let (case, body) = body_case(row);
+    let record = body.and_then(|body| body.record.as_ref().map(|record| (body, record)));
+    json!({
+        "case": case,
+        "artifact_id": record.and_then(|(_, record)| (record.artifact != "0").then(|| record.artifact.clone())),
+        "body_length": record.map(|(_, record)| record.body_length.to_string()),
+        "captured_length": record.map(|(_, record)| record.captured.to_string()),
+        "partial_index": record.map(|(_, record)| record.partial_index),
+        "shared": record.is_some_and(|(_, record)| record.flags & 1 != 0),
+        // Version 2 bit 7: a byte bound withheld a snapshot the spacing allowed.
+        "snapshots_withheld": record.is_some_and(|(_, record)| record.flags & 0x80 != 0),
+        "sha256": record.and_then(|(_, record)| record.sha256.clone()),
+        "record_sequence": body.map(|body| body.sequence.to_string()),
+        "record_time_ns": body.map(|body| body.time.to_string()),
+        "response_started": row.response.as_ref().map(|(session, process, sequence)| json!({
+            "session_id": session, "process_id": process, "sequence_number": sequence.to_string()})),
+        // A refusal, or any newest record without bytes, does not hide a
+        // snapshot of the same response the receiver still holds.
+        "earlier_snapshot": body
+            .filter(|body| body.record.as_ref().is_none_or(|record| record.artifact == "0"))
+            .and_then(|body| body.snapshot.as_ref())
+            .map(|(sequence, time, snapshot)| json!({
+                "artifact_id": snapshot.artifact, "body_length": snapshot.body_length.to_string(),
+                "captured_length": snapshot.captured.to_string(), "partial_index": snapshot.partial_index,
+                "sha256": snapshot.sha256, "record_sequence": sequence.to_string(), "record_time_ns": time.to_string()})),
+    })
+}
 fn decode_target(event: &Value) -> Option<Target> {
     let payload = event["payload"].as_str()?;
     let (sequence, parent) = (
@@ -1603,6 +1878,52 @@ impl RequestIndex {
                         number(&event["process_id"]) as u32,
                         text(&event["parent_event_id"]),
                     );
+                    if kind == "response_body"
+                        && let (Some(parent_sequence), Some(sequence)) = (
+                            canonical(&event["parent_event_id"], true),
+                            canonical(&event["sequence_number"], true),
+                        )
+                    {
+                        let time = unsigned(&event["monotonic_time_ns"]).unwrap_or(0);
+                        let record = decode_response_body(&event);
+                        let snapshot = record
+                            .as_ref()
+                            .filter(|record| record.state == 3 && record.captured != 0)
+                            .map(|record| (sequence, time, record.clone()));
+                        let mut child = BodyChild {
+                            parent: (parent.0.clone(), parent.1, parent_sequence),
+                            sequence,
+                            time,
+                            record,
+                            snapshot,
+                        };
+                        // A later end supersedes partial snapshots of the same
+                        // response; the newest retained snapshot is kept beside it.
+                        match row
+                            .bodies
+                            .iter()
+                            .position(|body| body.parent == child.parent)
+                        {
+                            Some(at) => {
+                                let held = &mut row.bodies[at];
+                                let newer_snapshot = match (&held.snapshot, &child.snapshot) {
+                                    (Some(old), Some(new)) => new.0 > old.0,
+                                    (None, Some(_)) => true,
+                                    _ => false,
+                                };
+                                if !newer_snapshot {
+                                    child.snapshot = held.snapshot.take();
+                                }
+                                if held.sequence < sequence {
+                                    *held = child;
+                                } else if newer_snapshot {
+                                    held.snapshot = child.snapshot;
+                                }
+                            }
+                            None if row.bodies.len() < MAX_TARGETS => row.bodies.push(child),
+                            None => {}
+                        }
+                    }
                     if kind == "request_target"
                         && row.children.len() < MAX_TARGETS
                         && !row.children.iter().any(|child| child.parent == parent)
@@ -1657,6 +1978,10 @@ impl RequestIndex {
                     worker_served: false,
                     memory_cache: false,
                     static_data: false,
+                    memory_cache_source: None,
+                    response: None,
+                    bodies: Vec::new(),
+                    redirected: false,
                     scheme_only: false,
                     worker_answer: None,
                     browser: false,
@@ -1689,7 +2014,7 @@ impl RequestIndex {
             payload_text(&hex::decode(event["payload"].as_str().unwrap_or("")).unwrap_or_default());
         let reuse = memory_cache(&event);
         let (target, scheme_only) = match &reuse {
-            Some((_, _, host)) => memory_cache_target(&event, host),
+            Some(reuse) => memory_cache_target(&event, &reuse.host),
             None => scoped_target(network_target(&payload, kind), &payload, &event),
         };
         let version = event["protocol_version"].as_u64().unwrap_or(0);
@@ -1757,16 +2082,33 @@ impl RequestIndex {
             });
         }
         let response = (kind == "response_started").then(|| response_metadata(&payload));
+        row.redirected |= kind == "request_redirected";
+        if kind == "response_started"
+            && let Some(sequence) = canonical(&event["sequence_number"], true)
+            && row
+                .response
+                .as_ref()
+                .is_none_or(|(_, _, newest)| *newest < sequence)
+        {
+            row.response = Some((
+                text(&event["session_id"]),
+                number(&event["process_id"]) as u32,
+                sequence,
+            ));
+        }
         // A renderer completion carries the response's cache and service-worker
         // flags, and a service worker's end without a response its own.
         if response.is_some() || matches!(kind, "request_completed" | "request_failed") {
             row.cache |= flags & 2 != 0;
             row.worker_served |= flags & 4 != 0;
         }
-        if let Some((blink_type, static_data, _)) = &reuse {
+        if let Some(reuse) = &reuse {
             row.memory_cache = true;
-            row.static_data = *static_data;
-            row.resource = memory_cache_resource(*blink_type).into();
+            row.static_data = reuse.static_data;
+            row.resource = memory_cache_resource(reuse.blink_type).into();
+            if reuse.source.is_some() {
+                row.memory_cache_source.clone_from(&reuse.source);
+            }
         }
         if let Some((mime, protocol)) = &response {
             row.mime = mime.clone();
@@ -2090,6 +2432,21 @@ impl RequestIndex {
         document["static_data"] = json!(row.static_data);
         document["race_network"] = json!(row.worker_answer.is_some() && row.browser);
         document["end_lost"] = json!(row.end_lost);
+        document["response_body"] = body_document(row);
+        // The reused response's own row, when this session recorded it.
+        document["memory_cache_source"] = json!(row.memory_cache_source.as_ref().map(|id| {
+            let state = self.state.as_ref().unwrap();
+            let source = state.by_id.get(id).map(|&ordinal| &state.rows[ordinal as usize]);
+            let reason = match source {
+                None => Some("not_recorded"),
+                Some(source) => source_mismatch(row, source),
+            };
+            let shown = source.filter(|_| reason.is_none());
+            json!({"id": id, "found": shown.is_some(), "reason": reason,
+                "response_body": shown.map(body_document),
+                "method": shown.map(|row| row.method.clone()), "path": shown.map(|row| row.path.clone()),
+                "type": shown.map(|row| row.resource.clone()), "mime_type": shown.and_then(|row| row.mime.clone())})
+        }));
         let owned = row.extension.is_some()
             || !row_tabs(row, &self.state.as_ref().unwrap().tab_sets).is_empty();
         document["tab_reason"] = json!((!owned).then(|| {
@@ -2259,6 +2616,31 @@ impl RequestIndex {
         let exhaustive =
             self.caught_up(state.indexed_to) && state.identities.len() < MAX_IDENTITIES;
         Ok((identities, exhaustive))
+    }
+
+    /// Every row's body case, counted for `get_session_summary`, and whether
+    /// the index has caught up with the store.
+    pub fn response_bodies(&mut self) -> Result<Value> {
+        self.refresh()?;
+        let state = self.state.as_ref().expect("index state");
+        let mut cases = BTreeMap::<&str, u64>::new();
+        let mut withheld = 0u64;
+        for row in &state.rows {
+            let (case, body) = body_case(row);
+            *cases.entry(case).or_default() += 1;
+            withheld += u64::from(
+                body.and_then(|body| body.record.as_ref())
+                    .is_some_and(|record| record.flags & 0x80 != 0),
+            );
+        }
+        Ok(json!({
+            "complete": self.caught_up(state.indexed_to),
+            "requests": state.rows.len().to_string(),
+            "unindexed_records": state.unindexed.to_string(),
+            "snapshots_withheld": withheld.to_string(),
+            "cases": cases.into_iter().map(|(case, count)| (case.to_owned(), json!(count.to_string())))
+                .collect::<serde_json::Map<_, _>>(),
+        }))
     }
 
     pub fn respond(&mut self, query: &RequestQuery, etag: Option<&str>) -> Result<Answer> {
@@ -2855,6 +3237,388 @@ mod tests {
             &reuse(1, true, b"archive.example.test"),
             merge(class(2), json!({"decoded_body_length": "64"})),
         );
+    }
+    /// A `response_body` payload: state, lengths, partial index and, with a
+    /// retained body, a nonzero digest (protocol/native-network-v3.md).
+    fn body(state: u8, length: u64, captured: u64, partial: u16) -> Vec<u8> {
+        let mut bytes = vec![0; 128];
+        bytes[..4].copy_from_slice(&[1, 0, 128, 0]);
+        bytes[4] = state;
+        bytes[8..16].copy_from_slice(&length.to_le_bytes());
+        bytes[16..24].copy_from_slice(&captured.to_le_bytes());
+        bytes[28..30].copy_from_slice(&partial.to_le_bytes());
+        if captured != 0 {
+            bytes[32..64].fill(0xab);
+        }
+        bytes
+    }
+    /// Every reason a row's body is or is not retained, and a reuse that names
+    /// the request whose response it reused.
+    fn response_bodies(store: &mut Store) {
+        let context =
+            json!({"tab_id": 3, "browser_context_id_high": "5", "browser_context_id_low": "6"});
+        let browser = |request: u64| {
+            merge(
+                context.clone(),
+                json!({"initiator_process_id": 61, "initiator_request_id": request}),
+            )
+        };
+        let child = |parent: &str, artifact: &str, request: u64| {
+            merge(
+                browser(request),
+                json!({"parent_event_id": parent, "artifact_id": artifact}),
+            )
+        };
+        // Retained: a partial snapshot, then the ended body supersedes it.
+        store.push(
+            61,
+            20,
+            "request_initiated",
+            b"GET bodies.example.test",
+            json!({}),
+        );
+        store.push(
+            7,
+            960,
+            "request_started",
+            b"GET bodies.example.test",
+            merge(browser(20), json!({"resource_type": 13})),
+        );
+        let response = store.push(
+            7,
+            960,
+            "response_started",
+            b"application/json",
+            merge(browser(20), json!({"status_code": 200})),
+        );
+        store.push(
+            7,
+            960,
+            "response_body",
+            &body(3, 40, 40, 1),
+            child(&response, "77", 20),
+        );
+        store.push(
+            7,
+            960,
+            "response_body",
+            &body(1, 90, 90, 0),
+            child(&response, "78", 20),
+        );
+        store.push(
+            7,
+            960,
+            "request_completed",
+            b"completed",
+            merge(
+                browser(20),
+                json!({"status_code": 200, "decoded_body_length": "90"}),
+            ),
+        );
+        // A memory-cache reuse naming that request (payload version 2, bit 2).
+        let mut named = reuse(5, false, b"bodies.example.test");
+        (named[0], named[5]) = (2, 4);
+        store.push(61, 21, "memory_cache_reuse", &named,
+            json!({"scheme_class": 2, "loader_kind": 16, "tab_id": 3, "status_code": 200,
+                "decoded_body_length": "90", "initiator_process_id": 61, "initiator_request_id": 20}));
+        // Not modified, and a malformed record (captured past its length).
+        store.push(
+            7,
+            961,
+            "request_started",
+            b"GET bodies.example.test",
+            merge(browser(23), json!({})),
+        );
+        let cached = store.push(
+            7,
+            961,
+            "response_started",
+            b"application/json",
+            merge(browser(23), json!({"status_code": 304})),
+        );
+        store.push(
+            7,
+            961,
+            "response_body",
+            &body(7, 0, 0, 0),
+            child(&cached, "0", 23),
+        );
+        store.push(
+            7,
+            962,
+            "request_started",
+            b"GET bodies.example.test",
+            merge(browser(24), json!({})),
+        );
+        let broken = store.push(
+            7,
+            962,
+            "response_started",
+            b"application/json",
+            merge(browser(24), json!({"status_code": 200})),
+        );
+        store.push(
+            7,
+            962,
+            "response_body",
+            &body(1, 4, 9, 0),
+            child(&broken, "79", 24),
+        );
+        // A redirect with nothing after it, and a request cancelled before any response.
+        store.push(
+            7,
+            963,
+            "request_started",
+            b"GET bodies.example.test",
+            merge(browser(25), json!({})),
+        );
+        store.push(
+            7,
+            963,
+            "request_redirected",
+            b"GET bodies.example.test",
+            merge(browser(25), json!({"status_code": 302})),
+        );
+        store.push(
+            7,
+            964,
+            "request_started",
+            b"GET bodies.example.test",
+            merge(browser(26), json!({})),
+        );
+        store.push(
+            7,
+            964,
+            "request_failed",
+            b"failed",
+            merge(browser(26), json!({"error_code": -3})),
+        );
+        // A service worker answered the page in the renderer.
+        store.push(
+            61,
+            22,
+            "request_initiated",
+            b"GET sw.example.test",
+            json!({"scheme_class": 2, "loader_kind": 16, "tab_id": 3}),
+        );
+        store.push(61, 22, "request_completed", b"completed",
+            json!({"scheme_class": 2, "tab_id": 3, "status_code": 200, "decoded_body_length": "12", "flags": 4}));
+        // The redirect above then ends without another response: redirected.
+        store.push(
+            7,
+            963,
+            "request_completed",
+            b"completed",
+            merge(browser(25), json!({})),
+        );
+        more_response_bodies(store);
+    }
+    /// The remaining body cases, refusals after snapshots, redirects that end
+    /// otherwise, and memory-cache reuses whose source is missing, cut,
+    /// partial, on another host or started later (renderers 62 and 63).
+    fn more_response_bodies(store: &mut Store) {
+        let context =
+            json!({"tab_id": 3, "browser_context_id_high": "5", "browser_context_id_low": "6"});
+        let browser = |request: u64| {
+            merge(
+                context.clone(),
+                json!({"initiator_process_id": 62, "initiator_request_id": request}),
+            )
+        };
+        let child = |parent: &str, artifact: &str, request: u64| {
+            merge(
+                browser(request),
+                json!({"parent_event_id": parent, "artifact_id": artifact}),
+            )
+        };
+        // A request ending with one record body: each pushes start, response, record.
+        let mut answered = |request: u64, payload: Vec<u8>, artifact: &str, status: i64| {
+            let id = 970 + request;
+            store.push(
+                7,
+                id,
+                "request_started",
+                b"GET more.example.test",
+                merge(browser(request), json!({})),
+            );
+            let response = store.push(
+                7,
+                id,
+                "response_started",
+                b"application/json",
+                merge(browser(request), json!({"status_code": status})),
+            );
+            store.push(
+                7,
+                id,
+                "response_body",
+                &payload,
+                child(&response, artifact, request),
+            );
+            response
+        };
+        const MIB: u64 = 1024 * 1024;
+        answered(1, body(3, 30, 30, 1), "81", 200);
+        answered(2, body(2, 20 * MIB, 16 * MIB, 0), "82", 200);
+        answered(3, body(4, 10, 10, 0), "83", 200);
+        answered(4, body(5, 0, 0, 0), "0", 200);
+        answered(5, body(6, 0, 0, 0), "0", 200);
+        // Version 2 bit 7: a byte bound withheld a snapshot the spacing allowed.
+        let mut withheld = body(3, 30, 30, 1);
+        (withheld[0], withheld[5]) = (2, 0x80);
+        answered(12, withheld, "88", 200);
+        // A refused end keeps the snapshot the receiver holds beside it.
+        let refused = answered(6, body(3, 30, 30, 1), "85", 200);
+        store.push(
+            7,
+            976,
+            "response_body",
+            &body(12, 60, 0, 0),
+            child(&refused, "0", 6),
+        );
+        // Ended with no response, and a redirect then a 304.
+        store.push(
+            7,
+            977,
+            "request_started",
+            b"GET more.example.test",
+            merge(browser(7), json!({})),
+        );
+        store.push(
+            7,
+            977,
+            "request_completed",
+            b"completed",
+            merge(browser(7), json!({})),
+        );
+        store.push(
+            7,
+            978,
+            "request_started",
+            b"GET more.example.test",
+            merge(browser(8), json!({})),
+        );
+        let hop = store.push(
+            7,
+            978,
+            "request_redirected",
+            b"GET more.example.test",
+            merge(browser(8), json!({"status_code": 302})),
+        );
+        store.push(
+            7,
+            978,
+            "response_body",
+            &body(8, 0, 0, 0),
+            child(&hop, "0", 8),
+        );
+        let cached = store.push(
+            7,
+            978,
+            "response_started",
+            b"application/json",
+            merge(browser(8), json!({"status_code": 304})),
+        );
+        store.push(
+            7,
+            978,
+            "response_body",
+            &body(7, 0, 0, 0),
+            child(&cached, "0", 8),
+        );
+        // A redirect then a failure, a cancel, or no end yet: never redirected.
+        for (request, end) in [(9, Some(-105)), (10, Some(-3)), (11, None)] {
+            let id = 970 + request;
+            store.push(
+                7,
+                id,
+                "request_started",
+                b"GET more.example.test",
+                merge(browser(request), json!({})),
+            );
+            store.push(
+                7,
+                id,
+                "request_redirected",
+                b"GET more.example.test",
+                merge(browser(request), json!({"status_code": 302})),
+            );
+            if let Some(error) = end {
+                store.push(
+                    7,
+                    id,
+                    "request_failed",
+                    b"failed",
+                    merge(browser(request), json!({"error_code": error})),
+                );
+            }
+        }
+        // Reuse sources: cut at the limit, and a snapshot.
+        let source = |store: &mut Store, renderer: u64, payload: Vec<u8>, artifact: &str| {
+            store.push(
+                63,
+                renderer,
+                "request_initiated",
+                b"GET src.example.test",
+                json!({}),
+            );
+            let id = 990 + renderer;
+            let joined = merge(
+                context.clone(),
+                json!({"initiator_process_id": 63, "initiator_request_id": renderer}),
+            );
+            store.push(
+                7,
+                id,
+                "request_started",
+                b"GET src.example.test",
+                joined.clone(),
+            );
+            let response = store.push(
+                7,
+                id,
+                "response_started",
+                b"application/json",
+                merge(joined.clone(), json!({"status_code": 200})),
+            );
+            store.push(
+                7,
+                id,
+                "response_body",
+                &payload,
+                merge(
+                    joined,
+                    json!({"parent_event_id": response, "artifact_id": artifact}),
+                ),
+            );
+        };
+        let reuse_of = |store: &mut Store, renderer: u64, host: &[u8], source: Option<u64>| {
+            let mut payload = reuse(1, false, host);
+            let mut fields =
+                json!({"scheme_class": 2, "loader_kind": 16, "tab_id": 3, "status_code": 200});
+            if let Some(source) = source {
+                (payload[0], payload[5]) = (2, 4);
+                fields["initiator_process_id"] = json!(63);
+                fields["initiator_request_id"] = json!(source);
+            }
+            store.push(63, renderer, "memory_cache_reuse", &payload, fields);
+        };
+        source(store, 1, body(2, 20 * MIB, 16 * MIB, 0), "86");
+        reuse_of(store, 2, b"src.example.test", Some(1));
+        source(store, 3, body(3, 50, 50, 1), "87");
+        reuse_of(store, 4, b"src.example.test", Some(3));
+        reuse_of(store, 5, b"src.example.test", Some(99));
+        reuse_of(store, 6, b"other.example.test", Some(1));
+        reuse_of(store, 7, b"src.example.test", Some(8));
+        store.push(
+            63,
+            8,
+            "request_initiated",
+            b"GET src.example.test",
+            json!({}),
+        );
+        // A version 1 reuse names no source.
+        reuse_of(store, 9, b"src.example.test", None);
     }
     fn write(path: &Path, store: &Store) {
         fs::write(path, store.bytes()).unwrap();
@@ -3866,6 +4630,101 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_row_names_why_its_body_is_or_is_not_retained() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events.jsonl");
+        let mut store = Store {
+            events: Vec::new(),
+            sequence: 0,
+        };
+        response_bodies(&mut store);
+        write(&path, &store);
+        let mut index = RequestIndex::new(&path);
+        let counts = index.response_bodies().unwrap();
+        assert_eq!(counts["complete"], true);
+        let cases = counts["cases"].as_object().unwrap();
+        assert_eq!(
+            cases
+                .iter()
+                .map(|(case, count)| format!("{case}={}", count.as_str().unwrap()))
+                .collect::<Vec<_>>(),
+            [
+                "aborted=1",
+                "cancelled=1",
+                "cancelled_before_response=2",
+                "captured=1",
+                "captured_truncated=2",
+                "empty=1",
+                "failed_before_response=1",
+                "malformed=1",
+                "memory_cache=7",
+                "no_response=1",
+                "not_captured_session_budget=1",
+                "not_modified=2",
+                "partial=3",
+                "pending=2",
+                "redirected=1",
+                "service_worker=1",
+            ]
+        );
+        let document = page(&mut index, "limit=500");
+        let rows = document["requests"].as_array().unwrap();
+        let row = |id: &str| rows.iter().find(|row| row["id"] == id).unwrap();
+        // A refused end names the snapshot of the same response that is retained.
+        let refused = &row("S1:R62:6")["response_body"];
+        assert_eq!(refused["case"], "not_captured_session_budget");
+        assert!(refused["artifact_id"].is_null());
+        assert_eq!(refused["earlier_snapshot"]["artifact_id"], "85");
+        assert_eq!(refused["earlier_snapshot"]["captured_length"], "30");
+        assert_eq!(refused["earlier_snapshot"]["partial_index"], 1);
+        assert!(row("S1:R62:1")["response_body"]["earlier_snapshot"].is_null());
+        assert_eq!(
+            row("S1:R62:12")["response_body"]["snapshots_withheld"],
+            true
+        );
+        assert_eq!(
+            row("S1:R62:1")["response_body"]["snapshots_withheld"],
+            false
+        );
+        assert_eq!(counts["snapshots_withheld"], "1");
+        // A redirect then a failure, a cancel or no end is never redirected.
+        for (id, case) in [
+            ("S1:R62:9", "failed_before_response"),
+            ("S1:R62:10", "cancelled_before_response"),
+            ("S1:R62:11", "pending"),
+            ("S1:R62:8", "not_modified"),
+            ("S1:R61:25", "redirected"),
+        ] {
+            assert_eq!(row(id)["response_body"]["case"], case, "{id}");
+        }
+        // Each reuse source is the reuse's load only on its host and before it.
+        for (id, found, reason, case) in [
+            ("S1:R63:2", true, None, Some("captured_truncated")),
+            ("S1:R63:4", true, None, Some("partial")),
+            ("S1:R63:5", false, Some("not_recorded"), None),
+            ("S1:R63:6", false, Some("host_differs"), None),
+            ("S1:R63:7", false, Some("started_after"), None),
+        ] {
+            let source = &row(id)["memory_cache_source"];
+            assert_eq!(source["found"], found, "{id}");
+            assert_eq!(source["reason"].as_str(), reason, "{id}");
+            assert_eq!(source["response_body"]["case"].as_str(), case, "{id}");
+        }
+        assert!(row("S1:R63:9")["memory_cache_source"].is_null());
+        let reuse = rows.iter().find(|row| row["memory_cache"] == true).unwrap();
+        let source = &reuse["memory_cache_source"];
+        assert_eq!(source["id"], "S1:R61:20");
+        assert_eq!(source["found"], true);
+        // The ended body supersedes its snapshot, and names its own artifact.
+        assert_eq!(source["response_body"]["artifact_id"], "78");
+        assert_eq!(source["response_body"]["body_length"], "90");
+        assert_eq!(source["response_body"]["response_started"]["process_id"], 7);
+        let retained = rows.iter().find(|row| row["id"] == "S1:R61:20").unwrap();
+        assert_eq!(retained["response_body"]["case"], "captured");
+        assert!(retained["memory_cache_source"].is_null());
+    }
+
     /// Golden for tools/check-request-index.mjs.
     #[test]
     #[ignore]
@@ -3877,6 +4736,7 @@ mod tests {
         let mut store = fixture();
         push_stack_rows(&mut store);
         renderer_answered(&mut store);
+        response_bodies(&mut store);
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
         let mut document = page(&mut index, "limit=500");

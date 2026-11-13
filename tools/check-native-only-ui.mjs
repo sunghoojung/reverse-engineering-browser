@@ -203,6 +203,36 @@ for (const tab of ['response', 'preview']) {
   assert.match(panel.textContent, /recorded no response for this request/);
   assert.doesNotMatch(panel.textContent, /cdp-body-needle|cdp-header-needle/);
 }
+// A row with native records names its exact body case in both tabs: a
+// service worker's answer and a memory-cache reuse never read as a missing
+// or empty body (protocol/native-network-v3.md "Bodies the proxy never sees").
+for (const [fields, pattern] of [[`fromServiceWorker: true`, /Served by a service worker/],
+  [`memoryCache: true`, /Reused from the memory cache/]]) {
+  for (const tab of ['response', 'preview']) {
+    runInContext(`state.requests = [{id: 'native', path: 'cdn.invalid', method: 'GET', status: 200, type: 'img', origin: 'live',
+      hostOnly: true, tabId: '0', events: [{}], rank: 5, operation: 'request_completed', time: 1, ${fields}}];
+      state.selectedRequestId = 'native'; state.inspectorTab = ${JSON.stringify(tab)}; renderInspector();`, context);
+    const panel = document.getElementById('response-inspector');
+    assert.match(panel.textContent, pattern, `${tab}: ${pattern}`);
+    assert.doesNotMatch(panel.textContent, /Empty body|recorded no response/, `${tab} names the case`);
+  }
+}
+// A memory-cache reuse names the request whose response Blink reused through
+// its initiator fields; Initiator shows the reuse's own renderer request and
+// names the source apart, never as its initiator.
+runInContext(`state.requests = [{id: 'S1:R61:21', path: 'cdn.invalid', method: 'GET', status: 200, type: 'img', origin: 'live',
+  hostOnly: true, tabId: '0', rank: 5, memoryCache: true, memoryCacheSource: 'S1:R61:20', operation: 'memory_cache_reuse', time: 1,
+  events: [{protocol_version: 3, type: 'memory_cache_reuse', category: 'network', session_id: '1', process_id: 61, request_id: '21',
+    frame_id: '7', sequence_number: '5', initiator_process_id: 61, initiator_request_id: 20}]}];
+  state.selectedRequestId = 'S1:R61:21'; state.inspectorTab = 'initiator'; renderInspector();`, context);
+const initiatorRows = Object.fromEntries([...document.querySelectorAll('#screen-traffic .field-row')]
+  .map(row => [row.querySelector('.field-key').textContent, row.querySelector('.field-value').textContent]));
+assert.equal(initiatorRows['Renderer request'], '21', 'a reuse shows its own renderer request, not its source');
+assert.match(initiatorRows['Reused response of'] ?? '', /^S1:R61:20: Blink reused this request's response; it did not start this load$/);
+// Hex is paged by range, never cut at a fixed read.
+const responseSource = sources.find(([file]) => file === 'traffic_response.js')[1];
+assert(!/subarray\(0, TRAFFIC_RESPONSE_HEX_BYTES\)/.test(responseSource), 'Response hex is paged, not a fixed first read');
+assert(/function hexPager/.test(responseSource), 'Response hex has a range pager');
 // The Headers tab reads native header records only, never a CDP exchange.
 runInContext(`state.inspectorTab = 'headers'; renderInspector();`, context);
 const headersPanel = document.getElementById('headers-inspector');

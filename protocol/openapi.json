@@ -330,7 +330,7 @@
       "get": {
         "operationId": "get_session_summary",
         "summary": "Summarize what this capture recorded",
-        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget, Wasm compiled without a stored module, each artifact capture failure reason, or request bodies and full targets a content session did not retain (budget, pool, channel or kind) with counts, counted browser-internal exclusions, and requests without a browser tab. Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
+        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget, Wasm compiled without a stored module, each artifact capture failure reason, or request bodies and full targets a content session did not retain (budget, pool, channel or kind) with counts, counted browser-internal exclusions, requests without a browser tab, and every request's response body case (retained, or why not: served by a service worker, reused from the memory cache, 304, redirected, aborted, cancelled, empty and the rest). Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
         "tags": [
           "health"
         ],
@@ -18464,6 +18464,8 @@
           "static_data",
           "race_network",
           "end_lost",
+          "response_body",
+          "memory_cache_source",
           "mime_type",
           "protocol",
           "response_time_ns",
@@ -18772,6 +18774,82 @@
             "type": "boolean",
             "description": "A service_worker_end_lost gap names this row: the renderer lost the end of a request its service worker handled, so a row with no response reads incomplete, not pending."
           },
+            "response_body": {
+              "$ref": "#/components/schemas/RequestRowResponseBody"
+            },
+            "memory_cache_source": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "description": "A version 2 memory_cache_reuse names the renderer request whose response Blink reused (ResourceResponse::RequestId()). found is true only when that row exists, was requested from the reuse's web host and started before the reuse; reason says why not. A found source carries its body, which holds what was retained of the bytes Blink reused. Null for every other row and for a reuse that names none.",
+              "required": [
+                "id",
+                "found",
+                "reason",
+                "response_body",
+                "method",
+                "path",
+                "type",
+                "mime_type"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "found": {
+                  "type": "boolean"
+                },
+                "response_body": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RequestRowResponseBody"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "method": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "not_recorded",
+                    "host_differs",
+                    "started_after",
+                    null
+                  ],
+                  "description": "Why the named row is not this reuse's load: none was recorded, it was requested from another host (a renderer process ID reused within the session), or it started after the reuse. Null when found."
+                },
+                "mime_type": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
           "mime_type": {
             "type": [
               "string",
@@ -34754,6 +34832,192 @@
         ],
         "description": "A filtered get_events document. event_window covers every byte read while waiting."
       },
+        "RequestRowResponseBody": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Why this row's response body is or is not retained (protocol/native-network-v3.md \"Bodies the proxy never sees\"): the state of the newest response_body record of its final response_started, else why there is none. Traffic's responseBodyCase decides the same; make request-index-check holds them equal.",
+          "required": [
+            "case",
+            "artifact_id",
+            "body_length",
+            "captured_length",
+            "partial_index",
+            "shared",
+            "snapshots_withheld",
+            "sha256",
+            "record_sequence",
+            "record_time_ns",
+            "response_started",
+            "earlier_snapshot"
+          ],
+          "properties": {
+            "case": {
+              "type": "string",
+              "enum": [
+                "captured",
+                "captured_truncated",
+                "partial",
+                "aborted",
+                "cancelled",
+                "empty",
+                "not_modified",
+                "redirected",
+                "not_captured_type",
+                "not_captured_artifact_unavailable",
+                "not_captured_transfer_refused",
+                "not_captured_session_budget",
+                "malformed",
+                "source_artifact",
+                "no_record",
+                "memory_cache",
+                "service_worker",
+                "failed_before_response",
+                "cancelled_before_response",
+                "interrupted",
+                "end_lost",
+                "pending",
+                "renderer_answered",
+                "no_response"
+              ]
+            },
+            "artifact_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[1-9][0-9]{0,19}$",
+              "description": "The artifact the record names; null without retained bytes."
+            },
+            "body_length": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^(0|[1-9][0-9]{0,19})$",
+              "description": "Decoded bytes that passed the tee, so far for a partial record."
+            },
+            "captured_length": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^(0|[1-9][0-9]{0,19})$"
+            },
+            "partial_index": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "shared": {
+              "type": "boolean",
+              "description": "Identical bytes were retained earlier and the artifact is that earlier one."
+            },
+            "snapshots_withheld": {
+              "type": "boolean",
+              "description": "The record has response_body version 2 flag bit 7: a snapshot the schedule's spacing allowed was withheld by a byte bound."
+            },
+            "sha256": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "record_sequence": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[1-9][0-9]{0,19}$"
+            },
+            "record_time_ns": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^(0|[1-9][0-9]{0,19})$"
+            },
+            "response_started": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "required": [
+                "session_id",
+                "process_id",
+                "sequence_number"
+              ],
+              "properties": {
+                "session_id": {
+                  "type": "string"
+                },
+                "process_id": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "sequence_number": {
+                  "type": "string"
+                }
+              },
+              "description": "The final response_started record, the creator of a script, Wasm or response body artifact."
+            },
+            "earlier_snapshot": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "description": "When the newest record names no bytes (a refusal or a malformed record), the newest retained partial of the same response, which the receiver still holds; else null.",
+              "required": [
+                "artifact_id",
+                "body_length",
+                "captured_length",
+                "partial_index",
+                "sha256",
+                "record_sequence",
+                "record_time_ns"
+              ],
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]{0,19}$"
+                },
+                "body_length": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "captured_length": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "partial_index": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                },
+                "sha256": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "record_sequence": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]{0,19}$"
+                },
+                "record_time_ns": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                }
+              }
+            }
+          }
+        },
       "SessionSummary": {
         "type": "object",
         "additionalProperties": false,
@@ -34771,7 +35035,8 @@
           "checks",
           "capture_state",
           "exclusions",
-          "request_tabs"
+          "request_tabs",
+          "response_bodies"
         ],
         "properties": {
           "protocol_version": {
@@ -35237,6 +35502,96 @@
               }
             }
           },
+            "response_bodies": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Every request's response body case from the request index's rows: how many bodies were retained, and why each other one was not, including the responses the browser proxy never sees (served by a service worker, reused from the memory cache, answered in the renderer).",
+              "required": [
+                "available",
+                "reason",
+                "complete",
+                "requests",
+                "unindexed_records",
+                "cases",
+                "snapshots_withheld"
+              ],
+              "properties": {
+                "available": {
+                  "type": "boolean",
+                  "description": "False when the request index could not answer; the rest of the summary stands."
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why the counts are unavailable, else null."
+                },
+                "complete": {
+                  "type": "boolean",
+                  "description": "The index had read the whole store; otherwise the counts cover the part read so far."
+                },
+                "requests": {
+                  "$ref": "#/components/schemas/Uint64String"
+                },
+                "unindexed_records": {
+                  "$ref": "#/components/schemas/Uint64String"
+                },
+                "cases": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "case",
+                      "count",
+                      "meaning"
+                    ],
+                    "properties": {
+                      "case": {
+                        "type": "string",
+                        "enum": [
+                          "captured",
+                          "captured_truncated",
+                          "partial",
+                          "aborted",
+                          "cancelled",
+                          "empty",
+                          "not_modified",
+                          "redirected",
+                          "not_captured_type",
+                          "not_captured_artifact_unavailable",
+                          "not_captured_transfer_refused",
+                          "not_captured_session_budget",
+                          "malformed",
+                          "source_artifact",
+                          "no_record",
+                          "memory_cache",
+                          "service_worker",
+                          "failed_before_response",
+                          "cancelled_before_response",
+                          "interrupted",
+                          "end_lost",
+                          "pending",
+                          "renderer_answered",
+                          "no_response"
+                        ]
+                      },
+                      "count": {
+                        "$ref": "#/components/schemas/Uint64String"
+                      },
+                      "meaning": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "snapshots_withheld": {
+                  "$ref": "#/components/schemas/Uint64String",
+                  "description": "Rows whose newest body record says a byte bound withheld a snapshot (response_body flag bit 7)."
+                }
+              }
+            },
           "checks": {
             "type": "array",
             "description": "What looks wrong or notable, most important first. Empty when nothing was found.",
@@ -35266,6 +35621,8 @@
                     "browser_internal_excluded",
                     "no_tab_traffic_excluded",
                     "memory_cache_reuse_not_recorded",
+                    "response_bodies_not_observed",
+                    "response_snapshots_withheld",
                     "network_tab_unresolved",
                     "network_tab_no_document",
                     "bounded_scope"

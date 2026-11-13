@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import socket
 import struct
@@ -106,6 +107,30 @@ TRANSPORT_HEADERS = (
 
 def run(*command: str, **kwargs) -> None:
     subprocess.run(command, check=True, **kwargs)
+
+
+def check_schedule_table(replays: list[dict]) -> None:
+    """The contract's partial body sizing table must be what the capture does."""
+    text = (ROOT / "protocol/native-network-v3.md").read_text()
+    mib, second = 1024 * 1024, 1_000_000_000
+    for replay in replays:
+        row = re.search(
+            r"^\| " + re.escape(replay["name"]) + r" \| (\d+) \| (\d+) MiB \| (\d+) s old([^|]*)\|$",
+            text,
+            re.MULTILINE,
+        )
+        if not row:
+            raise SystemExit(f"native-network-v3.md has no sizing row for {replay['name']}")
+        expected = (int(row[1]), int(row[2]), int(row[3]))
+        actual = (replay["snapshots"], replay["copied_bytes"] // mib, replay["stale_ns"] // second)
+        if expected != actual:
+            raise SystemExit(f"native-network-v3.md sizing row {replay['name']} says {expected}, the replay {actual}")
+        sealed = re.search(r"sealed after (\d+) s", row[4])
+        if (replay["sealed_ns"] is None) != (sealed is None) or (
+            sealed and int(sealed[1]) != replay["sealed_ns"] // second
+        ):
+            raise SystemExit(f"native-network-v3.md sizing row {replay['name']} names the seal wrongly")
+    print(f"PASS partial body sizing table matches the replay of {len(replays)} streams")
 
 
 def compiler_flags() -> list[str]:
@@ -705,6 +730,7 @@ def main() -> None:
             str(output),
             str(ROOT / "tools/fixtures/vm-workspace-effects/stack.js"),
         )
+        check_schedule_table(json.loads((output / "schedule-replay.json").read_text()))
         cases = json.loads((output / "cases.json").read_text())
         wire_hashes = {
             name: hashlib.sha256((output / name).read_bytes()).hexdigest()

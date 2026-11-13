@@ -1092,7 +1092,7 @@ void CheckResponseBodies() {
   }
   reb::ResponseBodyPayload decoded;
   Check(reb::DecodeResponseBodyPayload(reb::EncodeNativeResponseBodyPayload(full), decoded) &&
-            decoded.protocol_version == 1 && decoded.payload_size == 128 && decoded.state == 3 &&
+            decoded.protocol_version == 2 && decoded.payload_size == 128 && decoded.state == 3 &&
             decoded.flags == 0x5a && decoded.content_type_length == 0x3f &&
             decoded.coding_count == 3 && decoded.body_length == full.body_length &&
             decoded.captured_length == full.captured_length &&
@@ -1134,6 +1134,11 @@ void CheckResponseBodies() {
   encoded.flags |= reb::kNativeResponseBodyStillEncoded | reb::kNativeResponseBodyServiceWorker;
   auto unobserved = ResponseSummary(S::kCaptured, 12, 12);
   unobserved.flags |= reb::kNativeResponseBodyCompletionUnobserved;
+  // Version 2 bit 7: a snapshot the spacing allowed was withheld by a byte bound.
+  auto withheld = ResponseSummary(S::kPartial, 300, 300);
+  withheld.flags |= reb::kNativeResponseBodySnapshotsWithheld;
+  auto withheld_end = ResponseSummary(S::kNotCapturedSessionBudget, 4096);
+  withheld_end.flags |= reb::kNativeResponseBodySnapshotsWithheld;
   auto untyped = ResponseSummary(S::kNotModified, 0);
   untyped.flags = 0;
   untyped.content_type = {};
@@ -1157,12 +1162,19 @@ void CheckResponseBodies() {
       {"response artifact unavailable", ResponseSummary(S::kNotCapturedArtifactUnavailable, 77), 0},
       {"response transfer refused", ResponseSummary(S::kNotCapturedTransferRefused, 0), 0},
       {"response session budget", ResponseSummary(S::kNotCapturedSessionBudget, 4096), 0},
+      {"response partial with snapshots withheld", withheld, 919},
+      {"response refused with snapshots withheld", withheld_end, 0},
   };
   for (const Valid& item : valid) {
     golden.emplace_back(item.name, ResponseEvent(item.summary, item.artifact_id));
     Check(reb::IsValidEvent(golden.back().second),
           std::string("valid response body state: ") + item.name);
   }
+  // Version 1 records, from before bit 7, stay valid.
+  auto version_one = ResponseEvent(ResponseSummary(S::kCaptured, 900, 900), 911);
+  version_one.inline_payload[0] = std::byte{1};
+  golden.emplace_back("response version 1", version_one);
+  Check(reb::IsValidEvent(version_one), "valid response body state: version 1");
 
   using Mutation = std::function<void(reb::NativeResponseBodySummary&, reb::EventRecord&)>;
   struct Invalid {
@@ -1182,11 +1194,16 @@ void CheckResponseBodies() {
     };
   };
   const Invalid invalid[] = {
-      {"response version 2", captured, 911, byte(0, std::byte{2})},
+      {"response version 3", captured, 911, byte(0, std::byte{3})},
+      {"response version 0", captured, 911, byte(0, std::byte{0})},
+      {"response version 1 with bit 7", captured, 911,
+       [](reb::NativeResponseBodySummary&, reb::EventRecord& event) {
+         event.inline_payload[0] = std::byte{1};
+         event.inline_payload[5] |= std::byte{0x80};
+       }},
       {"response reserved", captured, 911, byte(30, std::byte{1})},
       {"response state 0", captured, 911, byte(4, std::byte{0})},
       {"response state 13", refused, 0, byte(4, std::byte{13})},
-      {"response unknown flag", captured, 911, byte(5, std::byte{0xc0})},
       {"response captured without artifact", captured, 0, {}},
       {"response artifact without bytes", refused, 911, {}},
       {"response digest without bytes", refused, 0,

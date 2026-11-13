@@ -196,6 +196,23 @@ neither kind; Traffic shows them with their request.
 - Every admitted request: one more 320-byte record, a walk over the body
   element list, a non-allocating `Content-Type` lookup and at most 4 MiB of
   SHA-256 on the browser UI sequence. Bodies above 4 MiB are marked, not hashed.
+- Issue #436 asks that request bodies be copied and hashed on a background
+  sequence while a reference keeps the body alive. The copy into the artifact
+  and the artifact's digest are (next item). The record's own digest stays on
+  the UI sequence on purpose, and this version keeps it there:
+  - It is metadata of every Network session, and the record is emitted as the
+    start's immediate child. Hashing elsewhere would defer the record past the
+    start for every request with a body, and add to metadata sessions the
+    capture-end and expiry losses that deferred reads have
+    ([v3](native-network-v3.md#request-body-reads)).
+  - A metadata session holds no reference to the body after the start
+    returns, so there is nothing to hash later without keeping every body
+    alive in a session that retains none.
+  - The 4 MiB bound caps the work. SHA-256 runs at about 3 GB/s with the ARMv8
+    and x86 SHA extensions that BoringSSL uses (3.0 GB/s for 4 MiB blocks with
+    OpenSSL 3.6 on the Apple silicon machine this was measured on), so the
+    worst case is about 1.4 ms once per such request, and only while capture
+    is active. Most bodies are a few kilobytes and hash in microseconds.
 - Request content: one more record per start or redirect. A body, and a target
   past 116 bytes, is charged to the session's byte budget, then copied and
   hashed on a background sequence while a reference keeps the immutable body
@@ -234,7 +251,7 @@ neither kind; Traffic shows them with their request.
   request detail shows the full URL once its `request_target` artifact is read,
   or why the rest was not retained, and the body capture state, content type,
   length, digest, kind and, for retained bodies, the bytes decoded as UTF-8
-  text. Bodies are read by range, 256 KiB at a time on request; the backend
+  text. Bodies are read by range, 2 MiB at a time on request; the backend
   checks size and SHA-256 on every read and the view rechecks the digest once
   every byte is shown. A malformed child is shown
   as malformed in its own request instead of failing the whole refresh.

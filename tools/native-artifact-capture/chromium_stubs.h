@@ -148,9 +148,16 @@ struct SequencedTaskRunner {
   }
   template <class Task>
   void PostDelayedTask(const Location&, Task&& task, TimeDelta delay) {
-    tasks.push_back({delay.ns, std::function<void()>(std::forward<Task>(task))});
+    tasks.push_back({delay.ns, std::function<void()>(std::forward<Task>(task)), test_now_ns});
   }
-  std::vector<std::pair<std::int64_t, std::function<void()>>> tasks;
+  // `first` is the delay and `second` the task, as a pair names them, and
+  // `posted` the test clock when it was posted.
+  struct Posted {
+    std::int64_t first;
+    std::function<void()> second;
+    std::int64_t posted;
+  };
+  std::vector<Posted> tasks;
 };
 }  // namespace base
 #define FROM_HERE ::base::Location()

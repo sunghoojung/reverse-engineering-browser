@@ -126,11 +126,14 @@ struct CaptureExclusionPayload final {
 
 // memory_cache_reuse (type 52), see "Memory-cache reuse" in
 // protocol/native-network-v3.md.
-inline constexpr std::uint16_t kMemoryCacheReusePayloadVersion = 1;
+inline constexpr std::uint16_t kMemoryCacheReusePayloadVersion = 2;
 inline constexpr std::size_t kMemoryCacheReusePayloadSize = 128;
 inline constexpr std::size_t kMemoryCacheReuseHostSize = 120;
 inline constexpr std::uint8_t kMemoryCacheReuseStaticData = 1U << 0U;
 inline constexpr std::uint8_t kMemoryCacheReuseHostTruncated = 1U << 1U;
+// Version 2: the envelope's initiator fields name the renderer request whose
+// response was reused (its own process and that request's ID).
+inline constexpr std::uint8_t kMemoryCacheReuseSourceNamed = 1U << 2U;
 // Blink ResourceType at the pin, kImage to kDictionary.
 inline constexpr std::uint8_t kMemoryCacheReuseResourceTypeLimit = 15;
 
@@ -164,11 +167,16 @@ struct MemoryCacheReusePayload final {
 
 [[nodiscard]] constexpr bool IsValidMemoryCacheReusePayload(
     const MemoryCacheReusePayload& value) noexcept {
-  constexpr std::uint8_t kKnownFlags = kMemoryCacheReuseStaticData | kMemoryCacheReuseHostTruncated;
-  if (value.version != kMemoryCacheReusePayloadVersion ||
+  // Version 1 records, from before the source was named, stay valid.
+  const std::uint8_t known_flags =
+      kMemoryCacheReuseStaticData | kMemoryCacheReuseHostTruncated |
+      (value.version >= 2 ? kMemoryCacheReuseSourceNamed : std::uint8_t{0});
+  if (value.version == 0 || value.version > kMemoryCacheReusePayloadVersion ||
       value.size != kMemoryCacheReusePayloadSize || value.resource_type == 0 ||
       value.resource_type > kMemoryCacheReuseResourceTypeLimit ||
-      (value.flags & static_cast<std::uint8_t>(~kKnownFlags)) != 0 ||
+      (value.flags & static_cast<std::uint8_t>(~known_flags)) != 0 ||
+      ((value.flags & kMemoryCacheReuseSourceNamed) != 0 &&
+       (value.flags & kMemoryCacheReuseStaticData) != 0) ||
       value.host_length > kMemoryCacheReuseHostSize || value.reserved != 0 ||
       ((value.flags & kMemoryCacheReuseHostTruncated) != 0 &&
        value.host_length != kMemoryCacheReuseHostSize)) {
@@ -191,10 +199,12 @@ struct MemoryCacheReusePayload final {
          h.artifact_id == 0 && h.parent_event_id == 0 && h.browser_context_id_high == 0 &&
          h.browser_context_id_low == 0 && h.encoded_data_length == 0 &&
          h.decoded_body_length >= 0 && h.status_code >= 0 && h.error_code == 0 &&
-         h.resource_type == 0 && h.initiator_request_id == 0 && h.initiator_process_id == 0 &&
-         h.scheme_class != 0 && IsRendererLoaderKind(h.loader_kind) &&
+         h.resource_type == 0 && h.scheme_class != 0 && IsRendererLoaderKind(h.loader_kind) &&
          DecodeMemoryCacheReusePayload(event.inline_payload, value) &&
-         IsValidMemoryCacheReusePayload(value);
+         IsValidMemoryCacheReusePayload(value) &&
+         ((value.flags & kMemoryCacheReuseSourceNamed) != 0
+              ? h.initiator_process_id == h.process_id && h.initiator_request_id != 0
+              : h.initiator_request_id == 0 && h.initiator_process_id == 0);
 }
 }  // namespace reb
 #endif

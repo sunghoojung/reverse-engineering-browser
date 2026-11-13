@@ -1432,6 +1432,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const rows = state.trafficIndex?.answer?.()?.rows ?? [];
         const lost = new Set(rows.filter(row => row.endLost).map(row => row.id));
         if (lost.size) for (const request of state.requests) if (lost.has(request.id)) markTrafficEndLost(request);
+        // Every row's body answer: a window row can lack its response_started.
+        const indexed = new Map(rows.map(row => [row.id, row]));
+        if (indexed.size) for (const request of state.requests) if (indexed.has(request.id)) copyTrafficBodyFacts(request, indexed.get(request.id));
+      }
+
+      // The index alone knows the row a reuse names and that row's body
+      // (protocol/request-index-v1.md); copied like End lost, in place.
+      function copyTrafficBodyFacts(request, indexed) {
+        if (!indexed) return;
+        if (indexed.memoryCacheSourceRow) request.memoryCacheSourceRow = indexed.memoryCacheSourceRow;
+        if (indexed.responseBodyIndex) request.responseBodyIndex = indexed.responseBodyIndex;
       }
 
       function renderShellStatus() {
@@ -3534,6 +3545,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const retained = state.requests.find(request => request.id === id);
         if (retained && (!indexed || trafficRecordCount(retained) >= indexed.indexRow.records)) {
           if (indexed?.endLost) markTrafficEndLost(retained);
+          copyTrafficBodyFacts(retained, indexed);
           selectRequest(id);
           focusRequestRow(id);
         } else if (indexed) loadTrafficRequest(indexed, true);
@@ -3558,6 +3570,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           Object.assign(request, {tabIds: indexed.tabIds, tabLink: indexed.tabLink, tabLinkLabel: indexed.tabLinkLabel,
             extensionId: indexed.extensionId, tabReason: indexed.tabReason, recordsPartial: partial});
           if (indexed.endLost) markTrafficEndLost(request);
+          copyTrafficBodyFacts(request, indexed);
           retainTrafficRequest(request);
           rebuildTrafficRequests();
           if (select) {
@@ -4019,7 +4032,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // Response and Preview tabs, protocol/native-network-v3.md.
       const trafficResponse = createTrafficResponse({getArtifacts: () => state.artifacts, getEvents: () => state.events,
         contentSession: () => state.requestContentCaptureEnabled, readable: () => location.protocol !== 'file:',
-        lookup: (record, request) => trafficArtifacts.lookup(record, trafficStoreOffset(request)), onChange: () => renderInspector()});
+        lookup: (record, request) => trafficArtifacts.lookup(record, trafficStoreOffset(request)), onChange: () => renderInspector(),
+        getRequests: () => state.requests,
+        // Rows open while the answered request was, of which the response view
+        // keeps the service worker's own requests for the same URL.
+        related: request => {
+          if (!state.trafficIndex?.search || !request.host) return {status: 'ready', rows: []};
+          return state.trafficIndex.search({from_ns: String(request.firstTimestamp ?? 0n), to_ns: String(request.lastTimestamp ?? 0n),
+            sort: 'start', limit: '500'}, AbortSignal.timeout(10000));
+        },
+        open: id => selectTrafficRow(id)});
       // get_request_stack positions are one-based; Sources reveals zero-based ones.
       function openResolvedFrame(resolution) {
         const line = Number.isSafeInteger(resolution.artifact_line) && resolution.artifact_line > 0 ? resolution.artifact_line - 1 : null;
@@ -4158,8 +4180,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = true;
           const lifecycleEvents = request?.events ?? [];
-          const correlated = lifecycleEvents.find(event => event.protocol_version >= 2 && event.initiator_process_id > 0);
-          const initiated = lifecycleEvents.find(event => event.type === 'request_initiated');
+          // A memory-cache reuse's initiator fields name the request whose
+          // response Blink reused, never an initiator (protocol/native-network-v3.md).
+          const correlated = lifecycleEvents.find(event => event.protocol_version >= 2 && event.initiator_process_id > 0 &&
+            event.type !== 'memory_cache_reuse');
+          const reuse = lifecycleEvents.find(event => event.type === 'memory_cache_reuse');
+          const initiated = lifecycleEvents.find(event => event.type === 'request_initiated') ?? reuse;
           const contextEvent = lifecycleEvents.find(event => browserContextToken(event));
           if (correlated || initiated || contextEvent) {
             const source = correlated ?? initiated ?? contextEvent;
@@ -4179,6 +4205,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
               );
             }
             details.push({ key: 'Frame', value: integerText(source, 'frame_id'), type: 'id' });
+            if (reuse && !correlated) {
+              details.push({ key: 'Reused response of', value: request.memoryCacheSource
+                ? `${request.memoryCacheSource}: Blink reused this request's response; it did not start this load`
+                : 'No request named: no request was made', type: request.memoryCacheSource ? 'id' : 'unavailable' });
+            }
             requestStackPanel.render(elements.fieldTree, request, inspectorDetailRows(details));
           } else {
             const empty = document.createElement('div');

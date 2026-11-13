@@ -200,7 +200,7 @@ impl Refusals {
             }
             (Some("network"), Some("response_body")) => {
                 if let Some(reason) = payload()
-                    .filter(|b| b.len() == 128 && b[0] == 1)
+                    .filter(|b| b.len() == 128 && (b[0] == 1 || b[0] == 2))
                     .and_then(|b| response_refusal(b[4]))
                 {
                     *self.content.entry(("response_body", reason)).or_default() += 1;
@@ -674,9 +674,205 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
     }))
 }
 
+/// What each request's response body case of the request index means
+/// (protocol/native-network-v3.md "Bodies the proxy never sees").
+fn body_case_meaning(case: &str) -> &'static str {
+    match case {
+        "captured" => "retained in full",
+        "captured_truncated" => "retained up to the 16 MiB capture limit",
+        "partial" => "still arriving; the newest snapshot is retained",
+        "aborted" => "the network failed mid-body; what arrived is retained",
+        "cancelled" => "the page or browser stopped reading; what arrived is retained",
+        "empty" => "the body had no bytes",
+        "not_modified" => "HTTP 304: the server sent no body",
+        "redirected" => {
+            "redirected, then ended with no other response; Chromium discards redirect bodies"
+        }
+        "not_captured_type" => {
+            "images, audio, video or fonts that page elements load, kept only with REB_CAPTURE_RESPONSE_MEDIA=1"
+        }
+        "not_captured_artifact_unavailable" => {
+            "no artifact channel: the Artifact category was off or the receiver was disconnected"
+        }
+        "not_captured_transfer_refused" => {
+            "refused by the bounded in-flight memory pool or artifact queue"
+        }
+        "not_captured_session_budget" => "arrived after the response body budget was used",
+        "malformed" => "the response body record is malformed",
+        "source_artifact" => "a script or Wasm response, retained as a source artifact",
+        "no_record" => {
+            "the browser saw a response but no body record is indexed: not a content capture session, or still arriving"
+        }
+        "memory_cache" => "reused from Blink's memory cache: no request was made",
+        "service_worker" => {
+            "answered by a service worker in the renderer, which the browser proxy never sees"
+        }
+        "failed_before_response" => "failed before any response",
+        "cancelled_before_response" => "cancelled before any response",
+        "interrupted" => "observation ended before the outcome was known",
+        "end_lost" => {
+            "a service worker ended it, but its start slot was reused, so its outcome was not recorded"
+        }
+        "pending" => "no response or end yet",
+        "renderer_answered" => {
+            "answered in the renderer without a URL loader (data:, blob: and other local schemes)"
+        }
+        _ => "ended with no response record",
+    }
+}
+
+/// The summary's ETag key: capture state, artifact manifest and the request
+/// index's progress, since the body case counts change as the index reads an
+/// unchanged store.
+pub fn etag_key(state: &str, manifest: &str, progress: &str) -> String {
+    format!("summary:{state}:{manifest}:index:{progress}")
+}
+
+/// Every request's response body case, counted from the request index's rows,
+/// and a check naming the bodies the browser proxy can never see. An index
+/// that cannot answer leaves the counts unavailable, with its reason.
+pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Value, String>) {
+    let counts = match counts {
+        Ok(counts) => counts,
+        Err(reason) => {
+            summary["response_bodies"] = json!({"available": false, "reason": reason,
+                "complete": false, "requests": "0", "unindexed_records": "0",
+                "snapshots_withheld": "0", "cases": []});
+            return;
+        }
+    };
+    let count = |case: &str| {
+        counts["cases"][case]
+            .as_str()
+            .and_then(|count| count.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let cases = counts["cases"]
+        .as_object()
+        .map(|cases| {
+            cases
+                .iter()
+                .map(|(case, value)| json!({"case": case, "count": value, "meaning": body_case_meaning(case)}))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let (worker, reused, local) = (
+        count("service_worker"),
+        count("memory_cache"),
+        count("renderer_answered"),
+    );
+    summary["response_bodies"] = json!({
+        "available": true, "reason": null,
+        "complete": counts["complete"], "requests": counts["requests"],
+        "unindexed_records": counts["unindexed_records"],
+        "snapshots_withheld": counts["snapshots_withheld"].as_str().unwrap_or("0"), "cases": cases,
+    });
+    let withheld = counts["snapshots_withheld"]
+        .as_str()
+        .and_then(|count| count.parse::<u64>().ok())
+        .unwrap_or(0);
+    if withheld > 0 {
+        let mut item = check(
+            "response_snapshots_withheld",
+            "info",
+            format!(
+                "{withheld} response bodies had a snapshot withheld while they arrived: their own snapshot allowance, the session's snapshot quarter of the response body budget, or the budget was used, so their newest snapshot is older than the schedule would make it. Raise REB_RESPONSE_BODY_BUDGET_MIB for a new session."
+            ),
+        );
+        item["count"] = json!(withheld.to_string());
+        if let Some(checks) = summary["checks"].as_array_mut() {
+            checks.push(item);
+        }
+    }
+    if worker + reused + local > 0 {
+        let mut item = check(
+            "response_bodies_not_observed",
+            "info",
+            format!(
+                "{} responses never reached the browser proxy, so their bodies are not retained under their own request: {worker} served by a service worker, {reused} reused from the memory cache and {local} answered in the renderer. Traffic links a reuse to the request whose response it reused, and a service worker answer to the worker's own fetch of the same URL, when those were retained.",
+                worker + reused + local
+            ),
+        );
+        item["count"] = json!((worker + reused + local).to_string());
+        if let Some(checks) = summary["checks"].as_array_mut() {
+            checks.push(item);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_body_cases_are_counted_with_their_meaning() {
+        let mut summary = json!({"checks": []});
+        add_response_bodies(
+            &mut summary,
+            Ok(
+                json!({"complete": true, "requests": "6", "unindexed_records": "0", "snapshots_withheld": "3",
+                "cases": {"captured": "2", "memory_cache": "1", "service_worker": "2", "renderer_answered": "1"}}),
+            ),
+        );
+        assert_eq!(summary["response_bodies"]["available"], true);
+        assert_eq!(summary["response_bodies"]["snapshots_withheld"], "3");
+        let withheld = summary["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == "response_snapshots_withheld")
+            .unwrap();
+        assert_eq!(withheld["count"], "3");
+        let cases = summary["response_bodies"]["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 4);
+        let worker = cases
+            .iter()
+            .find(|case| case["case"] == "service_worker")
+            .unwrap();
+        assert_eq!(worker["count"], "2");
+        assert!(worker["meaning"].as_str().unwrap().contains("never sees"));
+        let check = summary["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == "response_bodies_not_observed")
+            .unwrap();
+        assert_eq!(check["count"], "4");
+        assert!(
+            check["message"]
+                .as_str()
+                .unwrap()
+                .contains("2 served by a service worker, 1 reused")
+        );
+        assert!(
+            check["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("4 responses never reached")
+        );
+        let mut quiet = json!({"checks": []});
+        add_response_bodies(
+            &mut quiet,
+            Ok(
+                json!({"complete": true, "requests": "2", "unindexed_records": "0", "cases": {"captured": "2"}}),
+            ),
+        );
+        assert!(quiet["checks"].as_array().unwrap().is_empty());
+        // An index that cannot answer leaves the counts unavailable, never the summary.
+        let mut failed = json!({"checks": []});
+        add_response_bodies(&mut failed, Err("The request index is unreadable".into()));
+        assert_eq!(failed["response_bodies"]["available"], false);
+        assert_eq!(
+            failed["response_bodies"]["reason"],
+            "The request index is unreadable"
+        );
+        assert_eq!(failed["response_bodies"]["cases"], json!([]));
+        // The tag changes as the index reads an unchanged store.
+        assert_ne!(
+            etag_key("live", "m1", "4096"),
+            etag_key("live", "m1", "caught-up")
+        );
+    }
 
     #[test]
     fn filtered_wasm_gap_is_a_policy_exclusion() {

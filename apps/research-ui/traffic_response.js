@@ -7,7 +7,9 @@ const TRAFFIC_RESPONSE_PAGE_BYTES = 2 * 1024 * 1024;
 const TRAFFIC_RESPONSE_CACHE_BYTES = 48 * 1024 * 1024;
 const TRAFFIC_RESPONSE_RETRY_MS = 2000;
 const TRAFFIC_RESPONSE_FIND_LIMIT = 1000;
+// Hex shows one window of this many bytes at a time, paged to the end of the body.
 const TRAFFIC_RESPONSE_HEX_BYTES = 256 * 1024;
+const TRAFFIC_RESPONSE_CAPTURE_BYTES = 16n * 1024n * 1024n;
 // Bytes of a cut, partial or stopped body can end inside a character.
 const TRAFFIC_RESPONSE_OPEN_ENDED = new Set(['captured_truncated', 'partial', 'aborted', 'cancelled']);
 
@@ -19,28 +21,132 @@ function trafficResponseBytes(value) {
   return `${count.toLocaleString('en-US')} ${count === 1n ? 'byte' : 'bytes'}`;
 }
 
+const TRAFFIC_RESPONSE_STATES = new Set(['captured', 'captured_truncated', 'partial', 'aborted', 'cancelled', 'empty',
+  'not_modified', 'redirected', 'not_captured_type', 'not_captured_artifact_unavailable', 'not_captured_transfer_refused',
+  'not_captured_session_budget']);
+
+// The request index read the whole session, so it decides when the loaded
+// records lack the final response or its body record: a live row's
+// response_started can leave the retained window while later records stay.
+function trafficResponseIndexWins(request) {
+  const indexed = request?.responseBodyIndex;
+  if (!indexed) return false;
+  if (!request.events?.length) return true;
+  if (!request.responseStarted) return Boolean(indexed.response_started);
+  return !request.responseBody && Boolean(indexed.record_sequence);
+}
+
+// An index body answer as the record shape the model decodes. The record's
+// content type and codings are not in the index.
+function trafficIndexRecord(body) {
+  if (!body || (!TRAFFIC_RESPONSE_STATES.has(body.case) && body.case !== 'malformed')) return null;
+  if (body.case === 'malformed') return {malformed: true};
+  const started = body.response_started;
+  return {state: body.case, shared: body.shared === true, fromCache: false, serviceWorker: false, stillEncoded: false,
+    codingsOmitted: false, completionUnobserved: false, contentType: null, codings: [], bodyLength: body.body_length ?? '0',
+    capturedLength: body.captured_length ?? '0', partialIndex: body.partial_index ?? 0, sha256: body.sha256 ?? null,
+    artifactId: body.artifact_id ?? '0', sequenceNumber: body.record_sequence, parentEventId: started?.sequence_number,
+    sessionId: started?.session_id, processId: started?.process_id, monotonicTimeNs: body.record_time_ns, fromIndex: true};
+}
+
+// The body record this view describes: the loaded one, or the index's.
+function trafficResponseRecord(request) {
+  return trafficResponseIndexWins(request) ? trafficIndexRecord(request.responseBodyIndex) : request?.responseBody ?? null;
+}
+
+// A snapshot of the same response the receiver still holds when the newest
+// record names no bytes (a refusal, or a malformed record).
+function trafficResponseEarlier(request) {
+  if (!trafficResponseIndexWins(request) && request?.responseBodyEarlier) return request.responseBodyEarlier;
+  const earlier = request?.responseBodyIndex?.earlier_snapshot;
+  const started = request?.responseBodyIndex?.response_started;
+  if (!earlier || !started) return null;
+  return {state: 'partial', shared: false, artifactId: earlier.artifact_id, sessionId: started.session_id,
+    parentEventId: started.sequence_number, bodyLength: earlier.body_length, capturedLength: earlier.captured_length,
+    partialIndex: earlier.partial_index, sha256: earlier.sha256, sequenceNumber: earlier.record_sequence,
+    monotonicTimeNs: earlier.record_time_ns, codings: [], fromIndex: true};
+}
+
+// Why a request's response body is or is not retained (protocol/native-network-v3.md
+// "Bodies the proxy never sees"). The request index's body_case is the same
+// decision, held equal by tools/check-request-index.mjs, and decides when the
+// loaded records lack what it read.
+function responseBodyCase(request) {
+  if (!request) return 'pending';
+  if (trafficResponseIndexWins(request)) return request.responseBodyIndex.case;
+  // A row with neither records nor an index answer cannot be decided.
+  if (request.rank === undefined && !request.responseBody && !request.responseStarted) return 'unknown';
+  const record = request.responseBody;
+  if (record) return record.malformed ? 'malformed' : record.state;
+  if (request.responseStarted) return ['js', 'wasm'].includes(request.type) ? 'source_artifact' : 'no_record';
+  if (request.memoryCache) return 'memory_cache';
+  if (request.fromServiceWorker && !request.failed && !request.interrupted && request.rank >= 5) return 'service_worker';
+  // A failure, an ended observation or an open request after a redirect is
+  // that, not a redirect whose body was discarded.
+  if (request.failed) return request.errorCode === -3 ? 'cancelled_before_response' : 'failed_before_response';
+  if (request.interrupted) return 'interrupted';
+  if (request.endLost) return 'end_lost';
+  if (!(request.rank >= 5)) return 'pending';
+  if (request.redirected) return 'redirected';
+  return request.browserObserved ? 'no_response' : 'renderer_answered';
+}
+
+// Seconds from the response's start to a record, or null.
+function trafficResponseAfter(record, request) {
+  const [at, start] = [record?.monotonicTimeNs, request?.responseStarted?.monotonicTimeNs];
+  if (typeof at !== 'string' || typeof start !== 'string') return null;
+  const elapsed = BigInt(at) - BigInt(start);
+  if (elapsed < 0n) return null;
+  return elapsed < 1000000000n ? `${elapsed / 1000000n} ms` : `${(Number(elapsed / 1000000n) / 1000).toFixed(1)} s`;
+}
+
+// Why a request with no body record has none, by its body case.
+function trafficResponseUnseen(request, contentSession, kind = responseBodyCase(request)) {
+  const error = request?.errorCode ? ` (net error ${request.errorCode})` : '';
+  return {
+    source_artifact: 'Scripts and Wasm are retained as source artifacts. This one is not in the current catalog: its acknowledgment is pending, it was refused (see artifact_capture_failed in Evidence), or the session retains more than the 100,000 sources the catalog loads.',
+    no_record: contentSession
+      ? 'No response body record. The body may still be arriving, or its record left the retained window.'
+      : 'Response bodies are retained only in content capture sessions. Scripts and Wasm are retained in every session.',
+    memory_cache: request?.staticData
+      ? 'Decoded in the renderer: Blink decoded this data: URL or MHTML archive resource itself, so no request was made and no body passed the browser. A data: URL\'s content is the URL itself.'
+      : 'Reused from the memory cache: Blink answered this load from a resource it already held, so no request was made and no body passed the browser.',
+    service_worker: 'Served by a service worker: the worker answered in the renderer, which the browser network proxy never sees, so the bytes the page received are not retained for this request.',
+    redirected: 'Every response was a redirect, and the request ended without another. Chromium discards redirect bodies.',
+    failed_before_response: request?.fromServiceWorker
+      ? `The service worker ended this request without a response${error}, so there was no body.`
+      : `Failed before any response${error}, so there was no body.`,
+    cancelled_before_response: request?.fromServiceWorker
+      ? 'Cancelled while the service worker held it, before any response, so there was no body.'
+      : 'Cancelled before any response: the page or browser stopped the request, so there was no body.',
+    interrupted: 'Observation ended before any response: the browser proxy was destroyed or handed the request to another loader, so whether a body followed is not recorded.',
+    end_lost: 'A service worker ended this request, but the renderer had reused the slot that held its start, so its outcome and any body are not recorded.',
+    pending: 'No response yet.',
+    renderer_answered: 'Answered in the renderer without a URL loader (data:, blob: and other local schemes), so no body passed the browser network proxy. A data: URL\'s content is the URL itself.',
+    no_response: 'The request ended with no response record, so there is no body to show.'
+  }[kind] ?? 'The browser network proxy recorded no response for this request.';
+}
+
+// A partial record whose kept prefix is the whole capture limit is sealed:
+// those bytes are final, whether or not more had arrived when it was recorded.
+function trafficResponseSealed(record) {
+  return record?.state === 'partial' && BigInt(record.capturedLength) === TRAFFIC_RESPONSE_CAPTURE_BYTES;
+}
+
 // What the record says happened to the body, or why there is no record.
 function trafficResponseCapture(request, contentSession) {
-  const record = request?.responseBody;
+  const record = trafficResponseRecord(request);
   if (record?.malformed) return 'The response body record is malformed and was not interpreted.';
-  if (!record) {
-    if (!request?.responseStarted) {
-      return request?.redirectedBody
-        ? 'Every response was a redirect. Chromium discards redirect bodies.'
-        : 'The browser network proxy recorded no response for this request. Service-worker and memory-cache answers, and requests that failed first, never reach it.';
-    }
-    if (['js', 'wasm'].includes(request.type)) {
-      return 'Scripts and Wasm are retained as source artifacts. This one is not in the current catalog: its acknowledgment is pending, it was refused (see artifact_capture_failed in Evidence), or the session retains more than the 100,000 sources the catalog loads.';
-    }
-    return contentSession
-      ? 'No response body record. The body may still be arriving, or its record left the retained window.'
-      : 'Response bodies are retained only in content capture sessions. Scripts and Wasm are retained in every session.';
-  }
+  if (!record) return trafficResponseUnseen(request, contentSession);
   const kept = `${trafficResponseBytes(record.capturedLength)} of ${trafficResponseBytes(record.bodyLength)}`;
+  const after = trafficResponseAfter(record, request);
+  const sealed = trafficResponseSealed(record);
   return {
     captured: record.shared ? 'Retained in full. Identical bytes were already retained, so this names that artifact.' : 'Retained in full.',
     captured_truncated: `Retained prefix: ${kept}, truncated at the 16 MiB capture limit.`,
-    partial: `Partial: snapshot ${record.partialIndex} while the body was still arriving (${kept}). It is replaced when the body ends.`,
+    partial: `Still arriving: ${trafficResponseBytes(record.bodyLength)} had arrived${after ? ` ${after} after the response started` : ''}, at snapshot ${record.partialIndex}. ${sealed
+      ? `The first ${trafficResponseBytes(record.capturedLength)} reached the 16 MiB capture limit and are retained as they will stay; later bytes are only counted, and the body may still be arriving.`
+      : 'All of them are retained in this snapshot.'} The record of the ended body replaces it.`,
     aborted: record.capturedLength === '0' ? 'Aborted: the network failed before any byte was retained.'
       : `Aborted: the network failed mid-body. The ${trafficResponseBytes(record.capturedLength)} that arrived are retained.`,
     cancelled: record.capturedLength === '0' ? 'Cancelled: the page or browser stopped the request before any byte arrived.'
@@ -57,9 +163,17 @@ function trafficResponseCapture(request, contentSession) {
 
 function trafficResponseRows(record) {
   if (!record || record.malformed) return [];
+  // The index answer carries lengths and the digest, not the record's type or codings.
+  if (record.fromIndex) {
+    return [['Body length', `${trafficResponseBytes(record.bodyLength)} decoded`, 'value'],
+      ['SHA-256', record.sha256 ?? 'No retained bytes', record.sha256 ? 'value' : 'prose'],
+      ['Record', 'Read from the request index: the loaded records lack it, so its content type and codings are not shown.', 'prose']];
+  }
   const codings = record.codings.map(coding => TRAFFIC_RESPONSE_CODINGS[coding] ?? coding).join(', ');
   const notes = [record.fromCache && 'served from the HTTP cache', record.serviceWorker && 'served by a service worker',
     record.completionUnobserved && 'the loader reported no completion, so the end is unconfirmed'].filter(Boolean);
+  // Version 2 bit 7 (protocol/native-network-v3.md "Partial bodies").
+  const withheld = record.snapshotsWithheld ? [['Snapshots', 'A snapshot the schedule allowed was withheld: this body\'s snapshot allowance, the session\'s snapshot share or the response body budget was used, so the newest snapshot is older than the schedule would make it.', 'prose']] : [];
   return [
     ['Content type', record.contentType ?? 'Not a bounded media type; not recorded', record.contentType ? 'value' : 'prose'],
     ['Content encoding', codings ? `${codings}${record.codingsOmitted ? ', more not recorded' : ''} · ${record.stillEncoded
@@ -67,7 +181,8 @@ function trafficResponseRows(record) {
     ['Body length', record.bodyLength === '0' && record.state !== 'empty'
       ? 'Not observed' : `${trafficResponseBytes(record.bodyLength)} decoded`, 'value'],
     ['SHA-256', record.sha256 ?? 'No retained bytes', record.sha256 ? 'value' : 'prose'],
-    ...(notes.length ? [['Delivery', notes.join('; '), 'prose']] : [])
+    ...(notes.length ? [['Delivery', notes.join('; '), 'prose']] : []),
+    ...withheld
   ];
 }
 
@@ -114,10 +229,117 @@ function trafficResponseText(bytes, open = false) {
   }
 }
 
+// A body the request index (`response_body`) or the Traffic model describes, as a
+// request the artifact join reads: its record and its final response.
+function trafficResponseStand(id, type, body) {
+  const started = body?.response_started;
+  const responseStarted = started ? {sequenceNumber: started.sequence_number, sessionId: started.session_id,
+    processId: started.process_id} : null;
+  const responseBody = body?.artifact_id && started ? {state: body.case, shared: body.shared === true,
+    artifactId: body.artifact_id, sessionId: started.session_id, parentEventId: started.sequence_number,
+    bodyLength: body.body_length, capturedLength: body.captured_length, sha256: body.sha256, partialIndex: body.partial_index ?? 0} : null;
+  return {id, type, responseStarted, responseBody};
+}
+
+// A model row's body as the index words it, for the reuse's source.
+function trafficResponseBodySummary(row) {
+  const record = trafficResponseRecord(row);
+  return {case: responseBodyCase(row), body_length: record?.bodyLength ?? null, captured_length: record?.capturedLength ?? null,
+    partial_index: record?.partialIndex ?? null, record_time_ns: record?.monotonicTimeNs ?? null};
+}
+
+// The host a row was requested from: the host-only path, else its host field.
+function trafficResponseHost(row) {
+  return String(row?.host ?? (row?.hostOnly ? row.path : '') ?? '').replace(/:\d+$/, '').toLowerCase();
+}
+
+// The row a memory-cache reuse names as the request whose response Blink
+// reused (protocol/native-network-v3.md), from the index or the model's rows.
+// A renderer ID names a row only in its own process and session, so the source
+// must also have the reuse's host and have started before it.
+function trafficMemoryCacheSource(request, rows = []) {
+  const id = request?.memoryCacheSource;
+  if (!id) return null;
+  const indexed = request.memoryCacheSourceRow;
+  if (indexed?.id === id) {
+    return {id, found: indexed.found === true, reason: indexed.reason ?? null, body: indexed.response_body ?? null,
+      path: indexed.path ?? null, mimeType: indexed.mime_type ?? null,
+      stand: indexed.found ? trafficResponseStand(id, indexed.type, indexed.response_body) : null};
+  }
+  const row = rows.find(candidate => candidate.id === id);
+  if (!row) return {id, found: null, reason: null, body: null, path: null, stand: null};
+  const host = trafficResponseHost(request), sourceHost = trafficResponseHost(row);
+  const reason = host && sourceHost && host !== sourceHost && !(host.length === 120 && sourceHost.startsWith(host)) ? 'host_differs'
+    : typeof row.firstTimestamp === 'bigint' && typeof request.firstTimestamp === 'bigint' && row.firstTimestamp > request.firstTimestamp
+      ? 'started_after' : null;
+  if (reason) return {id, found: false, reason, body: null, path: row.path, stand: null};
+  return {id, found: true, reason: null, body: trafficResponseBodySummary(row), path: row.path, mimeType: row.mimeType ?? null,
+    stand: {id, type: row.type, responseStarted: row.responseStarted, responseBody: trafficResponseRecord(row)}};
+}
+
+// What was retained of a reuse's source: complete, cut at the limit, a
+// snapshot, stopped, or not at all.
+function trafficSourceState(source, reuse) {
+  const body = source?.body;
+  if (!body) return null;
+  const bytes = value => value === null || value === undefined ? 'an unknown number of bytes' : trafficResponseBytes(value);
+  let when = '';
+  if (typeof body.record_time_ns === 'string' && typeof reuse?.firstTimestamp === 'bigint') {
+    const gap = BigInt(body.record_time_ns) - reuse.firstTimestamp;
+    const magnitude = gap < 0n ? -gap : gap;
+    const amount = magnitude < 1000000000n ? `${magnitude / 1000000n} ms` : `${(Number(magnitude / 1000000n) / 1000).toFixed(1)} s`;
+    when = `, recorded ${amount} ${gap < 0n ? 'before' : 'after'} this reuse`;
+  }
+  return {
+    captured: `Complete: ${bytes(body.body_length)}.`,
+    captured_truncated: `Truncated: the first ${bytes(body.captured_length)} of ${bytes(body.body_length)} are retained.`,
+    partial: `Partial: snapshot ${body.partial_index ?? '?'} holds ${bytes(body.captured_length)} of the ${bytes(body.body_length)} that had arrived${when}. Blink reused the whole resource.`,
+    aborted: `Aborted mid-body: ${bytes(body.captured_length)} of ${bytes(body.body_length)} are retained.`,
+    cancelled: `Cancelled mid-body: ${bytes(body.captured_length)} of ${bytes(body.body_length)} are retained.`,
+    source_artifact: 'Retained as a script or Wasm source artifact.'
+  }[body.case] ?? `Not retained: ${trafficResponseCaseMeaning(body.case)}.`;
+}
+
+// A row's host, path and query, when it has a path to match: a metadata
+// session records the host alone.
+function trafficResponseUrl(row) {
+  if (!row?.host || row.target === undefined || row.target === null) return null;
+  return `${row.host}${row.target}`;
+}
+
+// Requests the service worker made for this request's URL while it was open:
+// the bytes it answered with may be theirs, which the records do not prove.
+function trafficServiceWorkerFetches(request, rows) {
+  if (!request || responseBodyCase(request) !== 'service_worker') return [];
+  const wanted = trafficResponseUrl(request);
+  if (!wanted) return [];
+  return rows.filter(row => row.id !== request.id && row.initiator === 'worker' && trafficResponseUrl(row) === wanted &&
+    row.firstTimestamp >= request.firstTimestamp && row.firstTimestamp <= request.lastTimestamp);
+}
+
+// One line for each body case, as the session summary words it.
+function trafficResponseCaseMeaning(kind) {
+  return {
+    captured: 'retained in full', captured_truncated: 'retained up to the 16 MiB capture limit',
+    partial: 'still arriving; its newest snapshot is retained', aborted: 'the network failed mid-body; what arrived is retained',
+    cancelled: 'stopped mid-body; what arrived is retained', empty: 'an empty body', not_modified: 'HTTP 304, no body',
+    redirected: 'redirected, then ended with no other response', not_captured_type: 'media or a font, not asked for',
+    not_captured_artifact_unavailable: 'the artifact channel was unavailable', not_captured_transfer_refused: 'refused by the bounded transfer',
+    not_captured_session_budget: 'past the response body budget', malformed: 'a malformed record',
+    source_artifact: 'retained as a source artifact', no_record: 'no body record', memory_cache: 'itself reused from the memory cache',
+    service_worker: 'itself served by a service worker', failed_before_response: 'failed before any response',
+    cancelled_before_response: 'cancelled before any response', interrupted: 'observation ended first', end_lost: 'its end was lost',
+    pending: 'no response yet', renderer_answered: 'answered in the renderer', no_response: 'no response record'
+  }[kind] ?? 'unknown';
+}
+
 // `request` and `worker` replace the format client's backend read and layout worker.
-function createTrafficResponse({getArtifacts, getEvents, contentSession, readable, onChange, request, worker, lookup = null}) {
+// `related(request)` answers {status, rows} of rows that may hold its bytes;
+// `open(id)` selects another Traffic row.
+function createTrafficResponse({getArtifacts, getEvents, contentSession, readable, onChange, request, worker, lookup = null,
+  getRequests = () => [], related = null, open = null}) {
   const views = new Map();
-  const options = {pretty: false, wrap: true, hex: false, query: '', current: 0};
+  const options = {pretty: false, wrap: true, hex: false, query: '', current: 0, hexKey: null, hexOffset: 0};
   const previews = new Map();
   let previewArea = null;
   let generation = 0;
@@ -346,6 +568,29 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     return bar;
   }
 
+  // Previous and next hex windows; a window past the loaded bytes reads the next range.
+  function hexPager(range, view) {
+    const bar = trafficNode('div', 'traffic-response-hex-pager');
+    bar.setAttribute('role', 'group');
+    bar.setAttribute('aria-label', 'Hex range');
+    for (const [control, label, step, disabled] of [
+      ['hex-previous', 'Previous 256 KiB', -1, range.start === 0],
+      ['hex-next', 'Next 256 KiB', 1, range.end >= view.total]]) {
+      const button = trafficNode('button', 'secondary-button', label);
+      button.type = 'button';
+      button.dataset.control = control;
+      // Not `disabled`, so keyboard focus stays when a step reaches either end.
+      button.setAttribute('aria-disabled', String(disabled));
+      button.addEventListener('click', () => {
+        if (disabled) return;
+        options.hexOffset = Math.max(0, range.start + step * TRAFFIC_RESPONSE_HEX_BYTES);
+        onChange();
+      });
+      bar.append(button);
+    }
+    return bar;
+  }
+
   function responseBody(container, request, artifact, view) {
     const nodes = [];
     const bytes = view.bytes;
@@ -362,13 +607,25 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     let layout = null;
     const raw = trafficNode('p', 'traffic-body-note code-view-raw');
     raw.setAttribute('role', 'status');
+    let hexWindow = null;
     if (binary || options.hex) {
-      value = formatWasmHex(bytes.subarray(0, TRAFFIC_RESPONSE_HEX_BYTES));
-      shown = codeView(value, artifact, 'text');
-      if (bytes.length > TRAFFIC_RESPONSE_HEX_BYTES) {
-        note = `Hex shows the first ${trafficResponseBytes(TRAFFIC_RESPONSE_HEX_BYTES)}.`;
-        copyNote = `Copied the hex of the first ${trafficResponseBytes(TRAFFIC_RESPONSE_HEX_BYTES)} of ${trafficResponseBytes(bytes.length)}.`;
+      // One window at a time, paged by range to the end of the retained body.
+      if (options.hexKey !== view.key) {
+        options.hexKey = view.key;
+        options.hexOffset = 0;
       }
+      const last = Math.max(0, Math.floor((view.total - 1) / TRAFFIC_RESPONSE_HEX_BYTES) * TRAFFIC_RESPONSE_HEX_BYTES);
+      const start = Math.min(options.hexOffset, last);
+      const end = Math.min(start + TRAFFIC_RESPONSE_HEX_BYTES, view.total);
+      hexWindow = {start, end, loaded: bytes.length >= end};
+      value = formatWasmHex(bytes.subarray(start, Math.min(end, bytes.length)), start);
+      shown = codeView(value, artifact, 'text');
+      if (view.total > TRAFFIC_RESPONSE_HEX_BYTES) {
+        note = `Hex shows bytes ${start.toLocaleString('en-US')} to ${(end - 1).toLocaleString('en-US')} of ${trafficResponseBytes(view.total)}.`;
+        copyNote = `Copied the hex of bytes ${start.toLocaleString('en-US')} to ${(end - 1).toLocaleString('en-US')} of ${trafficResponseBytes(view.total)}.`;
+      }
+      // A window past the loaded ranges reads the next range itself.
+      if (!hexWindow.loaded && !view.loadingMore && !view.moreError) void Promise.resolve().then(() => more(view.key));
     } else {
       if (options.pretty && prettyable && view.complete) {
         layout = layouts.layout(artifact, text, source, null);
@@ -383,9 +640,14 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     nodes.push(toolbar(container, binary, prettyable, shown, value, copyNote));
     if (decoded?.lossy && !options.hex) nodes.push(trafficNode('p', 'traffic-body-note', 'Not valid UTF-8; shown with replacement characters. Hex shows the exact bytes.'));
     if (note) nodes.push(trafficNode('p', 'traffic-body-note', note));
+    if (hexWindow && view.total > TRAFFIC_RESPONSE_HEX_BYTES) nodes.push(hexPager(hexWindow, view));
+    if (hexWindow && !hexWindow.loaded) {
+      nodes.push(trafficNode('p', 'traffic-body-note', view.moreError
+        ? `These bytes could not be read: ${view.moreError}.` : 'Reading these bytes…'));
+    }
     nodes.push(shown.code);
     if (layout?.status === 'ready' && layout.map) nodes.push(raw);
-    if (!view.complete) {
+    if (!view.complete && !hexWindow) {
       const button = trafficNode('button', 'secondary-button traffic-body-more', view.loadingMore ? 'Loading…' : 'Show the next 2 MiB');
       button.type = 'button';
       button.dataset.control = 'more';
@@ -442,12 +704,93 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     return [...lossyNote, pre];
   }
 
+  // The rows a related lookup found for a service-worker answer, read once per request.
+  const relatedAnswers = new Map();
+  // `searched` says what was looked through: the loaded rows only, or the
+  // index's rows of the request's time range, which `capped` says were cut.
+  function fetchesOf(target) {
+    if (!trafficResponseUrl(target)) return {status: 'no_path', rows: [], searched: 'none', capped: false};
+    const local = trafficServiceWorkerFetches(target, getRequests() ?? []);
+    if (!related) return {status: 'ready', rows: local, searched: 'loaded', capped: false};
+    let entry = relatedAnswers.get(target.id);
+    if (!entry) {
+      entry = {status: 'loading', rows: [], capped: false};
+      relatedAnswers.set(target.id, entry);
+      while (relatedAnswers.size > 16) relatedAnswers.delete(relatedAnswers.keys().next().value);
+      Promise.resolve().then(() => related(target)).then(answer => {
+        entry.status = answer?.status ?? 'ready';
+        entry.rows = Array.isArray(answer?.rows) ? answer.rows : [];
+        entry.capped = answer?.capped === true;
+      }, () => {entry.status = 'unavailable';}).finally(onChange);
+    }
+    const rows = [...local, ...trafficServiceWorkerFetches(target, entry.rows).filter(row => !local.some(item => item.id === row.id))];
+    return {status: entry.status, rows, searched: entry.status === 'ready' ? 'index' : 'loaded', capped: entry.capped};
+  }
+
+  // What the worker-fetch search found, and what it could not look at.
+  function fetchesNote(fetches) {
+    if (fetches.status === 'no_path') {
+      return 'This row has no path to match (a metadata-only session records the host alone), so requests the service worker made cannot be matched to it.';
+    }
+    if (fetches.status === 'loading') return 'Looking for requests the service worker made for this URL…';
+    if (fetches.rows.length) {
+      return `The service worker requested this URL while this request was open (${fetches.rows.length === 1 ? 'one request' : `${fetches.rows.length} requests`}). The records do not say whether it answered with those bytes.`;
+    }
+    const scope = fetches.searched === 'index'
+      ? `the request index's rows of this request's time range${fetches.capped ? ', cut at its first 500 rows, so later ones were not searched' : ''}`
+      : fetches.status === 'unavailable' ? 'the loaded rows only: the request index could not be read' : 'the loaded rows only';
+    return `No request the service worker made for this URL started while this request was open, among ${scope}. A worker that fetched before this request opened, fetched another URL, read Cache Storage or built the response leaves no match here.`;
+  }
+
+  // A button that selects another Traffic row, when this view can.
+  function opener(id, label) {
+    const button = trafficNode('button', 'secondary-button traffic-response-open', label);
+    button.type = 'button';
+    button.dataset.control = `open-${id}`;
+    button.dataset.request = id;
+    button.addEventListener('click', () => open?.(id));
+    return button;
+  }
+
+  // How a reuse names its source, and whether that source's bytes are shown.
+  function sourceNote(request, source) {
+    if (!source) {
+      return request.staticData ? null : 'The reused resource names no request of this renderer: its record predates naming one, or no request set the response\'s ID.';
+    }
+    if (source.found === null) return `It names request ${source.id} of this renderer, which is not among the rows loaded here.`;
+    if (!source.found) {
+      return {
+        host_differs: `Blink names request ${source.id} of this renderer, but that row was requested from another host, so it is not this resource's load: the renderer's process ID may have been reused within the session.`,
+        started_after: `Blink names request ${source.id} of this renderer, but that row started after this reuse, so it is not this resource's load: the renderer's process ID may have been reused within the session.`
+      }[source.reason] ?? `Blink names request ${source.id} of this renderer as the one that loaded it, which this session did not record: it loaded before the session started, or its records are not indexed.`;
+    }
+    const kind = source.body?.case;
+    if (source.stand?.responseBody || kind === 'source_artifact') {
+      return kind === 'captured'
+        ? 'Blink names the request of this renderer that loaded the resource. That request\'s retained body is shown here, complete.'
+        : 'Blink names the request of this renderer that loaded the resource. What was retained of that request\'s body is shown here; its state is below.';
+    }
+    return `Blink names the request of this renderer that loaded the resource. Its body was not retained: ${trafficResponseCaseMeaning(kind)}.`;
+  }
+
   function render(container, request, tab) {
-    const record = request?.responseBody ?? null;
-    const {artifact, found} = request ? artifactOf(request, record) : {artifact: null, found: null};
-    const refusal = artifact ? null : refusalOf(request) ?? (found?.status === 'refused' ? found.reason || 'unknown reason' : null);
+    const record = request ? trafficResponseRecord(request) : null;
+    const kind = responseBodyCase(request);
+    const source = kind === 'memory_cache' && request ? trafficMemoryCacheSource(request, getRequests() ?? []) : null;
+    const fetches = kind === 'service_worker' && request ? fetchesOf(request) : null;
+    // A newest record without bytes does not hide a snapshot the receiver holds.
+    const earlier = !source && record && (record.malformed || record.artifactId === '0') ? trafficResponseEarlier(request) : null;
+    // A reuse shows the bytes of the request it names; nothing else stands in for a body.
+    const indexed = trafficResponseIndexWins(request) ? trafficResponseStand(request.id, request.type, request.responseBodyIndex) : null;
+    const shownFrom = source?.stand ?? (earlier ? {...request, responseStarted: request.responseStarted ?? indexed?.responseStarted, responseBody: earlier}
+      : indexed ? {...request, responseStarted: indexed.responseStarted, responseBody: record} : request);
+    const shownRecord = source?.stand ? source.stand.responseBody : earlier ?? record;
+    const {artifact, found} = request ? artifactOf(shownFrom, shownRecord) : {artifact: null, found: null};
+    const refusal = artifact ? null : refusalOf(shownFrom) ?? (found?.status === 'refused' ? found.reason || 'unknown reason' : null);
     const view = artifact ? viewOf(artifact) : null;
-    const key = JSON.stringify([request?.id, request?.origin, tab, record, request?.responseStarted?.sequenceNumber, artifact?.artifact_id,
+    const key = JSON.stringify([request?.id, request?.origin, tab, record, kind, request?.responseStarted?.sequenceNumber, artifact?.artifact_id,
+      earlier?.artifactId, source && [source.id, source.found, source.reason, source.body, source.mimeType],
+      fetches && [fetches.status, fetches.capped, fetches.searched, fetches.rows.map(row => [row.id, row.responseBodyIndex?.case])],
       refusal, found?.status, view && [view.status, view.loaded, view.error, view.moreError, view.loadingMore], options, generation]);
     if (container.dataset.renderKey === key) return;
     container.dataset.renderKey = key;
@@ -465,21 +808,49 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       container.replaceChildren(trafficNode('div', 'exchange-no-selection', 'Select a request to inspect its response.'));
       return;
     }
-    const rows = [['Capture', artifact && !record ? 'Retained as a source artifact by this response.' : trafficResponseCapture(request, contentSession()), 'prose'],
+    const own = artifact && !record && !source;
+    const rows = [['Capture', own ? 'Retained as a source artifact by this response.' : trafficResponseCapture(request, contentSession()), 'prose'],
       ...trafficResponseRows(record)];
-    if (artifact) rows.push(['Artifact', `${artifact.kind} ${artifact.artifact_id} · ${artifact.mime_type}`, 'value']);
-    for (const [label, value, kind] of tab === 'preview' ? rows.slice(0, 1) : rows) {
+    if (earlier) {
+      const after = trafficResponseAfter(earlier, request);
+      rows.push(['Earlier snapshot', `Snapshot ${earlier.partialIndex}: ${trafficResponseBytes(earlier.capturedLength)} of the ${trafficResponseBytes(earlier.bodyLength)} that had arrived${after ? ` ${after} after the response started` : ''}. The receiver retains it, and it is shown below.`, 'prose']);
+    }
+    const reused = kind === 'memory_cache' ? sourceNote(request, source) : null;
+    if (reused) rows.push(['Reused from', reused, 'prose']);
+    const sourceState = source?.found ? trafficSourceState(source, request) : null;
+    if (sourceState) rows.push(['Source body', sourceState, 'prose']);
+    if (source?.found && /^multipart\/x-mixed-replace\b/i.test(source.mimeType ?? '')) {
+      rows.push(['Limit', 'A multipart/x-mixed-replace response: Blink holds its last part, while the retained body has every part.', 'prose']);
+    }
+    if (fetches) rows.push(['Worker fetches', fetchesNote(fetches), 'prose']);
+    if (artifact) rows.push([source?.stand ? 'Artifact (reused request)' : earlier ? 'Artifact (earlier snapshot)' : 'Artifact', `${artifact.kind} ${artifact.artifact_id} · ${artifact.mime_type}`, 'value']);
+    // Preview names why, and leaves the record's fields to Response.
+    const why = ['Capture', 'Earlier snapshot', 'Reused from', 'Source body', 'Limit', 'Worker fetches'];
+    for (const [label, value, valueKind] of tab === 'preview' ? rows.filter(([name]) => why.includes(name)) : rows) {
       const row = trafficNode('div', 'traffic-general-row');
       const valueNode = trafficNode('span', 'traffic-general-value', String(value));
-      valueNode.dataset.kind = kind;
+      valueNode.dataset.kind = valueKind;
       row.append(trafficNode('span', '', label), valueNode);
       nodes.push(row);
     }
-    const note = contentNote(record, artifact, view ?? {}, refusal, found);
+    const links = [];
+    if (source?.found && open) links.push(opener(source.id, `Open the request it reused${source.path ? `: ${source.path}` : ''}`));
+    for (const row of (fetches?.rows ?? []).slice(0, 3)) {
+      const body = row.responseBodyIndex?.case ?? responseBodyCase(row);
+      if (open) links.push(opener(row.id, `Open the worker's request (${trafficResponseCaseMeaning(body)})`));
+    }
+    if (links.length) {
+      const bar = trafficNode('div', 'traffic-response-links');
+      bar.append(...links);
+      nodes.push(bar);
+    }
+    const note = contentNote(shownRecord, artifact, view ?? {}, refusal, found);
     if (note) nodes.push(trafficNode('p', 'traffic-body-note', note));
-    if (view?.status === 'ready') nodes.push(...(tab === 'preview' ? preview(artifact, view, record) : responseBody(container, request, artifact, view)));
+    if (view?.status === 'ready') {
+      nodes.push(...(tab === 'preview' ? preview(artifact, view, shownRecord) : responseBody(container, shownFrom, artifact, view)));
+    }
     container.replaceChildren(...nodes);
-    container.dataset.state = record?.malformed ? 'malformed' : record?.state ?? (artifact ? 'source_artifact' : 'none');
+    container.dataset.state = record?.malformed ? 'malformed' : record?.state ?? (own ? 'source_artifact' : kind);
     const code = scroll && container.querySelector('.traffic-response-code');
     if (code) {
       code.scrollTop = scroll.top;

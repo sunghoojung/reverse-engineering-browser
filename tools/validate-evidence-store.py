@@ -558,16 +558,18 @@ def valid_request_body(event: dict, payload: bytes) -> bool:
 
 def valid_response_body(event: dict, payload: bytes) -> bool:
     """Every rule of the native-network-v3.md response_body record, mirrored from the C++ core."""
-    if not valid_request_child(event, payload):
+    if not valid_request_child(event, payload, (1, 2)):
         return False
     state, flags, type_length, coding_count = payload[4], payload[5], payload[6], payload[7]
+    # Version 2 adds bit 7, snapshots withheld by a byte bound.
+    known = 0xFF if payload[0] == 2 else 0x7F
     body_length = int.from_bytes(payload[8:16], "little")
     captured = int.from_bytes(payload[16:24], "little")
     codings, partial_index = payload[24:28], int.from_bytes(payload[28:30], "little")
     digest, content_type = payload[32:64], payload[64:128]
     media = content_type[:type_length]
     type_present = bool(flags & 0x40)
-    if (not 1 <= state <= 12 or flags & ~0x7F or any(payload[30:32]) or type_length > 64
+    if (not 1 <= state <= 12 or flags & ~known or any(payload[30:32]) or type_length > 64
             or type_present != (type_length != 0) or any(content_type[type_length:])
             or (type_present and (media.count(b"/") != 1 or media.startswith(b"/")
                                   or media.endswith(b"/")
@@ -936,12 +938,19 @@ def valid_capture_exclusion(event: dict, payload: bytes) -> bool:
 # protocol/native-network-v3.md memory_cache_reuse, shared with include/reb/network_scope.hpp.
 def valid_memory_cache_reuse(event: dict, payload: bytes) -> bool:
     if (event["protocol_version"] != 3 or event["category"] != "network" or event["flags"] != 0
-            or len(payload) != 128 or payload[:4] != bytes((1, 0, 128, 0))):
+            or len(payload) != 128 or payload[0] not in (1, 2) or payload[1:4] != bytes((0, 128, 0))):
         return False
     resource_type, flags, length = payload[4], payload[5], payload[6]
+    # Version 2 bit 2: the initiator fields name the reused response's request
+    # in the same renderer; static data has none.
+    named = bool(flags & 4)
+    if flags & ~(7 if payload[0] == 2 else 3) or (named and flags & 1):
+        return False
+    source = ((event["initiator_process_id"] == event["process_id"] and event["initiator_request_id"] != 0)
+              if named else event["initiator_request_id"] == 0 and event["initiator_process_id"] == 0)
     zero = ("navigation_id", "artifact_id", "parent_event_id", "browser_context_id_high",
             "browser_context_id_low", "encoded_data_length")
-    return (1 <= resource_type <= 15 and flags & ~3 == 0 and length <= 120 and payload[7] == 0
+    return (1 <= resource_type <= 15 and source and length <= 120 and payload[7] == 0
             and (not flags & 2 or length == 120)
             and all(0x21 <= byte <= 0x7E for byte in payload[8:8 + length])
             and not any(payload[8 + length:])
@@ -949,7 +958,6 @@ def valid_memory_cache_reuse(event: dict, payload: bytes) -> bool:
             and all(event[key] == "0" for key in zero) and event["process_id"] != 0
             and not event["decoded_body_length"].startswith("-") and event["status_code"] >= 0
             and event["error_code"] == 0 and event["resource_type"] == 0
-            and event["initiator_request_id"] == 0 and event["initiator_process_id"] == 0
             and event.get("scheme_class", 0) != 0 and event.get("loader_kind", 0) in LOADER_KINDS["memory_cache_reuse"])
 
 

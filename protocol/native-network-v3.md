@@ -57,6 +57,9 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | Probe queue version 4 | the memory-cache counters | Request scope and tabs |
 | Chromium patch 0038 | `record-synchronous-requests-on-calling-thread` | Request scope and tabs |
 | Chromium patch 0039, 0040 | `finish-service-worker-ends`, `record-memory-cache-reuse` | Request scope and tabs |
+| `memory_cache_reuse` payload version 2 | flag bit 2 `source_named` | Request scope and tabs |
+| `response_body` payload version 2 | flag bit 7 `snapshots_withheld` | Response bodies |
+| Chromium patch 0062 | `name-memory-cache-reuse-sources` | Request scope and tabs |
 
 Traffic detail tabs, in order: General, Headers, Payload, Preview, Response,
 Cookies, Initiator, Timing, Signals, Evidence.
@@ -332,7 +335,31 @@ handles each call after its detached and observer check:
 
 The record names no method: Blink adds only GET resources to the memory cache
 (`ShouldResourceBeAddedToMemoryCache`), and static data is GET too, so
-consumers show GET. A reuse a worker owns is linked to its tabs by the drain
+consumers show GET.
+
+The reuse also names the request that loaded the resource. At the pin
+`URLLoader::Context` keeps the `int` its `ResourceRequestSender::SendAsync`
+returns, which is the `GenerateRequestId` value that request's
+`request_initiated` record carries, and `WebURLResponse::Create` sets it as
+the response's `ResourceResponse::RequestId()`. The memory cache is per
+renderer process and Blink reuses only a resource whose status is `kCached`,
+whose response is that load's, so Chromium patch
+`0062-name-memory-cache-reuse-sources` passes
+`resource.GetResponse().RequestId()` to the sink. A revalidation that Blink
+answers `304` keeps the first response's request ID, because
+`Resource::RevalidationSucceeded` only updates its headers, so the named
+request is the one whose bytes Blink holds. Static data had no request.
+`GenerateRequestId` starts each renderer process at a random value from 0 to
+2^20 (`GetInitialRequestID` in `web_url_request_util.cc`) and counts up, so 0
+is a real ID only when that start is 0, and it is also what a response no
+request set carries; a reuse names a source only for an ID above 0 that is
+not static data. The source names a row as a `request_tab_link` names a renderer
+record: `initiator_process_id` (the record's own process) and
+`initiator_request_id`. A reuse's own row stays keyed by its own request ID;
+consumers never join it to its source by those fields, and they leave them
+out of its legacy browser key. They are never its initiator either: Traffic's
+Initiator tab shows the reuse's own renderer request and names the source as
+"Reused response of", and `get_xrefs` lists it as `reused_response`. A reuse a worker owns is linked to its tabs by the drain
 with a `request_tab_link`, as a worker request start is.
 
 ##### `memory_cache_reuse` (type 52)
@@ -351,10 +378,10 @@ record. Payload size 128, little endian:
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `1` |
+| 0 | 2 | payload version, `2` (`1` in older captures) |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | resource type: Blink `ResourceType` at the pin, 1 to 15 |
-| 5 | 1 | flags: bit 0 `static_data`, bit 1 `host_truncated` |
+| 5 | 1 | flags: bit 0 `static_data`, bit 1 `host_truncated`, bit 2 `source_named` (version 2) |
 | 6 | 1 | host length, 0 to 120 |
 | 7 | 1 | reserved, zero |
 | 8 | 120 | host as KURL gives it, zero after its length |
@@ -372,7 +399,11 @@ record. Payload size 128, little endian:
 
 Bit 0 marks static data (a `data:` URL or MHTML archive resource Blink decoded
 in place). Bit 1 marks a host longer than 120 bytes, and then the length is
-120. Host bytes are printable ASCII. Other bits and reserved bytes are zero.
+120. Bit 2, in version 2 only and never with bit 0, says the envelope's
+`initiator_process_id` equals its `process_id` and its nonzero
+`initiator_request_id` is the source request above; without bit 2 both are
+zero. Host bytes are printable ASCII. Other bits and reserved bytes are zero.
+Version 1 records, which name no source, stay valid.
 
 A browser-internal URL (class 16 to 20) is counted per class as a request
 would be, unless the configuration opts in, and returns its budget charge.
@@ -952,12 +983,86 @@ to `browser/native_response_body_capture.cc`:
   10 s and flagged.
 - Bytes stream to the receiver as they arrive
   ([artifact channel v2](../docs/architecture/artifact-transfer-channel.md#streamed-artifacts-version-2)).
-  A body without a declared length that is still open after a second is
-  published as `partial` by a receiver checkpoint of what arrived when it has
-  grown by half since the last one, at most 15 times, so snapshots stay within
-  three times the body. Open bodies at capture end or expiry end their stream
-  as one last `partial` record, or `not_captured_artifact_unavailable` when no
-  byte has arrived. The record of the ended body supersedes every snapshot.
+  A body still arriving is published as `partial` on the schedule in
+  [partial bodies](#partial-bodies), whether or not it declared a length. Open
+  bodies at capture end or expiry end their stream as one last `partial`
+  record, or `not_captured_artifact_unavailable` when no byte has arrived. The
+  record of the ended body supersedes every snapshot.
+
+### Partial bodies
+
+Server-sent events, long polling and slow downloads stay open for minutes or
+the whole session, so a body is readable while it arrives. A snapshot is a
+receiver checkpoint: the receiver copies every byte it holds of the stream
+into a new artifact, which a `partial` record names. A snapshot costs a copy of
+the whole kept prefix, so the schedule bounds copies by bytes and time instead
+of by a count. Snapshot n+1 of an open body is taken when a chunk arrives and
+all of these hold:
+
+1. The body grew since snapshot n.
+2. At least the larger of 1 s and a 32nd of the body's age has passed since
+   snapshot n (since the body opened, for the first). A body open for an hour
+   is snapshotted at most about 180 times, a day about 300, so the 16-bit
+   partial index is never reached.
+3. The copy fits the body's allowance, an eighth of the session's response body
+   budget (64 MiB of the default 512 MiB). A quarter of it may be spent at
+   once; of the rest, the share spendable so far is the larger of the share of
+   the session left when the body opened that has passed, and the share of the
+   16 MiB limit the body has filled. So a body spends its allowance evenly over
+   the session, or faster when it fills toward the limit.
+4. All snapshots of the session together stay within a quarter of the budget
+   (128 MiB by default), so whole bodies always keep three quarters, and the
+   copy fits what is left of the budget. Snapshots are charged to the budget;
+   a receiver refusal refunds them.
+
+A snapshot the spacing holds back is not left waiting for the next chunk: the
+first chunk that arrives too soon posts one delayed task on the capture's
+sequence for the time the spacing allows, which takes the snapshot then if the
+body is still open and the byte bounds allow it. The task finds the body by
+key and capture ID, as the completion wait does, so a body that ended or a new
+configuration leaves it nothing to do. A burst followed by silence is therefore
+published within the spacing.
+
+A snapshot the spacing allows but a byte bound withholds (the body's
+allowance, the session's quarter, or the budget) is not taken, and the
+session quarter goes to whichever bodies asked first. That is a counted limit:
+every later record of that body carries flag bit 7, `snapshots_withheld`
+(payload version 2), Traffic says the newest snapshot is older than the
+schedule would make it, and `get_session_summary` counts such bodies in
+`response_bodies.snapshots_withheld` with a `response_snapshots_withheld`
+check. The receiver keeps every snapshot it accepted, so a superseded one
+cannot be released to make room.
+
+A body whose kept prefix reaches the 16 MiB limit is sealed: those bytes can no
+longer change, so its stream ends there and a `partial` record names that
+artifact at once, without a copy. Later bytes are counted, and every later
+record of the body, including its end, names the sealed artifact.
+
+The bounds come from real streams. Wikimedia's public `recentchange` event
+stream ran at about 60 KB/s (42 events a second) and its `page-create` stream at
+about 3.6 KB/s (two 1.3 KB events a second); a chat completion streams 1 to
+20 KB/s for under a minute, and a notification channel sends a heartbeat of a
+few bytes every 15 to 30 s. In a one-hour session with the default budget:
+
+| Stream | Snapshots | Copied | Newest snapshot at most |
+| --- | ---: | ---: | --- |
+| 60 KB/s | 33 | 58 MiB | 82 s old, then sealed after 279 s |
+| 3.6 KB/s | 93 | 57 MiB | 810 s old |
+| 10 KB/s for 60 s | 50 | 12 MiB | 1 s old |
+| a heartbeat every 15 s | 84 | 0 MiB | 105 s old |
+
+Snapshots count `partial` records, the seal included; copied counts the
+receiver checkpoints, so not the seal. `make native-artifact-capture-check`
+replays these streams through the capture itself (chunks every 250 ms for the
+fast and chat streams, every 500 ms for the medium one, posted timers run as
+the clock passes them) and fails when this table differs from the replay.
+
+A larger budget (`REB_RESPONSE_BODY_BUDGET_MIB`) keeps a medium stream
+fresher, because its allowance grows with it; the 1 MiB minimum budget leaves
+a body 128 KiB of snapshots, so a stream past that is read when it ends.
+`make native-artifact-capture-check` drives a two-hour stream past the old
+limit of 15 snapshots and checks the spacing, the allowance, the session share
+and its refund, a declared length, and the seal.
 
 ### `response_body` (type 33)
 
@@ -969,7 +1074,7 @@ time is when the body ended or was snapshotted. Little endian:
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `1` |
+| 0 | 2 | payload version, `2` (`1` in older captures) |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | state |
 | 5 | 1 | flags |
@@ -1002,7 +1107,9 @@ Flags: bit 0 `shared`, identical bytes were already retained in this
 configuration and `artifact_id` names that earlier artifact; bit 1 served from
 the HTTP cache; bit 2 served by a service worker; bit 3 bytes still encoded
 (client-side decoding); bit 4 more than four codings, the rest not recorded;
-bit 5 completion not observed; bit 6 content type present. Other bits are zero.
+bit 5 completion not observed; bit 6 content type present; bit 7, in version 2
+only, a snapshot the schedule's spacing allowed was withheld by a byte bound
+([partial bodies](#partial-bodies)). Version 1 records stay valid without it.
 
 Codings: 1 `gzip` (and `x-gzip`), 2 `deflate`, 3 `br`, 4 `zstd`, 5 `dcb`,
 6 `dcz`, 7 `compress`, 15 any other token. `identity` is not a coding.
@@ -1053,17 +1160,121 @@ launcher passes for content sessions.
   with `--reb-response-body-budget-bytes` (`REB_RESPONSE_BODY_BUDGET_MIB`).
   A body is charged when it ends, once its digest is known: identical bytes
   are stored once by SHA-256 and charge nothing (the repeat stream is aborted),
-  each snapshot is charged, and a receiver refusal refunds them. The launcher grows a content session's receiver store
+  each snapshot is charged within its [shares](#partial-bodies), and a receiver
+  refusal refunds them. The launcher grows a content session's receiver store
   by both budgets.
 - Every refusal is a named state. The session summary counts states 2 and 9 to
   12 under `request_content_not_retained`, category `response_body`.
 
 ### Bodies the proxy never sees
 
-Service-worker and memory-cache answers and requests that failed before a
-response have no browser `response_started`, so they have no `response_body`
-record. Traffic says the proxy recorded no response for them; it never shows
-an empty body.
+Some requests have no browser `response_started`, so they have no
+`response_body` record. Each request instead has one body case, which Traffic's
+`responseBodyCase` and the request index decide alike
+([request index v1](request-index-v1.md)): the state of the newest
+`response_body` record of its final `response_started`, or `malformed`, else in
+this order:
+
+| Case | The request |
+| --- | --- |
+| `source_artifact` | A script or Wasm response: kinds 1 and 2 are its body |
+| `no_record` | Has a response but no body record: a metadata session, a body still arriving, or a record outside what was read |
+| `memory_cache` | Is a `memory_cache_reuse`: Blink answered from a resource it held and made no request |
+| `service_worker` | Ended with a renderer completion flagged `from_service_worker`: the worker answered in the renderer |
+| `failed_before_response`, `cancelled_before_response` | Failed before any response, with `ERR_ABORTED` for the second, after a redirect or not |
+| `interrupted` | The proxy's observation ended first (`proxy_destroyed`, `redirect_handoff`) |
+| `end_lost` | A `service_worker_end_lost` gap names it |
+| `pending` | Has no response and no end yet, after a redirect or not |
+| `redirected` | Was redirected, then ended with no other response |
+| `renderer_answered` | Was finished by the renderer without a URL loader (`data:`, `blob:` and other local schemes) |
+| `no_response` | Ended with no response record otherwise |
+
+A redirect does not decide the case: a request that fails, is cancelled, ends
+its observation or is still open after a redirect is that, so "every response
+was a redirect" is said only of one that then ended. A newest record that names
+no bytes (a refusal or a malformed record) does not hide the newest retained
+`partial` of the same response, which the receiver keeps: the row's
+`response_body.earlier_snapshot` names it, and Response and Preview open it
+under "Earlier snapshot". The loaded records decide only while they hold the
+row's final `response_started` and its body record; otherwise Traffic takes the
+index's answer, because a live row's `response_started` can leave the retained
+window while its later records stay.
+
+The Response and Preview tabs say which case applies, and never show an
+absent body as empty. `get_requests` gives every row its case as
+`response_body`, and `get_session_summary` counts the cases in
+`response_bodies`, with a `response_bodies_not_observed` check when service
+workers, the memory cache or the renderer answered some.
+
+Where those bytes are retained under another request, Traffic shows or links
+them instead of nothing:
+
+- A version 2 `memory_cache_reuse` names the request whose response Blink
+  reused ([memory-cache reuse](#memory-cache-reuse)). A renderer request ID
+  names a row only within its process and session, and a process ID can be
+  reused within a session, so the named row is the source only when it was
+  requested from the reuse's host (a 120-byte reuse host as a prefix) and
+  started before the reuse; otherwise `memory_cache_source.found` is false
+  with `reason` `host_differs` or `started_after`, and `not_recorded` when no
+  such row exists. A found source's `response_body` is shown in Response and
+  Preview, labelled as the reused request's, with a control that opens it, and
+  with its state: complete, cut at 16 MiB, a snapshot with how much had
+  arrived and when relative to the reuse, stopped mid-body, or not retained.
+  For a `multipart/x-mixed-replace` source Blink holds the last part while the
+  retained body has every part, which the view says.
+- A service worker answer has no digest of its own to match. Traffic lists the
+  requests the service worker itself made (`request_started` flag 4) for the
+  same host, path and query that started while the page's request was open,
+  read through `get_requests` with that time range, and links each with its
+  body case. The records do not say whether the worker answered with those
+  bytes, so they are linked, never shown as the page's body. When none is
+  found, Traffic says what it searched (that time range of the index, or the
+  loaded rows when the index could not be read) and when the search stopped at
+  its 500-row page; a row without a path (a metadata session records the host
+  alone) is not searched. A worker that fetched before the page's request
+  opened, fetched another URL, read Cache Storage or built its response leaves
+  no match, so no match is never a claim that the bytes are nowhere.
+- A `shared` record already names the earlier artifact with the same digest.
+
+#### Service-worker bodies are not retained for the page's request
+
+At the pin no response a service worker sends a page passes through
+`BraveProxyingURLLoaderFactory`, which wraps only the network factories
+`ContentBrowserClient::WillCreateURLLoaderFactory` hands it:
+
+- A controlled page's subresource request goes to
+  `content::ServiceWorkerSubresourceLoader` in the page's renderer. It
+  dispatches the fetch event over `blink.mojom.ControllerServiceWorker` and
+  sends the worker's response to the page's `URLLoaderClient` from the stream
+  or blob the worker's renderer gave it (`StartResponse`); the browser sees
+  neither.
+- A controlled navigation is answered by
+  `content::ServiceWorkerMainResourceLoader`, which the navigation's
+  interceptor chain runs instead of the network factory, so the proxied
+  network loader is never created for it.
+- A fallback, a race network request, a synthetic network request and a
+  navigation preload do reach a proxied factory. A subresource fallback uses
+  the page's own network factory. For a main resource,
+  `ServiceWorkerClient::CreateNetworkURLLoaderFactory` passes the factory for
+  each of `kNavigationPreload`, `kRaceNetworkRequest` and
+  `kSyntheticNetworkRequest` through `WillCreateURLLoaderFactory` as
+  `kNavigation`. Those records are the network attempt's
+  ([service worker ends](#service-worker-ends-without-a-response)).
+- A navigation the worker answers from `event.preloadResponse` therefore shows
+  as its preload request's row: a browser request that
+  `ServiceWorkerFetchDispatcher::MaybeStartNavigationPreload` gives resource
+  type `kNavigationPreloadMainFrame` or `kNavigationPreloadSubFrame` and the
+  `Service-Worker-Navigation-Preload` header, whose body case is that of any
+  proxied response and whose body is retained under that row. The navigation
+  itself has no row of its own, and the records do not say whether the worker
+  answered with those bytes unchanged.
+
+Retaining those bytes would mean a second tee in one of those loaders, one in
+the renderer, which may not open harness sockets or send artifacts, and one in
+a browser loader the proxy does not own. Both are second capture paths, which
+#428 rules out. When the worker took the bytes from its own `fetch`, that
+request passes through the proxy and its body is retained under the worker's
+row, which Traffic links as above.
 
 ### Agent access
 
@@ -1080,10 +1291,14 @@ binary is refused and oversized JSON returns a structural summary.
   `response_started` in the Preview and Response tabs (order above). Response
   shows the state, codings, lengths and digest, then the bytes as
   syntax-colored text with pretty print, wrap, find, copy and hex (always hex
-  for binary). Preview shows a bounded
+  for binary), hex in 256 KiB windows paged to the end of the retained body,
+  reading the next 2 MiB range when a window passes the bytes loaded. A
+  partial record says how many bytes had arrived and when, and whether the
+  body was sealed at the 16 MiB limit. Preview shows a bounded
   JSON tree, a raster image whose signature matches its bytes, plain text, or
   markup as source. HTML and SVG are never rendered. Reads are ranged 2 MiB at a
-  time and rechecked by size and SHA-256.
+  time and rechecked by size and SHA-256. Both tabs name the body case and its
+  links ([bodies the proxy never sees](#bodies-the-proxy-never-sees)).
 
 ### Validation
 
@@ -1093,7 +1308,8 @@ brotli and service-worker JSON, a fetched PNG, a chunked stream partial then
 captured, an aborted prefix, 304, a redirect, a cancelled body, a skipped font,
 digest dedupe, budget exhaustion, receiver refusal refund, 50 parallel bodies,
 the full pool, 16 MiB truncation, a missing completion, coding order, the
-capture-end partial, media opt-in, metadata-only sessions and tee refusal.
+capture-end partial, media opt-in, metadata-only sessions and tee refusal, and
+the [partial body schedule](#partial-bodies).
 `make native-network-capture-check` covers the redirect and unavailable records.
 `tests/network_request_test.cpp` checks layout parity and every valid and
 malformed record. `tools/check-traffic-response-ui.mjs` and

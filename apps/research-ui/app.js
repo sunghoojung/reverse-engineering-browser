@@ -56,6 +56,7 @@ const wasmIdentification = typeof createWasmIdentificationPanel === 'function' ?
     const problem = revealSourceByteOffset(source, offset, () => { if (typeof entropyMap !== 'undefined') entropyMap.close(); });
     if (problem) elements.sourcePosition.textContent = problem;
   }
+}) : null;
 // Compare with: the function match table between two captured Wasm modules.
 const wasmDiffPanel = typeof createWasmDiffPanel === 'function' && document.querySelector('#source-diff-view') ? createWasmDiffPanel({
   button: document.querySelector('#source-wasm-diff'), root: document.querySelector('#source-diff-view'),

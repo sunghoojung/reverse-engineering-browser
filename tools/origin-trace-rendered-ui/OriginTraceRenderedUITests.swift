@@ -3073,7 +3073,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#source-wasm")
       try await ui.waitUntil("(state.sourceEditorView?.view?.wasmRows ?? []).some(row => row.byte_offset === 0xd0)", timeout: 30, "the inspection rows did not load")
       try await ui.waitUntil("!document.querySelector('#value-flow').hidden", "the Trace value panel follows Inspect")
-      XCTAssertEqual(try await ui.value("document.querySelector('#value-flow-run').disabled") as? Bool, true, "\(size.name): nothing to trace before a row is chosen")
+      let idle = try await ui.value("document.querySelector('#value-flow-run').disabled") as? Bool
+      XCTAssertEqual(idle, true, "\(size.name): nothing to trace before a row is chosen")
       // Bring the import call row into view, then pick it with the pointer.
       _ = try await ui.value("""
         (() => { const line = state.sourceEditorView.view.wasmRows.findIndex(row => row.kind === 'instruction' && row.byte_offset === 0xd0);
@@ -3114,7 +3115,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
         if focused.hasPrefix("0x7e") { break }
         try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
       }
-      XCTAssertTrue((try await ui.value("document.activeElement?.textContent ?? ''") as? String ?? "").hasPrefix("0x7e"), "\(size.name): arrow keys reach the load")
+      let reached = try await ui.value("document.activeElement?.textContent ?? ''") as? String ?? ""
+      XCTAssertTrue(reached.hasPrefix("0x7e"), "\(size.name): arrow keys reach the load: \(reached)")
       try await ui.key(36, "\r")
       try await ui.waitUntil("(() => { const line = document.activeElement?.closest?.('.source-line'); return line && state.sourceEditorView.view.wasmRows[Number(line.dataset.localLine)].byte_offset === 0x7e; })()", "Enter reveals the load in Inspect")
       try await ui.waitUntil("document.activeElement.closest('.source-line').dataset.valueFlow === 'source'", "the revealed load is marked as a source")

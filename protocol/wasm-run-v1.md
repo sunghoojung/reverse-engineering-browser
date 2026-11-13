@@ -62,9 +62,9 @@ they can be copied between `args`, stubs, `results` and `expect`:
 
 | Type | Accepted | Returned |
 | --- | --- | --- |
-| `i32`, `i64` | signed or unsigned decimal of that width | signed decimal |
-| `f32`, `f64` | an optionally negative decimal with optional fraction and exponent (`1.5`, `-0`, `1e300`), `inf`, `-inf`, or `nan:0x` with the exact bit pattern; a finite literal that rounds to infinity is refused | the shortest form that reads back to the same bits (`1001.0`, `1e300`), `inf`, `-inf` or `nan:0x` |
-| `v128` | one hexadecimal integer (optional `0x`), lane 0 in the low bits | `0x` and 32 digits |
+| `i32`, `i64` | signed or unsigned decimal of that width: an optional `-`, then `0` or digits without a leading zero; no `+` | signed decimal |
+| `f32`, `f64` | an optionally negative decimal with optional fraction and exponent (`1.5`, `-0`, `1e300`), `inf`, `-inf`, or `nan:0x` with the exact bit pattern in exactly 8 (f32) or 16 (f64) hexadecimal digits; a finite literal that rounds to infinity is refused | the shortest form that reads back to the same bits (`1001.0`, `1e300`), `inf`, `-inf` or `nan:0x` |
+| `v128` | one to 32 hexadecimal digits (optional `0x`, no sign), lane 0 in the low bits | `0x` and 32 digits |
 | `funcref`, `externref` | `null` | `null` or `non-null` |
 
 `expect` holds test vectors: `results`, and at most one `memory` entry per

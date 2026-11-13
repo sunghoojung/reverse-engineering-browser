@@ -364,6 +364,22 @@ fn value(typed: &Typed) -> Result<Val> {
         return Err(Error::bad("A value literal is at most 64 characters"));
     }
     let float_bits = |text: &str| text.strip_prefix("nan:0x").map(|bits| bits.to_owned());
+    // Exactly the contract's spellings: Rust's parsers also take a leading
+    // `+` and extra leading zeros, which would make two literals of one value.
+    let hex_digits = |digits: &str, exact: Option<usize>| {
+        !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_hexdigit())
+            && exact.is_none_or(|length| digits.len() == length)
+    };
+    let integer = |text: &str| {
+        let digits = text.strip_prefix('-').unwrap_or(text);
+        !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_digit())
+            && (digits == "0" || !digits.starts_with('0'))
+    };
+    if matches!(typed.ty.as_str(), "i32" | "i64") && !integer(text) {
+        return Err(bad());
+    }
     Ok(match typed.ty.as_str() {
         "i32" => {
             let wide: i64 = text.parse().map_err(|_| bad())?;
@@ -381,6 +397,9 @@ fn value(typed: &Typed) -> Result<Val> {
         }
         "f32" => match float_bits(text) {
             Some(bits) => {
+                if !hex_digits(&bits, Some(8)) {
+                    return Err(bad());
+                }
                 let bits = u32::from_str_radix(&bits, 16).map_err(|_| bad())?;
                 if !f32::from_bits(bits).is_nan() {
                     return Err(bad());
@@ -391,6 +410,9 @@ fn value(typed: &Typed) -> Result<Val> {
         },
         "f64" => match float_bits(text) {
             Some(bits) => {
+                if !hex_digits(&bits, Some(16)) {
+                    return Err(bad());
+                }
                 let bits = u64::from_str_radix(&bits, 16).map_err(|_| bad())?;
                 if !f64::from_bits(bits).is_nan() {
                     return Err(bad());
@@ -401,7 +423,7 @@ fn value(typed: &Typed) -> Result<Val> {
         },
         "v128" => {
             let digits = text.strip_prefix("0x").unwrap_or(text);
-            if digits.is_empty() || digits.len() > 32 {
+            if !hex_digits(digits, None) || digits.len() > 32 {
                 return Err(bad());
             }
             Val::V128(V128::from(
@@ -2440,6 +2462,49 @@ mod tests {
         );
         assert_eq!(result["outcome"]["phase"], "instantiate");
         assert_eq!(result["results"], Value::Null);
+    }
+
+    #[test]
+    fn integer_nan_and_v128_literals_take_only_the_contract_spellings() {
+        for (ty, text) in [
+            ("i32", "+1"),
+            ("i32", "01"),
+            ("i64", "-007"),
+            ("i32", "-"),
+            ("i32", " 1"),
+            ("f32", "nan:0x0007fc00000"),
+            ("f32", "nan:0x7fc0000"),
+            ("f64", "nan:0x+7ff8000000000001"),
+            ("v128", "+1"),
+            ("v128", "0x+1"),
+            ("v128", ""),
+        ] {
+            assert!(
+                value(&Typed {
+                    ty: ty.into(),
+                    value: text.into()
+                })
+                .is_err(),
+                "{ty} {text}"
+            );
+        }
+        for (ty, text) in [
+            ("i32", "0"),
+            ("i32", "-0"),
+            ("i64", "-12"),
+            ("f32", "nan:0x7fc00001"),
+            ("f64", "nan:0x7ff8000000000001"),
+            ("v128", "0x1"),
+        ] {
+            assert!(
+                value(&Typed {
+                    ty: ty.into(),
+                    value: text.into()
+                })
+                .is_ok(),
+                "{ty} {text}"
+            );
+        }
     }
 
     #[test]

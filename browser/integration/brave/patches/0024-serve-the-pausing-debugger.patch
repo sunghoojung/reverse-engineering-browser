@@ -1,0 +1,54 @@
+diff --git a/browser/brave_content_browser_client.cc b/browser/brave_content_browser_client.cc
+index bb89aa6..7e2c14a 100644
+--- a/browser/brave_content_browser_client.cc
++++ b/browser/brave_content_browser_client.cc
+@@ -91,6 +91,7 @@
+ #include "brave/components/psst/buildflags/buildflags.h"
+ #include "brave/components/reverse_engineering_browser/browser/native_console_document_start.h"
+ #include "brave/components/reverse_engineering_browser/browser/native_console_session.h"
++#include "brave/components/reverse_engineering_browser/browser/native_debugger_pause_host.h"
+ #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
+ #include "brave/components/request_otr/common/buildflags/buildflags.h"
+ #include "brave/components/skus/common/features.h"
+@@ -577,6 +578,9 @@ void BraveContentBrowserClient::RenderProcessWillLaunch(
+     }
+     reb::StartNativeConsoleSession(std::move(retired));
+   }
++  // The pausing debugger experiment, off unless --reb-native-debugger names
++  // a socket path. See protocol/native-debugger-pause-v1.md.
++  reb::StartNativeDebuggerPauseHost();
+   Profile* profile = Profile::FromBrowserContext(host->GetBrowserContext());
+   // The BraveRendererUpdater might be null for some irregular profiles, e.g.
+   // the System Profile.
+@@ -1141,6 +1145,11 @@ void BraveContentBrowserClient::AppendExtraCommandLineSwitches(
+   std::string process_type =
+       command_line->GetSwitchValueASCII(switches::kProcessType);
+   if (process_type == switches::kRendererProcess) {
++    if (reb::IsNativeDebuggerPauseEnabled()) {
++      // Presence only: the renderer never learns the socket path, and the
++      // switch alone attaches nothing.
++      command_line->AppendSwitch("reb-native-debugger");
++    }
+     if (reb::IsNativeConsoleEnabled()) {
+       command_line->AppendSwitch("reb-native-console");
+       // Permission only. A renderer that receives this switch still runs
+diff --git a/renderer/brave_content_renderer_client.cc b/renderer/brave_content_renderer_client.cc
+index 3490cdd..08d68d9 100644
+--- a/renderer/brave_content_renderer_client.cc
++++ b/renderer/brave_content_renderer_client.cc
+@@ -20,6 +20,7 @@
+ #include "brave/components/misc_metrics/renderer/web3_metrics_render_frame_observer.h"
+ #include "brave/components/playlist/core/common/buildflags/buildflags.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_console_agent.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_console_document_start.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_debugger_pause_agent.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
+ #include "brave/components/safe_builtins/renderer/safe_builtins.h"
+@@ -180,6 +181,7 @@ void BraveContentRendererClient::RenderFrameCreated(
+     content::RenderFrame* render_frame) {
+   ChromeContentRendererClient::RenderFrameCreated(render_frame);
+   reb::NativeConsoleAgent::CreateIfEnabled(render_frame);
++  reb::NativeDebuggerPauseAgent::CreateIfEnabled(render_frame);
+   auto* rfo = new BraveRenderFrameObserver(render_frame);
+   auto* registry = rfo->registry();
+ 

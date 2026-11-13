@@ -584,8 +584,13 @@ NativeRequestStackTables* ActiveTables(const std::uint64_t generation,
   return state;
 }
 
+// The record types this walk carries a stack summary for: the phase 1
+// observations and the pausing debugger's own records, which share the same
+// 80-byte summary and 48-byte tail layout.
 bool IsObservation(const NativeProbeType type) noexcept {
-  return type >= NativeProbeType::kRequestWatchMatch && type <= NativeProbeType::kDomMutation;
+  return (type >= NativeProbeType::kRequestWatchMatch && type <= NativeProbeType::kDomMutation) ||
+         (type >= NativeProbeType::kDebuggerAttached &&
+          type <= NativeProbeType::kDebuggerBreakpoint);
 }
 
 NativeProbeEvent ChildEvent(const NativeProbeType type,

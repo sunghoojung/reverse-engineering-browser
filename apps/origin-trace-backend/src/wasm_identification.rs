@@ -781,7 +781,10 @@ fn v0_symbol(name: &str) -> Option<Option<&str>> {
 fn crate_root(after: &str) -> Option<&str> {
     let mut at = 0;
     if after.starts_with('s') {
-        at += after.find('_')? + 1;
+        // A disambiguator is a base-62 u64, at most 11 digits, then `_`.
+        // Looking no further keeps a crafted name of many `Cs` linear, since
+        // every `C` of the name is tried as a root.
+        at += after.bytes().take(13).position(|b| b == b'_')? + 1;
     }
     let digits = after[at..].bytes().take_while(u8::is_ascii_digit).count();
     let length: usize = after[at..at + digits].parse().ok()?;
@@ -3735,6 +3738,25 @@ mod tests {
         // A v0 name whose crate cannot be read is still certainly Rust.
         assert_eq!(rust_crate("_RNvNtB2_3fmt5write"), (None, true));
         assert_eq!(rust_crate("_ReadFile"), (None, false));
+    }
+
+    #[test]
+    fn a_crafted_v0_name_of_many_roots_is_read_in_linear_time() {
+        // Every `C` is tried as a crate root, and a `Cs` with no `_` after it
+        // must not search the rest of the name each time.
+        let name = format!("_RN{}", "Cs".repeat(500_000));
+        let started = Instant::now();
+        assert_eq!(rust_crate(&name), (None, true));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        // A disambiguator of the longest u64 still parses.
+        assert_eq!(
+            rust_crate("_RNvCsLygHFpkZqpB_4core3fmt"),
+            (Some("core"), true)
+        );
     }
 
     #[test]

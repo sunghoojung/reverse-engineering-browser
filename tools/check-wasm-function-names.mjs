@@ -197,6 +197,62 @@ async function checkSurfaces() {
   console.log('PASS Wasm names surfaces: Inspect headers and call targets, in-place refresh, F2 routing, hostile names as text, Graph title and function list with filter (LinkeDOM; not rendered QA)');
 }
 
+// The Flow panel itself, with one Wasm node: Rename in Details, focus after
+// a save, and the mark cleared when the session changes.
+async function checkFlow() {
+  const dom = parseHTML('<!doctype html><html><body><div id="flow"></div></body></html>');
+  const {document, window, Event} = dom;
+  window.HTMLElement.prototype.select ??= function select() {};
+  window.HTMLElement.prototype.scrollIntoView ??= function scrollIntoView() {};
+  document.hasFocus ??= () => true;
+  let focused = null;
+  window.HTMLElement.prototype.focus = function focus() { focused = this; };
+  const node = {id: 0, kind: 'wasm', context: 0, status: 'resolved', function_index: 5, sha256: SHA, artifact_id: '9', url: 'https://wasm.test/m.wasm', script_id: 3, hits: 2, entries: 1, leaves: 1};
+  const graph = {schema: 'flow-graph-v1', session_id: '1', evidence: 'observed', complete: true, coverage: {stopped: 'end'}, stacks: {records: {request_initiator_stack: 1}, not_walked: {}},
+    truncated: {}, limits: {}, not_shown: {}, contexts: [{id: 0, process_id: 1, execution_context_id: '7', origin: 'https://wasm.test', origins: [], frame_ids: [], tab_ids: [], counts: {}}],
+    nodes: [node], edges: [], paths: []};
+  const store = server(library());
+  const fetcher = async (url, options) => String(url).startsWith('/api/flow-graph') ? Response.json(graph) : store.fetcher(url, options);
+  const context = {document, window, Event, location: {protocol: 'http:'}, addEventListener: () => {}, fetch: fetcher,
+    requestAnimationFrame: fn => setTimeout(() => fn(performance.now()), 0), cancelAnimationFrame: clearTimeout, performance,
+    getComputedStyle: () => ({getPropertyValue: () => ''}), innerHeight: 800, innerWidth: 1180, devicePixelRatio: 1, dispatchEvent: () => true, URLSearchParams, AbortSignal};
+  const scripts = ['wasm_function_names.js', 'graph_layout_client.js', 'block_graph.js', 'request_stack.js', 'flow_graph_layout.js', 'flow_graph.js'];
+  const extra = (await Promise.all(scripts.map(name => read(`apps/research-ui/${name}`)))).join('\n');
+  const {api, validateLibrary, wasm, panel: createFlow, flowGraphKey} = await namesModels(root, context, extra, ', wasm: RebWasmFunctionNames, panel: createFlowGraphPanel, flowGraphKey: flowGraphNodeKey');
+  const controller = api.mount({fetcher: store.fetcher, validateLibrary, onChange: () => wasm.changed()});
+  assert(await controller.load(), controller.model.message);
+  const host = document.querySelector('#flow');
+  const flow = createFlow({host, open: () => {}, available: () => true});
+  flow.show({session: '1'});
+  for (let i = 0; i < 40 && !host.querySelector('.flow-graph-canvas'); i++) await settle();
+  for (let i = 0; i < 40; i++) await settle();
+  flow.select(flowGraphKey(node), {reveal: false});
+  for (let i = 0; i < 10; i++) await settle();
+  const details = host.querySelector('.flow-graph-details-toggle');
+  if (details?.getAttribute('aria-pressed') !== 'true') details?.click();
+  for (let i = 0; i < 10; i++) await settle();
+  assert.equal(host.dataset.wasmFunction, '5', `The selected Wasm card marks the panel: ${JSON.stringify({state: host.querySelector('.flow-graph-state')?.textContent, selected: flow.selection?.(), canvas: !!host.querySelector('.flow-graph-canvas'), details: host.querySelector('.flow-graph-details-toggle')?.getAttribute('aria-pressed')})}`);
+  const rename = host.querySelector('[data-wasm-rename]');
+  assert(rename, 'Details offers Rename for a Wasm card');
+  rename.focus(); rename.click();
+  const input = host.querySelector('.flow-graph-name-host input');
+  assert(input, 'The editor opens in the Flow slot');
+  input.value = 'mix_state';
+  host.querySelector('.flow-graph-name-host form').dispatchEvent(new Event('submit', {cancelable: true}));
+  for (let i = 0; i < 40 && wasm.nameOf(SHA, 5) !== 'mix_state'; i++) await settle();
+  for (let i = 0; i < 10; i++) await settle();
+  assert.equal(wasm.nameOf(SHA, 5), 'mix_state');
+  assert(!rename.isConnected, 'Details was redrawn after the save');
+  assert(focused && focused.isConnected && focused !== document.body, `Focus returns to a control, not the body: ${focused?.tagName}`);
+  assert(focused.matches('[data-wasm-rename], .flow-graph-canvas'), `Focus returns to the redrawn Rename or the canvas: ${focused?.outerHTML?.slice(0, 80)}`);
+  assert.equal(host.querySelector('[data-wasm-rename]').textContent, 'Rename');
+  // Another session: the previous function is not selected, so F2 must not
+  // rename it.
+  flow.show({session: '2'});
+  assert.equal(host.dataset.wasmFunction, undefined, 'A session change clears the mark');
+  console.log('PASS Wasm names in Flow: Details Rename, focus back on the redrawn control after a save, mark cleared on session change (LinkeDOM; not rendered QA)');
+}
+
 async function checkWiring() {
   const html = await read('apps/research-ui/index.html'), app = await read('apps/research-ui/app.js');
   const order = ['evidence_names.js', 'wasm_function_names.js', 'app.js'].map(name => html.indexOf(`src="${name}"`));
@@ -226,4 +282,5 @@ async function checkWiring() {
 
 await checkDocument();
 await checkSurfaces();
+await checkFlow();
 await checkWiring();

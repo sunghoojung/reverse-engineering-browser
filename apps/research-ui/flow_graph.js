@@ -1625,7 +1625,10 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     host.toggleAttribute('data-selected', selected >= 0);
     // F2 on the graph renames the selected Wasm function.
     const chosen = selected >= 0 ? display?.nodes[selected] : null;
-    if (chosen?.kind === 'wasm' && chosen.sha256) globalThis.RebWasmFunctionNames?.mark(host, chosen.sha256, chosen.function_index, `${flowGraphNodeName(chosen)} · func ${chosen.function_index}`, nameHost);
+    // After a save Details is redrawn, so focus returns to its new Rename
+    // button, or the canvas when Details is closed.
+    if (chosen?.kind === 'wasm' && chosen.sha256) globalThis.RebWasmFunctionNames?.mark(host, chosen.sha256, chosen.function_index, `${flowGraphNodeName(chosen)} · func ${chosen.function_index}`, nameHost,
+      () => inspector.querySelector('[data-wasm-rename]') ?? canvas);
     else globalThis.RebWasmFunctionNames?.unmark(host);
     // Details is built only while it is open; opening it builds it.
     if (!detailsOpen) return;
@@ -1676,7 +1679,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       openButton.addEventListener('click', () => open(node)); actions.append(openButton);
     }
     if (node.kind === 'wasm' && node.sha256 && globalThis.RebWasmFunctionNames) {
-      const rename = make('button', 'secondary-button', analyst ? 'Rename' : 'Name function'); rename.type = 'button';
+      const rename = make('button', 'secondary-button', analyst ? 'Rename' : 'Name function'); rename.type = 'button'; rename.dataset.wasmRename = 'true';
       rename.title = 'Rename this Wasm function (F2)';
       rename.addEventListener('click', () => globalThis.RebWasmFunctionNames.beginFrom(host));
       actions.append(rename);
@@ -2061,6 +2064,9 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       session = next ?? null;
       if (changed) {
         model = null; display = null; cards = null; layout = null; selected = -1; selectedRow = -1; highlight = null; highlightFromRequest = false; keyIndex = null; markTarget = null;
+        // The previous session's function is no longer selected: F2 must not
+        // rename it.
+        globalThis.RebWasmFunctionNames?.unmark(host);
         status_ = 'idle';
         // A key asked for before the first session waits for it; what was
         // asked for in another session does not carry over, and this

@@ -723,17 +723,28 @@ then read what changed before what stayed.
 ```text
 get_artifacts {"kind": "wasm", "limit": 20}
 get_wasm_module_diff {"artifact_id": "9", "compare_artifact_id": "14", "status": "changed,added,removed,ambiguous"}
-get_wasm_module_diff {"artifact_id": "9", "compare_artifact_id": "14", "status": "changed,added,removed,ambiguous", "row_offset": 200}
+get_wasm_module_diff {"artifact_id": "9", "compare_artifact_id": "14", "status": "changed,added,removed,ambiguous", "row_offset": <row_window.next_offset>}
 ```
 
 Good: `status: "complete"`, `summary.statuses` with every count, and rows
-whose `a` and `b` sides name a `function` index. `a.sha256` and that index
-identify a function in A; carry what you know about it to the B side of its
-row. Trust `identical` and `renumbered` (`normalized` method) most; a
-`call_graph` or `structural` match is a hypothesis with a `score`, so check it
-with `get_wasm_function_graph` on both sides. An `ambiguous` row lists tied
-`candidates` and was deliberately not paired. `unclassified` rows and a
-`partial` status mean a limit stopped matching; `omissions` says which.
+whose `a` and `b` sides name a `function` index. Page with the previous
+page's `row_window.next_offset`, never a fixed step: a page stops early when
+its rows are long.
+
+- **Identity**: `a.sha256` and a side's `function` identify a function in A;
+  carry what you know about it to the B side of its row.
+- **`identical`**: the body bytes are equal.
+- **`renumbered`**: the bytes differ only in ways the contract can explain as
+  renumbering or relocation, and every call reaches the matched function. It
+  cannot tell apart reads of two globals of the same type, so treat it as
+  strong evidence, not proof.
+- **`call_graph`, `structural`, `export_name`, `name`**: hypotheses with a
+  `score`. Check them with `get_wasm_function_graph` on both sides.
+- **`ambiguous`**: one row per member of a tie, with `group` saying how many
+  functions of each module tie. No pair was chosen.
+- **`unclassified`, or a `partial` status**: a limit or the deadline stopped a
+  step; `omissions` says which, and those functions may not really be added or
+  removed.
 
 ## Response shapes at a glance
 

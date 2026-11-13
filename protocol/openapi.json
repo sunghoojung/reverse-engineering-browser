@@ -4846,7 +4846,7 @@
       "get": {
         "operationId": "get_wasm_module_diff",
         "summary": "Match the functions of two captured WebAssembly modules",
-        "description": "Static function matching between two hash-verified core WASM artifacts (A is artifact_id, B is compare_artifact_id), for example two builds of one site's module. Matching runs in a fixed order: byte-identical bodies, normalized-identical bodies (call targets, renumbered locals, globals and types, and static data addresses ignored), import names, export names, name-section names, call-graph propagation, then structural similarity with a score. Rows report matched functions with method and score as identical, renumbered or changed, plus added, removed and ambiguous candidates; tied candidates stay ambiguous and are never forced into a pair. Each side names its function index, and a.sha256 and b.sha256 with that index identify a function. Structure only: no instruction text, constant value or data byte is returned. Bounded by module size, function count, comparisons and a deadline; partial status and omissions name what was not classified. Page with row_offset and row_limit, and narrow with status. Never executes either module.",
+        "description": "Static function matching between two hash-verified core WASM artifacts (A is artifact_id, B is compare_artifact_id), for example two builds of one site's module. Matching runs in a fixed order: byte-identical bodies, normalized-identical bodies (call targets, renumbered locals, globals and types, and static data addresses ignored), import names, export names, name-section names, call-graph propagation, then structural similarity with a score. Rows report matched functions with method and score as identical, renumbered or changed, plus added and removed functions. Tied candidates are never forced into a pair: each member of a tie is its own ambiguous row with its group. Each side names its function index, and a.sha256 and b.sha256 with that index identify a function. Structure only: no instruction text, constant value or data byte is returned. Bounded by module size, function count, comparisons and one deadline checked inside every body and loop; a stopped step leaves its functions unclassified, and partial status and omissions name it. Page with row_offset and row_limit, and narrow with status. Never executes either module.",
         "tags": [
           "artifacts"
         ],
@@ -4899,7 +4899,7 @@
             "name": "row_limit",
             "in": "query",
             "required": false,
-            "description": "Rows in the page, 1 to 1000. The page also stops at 98,304 bytes of serialized rows, so one page fits a 128 KiB MCP result; row_window.next_offset continues. Default 200.",
+            "description": "Rows in the page, 1 to 1000. The page also stops when the whole document, pretty-printed as the MCP server measures it, would pass 122,880 bytes, so one page fits a 128 KiB MCP result; continue from row_window.next_offset. Default 200.",
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -23182,6 +23182,7 @@
               "matched",
               "statuses",
               "methods",
+              "ambiguous_groups",
               "comparisons",
               "elapsed_ms"
             ],
@@ -23275,6 +23276,10 @@
                     "minimum": 0
                   }
                 }
+              },
+              "ambiguous_groups": {
+                "type": "integer",
+                "minimum": 0
               },
               "comparisons": {
                 "type": "integer",
@@ -23412,7 +23417,8 @@
               {
                 "$ref": "#/components/schemas/WasmModuleDiffFunction"
               }
-            ]
+            ],
+            "description": "This row's function in module A, or null on an added row or a tie member from B."
           },
           "b": {
             "oneOf": [
@@ -23422,33 +23428,30 @@
               {
                 "$ref": "#/components/schemas/WasmModuleDiffFunction"
               }
-            ]
+            ],
+            "description": "This row's function in module B, or null on a removed row or a tie member from A."
           },
-          "candidates": {
+          "group": {
             "type": "object",
             "additionalProperties": false,
             "required": [
+              "id",
               "a",
-              "b",
-              "truncated"
+              "b"
             ],
+            "description": "Present on an ambiguous row: the tie it belongs to and how many functions of each module tie. Every member of a tie is its own row.",
             "properties": {
+              "id": {
+                "type": "integer",
+                "minimum": 0
+              },
               "a": {
-                "type": "array",
-                "maxItems": 16,
-                "items": {
-                  "$ref": "#/components/schemas/WasmModuleDiffFunction"
-                }
+                "type": "integer",
+                "minimum": 0
               },
               "b": {
-                "type": "array",
-                "maxItems": 16,
-                "items": {
-                  "$ref": "#/components/schemas/WasmModuleDiffFunction"
-                }
-              },
-              "truncated": {
-                "type": "boolean"
+                "type": "integer",
+                "minimum": 0
               }
             }
           }

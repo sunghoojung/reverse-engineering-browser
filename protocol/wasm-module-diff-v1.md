@@ -57,12 +57,25 @@ The static data span runs from the lowest to the highest end of the active
 data segments of memory 0 whose offset is a constant. A value is an address
 when it lies in that span and is at least 1,024: small integers are far more
 often counts and flags than addresses, and common toolchains place static data
-at or above 1,024. Because the rule is a range test, a genuine constant that
-happens to fall inside the span is normalized too, which only makes the hash
-coarser. Every other immediate, including other constants, branch depths,
-memory and table indexes, lanes, and GC type immediates, is kept as encoded.
-Two functions with the same normalized hash differ at most in renumbering and
-relocation; the row status is then `renumbered`.
+at or above 1,024. Every other immediate, including other constants, branch
+depths, memory and table indexes, lanes, and GC type immediates, is kept as
+encoded.
+
+The normalized hash is deliberately coarse, because it is a matching key.
+Bodies with equal normalized hashes can still differ in three ways it cannot
+see:
+
+- a constant inside the data span, whether or not it is used as an address;
+- which function of the same signature a call reaches, or the order of calls
+  to functions of one signature;
+- which global of the same type is read or written.
+
+The row status (below) checks the first two. The third is a known limit.
+
+**Address map** (internal, used for the status): for each address the
+normalized hash replaced, in order, the data segment it falls in (by start
+order) and its offset in that segment. A relocation that moves segments keeps
+the map; a different constant changes it.
 
 **Structural fingerprint** (`structure`, 16 hex digits): the first 8 bytes of a
 SHA-256 over the signature, a hash of the control skeleton (the sequence of
@@ -84,34 +97,57 @@ count over the larger, and 1 when both are zero.
 ## Matching
 
 Passes run in this order and each considers only functions no earlier pass
-matched. A key shared by exactly one open function on each side is a match;
-a key shared by more is a tie and is left for later passes.
+matched or grouped. A key shared by exactly one open function on each side is
+a match; a key shared by more is a tie and is left for later passes.
 
-1. `import_name`: imports by module and field name.
+1. `import_name`: imports by module, field, signature and position among the
+   imports sharing those, then by module, field and position among the imports
+   sharing the names, so a changed signature still pairs and an import name
+   used twice pairs each use.
 2. `identical`: defined functions by body hash.
 3. `normalized`: defined functions by normalized body hash.
 4. `export_name`, then `name`: defined functions by first export name, then by
    name-section name.
-5. `call_graph`: from each matched pair, the k-th call sites of two bodies with
-   the same number of call sites propose their callees as a pair, and a pair
-   with exactly one open callee, or one open caller, on each side proposes
-   that pair. A proposal needs equal signatures and a similarity of at least
-   0.5. A function proposed for two partners stays open. Rounds repeat, at
-   most 16, while they add matches.
+5. `call_graph`: a worklist starting from every matched pair. For each pair:
+   - when the two bodies normalize equally and have the same number of call
+     sites, the k-th call sites sit at corresponding places, so their callees
+     are proposed, but only when neither callee has another open callee of
+     the pair that looks more like it;
+   - the open callees, and separately the open callers, of the pair are
+     compared with each other, and a pair that is each other's best
+     same-signature candidate by at least 0.01 is proposed;
+   - a proposal needs a similarity of at least 0.5;
+   - a pair with more than 64 open callees or callers on either side proposes
+     nothing from that set, so one function called from everywhere cannot make
+     the work quadratic.
 
-Passes 1 to 5 repeat until none adds a match. Then:
+   A new pair queues itself and the matched pairs next to it.
+
+Passes 1 to 5 repeat while propagation adds matches, at most four rounds.
+Then:
 
 6. `structural`: open defined functions that share no exact key with another
-   open function are scored against up to 64 open functions of the other side
-   with the same signature and the nearest instruction counts. A pair is
-   matched only when each is the other's best, the score is at least 0.75, and
-   both beat every runner-up by at least 0.01. Candidates within 0.01 of the
-   best form an `ambiguous` row.
+   open function are scored against the open functions of the other side with
+   the same signature and the nearest instruction counts: up to 64, or fewer
+   when the comparisons left, divided by every function on both sides that
+   could be scored, cannot pay for 64; below 4 the pass is not run. Each A
+   function keeps the candidates within 0.01 of its best score. A B function
+   no A function scored, because it sat outside every window, scores its own
+   nearest A candidates, so it is not reported as added only for that reason:
+   if it ties an A function's own best within 0.01, it contests that
+   function. Then:
+   - every tie is joined into a group first: a function with more than one such
+     candidate, a candidate that more than one function ranks best within
+     0.01, and a contesting B function join that group;
+   - a pair is then accepted only when its score is at least 0.75, neither side
+     is in a group, and the B candidate's best claimant beats every other
+     claimant by at least 0.01;
+   - a pass the budget stops accepts no pair and forms no group, because
+     mutual best is only meaningful once every candidate was scored.
 
-Passes 1 to 5 then run once more to carry the structural matches along the
-call graph. Finally, functions still tied by body hash or normalized hash form
-`ambiguous` rows with score 1. A tie is never resolved by index order or any
-other forced pick.
+Passes 1 to 5 run once more from the structural matches. Finally, functions
+still tied by body hash or normalized hash form groups. A tie is never
+resolved by index order or any other forced pick.
 
 ## Document
 
@@ -122,36 +158,47 @@ The [OpenAPI schema](openapi.json) defines `WasmModuleDiff`,
   `byte_size`, `imported_functions`, `defined_functions` and
   `analyzed_functions`.
 - `summary` counts every row by status and every matched row by method,
-  whatever page or `status` filter was requested, and reports the number of
-  similarity comparisons and the elapsed time.
-- Each row has `status`, `method` and `score` (both null for an unmatched
-  function), and `a` and `b` sides (null on the side a function is missing
-  from). A side gives `function`, `byte_offset` and `byte_end` (the body range;
-  equal for an import, at its import entry), `name` (name section, else first
-  export, escaped single-line text of at most 128 bytes), `import` (module and
-  field) or null, `type` (the declared signature), `instructions`, and the
-  `normalized` and `structure` fingerprints (null for an import).
-- An `ambiguous` row has null sides and `candidates` with up to 16 functions
-  per side and `truncated`.
+  whatever page or `status` filter was requested. It also gives
+  `ambiguous_groups`, the number of similarity scores computed, and the
+  elapsed time.
+- Each row has a `status`. A matched row also has `method` and `score`, and an
+  ambiguous row has its tie's `method` and `score`; both are null otherwise.
+  Its `a` and `b` sides are null on the side a function is missing from.
+- A side gives:
+  - `function`;
+  - `byte_offset` and `byte_end`: the body range, or both at the import
+    entry for an import;
+  - `name`: the name section, else the first export, as escaped single-line
+    text of at most 128 bytes;
+  - `import`: module and field, or null;
+  - `type`: the declared signature;
+  - `instructions`;
+  - the `normalized` and `structure` fingerprints, null for an import.
+- Each member of a tie is its own `ambiguous` row with one side set and
+  `group` (`id`, and how many functions of A and of B tie), so paging reaches
+  every member of a large tie.
 
 Statuses, in page order:
 
 | Status | Meaning |
 | --- | --- |
-| `changed` | Matched; the normalized hashes differ, or an import's signature changed. |
+| `changed` | Matched; the bodies differ in more than renumbering and relocation as this contract can tell, or an import's names or signature changed. |
 | `added` | Only in B. |
 | `removed` | Only in A. |
-| `ambiguous` | Tied candidates; no pair was chosen. |
-| `unclassified` | Unmatched when a limit or the deadline stopped the comparison, so it may not really be added or removed. |
-| `renumbered` | Matched; bytes differ but the normalized hashes are equal. |
-| `identical` | Matched; the body bytes, or an import's name and signature, are equal. |
+| `ambiguous` | A member of a tie; no pair was chosen. |
+| `unclassified` | Unmatched when a limit or the deadline stopped the comparison, so it may not really be added, removed or tied. |
+| `renumbered` | Matched; the bytes differ, but the normalized hashes and the address maps are equal, and every call site calls the matched function on the other side. |
+| `identical` | Matched; the body bytes are equal, or an import's names and signature are. Equal bytes can still call functions whose indexes now mean something else. |
 
-Rows are ordered by status, then function index. `status` narrows the rows to
-a comma separated list of these names; an unknown or repeated name fails with
-400. `row_offset` and `row_limit` (1 to 1,000, default 200) page them, and a
-page also stops at 98,304 bytes of serialized rows so it fits a 128 KiB MCP
-result. `row_window` gives `offset`, `rows`, `total_rows` and `next_offset`,
-null at the end. `requested_statuses` echoes the filter, or null.
+Rows are ordered by status, then by tie, then by function index. `status`
+narrows the rows to a comma separated list of these names; an unknown or
+repeated name fails with 400. `row_offset` and `row_limit` (1 to 1,000,
+default 200) page them. A page also stops before the whole document,
+pretty-printed as the MCP server measures its inline limit, passes 122,880
+bytes, so a page of long mangled names still fits the 131,072-byte limit.
+Continue from `row_window.next_offset`, which is null at the end; a page can
+hold fewer rows than `row_limit`. `row_window` also gives `offset`, `rows` and
+`total_rows`. `requested_statuses` echoes the filter, or null.
 
 The report holds no instruction text, constant value, data byte or custom
 section content, so it is structure at every permission level. Function,
@@ -164,21 +211,38 @@ import and export names are returned as in `get_wasm_functions`.
   compared on that prefix and named in `omissions`.
 - A body over 7,654,321 bytes or a function with more than 50,000 locals is
   rejected as malformed, since web engines reject both.
-- Structural comparisons: 4,000,000 in all and 64 per function.
+- Similarity scores: 4,000,000 in all, across propagation and the structural
+  pass, and at most 64 per function in the structural pass.
 - One four-second deadline covers fingerprinting and matching, below the
-  native helper's five-second process limit.
-- When a limit or the deadline stops the work, `status` is `partial`,
-  `omissions` names the step, and every function left unmatched is
-  `unclassified` instead of `added` or `removed`.
-- The two most recent reports stay in memory, keyed by both artifact IDs and
-  SHA-256 digests, so paging a pair does not repeat the comparison.
+  native helper's five-second process limit. It is checked before each body,
+  every 4,096 instructions inside one, before each exact pass, at each
+  propagation step and before each structural candidate set. Global and local
+  first-use numbering use tables indexed by number, so no body costs more
+  than linear work between two checks.
+- When a limit or the deadline stops a step:
+  - `status` is `partial`;
+  - `omissions` names the step and why it stopped, and how many of each
+    module's functions were fingerprinted;
+  - every function left unmatched is `unclassified` instead of `added`,
+    `removed` or `ambiguous`;
+  - matches made before the stop stand.
+- The loopback backend keeps the two most recent reports in memory, keyed by
+  both artifact IDs and SHA-256 digests, so paging a pair does not repeat the
+  comparison. The native `reb://` route starts a new helper process for each
+  page and filter, so each of its pages repeats the comparison inside the
+  same bound.
 
-Errors use the shared `Error` body: 400 for a malformed or repeated parameter,
-the same artifact twice, a non-WebAssembly artifact or an oversized module; 404
-for a missing artifact; 422 for an empty or malformed module, an unsupported
-version or component encoding, or disagreeing function and code counts; 500
-for an integrity failure. A module that declares no functions is valid: its
-other side is entirely added or removed, and `omissions` says so.
+Errors use the shared `Error` body:
+
+| Status | When |
+| --- | --- |
+| 400 | a malformed or repeated parameter, the same artifact twice, a non-WebAssembly artifact, or an oversized module |
+| 404 | a missing artifact |
+| 422 | an empty or malformed module, an unsupported version or component encoding, or disagreeing function and code counts |
+| 500 | an integrity failure |
+
+A module that declares no functions is valid: its other side is entirely
+added or removed, and `omissions` says so.
 
 ## Library signatures
 

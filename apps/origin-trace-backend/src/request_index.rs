@@ -4900,6 +4900,16 @@ mod tests {
             &matched,
             json!({"parent_event_id": initiated}),
         );
+        // The renderer records one match per request; a second one, as a
+        // replayed or merged store could hold, never replaces the first.
+        matched[80] = 5;
+        store.push(
+            41,
+            30,
+            "request_watch_match",
+            &matched,
+            json!({"parent_event_id": initiated}),
+        );
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
         let mut document = page(&mut index, "limit=500");
@@ -4951,10 +4961,12 @@ mod tests {
                     "timeline": answer["timeline"]}),
             )
         });
-        // The events as every backend page delivers them to Traffic, decoded
-        // objects beside the hex.
+        // The events as a row's store read delivers them to Traffic: a filtered
+        // read, with each observation decoded beside its hex. The polling
+        // window carries no decode; check-request-index.mjs reads those too.
         let mut events = store.events.clone();
         crate::event_query::annotate_events(&mut events);
+        crate::debugger_observation::annotate(&mut events);
         let golden = json!({"events": events, "rows": document["requests"].take(),
             "orders": orders.into_iter().collect::<serde_json::Map<_, _>>(),
             "searches": searches.into_iter().collect::<serde_json::Map<_, _>>(),

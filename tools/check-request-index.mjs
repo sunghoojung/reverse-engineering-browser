@@ -71,10 +71,18 @@ assert(lost && lost.status === 'incomplete' && view.trafficStatusCell(lost).text
 const raced = shownRows.find(row => row.raceNetwork);
 assert(raced && raced.status === 'failed' && raced.fromServiceWorker && view.trafficStatusCell(raced).text === 'Failed');
 assert.equal(shownRows.filter(row => row.endLost || row.raceNetwork).length, 2);
-// A watched request names its rule and its match record, from the backend's decode.
+// A watched request names its rule and its first match record, from the backend's decode.
 const watched = shownRows.filter(row => row.watch);
+const matches = golden.events.filter(event => event.type === 'request_watch_match');
+assert(matches.length === 2 && matches[0].debugger_observation.detail.rule === 3 && matches[1].debugger_observation.detail.rule === 5,
+  'the golden holds two matches of one request');
 assert(watched.length === 1 && watched[0].watch.rule === 3 && watched[0].watch.methodMatched === true &&
-  /^[1-9][0-9]*$/.test(watched[0].watch.sequenceNumber), 'one watched row with its rule');
+  watched[0].watch.sequenceNumber === matches[0].sequence_number, 'one watched row, with its first match');
+// Without the decode (the polling window carries none) the same match is
+// named, with no rule; Traffic then takes the rule from the index row.
+const bare = requestsFromEvents(golden.events.map(({debugger_observation, ...event}) => event), 'live')
+  .find(row => row.id === watched[0].id);
+assert.deepEqual({...bare.watch}, {...watched[0].watch, rule: null, methodMatched: null}, 'an undecoded match names the same record');
 // An MHTML archive reuse has no HTTP status, yet it finished: never No loader.
 const archive = shownRows.find(row => row.memoryCache && row.status === 'finished');
 const archiveCell = archive && view.trafficStatusCell(archive);

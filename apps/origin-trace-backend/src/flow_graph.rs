@@ -822,6 +822,11 @@ impl<'a> Builder<'a> {
         let usable = source.ok().filter(|_| reason.is_none());
         if frame.kind == 2 {
             detail["function_index"] = json!(frame.detail);
+            // The module digest is the function's identity across sessions;
+            // researcher names join to it.
+            if let Some(sha) = identity.and_then(|identity| identity.sha256) {
+                detail["sha256"] = json!(hex::encode(sha));
+            }
             if let Ok((_, resolved)) = source
                 && let Some(name) = resolved.names.get(&frame.detail)
             {

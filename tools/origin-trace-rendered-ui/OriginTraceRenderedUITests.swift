@@ -417,13 +417,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // The same state in the light theme, set the way the theme toggle sets it,
   // without a click that could close an overlaid sidebar.
   @MainActor
-  private func lightScreenshot(_ ui: Harness, _ name: String, _ size: String) async throws {
+  private func lightScreenshot(_ ui: Harness, _ name: String, _ size: String, scope: String = "#debugger-sidebar") async throws {
     _ = try await ui.value("""
       (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null;
         document.documentElement.dataset.theme = 'light';
         await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
       """)
-    try await assertLayout(ui, "#debugger-sidebar", "\(size) \(name) light")
+    try await assertLayout(ui, scope, "\(size) \(name) light")
     try await ui.screenshot("\(name)-light-\(size)")
     _ = try await ui.value("""
       (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
@@ -3875,6 +3875,109 @@ final class OriginTraceRenderedUITests: XCTestCase {
         """, "\(size.name): the pausing sections did not come into view")
       try await ui.screenshot("debugger-pausing-sections-\(size.name)")
       try await lightScreenshot(ui, "debugger-pausing-sections", size.name)
+    }
+  }
+
+  // A Wasm function renamed once shows everywhere it appears: the Inspect
+  // header and the call row that targets it, the Graph function list and
+  // title. The captured identity stays visible beside it.
+  @MainActor
+  func test39WasmFunctionNames() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"420\"]")
+      try await ui.waitUntil("!document.querySelector('#source-wasm').hidden", "\(size.name): Inspect is offered for the module")
+      try await ui.click("#source-wasm")
+      let header = ".source-line[data-wasm-function='1']:not([data-wasm-target]):not([data-wasm-body])"
+      try await ui.waitUntil("document.querySelector(\"\(header) .wasm-function-rename\") !== null", "\(size.name): the helper's header row has a rename control")
+      try await ui.click("\(header) .wasm-function-rename")
+      try await ui.waitUntil("document.activeElement === document.querySelector('#source-name-host input')", "\(size.name): the editor took focus")
+      // Select-all then type: the name may already exist from the other size.
+      try await ui.key(0, "a", modifiers: [.command])
+      try await ui.type("encode_payload")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("""
+        (document.querySelector("\(header) .wasm-function-name")?.textContent === 'encode_payload') &&
+          document.querySelector('#source-name-host form') === null
+        """, timeout: 15, "\(size.name): the header did not show the saved name")
+      let listing = try await ui.json("""
+        (() => { const call = document.querySelector(".source-line[data-wasm-target][data-wasm-function='1']");
+          const row = document.querySelector("\(header)");
+          return {captured: row.querySelector('.source-text').textContent, call: call?.querySelector('.wasm-function-target')?.textContent ?? null,
+            italic: getComputedStyle(row.querySelector('.wasm-function-name')).fontStyle, focus: document.activeElement?.className ?? ''}; })()
+        """)
+      XCTAssertTrue((listing["captured"] as? String ?? "").contains("func 1"), "\(size.name): the captured header stays: \(listing)")
+      XCTAssertEqual(listing["call"] as? String, "encode_payload", "\(size.name): the call row names its callee: \(listing)")
+      XCTAssertEqual(listing["italic"] as? String, "italic", "\(size.name): a name reads as a researcher name: \(listing)")
+      // F2 after a click on the call row names its callee: rows take no
+      // focus, so the code view resolves the row under the cursor.
+      try await ui.click(".source-line[data-wasm-target][data-wasm-function='1'] .source-text")
+      try await ui.key(120, "\u{F705}", modifiers: [.function])
+      try await ui.waitUntil("document.querySelector('#source-name-host input')?.getAttribute('aria-label') === 'Researcher name for func 1'",
+        "\(size.name): F2 on the call row did not open the callee's editor")
+      try await ui.key(53, "\u{1b}")
+      try await ui.waitUntil("document.querySelector('#source-name-host form') === null", "\(size.name): Escape did not close the editor")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) Wasm names in Inspect")
+      try await assertInert(ui, "\(size.name) Wasm names in Inspect")
+      try await ui.screenshot("wasm-names-inspect-\(size.name)")
+      // The Graph opens the largest body (func 2); the list shows both names.
+      try await ui.click("#source-graph")
+      try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '').includes('block')", timeout: 30, "\(size.name): the graph did not lay out")
+      try await ui.click("#source-graph-host .block-graph-fn-wrap button[aria-haspopup]")
+      try await ui.waitUntil("document.querySelectorAll('#source-graph-host .block-graph-fn-row').length === 2", "\(size.name): the function list did not open")
+      let list = try await ui.json("""
+        ({rows: [...document.querySelectorAll('#source-graph-host .block-graph-fn-row')].map(row => ({name: row.querySelector('.block-graph-fn-name').textContent,
+          analyst: row.querySelector('.block-graph-fn-analyst')?.textContent ?? null}))})
+        """)
+      let rows = list["rows"] as? [[String: Any]] ?? []
+      XCTAssertEqual(rows.first?["analyst"] as? String, "encode_payload", "\(size.name): the list shows the name beside func 1: \(rows)")
+      XCTAssertEqual(rows.first?["name"] as? String, "func 1", "\(size.name): the captured identity stays: \(rows)")
+      // The open popover covers the graph by design, so only the popover
+      // itself is checked while it is open; the host is checked once it closes.
+      try await assertLayout(ui, "#source-graph-host .block-graph-fn-menu", "\(size.name) Wasm names in the function list")
+      let menu = try await ui.json("""
+        (() => { const box = document.querySelector('#source-graph-host .block-graph-fn-menu').getBoundingClientRect();
+          return {inside: box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight}; })()
+        """)
+      XCTAssertEqual(menu["inside"] as? Bool, true, "\(size.name): the function list stays in the window: \(menu)")
+      try await ui.screenshot("wasm-names-function-list-\(size.name)")
+      try await ui.click("#source-graph-host .block-graph-fn-row", containing: "func 1")
+      try await ui.waitUntil("""
+        document.querySelector('#source-graph-host .block-graph-analyst-name')?.textContent === 'encode_payload' &&
+          document.querySelector('#source-graph-host .block-graph-fn-menu') === null
+        """, "\(size.name): the Graph title did not show the name")
+      try await assertLayout(ui, "#source-graph-host", "\(size.name) Wasm names in the Graph")
+      // The Graph moves to func 2 while the last clicked Inspect row is the
+      // call into func 1: F2 on the graph names the function it draws,
+      // wherever the click left focus inside the editor; Escape closes it.
+      try await ui.click("#source-graph-host button[aria-label='Next function']")
+      try await ui.waitUntil("""
+        (document.querySelector('#source-graph-host .block-graph-title')?.textContent ?? '') === 'run' &&
+          (document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '').includes('block')
+        """, timeout: 30, "\(size.name): the Graph did not move to func 2")
+      try await ui.click("#source-graph-host .block-graph-canvas")
+      // Where focus sits when F2 is pressed, so a failure names the element
+      // that took the key.
+      let focusAtF2 = try await ui.json("""
+        (() => { const a = document.activeElement, box = document.querySelector('#source-graph-host .block-graph-canvas').getBoundingClientRect();
+          const at = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+          const name = e => e ? `${e.tagName.toLowerCase()}#${e.id}.${String(e.className)}` : null;
+          return {active: name(a), label: a?.getAttribute?.('aria-label') ?? null, function: a?.dataset?.wasmFunction ?? null,
+            rects: a?.getClientRects?.().length ?? 0, insideHidden: Boolean(a?.closest?.('[hidden]')), atClickPoint: name(at),
+            graphFunction: document.querySelector('#source-graph-host').dataset.wasmFunction ?? null}; })()
+        """)
+      try await ui.key(120, "\u{F705}", modifiers: [.function])
+      try await ui.waitUntil("""
+        document.querySelector('#source-name-host input')?.getAttribute('aria-label') === 'Researcher name for run (func 2)' &&
+          document.querySelector('#source-name-host input')?.value === ''
+        """, "\(size.name): F2 did not open the editor for the Graph's function; focus at F2: \(focusAtF2)")
+      try await ui.key(53, "\u{1b}")
+      try await ui.waitUntil("document.querySelector('#source-name-host form') === null", "\(size.name): Escape did not close the editor")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) Wasm names in the Graph")
+      try await ui.screenshot("wasm-names-graph-\(size.name)")
+      try await lightScreenshot(ui, "wasm-names-graph", size.name, scope: "#screen-sources")
+      try await ui.click("#source-graph")
     }
   }
 

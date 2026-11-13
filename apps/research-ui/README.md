@@ -458,6 +458,20 @@ or the handler's finding, source artifact, listing key and source range), so an
 item that merely shares a URL, file name or handler label never inherits a name,
 and replaced or ambiguous evidence shows none.
 
+Wasm functions are named by module SHA-256 and function index (imports
+included), so a name follows identical module bytes into every session. Rename
+one from **Inspect** (the pencil on a function, import, declaration or start
+row), the **Graph** (**Rename** in its toolbar, or F2 on the graph or on a
+highlighted **Functions** row) or a Flow graph Wasm card (**Rename** in Details,
+or F2 with the card selected). F2 on a call row renames its callee, and on an
+instruction or locals row the function containing it; the module file is still
+renamed from its tree row, its tab or the toolbar. The name
+then follows the Inspect listing (on headers and after call rows), the Graph
+title and function list, Flow cards and Details, Initiator frames and
+cross-reference rows, beside `func N` and any import, export or name-section
+name. Agents read the same names as `analyst_name` in every Wasm tool result.
+See [Wasm function names v1](../../protocol/wasm-function-names-v1.md).
+
 Names survive relaunch in one non-executable `Evidence names.reb-names.json`
 scratchpad in the Analyst library, written through the existing local Analyst
 routes. Each save rereads the library first; a name changed elsewhere since you
@@ -1659,6 +1673,7 @@ capture, fetch anything or change a row.
 | `traffic_columns.js` | Column widths, hidden columns, the header menu, saved layout and fitting columns to the table width |
 | `traffic_overview.js` | The timing strip and its pointer and keyboard time-range selection |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
+| `wasm_function_names.js` | Wasm function names in Inspect, the Graph and its function list, Flow cards, Initiator frames and cross-references: inert name spans, the F2 and Rename entry points, and in-place refresh after a rename |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
 | `source_tree.js` | The Sources navigator: frame, group, origin and folder model, hand-parsed non-special URLs, mounted-window rows, keyboard, type-ahead and filter; `app.js` supplies the catalog and the open path |
 | `debugger_sidebar.js`, `debugger_sidebar.css` | The Sources debugger sidebar: its section registry, the Threads view, Watch rules, Observations and Pausing, and their reads of `get_native_debugger` and `get_request_stack` |

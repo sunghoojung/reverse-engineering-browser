@@ -430,6 +430,8 @@ struct Row<'a> {
     operation: String,
     state: &'static str,
     target: Target<'a>,
+    /// The Wasm function this row names, in the module's full index space.
+    function: Option<u32>,
 }
 
 enum Target<'a> {
@@ -488,7 +490,7 @@ impl Row<'_> {
                 (evidence, ids, time.cloned().unwrap_or(Value::Null))
             }
         };
-        json!({
+        let mut row = json!({
             "direction": direction.key(),
             "kind": self.kind,
             "name": self.name,
@@ -499,7 +501,11 @@ impl Row<'_> {
             "evidence": evidence,
             "ids": ids,
             "time_ns": time,
-        })
+        });
+        if let Some(function) = self.function {
+            row["function_index"] = json!(function);
+        }
+        row
     }
 }
 
@@ -535,6 +541,7 @@ fn event_row<'a>(kind: &'static str, name: String, detail: String, event: &'a Va
         operation: event["type"].as_str().unwrap_or("event").to_owned(),
         state: "observed",
         target: Target::Event(event),
+        function: None,
     }
 }
 
@@ -977,8 +984,16 @@ fn artifact_plan(
         patterns.push(r#""parent_event_id":"?[1-9]"#.to_owned());
         patterns.push(r#""type":"gap""#.to_owned());
     }
+    let mut selection = resolved("artifact", label);
+    // The module digest and selected function are the researcher-name key.
+    if wasm.is_some() {
+        selection["wasm_sha256"] = json!(info.sha256);
+        if let Some(target) = wasm.as_ref().and_then(|module| module.target) {
+            selection["function_index"] = json!(target);
+        }
+    }
     Ok(Plan::Artifact {
-        selection: resolved("artifact", label),
+        selection,
         prefilter: compile(&patterns)?,
         session,
         session_text: session.to_string(),
@@ -1452,26 +1467,46 @@ fn classify_wasm(
         let direct = (observation["direct_caller"]["kind"] == "same-instance")
             .then(|| observation["direct_caller"]["function_index"].as_u64())
             .flatten();
-        let callee = observation["callee_function_index"].as_u64();
+        // Only a resolved entry names a callee of this instance. A null,
+        // out-of-bounds, foreign or unresolved entry records index 0, which
+        // is not function 0, so it is labeled by its resolution instead.
+        let resolution = observation["resolution"].as_str();
+        let callee = (resolution == Some("resolved"))
+            .then(|| observation["callee_function_index"].as_u64())
+            .flatten();
+        let unresolved = resolution.filter(|value| *value != "resolved");
         let offset = observation["module_byte_offset"].as_u64().unwrap_or(0);
         let function_name = |index: u64| module.function_name(index as u32);
         if function == u64::from(target) {
             facts.link_parents.insert((process, sequence));
             if let Some(caller) = direct {
-                let row = event_row(
+                let mut row = event_row(
                     "direct_caller",
                     function_name(caller),
                     format!("called this function · sample {sequence} · byte {offset}"),
                     event,
                 );
+                row.function = u32::try_from(caller).ok();
                 sinks[0].push(&row, Direction::In, needle);
             }
             if let Some(callee) = callee {
-                let row = event_row(
+                let mut row = event_row(
                     "indirect_call",
                     function_name(callee),
                     format!(
                         "call_indirect · slot {} · byte {offset}",
+                        observation["slot"]
+                    ),
+                    event,
+                );
+                row.function = u32::try_from(callee).ok();
+                sinks[1].push(&row, Direction::Out, needle);
+            } else if let Some(resolution) = unresolved {
+                let row = event_row(
+                    "indirect_call",
+                    format!("{resolution} callee"),
+                    format!(
+                        "call_indirect · slot {} · byte {offset} · no callee of this instance",
                         observation["slot"]
                     ),
                     event,
@@ -1481,17 +1516,18 @@ fn classify_wasm(
             return;
         }
         if direct == Some(u64::from(target)) {
-            let row = event_row(
+            let mut row = event_row(
                 "direct_caller",
                 function_name(function),
                 format!("called by this function · sample {sequence}"),
                 event,
             );
+            row.function = u32::try_from(function).ok();
             sinks[1].push(&row, Direction::Out, needle);
             return;
         }
         if callee == Some(u64::from(target)) {
-            let row = event_row(
+            let mut row = event_row(
                 "indirect_call",
                 function_name(function),
                 format!(
@@ -1500,6 +1536,7 @@ fn classify_wasm(
                 ),
                 event,
             );
+            row.function = u32::try_from(function).ok();
             sinks[0].push(&row, Direction::In, needle);
         }
         return;
@@ -1557,6 +1594,7 @@ fn static_rows(plan: &Plan, stores: &Stores, sinks: &mut [Sink; 2], needle: &str
                     operation: "dispatch_sample".to_owned(),
                     state: "observed",
                     target: Target::Sample(reference, sample.get("monotonic_time_ns")),
+                    function: None,
                 };
                 sinks[0].push(&row, Direction::In, needle);
             }
@@ -1652,6 +1690,7 @@ fn artifact_row<'a>(
             info,
             byte_offset,
         },
+        function: None,
     }
 }
 
@@ -1676,7 +1715,7 @@ fn emit_wasm_static(
                     let (offset, import) = entry;
                     if matches!(import.ty, TypeRef::Func(_)) {
                         let name = format!("{}.{}", import.module, import.name);
-                        let row = artifact_row(
+                        let mut row = artifact_row(
                             "wasm_import",
                             name,
                             format!("import · func {index}"),
@@ -1685,6 +1724,7 @@ fn emit_wasm_static(
                             info,
                             Some(offset as u32),
                         );
+                        row.function = Some(index);
                         sinks[1].push(&row, Direction::Out, needle);
                         index += 1;
                     }
@@ -1696,7 +1736,7 @@ fn emit_wasm_static(
                     if export.kind == ExternalKind::Func
                         && target.is_none_or(|target| export.index == target)
                     {
-                        let row = artifact_row(
+                        let mut row = artifact_row(
                             "wasm_export",
                             export.name.to_owned(),
                             format!("export · func {}", export.index),
@@ -1705,6 +1745,7 @@ fn emit_wasm_static(
                             info,
                             Some(offset as u32),
                         );
+                        row.function = Some(export.index);
                         sinks[0].push(&row, Direction::In, needle);
                     }
                 }
@@ -1729,7 +1770,7 @@ fn emit_wasm_static(
                         _ => continue,
                     };
                     if callee == target {
-                        let row = artifact_row(
+                        let mut row = artifact_row(
                             "wasm_call",
                             module.function_name(caller),
                             format!("calls this function · byte {offset}"),
@@ -1738,10 +1779,11 @@ fn emit_wasm_static(
                             info,
                             Some(offset as u32),
                         );
+                        row.function = Some(caller);
                         sinks[0].push(&row, Direction::In, needle);
                     }
                     if caller == target {
-                        let row = artifact_row(
+                        let mut row = artifact_row(
                             "wasm_call",
                             module.function_name(callee),
                             format!("call · byte {offset}"),
@@ -1750,6 +1792,7 @@ fn emit_wasm_static(
                             info,
                             Some(offset as u32),
                         );
+                        row.function = Some(callee);
                         sinks[1].push(&row, Direction::Out, needle);
                     }
                 }
@@ -2625,6 +2668,112 @@ mod tests {
         assert_eq!(rows[0]["kind"], "wasm_import");
         assert_eq!(rows[0]["name"], "env.host");
         assert_eq!(module_level["counts"]["in"]["matching"], 2);
+    }
+
+    fn indirect_observation(sequence: u64, function: u32, resolution: u32, callee: u32) -> Value {
+        let mut payload = [0u8; 128];
+        payload[..4].copy_from_slice(&[1, 0, 128, 0]);
+        for (at, value) in [
+            (4, function),
+            (8, 40),
+            (12, 0),
+            (16, 3),
+            (20, callee),
+            (24, resolution),
+        ] {
+            payload[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        event(
+            sequence,
+            json!({"category":"vm","type":"wasm_indirect_observation","artifact_id":"11","flags":0,
+                "payload_size":128,"payload_truncated":false,"payload":hex::encode(payload)}),
+        )
+    }
+
+    // An indirect call names a callee only when its entry resolved in this
+    // instance. A foreign or null entry records index 0, which is not function
+    // 0 (the import here), so it is labeled by its resolution, never named.
+    #[test]
+    fn unresolved_indirect_calls_name_no_function() {
+        let bytes = wat::parse_str(
+            r#"(module
+              (import "env" "host" (func $host))
+              (func $inner (export "inner"))
+              (func $outer (export "outer")))"#,
+        )
+        .unwrap();
+        let hash = hex::encode(sha2::Sha256::digest(&bytes));
+        let manifest = json!({"protocol_version":1,"artifact_id":"11","session_id":"7","navigation_id":"1","frame_id":"2",
+            "parent_artifact_id":"0","creator_event_id":"0","execution_context_id":"1","capture_origin":"unknown",
+            "kind":"wasm","url":"https://synthetic.test/m.wasm","mime_type":"application/wasm",
+            "byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+        // Resolutions: 0 resolved, 1 null, 3 foreign.
+        let events = [
+            indirect_observation(1, 1, 0, 2),
+            indirect_observation(2, 1, 3, 0),
+            indirect_observation(3, 1, 1, 0),
+        ];
+        let fixture = fixture(&events, &[manifest]);
+        std::fs::create_dir_all(fixture.stores.artifacts.join("blobs")).unwrap();
+        std::fs::write(
+            fixture.stores.artifacts.join(format!("blobs/{hash}.bin")),
+            &bytes,
+        )
+        .unwrap();
+        let bodies: Vec<usize> = Parser::new(0)
+            .parse_all(&bytes)
+            .filter_map(|payload| match payload.unwrap() {
+                Payload::CodeSectionEntry(body) => Some(body.range().start),
+                _ => None,
+            })
+            .collect();
+        let document = page(
+            &fixture,
+            &Cursors::default(),
+            &format!(
+                "kind=artifact&session_id=7&artifact_id=11&byte_offset={}",
+                bodies[0]
+            ),
+        );
+        let outgoing: Vec<&Value> = document["pages"]["out"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["kind"] == "indirect_call")
+            .collect();
+        assert_eq!(outgoing.len(), 3, "{outgoing:?}");
+        assert_eq!(outgoing[0]["name"], "outer");
+        assert_eq!(outgoing[0]["function_index"], 2);
+        assert_eq!(outgoing[1]["name"], "foreign callee");
+        assert_eq!(outgoing[2]["name"], "null callee");
+        for row in &outgoing[1..] {
+            assert!(row.get("function_index").is_none(), "{row}");
+        }
+        // Selecting the import (function 0) by its entry finds no indirect
+        // caller at all: the foreign and null entries record index 0 too.
+        let import_offset = Parser::new(0)
+            .parse_all(&bytes)
+            .find_map(|payload| match payload.unwrap() {
+                Payload::ImportSection(reader) => reader
+                    .into_iter_with_offsets()
+                    .next()
+                    .map(|entry| entry.unwrap().0),
+                _ => None,
+            })
+            .unwrap();
+        let import = page(
+            &fixture,
+            &Cursors::default(),
+            &format!("kind=artifact&session_id=7&artifact_id=11&byte_offset={import_offset}"),
+        );
+        assert_eq!(import["selection"]["function_index"], 0, "{import}");
+        let callers: Vec<&Value> = import["pages"]["in"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["kind"] == "indirect_call")
+            .collect();
+        assert!(callers.is_empty(), "{callers:?}");
     }
 
     #[test]

@@ -553,6 +553,16 @@ pub fn inspect(bytes: &[u8], sections: Option<&BTreeSet<u8>>) -> Result<Value> {
                         Some(index),
                         instruction(&op),
                     );
+                    // A direct callee or function reference is structure, like
+                    // `function_index`, so a read that omits row text still
+                    // names it (and a researcher name joins to it).
+                    if let Operator::Call { function_index }
+                    | Operator::ReturnCall { function_index }
+                    | Operator::RefFunc { function_index } = op
+                        && let Some(row) = rows.values.last_mut()
+                    {
+                        row["target_function_index"] = json!(function_index);
+                    }
                 }
                 reader.finish().map_err(bad)?;
             }

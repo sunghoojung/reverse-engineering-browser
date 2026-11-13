@@ -942,6 +942,11 @@ fn frame_value(
     if frame.kind == 2 {
         value["function_index"] = json!(frame.detail);
         value["module_offset"] = json!(frame.position);
+        // The module digest is the function's identity across sessions;
+        // researcher names join to it.
+        if let Some(sha) = identities.get(&key).and_then(|identity| identity.sha256) {
+            value["module_sha256"] = json!(hex::encode(sha));
+        }
         value["resolution"] = match source {
             Some(Ok(source)) => json!({
                 "status": "resolved",

@@ -1913,7 +1913,7 @@
       "get": {
         "operationId": "get_flow_graph",
         "summary": "Fold every recorded stack of one session into one flow graph across frames, realms, JavaScript, eval and Wasm",
-        "description": "Every request_initiator_stack (34), navigation_initiator_stack (46), async_task_stack (48) and walked script_cookie write (39) of one session, folded into one observed graph. Each distinct stack digest is decoded once and counted by occurrences; each retained script or module is read once for every frame that names it. Nodes are functions (javascript, eval for eval or new Function scripts, wasm) and sinks (request as METHOD host, navigation kind, cookie_write API), keyed by realm and code, so the same code in one realm is one node. contexts are realms: process_id plus the execution_context_id of the script_identity records (35), with the frame_ids the realm's stacks were recorded in, tab_ids and script origins. Edges: call (adjacent synchronous frames, with call sites), await (an async function's awaiter, labeled by any Promise combinator), task (a task segment: the stack that scheduled a timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask or queued event, to that task's first frame; via names microtask hops), omitted (the run a stack deeper than 1,024 frames dropped) and request, navigation or cookie_write edges to sinks. crosses names frame (a change of realm), language (JavaScript and Wasm) and dynamic (a call into eval code). paths lists each distinct stack's edges and nodes for highlighting. A frame that does not resolve keeps its script ID and a reason; a missing scheduling stack cuts the chain (chain_cut on the node it would have entered), never bridged. Workers, MessagePort messages and out-of-process frames are not walked and are listed in not_shown. An edge counts each stack once however often that stack walks it; via, label and omitted merge what the stacks that share it say. A task edge enters only a frame known to be its task's first: the last awaiter of an await chain, else the outermost synchronous frame, never the outermost of a walk that stopped at 256 frames or of a truncated await chain. Limits are reported in limits and truncated, a scan stops at a 30-second deadline with coverage.stopped deadline, and complete is false whenever anything was cut. The answer is cached until the event store or artifact manifest changes; a deadline-cut answer is not cached. See protocol/flow-graph-v1.md.",
+        "description": "Every request_initiator_stack (34), navigation_initiator_stack (46), async_task_stack (48) and walked script_cookie write (39) of one session, folded into one observed graph. Each distinct stack digest is decoded once and counted by occurrences; each retained script or module is read once for every frame that names it. Nodes are functions (javascript, eval for eval or new Function scripts, wasm) and sinks (request as METHOD host, navigation kind, cookie_write API), keyed by realm and code, so the same code in one realm is one node. contexts are realms: process_id plus the execution_context_id of the script_identity records (35), with the frame_ids the realm's stacks were recorded in, tab_ids and script origins. Edges: call (adjacent synchronous frames, with call sites), await (an async function's awaiter, labeled by any Promise combinator), task (a task segment: the stack that scheduled a timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask or queued event, to that task's first frame; via names microtask hops), omitted (the run a stack deeper than 1,024 frames dropped) and request, navigation or cookie_write edges to sinks. crosses names frame (a change of realm), language (JavaScript and Wasm) and dynamic (a call into eval code). paths lists each distinct stack's edges and nodes for highlighting. A frame that does not resolve keeps its script ID and a reason; a missing scheduling stack cuts the chain (chain_cut on the node it would have entered), never bridged. Workers, MessagePort messages and out-of-process frames are not walked and are listed in not_shown. An edge counts each stack once however often that stack walks it; via, label and omitted merge what the stacks that share it say. A task edge enters only a frame known to be its task's first: the last awaiter of an await chain, else the outermost synchronous frame, never the outermost of a walk that stopped at 256 frames or of a truncated await chain. Limits are reported in limits and truncated, a scan stops at a 30-second deadline with coverage.stopped deadline, and complete is false whenever anything was cut. The answer is cached until the event store or artifact manifest changes; a deadline-cut answer is not cached. See protocol/flow-graph-v1.md. Wasm nodes carry their module sha256 and, when the researcher named the function, analyst_name; analyst_names reports the names document status.",
         "tags": [
           "events"
         ],
@@ -2012,7 +2012,7 @@
       "get": {
         "operationId": "get_request_stack",
         "summary": "Read the JavaScript and Wasm call stack that started one renderer request or script navigation",
-        "description": "Newest request_initiator_stack record (34) inside the bytes the request index names for one renderer request (or the newest 64 MiB of events when it names none), named by the renderer's process_id and request_id as its request_initiated record carries them, or with navigation_sequence the navigation_initiator_stack record (46) a browser navigation_initiator_link (47) names, or with observation_sequence one debugger observation record (40 to 45) of that renderer, with every recorded frame innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact of any capture origin (network, stack_script, compiled_script or dynamic_javascript), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Await frames follow the synchronous ones. A version 2 record adds task_segments, nearest first: each async task (timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or observer) with the stack that scheduled it, resolved from its async_task_stack (48) artifact, and microtask hops linked through task attribution. A version 3 record adds scope, the isolate the stack was walked in (the document main thread or a dedicated, shared or service worker), message segments (MessagePort, BroadcastChannel and worker postMessage) whose frames resolve in the posting thread's or renderer's isolate, a microtask segment's promise registration (then, catch, finally or await) when promise stacks were recorded, a no_script segment that ends the chain where a task was scheduled with no script running, and an origin_rejected segment that ends it where a received message's task origin did not validate. task_chain_cut says an earlier caller was not recorded; async_callers_not_shown lists the callers this record version cannot show. status is not_recorded when the read covered the request's indexed bytes or the whole store and found no stack record, and outside_scan when it did not reach all of them; coverage says what was read. A frame keeps reason script_identity_outside_scan when its identity was not found and not every identity was read. An observation adds observation: its type, decoded detail and its own frame (the listener, timer callback or throw site) resolved alone as site, or null when it names none; its stack is the one recorded when it fired, and the site can resolve when the stack holds no script. See protocol/native-network-v3.md and protocol/native-debugger-observation-v1.md.",
+        "description": "Newest request_initiator_stack record (34) inside the bytes the request index names for one renderer request (or the newest 64 MiB of events when it names none), named by the renderer's process_id and request_id as its request_initiated record carries them, or with navigation_sequence the navigation_initiator_stack record (46) a browser navigation_initiator_link (47) names, or with observation_sequence one debugger observation record (40 to 45) of that renderer, with every recorded frame innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact of any capture origin (network, stack_script, compiled_script or dynamic_javascript), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Await frames follow the synchronous ones. A version 2 record adds task_segments, nearest first: each async task (timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or observer) with the stack that scheduled it, resolved from its async_task_stack (48) artifact, and microtask hops linked through task attribution. A version 3 record adds scope, the isolate the stack was walked in (the document main thread or a dedicated, shared or service worker), message segments (MessagePort, BroadcastChannel and worker postMessage) whose frames resolve in the posting thread's or renderer's isolate, a microtask segment's promise registration (then, catch, finally or await) when promise stacks were recorded, a no_script segment that ends the chain where a task was scheduled with no script running, and an origin_rejected segment that ends it where a received message's task origin did not validate. task_chain_cut says an earlier caller was not recorded; async_callers_not_shown lists the callers this record version cannot show. status is not_recorded when the read covered the request's indexed bytes or the whole store and found no stack record, and outside_scan when it did not reach all of them; coverage says what was read. A frame keeps reason script_identity_outside_scan when its identity was not found and not every identity was read. An observation adds observation: its type, decoded detail and its own frame (the listener, timer callback or throw site) resolved alone as site, or null when it names none; its stack is the one recorded when it fired, and the site can resolve when the stack holds no script. See protocol/native-network-v3.md and protocol/native-debugger-observation-v1.md. Wasm frames carry module_sha256 and, when the researcher named the function, analyst_name; analyst_names reports the names document status.",
         "tags": [
           "events"
         ],
@@ -4447,7 +4447,7 @@
       "post": {
         "operationId": "analyst_action",
         "summary": "analyst action",
-        "description": "Existing local research UI operation.",
+        "description": "Local Analyst library actions: replace_local_analyst_workspace replaces the whole library, run_local_analyst_script and cancel_local_analyst_script run a saved script, and set_wasm_function_name sets, replaces or clears one researcher Wasm function name in the evidence-names file without the caller reading or resending the other Analyst files.",
         "tags": [
           "local-analyst"
         ],
@@ -4587,7 +4587,7 @@
       "get": {
         "operationId": "get_wasm_functions",
         "summary": "List a captured WebAssembly module's functions",
-        "description": "Inert, bounded function list for a hash-verified core WASM artifact: each defined function's index, byte range and type index, without decoding an instruction. Names come from the name section, then exports, as escaped single-line text. The list is limited by a byte budget; a partial status and omissions name what was left out.",
+        "description": "Inert, bounded function list for a hash-verified core WASM artifact: each defined function's index, byte range and type index, without decoding an instruction. Names come from the name section, then exports, as escaped single-line text. The list is limited by a byte budget; a partial status and omissions name what was left out. Researcher names of this module's functions are listed separately in analyst_names as [index, name] pairs, beside the captured names.",
         "tags": [
           "artifacts"
         ],
@@ -4700,7 +4700,7 @@
       "get": {
         "operationId": "get_wasm_function_graph",
         "summary": "Basic blocks for one WebAssembly function",
-        "description": "Declared static control flow for one defined function of a hash-verified core WASM artifact. Blocks and edges come from the same decoder as inspect_wasm; every edge carries a kind and an unresolved target stays labeled with a null destination. complete is always false: reachable here is not observed execution and the drawing is not a proof. Responses are bounded by the row text and structure byte budgets, and a partial status with omissions names what was cut. Never executes the module.",
+        "description": "Declared static control flow for one defined function of a hash-verified core WASM artifact. Blocks and edges come from the same decoder as inspect_wasm; every edge carries a kind and an unresolved target stays labeled with a null destination. complete is always false: reachable here is not observed execution and the drawing is not a proof. Responses are bounded by the row text and structure byte budgets, and a partial status with omissions names what was cut. Never executes the module. The function's researcher name is analyst_name and its module's names are analyst_names, so a call row's target index resolves.",
         "tags": [
           "artifacts"
         ],
@@ -4828,7 +4828,7 @@
       "get": {
         "operationId": "inspect_wasm",
         "summary": "Inspect a captured WebAssembly module",
-        "description": "Inert bounded decoding of a hash-verified core WASM artifact. Never executes the module. The optional sections filter decodes rows for only the named sections, so export, type, import, custom and data tables stay reachable when code-section instructions would otherwise exhaust the 8,192-row budget. Per-function declaration rows appear only when sections names function. coverage names what was analyzed, excluded and truncated, and a filtered document is never decoded. Partial results name unvisited coverage; decoded does not assert type validity or runtime behavior.",
+        "description": "Inert bounded decoding of a hash-verified core WASM artifact. Never executes the module. The optional sections filter decodes rows for only the named sections, so export, type, import, custom and data tables stay reachable when code-section instructions would otherwise exhaust the 8,192-row budget. Per-function declaration rows appear only when sections names function. coverage names what was analyzed, excluded and truncated, and a filtered document is never decoded. Partial results name unvisited coverage; decoded does not assert type validity or runtime behavior. Researcher names (Analyst evidence names, keyed by module SHA-256 and function index) appear as analyst_name on function, import, declaration and start rows and as target_analyst_name beside target_function_index on call, return_call and ref.func rows, with the module's names in analyst_names; captured text is unchanged.",
         "tags": [
           "artifacts"
         ],
@@ -8141,7 +8141,7 @@
       "get": {
         "operationId": "get_xrefs",
         "summary": "Read paged cross-references for one selection",
-        "description": "Lists the evidence that points at a selection and the evidence it points at, using only links the stores already hold: parent events, request initiator and lifecycle, host links from retained dispatch samples, artifact creators, and Wasm import, export and direct-call uses. A link that was not recorded is listed under gaps, and no caller is inferred. Rows are counted across the whole store and returned one window at a time, oldest first, so a selection with a very large number of links stays bounded in memory. Pass the snapshot from the first response on later pages of one list. Read-only: a vm_handler selection uses the VM analysis already cached in this backend and reports analysis-not-ready rather than computing one.",
+        "description": "Lists the evidence that points at a selection and the evidence it points at, using only links the stores already hold: parent events, request initiator and lifecycle, host links from retained dispatch samples, artifact creators, and Wasm import, export and direct-call uses. A link that was not recorded is listed under gaps, and no caller is inferred. Rows are counted across the whole store and returned one window at a time, oldest first, so a selection with a very large number of links stays bounded in memory. Pass the snapshot from the first response on later pages of one list. Read-only: a vm_handler selection uses the VM analysis already cached in this backend and reports analysis-not-ready rather than computing one. For a Wasm module selection, selection.wasm_sha256 and function_index identify the function, and rows that name a Wasm function carry function_index and, when the researcher named it, analyst_name.",
         "tags": [
           "analysis"
         ],
@@ -10114,6 +10114,17 @@
                 "leaves": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$",
+                  "description": "A Wasm node's module SHA-256, from its script identity."
+                },
+                "analyst_name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80,
+                  "description": "Researcher name from the local Analyst evidence-names document, keyed by module SHA-256 and function index. Interpretation, not evidence; present only when a name exists."
                 }
               }
             }
@@ -10260,6 +10271,9 @@
                 }
               }
             }
+          },
+          "analyst_names": {
+            "$ref": "#/components/schemas/WasmAnalystNames"
           }
         }
       },
@@ -10578,6 +10592,9 @@
                 ]
               }
             }
+          },
+          "analyst_names": {
+            "$ref": "#/components/schemas/WasmAnalystNames"
           }
         }
       },
@@ -20737,6 +20754,67 @@
             "type": "object",
             "properties": {
               "action": {
+                "const": "set_wasm_function_name",
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "description": "The module's SHA-256, as inspect_wasm and get_artifacts report it."
+              },
+              "function": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295,
+                "description": "Function index in the full index space, imports included."
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 1024,
+                "description": "Plain single-line text of at most 80 characters after trimming; an empty name clears it. Control, invisible and direction-override characters are refused."
+              },
+              "expected_name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The name the caller last read, or null for an unnamed function. When present and the saved name differs, nothing is written and the call fails with 409."
+              }
+            },
+            "required": [
+              "action",
+              "sha256",
+              "function",
+              "name"
+            ],
+            "additionalProperties": false,
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "filesystem-write"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "usable-names-document",
+                  "condition": "The Analyst library holds no names document, or exactly one valid one; a malformed or ambiguous document is never overwritten (409)."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Sets, replaces or clears one researcher name for a Wasm function, keyed by module SHA-256 and function index, in the Analyst evidence-names file. The backend reads the library, changes only that entry and replaces one generation, so other names, files and folders are kept and a concurrent change is refused with 409, never retried. It does not change captured evidence.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/wasm_names.rs",
+                  "symbol": "set_function_name"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
                 "const": "run_local_analyst_script",
                 "type": "string"
               },
@@ -21120,6 +21198,9 @@
               "run_id",
               "cancel_requested"
             ]
+          },
+          {
+            "$ref": "#/components/schemas/WasmFunctionNameResult"
           }
         ]
       },
@@ -21532,6 +21613,132 @@
           },
           "notice": {
             "type": "string"
+          },
+          "analyst_names": {
+            "$ref": "#/components/schemas/WasmAnalystNames"
+          }
+        }
+      },
+      "WasmAnalystNames": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Researcher Wasm function names joined into this read (docs/product/evidence-names-v1.md, protocol/wasm-function-names-v1.md). status says whether the library's names document was usable: none (no document yet), ready, malformed, ambiguous (several candidates) or unavailable (the library could not be read). Only ready joins names. A one-module read lists that module's names as [index, name] pairs; a read that spans modules reports how many items it joined.",
+        "required": [
+          "status",
+          "file",
+          "library_generation",
+          "notice"
+        ],
+        "properties": {
+          "status": {
+            "enum": [
+              "none",
+              "ready",
+              "malformed",
+              "ambiguous",
+              "unavailable"
+            ]
+          },
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "library_generation": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "notice": {
+            "type": "string"
+          },
+          "module_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "functions": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "joined": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "WasmFunctionNameResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "key",
+          "sha256",
+          "function",
+          "name",
+          "previous_name",
+          "changed",
+          "library_generation",
+          "file"
+        ],
+        "properties": {
+          "schema": {
+            "const": "wasm-function-name-result-v1"
+          },
+          "key": {
+            "type": "string",
+            "pattern": "^wasm-function:[a-f0-9]{64}:[0-9]+$"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "function": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 80
+          },
+          "previous_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 80
+          },
+          "changed": {
+            "type": "boolean"
+          },
+          "library_generation": {
+            "$ref": "#/components/schemas/SafeInteger"
+          },
+          "file": {
+            "type": "string"
           }
         }
       },
@@ -21721,6 +21928,15 @@
           },
           "notice": {
             "type": "string"
+          },
+          "analyst_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "description": "Researcher name of this function. Researcher name from the local Analyst evidence-names document, keyed by module SHA-256 and function index. Interpretation, not evidence; present only when a name exists."
+          },
+          "analyst_names": {
+            "$ref": "#/components/schemas/WasmAnalystNames"
           }
         }
       },
@@ -22117,6 +22333,24 @@
                 },
                 "text_truncated": {
                   "type": "boolean"
+                },
+                "target_function_index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295,
+                  "description": "The direct callee of call and return_call, or the function ref.func names, in the full index space. Structure, so a read without row text still names it."
+                },
+                "analyst_name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80,
+                  "description": "Researcher name of function_index on function, import, declaration and start rows. Researcher name from the local Analyst evidence-names document, keyed by module SHA-256 and function index. Interpretation, not evidence; present only when a name exists."
+                },
+                "target_analyst_name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80,
+                  "description": "Researcher name of target_function_index. Researcher name from the local Analyst evidence-names document, keyed by module SHA-256 and function index. Interpretation, not evidence; present only when a name exists."
                 }
               }
             }
@@ -22246,6 +22480,9 @@
                 "const": 2000
               }
             }
+          },
+          "analyst_names": {
+            "$ref": "#/components/schemas/WasmAnalystNames"
           }
         }
       },
@@ -34033,6 +34270,23 @@
               },
               "detail": {
                 "type": "string"
+              },
+              "wasm_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "description": "The selected Wasm module's SHA-256, the researcher-name key."
+              },
+              "function_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295,
+                "description": "The selected Wasm function, when byte_offset narrowed the selection to one."
+              },
+              "analyst_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "description": "Researcher name from the local Analyst evidence-names document, keyed by module SHA-256 and function index. Interpretation, not evidence; present only when a name exists."
               }
             }
           },
@@ -34120,6 +34374,9 @@
                 "minimum": 0
               }
             }
+          },
+          "analyst_names": {
+            "$ref": "#/components/schemas/WasmAnalystNames"
           }
         }
       },
@@ -34266,6 +34523,18 @@
               "string",
               "null"
             ]
+          },
+          "function_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "The Wasm function a wasm_import, wasm_export, wasm_call, direct_caller or indirect_call row names, in the module's full index space."
+          },
+          "analyst_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "description": "Researcher name from the local Analyst evidence-names document, keyed by module SHA-256 and function index. Interpretation, not evidence; present only when a name exists."
           }
         }
       },
@@ -37909,6 +38178,17 @@
           },
           "resolution": {
             "$ref": "#/components/schemas/RequestStackResolution"
+          },
+          "module_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "A Wasm frame's module SHA-256, from its script identity."
+          },
+          "analyst_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "description": "Researcher name from the local Analyst evidence-names document, keyed by module SHA-256 and function index. Interpretation, not evidence; present only when a name exists."
           }
         }
       }

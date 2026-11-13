@@ -134,6 +134,18 @@ function dispatcherWasm(arms) {
     ...section(7, [1, 8, ...Buffer.from('dispatch'), 0, 0]), ...section(10, [1, ...leb(body.length), ...body])]);
 }
 
+// test39: an import (func 0), an unexported helper (func 1) and an export
+// (func 2) that calls it, so a name shows on a header and on a call row.
+export const NAMED_WASM_ARTIFACT_ID = '420';
+function namedFunctionsWasm() {
+  const leb = n => { const out = []; do { let b = n & 127; n >>>= 7; out.push(n ? b | 128 : b); } while (n); return out; };
+  const section = (id, data) => [id, ...leb(data.length), ...data];
+  const text = value => [value.length, ...Buffer.from(value)];
+  return Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, ...section(1, [1, 0x60, 0, 0]),
+    ...section(2, [1, ...text('env'), ...text('log'), 0, 0]), ...section(3, [2, 0, 0]),
+    ...section(7, [1, ...text('run'), 0, 2]), ...section(10, [2, 2, 0, 0x0b, 4, 0, 0x10, 1, 0x0b])]);
+}
+
 function jsonLines(text) {
   return text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
 }
@@ -912,6 +924,9 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const graphWasm = await artifact(artifacts, {artifact_id: '340', session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: 'fixture://graph-dispatcher.wasm'},
   dispatcherWasm(32));
+  const namedWasm = await artifact(artifacts, {artifact_id: NAMED_WASM_ARTIFACT_ID, session_id: '1', navigation_id: '100', frame_id: '200',
+    capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: 'fixture://named-functions.wasm'},
+  namedFunctionsWasm());
   const guest = await goldenEvidence(artifacts, guestStore);
   const physical = await goldenEvidence(artifacts, dispatchStore);
   assert(guest.events.some(event => event.type === 'wasm_guest_dispatch'), 'guest golden store holds a guest sample');
@@ -921,7 +936,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
   const debuggerRecords = await debuggerObservations(network, artifacts);
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, namedWasm, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   for (const process of WORKER_STACK_PROCESSES) {
     assert.equal(retained.filter(event => event.process_id === process).length,

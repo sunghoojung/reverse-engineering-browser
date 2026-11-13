@@ -52,6 +52,7 @@ privacy, and implementation limits are documented in
 - Preserve module bytes, hashes, origin, creator artifact, and lifecycle events.
 - Display imports, exports, types, functions, tables, memories, globals, strings, data segments, and custom sections.
 - [Captured module inspection and byte-offset disassembly](./wasm-inspection-v1.md) are implemented in Sources. Higher-level readable reconstruction remains planned.
+- [Researcher function names](./wasm-function-names-v1.md) keyed by module SHA-256 and function index are implemented: renamed from Inspect, Graph and Flow, shown in every Wasm view and joined into every agent-facing Wasm read.
 - Record compilation, instantiation, exported calls, imported calls, traps, and memory growth.
 - Connect JavaScript-to-WASM and WASM-to-JavaScript crossings.
 - Search for values moving between WASM, JavaScript, browser APIs, and network requests.

@@ -7883,6 +7883,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           displayed.append(text);
           if (excerpt.columnEnd < excerpt.fullLength) displayed.append(textElement('span', 'source-excerpt-notice', ` ⟪ columns ${excerpt.columnEnd + 1}–${excerpt.fullLength} omitted; use Find or Go to column ⟫`));
           row.append(gutter, displayed);
+          if (view.wasmRows && typeof RebWasmFunctionNames !== 'undefined') RebWasmFunctionNames.decorateInspectRow(row, view.wasmRows[index], source.sha256);
           return row;
         });
         elements.sourceCode.replaceChildren(...nodes);
@@ -10271,6 +10272,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         renderSourceTree(false);
         renderSourceTabs();
         refreshVmHandlerNames();
+        // Wasm function names (wasm_function_names.js) patch their views in place.
+        if (typeof RebWasmFunctionNames !== 'undefined') RebWasmFunctionNames.changed();
       }
 
       // Names change without a new VM workspace. Patch the listing, Symbol Tree
@@ -10436,7 +10439,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         refreshDecoderEngine();
         evidenceNames.load();
 
-        setInterval(refresh, 2000);
+        // The same tick asks whether the names library changed (one stat on
+        // the backend while it has not), so names an agent sets appear.
+        setInterval(() => { refresh(); evidenceNames.poll?.(); }, 2000);
       }
 
       initializeInvestigationNavigation();

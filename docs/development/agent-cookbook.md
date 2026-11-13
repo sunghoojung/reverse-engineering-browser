@@ -619,6 +619,25 @@ they are returned at Read only too and are the same as at Full access, except
 that Read only, Ask and Auto withhold any string longer than 160 characters,
 such as a long script URL. The payload hex is what those levels omit.
 
+## 26. Name a Wasm function so every read shows it
+
+Setting a name needs Ask for actions; reading names works at every level.
+
+```text
+inspect_wasm {"artifact_id": "9", "sections": "import,function,code", "row_limit": 256}
+analyst_action {"body": {"action": "set_wasm_function_name", "sha256": "<module sha256>", "function": 1337, "name": "encode_payload", "expected_name": null}}
+get_wasm_function_graph {"artifact_id": "9", "function": 1337}
+```
+
+Good: the result's `changed` is true and `key` is
+`wasm-function:<sha256>:1337`. Later reads show `analyst_name` beside the
+captured identity: function header rows, `target_analyst_name` on calls to it
+(next to `target_function_index`), graph `analyst_name`, xref rows, Flow nodes
+and Initiator frames. Every artifact with the same bytes shares the name. A 409
+means someone renamed it first: read again and pass the current name as
+`expected_name`. An empty `name` clears it. `analyst_names.status` other than
+`ready` or `none` means the names file needs the researcher's attention.
+
 ## Response shapes at a glance
 
 | Tool | Look at |
@@ -627,7 +646,7 @@ such as a long script URL. The payload hex is what those levels omit.
 | `get_events` | `events`, `named_gaps`, `query` |
 | `get_artifacts` | `artifacts`, `query` |
 | `wait_for_events` | `wait.timed_out`, `events`, `query.next_after`; `debugger_observation` on types 40 to 45 |
-| `inspect_wasm` | `coverage`, then the requested section rows |
+| `inspect_wasm` | `coverage`, then the requested section rows; `analyst_names` for researcher names |
 | `start_live_session` | `session_id`, `url_opened`, `capture_observed`, `options` |
 | `session_action` `list_inputs` | `elements` with `role`, `name`, `visible`, `x`, `y` |
 | `get_native_console` | `binding_id`, `targets` (`frame`, `origin`, `top_relation`, `out_of_process`), `selection` |

@@ -5475,3 +5475,15 @@ details.decoder-card > header p { margin-top: 0; }
 /* Planes: Sources' navigator and debugger sit on the panel surface beside the
    editor's code ground, so tree and code read as separate panes. */
 #screen-sources :is(.sources-navigator, .sources-debugger) { background: var(--panel); }
+/* Wasm function names (wasm_function_names.js): beside the decoded listing,
+   the Graph title and the function list, never in place of a captured name. */
+.source-excerpt > .wasm-function-name { margin-left: 2ch; font-size: 11.5px; }
+.source-excerpt > .wasm-function-target::before { content: "→ "; font-style: normal; }
+.source-excerpt > .wasm-function-rename {
+  margin-left: 1ch; padding: 0 4px; border: 1px solid transparent; border-radius: 4px;
+  background: transparent; color: var(--faint); font: 11px/16px var(--sans); cursor: pointer; vertical-align: baseline;
+}
+.source-line:hover .wasm-function-rename, .wasm-function-rename:focus-visible { border-color: var(--line); color: var(--text); }
+.wasm-function-rename:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.block-graph-analyst-name { flex: 0 1 auto; max-width: 30%; font-size: 12px; }
+.block-graph-fn-row > .block-graph-fn-analyst { flex: 0 1 auto; max-width: 45%; margin-left: auto; font-size: 11px; }

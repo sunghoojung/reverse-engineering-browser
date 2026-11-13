@@ -42,7 +42,8 @@ The seed is the instruction. When it records an operand that no node of its
 own consumes (a block's `end`, a carried value of `br`, `br_if` or
 `br_table`), that operand's producer is an ordinary node one step from the
 seed, so the leaf and address rules below apply to it as to any producer; an
-operand seed always lists its producer, in a forward slice too.
+operand seed always lists its producer, in a forward slice too. A whole
+`try_table` seed is every one of its catch clauses' exception values.
 
 ## Simulation
 
@@ -83,7 +84,8 @@ index, and other table results follow nothing. A load is linked to an earlier st
 (`forwarded_store`) only when both are full width of the same type
 (`i32`, `i64`, `f32`, `f64`, `v128`), use the same memory and static offset,
 and take the address from equal constants, and the store is the latest one in
-the same basic block with no other store, call, atomic or memory operation in
+the same basic block with no other store, call, atomic, `atomic.fence` or
+memory operation in
 between. Every other load stays a source. Globals are not forwarded the same
 way: a `global.get` is always a source, even right after a `global.set` of the
 same global.
@@ -178,7 +180,8 @@ indices and edges stay readable at every level.
 - Input: 64 MiB, the block graph's limit. One body: 7,654,321 bytes, the size
   engines accept. Locals: 50,000, the count engines accept. Larger is 400.
 - Simulation: 2,000,000 instructions and 4,000,000 work units (instructions,
-  loop-write, snapshot and join entries, and every value an instruction
+  loop-write, snapshot and join entries, every `br_table` target and every
+  `try_table` catch clause with its values, and every value an instruction
   records, a branch copies or carries, or a merge joins, so a block with many
   results and many branches to it is bounded in time and memory). The
   loop-write pass reads the whole body and records a write
@@ -196,7 +199,9 @@ indices and edges stay readable at every level.
   limit is 131,072). Past it, the seed, sources, sinks and joins are kept first,
   then the steps nearest the seed; kept nodes are renumbered in walk order,
   `truncated.bytes` is set and an omission gives the counts.
-- `expression`: three levels deep and 160 bytes.
+- `expression`: three levels deep and 160 bytes. `text`: 160 bytes; a
+  `try_table` lists its first 8 catch clauses and then their count. The seed
+  ranks first in the byte cut, so a cut document always lists it.
 - Interprocedural: 64 steps and 256 direct call sites, within the same deadline.
 
 The backend runs on the bounded blocking reader pool. The UI fetches one slice

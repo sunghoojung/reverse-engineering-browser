@@ -32,6 +32,9 @@ pub const MAX_DEPTH: u32 = 256;
 /// Edges and join entries per node of the cap.
 const EDGES_PER_NODE: usize = 4;
 const MAX_EXPRESSION_BYTES: usize = 160;
+const MAX_TEXT_BYTES: usize = 160;
+/// Catch clauses an instruction's text lists before a count.
+const MAX_LISTED_CLAUSES: usize = 8;
 const EXPRESSION_DEPTH: u32 = 3;
 const MAX_STEPS: usize = 64;
 /// Call sites recorded per callee scan; past it the list is marked partial.
@@ -593,17 +596,26 @@ fn instruction_text(
 fn operator_text(op: &Operator<'_>) -> String {
     let mut text = wasm::mnemonic(op);
     let operands = match op {
-        Operator::TryTable { try_table } => try_table
-            .catches
-            .iter()
-            .map(|catch| match catch {
-                wasmparser::Catch::One { tag, label } => format!("(catch {tag} {label})"),
-                wasmparser::Catch::OneRef { tag, label } => format!("(catch_ref {tag} {label})"),
-                wasmparser::Catch::All { label } => format!("(catch_all {label})"),
-                wasmparser::Catch::AllRef { label } => format!("(catch_all_ref {label})"),
-            })
-            .collect::<Vec<_>>()
-            .join(" "),
+        Operator::TryTable { try_table } => {
+            let mut listed = try_table
+                .catches
+                .iter()
+                .take(MAX_LISTED_CLAUSES)
+                .map(|catch| match catch {
+                    wasmparser::Catch::One { tag, label } => format!("(catch {tag} {label})"),
+                    wasmparser::Catch::OneRef { tag, label } => {
+                        format!("(catch_ref {tag} {label})")
+                    }
+                    wasmparser::Catch::All { label } => format!("(catch_all {label})"),
+                    wasmparser::Catch::AllRef { label } => format!("(catch_all_ref {label})"),
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            if try_table.catches.len() > MAX_LISTED_CLAUSES {
+                let _ = write!(listed, " ... {} clauses", try_table.catches.len());
+            }
+            listed
+        }
         Operator::Try { .. } => String::new(),
         Operator::Catch { tag_index } => tag_index.to_string(),
         _ => wasm_graph::operands(op),
@@ -611,6 +623,20 @@ fn operator_text(op: &Operator<'_>) -> String {
     if !operands.is_empty() {
         text.push(' ');
         text.push_str(&operands);
+    }
+    text
+}
+
+/// Like `expression`, a node's text is capped so no single node can fill the
+/// response budget.
+fn capped(mut text: String) -> String {
+    if text.len() > MAX_TEXT_BYTES {
+        let mut cut = MAX_TEXT_BYTES;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str("...");
     }
     text
 }
@@ -972,18 +998,32 @@ pub(crate) fn value_flow_with(
                         )));
                     }
                     if node != NONE {
-                        slicer.seed(node);
-                        seed_nodes.push(node);
-                        if request.direction.backward() {
-                            let edges: Vec<u32> = slicer.adjacency.inputs(node).to_vec();
-                            slicer.backward(&[], &edges);
+                        // A try_table makes one exception node per catch
+                        // clause; the whole instruction seeds every one.
+                        let mut nodes = vec![node];
+                        if sim.nodes[node as usize].kind == NodeKind::ExceptionValue {
+                            nodes.extend((0..sim.nodes.len() as u32).filter(|other| {
+                                *other != node
+                                    && sim.nodes[*other as usize].kind == NodeKind::ExceptionValue
+                                    && sim.nodes[*other as usize].instruction == instruction
+                            }));
                         }
-                        let results = sim.nodes[node as usize].results;
-                        if request.direction.forward() {
-                            let starts: Vec<(Def, u32)> = (0..results)
-                                .map(|result| (Def { node, result }, 0))
-                                .collect();
-                            slicer.forward(&starts);
+                        for node in nodes {
+                            if slicer.seed(node).is_none() {
+                                break;
+                            }
+                            seed_nodes.push(node);
+                            if request.direction.backward() {
+                                let edges: Vec<u32> = slicer.adjacency.inputs(node).to_vec();
+                                slicer.backward(&[], &edges);
+                            }
+                            let results = sim.nodes[node as usize].results;
+                            if request.direction.forward() {
+                                let starts: Vec<(Def, u32)> = (0..results)
+                                    .map(|result| (Def { node, result }, 0))
+                                    .collect();
+                                slicer.forward(&starts);
+                            }
                         }
                     } else {
                         // A block end or a branch has no node of its own: its
@@ -1156,7 +1196,7 @@ pub(crate) fn value_flow_with(
             }
             _ => {}
         }
-        object.insert("text".into(), json!(texts.text(entry.node)));
+        object.insert("text".into(), json!(capped(texts.text(entry.node))));
         if n.results > 0 && !matches!(n.kind, NodeKind::Return | NodeKind::LocalSet) {
             object.insert(
                 "expression".into(),
@@ -1284,6 +1324,7 @@ pub(crate) fn value_flow_with(
         "max_join_entries": MAX_JOIN_ENTRIES,
         "max_depth": request.max_depth,
         "max_expression_bytes": MAX_EXPRESSION_BYTES,
+        "max_text_bytes": MAX_TEXT_BYTES,
         "max_interprocedural_steps": MAX_STEPS,
         "max_call_sites": MAX_CALL_SITES,
         "max_response_bytes": MAX_RESPONSE_BYTES,
@@ -1443,8 +1484,10 @@ pub(crate) fn value_flow_with(
     if fits_response(&whole) {
         return Ok(whole);
     }
-    // The longest prefix that fits; fewer nodes never make the document larger.
-    let (mut low, mut high) = (0usize, total - 1);
+    // The longest ranked prefix that fits; fewer nodes never make the document
+    // larger. The seed ranks first, and every node's text is capped, so one
+    // node is far under the budget and the seed is always listed.
+    let (mut low, mut high) = (1usize.min(total - 1), total - 1);
     while low < high {
         let middle = (low + high).div_ceil(2);
         if fits_response(&assemble(middle)) {
@@ -3120,5 +3163,93 @@ mod tests {
             "work {} under the {charged} the copies and merge slots cost",
             sim.work
         );
+    }
+
+    #[test]
+    fn handler_text_is_capped_and_the_seed_survives_the_cut() {
+        let mut text = String::from(
+            "(module (tag $e (param i32)) (import \"env\" \"f\" (func $f)) (func (result i32) block $h (result i32) try_table",
+        );
+        text.push_str(&" (catch $e $h)".repeat(10_000));
+        text.push_str(" call $f end unreachable end))");
+        let bytes = wat::parse_str(text).unwrap();
+        let try_table = offset_of(&bytes, 1, "try_table", 0);
+        let document = flow(&bytes, &format!("function=1&offset={try_table}")).unwrap();
+        assert!(
+            document["node_count"].as_u64().unwrap() >= 1,
+            "{}",
+            document["omissions"]
+        );
+        assert!(!document["seed"]["nodes"].as_array().unwrap().is_empty());
+        for n in document["nodes"].as_array().unwrap() {
+            assert!(
+                n["text"].as_str().unwrap().len() <= MAX_TEXT_BYTES + 3,
+                "{}",
+                n["text"]
+            );
+        }
+        let handler = node(&document, "exception_value")[0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            handler.contains("try_table (catch 0 0)") && handler.ends_with("... 10000 clauses"),
+            "{handler}"
+        );
+        // Eight long clauses alone pass the cap: deep labels need no count.
+        let mut text =
+            String::from("(module (import \"env\" \"f\" (func $f)) (func (result exnref)");
+        text.push_str(&" block (result exnref)".repeat(10_000));
+        text.push_str(" try_table");
+        text.push_str(&" (catch_all_ref 9999)".repeat(8));
+        text.push_str(" call $f end unreachable");
+        text.push_str(&" end".repeat(10_000));
+        text.push_str("))");
+        let deep = wat::parse_str(text).unwrap();
+        let try_table = offset_of(&deep, 1, "try_table", 0);
+        let document = flow(&deep, &format!("function=1&offset={try_table}")).unwrap();
+        for n in document["nodes"].as_array().unwrap() {
+            assert!(
+                n["text"].as_str().unwrap().len() <= MAX_TEXT_BYTES + 3,
+                "{}",
+                n["text"]
+            );
+        }
+    }
+
+    #[test]
+    fn a_handler_seed_follows_every_catch_clause() {
+        let bytes = wat::parse_str(
+            r#"(module (tag $a (param i32)) (tag $b (param i32))
+              (import "env" "sa" (func $sa (param i32))) (import "env" "sb" (func $sb (param i32))) (import "env" "f" (func $f))
+              (func (result i32)
+                (block $outer (result i32)
+                  (block $inner (result i32)
+                    (try_table (catch $a $inner) (catch $b $outer) (call $f))
+                    (return (i32.const 0)))
+                  (call $sa)
+                  (return (i32.const 1)))
+                (call $sb)
+                (i32.const 2)))"#,
+        )
+        .unwrap();
+        let try_table = offset_of(&bytes, 3, "try_table", 0);
+        let document = flow(
+            &bytes,
+            &format!("function=3&offset={try_table}&direction=forward"),
+        )
+        .unwrap();
+        let mut reached: Vec<u64> = node(&document, "import_call")
+            .iter()
+            .filter(|n| n["sink"] == true)
+            .map(|n| n["function"].as_u64().unwrap())
+            .collect();
+        reached.sort_unstable();
+        assert_eq!(
+            reached,
+            [0, 1],
+            "both clauses' values are followed: {}",
+            document["nodes"]
+        );
+        assert_eq!(document["seed"]["nodes"].as_array().unwrap().len(), 2);
     }
 }
